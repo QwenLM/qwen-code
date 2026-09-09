@@ -199,14 +199,30 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
       fallback={(error, reset) => {
         // A reload rebuilds the module graph — the only recovery for a crash
         // rooted in page-level module state (e.g. a duplicated context module
-        // in dev). It is only safe when the daemon token survives the reload;
-        // otherwise fall back to an in-place reset, which keeps the in-memory
-        // token.
-        const canReload = hasReloadSurvivableDaemonToken();
+        // in dev). Reload is only safe when it cannot strand a credential:
+        // either no token was resolved at boot (tokenless trusted loopback —
+        // nothing to strand; reads the prop, never getDaemonToken(), whose
+        // in-memory cache always reports a token after boot), or a token
+        // survives in the URL or per-tab storage. Otherwise fall back to an
+        // in-place reset, which keeps the in-memory token.
+        const canReload = !daemonToken || hasReloadSurvivableDaemonToken();
         return (
           <RootErrorFallback
             error={error}
-            onRetry={() => (canReload ? window.location.reload() : reset())}
+            onRetry={() => {
+              if (!canReload) {
+                reset();
+                return;
+              }
+              // Session switches strip the one-shot theme/language params
+              // from the URL; carry the live values so the reloaded page
+              // comes back as the user had it.
+              const url = new URL(window.location.href);
+              url.searchParams.set('theme', theme);
+              url.searchParams.set('language', language);
+              window.history.replaceState(null, '', url);
+              window.location.reload();
+            }}
             retryMode={canReload ? 'reload' : 'reset'}
             language={language}
           />

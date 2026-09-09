@@ -525,6 +525,17 @@ describe('DaemonWorkspaceProvider', () => {
         await new Promise((r) => setTimeout(r, 0));
       });
 
+      // A same-element re-render skips the contextValue memo (its deps are
+      // unchanged), so only the render-phase record runs — the copy must not
+      // downgrade from 'provided' because of it.
+      act(() => {
+        root?.render(
+          <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170">
+            {null}
+          </DaemonWorkspaceProvider>,
+        );
+      });
+
       expect(renderBareConsumer()?.message).toContain(
         'outside its live subtree',
       );
@@ -610,6 +621,86 @@ describe('DaemonWorkspaceProvider', () => {
         });
 
         expect(error?.message).toContain('without an active client');
+      } finally {
+        restore();
+      }
+    });
+
+    it('never evicts the live copy when foreign copies accumulate past the cap', async () => {
+      const restore = swapRegistry(new Map());
+      try {
+        await renderWithProvider(null);
+        await act(async () => {
+          await new Promise((r) => setTimeout(r, 0));
+        });
+        const registry = readRegistry();
+        const ownId = [...registry.keys()][0];
+        if (!ownId) throw new Error('live copy was not registered');
+        // 8 === MAX_TRACKED_PROVIDER_COPIES in the provider module.
+        for (let i = 0; i < 8; i++) {
+          registry.set(`https://example.test/copy-${i}.js#x${i}`, 'provided');
+        }
+
+        // A re-render that skips the contextValue memo re-records the live
+        // copy; the eviction must target the oldest *foreign* entry.
+        act(() => {
+          root?.render(
+            <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170">
+              {null}
+            </DaemonWorkspaceProvider>,
+          );
+        });
+
+        expect(registry.size).toBe(8);
+        expect(registry.has(ownId)).toBe(true);
+      } finally {
+        restore();
+      }
+    });
+
+    it('still names the no-active-client cause when a copy that provided loses its client', async () => {
+      const restore = swapRegistry(new Map());
+      let error: Error | undefined;
+
+      function Harness() {
+        try {
+          useDaemonWorkspace();
+        } catch (e) {
+          error = e as Error;
+        }
+        return null;
+      }
+
+      try {
+        container = document.createElement('div');
+        document.body.appendChild(container);
+        root = createRoot(container);
+        await act(async () => {
+          root?.render(
+            <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170">
+              <Harness />
+            </DaemonWorkspaceProvider>,
+          );
+        });
+        await act(async () => {
+          await new Promise((r) => setTimeout(r, 0));
+        });
+        expect(error).toBeUndefined();
+
+        // The copy stays 'provided' (terminal), so the message must admit the
+        // lost-client cause rather than only naming placement.
+        await act(async () => {
+          root?.render(
+            <DaemonWorkspaceProvider
+              baseUrl="http://127.0.0.1:4170"
+              autoConnect={false}
+            >
+              <Harness />
+            </DaemonWorkspaceProvider>,
+          );
+        });
+
+        expect(error?.message).toContain('no active client');
       } finally {
         restore();
       }

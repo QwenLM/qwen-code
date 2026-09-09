@@ -117,6 +117,65 @@ describe('StandaloneApp', () => {
     expect(container.querySelector('button')).toBeNull();
   });
 
+  it('reloads even without a survivable token when no token was resolved at boot', () => {
+    // Tokenless trusted loopback: nothing a reload could strand.
+    testState.throwOnRender = true;
+    testState.tokenSurvivesReload = false;
+    const reload = vi.fn();
+    vi.stubGlobal('location', { ...window.location, reload });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    act(() => root.render(<StandaloneApp daemonToken={undefined} />));
+
+    const retry = container.querySelector('button');
+    expect(retry?.textContent).toBe('Reload page');
+    expect(reload).not.toHaveBeenCalled();
+
+    act(() => {
+      retry?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('carries the live theme and language across a reload retry', () => {
+    window.history.replaceState(null, '', '/?theme=light&language=zh-CN');
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    // A session switch strips the one-shot params from the URL.
+    act(() => {
+      testState.props?.webShellProps.onSessionIdChange?.(
+        'session-1',
+        'workspace-1',
+      );
+    });
+    expect(window.location.search).not.toContain('theme=');
+
+    testState.throwOnRender = true;
+    const reload = vi.fn();
+    vi.stubGlobal('location', { ...window.location, reload });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const replaceState = vi.spyOn(window.history, 'replaceState');
+
+    act(() => {
+      testState.props?.webShellProps.onSessionIdChange?.(
+        'session-2',
+        'workspace-1',
+      );
+    });
+    const retry = container.querySelector('button');
+    expect(retry?.textContent).toBe('重新加载');
+
+    act(() => {
+      retry?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    const reloadUrl = String(replaceState.mock.calls.at(-1)?.[2]);
+    expect(reloadUrl).toContain('theme=light');
+    expect(reloadUrl).toContain('language=zh-CN');
+  });
+
   it('keeps the controlled session target in sync with URL changes', () => {
     act(() => root.render(<StandaloneApp daemonToken="token" />));
 

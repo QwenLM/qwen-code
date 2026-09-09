@@ -87,11 +87,13 @@ describe('RootErrorFallback', () => {
         error={new Error('x')}
         onRetry={() => {}}
         language="zh-CN"
+        retryMode="reload"
       />,
     );
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(
       '出了点问题',
     );
+    expect(container.querySelector('button')?.textContent).toBe('重新加载');
   });
 
   it('catches an App-level render crash instead of white-screening', () => {

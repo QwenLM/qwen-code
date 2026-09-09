@@ -203,6 +203,11 @@ const documentBuildResult = await build({
   target: ['chrome120'],
   legalComments: 'none',
   loader: { '.css': 'css' },
+  // DaemonWorkspaceProvider.tsx reads import.meta.url (guarded) for its
+  // module-copy diagnostic id; esbuild lowers import.meta to {} under iife
+  // and warns per read. The read is deliberate, so silence the warning here
+  // and let the check below fail the build if it ever resurfaces.
+  logOverride: { 'empty-import-meta': 'silent' },
   define: {
     'process.env.NODE_ENV': '"production"',
     __EXPORT_TRANSCRIPT_RENDERER_VERSION__: JSON.stringify(
@@ -214,6 +219,16 @@ const documentBuildResult = await build({
     ),
   },
 });
+
+const emptyImportMetaWarnings = documentBuildResult.warnings.filter(
+  (warning) => warning.id === 'empty-import-meta',
+);
+if (emptyImportMetaWarnings.length > 0) {
+  throw new Error(
+    'export-transcript-document build produced empty-import-meta warnings: ' +
+      'the logOverride silence is missing or a new import.meta use landed.',
+  );
+}
 
 const documentJsBundle = documentBuildResult.outputFiles.find((file) =>
   file.path.endsWith('.js'),

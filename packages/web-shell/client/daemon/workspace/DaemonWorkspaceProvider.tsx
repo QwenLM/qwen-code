@@ -16,6 +16,7 @@ import {
 import type { DaemonCapabilities } from '@qwen-code/sdk/daemon';
 import { DaemonClient } from '@qwen-code/sdk/daemon';
 import { createDaemonWorkspaceActions } from './actions.js';
+import { setBoundedMapEntry } from '../../utils/bounded-map.js';
 import type {
   DaemonWorkspaceContextValue,
   DaemonWorkspaceProviderProps,
@@ -34,9 +35,14 @@ const DaemonWorkspaceContext = createContext<
 // even though a provider from the other copy is mounted. The registry records
 // which module copies rendered a provider — and whether they produced a
 // context value — so the strict hook's error can say which case it hit. The
-// id carries the module URL so the message points at the offending chunk.
-// Diagnostic only — the context itself is never shared.
-const moduleInstanceId = `${import.meta.url}#${Math.random().toString(36).slice(2, 8)}`;
+// id carries the module URL so the message points at the offending chunk; the
+// esbuild iife build for export documents lowers import.meta to {}, hence the
+// guarded fallback. Diagnostic only — the context itself is never shared.
+const moduleUrl =
+  typeof import.meta.url === 'string' && import.meta.url
+    ? import.meta.url
+    : 'web-shell/DaemonWorkspaceProvider';
+const moduleInstanceId = `${moduleUrl}#${Math.random().toString(36).slice(2, 8)}`;
 
 type ProviderCopyState =
   // Rendered, but never produced a context value (e.g. autoConnect={false}).
@@ -61,16 +67,10 @@ function recordProviderCopy(id: string, provided: boolean): void {
   const registry = providerCopyRegistry();
   const next: ProviderCopyState =
     provided || registry.get(id) === 'provided' ? 'provided' : 'rendered';
-  // Re-insert at the end so the cap below evicts stale copies (e.g. from
-  // hot re-evaluations whose provider is gone), never a live one — a live
-  // provider re-records on every render.
-  registry.delete(id);
-  registry.set(id, next);
-  while (registry.size > MAX_TRACKED_PROVIDER_COPIES) {
-    const oldest = registry.keys().next().value;
-    if (oldest === undefined) break;
-    registry.delete(oldest);
-  }
+  // Re-recording moves the entry to the newest position, so the cap evicts
+  // stale copies (e.g. from hot re-evaluations whose provider is gone),
+  // never a live one — a live provider re-records on every render.
+  setBoundedMapEntry(registry, id, next, MAX_TRACKED_PROVIDER_COPIES);
 }
 
 // Module-level sentinel for deferred-disposal StrictMode guard.
@@ -315,12 +315,13 @@ export function useDaemonWorkspace(): DaemonWorkspaceContextValue {
           `DaemonWorkspaceProvider module`
         : ownState === 'provided'
           ? 'a DaemonWorkspaceProvider from this module copy has rendered, ' +
-            'so this consumer is outside its live subtree (or it has ' +
-            'unmounted)'
+            'so this consumer is outside its live subtree, that provider ' +
+            'has unmounted, or it currently has no active client ' +
+            '(autoConnect is false)'
           : ownState === 'rendered'
             ? 'a DaemonWorkspaceProvider from this module copy has rendered ' +
-              'without an active client (e.g. autoConnect is false), so it ' +
-              'provides no workspace context'
+              'without an active client (e.g. autoConnect is false), or ' +
+              'has since unmounted, so it provides no workspace context'
             : 'no DaemonWorkspaceProvider has rendered in this page';
     throw new Error(
       `useDaemonWorkspace must be used within DaemonWorkspaceProvider ` +
