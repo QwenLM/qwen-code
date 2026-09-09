@@ -391,6 +391,238 @@ describe('matchesCommandPattern', () => {
     });
   });
 
+  // Security regression coverage for #10192 / #10197: a leading environment
+  // assignment may only be stripped for permission matching when it is
+  // provably static and carries no runtime/loader semantics.
+  describe('leading environment assignment security (#10192 / #10197)', () => {
+    it('does not match when the assignment hides command substitution', async () => {
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'X=`touch${IFS}/tmp/poc` npm --version',
+        ),
+      ).toBe(false);
+      expect(
+        matchesCommandPattern('npm *', 'X=`touch${IFS}/tmp/poc` npm --version'),
+      ).toBe(false);
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'X=$(touch /tmp/poc) npm --version',
+        ),
+      ).toBe(false);
+      // A quoted substitution collapses into a single assignment-looking
+      // word, so a naive NAME=value strip would hide it entirely.
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'X="$(touch /tmp/poc)" npm --version',
+        ),
+      ).toBe(false);
+    });
+
+    it('does not match when the assignment hides parameter expansion', async () => {
+      // shell-quote drops unknown ${…} references, so the value must be
+      // re-materialized before stripping or the payload vanishes from view.
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'X=${IFS}touch${IFS}/tmp/poc npm --version',
+        ),
+      ).toBe(false);
+    });
+
+    it('does not match runtime-loader assignments (#10197)', async () => {
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
+        ),
+      ).toBe(false);
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'GIT_CONFIG_GLOBAL=/tmp/evil.cfg npm --version',
+        ),
+      ).toBe(false);
+      // One unsafe assignment keeps the whole prefix in place.
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'FOO=bar NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
+        ),
+      ).toBe(false);
+    });
+
+    it('does not match binary-hijack and loader variables (PATH, LD_AUDIT, JAVA_TOOL_OPTIONS)', async () => {
+      // `PATH=…` re-points binary lookup even for a literal value.
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'PATH=/tmp/evil/bin npm --version',
+        ),
+      ).toBe(false);
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'LD_AUDIT=/tmp/evil.so npm --version',
+        ),
+      ).toBe(false);
+      expect(
+        matchesCommandPattern(
+          'java -version',
+          'JAVA_TOOL_OPTIONS=-javaagent:/tmp/evil.jar java -version',
+        ),
+      ).toBe(false);
+      expect(
+        matchesCommandPattern(
+          'java -version',
+          'GLIBC_TUNABLES=glibc.malloc.check=t java -version',
+        ),
+      ).toBe(false);
+    });
+
+    it('does not match lowercase spellings of unstrippable variables', async () => {
+      // Windows resolves environment variable names case-insensitively, so
+      // `node_options=` must be treated as NODE_OPTIONS. Removing the
+      // case-fold must turn this test red.
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'node_options=--require=/tmp/preload.cjs npm --version',
+        ),
+      ).toBe(false);
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'path=/tmp/evil/bin npm --version',
+        ),
+      ).toBe(false);
+    });
+
+    it('does not match NPM_CONFIG_* config injection (NPM_CONFIG_USERCONFIG)', async () => {
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'NPM_CONFIG_USERCONFIG=/tmp/evil-npmrc npm --version',
+        ),
+      ).toBe(false);
+    });
+
+    it('does not match when a variable reference sits in the NAME part', async () => {
+      // `A$PWD=c` is not an assignment for bash (the name is not a plain
+      // literal), so bash executes the expanded word as a command while the
+      // parsed view would strip it. Both parses disagree → keep intact.
+      expect(
+        matchesCommandPattern('npm --version', 'A$PWD=c npm --version'),
+      ).toBe(false);
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'A$UNDEFINED_VAR=c npm --version',
+        ),
+      ).toBe(false);
+      // After a clean assignment the same divergence still applies.
+      expect(
+        matchesCommandPattern('npm --version', 'X=hello A$X=c npm --version'),
+      ).toBe(false);
+      // Even without an `=`: the expansion of the first word could inject
+      // one, so the word can never be verified as a command word.
+      expect(matchesCommandPattern('npm *', 'A$X npm --version')).toBe(false);
+    });
+
+    it('does not match when the raw word is not a plain NAME=value for bash', async () => {
+      // `FOO\=bar` — the escaped `=` disqualifies the assignment, so bash
+      // runs a command literally named `FOO=bar`; the parser resolves the
+      // escape away and must not strip the word.
+      expect(
+        matchesCommandPattern('npm --version', 'FOO\\=bar npm --version'),
+      ).toBe(false);
+      // Quotes in the NAME part disqualify the assignment the same way.
+      expect(
+        matchesCommandPattern('npm --version', 'A"x"=c npm --version'),
+      ).toBe(false);
+      // Escaped spaces inside a *value* are fine: bash still sees an
+      // assignment there, so stripping stays correct.
+      expect(
+        matchesCommandPattern('npm install', 'FOO=a\\ b npm install'),
+      ).toBe(true);
+    });
+
+    it('does not match glob-bearing assignments', async () => {
+      expect(matchesCommandPattern('npm --version', 'X=* npm --version')).toBe(
+        false,
+      );
+    });
+
+    it('logs when an unsafe prefix keeps the command intact', async () => {
+      // `DEBUG=* npm test` silently stops matching allow rules — the only
+      // observable trace should be a debug log, not a silent mismatch.
+      debugLoggerMock.debug.mockClear();
+      expect(matchesCommandPattern('npm test', 'DEBUG=* npm test')).toBe(false);
+      expect(debugLoggerMock.debug).toHaveBeenCalledWith(
+        expect.stringContaining('DEBUG=* npm test'),
+      );
+      // A provably static prefix strips silently.
+      debugLoggerMock.debug.mockClear();
+      expect(matchesCommandPattern('npm test', 'DEBUG=1 npm test')).toBe(true);
+      expect(debugLoggerMock.debug).not.toHaveBeenCalled();
+    });
+
+    it('still strips static assignments for #2846 compatibility', async () => {
+      expect(
+        matchesCommandPattern(
+          'python3 *',
+          'PYTHONPATH=/tmp/lib python3 -c "print(1)"',
+        ),
+      ).toBe(true);
+      expect(
+        matchesCommandPattern('npm --version', 'FOO=bar npm --version'),
+      ).toBe(true);
+      expect(
+        matchesCommandPattern('npm install', 'FOO="bar baz" npm install'),
+      ).toBe(true);
+    });
+
+    it('still strips tilde paths in static assignments', async () => {
+      // Tilde expansion in an assignment value yields only a path, so
+      // `PYTHONPATH=~/lib …` keeps matching. Removing `~` from the static
+      // value charset must turn this test red.
+      expect(
+        matchesCommandPattern(
+          'python3 *',
+          'PYTHONPATH=~/lib python3 -c "print(1)"',
+        ),
+      ).toBe(true);
+    });
+
+    it("strips unsafe prefixes for deny/ask rules ('always' mode)", async () => {
+      // Restrictive rules must keep matching the command underneath a
+      // hostile prefix — widening a deny/ask match is the safe direction.
+      expect(
+        matchesCommandPattern(
+          'rm *',
+          'LD_PRELOAD=/tmp/evil.so rm -rf /tmp/x',
+          'always',
+        ),
+      ).toBe(true);
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
+          'always',
+        ),
+      ).toBe(true);
+      expect(
+        matchesCommandPattern('rm *', 'FOO=1 rm -rf /tmp/x', 'always'),
+      ).toBe(true);
+      // Default mode stays conservative for allow rules.
+      expect(
+        matchesCommandPattern('rm *', 'LD_PRELOAD=/tmp/evil.so rm -rf /tmp/x'),
+      ).toBe(false);
+    });
+  });
+
   // Wildcard at head
   describe('wildcard at head', () => {
     it('matches any command ending with pattern', async () => {
@@ -1933,6 +2165,120 @@ describe('PermissionManager', () => {
             command: 'rm -rf "$(pwd)/build"',
           }),
         ).toBe('deny');
+      });
+    });
+
+    // Security regression coverage for #10192 / #10197: a saved concrete
+    // Bash allow rule must not be reachable through a leading environment
+    // assignment that carries substitution or runtime-loader semantics.
+    describe('leading environment assignments (issues #10192 / #10197)', () => {
+      it('does not allow command substitution hidden in a leading assignment (#10192)', async () => {
+        const pm2 = new PermissionManager(
+          makeConfig({ permissionsAllow: ['Bash(npm --version)'] }),
+        );
+        pm2.initialize();
+        expect(
+          await pm2.evaluate({
+            toolName: 'run_shell_command',
+            command: 'X=`touch${IFS}/tmp/poc` npm --version',
+          }),
+        ).toBe('ask');
+      });
+
+      it('does not allow loader-variable assignments (#10197)', async () => {
+        const pm2 = new PermissionManager(
+          makeConfig({ permissionsAllow: ['Bash(npm --version)'] }),
+        );
+        pm2.initialize();
+        expect(
+          await pm2.evaluate({
+            toolName: 'run_shell_command',
+            command: 'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
+          }),
+        ).toBe('ask');
+        expect(
+          await pm2.evaluate({
+            toolName: 'run_shell_command',
+            command: 'GIT_CONFIG_GLOBAL=/tmp/evil.cfg npm --version',
+          }),
+        ).toBe('ask');
+      });
+
+      it('still allows static env prefixes to match saved rules (#2846)', async () => {
+        const pm2 = new PermissionManager(
+          makeConfig({ permissionsAllow: ['Bash(python3 *)'] }),
+        );
+        pm2.initialize();
+        expect(
+          await pm2.evaluate({
+            toolName: 'run_shell_command',
+            command: 'PYTHONPATH=/tmp/lib python3 -c "print(1)"',
+          }),
+        ).toBe('allow');
+      });
+
+      it('plain command without prefix still matches the saved rule', async () => {
+        const pm2 = new PermissionManager(
+          makeConfig({ permissionsAllow: ['Bash(npm --version)'] }),
+        );
+        pm2.initialize();
+        expect(
+          await pm2.evaluate({
+            toolName: 'run_shell_command',
+            command: 'npm --version',
+          }),
+        ).toBe('allow');
+      });
+
+      it('deny rules still block env-prefixed commands (review R1-1)', async () => {
+        // Restrictive rules strip leading assignments unconditionally, so a
+        // hostile prefix cannot hide `rm` from `Bash(rm -rf *)` — without
+        // this, an unsafe prefix would fall through to the default and could
+        // be auto-approved in yolo mode.
+        const pm2 = new PermissionManager(
+          makeConfig({ permissionsDeny: ['Bash(rm -rf *)'] }),
+        );
+        pm2.initialize();
+        expect(
+          await pm2.evaluate({
+            toolName: 'run_shell_command',
+            command: 'LD_PRELOAD=/tmp/evil.so rm -rf /tmp/x',
+          }),
+        ).toBe('deny');
+        expect(
+          await pm2.evaluate({
+            toolName: 'run_shell_command',
+            command: 'NODE_OPTIONS=--require=/tmp/p.cjs rm -rf /tmp/x',
+          }),
+        ).toBe('deny');
+        // A static prefix is stripped in both modes; deny keeps working.
+        expect(
+          await pm2.evaluate({
+            toolName: 'run_shell_command',
+            command: 'FOO=1 rm -rf /tmp/x',
+          }),
+        ).toBe('deny');
+      });
+
+      it('ask rules still catch env-prefixed commands (review R1-1)', async () => {
+        // `git status` is read-only, so without the ask rule matching through
+        // the unsafe prefix this would resolve to 'allow'.
+        const pm2 = new PermissionManager(
+          makeConfig({ permissionsAsk: ['Bash(git status)'] }),
+        );
+        pm2.initialize();
+        expect(
+          await pm2.evaluate({
+            toolName: 'run_shell_command',
+            command: 'NODE_OPTIONS=--require=/tmp/p.cjs git status',
+          }),
+        ).toBe('ask');
+        expect(
+          await pm2.evaluate({
+            toolName: 'run_shell_command',
+            command: 'git status',
+          }),
+        ).toBe('ask');
       });
     });
 

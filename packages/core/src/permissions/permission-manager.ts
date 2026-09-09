@@ -416,19 +416,25 @@ export class PermissionManager {
     const baseDecision: PermissionDecision = (() => {
       // Restrictive rules follow canonical destinations; allow rules stay
       // lexical so a symlink cannot widen what the user explicitly allowed.
+      // Restrictive rules also strip leading env assignments unconditionally
+      // ('always') so a hostile prefix (`LD_PRELOAD=… rm -rf x`) cannot hide
+      // the underlying command from a deny/ask rule; allow rules keep the
+      // conservative safe-only stripping (#10192 review).
       // Priority 1: deny rules (session first, then persistent)
       for (const rule of [
         ...this.sessionRules.deny,
         ...this.persistentRules.deny,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'deny';
+        if (matchesRule(rule, ...matchArgs, 'canonical', 'always'))
+          return 'deny';
       }
       // Priority 2: ask rules
       for (const rule of [
         ...this.sessionRules.ask,
         ...this.persistentRules.ask,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'ask';
+        if (matchesRule(rule, ...matchArgs, 'canonical', 'always'))
+          return 'ask';
       }
       // Priority 3: allow rules
       for (const rule of [
@@ -934,7 +940,9 @@ export class PermissionManager {
       ...this.sessionRules.deny,
       ...this.persistentRules.deny,
     ]) {
-      if (matchesRule(rule, ...matchArgs, 'canonical')) {
+      // 'always': a deny rule must still catch the command underneath a
+      // hostile env-assignment prefix (#10192 review).
+      if (matchesRule(rule, ...matchArgs, 'canonical', 'always')) {
         return rule.raw;
       }
     }
@@ -1053,6 +1061,7 @@ export class PermissionManager {
                 undefined,
                 undefined,
                 'canonical',
+                'always',
               ),
             ) ||
             allowRules.some((rule) =>
@@ -1087,7 +1096,7 @@ export class PermissionManager {
 
     return (
       restrictiveRules.some((rule) =>
-        matchesRule(rule, ...matchArgs, 'canonical'),
+        matchesRule(rule, ...matchArgs, 'canonical', 'always'),
       ) || allowRules.some((rule) => matchesRule(rule, ...matchArgs))
     );
   }
@@ -1183,8 +1192,10 @@ export class PermissionManager {
       toolAliases,
     ] as const;
 
+    // 'always': an ask rule must still catch the command underneath a
+    // hostile env-assignment prefix (#10192 review).
     return askRules.some((rule) =>
-      matchesRule(rule, ...matchArgs, 'canonical'),
+      matchesRule(rule, ...matchArgs, 'canonical', 'always'),
     );
   }
 
