@@ -727,6 +727,36 @@ export class ContentGenerationPipeline {
         throw error;
       }
 
+      // A finish chunk parked for the usage merge must not be lost when the
+      // iterator throws before the trailing usage chunk arrives (e.g. a
+      // gateway error frame landing where that tail would have been):
+      // downstream completeness gates key on the finish reason to tell a
+      // completed answer from a cut one. The flush sits below the
+      // InvalidStreamError rethrow — a protocol-tag-leak stream must not
+      // deliver one — and above the guard and StreamContentError rethrows so
+      // every recoverable error class still sees it. `handleError` never
+      // returns, so the Stage 2d flush above cannot double-yield this
+      // response.
+      //
+      // A parked finish carrying a functionCall stays parked: the converter
+      // emits functionCall parts only on the finish chunk, and releasing one
+      // here would flip LlmChat's delivered flags (streamYieldedContentChunk,
+      // streamYieldedFunctionCall) and shut the transport replay gate that
+      // recovers exactly this cut, while the post-completion acceptance arm
+      // this flush feeds excludes tool calls anyway.
+      const parkedHasToolCall = pendingFinishResponse?.candidates?.some(
+        (candidate) =>
+          candidate.content?.parts?.some((part) => part.functionCall),
+      );
+      if (pendingFinishResponse && !finishYielded && !parkedHasToolCall) {
+        logPendingProtocolTagSanitized(
+          pendingFinishResponse,
+          pendingFinishProtocolTagSanitized,
+        );
+        yield pendingFinishResponse;
+        finishYielded = true;
+      }
+
       // Re-throw StreamContentError directly so it can be handled by
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
       if (error instanceof StreamContentError) {
@@ -776,21 +806,6 @@ export class ContentGenerationPipeline {
           'Model response leaked thinking tags.',
           'PROTOCOL_TAG_LEAK',
         );
-      }
-
-      // A finish chunk parked for the usage merge must not be lost when the
-      // iterator throws before the trailing usage chunk arrives (e.g. a
-      // gateway error frame landing where that tail would have been):
-      // downstream completeness gates key on the finish reason to tell a
-      // completed answer from a cut one. `handleError` never returns, so the
-      // Stage 2d flush above cannot double-yield this response.
-      if (pendingFinishResponse && !finishYielded) {
-        logPendingProtocolTagSanitized(
-          pendingFinishResponse,
-          pendingFinishProtocolTagSanitized,
-        );
-        yield pendingFinishResponse;
-        finishYielded = true;
       }
 
       // Use shared error handling logic

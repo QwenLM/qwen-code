@@ -33,12 +33,11 @@ export function isRetryableStreamTransportError(
  * status survived — a gateway error frame pushed into an already-200 SSE
  * stream, which the OpenAI SDK surfaces with neither a status nor a socket
  * code. This needs its own predicate instead of a wider
- * `RETRYABLE_STREAM_TRANSPORT_CODES`: that set is socket-only by contract, and
- * the Anthropic generator shares the predicate over it to decide whether
- * deferred tool-call chunks may be released. That release gate deliberately
- * stays transport-only, so it is narrower than LlmChat's replay boundary, which
- * admits this class too; the comment at its call site in the Anthropic
- * generator records why releasing there would disable the recovery.
+ * `RETRYABLE_STREAM_TRANSPORT_CODES`: that set is socket-only by contract.
+ * LlmChat's replay/continuation boundary admits this class alongside socket
+ * cuts, and the Anthropic generator's deferred tool-call release gate reads
+ * both predicates so a closed batch reaches LlmChat on the same footing on
+ * either provider.
  */
 export function isRetryableStatuslessUpstreamError(
   classification: RetryErrorClassification,

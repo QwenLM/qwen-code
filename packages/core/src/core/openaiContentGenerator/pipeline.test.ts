@@ -3336,16 +3336,19 @@ describe('ContentGenerationPipeline', () => {
         async *[Symbol.asyncIterator]() {
           yield {
             id: 'finish-chunk',
-            choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+            choices: [{ delta: {}, finish_reason: 'stop' }],
           } as OpenAI.Chat.ChatCompletionChunk;
           throw streamError;
         },
       };
+      // The error-path flush never releases a functionCall-bearing finish
+      // (see the withhold test below), so this fixture's finish carries a
+      // text part: the log pin needs a finish the flush actually delivers.
       const finishResponse = new GenerateContentResponse();
       finishResponse.responseId = 'finish-response';
       finishResponse.candidates = [
         {
-          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          content: { parts: [{ text: 'sanitized answer' }] },
           finishReason: FinishReason.STOP,
           index: 0,
         },
@@ -3356,7 +3359,7 @@ describe('ContentGenerationPipeline', () => {
         (_chunk, context) => {
           context.protocolTagSanitized = {
             tagName: 'think',
-            toolCallCount: 1,
+            toolCallCount: 0,
           };
           return finishResponse;
         },
@@ -5043,6 +5046,140 @@ describe('ContentGenerationPipeline', () => {
       );
 
       await expect(iterator.next()).rejects.toThrow("'id'");
+      expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
+    });
+
+    it('flushes a parked finish response ahead of a stream-guard timeout', async () => {
+      // A provider that emits content plus `finish_reason: 'stop'` and then
+      // goes silent — a hung or drip-fed gateway after the answer — trips
+      // the inactivity watchdog while the finish chunk is still parked for
+      // the usage merge. Downstream completeness gates key on the finish
+      // reason, so the parked response must reach the caller ahead of the
+      // guard's rethrow; a flush placed below the guard branch never runs
+      // for this error class.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+
+      const mockChunk1 = {
+        id: 'chunk-1',
+        choices: [
+          { delta: { content: 'a complete answer' }, finish_reason: null },
+        ],
+      } as OpenAI.Chat.ChatCompletionChunk;
+      const mockChunk2 = {
+        id: 'chunk-2',
+        choices: [{ delta: { content: '' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletionChunk;
+
+      const guardError = new StreamInactivityTimeoutError(240_000, 2, 240_500);
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield mockChunk1;
+          yield mockChunk2;
+          throw guardError;
+        },
+      };
+
+      const mockContentResponse = new GenerateContentResponse();
+      mockContentResponse.candidates = [
+        { content: { parts: [{ text: 'a complete answer' }], role: 'model' } },
+      ];
+      const mockFinishResponse = new GenerateContentResponse();
+      mockFinishResponse.candidates = [
+        {
+          content: { parts: [], role: 'model' },
+          finishReason: FinishReason.STOP,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
+        .mockReturnValueOnce(mockContentResponse)
+        .mockReturnValueOnce(mockFinishResponse);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        userPromptId,
+      );
+      const iterator = resultGenerator[Symbol.asyncIterator]();
+
+      const contentResult = await iterator.next();
+      if (contentResult.done) throw new Error('Expected a content response.');
+      expect(contentResult.value).toBe(mockContentResponse);
+
+      // The parked finish is flushed ahead of the guard's rethrow.
+      const finishResult = await iterator.next();
+      if (finishResult.done) throw new Error('Expected a finish response.');
+      expect(finishResult.value.candidates?.[0]?.finishReason).toBe(
+        FinishReason.STOP,
+      );
+
+      // The caller still rejects with the dedicated timeout error instance —
+      // its type and idle/chunk metadata intact — because the guard branch
+      // bypasses handleError.
+      await expect(iterator.next()).rejects.toBe(guardError);
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('withholds a parked functionCall finish when the stream fails before the trailing tail', async () => {
+      // The converter emits functionCall parts only on the finish chunk, and
+      // streaming always parks that chunk for the trailing usage metadata.
+      // Releasing it ahead of the error would flip LlmChat's delivered flags
+      // (streamYieldedContentChunk, streamYieldedFunctionCall) and shut the
+      // transport replay gate that recovers exactly this cut, while the
+      // post-completion acceptance arm the flush feeds excludes tool calls
+      // anyway — so a tool-call finish stays parked on the error path.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const streamError = new Error('stream failed after finish');
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'finish-chunk',
+            choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          throw streamError;
+        },
+      };
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValue(
+        finishResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      const results: GenerateContentResponse[] = [];
+      await expect(async () => {
+        for await (const result of resultGenerator) {
+          results.push(result);
+        }
+      }).rejects.toThrow(streamError);
+      // The tool-call finish stays parked: the caller sees no chunk, only
+      // the rejection.
+      expect(results).toEqual([]);
       expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
     });
   });

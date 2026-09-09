@@ -10913,6 +10913,76 @@ describe('LlmChat', async () => {
         ).toHaveBeenCalledTimes(1);
       });
 
+      it('does not continue a status-less upstream error that delivered a functionCall', async () => {
+        // The continuation gate admits a status-less upstream failure for
+        // prose, but a delivered functionCall excludes it exactly as for a
+        // socket cut. The Anthropic deferred-batch release relies on this
+        // exclusion: it releases a closed tool call ahead of this error
+        // class so the call reaches error-path persistence and the
+        // scheduler's repair flow, instead of the model being asked to
+        // resume prose whose tool decision it never saw.
+        const upstreamError = Object.assign(new Error("'id'"), {
+          code: 'KeyError',
+          requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+        });
+        const toolChunk = {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_1',
+                      name: 'read_file',
+                      args: { path: '/tmp/a.txt' },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield textChunk('Let me read that file. ');
+              yield toolChunk;
+              throw upstreamError;
+            })(),
+          )
+          // Tripwire: consumed only if the cut is wrongly resumed.
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield textChunk('fabricated tail', 'STOP');
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-upstream-statusless-functioncall',
+        );
+        const { events, caughtError } = await drainCollecting(stream);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(0);
+        expect(caughtError).toBe(upstreamError);
+        // The delivered functionCall is persisted on the error path, paired
+        // for the scheduler's repair flow.
+        expect(
+          chat
+            .getHistory()
+            .at(-1)
+            ?.parts?.some((part) => part.functionCall),
+        ).toBe(true);
+      });
+
       it('replays rather than continues when only a thought was delivered', async () => {
         // The reported failure mode: thinking models emit reasoning within
         // seconds, so gating replay on "any chunk yielded" made it

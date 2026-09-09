@@ -56,7 +56,10 @@ import { parseToolCallArguments } from '../tool-call-arguments.js';
 import { classifyRetryError } from '../../utils/retryErrorClassification.js';
 import { getErrorStatus } from '../../utils/errors.js';
 import { buildSessionAwareFetch } from '../outbound-session-id.js';
-import { isRetryableStreamTransportError } from '../stream-transport-retry.js';
+import {
+  isRetryableStatuslessUpstreamError,
+  isRetryableStreamTransportError,
+} from '../stream-transport-retry.js';
 import {
   reportAnthropicEvent,
   reportAnthropicFollowingRequest,
@@ -1621,17 +1624,21 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (upstreamStreamFailed) {
       const upstreamErrorClassification =
         classifyRetryError(upstreamStreamError);
-      // Narrower than LlmChat's replay boundary on purpose. LlmChat also
-      // admits a status-less upstream failure the provider traced with its own
-      // request id; releasing a closed batch here would flip what LlmChat then
-      // sees as already delivered (`streamYieldedContentChunk`,
-      // `streamYieldedFunctionCall`) and shut both of its recovery gates, so
-      // for that class the batch stays withheld and the error propagates,
-      // leaving LlmChat free to replay or continue — which is also what this
-      // path did before that class was classified at all. Only known mid-SSE
-      // socket cuts release.
+      // Match LlmChat's replay boundary: known mid-SSE socket cuts and
+      // status-less upstream failures the provider traced with a request id
+      // both release an already closed batch before the error propagates.
+      // Releasing keeps the two providers' functionCall cuts on one footing —
+      // the delivered call flips LlmChat's delivered flags
+      // (`streamYieldedContentChunk`, `streamYieldedFunctionCall`), which
+      // shuts replay and continuation, and the error-path persistence plus
+      // the scheduler's repair flow take over. Withholding would instead
+      // leave a resume over prose as the only recovery once answer text has
+      // been delivered: a withheld batch never sets
+      // `streamYieldedFunctionCall`, so the model would be asked to continue
+      // an answer whose tool call it never saw.
       if (
-        isRetryableStreamTransportError(upstreamErrorClassification) &&
+        (isRetryableStreamTransportError(upstreamErrorClassification) ||
+          isRetryableStatuslessUpstreamError(upstreamErrorClassification)) &&
         deferredToolCalls.length > 0 &&
         !hasEmptyToolCall &&
         !hasMalformedToolCall &&
