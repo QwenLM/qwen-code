@@ -642,6 +642,14 @@ describe('WorkspaceRuntimeCoordinator', () => {
     // Within the cooldown the latch stays terminal for the ensure path.
     await coordinator.ensure();
     expect(coordinator.status().capabilities?.extensions?.state).toBe('error');
+    const callsBefore = harness.invokeWorkspaceCommand.mock.calls.length;
+    await expect(
+      coordinator.reconcileExtensionGeneration(0),
+    ).resolves.toMatchObject({
+      state: 'deferred',
+      error: 'Extension runtime refresh failed: broken extension',
+    });
+    expect(harness.invokeWorkspaceCommand).toHaveBeenCalledTimes(callsBefore);
 
     // The underlying fault heals without any store write; once the cooldown
     // elapses the ensure path must retry instead of certifying the failure

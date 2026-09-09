@@ -500,7 +500,15 @@ export function ExtensionsManagerPage({
   const [busyName, setBusyName] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [messageTone, setMessageTone] = useState<ManagementNoticeTone>('info');
-  const [messageOwner, setMessageOwner] = useState<string | null>(null);
+  const [messageOwner, setMessageOwnerState] = useState<string | null>(null);
+  const setMessageOwner = useCallback((owner: string | null) => {
+    messageOwnerRef.current = owner;
+    setMessageOwnerState(owner);
+  }, []);
+  const releaseMessageOwner = useCallback((owner: string) => {
+    // Release the in-flight lock without losing the displayed notice's attribution.
+    if (messageOwnerRef.current === owner) messageOwnerRef.current = null;
+  }, []);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const [workspaceTrusted, setWorkspaceTrusted] = useState(true);
   const [refreshError, setRefreshError] = useState<{
@@ -565,10 +573,6 @@ export function ExtensionsManagerPage({
     },
     [],
   );
-
-  useEffect(() => {
-    messageOwnerRef.current = messageOwner;
-  }, [messageOwner]);
 
   const load = useCallback(
     async (preserveMessage = false) => {
@@ -757,6 +761,7 @@ export function ExtensionsManagerPage({
     [
       actions,
       splitRuntimeAvailable,
+      setMessageOwner,
       workspace.client,
       workspace.workspaceCwd,
       workspaceClient,
@@ -797,14 +802,15 @@ export function ExtensionsManagerPage({
               },
           );
         }
-        // `refresh` reconciles the runtime; adopting it would lock the page
-        // behind an action the user never started.
+        // Background refreshes and update checks must not lock management actions.
         const activeMutation = operations.find(
           (operation) =>
             operation.operation !== 'install' &&
-            operation.operation !== 'refresh',
+            operation.operation !== 'refresh' &&
+            operation.operation !== 'check-updates',
         );
         if (activeMutation) {
+          setMessageOwner(activeMutation.name ?? 'extension');
           mutationInFlightRef.current = true;
           if (activeMutation.operation === 'uninstall') {
             uninstallInFlightNameRef.current =
@@ -837,7 +843,7 @@ export function ExtensionsManagerPage({
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [actions]);
+  }, [actions, setMessageOwner]);
 
   const extensionsVersionRef = useRef(signals?.extensionsVersion ?? 0);
   useEffect(() => {
@@ -990,16 +996,12 @@ export function ExtensionsManagerPage({
       setPendingMutation(null);
       setBusyName(null);
       mutationInFlightRef.current = false;
-      const releaseMessageOwner = () => {
-        setMessageOwner((owner) =>
-          owner === pendingMutation.name ? null : owner,
-        );
-      };
+      const releaseOwner = () => releaseMessageOwner(pendingMutation.name);
       if (pendingMutation.operation === 'uninstall') {
         uninstallInFlightNameRef.current = null;
-        void load(true).finally(releaseMessageOwner);
+        void load(true).finally(releaseOwner);
       } else {
-        releaseMessageOwner();
+        releaseOwner();
       }
     };
     const poll = async () => {
@@ -1072,9 +1074,7 @@ export function ExtensionsManagerPage({
           }
           // Same owner release as the non-polling settle: after the reload.
           void load(true).finally(() => {
-            setMessageOwner((owner) =>
-              owner === pendingMutation.name ? null : owner,
-            );
+            releaseMessageOwner(pendingMutation.name);
           });
           return;
         }
@@ -1101,7 +1101,16 @@ export function ExtensionsManagerPage({
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [actions, clearInteraction, load, pendingMutation, showInteraction, t]);
+  }, [
+    actions,
+    clearInteraction,
+    load,
+    pendingMutation,
+    showInteraction,
+    t,
+    setMessageOwner,
+    releaseMessageOwner,
+  ]);
 
   const refreshList = useCallback(() => {
     loadNoticeRef.current = false;
@@ -1110,7 +1119,7 @@ export function ExtensionsManagerPage({
     setMessageTone('info');
     setMessage(null);
     void load();
-  }, [load]);
+  }, [load, setMessageOwner]);
 
   const checkUpdates = useCallback(
     (name: string) => {
@@ -1152,7 +1161,7 @@ export function ExtensionsManagerPage({
           setCheckingName(null);
           // Release the notice owner latched above or the runtime-error gate
           // stays shut for the rest of the mount (mirrors runMutation).
-          setMessageOwner((owner) => (owner === name ? null : owner));
+          releaseMessageOwner(name);
         });
     },
     [
@@ -1160,6 +1169,8 @@ export function ExtensionsManagerPage({
       connection.clientId,
       selectedName,
       splitRuntimeAvailable,
+      setMessageOwner,
+      releaseMessageOwner,
       t,
       workspace.client,
     ],
@@ -1229,6 +1240,7 @@ export function ExtensionsManagerPage({
     installMethod,
     installSource,
     operationsRecovered,
+    setMessageOwner,
     pendingInstall,
     pendingMutation,
     splitRuntimeAvailable,
@@ -1303,7 +1315,7 @@ export function ExtensionsManagerPage({
             // runtime error surfacing mid-flight cannot replace the result;
             // release it afterwards or the error gate stays shut for good.
             void load(true).finally(() => {
-              setMessageOwner((owner) => (owner === name ? null : owner));
+              releaseMessageOwner(name);
             });
           }
         });
@@ -1318,6 +1330,8 @@ export function ExtensionsManagerPage({
       pendingMutation,
       selectedName,
       t,
+      setMessageOwner,
+      releaseMessageOwner,
     ],
   );
 
@@ -1408,11 +1422,13 @@ export function ExtensionsManagerPage({
         // The action's own reload has already settled (or never ran), so
         // release the notice owner — holding it would keep the
         // runtime-error gate shut for the rest of the mount.
-        setMessageOwner((owner) => (owner === extension.name ? null : owner));
+        releaseMessageOwner(extension.name);
       }
     },
     [
       activationRequiresExplicitRefresh,
+      setMessageOwner,
+      releaseMessageOwner,
       busyName,
       checkingName,
       load,

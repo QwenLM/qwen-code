@@ -733,18 +733,23 @@ export function createExtensionsController(
                           refreshed: reconciliation.refreshed,
                           failed: reconciliation.failed,
                         };
+                        const reconciliationError =
+                          reconciliation.error ??
+                          (reconciliation.state !== 'reconciled'
+                            ? 'Extension runtime has not applied the committed generation. Retry the runtime refresh.'
+                            : undefined);
                         runtime.bridge.broadcastExtensionsChanged({
                           ...bridgeMutationEvent(event),
                           ...result,
-                          ...(reconciliation.error
-                            ? { error: reconciliation.error }
+                          ...(reconciliationError
+                            ? { error: reconciliationError }
                             : {}),
                         });
                         return {
                           status: 'fulfilled' as const,
                           result,
                           reconciled: reconciliation.state === 'reconciled',
-                          reconciliationError: reconciliation.error,
+                          reconciliationError,
                           elapsedMs: Date.now() - startedAt,
                         };
                       }

@@ -398,7 +398,12 @@ export class WorkspaceRuntimeCoordinator {
       current.revision === revision &&
       this.isExtensionsFailureLatched(revision, snapshot.runtimeEpoch)
     ) {
-      return { state: 'deferred', refreshed: 0, failed: 0 };
+      return {
+        state: 'deferred',
+        refreshed: 0,
+        failed: 0,
+        error: current.error?.message,
+      };
     }
     const appliedGenerationBefore = this.appliedExtensionGeneration;
     let result: ServeWorkspaceExtensionsRefreshResult | undefined;

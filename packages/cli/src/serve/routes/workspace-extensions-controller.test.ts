@@ -13,6 +13,8 @@ import type { Response } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { resolveLanguageSetting } from '../../i18n/index.js';
+import * as runtimeCoordinator from '../workspace-runtime-coordinator.js';
+import type { WorkspaceRuntime } from '../workspace-registry.js';
 import {
   createExtensionsController,
   redactExtensionDisplaySource,
@@ -415,6 +417,68 @@ describe('createExtensionsController', () => {
       }),
     );
   });
+
+  it.each([undefined, 'latched refresh failure'])(
+    'warns when runtime reconciliation is deferred: %s',
+    async (error) => {
+      const reconcileExtensionGeneration = vi.fn(async () => ({
+        state: 'deferred',
+        refreshed: 0,
+        failed: 0,
+        error,
+      }));
+      vi.spyOn(
+        runtimeCoordinator,
+        'getWorkspaceRuntimeCoordinatorIfSupported',
+      ).mockReturnValue({
+        reconcileExtensionGeneration,
+      } as unknown as runtimeCoordinator.WorkspaceRuntimeCoordinator);
+      const runtime = {
+        workspaceId: 'secondary',
+        workspaceCwd: '/work/secondary',
+        workspaceService: { invalidateWorkspaceSkillsStatus: vi.fn() },
+        bridge: { broadcastExtensionsChanged: vi.fn() },
+      } as unknown as WorkspaceRuntime;
+      const controller = createExtensionsController({
+        boundWorkspace: '/work/bound',
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+      });
+      const manager = {
+        refreshCache: vi.fn(async () => undefined),
+        getExtensionStoreSnapshot: vi.fn(async () => ({ generation: 2 })),
+      } as unknown as ExtensionManager;
+      const json = vi.fn();
+      const response = {
+        status: vi.fn().mockReturnThis(),
+        location: vi.fn().mockReturnThis(),
+        set: vi.fn().mockReturnThis(),
+        json,
+      } as unknown as Response;
+      controller.runQueuedExtensionMutation(
+        'refresh',
+        {},
+        response,
+        async () => ({ status: 'refreshed', refreshed: 0, failed: 0 }),
+        { manager, refreshRuntimes: [runtime] },
+      );
+      const operationId = json.mock.calls[0]![0].operationId as string;
+      await vi.waitFor(() =>
+        expect(controller.getOperation(operationId)).toMatchObject({
+          status: 'succeeded_with_warnings',
+          warnings: [
+            {
+              workspaceId: 'secondary',
+              error:
+                error ??
+                'Extension runtime has not applied the committed generation. Retry the runtime refresh.',
+            },
+          ],
+        }),
+      );
+      expect(reconcileExtensionGeneration).toHaveBeenCalled();
+    },
+  );
 
   it('clears phase from every terminal operation state', async () => {
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);

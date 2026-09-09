@@ -59,8 +59,12 @@ Extensions page:
 1. loads the global catalog and selected workspace projection without starting
    ACP;
 2. calls the shared parameterless runtime ensure;
-3. merges live details and `isActive` only when capability and catalog epochs
-   match the current runtime and applied generation equals desired generation;
+3. merges live details and `isActive` when the durable catalog generation and
+   coordinator are available, the runtime catalog is initialized, and capability
+   and catalog epochs match the coordinator epoch. Readiness and matching
+   desired/applied generations on the capability and activation projection
+   determine whether to re-read the catalog and projection, not whether to
+   retain matching-epoch live rows;
 4. shows the workspace selector on the list page and the disabled selector in
    detail view.
 

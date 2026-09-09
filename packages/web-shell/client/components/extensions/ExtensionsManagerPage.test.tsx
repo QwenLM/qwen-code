@@ -498,6 +498,13 @@ describe('ExtensionsManagerPage split-runtime trust gating', () => {
           updateState: 'update available',
           isActive: true,
         },
+        {
+          id: 'ext-other',
+          name: 'other',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceOverrideCount: 0,
+        },
       ],
     });
     // No operationId: runMutation settles without polling, through its
@@ -535,6 +542,16 @@ describe('ExtensionsManagerPage split-runtime trust gating', () => {
       ),
     );
     await flush();
+
+    await act(async () => {
+      click(findButton('Manage Extensions'));
+    });
+    await act(async () => {
+      click(container.querySelector('[role="button"][aria-label="other"]')!);
+    });
+    expect(container.textContent).not.toContain(
+      'Extension action queued for "demo".',
+    );
 
     // The runtime capability latches to error after the mutation settled;
     // the next signal-driven load must record it in both views.
@@ -823,29 +840,35 @@ describe('ExtensionsManagerPage activation refresh', () => {
     expect(container.textContent).toContain('session refresh failed');
   });
 
-  it('does not adopt an in-flight refresh as a pending mutation', async () => {
-    const running = {
-      v: 1 as const,
-      operationId: 'refresh-1',
-      operation: 'refresh',
-      status: 'running' as const,
-      phase: 'reconciling' as const,
-      createdAt: 1,
-      updatedAt: 2,
-    };
-    state.actions.activeExtensionOperations.mockResolvedValue({
-      v: 1,
-      operations: [running],
-    });
-    state.actions.extensionOperationStatus.mockResolvedValue(running);
-    await renderPage();
+  it.each(['refresh', 'check-updates'])(
+    'does not adopt an in-flight %s as a pending mutation',
+    async (operation) => {
+      const running = {
+        v: 1 as const,
+        operationId: 'refresh-1',
+        operation,
+        status: 'running' as const,
+        phase: 'reconciling' as const,
+        createdAt: 1,
+        updatedAt: 2,
+      };
+      state.actions.activeExtensionOperations.mockResolvedValue({
+        v: 1,
+        operations: [running],
+      });
+      state.actions.extensionOperationStatus.mockResolvedValue(running);
+      await renderPage();
 
-    expect(container.textContent).not.toContain('Extension action queued');
-    expect(findButton('Add').disabled).toBe(false);
+      expect(container.textContent).not.toContain('Extension action queued');
+      expect(findButton('Add').disabled).toBe(false);
+      expect(state.actions.extensionOperationStatus).not.toHaveBeenCalled();
 
-    await chooseActivation('workspace', 'Disabled');
-    expect(state.workspaceHandle.setExtensionActivation).toHaveBeenCalledOnce();
-  });
+      await chooseActivation('workspace', 'Disabled');
+      expect(
+        state.workspaceHandle.setExtensionActivation,
+      ).toHaveBeenCalledOnce();
+    },
+  );
 
   it('keeps the catalog load error when a stale refresh rejects', async () => {
     let rejectRefresh: ((error: Error) => void) | undefined;
