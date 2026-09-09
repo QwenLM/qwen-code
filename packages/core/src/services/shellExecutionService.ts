@@ -2182,7 +2182,17 @@ export class ShellExecutionService {
           // (`taskkill /f /pid`) runs whenever `isPtyActive(pid)` is still
           // true, a taskkill the caller did not explicitly ask for. That is the
           // same recycle race the cancel path documents; it is pre-existing in
-          // kind, and no shipped caller omits `postPromote`.
+          // kind, and narrower than it looks. Most shipped `execute()` call
+          // sites omit `postPromote`, but none of them can reach this code:
+          // `performBackgroundPromote` is only entered from a
+          // `{ kind: 'background' }` abort (see the abortHandler switch below),
+          // and that abort's sole producer is the shell tool's Ctrl+B handler
+          // firing the `promoteAbortController` it created on the foreground
+          // `execute()` path (tools/shell.ts) — the one call site that also
+          // passes `postPromote`. So a no-`postPromote` promote is reachable
+          // only from that user-initiated foreground-to-background handoff,
+          // where the settle-time reap is the intended ownership transfer
+          // rather than a surprise taskkill.
           //
           // Only the *forwarding* to caller handlers stays gated:
           // `firePostSettle` early-returns on `!postPromote?.onSettle` after

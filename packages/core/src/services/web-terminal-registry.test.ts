@@ -305,8 +305,13 @@ describe('WebTerminalRegistry', () => {
 
     expect(registry.release('terminal:release-live-deferred')).toBe(true);
     expect(kill).toHaveBeenCalledOnce();
-    // The deferred kill tore nothing down, so releaseHost still has to.
-    expect(nativeKill).toHaveBeenCalledOnce();
+    // The deferred kill tore nothing down and is still queued in node-pty's
+    // _deferreds; when it eventually runs it closes the pseudo-console. So
+    // releaseHost must dispose the worker now (the one resource a never-run
+    // deferred kill would strand) WITHOUT closing the pseudo-console itself —
+    // a native close here plus the queued kill's later close would double-free
+    // the same HPCON.
+    expect(nativeKill).not.toHaveBeenCalled();
     expect(conoutDispose).toHaveBeenCalledOnce();
   });
 

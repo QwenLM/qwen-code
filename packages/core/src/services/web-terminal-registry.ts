@@ -6,7 +6,11 @@
 
 import { spawnSync } from 'node:child_process';
 import { getPty } from '../utils/getPty.js';
-import { noteConPtyHostReleased, releaseConPtyHost } from './conpty-host.js';
+import {
+  disposeConoutWorker,
+  noteConPtyHostReleased,
+  releaseConPtyHost,
+} from './conpty-host.js';
 
 /**
  * Minimal PTY surface used by the web terminal registry. Backed by node-pty.
@@ -18,10 +22,12 @@ export interface WebTerminalPty {
   kill(): void;
   /**
    * Release node-pty's Windows conout worker without signalling the shell pid.
-   * Used when the shell has already exited, where `kill()` would reach a
-   * possibly recycled pid. Attempts the ConPTY host close too, which no-ops
-   * after a natural exit at the pinned node-pty — see `releaseConPtyHost`.
-   * No-op off Windows. See #11303.
+   * Used after the shell has exited, where `kill()` would reach a possibly
+   * recycled pid, and on the live-release path where a deferred `kill()` would
+   * otherwise strand the worker. When the kill is still deferred (the shell
+   * has not emitted its first output byte) it disposes only the worker, leaving
+   * the native ConPTY close to the queued `kill()` — see `disposeConoutWorker`
+   * and `releaseConPtyHost`. No-op off Windows. See #11303.
    */
   releaseHost?(): void;
 }
@@ -298,7 +304,22 @@ export class WebTerminalRegistry {
             noteConPtyHostReleased(spawned);
           }
         },
-        releaseHost: () => releaseConPtyHost(spawned),
+        releaseHost: () => {
+          // node-pty's WindowsTerminal.kill() defers its whole teardown while
+          // `_isReady` is false, so a release before the shell's first output
+          // byte still has a kill() queued in `_deferreds`. That queued
+          // teardown runs the native ClosePseudoConsole when it fires (or the
+          // native exit-watcher erases the baton first if the shell exits), so
+          // closing the pseudo-console here would double-close the same HPCON.
+          // Dispose only the conout worker now — the one resource a deferred
+          // kill can strand, and an idempotent one — and leave the native close
+          // to the queued kill().
+          if ((spawned as { _isReady?: boolean })._isReady === false) {
+            disposeConoutWorker(spawned);
+            return;
+          }
+          releaseConPtyHost(spawned);
+        },
       };
     } catch {
       this.finishCreating(terminalId);
@@ -435,10 +456,11 @@ export class WebTerminalRegistry {
       killPtyTree(session.pty);
       // killPtyTree's pty.kill() defers its whole teardown while `_isReady` is
       // false, so a terminal released before its shell's first output byte (tab
-      // closed during slow pwsh startup, or a workspace drain) would strand the
-      // conout worker with no owner left to retry. The wrapper's kill() notes
-      // the close when it really ran, so this release only fires the worker
-      // dispose a deferred kill left behind — never a second close.
+      // closed during slow pwsh startup, or a workspace drain) still has a
+      // kill() queued in node-pty's `_deferreds`. The wrapper's kill() notes
+      // the close only when it really ran; releaseHost then disposes the worker
+      // a deferred kill would strand, and skips the native close so the queued
+      // kill() stays the single closer — never a second close.
       session.pty.releaseHost?.();
     } else {
       // The shell already exited, so nothing may signal its (possibly recycled)
