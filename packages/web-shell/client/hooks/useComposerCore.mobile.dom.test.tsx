@@ -455,4 +455,49 @@ describe('useComposerCore mobile textarea backend', () => {
     ).toBe('mobile draft text');
     vi.useRealTimers();
   });
+
+  it('walks prompt history from navigatePrevHistory/navigateNextHistory', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('first message');
+    act(() => latest!.submitText());
+    typeText('second message');
+    act(() => latest!.submitText());
+    typeText('working draft');
+    expect(latest!.mobileComposer!.value).toBe('working draft');
+
+    act(() => latest!.navigatePrevHistory());
+    expect(latest!.mobileComposer!.value).toBe('second message');
+    act(() => latest!.navigatePrevHistory());
+    expect(latest!.mobileComposer!.value).toBe('first message');
+    act(() => latest!.navigateNextHistory());
+    expect(latest!.mobileComposer!.value).toBe('second message');
+    act(() => latest!.navigateNextHistory());
+    expect(latest!.mobileComposer!.value).toBe('working draft');
+  });
+
+  it('persists the draft again once the user edits after a history walk', async () => {
+    mockTouchDevice();
+    await mount({
+      sessionId: 'mobile-session',
+      atWorkspaceCwd: '/workspace/mobile',
+    });
+    typeText('first message');
+    act(() => latest!.submitText());
+    typeText('draft text');
+    act(() => latest!.navigatePrevHistory());
+    expect(latest!.mobileComposer!.value).toBe('first message');
+
+    typeText('edited after walk');
+    act(() => {
+      container!
+        .querySelector('textarea')!
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(
+      localStorage.getItem(
+        'qwen-web-shell-session-draft:' + encodeURIComponent('mobile-session'),
+      ),
+    ).toBe('edited after walk');
+  });
 });

@@ -1,3 +1,4 @@
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -16,6 +17,62 @@ struct PipeResponse {
     ok: bool,
     result: Option<Value>,
     error: Option<String>,
+    #[serde(default)]
+    restart_required: bool,
+}
+
+fn pipe_server_process_id(pipe: std::os::windows::io::RawHandle) -> std::io::Result<u32> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetNamedPipeServerProcessId(pipe: *mut core::ffi::c_void, process_id: *mut u32) -> i32;
+    }
+
+    let mut process_id = 0;
+    if unsafe { GetNamedPipeServerProcessId(pipe, &mut process_id) } == 0 || process_id == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(process_id)
+    }
+}
+
+fn terminate_worker_process(process_id: u32) -> std::io::Result<()> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(
+            desired_access: u32,
+            inherit_handle: i32,
+            process_id: u32,
+        ) -> *mut core::ffi::c_void;
+        fn TerminateProcess(process: *mut core::ffi::c_void, exit_code: u32) -> i32;
+        fn WaitForSingleObject(handle: *mut core::ffi::c_void, milliseconds: u32) -> u32;
+        fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
+    }
+
+    const PROCESS_TERMINATE: u32 = 0x0001;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const WAIT_OBJECT_0: u32 = 0;
+    const RESTART_EXIT_CODE: u32 = 75;
+    const TERMINATION_TIMEOUT_MS: u32 = 5_000;
+
+    let process = unsafe { OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, 0, process_id) };
+    if process.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    let terminated = unsafe { TerminateProcess(process, RESTART_EXIT_CODE) };
+    if terminated == 0 {
+        let error = std::io::Error::last_os_error();
+        let _ = unsafe { CloseHandle(process) };
+        return Err(error);
+    }
+    let wait = unsafe { WaitForSingleObject(process, TERMINATION_TIMEOUT_MS) };
+    let _ = unsafe { CloseHandle(process) };
+    if wait != WAIT_OBJECT_0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("UIAccess worker {process_id} did not terminate after restart response"),
+        ));
+    }
+    Ok(())
 }
 
 fn launch_gate() -> &'static tokio::sync::Mutex<()> {
@@ -221,9 +278,39 @@ fn decode_tool_result(value: Value) -> anyhow::Result<ToolResult> {
     })
 }
 
+fn finish_response<F>(
+    name: &str,
+    response: PipeResponse,
+    worker_process_id: u32,
+    retire_worker: F,
+) -> anyhow::Result<ToolResult>
+where
+    F: FnOnce() -> std::io::Result<()>,
+{
+    let result = if response.ok {
+        decode_tool_result(response.result.unwrap_or(Value::Null))
+    } else {
+        Err(anyhow::anyhow!(
+            "{}",
+            response
+                .error
+                .unwrap_or_else(|| format!("UIAccess {name} failed"))
+        ))
+    };
+    if response.restart_required {
+        if let Err(error) = retire_worker() {
+            tracing::warn!(
+                "failed to retire UIAccess worker {worker_process_id} after degraded response: {error}"
+            );
+        }
+    }
+    result
+}
+
 async fn call_worker(name: &str, args: Value) -> anyhow::Result<ToolResult> {
     let module = module_path()?;
     let mut client = ensure_pipe(&module).await?;
+    let worker_process_id = pipe_server_process_id(client.as_raw_handle())?;
     let request = json!({"method":"call", "name":name, "args":args});
     client
         .write_all(format!("{}\n", serde_json::to_string(&request)?).as_bytes())
@@ -235,15 +322,9 @@ async fn call_worker(name: &str, args: Value) -> anyhow::Result<ToolResult> {
         anyhow::bail!("UIAccess worker closed before returning {name}");
     }
     let response: PipeResponse = serde_json::from_str(&line)?;
-    if !response.ok {
-        anyhow::bail!(
-            "{}",
-            response
-                .error
-                .unwrap_or_else(|| format!("UIAccess {name} failed"))
-        );
-    }
-    decode_tool_result(response.result.unwrap_or(Value::Null))
+    finish_response(name, response, worker_process_id, || {
+        tokio::task::block_in_place(|| terminate_worker_process(worker_process_id))
+    })
 }
 
 /// Returns None only inside the authenticated UIAccess worker itself. Every
@@ -261,4 +342,69 @@ pub(crate) async fn forward_required(name: &str, args: Value) -> Option<ToolResu
             }),
         )
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    #[test]
+    fn degraded_response_is_decoded_before_worker_retirement() {
+        let retired = AtomicBool::new(false);
+        let response: PipeResponse = serde_json::from_value(json!({
+            "ok": true,
+            "result": {
+                "content": [{"type": "text", "text": "partial accessibility state"}],
+                "structuredContent": {
+                    "degraded": true,
+                    "degradedReason": "uia_provider_timeout"
+                }
+            },
+            "restart_required": true
+        }))
+        .unwrap();
+
+        let result = finish_response("get_window_state", response, 4242, || {
+            retired.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(retired.load(Ordering::SeqCst));
+        assert_eq!(
+            result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("degraded"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            result.content.first().and_then(|content| match content {
+                Content::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            }),
+            Some("partial accessibility state")
+        );
+    }
+
+    #[test]
+    fn ordinary_response_does_not_retire_worker() {
+        let retired = AtomicBool::new(false);
+        let response: PipeResponse = serde_json::from_value(json!({
+            "ok": true,
+            "result": {"content": [], "structuredContent": {"ok": true}}
+        }))
+        .unwrap();
+
+        finish_response("list_windows", response, 4242, || {
+            retired.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(!retired.load(Ordering::SeqCst));
+    }
 }
