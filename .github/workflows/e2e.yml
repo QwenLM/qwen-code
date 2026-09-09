@@ -126,6 +126,17 @@ jobs:
           retention-days: 1
           overwrite: true
 
+      # An absorbed stall must stay countable: a recovered upload leaves
+      # this job's conclusion green, so the main-CI failure tracker (which
+      # counts conclusion == "failure" jobs) never records it. The warning
+      # annotation keeps it on the check-run record without reddening the
+      # job; placed after the retry, the implicit success() gate scopes it
+      # to the absorbed case — a double failure reddens the job directly.
+      - name: 'Announce absorbed upload failure'
+        if: "${{ steps.upload-build.outcome == 'failure' }}"
+        run: |-
+          echo "::warning::Upload build artifact failed its first attempt and the retry absorbed it — count this toward the #11364 upload-stall recurrence threshold."
+
   e2e-test-linux:
     name: 'E2E Test (Linux) - ${{ matrix.sandbox }} - shard ${{ matrix.shard }}'
     # Persistent ECS pool with hosted fallback: every trigger here is a

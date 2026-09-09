@@ -531,6 +531,44 @@ describe('e2e build artifact upload retry (e2e.yml build job)', () => {
         buildSteps.indexOf(first) < buildSteps.indexOf(retry),
       'pack must run before the first attempt, which must run before the retry',
     );
+
+    // An absorbed first attempt leaves the job green, so the main-CI
+    // failure tracker — gated on conclusion == "failure" — never records
+    // the stall the retry recovered from. The announce step keeps it
+    // countable as a warning annotation (the same surface that named run
+    // 34208365262's "Upload progress stalled.") without reddening the job;
+    // after the retry, the implicit success() gate scopes it to the
+    // absorbed case — a double failure reddens the job directly.
+    const announce = buildSteps.find(
+      (s) => s.name === 'Announce absorbed upload failure',
+    );
+    assert.ok(
+      announce,
+      "the build job must have an 'Announce absorbed upload failure' step",
+    );
+    assert.equal(
+      announce.if,
+      "${{ steps.upload-build.outcome == 'failure' }}",
+      'the announce step must be gated on the first attempt outcome, exactly like the retry',
+    );
+    assert.ok(
+      !announce.uses,
+      'the announce step must be a plain run step — an action would carry its own failure modes',
+    );
+    assert.match(
+      announce.run,
+      /::warning::/,
+      'the announce step must emit a warning annotation the check-run annotations API keeps queryable',
+    );
+    assert.doesNotMatch(
+      announce.run,
+      /::error::|exit\s+[1-9]/,
+      'the announce step must not be able to turn the build job red',
+    );
+    assert.ok(
+      buildSteps.indexOf(retry) < buildSteps.indexOf(announce),
+      'the announce step must run after the retry so it fires only for the absorbed failure',
+    );
     // The archive name above is derived from the upload side, so the
     // consumer side must be pinned against it too: a rename moving the
     // pack step and both upload paths together re-derives `archive` and
