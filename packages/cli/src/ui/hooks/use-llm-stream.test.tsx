@@ -621,6 +621,36 @@ describe('useLlmStream', () => {
     expect(syntheticPrompt).toContain('not evidence that the user supplied it');
   });
 
+  it('renders the queued spend figures into the synthetic Goal turn', async () => {
+    // The render site reads `usage` off the queued turn. Dropping that read
+    // typechecks and only shows up as a prompt missing its budget line.
+    const goal: QueuedGoalTurn = {
+      kind: 'goal',
+      permit: {
+        goalId: 'goal-usage',
+        revision: 2,
+        turnId: 'turn-usage',
+      },
+      turnKey: 'goal-runtime:turn-usage',
+      continuationContext: 'report the figures',
+      usage: { tokensUsed: 1_234, tokenBudget: 30_000_000, turnCount: 4 },
+    };
+    const { result, mockSendMessageStream: streamMock } = renderTestHook([]);
+
+    await act(async () => {
+      await result.current.submitQuery(
+        goal.continuationContext,
+        SendMessageType.Goal,
+        'prompt-id-goal-usage',
+        { goal },
+      );
+    });
+
+    expect(streamMock.mock.calls[0]?.[0] as string).toContain(
+      'Token budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
+    );
+  });
+
   it('claims a Goal only after direct user input becomes model-facing', async () => {
     const goal: QueuedGoalTurn = {
       kind: 'goal',

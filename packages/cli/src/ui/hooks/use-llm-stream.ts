@@ -78,11 +78,11 @@ import {
   finalizeToolResponses,
   endInteractionSpan,
   getActiveInteractionSpan,
-  renderGoalContinuationPrompt,
   decideNotificationAdmission,
   DroppedNotificationTally,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
   type BackgroundNotificationKind,
+  renderGoalContinuationTurn,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -3746,14 +3746,7 @@ export const useLlmStream = (
             submitType === SendMessageType.Goal
               ? queuedGoal
                 ? {
-                    queryToSend: renderGoalContinuationPrompt({
-                      goalId: queuedGoal.permit.goalId,
-                      revision: queuedGoal.permit.revision,
-                      objective: queuedGoal.continuationContext,
-                      objectiveUpdated: queuedGoal.objectiveUpdated,
-                      windDown: queuedGoal.windDown,
-                      verifierFeedback: queuedGoal.verifierFeedback,
-                    }),
+                    queryToSend: renderGoalContinuationTurn(queuedGoal),
                     shouldProceed: true,
                   }
                 : { queryToSend: null, shouldProceed: false }
