@@ -794,8 +794,15 @@ export function isTerminalImageDisplay(
   );
 }
 
+export interface AskUserQuestionResultDisplay {
+  type: 'ask_user_question_answers';
+  text: string;
+  answers: Array<{ question: string; answer: string }>;
+}
+
 export type ToolResultDisplay =
   | string
+  | AskUserQuestionResultDisplay
   | FileDiff
   | TodoResultDisplay
   | PlanResultDisplay

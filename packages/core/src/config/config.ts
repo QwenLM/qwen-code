@@ -172,7 +172,6 @@ import {
   type PostToolBatchToolCall,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
-import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import {
   createGoalRuntime,
   GoalPersistenceUnavailableError,
@@ -3277,8 +3276,6 @@ export class Config {
             // Execute the appropriate hook based on eventName
             let result;
             let stopHookCount: number | undefined;
-            let hasNonGoalBlockingStopHook: boolean | undefined;
-            let nonGoalBlockingStopReason: string | undefined;
             const input = request.input || {};
             const signal = request.signal;
             switch (request.eventName) {
@@ -3317,32 +3314,6 @@ export class Config {
                   ? createHookOutput('Stop', stopResult.finalOutput)
                   : undefined;
                 stopHookCount = stopResult.allOutputs.length;
-                const goalHookId =
-                  stopResult.finalOutput?.hookSpecificOutput?.[
-                    GOAL_HOOK_ID_OUTPUT_KEY
-                  ];
-                if (typeof goalHookId === 'string') {
-                  const nonGoalBlockingOutputs = stopResult.allOutputs.filter(
-                    (output) =>
-                      output.hookSpecificOutput?.[GOAL_HOOK_ID_OUTPUT_KEY] !==
-                        goalHookId &&
-                      (output.decision === 'block' ||
-                        output.decision === 'deny' ||
-                        output.continue === false),
-                  );
-                  hasNonGoalBlockingStopHook =
-                    nonGoalBlockingOutputs.length > 0;
-                  if (hasNonGoalBlockingStopHook) {
-                    nonGoalBlockingStopReason = nonGoalBlockingOutputs
-                      .map(
-                        (output) =>
-                          output.stopReason ||
-                          output.reason ||
-                          'No reason provided',
-                      )
-                      .join('\n');
-                  }
-                }
                 break;
               }
               case 'MessageDisplay': {
@@ -3471,8 +3442,6 @@ export class Config {
               output: result,
               // Include stop hook count for Stop events
               stopHookCount,
-              hasNonGoalBlockingStopHook,
-              nonGoalBlockingStopReason,
             } as HookExecutionResponse);
           } catch (error) {
             this.debugLogger.warn(`Hook execution failed: ${error}`);
@@ -4356,6 +4325,12 @@ export class Config {
       },
     );
     const newContentGeneratorConfig = config;
+    if (
+      priorReasoning === false &&
+      newContentGeneratorConfig.thinkingMandatory !== true
+    ) {
+      newContentGeneratorConfig.reasoning = false;
+    }
     this.contentGenerator = await createContentGenerator(
       newContentGeneratorConfig,
       this,
@@ -4368,7 +4343,13 @@ export class Config {
     // fires — and the resolved model can differ from the pre-auth one.
     this.publishModelEnv();
 
-    // Re-apply the user's reasoning effort that the provider sync above wiped.
+    // Re-apply the user's reasoning preference that the provider sync wiped.
+    if (
+      priorReasoning === false &&
+      newContentGeneratorConfig.reasoning === false
+    ) {
+      this.modelsConfig.getGenerationConfig().reasoning = false;
+    }
     if (priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
     }
@@ -5258,13 +5239,16 @@ export class Config {
    */
   getReasoningEffortOverride(): ReasoningEffortOverride | undefined {
     const cfg = this.getContentGeneratorConfig();
-    if (
-      !cfg ||
-      !DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg) ||
-      !isTieredEffortWireModel(cfg.model)
-    ) {
+    if (!cfg || !DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg)) {
       return undefined;
     }
+
+    const configuredReasoning = cfg.authType
+      ? this.getResolvedModelConfig(cfg.authType, cfg.model, cfg.baseUrl)
+          ?.capabilities.reasoning
+      : undefined;
+    const tieredModel = isTieredEffortWireModel(cfg.model, configuredReasoning);
+    if (!tieredModel) return undefined;
 
     const currentEffort = this.getReasoningEffort();
     const selected = selectDashScopeThinkingKnob(
@@ -5272,6 +5256,7 @@ export class Config {
       cfg.extra_body,
       cfg.samplingParams,
       currentEffort,
+      tieredModel,
     );
     if (
       !selected ||
@@ -5293,6 +5278,7 @@ export class Config {
         undefined,
         cfg.samplingParams,
         currentEffort,
+        tieredModel,
       );
       if (
         below?.source === 'samplingParams' &&

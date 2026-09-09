@@ -8693,6 +8693,64 @@ describe('Session', () => {
         originatorClientId: 'client-1',
       };
 
+      it.each([false, true])(
+        'records the trusted identity before streaming (display=%s)',
+        async (withDisplayText) => {
+          let currentPromptId = '';
+          mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+            expect(
+              mockChatRecordingService.recordUserMessage,
+            ).toHaveBeenLastCalledWith(
+              'same prompt',
+              undefined,
+              withDisplayText
+                ? { displayText: 'visible prompt', hookContext: '' }
+                : undefined,
+              currentPromptId,
+            );
+            return Promise.resolve(createEmptyStream());
+          });
+          for (const promptId of ['daemon-first', 'daemon-second']) {
+            currentPromptId = promptId;
+            await session.prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt: [{ type: 'text', text: 'same prompt' }],
+                _meta: {
+                  promptId: 'client-supplied-id',
+                  ...(withDisplayText
+                    ? { 'qwen.daemon.promptDisplayText': 'visible prompt' }
+                    : {}),
+                },
+              },
+              { ...trustedContext, promptId },
+            );
+          }
+          expect(
+            mockChatRecordingService.recordUserMessage.mock.calls.map(
+              (args) => args[3],
+            ),
+          ).toEqual(['daemon-first', 'daemon-second']);
+        },
+      );
+
+      it('does not persist a client-supplied identity without a trusted context', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'untrusted identity' }],
+          _meta: { promptId: 'client-supplied-id' },
+        });
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          'untrusted identity',
+          undefined,
+          undefined,
+          undefined,
+        );
+      });
+
       it('records a completed turn_result for a daemon-admitted prompt', async () => {
         mockChat.sendMessageStream = vi
           .fn()
@@ -9683,6 +9741,9 @@ describe('Session', () => {
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
         '原始语音文本',
+        undefined,
+        undefined,
+        trustedContext.promptId,
       );
       expect(textParts(firstSentMessage())).toEqual([
         '<realtime_delegation>trusted model input</realtime_delegation>',
@@ -9733,6 +9794,7 @@ describe('Session', () => {
           hookContext: '',
           attachmentReferences: [imageReference, fileReference],
         },
+        undefined,
       );
     });
 
@@ -9759,6 +9821,7 @@ describe('Session', () => {
         'describe these',
         undefined,
         expect.objectContaining({ attachmentReferences }),
+        undefined,
       );
     });
 
@@ -9787,6 +9850,7 @@ describe('Session', () => {
         expect.objectContaining({
           attachmentReferences: [attachmentReference],
         }),
+        undefined,
       );
     });
 
@@ -12915,6 +12979,9 @@ describe('Session', () => {
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
         '3',
+        undefined,
+        undefined,
+        undefined,
       );
       expect(mockLlmClient.tryCompressChat).toHaveBeenCalledWith(
         'test-session-id########3',
@@ -12943,6 +13010,7 @@ describe('Session', () => {
         'internal channel instructions\n\nhello',
         undefined,
         { displayText: 'hello', hookContext: '' },
+        undefined,
       );
       expect(
         agentTelemetry.addAgentInputMessageAttributes,
@@ -23973,6 +24041,9 @@ describe('Session', () => {
         expect(finishedSpy).toHaveBeenCalledTimes(1);
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           '/btw question',
+          undefined,
+          undefined,
+          undefined,
         );
         expect(
           mockChatRecordingService.recordSlashCommand,
@@ -24070,12 +24141,24 @@ describe('Session', () => {
         });
         mockChatRecordingService.recordUserMessage.mockClear();
 
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/advisor check my work' }],
-        });
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: '/advisor check my work' }],
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-advisor',
+          },
+        );
 
-        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalled();
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          '/advisor check my work',
+          undefined,
+          undefined,
+          'daemon-advisor',
+        );
       });
 
       it.each([
@@ -27007,6 +27090,8 @@ describe('Session', () => {
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           'hello',
           permit,
+          undefined,
+          undefined,
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
       });
