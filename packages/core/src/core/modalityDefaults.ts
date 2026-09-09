@@ -6,6 +6,7 @@
 
 import type { InputModalities } from './contentGenerator.js';
 import { normalize } from './tokenLimits.js';
+import { parseModelReasoningCapabilities } from './reasoning-effort.js';
 
 const FULL_MULTIMODAL: InputModalities = {
   image: true,
@@ -138,15 +139,23 @@ export function isQwenFamilyWireModel(model: string | undefined): boolean {
 }
 
 /**
- * True for the qwen3.8-max wire model family — the only family that
- * reads the tiered `reasoning_effort` field directly. Prefix-matched so
- * dated snapshots and `-latest` aliases are covered, consistent with the
- * family pattern in MODALITY_PATTERNS above. Older qwen hybrids expose
- * only the on/off `enable_thinking` switch instead.
+ * A configured Qwen reasoning protocol takes precedence over the legacy
+ * qwen3.8-max family fallback. Other providers use independent wire rules.
  */
-export function isTieredEffortWireModel(model: string | undefined): boolean {
+export function isTieredEffortWireModel(
+  model: string | undefined,
+  configuredReasoning?: unknown,
+): boolean {
   if (!model) {
     return false;
+  }
+  const reasoning = parseModelReasoningCapabilities(configuredReasoning);
+  if (reasoning) {
+    return (
+      isQwenFamilyWireModel(model) &&
+      !reasoning.toggleOnly &&
+      reasoning.disableField === 'reasoning_effort'
+    );
   }
   return model.toLowerCase().startsWith('qwen3.8-max');
 }

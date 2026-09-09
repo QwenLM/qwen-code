@@ -6103,7 +6103,13 @@ describe('AgentTool', () => {
       ).createInvocation(params);
       const updates: AgentResultDisplay[] = [];
       const result = await invocation.execute(undefined, (output) => {
-        updates.push(output as AgentResultDisplay);
+        const display = output as AgentResultDisplay;
+        if (display.subagentSessionReady) {
+          expect(mockRegistry.register).toHaveBeenCalled();
+          expect(attachSpy).toHaveBeenCalled();
+          expect(writeMetaSpy).toHaveBeenCalled();
+        }
+        updates.push(display);
       });
 
       const llmText = partToString(result.llmContent);
@@ -6154,7 +6160,14 @@ describe('AgentTool', () => {
       const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('background');
       expect(display.executionMode).toBe('background');
+      expect(
+        (result.returnDisplay as AgentResultDisplay).subagentSessionReady,
+      ).toBe(true);
+      expect(
+        updates.some((update) => update.subagentSessionReady === true),
+      ).toBe(true);
       expect(updates[0]).toMatchObject({
+        subagentSessionReady: false,
         status: 'running',
         executionMode: 'background',
       });
@@ -6697,6 +6710,8 @@ describe('AgentTool', () => {
     });
 
     it('runs in the foreground when run_in_background is false', async () => {
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
       ).createInvocation({
@@ -6707,14 +6722,27 @@ describe('AgentTool', () => {
       });
       const updates: AgentResultDisplay[] = [];
       const result = await invocation.execute(undefined, (output) => {
-        updates.push(output as AgentResultDisplay);
+        const display = output as AgentResultDisplay;
+        if (display.subagentSessionReady) {
+          expect(mockRegistry.register).toHaveBeenCalled();
+          expect(attachSpy).toHaveBeenCalled();
+          expect(writeMetaSpy).toHaveBeenCalled();
+        }
+        updates.push(display);
       });
 
       expect(partToString(result.llmContent)).toBe('Monitor done');
       expect((result.returnDisplay as AgentResultDisplay).executionMode).toBe(
         'foreground',
       );
+      expect(
+        (result.returnDisplay as AgentResultDisplay).subagentSessionReady,
+      ).toBe(true);
+      expect(
+        updates.some((update) => update.subagentSessionReady === true),
+      ).toBe(true);
       expect(updates[0]).toMatchObject({
+        subagentSessionReady: false,
         status: 'running',
         executionMode: 'foreground',
       });
@@ -6848,6 +6876,9 @@ describe('AgentTool', () => {
         expect((result.returnDisplay as AgentResultDisplay).status).toBe(
           'failed',
         );
+        expect(
+          (result.returnDisplay as AgentResultDisplay).subagentSessionReady,
+        ).toBe(false);
         expect(attachSpy).not.toHaveBeenCalled();
         expect(mockAgent.execute).not.toHaveBeenCalled();
         expect(mockRegistry.complete).not.toHaveBeenCalled();
