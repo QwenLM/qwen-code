@@ -286,6 +286,34 @@ describe('UserMessage', () => {
     expect(container.textContent).toContain('a@b.test');
   });
 
+  it('linkifies URLs in text parts from a host-provided parser', () => {
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          parseUserMessageContent: () => [
+            { type: 'text', text: 'see https://example.com/parsed ' },
+            {
+              type: 'tag',
+              tag: {
+                id: 'file:readme',
+                kind: 'file',
+                value: 'readme',
+                serialized: '@file:readme',
+              },
+            },
+          ],
+        }}
+      >
+        <UserMessage content="see https://example.com/parsed @file:readme" />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(
+      container.querySelector('a[href="https://example.com/parsed"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('readme');
+  });
+
   it('renders URLs in message text as external links', () => {
     const container = render(
       <UserMessage content="see https://example.com/docs, then reply" />,

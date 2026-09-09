@@ -267,16 +267,6 @@
   word-break: break-word;
 }
 
-.link {
-  color: var(--agent-blue-500);
-  text-decoration: none;
-}
-
-.link:hover {
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
 .messageTag {
   position: relative;
   display: inline-flex;

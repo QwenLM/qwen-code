@@ -2,7 +2,7 @@ import { memo, useMemo } from 'react';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { splitTextByUrls } from '../../utils/linkify';
 import { isSafeHref } from './Markdown';
-import styles from './UserMessage.module.css';
+import styles from './Markdown.module.css';
 
 /**
  * Plain-text renderer that turns explicit http(s) URLs into anchors. Mirrors

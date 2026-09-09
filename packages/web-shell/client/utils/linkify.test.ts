@@ -81,6 +81,40 @@ describe('splitTextByUrls', () => {
     }
   });
 
+  it('does not absorb an emoji written directly after the URL', () => {
+    expect(splitTextByUrls('check https://example.com👍')).toEqual([
+      { type: 'text', value: 'check ' },
+      { type: 'url', value: 'https://example.com' },
+      { type: 'text', value: '👍' },
+    ]);
+  });
+
+  it('does not absorb Thai text written directly after the URL', () => {
+    expect(splitTextByUrls('ดูhttps://example.comได้เลย')).toEqual([
+      { type: 'text', value: 'ดู' },
+      { type: 'url', value: 'https://example.com' },
+      { type: 'text', value: 'ได้เลย' },
+    ]);
+  });
+
+  it("keeps an apostrophe inside the URL (L'Aquila)", () => {
+    const url = "https://en.wikipedia.org/wiki/L'Aquila";
+    expect(splitTextByUrls(url)).toEqual([{ type: 'url', value: url }]);
+  });
+
+  it('trims markdown emphasis delimiters around the URL', () => {
+    expect(splitTextByUrls('see **https://example.com/docs** then')).toEqual([
+      { type: 'text', value: 'see **' },
+      { type: 'url', value: 'https://example.com/docs' },
+      { type: 'text', value: '** then' },
+    ]);
+    expect(splitTextByUrls('_https://example.com/a_ and more')).toEqual([
+      { type: 'text', value: '_' },
+      { type: 'url', value: 'https://example.com/a' },
+      { type: 'text', value: '_ and more' },
+    ]);
+  });
+
   it.each(['。', '，', '；', '：', '！', '？', '、'])(
     'trims trailing CJK punctuation %s',
     (punct) => {
@@ -92,6 +126,14 @@ describe('splitTextByUrls', () => {
       ]);
     },
   );
+
+  it('trims only the unmatched closer from a balanced-then-unmatched run', () => {
+    expect(splitTextByUrls('(see https://x.com/a())')).toEqual([
+      { type: 'text', value: '(see ' },
+      { type: 'url', value: 'https://x.com/a()' },
+      { type: 'text', value: ')' },
+    ]);
+  });
 
   it('keeps a balanced closing paren inside the URL', () => {
     expect(

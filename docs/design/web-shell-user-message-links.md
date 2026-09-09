@@ -29,13 +29,14 @@ the composer is not clickable in the transcript, forcing copy-paste to open it.
 1. **New util `client/utils/linkify.ts`** exporting
    `splitTextByUrls(text): Array<{ type: 'text' | 'url'; value: string }>`:
    - Matches `http://` and `https://` URLs only (explicit scheme required).
-   - CJK characters terminate a match (sentence punctuation, full-width
-     brackets, and the ideograph / kana / hangul ranges) — such characters are
-     always percent-encoded in real URLs, and CJK prose commonly follows a URL
-     with no space.
-   - Trims trailing ASCII sentence punctuation (`, . ; : ! ? ' " \``) and
-closing brackets `) ] }`with no matching opener inside the URL (a`)`is
-kept when the URL contains a matching`(` — e.g. Wikipedia-style URLs).
+   - The character set is an allowlist of the ASCII URL grammar
+     (RFC 3986-ish); anything outside it — whitespace, markup delimiters, CJK
+     prose, emoji — terminates the match. Non-ASCII characters are
+     percent-encoded in real URLs, so they fail closed to plain text.
+   - Trims trailing ASCII sentence punctuation (`` , . ; : ! ? ' " ` ``),
+     markdown emphasis delimiters (`*`, `_`, `\`), and closing brackets `)`,
+     `]`, `}` with no matching opener inside the URL (a `)` is kept when the
+     URL contains a matching `(` — e.g. Wikipedia-style URLs).
    - A match that trims down to the bare scheme (`https://`) is not a URL and
      stays text.
 2. **New component `client/components/messages/LinkifiedText.tsx`**: renders a
@@ -45,19 +46,22 @@ kept when the URL contains a matching`(` — e.g. Wikipedia-style URLs).
    contains no URL it returns the plain string (no extra DOM nodes).
 3. **`UserMessage.tsx`**: wrap text segments with `LinkifiedText` in both
    default rendering paths (`DefaultUserMessageContent` text segments and the
-   parsed-parts text parts in the `renderedContent` memo).
-4. **`UserMessage.module.css`**: add a `.link` rule mirroring
-   `Markdown.module.css` (`color: var(--agent-blue-500)`, underline on hover).
+   parsed-parts text parts in the `renderedContent` memo), plus the
+   scheduled-task-run prompt.
+4. **Link styling**: `LinkifiedText` reuses the `.link` rule from
+   `Markdown.module.css` — no copy.
 
 ## Design decisions and rationale
 
-| Decision                                                                       | Rationale                                                                                                                                 |
-| ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Explicit `https?://` scheme only; no bare `www.`/domains/emails                | Minimum surface, near-zero false positives; pasted URLs almost always carry a scheme.                                                     |
-| Reuse `isSafeHref` + `useExternalLinkOpener`                                   | Same safety check and desktop-shell routing as assistant-message links; no second policy to maintain.                                     |
-| Separate tiny util + component instead of routing user text through `Markdown` | User text is intentionally not markdown (composer tags, `white-space: pre-wrap` layout); a regex tokenizer avoids changing that contract. |
-| No linkification inside host-provided `renderUserMessageContent` output        | That output belongs to the embedding host; overriding it would break the customization contract.                                          |
-| Scheduled-task-run prompt is linkified too                                     | Only the header lines are machine-generated; the prompt body is user-authored task instructions, so it gets the same treatment.           |
+| Decision                                                                       | Rationale                                                                                                                                                                                                                                                                                |
+| ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Explicit `https?://` scheme only; no bare `www.`/domains/emails                | Minimum surface, near-zero false positives; pasted URLs almost always carry a scheme.                                                                                                                                                                                                    |
+| ASCII allowlist, not a denylist of prose characters                            | A denylist is wrong in both directions: unlisted scripts (emoji, Thai) get absorbed into the href, and excluded ASCII quotes truncate URLs containing them (`/wiki/L'Aquila`). The allowlist fails closed and matches the boundary behavior of remark-gfm, which assistant messages use. |
+| Raw IRIs are not linkified whole                                               | `https://zh.wikipedia.org/wiki/中文` linkifies only its ASCII prefix — the one case that yields a _wrong_ link rather than no link. Accepted tradeoff: absorbing CJK would swallow the following prose (`详情见https://example.com即可使用`); percent-encoded URLs are unaffected.       |
+| Reuse `isSafeHref` + `useExternalLinkOpener`                                   | Same safety check and desktop-shell routing as assistant-message links; no second policy to maintain.                                                                                                                                                                                    |
+| Separate tiny util + component instead of routing user text through `Markdown` | User text is intentionally not markdown (composer tags, `white-space: pre-wrap` layout); a regex tokenizer avoids changing that contract.                                                                                                                                                |
+| No linkification inside host-provided `renderUserMessageContent` output        | That output belongs to the embedding host; overriding it would break the customization contract.                                                                                                                                                                                         |
+| Scheduled-task-run prompt is linkified too                                     | Only the header lines are machine-generated; the prompt body is user-authored task instructions, so it gets the same treatment.                                                                                                                                                          |
 
 ## Files affected
 
@@ -66,8 +70,8 @@ kept when the URL contains a matching`(` — e.g. Wikipedia-style URLs).
 - `packages/web-shell/client/components/messages/LinkifiedText.tsx` (new)
 - `packages/web-shell/client/components/messages/LinkifiedText.test.tsx` (new)
 - `packages/web-shell/client/components/messages/UserMessage.tsx` (wrap text)
-- `packages/web-shell/client/components/messages/UserMessage.module.css` (`.link`)
 - `packages/web-shell/client/components/messages/UserMessage.test.tsx` (integration case)
+- `packages/web-shell/client/e2e/web-shell.user-message-links.spec.ts` (new, `@smoke`)
 
 ## Scope boundaries
 
@@ -78,12 +82,18 @@ kept when the URL contains a matching`(` — e.g. Wikipedia-style URLs).
 
 ## Validation
 
-- Unit tests for `splitTextByUrls`: scheme filtering, trailing punctuation,
-  balanced/unbalanced parentheses, CJK punctuation, multiple URLs, no-match
-  passthrough.
-- Component tests for `LinkifiedText` and a `UserMessage` integration case:
-  URL renders as an anchor with `target="_blank"` / `rel="noopener noreferrer"`;
-  surrounding text and composer-tag chips unchanged.
+- Unit tests for `splitTextByUrls`: scheme filtering, trailing punctuation and
+  markdown emphasis delimiters, balanced/unbalanced brackets, CJK / emoji /
+  Thai termination, apostrophes inside URLs, multiple URLs, bare-scheme and
+  no-match passthrough.
+- Component tests for `LinkifiedText` and `UserMessage` integration cases
+  (every render path: default, annotated segments, host-parser parts,
+  parse-failure fallback, scheduled-task prompt): URL renders as an anchor
+  with `target="_blank"` / `rel="noopener noreferrer"`; surrounding text and
+  composer-tag chips unchanged; desktop-shell clicks route through
+  `useExternalLinkOpener`.
+- Playwright `@smoke` spec replaying a user message with a URL through the
+  mock daemon.
 - `npm run build && npm run typecheck` and focused vitest runs.
 
 ## Acceptance criteria

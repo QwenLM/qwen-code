@@ -27,11 +27,13 @@
 1. **新增工具 `client/utils/linkify.ts`**，导出
    `splitTextByUrls(text): Array<{ type: 'text' | 'url'; value: string }>`：
    - 仅匹配 `http://` 与 `https://` URL（必须显式带 scheme）。
-   - CJK 字符会终止匹配（句读符号、全角括号以及表意文字/假名/谚文区
-     间）——这类字符在真实 URL 中必然经过百分号编码，且中文/日文行文常
-     在 URL 后不加空格直接接文字。
-   - 从匹配结果尾部裁剪 ASCII 句读符号（`, . ; : ! ? ' " \``）以及在
-URL 内无配对开括号的右括号 `) ] }`（当 URL 内含配对 `(`时保留`)`——例如维基百科风格的 URL）。
+   - 字符集采用 ASCII URL 语法白名单（近似 RFC 3986）；白名单之外的一切
+     ——空白、标记分隔符、CJK 正文、emoji——都会终止匹配。非 ASCII 字符
+     在真实 URL 中必然经过百分号编码，因此 fail closed 保持纯文本。
+   - 从匹配结果尾部裁剪 ASCII 句读符号（`` , . ; : ! ? ' " ` ``）、
+     markdown 强调分隔符（`*`、`_`、`\`），以及在 URL 内无配对开括号的
+     右括号 `)`、`]`、`}`（当 URL 内含配对 `(` 时保留 `)`——例如维基
+     百科风格的 URL）。
    - 裁剪后只剩裸 scheme（`https://`）的匹配不算 URL，保持纯文本。
 2. **新增组件 `client/components/messages/LinkifiedText.tsx`**：将字符串中
    的 URL 片段渲染为 `<a target="_blank" rel="noopener noreferrer">`，用
@@ -40,19 +42,21 @@ URL 内无配对开括号的右括号 `) ] }`（当 URL 内含配对 `(`时保�
    （不引入额外 DOM 节点）。
 3. **`UserMessage.tsx`**：在两条默认渲染路径中用 `LinkifiedText` 包裹文本
    片段（`DefaultUserMessageContent` 的文本片段与 `renderedContent` memo
-   中解析片段的文本部分）。
-4. **`UserMessage.module.css`**：新增 `.link` 规则，对齐
-   `Markdown.module.css`（`color: var(--agent-blue-500)`，悬停下划线）。
+   中解析片段的文本部分），并覆盖定时任务运行的 prompt。
+4. **链接样式**：`LinkifiedText` 直接复用 `Markdown.module.css` 的 `.link`
+   规则——不做复制。
 
 ## 设计决策与理由
 
-| 决策                                                     | 理由                                                                                             |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| 仅支持显式 `https?://` scheme；不匹配裸 `www.`/域名/邮箱 | 最小改动面，几乎无误判；粘贴的 URL 几乎都带 scheme。                                             |
-| 复用 `isSafeHref` + `useExternalLinkOpener`              | 与助手消息链接相同的安全校验与桌面壳路由；无需维护第二套策略。                                   |
-| 独立的小工具 + 组件，而不是把用户文本走 `Markdown`       | 用户文本有意不走 markdown（composer 标签、`white-space: pre-wrap` 布局）；正则分词不改变该契约。 |
-| 不处理宿主自定义 `renderUserMessageContent` 的输出       | 该输出属于嵌入宿主；覆盖它会破坏定制化契约。                                                     |
-| 定时任务运行的 prompt 同样链接化                         | 机器生成的只是头部行；prompt 正文是用户编写的任务指令，应与普通用户消息一致。                    |
+| 决策                                                     | 理由                                                                                                                                                                                                                |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 仅支持显式 `https?://` scheme；不匹配裸 `www.`/域名/邮箱 | 最小改动面，几乎无误判；粘贴的 URL 几乎都带 scheme。                                                                                                                                                                |
+| ASCII 白名单而非散文字符黑名单                           | 黑名单两个方向都错：未列出的文字（emoji、泰文）会被吞进 href，被排除的 ASCII 引号会截断含引号的 URL（`/wiki/L'Aquila`）。白名单 fail closed，且与助手消息使用的 remark-gfm 边界行为一致。                           |
+| 原始 IRI 不做整体链接化                                  | `https://zh.wikipedia.org/wiki/中文` 只链接其 ASCII 前缀——这是唯一产生**错误链接**而非不产生链接的情形。已接受的取舍：吸收 CJK 会吞掉后面的正文（`详情见https://example.com即可使用`）；百分号编码的 URL 不受影响。 |
+| 复用 `isSafeHref` + `useExternalLinkOpener`              | 与助手消息链接相同的安全校验与桌面壳路由；无需维护第二套策略。                                                                                                                                                      |
+| 独立的小工具 + 组件，而不是把用户文本走 `Markdown`       | 用户文本有意不走 markdown（composer 标签、`white-space: pre-wrap` 布局）；正则分词不改变该契约。                                                                                                                    |
+| 不处理宿主自定义 `renderUserMessageContent` 的输出       | 该输出属于嵌入宿主；覆盖它会破坏定制化契约。                                                                                                                                                                        |
+| 定时任务运行的 prompt 同样链接化                         | 机器生成的只是头部行；prompt 正文是用户编写的任务指令，应与普通用户消息一致。                                                                                                                                       |
 
 ## 受影响文件
 
@@ -61,8 +65,8 @@ URL 内无配对开括号的右括号 `) ] }`（当 URL 内含配对 `(`时保�
 - `packages/web-shell/client/components/messages/LinkifiedText.tsx`（新增）
 - `packages/web-shell/client/components/messages/LinkifiedText.test.tsx`（新增）
 - `packages/web-shell/client/components/messages/UserMessage.tsx`（包裹文本）
-- `packages/web-shell/client/components/messages/UserMessage.module.css`（`.link`）
 - `packages/web-shell/client/components/messages/UserMessage.test.tsx`（集成用例）
+- `packages/web-shell/client/e2e/web-shell.user-message-links.spec.ts`（新增，`@smoke`）
 
 ## 范围边界
 
@@ -72,11 +76,15 @@ URL 内无配对开括号的右括号 `) ] }`（当 URL 内含配对 `(`时保�
 
 ## 验证
 
-- `splitTextByUrls` 单元测试：scheme 过滤、尾部标点、配对/不配对括号、
-  CJK 标点、多 URL、无匹配透传。
-- `LinkifiedText` 组件测试与 `UserMessage` 集成用例：URL 渲染为带
-  `target="_blank"` / `rel="noopener noreferrer"` 的锚点；周围文本与
-  composer 标签 chip 不变。
+- `splitTextByUrls` 单元测试：scheme 过滤、尾部标点与 markdown 强调分隔
+  符、配对/不配对括号、CJK / emoji / 泰文终止、URL 内单引号、多 URL、
+  裸 scheme 与无匹配透传。
+- `LinkifiedText` 组件测试与 `UserMessage` 集成用例（覆盖每条渲染路径：
+  默认、注解片段、宿主解析器 parts、解析失败回退、定时任务 prompt）：
+  URL 渲染为带 `target="_blank"` / `rel="noopener noreferrer"` 的锚点；
+  周围文本与 composer 标签 chip 不变；桌面壳点击经 `useExternalLinkOpener`
+  路由。
+- Playwright `@smoke` 用例：通过 mock daemon 回放含 URL 的用户消息。
 - `npm run build && npm run typecheck` 及聚焦的 vitest 运行。
 
 ## 验收标准

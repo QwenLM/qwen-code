@@ -9,7 +9,7 @@ import {
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
 
-test('user message URLs render as clickable links', async ({
+test('user message URLs render as clickable links @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({

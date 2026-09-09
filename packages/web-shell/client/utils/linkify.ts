@@ -1,13 +1,16 @@
 /**
  * Split plain text into URL and non-URL segments so callers can render the URL
  * parts as anchors. Only explicit `http://` / `https://` URLs match — bare
- * domains and emails are left as text on purpose. CJK characters terminate a
- * match (they are always percent-encoded in real URLs, and CJK prose commonly
- * follows a URL with no space), and trailing ASCII sentence punctuation plus
- * closing brackets with no matching opener inside the URL are trimmed from it
- * (so `https://en.wikipedia.org/wiki/Foo_(bar)` keeps its `)` while
- * `(see https://example.com/foo)` drops it). A match that trims down to the
- * bare scheme (`https://`) is not a URL and stays text.
+ * domains and emails are left as text on purpose. The character set is an
+ * allowlist of the ASCII URL grammar, so anything else — whitespace, markup
+ * delimiters, CJK prose, emoji — terminates the match (`详情见https://a.com即可`
+ * splits at the boundary, `https://a.com👍` does not absorb the emoji).
+ * Trailing ASCII sentence punctuation, markdown emphasis delimiters (`* _ \`),
+ * and closing brackets with no matching opener inside the URL are trimmed from
+ * it (so `https://en.wikipedia.org/wiki/Foo_(bar)` keeps its `)` while
+ * `(see https://example.com/foo)` drops it, and `**https://a.com**` sheds the
+ * asterisks). A match that trims down to the bare scheme (`https://`) is not a
+ * URL and stays text.
  */
 
 export interface LinkifySegment {
@@ -15,13 +18,13 @@ export interface LinkifySegment {
   value: string;
 }
 
-// Excluded after the scheme: whitespace and markup delimiters, full-width
-// forms, and the CJK punctuation / ideograph / kana / hangul ranges — all of
-// them percent-encoded in real URLs.
-const URL_PATTERN =
-  /https?:\/\/[^\s<>"'，；：！？（）·—…\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]+/gi;
+// RFC 3986-ish ASCII URL grammar as an allowlist: alphanumerics, unreserved
+// marks, sub-delims, and the gen-delims that can appear inside a URL. Anything
+// outside it terminates the match — non-ASCII characters are percent-encoded
+// in real URLs, so they fail closed to plain text.
+const URL_PATTERN = /https?:\/\/[A-Za-z0-9\-._~:/?#[\]{}@!$&'()*+,;=%]+/gi;
 
-const TRAILING_PUNCT = new Set([...'.,;:!?\'"`']);
+const TRAILING_PUNCT = new Set([...'.,;:!?\'"`]*_\\']);
 
 const PAIRED_CLOSERS: Record<string, string> = {
   ')': '(',
@@ -40,19 +43,26 @@ function countChar(text: string, char: string): number {
 }
 
 function trimTrailing(url: string): string {
-  let out = url;
-  while (out.length > 0) {
-    const last = out.charAt(out.length - 1);
-    const opener = PAIRED_CLOSERS[last];
-    if (opener !== undefined) {
-      if (countChar(out, opener) >= countChar(out, last)) break;
-      out = out.slice(0, -1);
+  // A trailing closer belongs to the URL only when an opener inside the URL
+  // matches it; each pair's excess closers is counted once up front so the
+  // loop below trims by index in O(n) total.
+  const excess: Record<string, number> = {};
+  for (const [closer, opener] of Object.entries(PAIRED_CLOSERS)) {
+    excess[closer] = countChar(url, closer) - countChar(url, opener);
+  }
+  let end = url.length;
+  while (end > 0) {
+    const last = url.charAt(end - 1);
+    if (Object.hasOwn(excess, last)) {
+      if (excess[last] <= 0) break;
+      excess[last]--;
+      end--;
       continue;
     }
     if (!TRAILING_PUNCT.has(last)) break;
-    out = out.slice(0, -1);
+    end--;
   }
-  return out;
+  return url.slice(0, end);
 }
 
 export function splitTextByUrls(text: string): LinkifySegment[] {
