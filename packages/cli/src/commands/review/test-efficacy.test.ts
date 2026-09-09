@@ -38,7 +38,9 @@ import { sanitizedGitEnv } from './lib/worktree.js';
 import {
   mkdtempSync,
   mkdirSync,
+  realpathSync,
   writeFileSync,
+  appendFileSync,
   symlinkSync,
   existsSync,
   readFileSync,
@@ -561,6 +563,340 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       expect(r.detail).toContain('no .git');
       expect(readFileSync(join(dir, 'a.ts'), 'utf8')).toBe('gone.clear();\n');
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to run through a repo-LOCAL content filter, and only a local one', () => {
+    // The restore rewrites every tracked file in this tree, and a checkout
+    // EXECUTES `filter.<name>.smudge` whenever it does — the same surface
+    // `scratch-tree` refuses to reset through, run twice per probe run one
+    // directory over with no screen at all.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-filter-'));
+    const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-canary-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, 'b.ts'), 'export const b = 1;\n');
+      // The attributes line is half the plant and belongs in the fixture: a
+      // filter git never SELECTS for a tracked path executes nothing, so
+      // without this the restore is harmless with or without the screen and
+      // the test would stay green if a later edit moved the screen below the
+      // checkout. With it, the canary below pins the ORDER, not just the
+      // message.
+      writeFileSync(join(dir, '.gitattributes'), '*.ts filter=evil\n');
+      asCheckout(dir);
+      // OUTSIDE the probe tree, but inside a fixture this test removes: the
+      // restore's second spawn is `clean -ffdx`, which deletes an untracked
+      // canary written into the tree and would hide the very ordering bug the
+      // canary exists to catch. Nothing is left on the runner either way.
+      const canary = join(canaryDir, 'PWNED-smudge');
+      execFileSync('git', ['config', 'filter.evil.smudge', `touch ${canary}`], {
+        cwd: dir,
+      });
+      // A checkout runs the smudge only on files it actually REWRITES, and it
+      // rewrites nothing when the tree already matches HEAD. A dirty file is
+      // what a probe run leaves behind and what the restore exists to undo, so
+      // it is also the condition under which the canary can fire at all.
+      writeFileSync(join(dir, 'a.ts'), 'dirtied by a previous run\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('filter.evil.smudge');
+      // The refusal has to come BEFORE the checkout, not merely instead of a
+      // verdict: this is the assertion that goes red if the screen moves down.
+      expect(existsSync(canary)).toBe(false);
+
+      // ...and a filter in the user's GLOBAL config is their own contract, the
+      // way it is for any git command they run. `git lfs install` writes one
+      // there, so refusing on it would put every contributor with git-lfs into
+      // permanent refusal — the failure mode a blanket rule reproduces.
+      execFileSync('git', ['config', '--unset', 'filter.evil.smudge'], {
+        cwd: dir,
+      });
+      execFileSync(
+        'git',
+        ['config', '--global', 'filter.lfs.clean', 'git-lfs clean -- %f'],
+        { cwd: dir },
+      );
+
+      // It gets all the way to the runner, which this bare fixture does not
+      // have — the throw is from `findVitestBin`, and that IS the observation:
+      // the restore did not refuse, so the phase proceeded.
+      let afterDetail: string;
+      try {
+        afterDetail = runOneMutant(
+          dir,
+          { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+          ['a.test.ts'],
+        ).detail;
+      } catch (e) {
+        afterDetail = e instanceof Error ? e.message : String(e);
+      }
+
+      expect(afterDetail).not.toContain('filter.lfs.clean');
+      expect(afterDetail).not.toContain('content filter');
+      // The local `evil` filter is gone, so nothing selected by the committed
+      // attributes line remains to execute either.
+      expect(existsSync(canary)).toBe(false);
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(canaryDir, { recursive: true, force: true });
+    }
+  });
+
+  it('still sees a filter whose value is padded huge', () => {
+    // The screened file is attacker-writable and git prints every matching
+    // value in full, so a `smudge` padded past `spawnSync`'s DEFAULT 1 MiB
+    // buffer kills git with ENOBUFS and leaves no stdout — a screen reading
+    // that as "no key matched" skips the one file defining the filter and
+    // reports the repository clean while the restore executes it. What closes
+    // that is the raised buffer the screen's read carries, so the padded value
+    // is read, the key is found, and the refusal fires. This asserts the
+    // COMBINATION end to end, from the probe down through the screen; the
+    // buffer itself lives in the screen, which is `main`'s and not this diff's,
+    // so no mutation of this PR reddens it. Lowering that buffer does.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-bigvalue-'));
+    const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-canary-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, '.gitattributes'), '*.ts filter=evil\n');
+      asCheckout(dir);
+      const canary = join(canaryDir, 'PWNED-bigvalue');
+      // git takes the LAST value; the first is only there to push the
+      // enumeration's output past the default buffer.
+      appendFileSync(
+        join(dir, '.git', 'config'),
+        `[filter "evil"]\n\tsmudge = echo ${'x'.repeat(1200000)}\n` +
+          `\tsmudge = touch ${canary}\n`,
+      );
+      writeFileSync(join(dir, 'a.ts'), 'dirtied by a previous run\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('filter.evil.smudge');
+      expect(existsSync(canary)).toBe(false);
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(canaryDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a config candidate it cannot read — not "clean"', () => {
+    // git answers an unreadable `--file` with exit 1 and a warning on stderr —
+    // the same status as "no key matched" — so readability cannot be inferred
+    // from the exit code, and a screen that tried would call a config it never
+    // read clean. The screen decides it constructively instead, before the
+    // read: a candidate that is not a regular file it can open is a refusal.
+    // The candidate here is `config.worktree`, which git honors once
+    // `extensions.worktreeConfig` is on; a directory in its place is the shape
+    // that gate exists for.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-unreadable-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      mkdirSync(join(dir, '.git', 'config.worktree'));
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('could not read to the bottom');
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does NOT refuse over an include directive whose target is missing', () => {
+    // The shape every standard CI checkout has, and the one that turned this
+    // screen into a permanent refusal: `actions/checkout` with persisted
+    // credentials writes `includeIf "gitdir:…"` directives into the
+    // repository-local config, their target is a per-job file that is gone by
+    // the next job, and on a persistent runner the directives accumulate in a
+    // reused `.git/config`. git ignores a dangling include, so the checkout
+    // this screen authorises executes nothing from it — and a repository that
+    // defines no content filter must not be told that it defines one. Measured
+    // before the fix: two hits, `filters` empty, the whole efficacy phase
+    // not-run.
+    //
+    // The condition below cannot match this tree, and that is deliberately NOT
+    // what this turns on: the screen does not evaluate includeIf conditions,
+    // because a match test against only the screened tree's own gitdir would
+    // re-open the creation path, where `worktree add` registers a NEW admin
+    // entry under `<common>/worktrees/`. What it asks is whether the target
+    // exists. `lib/worktree.test.ts` pins the same rule on the screen itself.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-dangling-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      appendFileSync(
+        join(dir, '.git', 'config'),
+        '[includeIf "gitdir:/github/workspace/.git"]\n' +
+          '\tpath = /github/runner_temp/git-credentials.config\n',
+      );
+
+      let detail: string;
+      try {
+        detail = runOneMutant(
+          dir,
+          { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+          ['a.test.ts'],
+        ).detail;
+      } catch (e) {
+        detail = e instanceof Error ? e.message : String(e);
+      }
+
+      expect(detail).not.toContain('could not read to the bottom');
+      expect(detail).not.toContain('content filter');
+      // And it reached the runner, which this bare fixture does not have: the
+      // screen PASSED, rather than the run failing for some other reason — the
+      // difference between "did not refuse" and "proceeded".
+      expect(detail).toContain('vitest');
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('REFUSES an include whose `..` the kernel resolves through a symlink', () => {
+    // The other half of the test above, and the one that makes the `dangling`
+    // bucket safe to drop anything at all. `<repo>/.git/link` is a symlink and
+    // `include.path = link/../evil.cfg` names a payload one level ABOVE the
+    // link's target: git concatenates and lets the kernel resolve, so it reads
+    // that payload, while a lexical collapse looks for `.git/evil.cfg`, finds
+    // nothing, and files a file git really reads as missing. Measured end to
+    // end: git's merged read lists `filter.evil.smudge`, the collapsed screen
+    // answered `filters: []`, and a restore-shaped checkout executed it.
+    //
+    // So this fixture is indistinguishable from the one above to anything that
+    // resolves paths the way Node's `resolve()` does, and the two must come out
+    // opposite: that one proceeds, this one refuses.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-lexdiv-e2e-'));
+    const outside = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-lexdiv-out-')),
+    );
+    const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-lexdiv-canary-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      const canary = join(canaryDir, 'PWNED-lexdiv');
+      // The payload sits ABOVE the symlink's target, so only kernel resolution
+      // of `..` reaches it. It passes content through: a filter that returns
+      // nothing empties the file and the checkout fails for an unrelated
+      // reason, which reads as a refusal the screen never made.
+      mkdirSync(join(outside, 'sub'), { recursive: true });
+      writeFileSync(
+        join(outside, 'evil.cfg'),
+        `[filter "evil"]\n\tsmudge = touch ${canary}; cat\n`,
+      );
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, '.gitattributes'), '*.ts filter=evil\n');
+      asCheckout(dir);
+      symlinkSync(join(outside, 'sub'), join(dir, '.git', 'link'));
+      execFileSync(
+        'git',
+        ['config', '--add', 'include.path', 'link/../evil.cfg'],
+        { cwd: dir },
+      );
+      writeFileSync(join(dir, 'a.ts'), 'dirtied by a previous run\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('filter.evil.smudge');
+      // Damage: the smudge never ran, which is the whole claim.
+      expect(existsSync(canary)).toBe(false);
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+      rmSync(canaryDir, { recursive: true, force: true });
+    }
+  });
+
+  it('flattens control characters in the filter key it names', () => {
+    // A config subsection name legally carries control and format characters,
+    // and `--get-regexp` prints them verbatim. These detail strings reach the
+    // agent-facing report through JSON.stringify, which escapes Cc but NOT Cf
+    // (bidi overrides), Zl/Zp, or backticks — so the flattening has to happen
+    // here, through the same helper scratch-tree already uses.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-inert-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      // ESC (Cc) and a right-to-left override (Cf) inside the subsection name.
+      execFileSync(
+        'git',
+        ['config', 'filter.ev\u001bil\u202eX.smudge', 'cat'],
+        { cwd: dir },
+      );
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('filter.ev il X.smudge');
+      expect(r.detail).not.toContain('\u001b');
+      expect(r.detail).not.toContain('\u202e');
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses when git cannot PARSE a candidate config — not "clean"', () => {
+    // The readability gate above answers "can this process open it"; this is
+    // the other half — a file that opens fine and that git then dies on. A
+    // malformed section header exits 128 (not the 1 that means "no key
+    // matched"), so a screen that only distinguished 0 from non-0 would skip
+    // the file and report the repository clean on a config it never read.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-malformed-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      // Unclosed section header — a regular, readable file git refuses to parse.
+      writeFileSync(
+        join(dir, '.git', 'config.worktree'),
+        '[filter "evil"\n\tsmudge = cat\n',
+      );
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('could not read to the bottom');
+    } finally {
+      isolation.dispose();
       rmSync(dir, { recursive: true, force: true });
     }
   });
