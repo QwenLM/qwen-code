@@ -10,6 +10,7 @@ import {
   type MCPServerConfig,
   normalizeClaudeMcpServer,
 } from '@qwen-code/qwen-code-core';
+import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import stripJsonComments from 'strip-json-comments';
 
 /** Project-scoped MCP config filename, read from the workspace root. */
@@ -37,6 +38,27 @@ export interface LoadProjectMcpServersResult {
  * never spawns a process, opens a transport, or runs a health check. A missing
  * file is normal (returns empty); a malformed file is reported via `errors` and
  * otherwise ignored so it can never crash startup.
+ *
+ * `$VAR` / `${VAR}` placeholders are expanded with the same resolver every
+ * settings scope uses, so a checked-in `.mcp.json` can reference a secret
+ * instead of embedding it.
+ *
+ * Deliberately NO `getHomeEnvFallbackVars()` here, unlike `loadSettings`.
+ * Settings need that fallback because they resolve before `loadEnvironment()`
+ * runs; `.mcp.json` is read only from `assembleMcpServers`, which every caller
+ * reaches after `loadSettings()` has already loaded `~/.qwen/.env` and `~/.env`
+ * into `process.env`. The only keys the fallback would add on top of
+ * `process.env` are the ones `loadEnvironment` deliberately REFUSED to apply —
+ * loader-affecting keys (`isLoaderEnvKey`, e.g. `NODE_OPTIONS`) and private
+ * provenance markers. Passing it would let a repository-supplied `.mcp.json`
+ * read exactly the values the env loader withholds, which is the #8653 vector
+ * rather than a fix.
+ *
+ * `resolveEnvVarsInObject` keeps the internal-secret guard, so a repo-supplied
+ * `.mcp.json` still cannot read Qwen's own secret env vars. Resolution happens
+ * before approval hashing, so the user approves the config that will actually
+ * be used — matching gated workspace-scope servers, whose settings are already
+ * resolved by the time `assembleMcpServers` sees them.
  */
 export function loadProjectMcpServers(
   projectRoot: string,
@@ -87,7 +109,9 @@ export function loadProjectMcpServers(
     // `.mcp.json` is the Claude Code convention, so entries may use Claude's
     // `type`-based transport shape; normalize them to Qwen's field-based shape.
     servers[name] = {
-      ...normalizeClaudeMcpServer(value as MCPServerConfig),
+      ...normalizeClaudeMcpServer(
+        resolveEnvVarsInObject(value as MCPServerConfig),
+      ),
       scope: 'project',
     };
   }
