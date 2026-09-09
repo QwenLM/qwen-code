@@ -2832,21 +2832,41 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       if (role === 'docs-nav') {
         expect(brief).toContain(join(absTmp, 'qwen-review-pr-6766-context.md'));
       }
+      if (role === 'verify') {
+        // The verify brief carries the `### Incidental findings` channel two
+        // lines above the weld; the weld must name what it supersedes, or a
+        // verifier obeying the earlier instruction files an incidental this
+        // profile has no later round to carry.
+        expect(brief).toContain('### Incidental findings');
+        expect(brief).toContain('channel above is withdrawn');
+      }
     },
   );
 
-  it('welds no context pointer for a malformed plan identity', () => {
-    // '007' passes `isPositivePrNumber` but is not a safe positive integer —
-    // the same tampered-plan family role 0's and 6d's welds refuse. The
-    // pointer is omitted, not welded; the causal scope paragraph still rides.
-    const brief = buildRoleBrief(
-      { ...PR_PLAN, prNumber: '007', reviewProfile: 'docs-nav' },
-      'docs-nav',
-      { planPath: join(absTmp, 'plan.json') },
-    );
-    expect(brief).not.toContain('-context.md');
-    expect(brief).toContain('causal base/head difference');
-  });
+  it.each([
+    // '007' passes `isPositivePrNumber` but fails the no-leading-zero shape
+    // conjunct. The remaining three pass both shape conjuncts and are refused
+    // by the safe-integer bound alone — without it they weld a junk-row
+    // context pointer into the sole reviewer's brief.
+    '007',
+    '9007199254740993',
+    Number.MAX_SAFE_INTEGER + 2,
+    '123456789012345678901',
+  ])(
+    'welds no context pointer for a malformed plan identity %s',
+    (prNumber) => {
+      // The same tampered-plan family role 0's and 6d's welds refuse. The
+      // pointer is omitted, not welded; the causal scope paragraph still
+      // rides.
+      const brief = buildRoleBrief(
+        { ...PR_PLAN, prNumber, reviewProfile: 'docs-nav' },
+        'docs-nav',
+        { planPath: join(absTmp, 'plan.json') },
+      );
+      expect(brief).not.toContain('-context.md');
+      expect(brief).toContain('causal base/head difference');
+    },
+  );
 
   it.each([
     '1a',

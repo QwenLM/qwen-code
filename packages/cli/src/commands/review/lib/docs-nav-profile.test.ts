@@ -94,6 +94,25 @@ describe('static documentation navigation profile', () => {
     expect(classify(BASE, source)).toBe(false);
   });
 
+  it('retains full review for a reorder of a digit-shaped key', () => {
+    // V8 hoists integer-index-shaped keys ahead of every string key in
+    // ascending order, so Object.keys() reads ['2026', 'architecture'] on
+    // BOTH sides of this pure reorder and the join compares equal — the
+    // classifier must refuse the key shape, not compare the reorder away.
+    const base = `export default {
+  '2026': { title: '2026' },
+  architecture: 'Architecture',
+};
+`;
+    const head = `export default {
+  architecture: 'Architecture',
+  '2026': { title: '2026' },
+};
+`;
+    expect(classify(base, head)).toBe(false);
+    expect(classify(head, base)).toBe(false);
+  });
+
   it('checks the entire files, including unchanged executable content', () => {
     expect(
       classify(

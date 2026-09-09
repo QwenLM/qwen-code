@@ -61,13 +61,18 @@ function literalNavigation(source: string): NavObject | null {
     } else {
       json.push(value);
     }
-    if (
-      tokens[i + 1] === ':' &&
-      ['__proto__', 'constructor', 'prototype'].includes(
-        value.replace(/^['"]|['"]$/g, ''),
-      )
-    ) {
-      return null;
+    if (tokens[i + 1] === ':') {
+      const key = value.replace(/^['"]|['"]$/g, '');
+      if (
+        ['__proto__', 'constructor', 'prototype'].includes(key) ||
+        // Object.keys hoists an integer-index-shaped key ahead of every
+        // string key in ascending order, so a digit-named entry's reorder
+        // would compare equal below — refuse the shape, keeping accepted
+        // objects exactly the ones whose Object.keys order IS source order.
+        /^(?:0|[1-9][0-9]*)$/.test(key)
+      ) {
+        return null;
+      }
     }
   }
   try {

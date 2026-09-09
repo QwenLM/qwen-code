@@ -1562,7 +1562,10 @@ export function buildRoleBrief(
         'the diff concretely changes its behavior or exposure; increased ' +
         'discoverability alone does not establish that. Reject unrelated ' +
         'pre-existing candidates without investigating their implementations. ' +
-        'Do not file incidental findings or start further audit rounds.',
+        'Do not file incidental findings or start further audit rounds: this ' +
+        'profile runs no later verification round to carry one, so the ' +
+        '`### Incidental findings` channel above is withdrawn — leave that ' +
+        'section out of the report.',
     );
     if (
       role === 'docs-nav' &&
