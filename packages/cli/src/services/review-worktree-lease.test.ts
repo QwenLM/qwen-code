@@ -46,6 +46,10 @@ const fsMockState = vi.hoisted(() => ({
     plantMtime: Date;
   } | null,
   readdirFailureDir: null as string | null,
+  // Set from exactly one test: the mirror's rename and tmp cleanup BOTH
+  // fail — the shape the "never fatal" contract exists for.
+  failMirrorRenameFrom: null as string | null,
+  failRmOn: null as string | null,
 }));
 
 // The execFileSync wrapper: counts the finalizer's destructive git calls (one
@@ -115,6 +119,31 @@ vi.mock('node:fs', async (importOriginal) => {
       }
       return actual.readdirSync(path);
     }) as typeof actual.readdirSync,
+    renameSync: ((oldPath: string, newPath: string) => {
+      if (
+        fsMockState.failMirrorRenameFrom !== null &&
+        String(oldPath).startsWith(fsMockState.failMirrorRenameFrom)
+      ) {
+        throw Object.assign(new Error('EPERM: operation not permitted'), {
+          code: 'EPERM',
+        });
+      }
+      return actual.renameSync(oldPath, newPath);
+    }) as typeof actual.renameSync,
+    rmSync: ((
+      path: PathOrFileDescriptor,
+      options?: Parameters<typeof actual.rmSync>[1],
+    ) => {
+      if (
+        fsMockState.failRmOn !== null &&
+        String(path).startsWith(fsMockState.failRmOn)
+      ) {
+        throw Object.assign(new Error('EBUSY: resource busy'), {
+          code: 'EBUSY',
+        });
+      }
+      return actual.rmSync(path, options as never);
+    }) as typeof actual.rmSync,
   };
 });
 
@@ -133,6 +162,8 @@ function createRepository(): string {
 afterEach(() => {
   fsMockState.plantBeforeNewPathWrite = null;
   fsMockState.readdirFailureDir = null;
+  fsMockState.failMirrorRenameFrom = null;
+  fsMockState.failRmOn = null;
   execStub.worktreeRemoveCalls.length = 0;
   execStub.failWorktreeVerbs = 0;
   stdioSpy.writeStderrLineSafe.mockClear();
@@ -638,6 +669,27 @@ describe('the one-release rollout window', () => {
     expect(mirror.sessionId).toBe('session-a');
     expect(mirror.promptId).toBe('prompt-a');
     expect(mirror.worktreePath).toBe(join(root, '.qwen', 'tmp', 'review-pr-1'));
+  });
+
+  it('the mirror is never fatal — not even when the rename AND the tmp cleanup both fail', () => {
+    // Mount weather is not a verdict: the legacy path lives in the mounted
+    // directory, so a rename failure there (a lock, EACCES) must not roll
+    // back an acquisition that already won — and the tmp cleanup behind it
+    // must not throw either, or the "never fatal" contract is broken one
+    // failure deeper.
+    const root = createRepository();
+    const legacy = legacyPathFor(root);
+    writeLegacyLease(acquire(root)); // something stands at the name
+    fsMockState.failMirrorRenameFrom = legacy;
+    fsMockState.failRmOn = legacy;
+
+    expect(() => createReviewWorktreeLease(acquire(root))).not.toThrow();
+    // The acquisition stands on the new path.
+    expect(readReviewWorktreeLease(root, 'pr-1')?.sessionId).toBe('session-a');
+    // And the skip was announced, not silent.
+    expect(stdioSpy.writeStderrLineSafe).toHaveBeenCalledWith(
+      expect.stringContaining('could not mirror'),
+    );
   });
 
   it('displaces a foreign lease surfacing mid-acquisition — warned, never a back-out', () => {

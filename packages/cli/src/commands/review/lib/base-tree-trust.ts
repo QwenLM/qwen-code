@@ -258,8 +258,13 @@ function atomicWrite(trustPath: string, value: TrustFile): void {
     writeFileSync(tmp, `${JSON.stringify(value)}\n`);
     renameSync(tmp, trustPath);
   } catch (err) {
-    // The tmp file matches no sweep's glob: take it with us.
-    rmSync(tmp, { force: true });
+    // The tmp file matches no sweep's glob: take it with us — and the
+    // removal must not mask the original failure.
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // Litter, not a verdict.
+    }
     throw err;
   }
 }

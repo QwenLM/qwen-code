@@ -306,8 +306,15 @@ function mirrorLeaseAtLegacyPath(
     renameSync(tmp, legacy);
   } catch (error) {
     // A rename failure (a directory at the name, EACCES) leaves the tmp
-    // file behind: it matches no sweep's glob, so take it with us.
-    rmSync(tmp, { force: true });
+    // file behind: it matches no sweep's glob, so take it with us — and
+    // THAT removal must not throw either: the mirror is never fatal, and
+    // an rm error escaping here would roll back the acquisition that
+    // already won.
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // A tmp file left behind is litter, not a verdict.
+    }
     warnMirrorSkipped(legacy, error);
     return;
   }
