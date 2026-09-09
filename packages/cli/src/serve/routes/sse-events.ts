@@ -214,6 +214,8 @@ export function registerSseEventsRoutes(
     };
     let slowWarningCount = 0;
     let eventBusEvictionReason: string | undefined;
+    let closeReason: SseCloseReason | undefined;
+    let terminalEventType: string | undefined;
     const onSubscriberDiagnostic = (
       diagnostic: EventBusSubscriberDiagnostic,
     ): boolean => {
@@ -322,6 +324,9 @@ export function registerSseEventsRoutes(
               : {}),
           },
         );
+        closeReason = 'event_bus_evicted';
+        terminalEventType = 'client_evicted';
+        res.destroy();
       }
       return handled;
     };
@@ -449,9 +454,7 @@ export function registerSseEventsRoutes(
     }
 
     const openedAt = performance.now();
-    let closeReason: SseCloseReason | undefined;
     let terminalCandidate: SseCloseReason | undefined;
-    let terminalEventType: string | undefined;
     let eventFramesWriteSettled = 0;
     let lastEventIdWritten: number | undefined;
     let backpressureCount = 0;
