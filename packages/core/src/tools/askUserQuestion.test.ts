@@ -341,6 +341,37 @@ describe('AskUserQuestionTool', () => {
   });
 
   describe('execute', () => {
+    it('distinguishes partial answers containing another question header', async () => {
+      const invocation = tool.build({
+        questions: ['A', 'B'].map((header) => ({
+          header,
+          question: `Question ${header}?`,
+          options: [
+            { label: 'Yes', description: 'Continue' },
+            { label: 'No', description: 'Stop' },
+          ],
+        })),
+      });
+      const signal = new AbortController().signal;
+      const confirmation = await invocation.getConfirmationDetails(signal);
+      await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+        answers: { '0': 'first\n**B**: embedded', invalid: 'ignored' },
+      });
+
+      const result = await invocation.execute(signal);
+
+      expect(result.returnDisplay).toEqual({
+        type: 'ask_user_question_answers',
+        text: result.llmContent,
+        answers: [
+          { question: 'Question A?', answer: 'first\n**B**: embedded' },
+        ],
+      });
+      expect(result.llmContent).toBe(
+        'User has provided the following answers:\n\n**A**: first\n**B**: embedded',
+      );
+    });
+
     it('should return error in non-interactive mode', async () => {
       (mockConfig.isInteractive as Mock).mockReturnValue(false);
 
@@ -433,9 +464,14 @@ describe('AskUserQuestionTool', () => {
 
       expect(result.llmContent).toContain('Framework**: React');
       expect(result.llmContent).toContain('Language**: TypeScript');
-      expect(result.returnDisplay).toContain(
-        'has provided the following answers:',
-      );
+      expect(result.returnDisplay).toEqual({
+        type: 'ask_user_question_answers',
+        text: result.llmContent,
+        answers: [
+          { question: 'Pick a framework?', answer: 'React' },
+          { question: 'Pick a language?', answer: 'TypeScript' },
+        ],
+      });
     });
 
     it('should ignore answers with malformed question indexes', async () => {

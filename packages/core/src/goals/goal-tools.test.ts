@@ -27,6 +27,8 @@ import {
   type PendingGoalProposal,
   type ProposeGoalToolConfig,
   applyPendingGoalProposal,
+  formatProposeGoalRecoveryFailed,
+  formatProposeGoalRecoveryNotStarted,
   UpdateGoalTool,
   type GoalToolConfig,
 } from './goal-tools.js';
@@ -1665,7 +1667,20 @@ describe('ProposeGoalTool', () => {
         objective: 'x'.repeat(PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS + 1),
       }),
     ).not.toBeNull();
+    expect(
+      tool.validateToolParams({ objective: 'Outcome: ship it.\nBudget: 20.' }),
+    ).toBe('objective must be written on one line.');
     expect(tool.validateToolParams({ objective })).toBeNull();
+  });
+
+  it('prints each recovery command as a complete final line', () => {
+    for (const message of [
+      formatProposeGoalRecoveryNotStarted(objective),
+      formatProposeGoalRecoveryFailed(objective),
+    ]) {
+      expect(message.split('\n').at(-1)).toBe(`/goal set ${objective}`);
+      expect(message.match(/\/goal/g)).toHaveLength(1);
+    }
   });
 
   it('shows the objective in a plain-text info dialog and parks it on approval', async () => {
@@ -1948,6 +1963,7 @@ describe('ProposeGoalTool', () => {
             );
             expect(result).toMatchObject({
               applied: false,
+              kind: 'changed',
               reason: expect.stringContaining('changed after the proposal'),
             });
           }
@@ -2013,6 +2029,7 @@ describe('ProposeGoalTool', () => {
     const applied = await applyPendingGoalProposal(runtime, config.pending()!);
     expect(applied.applied).toBe(false);
     if (applied.applied) return;
+    expect(applied.kind).toBe('changed');
     expect(applied.reason).toContain('became active');
     expect(runtime.getSnapshot().goal?.objective).toBe('Typed by hand');
   });
@@ -2047,7 +2064,10 @@ describe('ProposeGoalTool', () => {
         },
       },
     });
-    await expect(applied).resolves.toMatchObject({ applied: false });
+    await expect(applied).resolves.toMatchObject({
+      applied: false,
+      kind: 'changed',
+    });
     expect(runtime.getSnapshot().goal).toMatchObject({
       goalId: original.goalId,
       objective: 'Paused by user',
@@ -2079,6 +2099,8 @@ describe('ProposeGoalTool', () => {
       reviewedGoal: { goalId: paused.goalId, revision: paused.revision - 1 },
     });
     expect(applied.applied).toBe(false);
+    if (applied.applied) return;
+    expect(applied.kind).toBe('changed');
     expect(runtime.getSnapshot().goal?.goalId).toBe(paused.goalId);
   });
 });

@@ -1306,6 +1306,8 @@ export interface BridgeDaemonSessionDiagnostic {
   lastSeenAt?: number;
   currentModelId?: string;
   currentApprovalMode?: string;
+  /** Selected execution policy while the session is in Plan. */
+  planExecutionMode?: string;
   /**
    * The session's EFFECTIVE live-journal caps right now — the configured
    * baseline, or higher when adaptive growth raised them mid-turn. One
@@ -2203,13 +2205,14 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   setSessionApprovalMode(
     sessionId: string,
     mode: ApprovalMode,
-    opts: { persist: boolean },
+    opts: { persist: boolean; planMode?: boolean },
     context?: BridgeClientRequestContext,
   ): Promise<{
     sessionId: string;
     mode: ApprovalMode;
     previous: ApprovalMode;
     persisted: boolean;
+    planExecutionMode?: ApprovalMode;
   }>;
 
   /**

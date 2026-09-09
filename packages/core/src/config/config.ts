@@ -172,7 +172,6 @@ import {
   type PostToolBatchToolCall,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
-import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import {
   createGoalRuntime,
   GoalPersistenceUnavailableError,
@@ -1290,13 +1289,9 @@ export interface ConfigParameters {
    */
   fastModel?: string;
   /**
-   * Built-in WebSearch tool settings (`tools.webSearch` / ENABLE_WEB_SEARCH +
-   * WEB_SEARCH_MODEL env overrides). The tool registers only when `enabled`
-   * is true and `model` resolves to a DashScope-compatible modelProviders
-   * entry carrying a direct API key — or, for environments that cannot write
-   * settings.json, when an env-declared backend is supplied (`baseUrl` from
-   * WEB_SEARCH_BASE_URL, `apiKeyEnv` naming the key variable), which takes
-   * precedence over modelProviders resolution.
+   * Built-in WebSearch settings. `enabled: false` disables the tool; when the
+   * setting is omitted, the tool may derive a backend from the active provider
+   * at startup. An explicit model or env-declared backend takes precedence.
    */
   webSearch?: WebSearchSettings;
   /**
@@ -2340,6 +2335,7 @@ export class Config {
   private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
+  private planExecutionMode?: ApprovalMode;
   private approvalModeRevision = 0;
   private manualPlanExitNoticeEventState: ManualPlanExitNoticeEventState = {
     version: 0,
@@ -3282,8 +3278,6 @@ export class Config {
             // Execute the appropriate hook based on eventName
             let result;
             let stopHookCount: number | undefined;
-            let hasNonGoalBlockingStopHook: boolean | undefined;
-            let nonGoalBlockingStopReason: string | undefined;
             const input = request.input || {};
             const signal = request.signal;
             switch (request.eventName) {
@@ -3322,32 +3316,6 @@ export class Config {
                   ? createHookOutput('Stop', stopResult.finalOutput)
                   : undefined;
                 stopHookCount = stopResult.allOutputs.length;
-                const goalHookId =
-                  stopResult.finalOutput?.hookSpecificOutput?.[
-                    GOAL_HOOK_ID_OUTPUT_KEY
-                  ];
-                if (typeof goalHookId === 'string') {
-                  const nonGoalBlockingOutputs = stopResult.allOutputs.filter(
-                    (output) =>
-                      output.hookSpecificOutput?.[GOAL_HOOK_ID_OUTPUT_KEY] !==
-                        goalHookId &&
-                      (output.decision === 'block' ||
-                        output.decision === 'deny' ||
-                        output.continue === false),
-                  );
-                  hasNonGoalBlockingStopHook =
-                    nonGoalBlockingOutputs.length > 0;
-                  if (hasNonGoalBlockingStopHook) {
-                    nonGoalBlockingStopReason = nonGoalBlockingOutputs
-                      .map(
-                        (output) =>
-                          output.stopReason ||
-                          output.reason ||
-                          'No reason provided',
-                      )
-                      .join('\n');
-                  }
-                }
                 break;
               }
               case 'MessageDisplay': {
@@ -3476,8 +3444,6 @@ export class Config {
               output: result,
               // Include stop hook count for Stop events
               stopHookCount,
-              hasNonGoalBlockingStopHook,
-              nonGoalBlockingStopReason,
             } as HookExecutionResponse);
           } catch (error) {
             this.debugLogger.warn(`Hook execution failed: ${error}`);
@@ -4361,6 +4327,12 @@ export class Config {
       },
     );
     const newContentGeneratorConfig = config;
+    if (
+      priorReasoning === false &&
+      newContentGeneratorConfig.thinkingMandatory !== true
+    ) {
+      newContentGeneratorConfig.reasoning = false;
+    }
     this.contentGenerator = await createContentGenerator(
       newContentGeneratorConfig,
       this,
@@ -4373,7 +4345,13 @@ export class Config {
     // fires — and the resolved model can differ from the pre-auth one.
     this.publishModelEnv();
 
-    // Re-apply the user's reasoning effort that the provider sync above wiped.
+    // Re-apply the user's reasoning preference that the provider sync wiped.
+    if (
+      priorReasoning === false &&
+      newContentGeneratorConfig.reasoning === false
+    ) {
+      this.modelsConfig.getGenerationConfig().reasoning = false;
+    }
     if (priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
     }
@@ -4950,6 +4928,20 @@ export class Config {
   }
 
   /**
+   * The auth type of the currently selected model, read from `ModelsConfig`
+   * rather than the content generator config.
+   *
+   * Unlike {@link getAuthType}, this is usable before `refreshAuth` has run —
+   * the tool registry is built during `initialize()`, which happens first (the
+   * ACP bridge calls `initialize()` and only later `refreshAuth`). Callers that
+   * need the selected model's provider entry at registry-build time must use
+   * this.
+   */
+  getCurrentAuthType(): AuthType | undefined {
+    return this.modelsConfig.getCurrentAuthType();
+  }
+
+  /**
    * Resolve the effective input modalities of the current primary model. The
    * content generator config always carries resolved modalities (name-based
    * detection fills them in, defaulting unknown models to text-only), which is
@@ -5249,13 +5241,16 @@ export class Config {
    */
   getReasoningEffortOverride(): ReasoningEffortOverride | undefined {
     const cfg = this.getContentGeneratorConfig();
-    if (
-      !cfg ||
-      !DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg) ||
-      !isTieredEffortWireModel(cfg.model)
-    ) {
+    if (!cfg || !DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg)) {
       return undefined;
     }
+
+    const configuredReasoning = cfg.authType
+      ? this.getResolvedModelConfig(cfg.authType, cfg.model, cfg.baseUrl)
+          ?.capabilities.reasoning
+      : undefined;
+    const tieredModel = isTieredEffortWireModel(cfg.model, configuredReasoning);
+    if (!tieredModel) return undefined;
 
     const currentEffort = this.getReasoningEffort();
     const selected = selectDashScopeThinkingKnob(
@@ -5263,6 +5258,7 @@ export class Config {
       cfg.extra_body,
       cfg.samplingParams,
       currentEffort,
+      tieredModel,
     );
     if (
       !selected ||
@@ -5284,6 +5280,7 @@ export class Config {
         undefined,
         cfg.samplingParams,
         currentEffort,
+        tieredModel,
       );
       if (
         below?.source === 'samplingParams' &&
@@ -7177,6 +7174,28 @@ export class Config {
     return this.prePlanMode ?? ApprovalMode.DEFAULT;
   }
 
+  getPlanExecutionMode(): ApprovalMode | undefined {
+    return Object.hasOwn(this, 'planExecutionMode')
+      ? this.planExecutionMode
+      : undefined;
+  }
+
+  setPlanMode(enabled: boolean, executionMode: ApprovalMode): void {
+    if (isDerivedConfig(this)) {
+      throw new Error('Derived Configs cannot change plan workflow mode');
+    }
+    if (executionMode === ApprovalMode.PLAN) {
+      throw new Error('Plan is not an execution approval mode');
+    }
+    if (!this.isTrustedFolder() && executionMode !== ApprovalMode.DEFAULT) {
+      throw new TrustGateError(
+        'Cannot enable privileged approval modes in an untrusted folder.',
+      );
+    }
+    this.setApprovalMode(enabled ? ApprovalMode.PLAN : executionMode);
+    this.planExecutionMode = enabled ? executionMode : undefined;
+  }
+
   getApprovalModeRevision(): number {
     return this.approvalModeRevision;
   }
@@ -7287,6 +7306,7 @@ export class Config {
       this.autoModeDenialState = resetDenialState();
     }
     this.approvalMode = mode;
+    if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
     if (fromMode !== mode) {
       this.approvalModeRevision++;
     }
@@ -9771,11 +9791,22 @@ export class Config {
         return new DisplayImageTool(this);
       });
     }
-    // WebSearch is opt-in: it registers only when explicitly enabled AND the
-    // configured search model resolves to a usable DashScope entry. A failed
-    // gate surfaces a one-time startup notice instead of a silently missing
-    // tool. Nothing is imported unless the feature is enabled.
-    if (this.webSearchSettings?.enabled) {
+    // WebSearch is opt-out: it registers whenever the gate can resolve a
+    // usable backend — either configured explicitly, or derived from the
+    // provider the main model runs on. `enabled: false` turns it off without
+    // importing anything. A gate failure surfaces a one-time startup notice
+    // only when the tool was actually asked for; a provider with no search
+    // backend fails silently (`gate.silent`), since warning about a feature
+    // the user never configured is noise.
+    const hasExplicitWebSearchBackend =
+      !!this.webSearchSettings?.model?.trim() ||
+      !!this.webSearchSettings?.baseUrl;
+    if (
+      !this.getBareMode() &&
+      !this.isSafeMode() &&
+      this.webSearchSettings?.enabled !== false &&
+      (this.webSearchSettings?.enabled === true || !hasExplicitWebSearchBackend)
+    ) {
       const { evaluateWebSearchGate } = await import('../tools/web-search.js');
       const gate = evaluateWebSearchGate(this);
       if (gate.ok) {
@@ -9783,7 +9814,11 @@ export class Config {
           const { WebSearchTool } = await import('../tools/web-search.js');
           return new WebSearchTool(this);
         });
-      } else if (!this.webSearchNoticeEmitted && !options?.forSubAgent) {
+      } else if (
+        !gate.silent &&
+        !this.webSearchNoticeEmitted &&
+        !options?.forSubAgent
+      ) {
         this.webSearchNoticeEmitted = true;
         this.warnings.push(gate.notice);
       }

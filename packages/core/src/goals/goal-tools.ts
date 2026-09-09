@@ -625,10 +625,10 @@ function summarizeCatalog(
 export const PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS = 1500;
 
 export const formatProposeGoalRecoveryNotStarted = (objective: string) =>
-  `The approved Goal was not started because the turn did not finish normally. Run /goal set ${objective} if you still want to start it.`;
+  `The approved Goal was not started because the turn did not finish normally. To start it, run:\n/goal set ${objective}`;
 
 export const formatProposeGoalRecoveryFailed = (objective: string) =>
-  `The approved Goal could not be started. Check /goal before trying again, or run /goal set ${objective}.`;
+  `The approved Goal could not be started. Check the Goal status before trying again, or run:\n/goal set ${objective}`;
 
 export interface ProposeGoalToolParams {
   objective: string;
@@ -664,7 +664,7 @@ type ProposeGoalRuntime = Pick<GoalRuntime, 'getSnapshot' | 'dispatch'>;
 
 export type ApplyPendingGoalProposalResult =
   | { applied: true; goal: GoalRecord }
-  | { applied: false; reason: string };
+  | { applied: false; reason: string; kind: 'changed' | 'unavailable' };
 
 /**
  * Sets an approved proposal as the session Goal. Called by the client once
@@ -683,11 +683,16 @@ export async function applyPendingGoalProposal(
   if (current?.status === 'active') {
     return {
       applied: false,
+      kind: 'changed',
       reason: `A Goal became active (revision ${current.revision}) before the approved proposal could be set.`,
     };
   }
   if (!matchesReviewedGoal(current, proposal.reviewedGoal)) {
-    return { applied: false, reason: PROPOSE_GOAL_CHANGED_MESSAGE };
+    return {
+      applied: false,
+      kind: 'changed',
+      reason: PROPOSE_GOAL_CHANGED_MESSAGE,
+    };
   }
   const request: GoalControlRequest = current
     ? {
@@ -706,6 +711,7 @@ export async function applyPendingGoalProposal(
     if (!goal) {
       return {
         applied: false,
+        kind: 'unavailable',
         reason: 'The Goal runtime accepted the request but reported no Goal.',
       };
     }
@@ -716,10 +722,12 @@ export async function applyPendingGoalProposal(
   } catch (error) {
     if (
       error instanceof GoalConflictError ||
-      error instanceof GoalInvalidTransitionError ||
-      error instanceof GoalPersistenceUnavailableError
+      error instanceof GoalInvalidTransitionError
     ) {
-      return { applied: false, reason: error.message };
+      return { applied: false, kind: 'changed', reason: error.message };
+    }
+    if (error instanceof GoalPersistenceUnavailableError) {
+      return { applied: false, kind: 'unavailable', reason: error.message };
     }
     throw error;
   }
@@ -984,6 +992,9 @@ export class ProposeGoalTool extends BaseDeclarativeTool<
     }
     if (params.objective.length > PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS) {
       return `objective must be at most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters.`;
+    }
+    if (/[\r\n]/.test(params.objective)) {
+      return 'objective must be written on one line.';
     }
     return null;
   }

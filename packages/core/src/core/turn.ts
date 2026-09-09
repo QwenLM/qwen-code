@@ -37,7 +37,7 @@ import {
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
 import type { LoopType } from '../telemetry/types.js';
-import type { ActiveGoal } from '../goals/activeGoalStore.js';
+import type { ActiveGoal } from '../goals/goal-legacy-projection.js';
 import type {
   GoalSnapshotV2,
   GoalStateCause,

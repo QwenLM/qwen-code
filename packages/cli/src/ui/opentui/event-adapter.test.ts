@@ -754,6 +754,16 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ).toBe('◌ [2] working');
     });
 
+    it('renders structured question answers as their display text', () => {
+      expect(
+        renderResultDisplay({
+          type: 'ask_user_question_answers',
+          text: 'Deploy where?\nStaging',
+          answers: [{ question: 'Deploy where?', answer: 'Staging' }],
+        }),
+      ).toBe('Deploy where?\nStaging');
+    });
+
     it('renders mcp_app with its fallbackText only', () => {
       expect(
         renderResultDisplay({
