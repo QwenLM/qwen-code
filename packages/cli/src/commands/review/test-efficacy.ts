@@ -61,7 +61,7 @@ import {
 import { createRequire } from 'node:module';
 import { dirname, join, isAbsolute, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { probeWorktreePath } from './lib/paths.js';
+import { inertPath, probeWorktreePath } from './lib/paths.js';
 // `discardWorktree` moved to `lib/worktree.ts` when `base-tree` needed the same
 // stale-sweep-then-remove step (its rationale lives there, with the helper), and
 // `exposeDependencies` followed it when `scratch-tree` needed the same
@@ -82,6 +82,8 @@ import {
   type ContainerRuntime,
 } from './lib/sandboxed-exec.js';
 import {
+  checkoutFilterCommands,
+  describeFilterScreen,
   discardWorktree,
   exposeDependencies,
   redirectedAncestor,
@@ -1296,6 +1298,36 @@ interface TestEfficacyArgs {
   now?: () => number;
 }
 
+// The two config-driven command surfaces a checkout fires from the very tree it
+// is cleaning: `core.hooksPath` (a `post-checkout` hook planted in the shared
+// common dir) and `core.fsmonitor` (a command git runs on checkout/status).
+// Disabling hooks does not cover filters — those are screened at each site
+// below — and neutralising one checkout does not cover the next, so all three
+// of this file's file-materialising checkouts pass this pair: the `worktree
+// add` that creates the probe tree, the restore's `checkout --force`, and the
+// revert's pathspec checkout. The restore's `clean -ffdx` rides along in the
+// same loop. `git apply --reverse` is not a checkout and runs neither surface;
+// it is screened for filters all the same.
+const CHECKOUT_INERT = [
+  '-c',
+  'core.hooksPath=/dev/null/no-hooks',
+  '-c',
+  'core.fsmonitor=',
+] as const;
+
+/**
+ * The refusal every screened site reports, differing only in the rewrite it
+ * names. One helper because four sites render the same screen answer, and a
+ * message a reader acts on should not depend on which of them produced it.
+ */
+function filterScreenRefusal(hits: string[], rewrite: string): string {
+  return (
+    "the repository's local config defines content filter(s), or includes " +
+    'config this screen could not read to the bottom: ' +
+    `${describeFilterScreen(hits.map(inertPath))} — ${rewrite}`
+  );
+}
+
 // Sanitized env on every git spawn below: an exported GIT_DIR redirects
 // repository discovery for ALL of them at once — the head sha read, the probe
 // resets, the revert's checkout — so the mutations would land in whichever
@@ -1639,21 +1671,32 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
   }
-  // A pathspec checkout runs no hook — but the config that decides that lives
-  // in a tree this code is defending against, so it is emptied here the way
-  // every other checkout in this pipeline empties it. `--` and a pathspec:
-  // this restores FILES and never moves HEAD.
-  // `core.fsmonitor` runs a command on BOTH of these, and the config that sets
-  // it lives in the tree they are cleaning: the residue probe empties it for
-  // exactly this reason and these two spawns were the ones still steerable.
-  const inert = [
-    '-c',
-    'core.hooksPath=/dev/null/no-hooks',
-    '-c',
-    'core.fsmonitor=',
-  ];
+  // A pathspec checkout DOES run `post-checkout` — measured on both shapes
+  // below, `checkout --force HEAD -- .` and a pathspec checkout of one file —
+  // and the config that decides whether it does lives in a tree this code is
+  // defending against, so it is emptied here the way every other checkout in
+  // this pipeline empties it. `--` and a pathspec: this restores FILES and
+  // never moves HEAD.
+  // Filters, before either spawn. A checkout EXECUTES `filter.<name>.smudge`
+  // whenever it rewrites a file, and the restore below rewrites every tracked
+  // file this tree has — so the same surface `scratch-tree` refuses to reset
+  // through was, one directory over, run through twice per probe run. The
+  // screen reads repo-LOCAL config only: `git lfs install` writes
+  // `filter.lfs.clean` into the user's GLOBAL config, and refusing on that
+  // would put every contributor with git-lfs into permanent refusal — the same
+  // failure as a tripwire that fires on every healthy run.
+  // A non-empty answer is a refusal whichever half it came from: a filter the
+  // screen found, or a candidate it could not read to the bottom. Both mean
+  // the checkout below would execute something this screen did not clear.
+  const filters = checkoutFilterCommands(probeTree);
+  if (filters.length > 0) {
+    return filterScreenRefusal(
+      filters,
+      "this tree's restore would EXECUTE them",
+    );
+  }
   for (const args of [
-    [...inert, 'checkout', '--force', 'HEAD', '--', '.'],
+    [...CHECKOUT_INERT, 'checkout', '--force', 'HEAD', '--', '.'],
     // `-ffdx`, because `-fd` honors the ignore rules — and those belong to the
     // commit under test, so a plant named to match one of them (a committed
     // `.gitignore` line and a file to match it) survived every restore. The
@@ -1661,7 +1704,7 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
     // rather than built, and it is the only ignored thing in this tree the
     // probes cannot run without. Everything else ignored — a built `dist`, a
     // planted config — goes.
-    [...inert, 'clean', '-ffdx', '-e', 'node_modules'],
+    [...CHECKOUT_INERT, 'clean', '-ffdx', '-e', 'node_modules'],
   ]) {
     const r = spawnSync('git', args, {
       cwd: probeTree,
@@ -1672,7 +1715,9 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
     if (r.status !== 0) {
       return (
         (r.stderr ?? '').toString().trim() ||
-        `git ${args[2]} exited ${r.status}`
+        // The subcommand, not `args[2]`: that index is a `-c` from the inert
+        // pair, so the message read "git -c exited 1" and named nothing.
+        `git ${args[CHECKOUT_INERT.length]} exited ${r.status}`
       );
     }
   }
@@ -2130,6 +2175,25 @@ export function runOneHunkProbe(
       verdict: 'inconclusive',
       detail:
         'the probe target was relinked through a symlink before the reverse patch applied — nothing was neutralised',
+    };
+  }
+  // Screened, and not by the restore's screen: `git apply --reverse` rewrites
+  // the working tree and executes BOTH sides of a content filter — the clean
+  // and the smudge, where a pathspec checkout fires only the smudge. The
+  // restore screened this tree three git spawns and several filesystem reads
+  // ago, which is a window a detached planter can land in — the capability the
+  // revert phase's own comment credits — and a plant that lands there is live
+  // here, once per hunk candidate, on the reviewer's host. Repo-local scope,
+  // for the git-lfs reason the restore's screen states.
+  const applyFilters = checkoutFilterCommands(probeTree);
+  if (applyFilters.length > 0) {
+    return {
+      ...meta,
+      verdict: 'inconclusive',
+      detail: filterScreenRefusal(
+        applyFilters,
+        'this reverse-apply would EXECUTE them',
+      ),
     };
   }
   const applied = spawnSync('git', ['apply', '--reverse', '-'], {
@@ -2651,10 +2715,47 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     let created = false;
     let sweep: SweepResult | undefined;
     try {
+      // Screened at RUN ENTRY, before the first spawn that materialises files.
+      // `worktree add` checks out `headSha` into the new tree, so it executes a
+      // planted `filter.<name>.smudge` exactly as the restore does (measured:
+      // the canary fires with and without the inert `-c` pair, which blanks
+      // hooks and fsmonitor but cannot blank a filter whose key carries a name
+      // of the planter's choosing). It runs before any PR code has, which is
+      // not why it is safe: the plant it would execute was left by an EARLIER
+      // review, in the common dir that `discard` and `cleanup` never wipe. That
+      // is the persistence #9558 describes, and the per-site screens below
+      // cannot reach back to it. Same repo-local scope, for the same git-lfs
+      // reason. The throw lands in this phase's existing catch, which records
+      // every probe as not-run — what it is, since nothing was isolated.
+      //
+      // ABOVE the stale-tree sweep, not below it. The sweep's stderr is
+      // non-empty on the healthy path — `git worktree remove` aimed at a tree
+      // that is not there answers "is not a working tree" — and the failure
+      // detail below appends it, so a refusal sited under the sweep published
+      // an unrelated cause beside the real one. This screens `worktree`, not
+      // the probe tree, so nothing about it depends on the sweep having run,
+      // and refusing before touching anything is the better order anyway.
+      const creationFilters = checkoutFilterCommands(worktree);
+      if (creationFilters.length > 0) {
+        throw new Error(
+          filterScreenRefusal(
+            creationFilters,
+            'creating the probe tree would EXECUTE them',
+          ),
+        );
+      }
       // Clear a stale probe tree left by a crashed run — it would fail `add`.
       // Its stderr is kept to explain a subsequent `add` failure.
       sweep = discardWorktree(worktree, probeTree);
-      git(worktree, 'worktree', 'add', '--detach', probeTree, headSha);
+      git(
+        worktree,
+        ...CHECKOUT_INERT,
+        'worktree',
+        'add',
+        '--detach',
+        probeTree,
+        headSha,
+      );
       created = true;
     } catch (e) {
       // Could not isolate — probe nothing rather than fall back to mutating the
@@ -2811,11 +2912,19 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               worktree,
             );
             if (harnessValidated === null) {
-              // The probe file could not be read, so no test was injected and
-              // no run happened. That is not a verdict about the runner —
-              // fall through and let the mutants spend the window as usual.
+              // THREE causes share this `null` and the note must not name one:
+              // the probe target was relinked out of the tree, the restore
+              // refused — a content filter is now among its reasons, which is
+              // this file's own screen — or the probe file could not be read.
+              // Naming the last, as this did, tells an operator the file is
+              // missing when the real answer may be that their repository
+              // defines a filter; the per-probe records below carry the actual
+              // reason, so this one only has to not contradict them. No test
+              // was injected and no run happened either way, which is not a
+              // verdict about the runner — fall through and let the mutants
+              // spend the window as usual.
               noteMutants(
-                `the positive control could not be set up (${greenProbes[0]} could not be read in the probe tree), so the harness was NOT validated this run — read every survivor below as unconfirmed by a control`,
+                `the positive control could not be set up (the probe target was relinked, the probe tree could not be restored, or ${greenProbes[0]} could not be read in it), so the harness was NOT validated this run — read every survivor below as unconfirmed by a control`,
               );
             }
           }
@@ -2981,7 +3090,46 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           (existsAtBase(probeTree, base, p) ? modified : added).push(p);
         }
         if (modified.length > 0) {
-          git(probeTree, 'checkout', base, '--', ...modified);
+          // Screened HERE, inside the gate and immediately before the spawn —
+          // not above the classification loop, and not above this `if`. Two
+          // reasons, and they pull in opposite directions. Below the loop,
+          // because that loop runs one synchronous `git cat-file -e` per revert
+          // path over a list the plan sizes, so a screen above it leaves a
+          // window measured in seconds in which the PR's own suite — which ran
+          // between the restore's screen and here, and whose phase catch
+          // deliberately continues so this revert still happens — can plant the
+          // filter from a detached process. Inside the gate, because a change
+          // that only ADDS files runs no checkout at all, and refusing it would
+          // lose the whole revert probe to a screen protecting a command that
+          // never executes.
+          // `checkout base -- <paths>` rewrites files, and a rewrite EXECUTES
+          // `filter.<name>.smudge`. Repo-local scope, for the git-lfs reason
+          // the restore's screen states. A non-empty answer is a refusal
+          // whichever half it came from. The throw lands in this phase's
+          // existing catch and is recorded as a probe that did not run.
+          const revertFilters = checkoutFilterCommands(probeTree);
+          if (revertFilters.length > 0) {
+            throw new Error(
+              filterScreenRefusal(
+                revertFilters,
+                "this revert's checkout would EXECUTE them",
+              ),
+            );
+          }
+          // Same neutralisation the restore's checkout runs: this revert
+          // rewrites the PR-modified files, and a `post-checkout` hook or a
+          // `core.fsmonitor` command planted in the never-wiped common dir
+          // mid-run would otherwise fire here — a surface the filter screen
+          // above does not cover, on a checkout the restore hardens and this
+          // one used to leave steerable.
+          git(
+            probeTree,
+            ...CHECKOUT_INERT,
+            'checkout',
+            base,
+            '--',
+            ...modified,
+          );
         }
         for (const p of added) safeRmWithin(probeTree, p);
 
