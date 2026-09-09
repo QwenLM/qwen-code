@@ -118,7 +118,6 @@ import type { SkillConfig } from '../skills/types.js';
 import { createSkillScopedAgentConfig } from '../memory/skillReviewAgentPlanner.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import { HookSystem } from '../hooks/index.js';
-import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type {
   ChatRecord,
@@ -13089,78 +13088,6 @@ describe('Model Switching and Config Updates', () => {
       );
       expect(response.success).toBe(true);
     });
-  });
-
-  describe('Stop dispatch through the hook execution bridge', () => {
-    it.each([
-      {
-        name: 'ignores non-blocking outputs',
-        otherOutput: { continue: true },
-        expected: false,
-        expectedReason: undefined,
-      },
-      {
-        name: 'detects another blocking output',
-        otherOutput: {
-          decision: 'block',
-          reason: 'Policy review is still required',
-        },
-        expected: true,
-        expectedReason: 'Policy review is still required',
-      },
-      {
-        name: 'preserves a stop reason',
-        otherOutput: {
-          continue: false,
-          stopReason: 'External stop hook feedback',
-        },
-        expected: true,
-        expectedReason: 'External stop hook feedback',
-      },
-    ])(
-      '$name when a goal hook blocks',
-      async ({ otherOutput, expected, expectedReason }) => {
-        const config = new Config({ ...baseParams });
-        await config.initialize();
-        const goalOutput = {
-          decision: 'block' as const,
-          reason: 'Keep working',
-          hookSpecificOutput: {
-            [GOAL_HOOK_ID_OUTPUT_KEY]: 'goal-hook-id',
-          },
-        };
-        const fireStopEvent = vi.fn().mockResolvedValue({
-          finalOutput: {
-            ...goalOutput,
-            ...otherOutput,
-          },
-          allOutputs: [goalOutput, otherOutput],
-        });
-        // @ts-expect-error - accessing private for testing
-        config['hookSystem'] = { fireStopEvent };
-
-        const response = await config
-          .getMessageBus()!
-          .request<HookExecutionRequest, HookExecutionResponse>(
-            {
-              type: MessageBusType.HOOK_EXECUTION_REQUEST,
-              eventName: 'Stop',
-              input: {
-                stop_hook_active: true,
-                last_assistant_message: 'last response',
-              },
-            },
-            MessageBusType.HOOK_EXECUTION_RESPONSE,
-          );
-
-        expect(response.error).toBeUndefined();
-        expect(response).toMatchObject({
-          success: true,
-          hasNonGoalBlockingStopHook: expected,
-        });
-        expect(response.nonGoalBlockingStopReason).toBe(expectedReason);
-      },
-    );
   });
 
   describe('MessageDisplay dispatch through the hook execution bridge', () => {

@@ -43,16 +43,6 @@ import {
   GoalPersistenceUnavailableError,
   type GoalRuntime,
 } from '../goals/goal-runtime.js';
-import {
-  activeGoalEquals,
-  getActiveGoal,
-  type ActiveGoal,
-} from '../goals/activeGoalStore.js';
-import {
-  abortGoalForStopHookCap,
-  getStopHookContinuationReason,
-  GOAL_HOOK_ID_OUTPUT_KEY,
-} from '../goals/goalHook.js';
 import { applyPendingGoalProposal } from '../goals/goal-tools.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
@@ -4012,31 +4002,6 @@ export class LlmClient {
         yield goalEvent;
       }
 
-      const activeGoalAtTurnStart = goalRuntime?.getSnapshot().goal
-        ? undefined
-        : getActiveGoal(this.config.getSessionId());
-      if (activeGoalAtTurnStart) {
-        yield {
-          type: LlmEventType.ActiveGoal,
-          value: activeGoalAtTurnStart,
-        };
-      }
-      let lastEmittedActiveGoal: ActiveGoal | undefined = activeGoalAtTurnStart;
-      // Tracks the last emitted goal value to suppress duplicate events.
-      // Mutates `lastEmittedActiveGoal` when an event is returned.
-      const maybeEmitActiveGoalChange = (
-        nextActiveGoal: ActiveGoal | undefined,
-      ): ServerLlmStreamEvent | undefined => {
-        if (activeGoalEquals(lastEmittedActiveGoal, nextActiveGoal)) {
-          return undefined;
-        }
-        lastEmittedActiveGoal = nextActiveGoal;
-        return {
-          type: LlmEventType.ActiveGoal,
-          value: nextActiveGoal ?? null,
-        };
-      };
-
       // MessageDisplay hook: fires repeatedly as this turn's reply streams
       // (before Stop, which fires once at the end). One dispatcher — one
       // message_id and one debounce accumulator — per turn.run() call;
@@ -4391,22 +4356,10 @@ export class LlmClient {
         for (const goalEvent of takePendingGoalEvents()) {
           yield goalEvent;
         }
-        // Stop hook callbacks can mutate active goal state during request().
-        // Capture it before cancellation returns so clear events are not lost.
-        const activeGoalAfterStopHook = goalPermit
-          ? undefined
-          : getActiveGoal(this.config.getSessionId());
-
         // Check if aborted after hook execution
         if (signal.aborted) {
           for (const goalEvent of await finalizeInterruptedGoalTurn()) {
             yield goalEvent;
-          }
-          const activeGoalEvent = maybeEmitActiveGoalChange(
-            activeGoalAfterStopHook,
-          );
-          if (activeGoalEvent) {
-            yield activeGoalEvent;
           }
           endCurrentInteraction('cancelled');
           return turn;
@@ -4528,17 +4481,12 @@ export class LlmClient {
         ) {
           // Check if aborted before continuing
           if (signal.aborted) {
-            const activeGoalEvent = maybeEmitActiveGoalChange(
-              activeGoalAfterStopHook,
-            );
-            if (activeGoalEvent) {
-              yield activeGoalEvent;
-            }
             endCurrentInteraction('cancelled');
             return turn;
           }
 
-          const continueReason = getStopHookContinuationReason(stopOutput);
+          const continueReason =
+            stopOutput.stopReason || stopOutput.reason || 'No reason provided';
 
           // Track stop hook iterations
           const currentIterationCount =
@@ -4558,19 +4506,6 @@ export class LlmClient {
               'Stop',
               stopHookBlockingCap,
             );
-            abortGoalForStopHookCap(
-              this.config,
-              this.config.getSessionId(),
-              warning,
-            );
-            const activeGoalAfterCap = getActiveGoal(
-              this.config.getSessionId(),
-            );
-            const activeGoalEvent =
-              maybeEmitActiveGoalChange(activeGoalAfterCap);
-            if (activeGoalEvent) {
-              yield activeGoalEvent;
-            }
             yield {
               type: LlmEventType.HookSystemMessage,
               value: warning,
@@ -4589,13 +4524,6 @@ export class LlmClient {
             return turn;
           }
 
-          const activeGoalEvent = maybeEmitActiveGoalChange(
-            activeGoalAfterStopHook,
-          );
-          if (activeGoalEvent) {
-            yield activeGoalEvent;
-          }
-
           yield {
             type: LlmEventType.StopHookLoop,
             value: {
@@ -4605,78 +4533,22 @@ export class LlmClient {
             },
           };
 
-          // A blocking Stop hook (e.g. /goal) feeds a fresh user-role prompt
-          // back to the model, starting a new logical turn — reset per-turn
-          // loop accounting so each continuation gets its own tool-call
-          // budget. Without this, a goal chain accumulates every iteration's
-          // tool calls into one "turn" and trips TURN_TOOL_CALL_CAP after a
-          // handful of healthy iterations. The ACP daemon path already has
-          // these semantics (fresh DaemonToolLoopState per continuation).
-          // Runaway protection is preserved: the cap still bounds each
-          // iteration, and the chain itself is bounded by
-          // stopHookBlockingCap / MAX_GOAL_ITERATIONS. Those are the only
-          // Goal-specific bounds on this path (a user-set maxSessionTurns
-          // still cuts the chain: each hook hop is a plain send with no
-          // Goal permit, so it counts as a session turn): the legacy hook
-          // Goal recurses inside one sendMessageStream call, so the
-          // runtime's token budget (which meters continuations the Goal
-          // runtime schedules) never sees it, and the recursion budget is
-          // not decremented below because a 50-iteration chain with steer
-          // and next-speaker continues would otherwise exhaust MAX_TURNS
-          // before its own iteration cap.
+          // A blocking Stop hook feeds a fresh user-role prompt back to the
+          // model, starting a new logical turn — reset per-turn loop
+          // accounting so each continuation gets its own tool-call budget.
+          // Without this, a hook chain accumulates every iteration's tool
+          // calls into one "turn" and trips TURN_TOOL_CALL_CAP after a handful
+          // of healthy iterations. The ACP daemon path already has these
+          // semantics (fresh DaemonToolLoopState per continuation). Runaway
+          // protection is preserved: the cap still bounds each iteration, and
+          // the chain itself is bounded by stopHookBlockingCap.
           this.loopDetector.reset(prompt_id);
 
-          const activeGoal = getActiveGoal(this.config.getSessionId());
-          const hookTurnBudget = activeGoal ? boundedTurns : boundedTurns - 1;
+          const hookTurnBudget = boundedTurns - 1;
           const pendingSteer = await takeSteerInput(hookTurnBudget);
-          const activeGoalAfterSteer = getActiveGoal(
-            this.config.getSessionId(),
-          );
-          const activeGoalChanged =
-            activeGoal !== undefined &&
-            activeGoalAfterSteer?.hookId !== activeGoal.hookId;
-          const goalContinuationChanged =
-            activeGoalChanged &&
-            stopOutput.hookSpecificOutput?.[GOAL_HOOK_ID_OUTPUT_KEY] ===
-              activeGoal.hookId;
-          if (activeGoalChanged) {
-            const activeGoalEvent =
-              maybeEmitActiveGoalChange(activeGoalAfterSteer);
-            if (activeGoalEvent) {
-              yield activeGoalEvent;
-            }
-          }
-          const discardGoalContinuation =
-            goalContinuationChanged &&
-            response.hasNonGoalBlockingStopHook === false;
-          const continuationReasonAfterSteer = discardGoalContinuation
-            ? undefined
-            : goalContinuationChanged &&
-                response.hasNonGoalBlockingStopHook === true
-              ? response.nonGoalBlockingStopReason || 'No reason provided'
-              : continueReason;
-          if (!continuationReasonAfterSteer && !pendingSteer) {
-            await this.settlePendingGoalProposal(
-              true,
-              signal,
-              loadGoalRuntime,
-              prompt_id,
-            );
-            for (const goalEvent of takePendingGoalEvents()) {
-              yield goalEvent;
-            }
-            endCurrentInteraction('ok');
-            normalCompletion = true;
-            return turn;
-          }
-          const continueRequest: Part[] = continuationReasonAfterSteer
-            ? [{ text: continuationReasonAfterSteer }]
-            : [];
+          const continueRequest: Part[] = [{ text: continueReason }];
           if (pendingSteer) {
-            if (continueRequest.length > 0) {
-              continueRequest.push({ text: '\n\n' });
-            }
-            continueRequest.push(...pendingSteer.parts);
+            continueRequest.push({ text: '\n\n' }, ...pendingSteer.parts);
           }
           const pushCountBefore = currentPushCount();
           let hookTurn: Turn;
@@ -4690,19 +4562,10 @@ export class LlmClient {
                 modelOverride: options?.modelOverride,
                 getSteerInput: options?.getSteerInput,
                 steerInput: pendingSteer,
-                stopHookState: discardGoalContinuation
-                  ? undefined
-                  : {
-                      iterationCount: currentIterationCount,
-                      reasons:
-                        continuationReasonAfterSteer &&
-                        continuationReasonAfterSteer !== continueReason
-                          ? [
-                              ...currentReasons.slice(0, -1),
-                              continuationReasonAfterSteer,
-                            ]
-                          : currentReasons,
-                    },
+                stopHookState: {
+                  iterationCount: currentIterationCount,
+                  reasons: currentReasons,
+                },
               },
               hookTurnBudget,
             );
@@ -4729,12 +4592,6 @@ export class LlmClient {
           return hookTurn;
         }
 
-        const activeGoalEvent = maybeEmitActiveGoalChange(
-          activeGoalAfterStopHook,
-        );
-        if (activeGoalEvent) {
-          yield activeGoalEvent;
-        }
         for (const goalEvent of takePendingGoalEvents()) {
           yield goalEvent;
         }
