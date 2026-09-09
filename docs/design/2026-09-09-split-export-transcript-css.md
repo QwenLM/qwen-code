@@ -75,12 +75,34 @@ and the CSS is fetched, parsed and cached separately.
 
 ### 1. `packages/web-templates/src/export-html/build.mjs`
 
-- Add an esbuild `onLoad` plugin (`filter: /web-shell\/dist\/transcript\.js$/`)
-  that reads the resolved file, matches
+- Add an esbuild `onLoad` plugin that reads the resolved file, matches
   `^const __qwenWebShellCss=("(?:[^"\\]|\\.)*");\n`, `JSON.parse`s the literal,
   strips the CSS constant line and the immediately-following runtime-injection
   line, and returns the remainder as `{ contents, loader: 'js' }`. Fail the
   build if either line is missing or moved.
+- The plugin's filter lives in a new module,
+  `packages/web-templates/src/export-html/transcript-css-entry.mjs`, which
+  `build.mjs` imports:
+
+  ```js
+  export const TRANSCRIPT_CSS_ENTRY_FILTER =
+    /web-shell[\\/]dist[\\/]transcript\.js$/;
+  ```
+
+  It is extracted because `build.mjs` is a top-level-await script with no
+  harness, and the match decision is the part that determines whether the
+  stylesheet is lifted at all — `scripts/tests/transcript-css-entry-filter.test.js`
+  can only pin it if it is importable without running a full bundle.
+  Both separators are in the character class because esbuild hands plugin
+  callbacks the platform-native absolute path; on Windows that is
+  `C:\repo\packages\web-shell\dist\transcript.js`, so a forward-slash-only
+  pattern never matches there: the callback never runs, the extracted CSS stays
+  `undefined`, and the mandatory guard below aborts every export build —
+  including the one `npm ci` runs through the root `prepare` script. The
+  `transcript\.js$` tail is load-bearing too, because a bare
+  `web-shell[\\/]dist[\\/]` prefix would also match `web-shell/dist/index.js`,
+  which `FORBIDDEN_DOCUMENT_INPUTS` bars from every export.
+
 - Write the decoded CSS to `dist/export-transcript-document.css`.
 - Derive `export-transcript-document.css`'s URL and `sha384-` SRI exactly as the
   JS asset does today, and add the two placeholders to the template replace
@@ -92,14 +114,41 @@ and the CSS is fetched, parsed and cached separately.
 
 - Add, after the existing inline `<style>`, a
   `<link rel="stylesheet" nonce="__EXPORT_NONCE__" id="transcript-stylesheet" integrity="__DOCUMENT_RENDERER_CSS_INTEGRITY__" crossorigin="anonymous" href="__DOCUMENT_RENDERER_CSS_URL__" />`.
-- Extend the existing fail-closed `showLoadError` listener to also treat
-  `event.target.id === 'transcript-stylesheet'` as a load failure.
+  The `<link>` goes _after_ the inline `<style>` so the component sheet wins
+  every equal-specificity tie by document order (`:where(...)` scoping
+  contributes zero specificity).
+- Extend the existing fail-closed `showLoadError` listener in the body script to
+  also treat `event.target.id === 'transcript-stylesheet'` as a load failure.
+- **Latch the stylesheet failure in `<head>`, ahead of the `<link>`.** The body
+  listener alone is not sufficient: Chromium parser-blocks the inline body
+  script on the pending head stylesheet, so on a large document a CSS failure
+  that settles before the parser is released is dispatched while no listener
+  exists yet — nothing marks the render as failed and the transcript renders
+  unstyled while stamping `data-render-complete="true"`. So a
+  `<script nonce="__EXPORT_NONCE__">` immediately before the `<link>` registers a
+  **capture-phase** `error` listener (resource error events do not bubble) that
+  sets `window.__transcriptStyleFailed = true` when the failing element's id is
+  `transcript-stylesheet`, and the existing body IIFE ends with
+  `if (window.__transcriptStyleFailed) { showLoadError(); }`.
+  Two constraints shape it: the script must carry the nonce because `script-src`
+  has no `'unsafe-inline'` (and `formatters/html.ts` replaces every
+  `__EXPORT_NONCE__` slot), and it must be **record-only** — `showLoadError`
+  writes `document.body.dataset` and `#app`, neither of which exists while the
+  parser is still in `<head>`. The latch's position ahead of the `<link>` is the
+  whole fix; `scripts/tests/export-transcript-document-template.test.js` pins
+  that position, the nonce, the capture phase, the record-only shape, and that
+  both listeners compare against the id the `<link>` actually carries.
 
 ### 3. `packages/web-templates/src/export-html/src/document-main.tsx`
 
 - Guard the render-success marker so a stylesheet load failure is not
   overwritten: only set `document.body.dataset.renderComplete = 'true'` when it
   is not already `'error'`.
+- Guard the mount itself at module scope: `createRoot` / `root.render` only run
+  when `document.body.dataset.renderComplete !== 'error'`. This is the guard
+  that decides whether the transcript renders at all after an asset failed to
+  load, leaving the inline `showLoadError` alert in place rather than replacing
+  it with an unstyled transcript.
 
 ### 4. Packaging scripts
 
@@ -121,12 +170,20 @@ and the CSS is fetched, parsed and cached separately.
   fail-closed case for a missing stylesheet.
 - `scripts/tests/package-assets.test.js` / `scripts/tests/install-script.test.js`:
   cover the CSS in the copy / publish / standalone-skip paths.
+- `scripts/tests/transcript-css-entry-filter.test.js`: pin the `onLoad` filter
+  (both path separators, and that the barred `web-shell/dist/index.js` entry does
+  not match) without running a bundle.
+- `scripts/tests/export-transcript-document-template.test.js`: pin the `<head>`
+  latch — position ahead of the `<link>`, nonce, capture phase, record-only
+  shape, body-side consumption, and that both listeners compare the id the
+  `<link>` carries.
 - `docs/verification/export-html-runtime-size/README.md`: update the measurement
   instructions to cover both assets.
 
 ## Files affected
 
 - `packages/web-templates/src/export-html/build.mjs`
+- `packages/web-templates/src/export-html/transcript-css-entry.mjs`
 - `packages/web-templates/src/export-html/src/document-index.html`
 - `packages/web-templates/src/export-html/src/document-main.tsx`
 - `scripts/copy_bundle_assets.js`
@@ -136,6 +193,8 @@ and the CSS is fetched, parsed and cached separately.
 - `integration-tests/chat-transcript-document.test.ts`
 - `scripts/tests/package-assets.test.js`
 - `scripts/tests/install-script.test.js`
+- `scripts/tests/export-transcript-document-template.test.js`
+- `scripts/tests/transcript-css-entry-filter.test.js`
 - `docs/verification/export-html-runtime-size/README.md`
 
 ## Design decisions and rationale

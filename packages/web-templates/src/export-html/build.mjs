@@ -128,8 +128,14 @@ const stripDocumentDeadModules = {
 // into a standalone CSS asset and hands the bundler the rest. The strip is
 // keyed to the generated shape (the CSS-constant line followed by the
 // runtime-injection line); if injectCssModules changes shape, the build fails
-// here rather than shipping a renderer that still injects CSS the document CSP
-// would block.
+// here rather than shipping a renderer that both links and injects the same
+// ~2.3 MB stylesheet. That duplicate would slip past both guards further down:
+// the document nonces every <style> created through document.createElement (the
+// shim in document-index.html), so the CSP admits the injected copy instead of
+// blocking it, and re-adding only the 367-byte injection line keeps the bundle
+// inside DOCUMENT_RUNTIME_WARNING_BYTES and MAX_DOCUMENT_RUNTIME_BYTES. So this
+// throw is the only guard on that path — and the createElement shim is what the
+// shipped renderer's own <style> injection still depends on.
 const extractedTranscriptCss = { css: undefined };
 const extractTranscriptCss = {
   name: 'extract-transcript-css',

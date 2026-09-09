@@ -63,10 +63,29 @@ transcript 组件样式表以 `const __qwenWebShellCss="…"` 字符串字面量
 
 ### 1. `packages/web-templates/src/export-html/build.mjs`
 
-- 新增 esbuild `onLoad` 插件（`filter: /web-shell\/dist\/transcript\.js$/`），读取
-  解析后的文件，匹配 `^const __qwenWebShellCss=("(?:[^"\\]|\\.)*");\n`，
-  `JSON.parse` 出字面量，剥离 CSS 常量行及其后紧跟的运行时注入行，把剩余部分作为
-  `{ contents, loader: 'js' }` 返回。任一行缺失或移位就使构建失败。
+- 新增 esbuild `onLoad` 插件，读取解析后的文件，匹配
+  `^const __qwenWebShellCss=("(?:[^"\\]|\\.)*");\n`，`JSON.parse` 出字面量，剥离
+  CSS 常量行及其后紧跟的运行时注入行，把剩余部分作为 `{ contents, loader: 'js' }`
+  返回。任一行缺失或移位就使构建失败。
+- 该插件的 filter 位于新模块
+  `packages/web-templates/src/export-html/transcript-css-entry.mjs`，由
+  `build.mjs` 导入：
+
+  ```js
+  export const TRANSCRIPT_CSS_ENTRY_FILTER =
+    /web-shell[\\/]dist[\\/]transcript\.js$/;
+  ```
+
+  抽出它的原因是 `build.mjs` 是一个带顶层 await、没有测试骨架的脚本，而「匹配决策」
+  正是决定样式表是否会被抽出的那一环 —— 只有让它可以在不跑完整构建的前提下被
+  import，`scripts/tests/transcript-css-entry-filter.test.js` 才能钉住它。
+  字符类里同时包含两种分隔符，是因为 esbuild 交给插件回调的是平台原生的绝对路径；
+  在 Windows 上它是 `C:\repo\packages\web-shell\dist\transcript.js`，因此只用正斜杠
+  的模式在那里永远匹配不到：回调不会执行，抽出的 CSS 保持 `undefined`，下面那条强制
+  守卫会中止每一次导出构建 —— 包括 `npm ci` 通过根 `prepare` 脚本运行的那一次。
+  `transcript\.js$` 这个结尾同样是承重的：只写 `web-shell[\\/]dist[\\/]` 前缀会连带
+  匹配到 `web-shell/dist/index.js`，而 `FORBIDDEN_DOCUMENT_INPUTS` 禁止它进入任何导出。
+
 - 把解码后的 CSS 写入 `dist/export-transcript-document.css`。
 - 按现有 JS 资产同样的方式推导 `export-transcript-document.css` 的 URL 和
   `sha384-` SRI，并把两个占位符加入模板替换链和残留占位符守卫。
@@ -77,13 +96,34 @@ transcript 组件样式表以 `const __qwenWebShellCss="…"` 字符串字面量
 
 - 在现有内联 `<style>` 之后新增
   `<link rel="stylesheet" nonce="__EXPORT_NONCE__" id="transcript-stylesheet" integrity="__DOCUMENT_RENDERER_CSS_INTEGRITY__" crossorigin="anonymous" href="__DOCUMENT_RENDERER_CSS_URL__" />`。
-- 扩展现有 fail-closed 的 `showLoadError` 监听器，把
+  `<link>` 必须放在内联 `<style>` **之后**，这样在文档顺序上组件样式表能赢下所有同特异性
+  冲突（`:where(...)` 作用域化贡献的特异性为零）。
+- 扩展 body 脚本中现有 fail-closed 的 `showLoadError` 监听器，把
   `event.target.id === 'transcript-stylesheet'` 也视为加载失败。
+- **在 `<head>` 中、`<link>` 之前锁存样式表失败。** 只改 body 监听器是不够的：Chromium
+  会因为 head 中挂起的样式表而阻塞 body 内联脚本的解析，因此在大文档上，一次先于解析器
+  恢复而尘埃落定的 CSS 失败被派发时还没有任何监听器存在 —— 没有东西把渲染标记为失败，
+  transcript 会完全无样式地渲染出来，同时把 `data-render-complete` 标成 `"true"`。
+  所以在 `<link>` 紧前方放一个 `<script nonce="__EXPORT_NONCE__">`，注册一个**捕获阶段**
+  的 `error` 监听器（资源错误事件不冒泡），当失败元素的 id 是 `transcript-stylesheet` 时
+  置 `window.__transcriptStyleFailed = true`；既有 body IIFE 的结尾则是
+  `if (window.__transcriptStyleFailed) { showLoadError(); }`。
+  两个约束决定了它的形态：脚本必须带 nonce，因为 `script-src` 没有 `'unsafe-inline'`
+  （而 `formatters/html.ts` 会替换每一个 `__EXPORT_NONCE__` 槽位）；它必须**只记录不行动**
+  —— `showLoadError` 会写 `document.body.dataset` 和 `#app`，而解析器还在 `<head>` 时
+  两者都不存在。锁存脚本位于 `<link>` 之前的这个**位置**就是整个修复的关键；
+  `scripts/tests/export-transcript-document-template.test.js` 钉住了该位置、nonce、
+  捕获阶段、「只记录」形态、body 侧的消费，以及两个监听器比较的 id 与 `<link>` 实际
+  携带的 id 一致。
 
 ### 3. `packages/web-templates/src/export-html/src/document-main.tsx`
 
 - 为渲染成功标记加保护，避免覆盖样式表加载失败：仅当
   `document.body.dataset.renderComplete` 还不是 `'error'` 时才置为 `'true'`。
+- 在模块作用域为挂载本身加保护：只有当
+  `document.body.dataset.renderComplete !== 'error'` 时才执行 `createRoot` /
+  `root.render`。资产加载失败后，真正决定 transcript 是否渲染的是这条守卫 —— 它保留
+  内联 `showLoadError` 的告警，而不是用一个无样式的 transcript 把它替换掉。
 
 ### 4. 打包脚本
 
@@ -103,11 +143,17 @@ transcript 组件样式表以 `const __qwenWebShellCss="…"` 字符串字面量
   断言它是唯一样式表请求，并新增「样式表缺失时 fail-closed」用例。
 - `scripts/tests/package-assets.test.js` / `scripts/tests/install-script.test.js`：
   覆盖 CSS 的拷贝 / 发布 / standalone 排除路径。
+- `scripts/tests/transcript-css-entry-filter.test.js`：在不跑构建的前提下钉住 `onLoad`
+  filter（两种路径分隔符，以及被禁止的 `web-shell/dist/index.js` 不匹配）。
+- `scripts/tests/export-transcript-document-template.test.js`：钉住 `<head>` 锁存脚本 ——
+  位于 `<link>` 之前的位置、nonce、捕获阶段、「只记录」形态、body 侧的消费，以及两个
+  监听器比较的 id 与 `<link>` 携带的 id 一致。
 - `docs/verification/export-html-runtime-size/README.md`：更新测量说明以覆盖两个资产。
 
 ## 涉及文件
 
 - `packages/web-templates/src/export-html/build.mjs`
+- `packages/web-templates/src/export-html/transcript-css-entry.mjs`
 - `packages/web-templates/src/export-html/src/document-index.html`
 - `packages/web-templates/src/export-html/src/document-main.tsx`
 - `scripts/copy_bundle_assets.js`
@@ -117,6 +163,8 @@ transcript 组件样式表以 `const __qwenWebShellCss="…"` 字符串字面量
 - `integration-tests/chat-transcript-document.test.ts`
 - `scripts/tests/package-assets.test.js`
 - `scripts/tests/install-script.test.js`
+- `scripts/tests/export-transcript-document-template.test.js`
+- `scripts/tests/transcript-css-entry-filter.test.js`
 - `docs/verification/export-html-runtime-size/README.md`
 
 ## 设计决策与理由

@@ -25,6 +25,14 @@ const template = readFileSync(
 
 const STYLESHEET_ID = 'id="transcript-stylesheet"';
 
+/**
+ * The id the `<link>` actually carries, read back out of the template rather
+ * than hard-coded. The same literal is spelled in three places — declared on
+ * the `<link>`, compared by the `<head>` latch, compared by the body listener
+ * — so deriving it here is what lets one test pin all three against each other.
+ */
+const STYLESHEET_LINK_ID = /<link[^>]*\bid="([^"]+)"/.exec(template)?.[1];
+
 /** The <head> script that records a stylesheet failure before the <link>. */
 function latchScript() {
   const latch = template.indexOf('window.__transcriptStyleFailed = true');
@@ -89,6 +97,21 @@ describe('export transcript document template', () => {
     expect(consumed).toBeGreaterThan(template.indexOf(STYLESHEET_ID));
     expect(template.slice(consumed, consumed + 120)).toContain(
       'showLoadError();',
+    );
+  });
+
+  it('compares the failing element id both listeners agree on', () => {
+    // Without this, one character of drift is invisible: the position, nonce,
+    // capture-phase and record-only assertions above all still pass if either
+    // listener compares against a different id, and the latch then records
+    // nothing — which is R1-2 reinstated with a green suite.
+    expect(STYLESHEET_LINK_ID).toBe('transcript-stylesheet');
+    expect(latchScript()).toContain(
+      `event.target.id === '${STYLESHEET_LINK_ID}'`,
+    );
+    const bodyListener = template.slice(template.indexOf('<body>'));
+    expect(bodyListener).toContain(
+      `event.target.id === '${STYLESHEET_LINK_ID}'`,
     );
   });
 });
