@@ -30,10 +30,15 @@ stdio for editors, channels, extensions — are covered by their own guides.
 **The daemon does not run inference in-process.** It spawns `qwen --acp` child
 processes and brokers between them and HTTP, so **the `qwen` executable must be
 installed on the daemon host**. A missing entry point surfaces as
-`MissingCliEntryError`. This is deliberate — each session's agent gets its own
-process, so a crash or runaway allocation is contained to one session. Size the
-container for the daemon plus its concurrent children and cap them with
-`--max-sessions`.
+`MissingCliEntryError`.
+
+There is **at most one child per workspace runtime**, not one per session. Every
+session in a workspace multiplexes onto that child and shares its process, OAuth
+state, file cache and hierarchy-memory parse. So the fault domain is the
+workspace: if the child exits, every session multiplexed onto it is torn down
+together. Size the container for the daemon plus one child per registered
+workspace, and when sessions must fail independently, run separate daemons —
+`--max-sessions` caps concurrency, not blast radius.
 
 **Authentication is single-operator.** One bearer token grants the whole API,
 and a trusted loopback caller gets full authority including code execution as
@@ -59,9 +64,9 @@ through `/proc/<pid>/cmdline`.
 
 ## The routes an integration actually uses
 
-The daemon registers **237** routes. Most of them exist to drive the Web Shell —
-git operations, extension install, workspace trust, voice, scheduled tasks — and
-change with that UI.
+Most of what the daemon registers exists to drive the Web Shell — git
+operations, extension install, workspace trust, voice, scheduled tasks — and
+changes with that UI. The subset below is an order of magnitude smaller.
 
 These are the ones a REST integration needs. Treat the rest as internal.
 
@@ -150,9 +155,10 @@ curl -N http://daemon:4170/session/$SID/events \
 Each `data:` line is a full envelope on one line; the envelope's `type` matches
 the `event:` line.
 
-**4. Prompt.** `202` means admitted. Correlate `turn_complete` / `turn_error` on
-the stream by `promptId`; `stopReason` is one of `end_turn`, `cancelled`,
-`max_tokens`, `error`, `length`.
+**4. Prompt.** `202` means admitted, not finished. Correlate `turn_complete` /
+`turn_error` on the stream by `promptId`, and read `stopReason` for why the turn
+ended — see
+[`POST /session/:id/prompt`](./qwen-serve-protocol.md#post-sessionidprompt).
 
 ```bash
 curl -sX POST http://daemon:4170/session/$SID/prompt \
@@ -176,13 +182,13 @@ curl -sX POST http://daemon:4170/permission/$REQUEST_ID \
 
 ## Operations
 
-| Concern          | Where                                                                                         |
-| ---------------- | --------------------------------------------------------------------------------------------- |
-| Concurrency caps | `--max-sessions`, `--max-total-sessions`; over-cap creates return `503` with `Retry-After`    |
-| Rate limiting    | `--rate-limit` plus the per-class `--rate-limit-*` flags                                      |
-| Idle cleanup     | `--session-idle-timeout-ms`; keep alive with `POST /session/:id/heartbeat`                    |
-| Memory           | `--memory-budget-mb`, `--child-heap-mode` — the budget covers the daemon **and** its children |
-| Prompt deadlines | `--prompt-deadline-ms`; expiry emits `turn_error`                                             |
-| Errors           | [Error taxonomy](./daemon/18-error-taxonomy.md)                                               |
-| Observability    | [Observability](./daemon/19-observability.md)                                                 |
-| Full flag list   | [Configuration](./daemon/17-configuration.md)                                                 |
+| Concern          | Where                                                                                                                                   |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Concurrency caps | `--max-sessions`, `--max-total-sessions`; over-cap creates return `503` with `Retry-After`                                              |
+| Rate limiting    | `--rate-limit` plus the per-class `--rate-limit-*` flags                                                                                |
+| Idle cleanup     | `--session-idle-timeout-ms`; keep alive with `POST /session/:id/heartbeat`                                                              |
+| Memory           | `--memory-budget-mb`, `--child-heap-mode` — **observe-only today**: they report a modelled partition, size no child and refuse no spawn |
+| Prompt deadlines | `--prompt-deadline-ms`; expiry emits `turn_error`                                                                                       |
+| Errors           | [Error taxonomy](./daemon/18-error-taxonomy.md)                                                                                         |
+| Observability    | [Observability](./daemon/19-observability.md)                                                                                           |
+| Full flag list   | [Configuration](./daemon/17-configuration.md)                                                                                           |
