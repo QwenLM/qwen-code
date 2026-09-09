@@ -252,6 +252,26 @@ describe('microcompactHistory', () => {
     expect(result.meta).toBeUndefined();
   });
 
+  it.each([
+    'toString',
+    'constructor',
+    'valueOf',
+    'hasOwnProperty',
+    '__proto__',
+  ])('handles Object.prototype tool name %s', (name) => {
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'prototype-name', name, args: {} } }],
+      },
+    ];
+
+    const result = microcompactHistory(history, Date.now(), DEFAULT_SETTINGS);
+
+    expect(result.history).toBe(history);
+    expect(result.meta).toBeUndefined();
+  });
+
   it('should clear old compactable tool results and keep recent', () => {
     const history: Content[] = [
       makeUserMessage('msg1'),

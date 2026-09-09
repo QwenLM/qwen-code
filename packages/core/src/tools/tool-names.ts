@@ -146,6 +146,9 @@ export const ToolNamesMigration = {
  * use this so an aliased call is treated identically everywhere.
  */
 export function canonicalToolName(toolName: string): string {
+  if (!Object.prototype.hasOwnProperty.call(ToolNamesMigration, toolName)) {
+    return toolName;
+  }
   return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
 }
 
