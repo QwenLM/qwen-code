@@ -4254,6 +4254,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     addNotice,
     dismissNotice,
     publishPromptSettlement,
+    retireAbandonedPrompt,
     setConnectionSynchronous,
   ]);
 
@@ -4408,6 +4409,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     connection.status,
     heartbeatFailureThreshold,
     heartbeatIntervalMs,
+    retireAbandonedPrompt,
   ]);
 
   const actions = useMemo<DaemonSessionActions>(
