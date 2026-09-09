@@ -427,6 +427,32 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
   }
 
+  /**
+   * Re-arm a server whose transport died at the same moment the tool call
+   * was aborted. The abort skips every reconnect branch in
+   * `handleReconnectOnError` (correctly — the call must not be replayed),
+   * so without this the dead connection would linger until a manual
+   * `/mcp reconnect` that Channel/daemon operators cannot run (#11272).
+   * Only fires when the recorded status actually says the transport is
+   * gone; a healthy server's cancel path stays untouched.
+   */
+  private scheduleRecoveryAfterAbort(): void {
+    if (!this.cliConfig) {
+      return;
+    }
+    if (getMCPServerStatus(this.serverName) !== MCPServerStatus.DISCONNECTED) {
+      return;
+    }
+    debugLogger.info(
+      `MCP server '${this.serverName}' disconnected at abort time; ` +
+        `re-arming connection in background for the next call`,
+    );
+    // Fire-and-forget: this call is already throwing its abort error; the
+    // rediscovery outcome only affects the NEXT tool call. attemptReconnect
+    // never throws and logs its own failures.
+    void this.attemptReconnect();
+  }
+
   private async handleReconnectOnError(
     error: unknown,
     signal: AbortSignal,
@@ -435,6 +461,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
 
     if (signal.aborted) {
+      // Cancelling a tool call must stay a cancel: no replay, no synthetic
+      // error. But if the transport happened to die together with the abort
+      // (server crash racing the user's cancel), the cancel path would skip
+      // every recovery branch below and the dead connection would stay
+      // unrepaired until a manual `/mcp reconnect` — unrecoverable in
+      // Channel/daemon mode with no TTY (issue #11272). Best-effort re-arm
+      // the connection for the NEXT call; this call still throws the abort.
+      this.scheduleRecoveryAfterAbort();
       throw error;
     }
 
