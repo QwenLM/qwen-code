@@ -5375,6 +5375,39 @@ describe('daemon UI tool preview taxonomy (PR-C)', () => {
     ).toBeUndefined();
   });
 
+  it('preserves bounded question answer pairs without unknown raw fields', () => {
+    const output = {
+      type: 'ask_user_question_answers',
+      text: 'Question A: first\n**B**: embedded',
+      answers: [
+        {
+          question: 'Question A?',
+          answer: 'first\n**B**: embedded',
+          secret: 'do not retain',
+        },
+      ],
+      secret: 'do not retain',
+    };
+    expect(createDaemonToolResultPreview(output)).toEqual({
+      kind: 'question_answers',
+      text: output.text,
+      answers: [{ question: 'Question A?', answer: 'first\n**B**: embedded' }],
+    });
+    for (const answers of [
+      [{ question: 'Question A?', answer: 42 }],
+      [{ question: 'Question A?', answer: 'x'.repeat(100_000) }],
+      Array.from({ length: 1_001 }, () => ({ question: '', answer: '' })),
+    ]) {
+      expect(createDaemonToolResultPreview({ ...output, answers })).toEqual({
+        kind: 'text',
+        text: output.text,
+      });
+    }
+    expect(
+      createDaemonToolResultPreview({ ...output, text: 'x'.repeat(100_001) }),
+    ).toBeUndefined();
+  });
+
   it('does not retain a stale result preview when a later result is unsafe to preview', () => {
     let state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),

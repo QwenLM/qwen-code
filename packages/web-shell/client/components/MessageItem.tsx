@@ -11,6 +11,12 @@ import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
 import { UserMessage } from './messages/UserMessage';
+import { QuestionAnswerMessage } from './messages/QuestionAnswerMessage';
+import {
+  extractText,
+  getQuestionAnswerResult,
+  isCompletedAskUserQuestion,
+} from './messages/toolFormatting';
 import {
   AssistantMessage,
   ThinkingMessage,
@@ -80,7 +86,17 @@ export const MessageItem = memo(function MessageItem({
     [onBranchSession, branchRecordId],
   );
   const compactMode = useContext(CompactModeContext);
+  const questionTool =
+    message.role === 'tool_group' &&
+    message.tools.length === 1 &&
+    isCompletedAskUserQuestion(message.tools[0])
+      ? message.tools[0]
+      : undefined;
+  const questionAnswer = questionTool
+    ? getQuestionAnswerResult(questionTool)
+    : null;
   const isUserStyled =
+    !!questionAnswer ||
     message.role === 'user' ||
     (message.role === 'system' &&
       message.source === 'mid_turn_message_injected');
@@ -125,6 +141,24 @@ export const MessageItem = memo(function MessageItem({
           />
         );
       case 'tool_group':
+        if (
+          questionTool &&
+          !questionAnswer &&
+          !extractText(questionTool)?.trim()
+        ) {
+          return null;
+        }
+        if (questionAnswer && questionTool) {
+          if (!questionAnswer.answers.length && !questionAnswer.text.trim())
+            return null;
+          return (
+            <QuestionAnswerMessage
+              tool={questionTool}
+              result={questionAnswer}
+              isLocateFlashing={isLocateFlashing}
+            />
+          );
+        }
         return (
           <ToolGroup
             tools={message.tools}
@@ -260,7 +294,9 @@ export const MessageItem = memo(function MessageItem({
       timestamp={message.timestamp}
       chatMode={isUserStyled}
       toolGroupSpacing={message.role === 'tool_group' && compactMode}
-      copyText={isUserStyled ? message.content : undefined}
+      copyText={
+        isUserStyled && 'content' in message ? message.content : undefined
+      }
       copyTitle={t('common.copy')}
     >
       {selectableSafeBody}
