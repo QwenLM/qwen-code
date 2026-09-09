@@ -34,6 +34,7 @@ import {
   type AgentNotifyTarget,
   type WorkspaceAgentsFile,
   type AgentWorkspaceState,
+  type ExternalIntake,
   type MessageOutcome,
   type RunCloseKind,
   type RunUsageRound,
@@ -365,6 +366,18 @@ function isValidEvent(value: unknown): value is ThreadEvent {
   );
 }
 
+function isValidExternalIntake(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['key']) &&
+    isNonEmptyString(value['callerId']) &&
+    isValidId(value['targetAgentId']) &&
+    isNonEmptyString(value['messageId']) &&
+    isNonEmptyString(value['contentHash']) &&
+    isFiniteTimestamp(value['receivedAt'])
+  );
+}
+
 function isValidThread(value: unknown): value is Thread {
   if (!isRecord(value)) return false;
   if (
@@ -403,7 +416,13 @@ function isValidThread(value: unknown): value is Thread {
     (value['acceptanceCriteria'] !== undefined &&
       typeof value['acceptanceCriteria'] !== 'string') ||
     (value['priority'] !== undefined &&
-      !THREAD_PRIORITIES.has(value['priority'] as ThreadPriority))
+      !THREAD_PRIORITIES.has(value['priority'] as ThreadPriority)) ||
+    // Present-but-malformed is rejected rather than ignored: this record is
+    // what makes a retry idempotent and what scopes reads to their caller, so
+    // a thread carrying an unreadable one must not be served at all — dropping
+    // the field would silently hand it to whoever asked next.
+    (value['externalIntake'] !== undefined &&
+      !isValidExternalIntake(value['externalIntake']))
   ) {
     return false;
   }
@@ -1555,6 +1574,8 @@ export interface CreateThreadInput {
   createdBy?: string;
   assigneeAgentId?: string;
   parentThreadId?: string;
+  /** Provenance when an external A2A caller raised this thread. */
+  externalIntake?: ExternalIntake;
 }
 
 /**
@@ -1620,6 +1641,7 @@ export async function prepareThreadInTransaction(
     ...(input.priority && input.priority !== DEFAULT_THREAD_PRIORITY
       ? { priority: input.priority }
       : {}),
+    ...(input.externalIntake ? { externalIntake: input.externalIntake } : {}),
   };
 }
 

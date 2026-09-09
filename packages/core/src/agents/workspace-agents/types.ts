@@ -327,6 +327,36 @@ export interface ThreadRun {
  * it is a prompt-injection surface by construction; keeping it out of the
  * repo means it is never committed, pulled, or reviewed as if it were code.
  */
+/**
+ * Provenance of a thread raised by an external A2A caller.
+ *
+ * Lives on the thread rather than in an index of its own so there is one
+ * source of truth: an index would be a second write, and a second write is a
+ * thing that can disagree with the first about whether work was accepted.
+ * Lookup by `key` is a scan, which costs the same as the other store scans and
+ * cannot go stale.
+ */
+export interface ExternalIntake {
+  /**
+   * `externalRequestKey(callerId, targetAgentId, messageId)`. Written in the
+   * same transaction that accepts the work — a key written afterwards cannot
+   * answer whether a retry arriving mid-acceptance is the same request.
+   */
+  key: string;
+  /** Authenticated caller, from the transport. Scopes every read back. */
+  callerId: string;
+  targetAgentId: string;
+  /** `Message.messageId` as the caller minted it. */
+  messageId: string;
+  /**
+   * Digest of the submitted content. The protocol lets a caller reuse an id;
+   * this is what turns "same key, different content" into a refusal instead of
+   * a silent overwrite of work already accepted.
+   */
+  contentHash: string;
+  receivedAt: number;
+}
+
 export interface Thread {
   schemaVersion: typeof AGENTS_SCHEMA_VERSION;
   id: string;
@@ -348,6 +378,8 @@ export interface Thread {
   priority?: ThreadPriority;
   /** Agent that owns the thread when no message names someone explicitly. */
   assigneeAgentId?: string;
+  /** Set when an external A2A caller raised this thread; see {@link ExternalIntake}. */
+  externalIntake?: ExternalIntake;
   createdAt: number;
   /** {@link HUMAN_AUTHOR_ID} or an agent id. */
   createdBy: string;

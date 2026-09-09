@@ -46,6 +46,7 @@ export { resolveAgentPersona } from '${repo}/${src}/persona.js';
 export { findAgentSessionBinding } from '${repo}/${src}/session-binding.js';
 export { strandLocalRuns, STRANDED_FAILURE_STAGE } from '${repo}/${src}/stranded-runs.js';
 export * from '${repo}/${src}/a2a-contract.js';
+export * from '${repo}/${src}/external-intake.js';
 export { deleteThread, enqueueThreadEvent } from '${repo}/${src}/store.js';
 export { ToolNames } from '${repo}/packages/core/src/tools/tool-names.js';
 `,
@@ -2249,6 +2250,129 @@ ok(
   'the extension is identified by an absolute URI, as A2A requires',
   /^https:\/\//.test(M.QWEN_A2A_EXTENSION_URI),
   M.QWEN_A2A_EXTENSION_URI,
+);
+
+console.log('\n30. external intake (P2, the half that needs no network)');
+await M.updateWorkspaceAgents(ROOT, (a) => [
+  ...a,
+  { id: 'ag_ext', name: 'ext', createdAt: 1 },
+]);
+const submission = {
+  callerId: 'client-one',
+  targetAgentId: 'ag_ext',
+  messageId: 'a2a-msg-1',
+  title: 'Read-only analysis',
+  body: 'Summarise the sample repository',
+  acceptanceCriteria: 'A summary naming the top-level packages',
+};
+const first = await M.acceptExternalSubmission(ROOT, submission);
+ok('a first submission is accepted', first.outcome === 'accepted', first.outcome);
+ok(
+  'and lands as a thread aimed at the named agent',
+  first.thread.assigneeAgentId === 'ag_ext',
+  first.thread.assigneeAgentId,
+);
+ok(
+  'carrying the intake record that scopes it',
+  first.thread.externalIntake?.callerId === 'client-one' &&
+    first.thread.externalIntake?.messageId === 'a2a-msg-1',
+  JSON.stringify(first.thread.externalIntake),
+);
+ok(
+  'and a booked run, so SUBMITTED is not a state with nothing behind it',
+  first.thread.runs.length === 1,
+  String(first.thread.runs.length),
+);
+
+// A retry means the caller did not hear the answer, not that it wants the work
+// done twice.
+const retry = await M.acceptExternalSubmission(ROOT, submission);
+ok('a retry is recognised, not accepted again', retry.outcome === 'duplicate');
+ok('and returns the same thread', retry.thread.id === first.thread.id);
+ok(
+  'with no second run booked',
+  retry.thread.runs.length === 1,
+  String(retry.thread.runs.length),
+);
+const allThreads = (await M.listThreads(ROOT)).threads.filter(
+  (t) => t.externalIntake?.key === first.thread.externalIntake.key,
+);
+ok('and no second thread anywhere in the store', allThreads.length === 1);
+
+// Reusing a key for different content is the one case that must be loud.
+let conflict;
+try {
+  await M.acceptExternalSubmission(ROOT, {
+    ...submission,
+    body: 'Actually, do something else entirely',
+  });
+} catch (error) {
+  conflict = error;
+}
+ok(
+  'the same key with different content is refused, not silently overwritten',
+  conflict instanceof M.ExternalIntakeConflictError,
+  conflict?.name,
+);
+ok(
+  'and the refusal names the work that already exists',
+  conflict?.existingThreadId === first.thread.id,
+);
+ok(
+  'the original work is untouched by the rejected attempt',
+  (await M.readThread(ROOT, first.thread.id)).body ===
+    'Summarise the sample repository',
+);
+
+// B serves several authorized clients over one queue.
+const second = await M.acceptExternalSubmission(ROOT, {
+  ...submission,
+  callerId: 'client-two',
+  messageId: 'a2a-msg-1',
+  title: "Another client's work",
+  body: 'Different work, same message id',
+});
+ok(
+  'a different caller reusing the same message id gets its own work',
+  second.outcome === 'accepted' && second.thread.id !== first.thread.id,
+  `${second.outcome} / ${second.thread.id}`,
+);
+
+const oneList = await M.listExternalThreadsForCaller(ROOT, 'client-one');
+const twoList = await M.listExternalThreadsForCaller(ROOT, 'client-two');
+ok(
+  'each caller lists only its own work',
+  oneList.length === 1 &&
+    twoList.length === 1 &&
+    oneList[0].id === first.thread.id &&
+    twoList[0].id === second.thread.id,
+  `${oneList.length} / ${twoList.length}`,
+);
+ok(
+  'locally raised threads belong to no external caller',
+  oneList.every((t) => t.externalIntake) && twoList.every((t) => t.externalIntake),
+);
+ok(
+  "a caller cannot read another caller's thread by id",
+  (await M.getExternalThreadForCaller(ROOT, 'client-two', first.thread.id)) ===
+    undefined,
+);
+ok(
+  'and can read its own',
+  (await M.getExternalThreadForCaller(ROOT, 'client-one', first.thread.id))
+    ?.id === first.thread.id,
+);
+ok(
+  'an unknown thread and a forbidden one are indistinguishable',
+  (await M.getExternalThreadForCaller(ROOT, 'client-two', 'th_nonexistent')) ===
+    (await M.getExternalThreadForCaller(ROOT, 'client-two', first.thread.id)),
+);
+
+// The state a caller polls for comes from the frozen mapping.
+ok(
+  'a freshly accepted task reports a non-terminal state to its caller',
+  !M.isA2ATerminal(M.toA2ATaskState(first.thread.status)),
+  M.toA2ATaskState(first.thread.status),
 );
 
 await fs.rm(tmp, { recursive: true, force: true });

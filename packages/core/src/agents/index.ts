@@ -86,6 +86,16 @@ export type { AgentNotificationSender } from './workspace-agents/dispatcher.js';
 export { resolveAgentPersona } from './workspace-agents/persona.js';
 export { findAgentSessionBinding } from './workspace-agents/session-binding.js';
 export {
+  acceptExternalSubmission,
+  listExternalThreadsForCaller,
+  getExternalThreadForCaller,
+  ExternalIntakeConflictError,
+} from './workspace-agents/external-intake.js';
+export type {
+  ExternalSubmission,
+  ExternalAcceptance,
+} from './workspace-agents/external-intake.js';
+export {
   A2A_PROTOCOL_VERSION,
   A2A_TRANSPORT_BINDING,
   A2A_AGENT_CARD_PATH,
