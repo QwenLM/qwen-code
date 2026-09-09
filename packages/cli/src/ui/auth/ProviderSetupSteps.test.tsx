@@ -569,6 +569,8 @@ describe('ProviderSetupSteps', () => {
 
     const frame = lastFrame() ?? '';
     expect(frame).toContain('Models · from the provider · 2 checked');
+    expect(frame).toMatch(/◉\uFE0E\s+MiniMax-M2\.7/);
+    expect(frame).toMatch(/◉\uFE0E\s+MiniMax-M3/);
     expect(frame.indexOf('MiniMax-M2.7')).toBeLessThan(
       frame.indexOf('MiniMax-M3'),
     );
@@ -576,6 +578,45 @@ describe('ProviderSetupSteps', () => {
     pressKey('return', '\r');
     expect(submitModelIds).toHaveBeenCalledWith({
       modelIds: ['MiniMax-M3', 'MiniMax-M2.7'],
+    });
+    unmount();
+  });
+
+  it('keeps curated selection order after toggling a provider-only model', async () => {
+    discoverProviderModelsMock.mockResolvedValue([
+      { id: 'provider-only-new' },
+      { id: 'MiniMax-M2.7' },
+      { id: 'MiniMax-M3' },
+    ]);
+    const submitModelIds = vi.fn();
+    const flow = createModelIdsFlow({ submitModelIds });
+    enableDiscovery(flow);
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+    await act(async () => {});
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toMatch(/○\uFE0E\s+provider-only-new/);
+    expect(frame).toMatch(/◉\uFE0E\s+MiniMax-M2\.7/);
+    expect(frame.indexOf('provider-only-new')).toBeLessThan(
+      frame.indexOf('MiniMax-M2.7'),
+    );
+
+    await act(async () => {
+      pressLatestKey('down');
+    });
+    await act(async () => {
+      pressLatestKey('down');
+    });
+    await act(async () => {
+      pressLatestKey('space', ' ');
+    });
+
+    pressKey('return', '\r');
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['MiniMax-M3', 'MiniMax-M2.7', 'provider-only-new'],
     });
     unmount();
   });
@@ -661,6 +702,7 @@ describe('ProviderSetupSteps', () => {
     });
 
     expect(lastFrame()).toMatch(/◉\uFE0E\s+MiniMax-M4/);
+    expect(lastFrame()).toContain('Models · from the provider · 2 checked');
 
     pressKey('return', '\r');
     expect(submitModelIds).toHaveBeenCalledWith({
