@@ -34,6 +34,75 @@ export interface ThreadSummaryView {
   parentThreadId?: string;
 }
 
+/**
+ * Who a thread's result belongs to.
+ *
+ * A workspace can hold work raised here and work raised by an external caller
+ * over A2A, side by side in one list. Without this the two are indistinguishable
+ * on the row, and "whose result is this" — one of the three questions P5 says a
+ * person must be able to answer at a glance — has no answer.
+ */
+export type ThreadOwner =
+  | { kind: 'local' }
+  | { kind: 'external'; callerId: string };
+
+/**
+ * The three questions P5 asks the interface to answer, answered once.
+ *
+ * Deliberately not three separate passes over the list. A thread is in exactly
+ * one of these, and computing them apart is how a thread ends up counted as
+ * both waiting for a person and still running — which reads as two pieces of
+ * work where there is one.
+ */
+export interface WorkspaceWorkSummary {
+  /** Booked and not yet started: nobody is doing this yet. */
+  queued: ThreadSummaryView[];
+  /** Stopped, and a person is what unblocks it. */
+  needsAnswer: ThreadSummaryView[];
+  /** In flight right now. */
+  running: ThreadSummaryView[];
+  /** Over, with whose it is. */
+  finished: Array<{ thread: ThreadSummaryView; owner: ThreadOwner }>;
+}
+
+/**
+ * Answer "who is queued, who needs an answer, whose is the result" in one pass.
+ *
+ * Sub-threads are folded into their parent rather than listed: a split is how
+ * an agent organises its own work, and surfacing every one turns one task into
+ * a list nobody asked for. The parent is the thing a person tracks.
+ */
+export function summariseWorkspaceWork(
+  threads: readonly ThreadSummaryView[],
+  ownerOf: (thread: ThreadSummaryView) => ThreadOwner = () => ({
+    kind: 'local',
+  }),
+): WorkspaceWorkSummary {
+  const summary: WorkspaceWorkSummary = {
+    queued: [],
+    needsAnswer: [],
+    running: [],
+    finished: [],
+  };
+  for (const thread of threads) {
+    if (thread.parentThreadId) continue;
+    if (thread.status === 'done' || thread.status === 'cancelled') {
+      summary.finished.push({ thread, owner: ownerOf(thread) });
+      continue;
+    }
+    // Checked before `liveRunCount`: a thread can be blocked and still show a
+    // live run mid-teardown, and "needs you" is the answer that matters — a
+    // person told it is running will wait for something that will not happen.
+    if (needsAttention(thread)) {
+      summary.needsAnswer.push(thread);
+      continue;
+    }
+    if (thread.liveRunCount > 0) summary.running.push(thread);
+    else summary.queued.push(thread);
+  }
+  return summary;
+}
+
 export interface ThreadGroup {
   key: 'needs_you' | 'running' | 'idle' | 'done';
   /** Sentence-case label. Not an all-caps eyebrow. */

@@ -2981,6 +2981,77 @@ ok(
   })).reason === 'not_leasable',
 );
 
+console.log('\n35. one glance answers the three questions (P5)');
+// "Who is queued, who needs an answer, whose is the result" — answered in one
+// pass, because computing them separately is how one thread ends up counted as
+// both waiting for a person and still running.
+const p5Row = (id, status, extra = {}) => ({
+  id,
+  title: id,
+  status,
+  reason: 'r',
+  updatedAt: 1,
+  liveRunCount: 0,
+  ...extra,
+});
+const p5Summary = M.view.summariseWorkspaceWork(
+  [
+    p5Row('t-queued', 'open'),
+    p5Row('t-running', 'in_progress', { liveRunCount: 1 }),
+    p5Row('t-blocked', 'blocked'),
+    p5Row('t-review', 'in_review'),
+    p5Row('t-done', 'done'),
+    p5Row('t-cancelled', 'cancelled'),
+    p5Row('t-child', 'open', { parentThreadId: 't-queued' }),
+  ],
+  (thread) =>
+    thread.id === 't-done'
+      ? { kind: 'external', callerId: 'partner-a' }
+      : { kind: 'local' },
+);
+ok('waiting work is queued', p5Summary.queued.map((t) => t.id).join() === 't-queued');
+ok('live work is running', p5Summary.running.map((t) => t.id).join() === 't-running');
+ok(
+  'a question and finished work both read as needing a person',
+  p5Summary.needsAnswer.map((t) => t.id).sort().join() === 't-blocked,t-review',
+  JSON.stringify(p5Summary.needsAnswer.map((t) => t.id)),
+);
+ok(
+  'done and cancelled are both over',
+  p5Summary.finished.map((f) => f.thread.id).sort().join() === 't-cancelled,t-done',
+);
+ok(
+  'and each finished item says whose it is',
+  p5Summary.finished.find((f) => f.thread.id === 't-done').owner.callerId === 'partner-a' &&
+    p5Summary.finished.find((f) => f.thread.id === 't-cancelled').owner.kind === 'local',
+);
+ok(
+  'sub-threads are folded into their parent, not listed as work of their own',
+  ![...p5Summary.queued, ...p5Summary.running, ...p5Summary.needsAnswer]
+    .concat(p5Summary.finished.map((f) => f.thread))
+    .some((t) => t.id === 't-child'),
+);
+ok(
+  'every thread lands in exactly one place, so nothing is counted twice',
+  p5Summary.queued.length + p5Summary.running.length + p5Summary.needsAnswer.length +
+    p5Summary.finished.length === 6,
+);
+// A blocked thread mid-teardown still shows a live run. Saying "running" there
+// makes a person wait for something that will not happen.
+const tearingDown = M.view.summariseWorkspaceWork([
+  p5Row('t-blocked-live', 'blocked', { liveRunCount: 1 }),
+]);
+ok(
+  'needing a person outranks a run that is still winding down',
+  tearingDown.needsAnswer.length === 1 && tearingDown.running.length === 0,
+);
+ok(
+  'and with no owner function everything is simply local',
+  M.view
+    .summariseWorkspaceWork([p5Row('t-done2', 'done')])
+    .finished[0].owner.kind === 'local',
+);
+
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
