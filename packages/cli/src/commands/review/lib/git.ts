@@ -8,14 +8,14 @@
 // `execFileSync` pattern as `lib/gh.ts` so quoting / escaping is consistent
 // across platforms.
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   insideReviewTmpLexically,
   redirectedAncestor,
   sanitizedGitEnv,
   untrustedRepositoryFrom,
 } from './worktree.js';
-import { existsSync, lstatSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, realpathSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
 /** Deadline for a single `git` invocation. Generous; a hang must still end. */
@@ -108,16 +108,86 @@ function gitOpts() {
  */
 let trustedLaunchDir: string | null = null;
 
+/**
+ * Where the KERNEL reports this process standing, as opposed to the spelling
+ * Node's `process.cwd()` serves from its cache.
+ *
+ * The two diverge exactly once an ancestor is renamed: the kernel's answer
+ * follows the inode to the renamed path, while Node's cache holds the
+ * pre-rename spelling until an in-process `chdir`. The gate's subject is the
+ * KERNEL's answer — every wrapper below spawns with no `cwd`, so the child
+ * inherits it — because the rename attack works by splitting the two: judged
+ * on the cached spelling (re-stood-up as an honest symlink target), executed
+ * in the renamed directory (the plant). POSIX only: Windows has no
+ * `/bin/pwd`, and there containment cannot exist so the gate is silent.
+ */
+function kernelCwd(): string | null {
+  try {
+    const r = spawnSync('/bin/pwd', ['-P'], {
+      encoding: 'utf8',
+      timeout: 5_000,
+      env: sanitizedGitEnv(),
+    });
+    if (r.error || r.status !== 0 || !r.stdout) return null;
+    return r.stdout.replace(/\n$/, '');
+  } catch {
+    return null;
+  }
+}
+
 /** Why this process must not run git from where it stands, or null. */
 function launchDirRefusal(): string | null {
   const cwd = process.cwd();
   if (trustedLaunchDir === cwd) return null;
-  const refusal = untrustedRepositoryFrom(cwd);
-  if (refusal === null) {
-    if (!insideReviewTmpLexically(cwd)) trustedLaunchDir = cwd;
+  if (!insideReviewTmpLexically(cwd)) {
+    // The pure no-marker string scan, memoized: an ordinary checkout never
+    // pays for this gate, and no filesystem answer was consulted to spoil.
+    trustedLaunchDir = cwd;
     return null;
   }
-  return refusal;
+  // Inside the spelling, judge where the KERNEL stands — that is where every
+  // wrapper's spawn lands — never the cached spelling. When they diverge, an
+  // ancestor was renamed mid-run; judge the kernel's answer, which the rename
+  // cannot dress up. Windows keeps the cached-spelling judgement: no
+  // `/bin/pwd` there, and no containment to protect either.
+  if (process.platform !== 'win32') {
+    const kernel = kernelCwd();
+    if (kernel === null) {
+      return (
+        `the kernel-resolved working directory could not be determined ` +
+        `(cwd ${cwd}), so where a command run from here would land is ` +
+        `unmeasured`
+      );
+    }
+    if (!insideReviewTmpLexically(kernel)) {
+      // The kernel stands OUTSIDE the review temp dir while the spelling the
+      // process answered to is inside it: a rename moved this process's
+      // directory, and the spawn lands wherever the kernel says.
+      return (
+        `the process's working directory was renamed mid-run: the spelling ` +
+        `${cwd} is inside the review temp dir but the kernel reports ` +
+        `${kernel} — where every command would actually run`
+      );
+    }
+    // Divergence within the mount is the plant's exact shape; agreement is
+    // the ordinary case. Judge the kernel's spelling either way.
+    let cachedReal: string | null;
+    try {
+      cachedReal = realpathSync(cwd);
+    } catch {
+      cachedReal = null;
+    }
+    if (cachedReal !== kernel) {
+      return (
+        `the process's working directory spelling ${cwd} resolves to ` +
+        `${cachedReal ?? 'a path that no longer exists'} while the kernel ` +
+        `reports ${kernel}: a rename mid-run split them, and every command ` +
+        `runs at the kernel's answer`
+      );
+    }
+    return untrustedRepositoryFrom(kernel);
+  }
+  return untrustedRepositoryFrom(cwd);
 }
 
 function assertTrustedLaunchDir(): void {

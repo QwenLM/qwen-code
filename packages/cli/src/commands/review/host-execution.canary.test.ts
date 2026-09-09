@@ -32,6 +32,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -584,6 +585,61 @@ describe('a planted repository reaches no host-side execution', () => {
         plant();
         // `status`, not `rev-parse`: the command that refreshes the index,
         // so the canary is a witness and not a decoration.
+        expect(() => git('status', '--porcelain')).toThrow(/review temp dir/);
+      } finally {
+        process.chdir(saved);
+      }
+      expect(existsSync(canary)).toBe(false);
+    },
+  );
+
+  itWhereContainmentExists(
+    'a leaf rename inside the mount cannot split the gate from the spawn (lib/git)',
+    () => {
+      // R30-47: the launch-dir gate judged Node's CACHED `process.cwd()`
+      // spelling while every gated spawn inherits the KERNEL cwd. A leaf
+      // rename inside the mount — `mv review-pr-1 evil` — plus the spelling
+      // re-stood as a symlink to an honest directory, made the cached
+      // spelling resolve honest while the kernel stood in the renamed tree:
+      // the gate passed, and `status` ran the plant's clean filter on the
+      // host. The gate now asks the kernel where the process stands and
+      // judges THAT.
+      const { repo, tree, canary } = mountedTree();
+      const saved = process.cwd();
+      try {
+        // An honest sibling worktree: what the re-stood spelling points at,
+        // so judging the CACHED spelling passes every arm of the gate while
+        // the kernel stands in the renamed tree. (Pointing the link at the
+        // repo ROOT would still refuse — the common-dir question — whatever
+        // the gate judges.)
+        const sibling = join(repo, '.qwen', 'tmp', 'sibling-wt');
+        execFileSync(
+          'git',
+          ['worktree', 'add', '-q', '--detach', sibling, 'HEAD'],
+          { cwd: repo },
+        );
+        process.chdir(tree);
+        expect(gitOpt('rev-parse', 'HEAD')).not.toBeNull();
+
+        // The rename, the honest re-stand of the spelling, and the plant
+        // at the kernel's location.
+        const evil = join(repo, '.qwen', 'tmp', 'evil');
+        renameSync(tree, evil);
+        symlinkSync(sibling, tree);
+        const common = plantRepository(
+          join(repo, '.qwen', 'tmp', '.evil-common'),
+          join(repo, '.git'),
+          canary,
+        );
+        plantAdminEntry(
+          join(repo, '.qwen', 'tmp', '.evil-git'),
+          join(repo, '.git', 'worktrees', 'review-pr-1'),
+          evil,
+          common,
+        );
+        // The index refresh only re-hashes a file whose stat changed.
+        writeFileSync(join(evil, 'a.ts'), 'export const x = 2;\n');
+
         expect(() => git('status', '--porcelain')).toThrow(/review temp dir/);
       } finally {
         process.chdir(saved);
