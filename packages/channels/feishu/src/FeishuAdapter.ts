@@ -1442,11 +1442,6 @@ export class FeishuChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): void {
-    // In blockStreaming mode, the BlockStreamer delivers text as plain messages.
-    // Skip card creation/updates to avoid duplicate content and a misleading
-    // "已取消" card at the end.
-    if (this.config.blockStreaming === 'on') return;
-
     const inboundMsgId = this.sessionToInboundMsg.get(sessionId);
     if (!inboundMsgId) {
       process.stderr.write(
@@ -1632,7 +1627,6 @@ export class FeishuChannel extends ChannelBase {
     _chatId: string,
     sessionId: string,
   ): void {
-    if (this.config.blockStreaming === 'on') return;
     const inboundMsgId = this.sessionToInboundMsg.get(sessionId);
     if (!inboundMsgId) return;
     const cardState = this.cardSessions.get(inboundMsgId);
@@ -1660,7 +1654,7 @@ export class FeishuChannel extends ChannelBase {
       this.onResponseBoundary(chatId, sessionId);
       return;
     }
-    if (reason !== 'input_requested' || this.config.blockStreaming === 'on') {
+    if (reason !== 'input_requested') {
       return;
     }
 
@@ -2112,10 +2106,7 @@ export class FeishuChannel extends ChannelBase {
       const sourceLabel = this.getResponseSourceLabel(sessionId);
       this.sessionToInboundMsg.set(sessionId, inboundMsgId);
       this.addReaction(inboundMsgId, 'OnIt').catch(() => {});
-      if (
-        this.config.blockStreaming !== 'on' &&
-        !this.cardSessions.has(inboundMsgId)
-      ) {
+      if (!this.cardSessions.has(inboundMsgId)) {
         this.cardSessions.set(inboundMsgId, {
           messageId: '',
           created: false,
@@ -2221,8 +2212,9 @@ export class FeishuChannel extends ChannelBase {
         // to avoid leaking state if onResponseComplete was skipped.
         this.cleanupCard(inboundMsgId);
       } else if (!cs) {
-        // No card session created (blockStreaming mode or gate rejection) —
-        // clean up auxiliary maps populated by processMessage.
+        // onPromptStart's isKnownInboundMessageId gate rejected this message, so
+        // no card session exists — clean up the auxiliary maps processMessage
+        // populated.
         this.msgToQuestion.delete(inboundMsgId);
         this.msgToSenderName.delete(inboundMsgId);
         this.msgToSenderId.delete(inboundMsgId);

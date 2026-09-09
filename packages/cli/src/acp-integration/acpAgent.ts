@@ -11262,6 +11262,7 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.sessionApprovalMode: {
         const sessionId = params['sessionId'];
         const mode = params['mode'];
+        const planMode = params['planMode'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw RequestError.invalidParams(
             undefined,
@@ -11277,11 +11278,24 @@ class QwenAgent implements Agent {
             `Invalid approval mode; allowed: ${APPROVAL_MODES.join(', ')}`,
           );
         }
+        if (
+          planMode !== undefined &&
+          (typeof planMode !== 'boolean' || mode === ApprovalMode.PLAN)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'planMode must be a boolean with a non-plan execution mode',
+          );
+        }
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         const previous = config.getApprovalMode();
         try {
-          config.setApprovalMode(mode as ApprovalMode);
+          if (typeof planMode === 'boolean') {
+            config.setPlanMode(planMode, mode as ApprovalMode);
+          } else {
+            config.setApprovalMode(mode as ApprovalMode);
+          }
         } catch (err) {
           // `TrustGateError` is the core's structured rejection for
           // untrusted-folder + privileged-mode. We re-raise it as a
@@ -11305,7 +11319,16 @@ class QwenAgent implements Agent {
         } else if (previous === 'plan') {
           session.clearActiveTodoPlanRevision();
         }
-        return { previous, current };
+        return {
+          previous,
+          current,
+          ...(current === ApprovalMode.PLAN
+            ? {
+                planExecutionMode:
+                  config.getPlanExecutionMode?.() ?? config.getPrePlanMode?.(),
+              }
+            : {}),
+        };
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow: {
         const enabled = params['enabled'];
@@ -14772,6 +14795,14 @@ class QwenAgent implements Agent {
 
     return {
       currentModeId: currentApprovalMode as ApprovalModeValue,
+      ...(currentApprovalMode === ApprovalMode.PLAN
+        ? {
+            _meta: {
+              planExecutionMode:
+                config.getPlanExecutionMode?.() ?? config.getPrePlanMode?.(),
+            },
+          }
+        : {}),
       availableModes,
     };
   }

@@ -23,7 +23,5 @@ export default {
   'qwen-serve-protocol': 'qwen serve HTTP protocol',
   daemon: 'Daemon Mode (Developer Deep Dive)',
 
-  examples: {
-    display: 'hidden',
-  },
+  examples: 'Examples',
 };

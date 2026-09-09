@@ -3272,6 +3272,26 @@ describe('multi-workspace session dispatch', () => {
     expect(primaryBridge.setApprovalModeCalls).toEqual([]);
   });
 
+  it('routes DAC planning controls to the live-session owner without a primary fallback', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/approval-mode')
+      .set('Host', host())
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({ mode: 'auto-edit', planMode: true });
+
+    expect(res.status).toBe(200);
+    expect(secondaryBridge.setApprovalModeCalls).toEqual([
+      expect.objectContaining({
+        sessionId: '22222222-2222-4222-a222-222222222222',
+        mode: 'auto-edit',
+        opts: { persist: false, planMode: true },
+        context: { clientId: 'secondary-client' },
+      }),
+    ]);
+    expect(primaryBridge.setApprovalModeCalls).toEqual([]);
+  });
+
   it('still rejects model/approval-mode mutations on an untrusted non-primary session', async () => {
     // Opening these routes to non-primary owners must not bypass the trust
     // gate: an untrusted workspace runtime is refused before the bridge runs.

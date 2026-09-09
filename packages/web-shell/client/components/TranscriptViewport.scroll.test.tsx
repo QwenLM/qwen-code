@@ -210,9 +210,14 @@ async function setup(
         v: 1,
         sessionId: 'session',
         snapshot: 's',
-        totalTurns: 1,
+        totalTurns: 4,
         start: 0,
-        turns: [{ ordinal: 0, turnId: 'u1', kind: 'prompt', label: 'u1' }],
+        turns: Array.from({ length: 4 }, (_, ordinal) => ({
+          ordinal,
+          turnId: ordinal === 0 ? 'u1' : `turn-${ordinal}`,
+          kind: 'prompt' as const,
+          label: 'u1',
+        })),
       };
     });
   const client: DaemonTurnNavigationClient = {

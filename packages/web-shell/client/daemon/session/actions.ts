@@ -43,6 +43,7 @@ import {
 } from '@qwen-code/sdk/daemon';
 import { extractHttpStatus, isInvalidClientIdError } from './httpErrors.js';
 import {
+  getPlanExecutionMode,
   mapProviderStatus,
   mapReasoningControls,
   mapSessionContextReasoning,
@@ -344,6 +345,7 @@ export function getConnectionAfterSessionClear(
       delete next.models;
       delete next.currentModel;
       delete next.currentMode;
+      delete next.planExecutionMode;
       delete next.contextWindow;
       delete next.providers;
       delete next.gitBranch;
@@ -1583,16 +1585,24 @@ export function createDaemonSessionActions({
       );
       try {
         const result = await withActionTimeout(
-          session.client.setSessionApprovalMode(session.sessionId, mode, {
-            persist: opts?.persist,
-            clientId: session.clientId,
-          }),
+          trackSessionConfigMutation(
+            session,
+            session.client.setSessionApprovalMode(session.sessionId, mode, {
+              persist: opts?.persist,
+              clientId: session.clientId,
+              ...(opts?.planMode !== undefined
+                ? { planMode: opts.planMode }
+                : {}),
+            }),
+          ),
           'Set approval mode timed out',
         );
         if (sessionRef.current === session) {
           setConnection((current) => ({
             ...current,
             currentMode: result.mode || mode,
+            planExecutionMode:
+              result.mode === 'plan' ? result.planExecutionMode : undefined,
           }));
         }
         return result;
@@ -2126,11 +2136,15 @@ export function createDaemonSessionActions({
           ) {
             return current;
           }
+          const currentMode = getModeFromSessionContext(context);
           return {
             ...current,
             context,
-            currentMode:
-              getModeFromSessionContext(context) ?? current.currentMode,
+            currentMode: currentMode ?? current.currentMode,
+            planExecutionMode:
+              currentMode !== undefined
+                ? getPlanExecutionMode(context)
+                : current.planExecutionMode,
             currentModel:
               getModelFromSessionContext(context) ?? current.currentModel,
             reasoning: mapSessionContextReasoning(context),

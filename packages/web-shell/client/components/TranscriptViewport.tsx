@@ -20,7 +20,9 @@ import { Button } from './ui/button';
 import { GlobalTurnNavigation } from './GlobalTurnNavigation';
 import styles from './TranscriptViewport.module.css';
 import { useTranscriptViewport } from '../hooks/useTranscriptViewport';
+import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import { useI18n } from '../i18n';
+import { SESSION_TIMELINE_MIN_VISIBLE_ENTRIES } from '../constants/sessions';
 
 interface ReadingAnchor {
   source: string;
@@ -49,8 +51,10 @@ export const TranscriptViewport = forwardRef<
     !props.hideSessionTimeline &&
     (viewport.navigation.mode === 'ready' ||
       viewport.navigation.mode === 'loading') &&
-    viewport.navigation.effectiveTurnCount > 0;
+    viewport.navigation.effectiveTurnCount >=
+      SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
   const root = useRef<HTMLDivElement>(null);
+  const navigationVisible = useChatNavigationVisible(root, globalNavigation);
   const list = useRef<MessageListHandle>(null);
   const anchor = useRef<ReadingAnchor | undefined>(undefined);
   const entryDirection = useRef<'older' | 'newer'>('older');
@@ -292,7 +296,7 @@ export const TranscriptViewport = forwardRef<
       data-history-viewport={historical ? 'historical' : 'live'}
     >
       {globalNavigation && (
-        <div className={styles.navigation}>
+        <div className={styles.navigation} hidden={!navigationVisible}>
           <GlobalTurnNavigation
             state={viewport.navigation}
             store={viewport.store}
@@ -305,7 +309,7 @@ export const TranscriptViewport = forwardRef<
         </div>
       )}
       <div
-        className={`${globalNavigation ? styles.columnWithRail : ''} flex min-h-0 min-w-0 flex-1 flex-col`}
+        className="flex min-h-0 min-w-0 flex-1 flex-col"
         onWheelCapture={(event) => {
           handleScrollIntent();
           loadAtEdge(event.deltaY < 0 ? 'older' : 'newer');
