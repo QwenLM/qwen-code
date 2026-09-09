@@ -552,6 +552,10 @@ describe('resolveWebShellBrand', () => {
         'a NUL character reference',
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8" width="&#0;"/>',
       ],
+      [
+        'an undeclared namespace prefix on a child',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><use xlink:href="#mark"/></svg>',
+      ],
     ])('rejects a document a browser would refuse: %s', (_label, document) => {
       // The resolver answers "would a browser render this as an image" with
       // a real XML parser, so well-formedness errors refuse the logo even
@@ -596,6 +600,21 @@ describe('resolveWebShellBrand', () => {
       expect(warnings).toEqual([
         expect.stringContaining('unprefixed elements'),
       ]);
+    });
+
+    it('accepts implicitly-bound and properly-declared prefixes', () => {
+      // The accept side of namespace processing: `xml:` is pre-bound by the
+      // XML spec (design tools emit `xml:space` routinely), and a declared
+      // `xlink` binding is legitimate — refusing either would break real
+      // exports, so this pins the boundary the refusal side stops at.
+      const file = writeLogo(
+        '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 8 8" xml:space="preserve"><use xlink:href="#mark"/></svg>',
+      );
+      const { brand, warnings } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(warnings).toBeUndefined();
+      expect(brand.logoDataUri).toBeDefined();
     });
 
     it('stays silent for a prefix-bound root when the default namespace is also bound', () => {

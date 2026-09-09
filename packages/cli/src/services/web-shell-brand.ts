@@ -372,6 +372,10 @@ const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
  * entities, out-of-range character references, malformed comments and the
  * rest are all well-formedness errors it reports. Attribute values arrive
  * entity-decoded, exactly once — the same single decode a browser applies.
+ * Namespace processing is enabled because browsers always have it (jsdom
+ * passes `xmlns: true` for XML documents): without it, an undeclared prefix
+ * such as `xlink:href` on a child parses clean here while the browser
+ * fatals on it.
  */
 function parseSvgRoot(content: string):
   | {
@@ -385,7 +389,7 @@ function parseSvgRoot(content: string):
   let rootPrefix: string | undefined;
   let rootAttrs: Record<string, string> | undefined;
   let hasUnprefixedElements = false;
-  const parser = new SaxesParser();
+  const parser = new SaxesParser({ xmlns: true });
   parser.on('error', () => {
     failed = true;
   });
@@ -396,7 +400,11 @@ function parseSvgRoot(content: string):
     if (rootLocal === undefined) {
       rootLocal = colon === -1 ? qName : qName.slice(colon + 1);
       rootPrefix = prefix;
-      rootAttrs = { ...tag.attributes };
+      // xmlns mode types attribute values as objects holding the decoded
+      // string; flatten them back to the Record<string, string> callers read.
+      rootAttrs = Object.fromEntries(
+        Object.entries(tag.attributes).map(([key, attr]) => [key, attr.value]),
+      );
       return;
     }
     // A prefix-bound root with an element outside its prefix paints nothing
