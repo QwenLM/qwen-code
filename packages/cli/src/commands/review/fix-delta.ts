@@ -392,17 +392,26 @@ export function snapshotWorkingTree(
     // `ghostDeletions` asks the other question — whether the RULES alone
     // hide a path, `--no-index` — because a rule that appeared between
     // the moments is exactly what it tests for.)
-    const add = gitWithEnvReport(env, [
-      '-C',
-      root,
-      ...capturePins(root),
-      'add',
-      '-A',
-      '--sparse',
-      '--ignore-errors',
-      '--',
-      ...excludePathspec(root, capturableSidePaths(root, sidePaths)),
-    ]);
+    const add = gitWithEnvReport(
+      env,
+      [
+        '-C',
+        root,
+        ...capturePins(root),
+        'add',
+        '-A',
+        '--sparse',
+        '--ignore-errors',
+        // The pathspec rides stdin as NUL-separated bytes: argv coerces a
+        // name that is not valid UTF-8 to U+FFFD, and an in-tree git dir
+        // named with such bytes (a `--separate-git-dir` the user chose)
+        // would otherwise fall out of the exclusion — the capture then
+        // records the audited repository's own objects as edits.
+        '--pathspec-from-file=-',
+        '--pathspec-file-nul',
+      ],
+      capturePathspecBytes(root, capturableSidePaths(root, sidePaths)),
+    );
     assertCompleteCapture(add, filtersConfigured);
     // The families are excluded above because the flow WRITES them between
     // the two states — as untracked files. A path the repository TRACKS
@@ -808,6 +817,36 @@ function literalExcludes(
     specs.push(`:(exclude,literal)${rel.split(sep).join('/')}`);
   }
   return specs;
+}
+
+/**
+ * `excludePathspec` as NUL-separated raw BYTES for
+ * `--pathspec-from-file - --pathspec-file-nul`: argv coerces a name that
+ * is not valid UTF-8 to U+FFFD, and an in-tree git dir named with such
+ * bytes (a `--separate-git-dir` the user chose) would otherwise fall out
+ * of the exclusion — the capture then records the audited repository's
+ * own objects as edits. The git-dir entry rides `inTreeGitDirBytes`' raw
+ * form; every other entry is ASCII or the caller's own string.
+ */
+function capturePathspecBytes(
+  root: string,
+  extraLiteral: readonly string[],
+): Buffer {
+  const specs: Buffer[] = [Buffer.from('.')];
+  for (const family of FIX_DELTA_EXCLUDES) {
+    specs.push(
+      Buffer.from(`:(glob,exclude)**/${family}`),
+      Buffer.from(`:(glob,exclude)**/${family}/**`),
+    );
+  }
+  const gitDir = inTreeGitDirBytes(root);
+  if (gitDir !== null) {
+    specs.push(Buffer.concat([Buffer.from(':(exclude,literal)'), gitDir]));
+  }
+  for (const rel of extraLiteral) {
+    specs.push(Buffer.from(`:(exclude,literal)${rel.split(sep).join('/')}`));
+  }
+  return Buffer.concat(specs.flatMap((s) => [s, Buffer.from([0])]));
 }
 
 /**
