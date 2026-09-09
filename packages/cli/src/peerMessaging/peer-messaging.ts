@@ -57,6 +57,7 @@ import {
   type PeerUserFrame,
   readPeerControllerRegistrySync,
   refundSendPacerMessage,
+  refundSendPacerToken,
   resolveControllerToken,
   sendDeliveryStatus,
   type SettledPeerReceipt,
@@ -208,6 +209,8 @@ export interface PeerMessagingOptions {
   forgetMirror?: (ipcPath: string, messageIds: readonly string[]) => void;
   /** Refund a message rejected before the receiver's admission meter. */
   refundMirror?: (ipcPath: string, messageId: string) => void;
+  /** Refund a duplicate's token while retaining its body baseline. */
+  refundMirrorToken?: (ipcPath: string, messageId: string) => void;
 }
 
 /** An accepted message waiting for the TUI's submit function. */
@@ -236,6 +239,8 @@ export class PeerMessaging {
   ) => void = forgetSendPacerMessages;
   private refundMirror: (ipcPath: string, messageId: string) => void =
     refundSendPacerMessage;
+  private refundMirrorToken: (ipcPath: string, messageId: string) => void =
+    refundSendPacerToken;
   private readonly receiptListeners = new Set<(receipt: PeerReceipt) => void>();
   private readonly dropListeners = new Set<(notice: DropNotice) => void>();
   /** Notices raised before anything subscribed; see `onDropped`. */
@@ -351,6 +356,8 @@ export class PeerMessaging {
     messaging.drainMirror = options.drainMirror ?? drainSendPacer;
     messaging.forgetMirror = options.forgetMirror ?? forgetSendPacerMessages;
     messaging.refundMirror = options.refundMirror ?? refundSendPacerMessage;
+    messaging.refundMirrorToken =
+      options.refundMirrorToken ?? refundSendPacerToken;
 
     // Any pair still in the environment at this point was inherited from an
     // ancestor session, and every exit below this line other than a bound
@@ -737,10 +744,17 @@ export class PeerMessaging {
     debugLogger.debug(
       `dropped receipt from ${first.address} (${frame.dropReason ?? 'unspecified'}) settled ${settledCount} message(s)`,
     );
-    // The receiver never gave these bodies to its model, so its duplicate
-    // baseline no longer contains them and the sender's mirror must agree.
-    for (const [ipcPath, idsForPath] of settledByPath) {
-      this.forgetMirror(ipcPath, idsForPath);
+    // A duplicate was rejected before charging the receiver, but it remains
+    // that receiver's latest-body baseline. Other drops do not leave a
+    // baseline, so the mirror forgets those bodies entirely.
+    if (frame.dropReason === 'duplicate') {
+      for (const [ipcPath, idsForPath] of settledByPath) {
+        for (const id of idsForPath) this.refundMirrorToken(ipcPath, id);
+      }
+    } else {
+      for (const [ipcPath, idsForPath] of settledByPath) {
+        this.forgetMirror(ipcPath, idsForPath);
+      }
     }
     if (frame.dropReason === 'rate-limited') {
       // The mirror bucket also said there was room and the receiver

@@ -107,6 +107,7 @@ let receipts: PeerFrame[];
 let drained: string[];
 let forgotten: Array<{ ipcPath: string; messageIds: readonly string[] }>;
 let refunded: Array<{ ipcPath: string; messageIds: readonly string[] }>;
+let tokenRefunded: Array<{ ipcPath: string; messageIds: readonly string[] }>;
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-peer-msg-'));
@@ -114,6 +115,7 @@ beforeEach(async () => {
   drained = [];
   forgotten = [];
   refunded = [];
+  tokenRefunded = [];
   chmodControl.holdSocketChmod = false;
   chmodControl.calls = 0;
   chmodControl.release = null;
@@ -226,6 +228,7 @@ async function start(
     drainMirror?: (ipcPath: string) => void;
     forgetMirror?: (ipcPath: string, messageIds: readonly string[]) => void;
     refundMirror?: (ipcPath: string, messageId: string) => void;
+    refundMirrorToken?: (ipcPath: string, messageId: string) => void;
   } = {},
 ): Promise<{
   messaging: PeerMessaging;
@@ -248,6 +251,8 @@ async function start(
       forgotten.push({ ipcPath, messageIds }),
     refundMirror: (ipcPath, messageId) =>
       refunded.push({ ipcPath, messageIds: [messageId] }),
+    refundMirrorToken: (ipcPath, messageId) =>
+      tokenRefunded.push({ ipcPath, messageIds: [messageId] }),
     ...extra,
   });
   if (!started) throw new Error('peer messaging failed to start');
@@ -621,6 +626,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     let current = 'session-a';
     const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
       getSessionId: () => current,
+      admission: new PeerAdmission(),
     });
     await send(
       m.socketPath!,
@@ -2247,12 +2253,13 @@ describe.skipIf(isWindows)('PeerMessaging drops', () => {
     );
     await settle();
 
-    // Neither reason says that the receiver's token level is exhausted,
-    // but both rejected frames are removed from the sender's per-message
-    // baseline so it matches the receiver's retained admission records.
+    // Queue-full never retained the body. Duplicate did retain the same
+    // body and charged no token, so its mirror record stays as the baseline.
     expect(drained).toEqual([]);
     expect(forgotten).toEqual([
       { ipcPath: receiverPath, messageIds: ['sent-c'] },
+    ]);
+    expect(tokenRefunded).toEqual([
       { ipcPath: receiverPath, messageIds: ['sent-d'] },
     ]);
   });

@@ -219,7 +219,7 @@ export interface PeerOrigin {
  * sender could use, and bounds what an unreal one can make this session
  * hold.
  */
-const MAX_SENDER_KEY_CHARS = 256;
+export const MAX_SENDER_KEY_CHARS = 256;
 
 /**
  * The identity rate limiting and drop reporting meter a sender by.

@@ -34,8 +34,15 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
-import type { PeerDropReason } from './peer-admission.js';
-import { peerSenderKey, type PeerOrigin } from './inbound-gate.js';
+import {
+  PEER_ADMISSION_LIMITS,
+  type PeerDropReason,
+} from './peer-admission.js';
+import {
+  MAX_SENDER_KEY_CHARS,
+  peerSenderKey,
+  type PeerOrigin,
+} from './inbound-gate.js';
 import {
   MAX_DROPPED_MSG_IDS,
   MAX_RETAINED_REPLY_TOKEN_CHARS,
@@ -73,6 +80,11 @@ export const DROP_FLUSH_BOUND_MS = 500;
  * longest an ordinary deferral takes.
  */
 export const MAX_DEFERRED_RECEIPT_AGE_MS = 2 * DROP_REPORT_WINDOW_MS;
+
+const PEER_BUCKET_REFILL_MS =
+  (PEER_ADMISSION_LIMITS.bucketCapacity /
+    PEER_ADMISSION_LIMITS.refillPerSecond) *
+  1000;
 
 /**
  * Receipts `flush` starts at once.
@@ -200,8 +212,8 @@ export class DropReceiptCoalescer {
     if (reason === undefined) return;
     // No reply address, no receipt. Nothing is lost that could have been
     // delivered: a sender that gave no `from` cannot be told anything.
-    const replyAddress = frame.from?.slice(0, 256);
-    if (replyAddress === undefined) return;
+    const replyAddress = frame.from?.slice(0, MAX_SENDER_KEY_CHARS);
+    if (!replyAddress) return;
 
     const now = this.now();
     const batch = this.touch(`${peerSenderKey(frame, origin)}\u0000${reason}`);
@@ -330,15 +342,20 @@ export class DropReceiptCoalescer {
       return;
     }
     const now = this.now();
-    if (!force && now - batch.firstNotedAt >= MAX_DEFERRED_RECEIPT_AGE_MS) {
+    const age = now - batch.firstNotedAt;
+    const staleRateLimit =
+      reason === 'rate-limited' && age >= PEER_BUCKET_REFILL_MS;
+    if (staleRateLimit || (!force && age >= MAX_DEFERRED_RECEIPT_AGE_MS)) {
       // Too old to be worth sending. A `rate-limited` receipt is a live
       // instruction on the sending side, and one this late would throttle
       // a sender against a bucket that refilled long ago — worse than
       // saying nothing, which is what a best-effort receipt is allowed to
-      // do. The close path forces these out regardless, because there the
-      // sender is about to lose its only chance at any answer.
+      // do. Rate-limit receipts use the receiver bucket's full-refill
+      // time even during close; forcing one out later would revive an
+      // expired throttle. Other reasons keep the broader best-effort
+      // bound while the session runs.
       debugLogger.debug(
-        `abandoning a dropped receipt held ${Math.round(now - batch.firstNotedAt)} ms by a spent budget`,
+        `abandoning a dropped receipt held ${Math.round(age)} ms by a spent budget`,
       );
       this.clearBatch(batch);
       return;

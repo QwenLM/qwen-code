@@ -55,7 +55,7 @@ the answer to the first arrives.
 ## Design
 
 **Meter arrivals before policy.** A token bucket per sender — 30 at once,
-then one every two seconds — plus a global bucket of 60, then one a
+then one every two seconds — plus a global bucket of 32, then one a
 second. A sender is identified by the reply address it puts on the frame,
 which is self-asserted; the global bucket is what makes rotating it
 pointless. Neither is a security boundary. A hostile same-uid process has

@@ -91,6 +91,20 @@ describe('PeerAdmission', () => {
     ).toEqual({ admitted: false, reason: 'duplicate' });
   });
 
+  it('compares repeats only with the latest admitted body', () => {
+    const admission = new PeerAdmission();
+
+    expect(admission.admit({ senderKey: 'peer', body: 'A' })).toEqual({
+      admitted: true,
+    });
+    expect(admission.admit({ senderKey: 'peer', body: 'B' })).toEqual({
+      admitted: true,
+    });
+    expect(admission.admit({ senderKey: 'peer', body: 'A' })).toEqual({
+      admitted: true,
+    });
+  });
+
   it('lets the same body through once the window has passed', () => {
     const clock = stubClock();
     const admission = new PeerAdmission({ now: clock.now });

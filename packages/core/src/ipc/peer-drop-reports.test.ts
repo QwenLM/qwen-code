@@ -24,6 +24,7 @@ import {
   type PeerUserFrame,
 } from './peer-frames.js';
 import { peerSenderKey, type PeerOrigin } from './inbound-gate.js';
+import { PEER_ADMISSION_LIMITS } from './peer-admission.js';
 
 const PEER: PeerOrigin = { selfSent: false };
 
@@ -223,7 +224,7 @@ describe('DropReceiptCoalescer', () => {
 
     // One more drop inside the same window: nothing goes out, but the
     // drop is not discarded either.
-    coalescer.note(frameFrom('/tmp/legit.sock'), 'rate-limited');
+    coalescer.note(frameFrom('/tmp/legit.sock'), 'queue-full');
     clock.advance(DROP_RECEIPT_TRAIL_MS);
     expect(sent).toHaveLength(MAX_DROP_RECEIPTS_PER_WINDOW);
 
@@ -245,6 +246,7 @@ describe('DropReceiptCoalescer', () => {
     );
 
     coalescer.note(frameFrom(undefined), 'rate-limited');
+    coalescer.note(frameFrom(''), 'rate-limited');
     clock.advance(DROP_RECEIPT_TRAIL_MS);
 
     expect(sent).toHaveLength(0);
@@ -442,6 +444,19 @@ describe('DropReceiptCoalescer bounds', () => {
     coalescer.dispose();
   });
 
+  it('retains a bounded reply token needed to authenticate the receipt', () => {
+    const sent: DroppedReceipt[] = [];
+    const coalescer = new DropReceiptCoalescer((receipt) => {
+      sent.push(receipt);
+    });
+    const frame = { ...frameFrom('/tmp/peer.sock'), replyToken: 'secret' };
+
+    coalescer.note(frame, 'rate-limited');
+
+    expect(sent[0]?.frame.replyToken).toBe('secret');
+    coalescer.dispose();
+  });
+
   it('emits a narrow notice without the rejected message body', () => {
     const notices: DropNotice[] = [];
     const throttle = new DropNoticeThrottle((notice) => notices.push(notice));
@@ -570,6 +585,33 @@ describe('DropReceiptCoalescer bounds', () => {
     // And it is gone rather than still re-arming.
     coalescer.dispose();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not dispatch a rate-limit receipt after the bucket refilled', () => {
+    const clock = stubClock();
+    const sent: DroppedReceipt[] = [];
+    const coalescer = new DropReceiptCoalescer(
+      (receipt) => {
+        sent.push(receipt);
+      },
+      { now: clock.now },
+    );
+    spendBudget(coalescer);
+    coalescer.note(frameFrom('/tmp/stale-rate.sock'), 'rate-limited');
+    const beforeAging = sent.length;
+    const refillMs =
+      (PEER_ADMISSION_LIMITS.bucketCapacity /
+        PEER_ADMISSION_LIMITS.refillPerSecond) *
+      1000;
+
+    clock.advance(refillMs + DROP_RECEIPT_TRAIL_MS);
+
+    expect(
+      sent
+        .slice(beforeAging)
+        .some((receipt) => receipt.frame.from === '/tmp/stale-rate.sock'),
+    ).toBe(false);
+    coalescer.dispose();
   });
 
   it('waits for a receipt the immediate path already started', async () => {

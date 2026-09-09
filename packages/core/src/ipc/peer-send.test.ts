@@ -42,6 +42,7 @@ const {
   lookupSentPeerMessageForTest,
   MAX_TRACKED_SENDS,
   refundSendPacerMessage,
+  refundSendPacerToken,
   resetSendPacerForTest,
   resetSentPeerMessagesForTest,
   senderModeClass,
@@ -404,7 +405,8 @@ describe('describeSendFailure', () => {
   it('explains a timeout as possibly still readable, with a next step', () => {
     const text = describeSendFailure(new PeerSendError('x', 'ETIMEDOUT'));
     expect(text).toContain('may still read it');
-    expect(text).toContain('retry once');
+    expect(text).toContain('do not assume it was lost or resend');
+    expect(text).toContain('wait for a delivery receipt');
   });
 
   it('falls back to the message for anything else', () => {
@@ -861,6 +863,21 @@ describe('sender-side pacing', () => {
     expect((await send('next one')).kind).toBe('failed');
   });
 
+  it('reports a repeat when the body and token limits both bind', async () => {
+    let lastBody = '';
+    for (let index = 0; index < PEER_ADMISSION_LIMITS.bucketCapacity; index++) {
+      lastBody = `message ${index}`;
+      await send(lastBody);
+    }
+
+    const refused = await send(lastBody);
+
+    expect(refused.kind).toBe('failed');
+    expect(refused.kind === 'failed' && refused.reason).toContain(
+      'turns away a repeat',
+    );
+  });
+
   it('keeps a separate mirror per target', async () => {
     const other = peer('p2', 'app-b');
     listMessageablePeers.mockResolvedValue([target, other]);
@@ -1063,6 +1080,15 @@ describe('the mirror and the receiver disagreeing', () => {
     }
   });
 
+  it('starts a fresh mirror conversation when the session id changes', async () => {
+    expect((await send('same body')).kind).toBe('sent');
+    listMessageablePeers.mockResolvedValue([
+      { ...target, sessionId: 'p2', ref: peerRef('p2') },
+    ]);
+
+    expect((await send('same body')).kind).toBe('sent');
+  });
+
   it('does not un-drain the mirror with a refund that lands after the drain', async () => {
     // The drain is the receiver's own word on its level. A refund from a
     // send that was in flight at the time must not quietly restore the
@@ -1090,6 +1116,51 @@ describe('the mirror and the receiver disagreeing', () => {
     } finally {
       setSendPacerClockForTest();
     }
+  });
+
+  it('does not quote a zero-message burst after a drain races a refund', async () => {
+    const clock = 0;
+    setSendPacerClockForTest(() => clock);
+    try {
+      let fail: (() => void) | undefined;
+      sendPeerFrame.mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            fail = () => reject(new PeerSendError('gone', 'ECONNREFUSED'));
+          }),
+      );
+      const inFlight = send('never arrived');
+      await vi.waitFor(() => expect(fail).toBeTypeOf('function'));
+      drainSendPacer(target.ipcPath);
+      fail?.();
+      await inFlight;
+
+      sendPeerFrame.mockResolvedValue(undefined);
+      const refused = await send('next body');
+      expect(refused.kind).toBe('failed');
+      expect(refused.kind === 'failed' && refused.reason).not.toContain(
+        ': 0 were sent',
+      );
+    } finally {
+      setSendPacerClockForTest();
+    }
+  });
+
+  it('keeps uncertain reset writes in the ledger and repeat baseline', async () => {
+    sendPeerFrame.mockRejectedValueOnce(
+      new PeerSendError('reset after connect', 'ECONNRESET'),
+    );
+    expect((await send('maybe arrived')).kind).toBe('failed');
+    const id = sendPeerFrame.mock.calls[0]?.[1].msgId as string;
+    expect(lookupSentPeerMessageForTest(id)).toBeDefined();
+
+    sendPeerFrame.mockResolvedValue(undefined);
+    const retry = await send('maybe arrived');
+    expect(retry.kind).toBe('failed');
+    expect(retry.kind === 'failed' && retry.reason).toContain(
+      'turns away a repeat',
+    );
+    expect(sendPeerFrame).toHaveBeenCalledTimes(1);
   });
 
   it('restores the body the receiver still remembers when a send is refunded', async () => {
@@ -1149,6 +1220,29 @@ describe('the mirror and the receiver disagreeing', () => {
       refundSendPacerMessage(target.ipcPath, firstId);
 
       expect((await send('after misaddressed')).kind).toBe('sent');
+    } finally {
+      setSendPacerClockForTest();
+    }
+  });
+
+  it('refunds a duplicate token without forgetting its body', async () => {
+    const clock = 0;
+    setSendPacerClockForTest(() => clock);
+    try {
+      for (let i = 0; i < PEER_ADMISSION_LIMITS.bucketCapacity; i += 1) {
+        expect((await send(`body ${i}`)).kind).toBe('sent');
+      }
+      const lastId = sendPeerFrame.mock.calls.at(-1)?.[1].msgId as string;
+      refundSendPacerToken(target.ipcPath, lastId);
+
+      const repeat = await send(
+        `body ${PEER_ADMISSION_LIMITS.bucketCapacity - 1}`,
+      );
+      expect(repeat.kind).toBe('failed');
+      expect(repeat.kind === 'failed' && repeat.reason).toContain(
+        'turns away a repeat',
+      );
+      expect((await send('different body')).kind).toBe('sent');
     } finally {
       setSendPacerClockForTest();
     }

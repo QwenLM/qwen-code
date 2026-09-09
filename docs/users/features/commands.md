@@ -887,7 +887,7 @@ cross-session message.
 ### Flood protection
 
 A session accepts up to 30 messages at once from one sender and then one
-every two seconds, and up to 60 at once from all senders together and
+every two seconds, and up to 32 at once from all senders together and
 then one a second. The second limit exists because a sender names itself:
 rotating that name gets a fresh allowance from the first limit but not
 from the second. A message from another session that repeats that
