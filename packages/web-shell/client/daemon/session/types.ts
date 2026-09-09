@@ -114,6 +114,7 @@ export interface DaemonConnectionState {
   currentModel?: string;
   reasoning?: DaemonReasoningControls;
   currentMode?: string;
+  planExecutionMode?: string;
   displayName?: string;
   titleSource?: 'manual' | 'auto';
   /** Latest main-conversation model usage event. */
@@ -475,7 +476,7 @@ export interface DaemonSessionActions {
   ): Promise<void>;
   setApprovalMode(
     mode: DaemonApprovalMode,
-    opts?: { persist?: boolean },
+    opts?: { persist?: boolean; planMode?: boolean },
   ): Promise<DaemonApprovalModeResult>;
   respondToPermission(
     requestId: string,
