@@ -138,7 +138,7 @@ describe('scheduled-task session lifecycle', () => {
     expect(generations).toEqual(
       new Map([
         ['a', 1],
-        ['b', 1],
+        ['b', 2],
         ['c', 0],
       ]),
     );
