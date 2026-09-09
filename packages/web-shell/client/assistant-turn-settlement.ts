@@ -49,15 +49,22 @@ function getSettledAssistantMessage(
   const messages = transcriptBlocksToDaemonMessages(blocks, {
     includeSourceIdentity: true,
   });
-  // Ownership for the scan below, deliberately wider than `promptBlockIds`:
-  // the reducer's merge predicate admits deltas when one side omits `promptId`
-  // and backfills it afterwards (sdk-typescript `daemon/ui/transcript.ts`), so
-  // an unstamped block is not evidence of a foreign turn. A block stamped with
-  // a *different* prompt id is.
+  // Ownership for the scan below, deliberately wider than `promptBlockIds`,
+  // but only while a block can still be backfilled: the reducer admits a delta
+  // with no `promptId` and stamps it from a later delta for the same block
+  // (sdk-typescript `daemon/ui/transcript.ts:836-840`). A *finished* unstamped
+  // assistant block can never be stamped, and the turns that emit one
+  // (goal-runtime and background-notification turns never cross the
+  // `session/prompt` boundary that sets `entry.activePromptId`) are foreign.
+  // Non-assistant blocks are never stamped by the reducer, so they stay
+  // admitted; a block stamped with a *different* prompt id is foreign.
   const promptOwnedIds = new Set(
     blocks
       .filter(
-        (block) => block.promptId === promptId || block.promptId === undefined,
+        (block) =>
+          block.promptId === promptId ||
+          (block.promptId === undefined &&
+            (block.kind !== 'assistant' || block.streaming === true)),
       )
       .map((block) => block.id),
   );

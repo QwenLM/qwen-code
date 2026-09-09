@@ -278,6 +278,54 @@ describe('assistant turn settlement projection', () => {
     expect(settled).not.toHaveProperty('message');
   });
 
+  it('treats a finished unstamped sibling as a foreign turn', () => {
+    // Goal-runtime and background-notification turns never cross the
+    // `session/prompt` boundary that sets `entry.activePromptId`, so their
+    // frames are forwarded unstamped (`bridgeClient.ts:1066-1071`) and nothing
+    // can backfill a block that already finished (`sdk-typescript
+    // daemon/ui/transcript.ts:836-840`). Admitting it re-glues a foreign turn's
+    // text onto this prompt's message id — the contamination the ownership
+    // rule exists to stop, entering through the unstamped door.
+    harness.blocks = [
+      assistantBlock('assistant-1', 'The answer is 42.', {
+        promptId: 'prompt-A',
+      }),
+      assistantBlock('assistant-2', 'goal turn text'),
+    ];
+
+    const settled = mountAndSettle({
+      sessionId: 'session-1',
+      promptId: 'prompt-A',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+    });
+
+    expect(settled).not.toHaveProperty('message');
+  });
+
+  it('does not settle a merged message that absorbed an unstamped streaming block', () => {
+    // The unstamped sibling is still open, so it stays owned: a later delta can
+    // yet stamp it. The merged message inherits its `streaming`, and the
+    // block-level guard cannot fire because the sibling is not in
+    // `promptBlockIds` — the message-level guard is the sole defence against
+    // handing a host unfinished text for a prompt reported `completed`.
+    harness.blocks = [
+      assistantBlock('assistant-1', 'The answer is 42.', {
+        promptId: 'prompt-A',
+      }),
+      assistantBlock('assistant-2', 'still typing', { streaming: true }),
+    ];
+
+    const settled = mountAndSettle({
+      sessionId: 'session-1',
+      promptId: 'prompt-A',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+    });
+
+    expect(settled).not.toHaveProperty('message');
+  });
+
   it('does not publish one merged message for two adjacent prompts', () => {
     // A continuation carries no user prompt to echo (`bridge.ts` skips
     // `echoPromptToSessionBus` when `isContinue`), so two top-level assistant
