@@ -6603,6 +6603,34 @@ describe('SessionArtifactStore', () => {
         vi.unstubAllEnvs();
       }
     });
+
+    it('keeps the restored record when snapshot retain bookkeeping fails', async () => {
+      const page = await saved('owner', 'original');
+      const references = path.join(
+        workspace,
+        'artifacts',
+        'snapshots',
+        page.managedId.replace('preview-', ''),
+        'references',
+      );
+      await fs.rm(references, { recursive: true });
+      await fs.writeFile(references, 'not a directory');
+
+      const restored = store('owner');
+      const warnings = await restored.restore(snapshot('owner', [page]));
+
+      expect(warnings).toEqual([
+        expect.stringContaining(
+          `restored artifact ${page.id} without retaining its snapshot`,
+        ),
+      ]);
+      await expect(restored.list()).resolves.toMatchObject({
+        artifacts: [expect.objectContaining({ id: page.id })],
+      });
+      await expect(readArtifactSnapshot(page, workspace)).resolves.toBe(
+        'original',
+      );
+    });
   });
 
   it('does not trust persisted published file urls during restore', async () => {

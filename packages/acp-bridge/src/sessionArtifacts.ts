@@ -834,11 +834,23 @@ export class SessionArtifactStore {
               retention !== 'ephemeral' ? true : undefined,
             insertSeq: ++this.insertSeq,
           };
-          await retainArtifactSnapshot(
-            stored,
-            this.runtimeBaseDir,
-            this.sessionId,
-          );
+          // retainArtifactSnapshot already tolerates missing bytes (ENOENT)
+          // and existing references (EEXIST); anything it still throws is a
+          // bookkeeping failure, so keep the restored record and let the read
+          // path report the snapshot as unavailable instead of dropping it.
+          try {
+            await retainArtifactSnapshot(
+              stored,
+              this.runtimeBaseDir,
+              this.sessionId,
+            );
+          } catch (error) {
+            warnings.push(
+              `restored artifact ${stored.id} without retaining its snapshot: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
           this.artifacts.set(stored.id, stored);
           restoredCount++;
         } catch (error) {
