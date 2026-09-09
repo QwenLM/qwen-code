@@ -29,6 +29,7 @@ import { sanitizeMimeForPlaceholder } from '../../services/compactionInputSlimmi
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 
 const debugLogger = createDebugLogger('RESPONSES_CONVERTER');
 
@@ -203,6 +204,13 @@ export function convertResponsesEventToGemini(
       // frame is terminal only, exactly as output_text.done is treated.
       return null;
 
+    case 'response.reasoning_text.delta': {
+      const data = event.data as { delta: string };
+      return makeChunkResponse(model, state, [
+        createOpenAIReasoningThoughtPart(data.delta),
+      ]);
+    }
+
     case 'response.reasoning_summary_text.delta': {
       const data = event.data as { delta: string };
       return makeChunkResponse(model, state, [
@@ -292,7 +300,7 @@ export function convertResponsesEventToGemini(
         // No encrypted_content means this turn's reasoning can't be replayed
         // (e.g. `include` wasn't honored for this model). Drop the signature
         // rather than emit one we can't reconstruct later — the thought text
-        // itself already streamed via reasoning_summary_text.delta above.
+        // itself already streamed via reasoning text or summary deltas above.
         if (!encryptedContent) return null;
         // NOTE: a single turn can contain multiple reasoning output items
         // (e.g. one per parallel function call), each emitted here as its own

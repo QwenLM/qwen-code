@@ -664,6 +664,67 @@ describe('ResponsesPipeline', () => {
     expect(result.usageMetadata?.totalTokenCount).toBe(5);
   });
 
+  describe.each(['', ' '])('SSE field separator %j', (separator) => {
+    it.each([
+      { eventLines: true, trailingNewline: true },
+      { eventLines: false, trailingNewline: true },
+      { eventLines: true, trailingNewline: false },
+      { eventLines: false, trailingNewline: false },
+    ])(
+      'parses chunked frames with %j',
+      async ({ eventLines, trailingNewline }) => {
+        const events = [
+          { type: 'response.output_text.delta', delta: 'hello' },
+          {
+            type: 'response.completed',
+            response: { id: 'response-framing', status: 'completed' },
+          },
+        ];
+        const body =
+          events
+            .map(({ type, ...data }) =>
+              [
+                ...(eventLines ? [`event:${separator}${type}`] : []),
+                `data:${separator}${JSON.stringify(eventLines ? data : { type, ...data })}`,
+              ].join('\n'),
+            )
+            .join('\n\n') + (trailingNewline ? '\n\n' : '');
+        const bytes = new TextEncoder().encode(body);
+        fetchMock.mockResolvedValue({
+          ok: true,
+          status: 200,
+          headers: { get: () => 'text/event-stream' },
+          body: new ReadableStream({
+            start(controller) {
+              for (let i = 0; i < bytes.length; i += 5) {
+                controller.enqueue(bytes.slice(i, i + 5));
+              }
+              controller.close();
+            },
+          }),
+        });
+        const pipeline = new ResponsesPipeline(
+          makeGeneratorConfig(),
+          makeCliConfig(),
+        );
+        const chunks = [];
+        for await (const chunk of pipeline.executeStream(
+          textRequest('hello'),
+          'prompt-framing',
+        )) {
+          chunks.push(chunk);
+        }
+        expect(
+          chunks.map((chunk) => chunk.candidates?.[0]?.content?.parts),
+        ).toEqual([[{ text: 'hello' }], []]);
+        expect(chunks.at(-1)?.candidates?.[0]?.finishReason).toBe(
+          FinishReason.STOP,
+        );
+        expect(chunks.at(-1)?.responseId).toBe('response-framing');
+      },
+    );
+  });
+
   it('parses data-only SSE frames (no event: line) -- the shape the Responses API actually emits', async () => {
     // Every other test builds frames with sseEvent(), which always prepends
     // an `event: ` line, so it never exercises the data-only branch that

@@ -219,7 +219,7 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 
 ### OpenAI Responses API (`openai-responses`)
 
-This auth type targets OpenAI's `/v1/responses` endpoint rather than Chat Completions. It replays prior-turn reasoning across turns and `--resume` via `reasoning.encrypted_content`, so multi-turn reasoning survives disk persistence and process restarts. Use `reasoning.effort` (not `extra_body.enable_thinking`, which the Chat Completions wires use) to control reasoning intensity.
+This auth type targets OpenAI's `/v1/responses` endpoint rather than Chat Completions. When the endpoint returns encrypted reasoning with visible thought text, it replays prior-turn reasoning across turns and `--resume` via `reasoning.encrypted_content`. Compatible endpoints that stream `response.reasoning_text.delta` also display their reasoning, but endpoints without `encrypted_content` cannot replay the opaque reasoning state. Use `reasoning.effort` (not `extra_body.enable_thinking`, which the Chat Completions wires use) to control reasoning intensity.
 
 ```json
 {

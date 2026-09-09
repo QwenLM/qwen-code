@@ -215,6 +215,8 @@ export type ResponsesSSEEventType =
   | 'response.refusal.done'
   | 'response.function_call_arguments.delta'
   | 'response.function_call_arguments.done'
+  | 'response.reasoning_text.delta'
+  | 'response.reasoning_text.done'
   | 'response.reasoning_summary_part.added'
   | 'response.reasoning_summary_part.done'
   | 'response.reasoning_summary_text.delta'

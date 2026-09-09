@@ -25,6 +25,7 @@ import type {
   ResponsesSSEEvent,
 } from './types.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { getThoughtSummary } from '../../utils/thoughtUtils.js';
 
 describe('convertResponsesEventToGemini', () => {
   it('emits a plain text chunk for response.output_text.delta', () => {
@@ -89,6 +90,60 @@ describe('convertResponsesEventToGemini', () => {
       { text: 'thinking...', thought: true },
     ]);
   });
+
+  it('streams raw reasoning text without requiring encrypted content', () => {
+    const state = new ResponsesStreamState();
+    for (const delta of ['Let me ', 'think.']) {
+      const resp = convertResponsesEventToGemini(
+        {
+          event: 'response.reasoning_text.delta',
+          data: { output_index: 0, delta },
+        },
+        'gpt-5',
+        state,
+      );
+      expect(resp?.candidates?.[0]?.content?.parts).toEqual([
+        { text: delta, thought: true },
+      ]);
+    }
+    const terminalEvents: ResponsesSSEEvent[] = [
+      {
+        event: 'response.reasoning_text.done',
+        data: { output_index: 0, text: 'Let me think.' },
+      },
+      {
+        event: 'response.output_item.done',
+        data: {
+          output_index: 0,
+          item: {
+            type: 'reasoning',
+            id: 'rs_raw',
+            summary: [{ type: 'summary_text', text: 'Let me think.' }],
+            encrypted_content: null,
+          },
+        },
+      },
+    ];
+    for (const event of terminalEvents) {
+      expect(convertResponsesEventToGemini(event, 'gpt-5', state)).toBeNull();
+    }
+  });
+
+  it.each(['**Checking the input**', 'Use **grep** first.'])(
+    'preserves raw reasoning markdown in the displayed thought: %s',
+    (delta) => {
+      const resp = convertResponsesEventToGemini(
+        { event: 'response.reasoning_text.delta', data: { delta } },
+        'gpt-5',
+        new ResponsesStreamState(),
+      );
+      expect(resp).not.toBeNull();
+      expect(getThoughtSummary(resp!)).toEqual({
+        subject: '',
+        description: delta,
+      });
+    },
+  );
 
   it('buffers function_call args across deltas and emits on output_item.done', () => {
     const state = new ResponsesStreamState();

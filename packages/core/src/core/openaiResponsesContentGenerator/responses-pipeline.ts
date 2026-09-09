@@ -962,14 +962,14 @@ export class ResponsesPipeline {
         buffer = lines.pop() ?? '';
 
         for (const line of lines) {
-          if (line.startsWith('event: ')) {
-            currentEventType = line.slice(7).trim() as ResponsesSSEEventType;
+          if (line.startsWith('event:')) {
+            currentEventType = line.slice(6).trim() as ResponsesSSEEventType;
             dataAccumulator = '';
             continue;
           }
 
-          if (line.startsWith('data: ')) {
-            const dataContent = line.slice(6);
+          if (line.startsWith('data:')) {
+            const dataContent = line.slice(5).replace(/^ /, '');
             if (dataContent === '[DONE]') continue;
 
             if (currentEventType) {
@@ -1019,8 +1019,8 @@ export class ResponsesPipeline {
       // unterminated line through the main per-line loop above. Process
       // it here the same way that loop would, so a connection dropped
       // mid-frame doesn't silently lose the last frame.
-      if (buffer.startsWith('data: ')) {
-        const dataContent = buffer.slice(6);
+      if (buffer.startsWith('data:')) {
+        const dataContent = buffer.slice(5).replace(/^ /, '');
         if (dataContent !== '[DONE]') {
           if (currentEventType) {
             dataAccumulator += (dataAccumulator ? '\n' : '') + dataContent;
