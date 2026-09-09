@@ -685,6 +685,70 @@ describe.skipIf(process.platform === 'win32')('real ACP subprocess', () => {
     expect(executor.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
     nowSpy.mockRestore();
   });
+  it('sends the system-prompt bundle only on the first turn, not continuations (R12-1)', async () => {
+    const options = params();
+    options.promptConfig.systemPrompt = 'SYSTEM PROMPT SENTINEL';
+    const executor = await create(options);
+    const payloads: string[][] = [];
+    const prompt = vi
+      .fn()
+      .mockImplementation((p: { prompt: Array<{ text: string }> }) => {
+        payloads.push(p.prompt.map((block) => block.text));
+        return Promise.resolve({ stopReason: 'end_turn' });
+      });
+    (
+      executor as unknown as {
+        connection: { prompt: typeof prompt; cancel: () => Promise<void> };
+      }
+    ).connection = { prompt, cancel: async () => {} };
+    // Turn 1: the bundle (system + task) is the only channel the instruction has.
+    await executor.execute(context('first'));
+    // Turn 2 (continuation on the same live session): only the task is sent —
+    // the session already holds the bundle. Re-sending it would duplicate the
+    // whole bundle per turn. Removing the gate turns this red (turn 2 gets 2
+    // blocks again).
+    await executor.execute(context('second'));
+    expect(payloads.length).toBe(2);
+    expect(payloads[0].length).toBe(2);
+    expect(payloads[0][0]).toContain('SYSTEM PROMPT SENTINEL');
+    expect(payloads[0][1]).toBe('first');
+    expect(payloads[1]).toEqual(['second']);
+  });
+  it('does not record entry inputs as delivered when the budget guard breaks a continuation (R12-2)', async () => {
+    const options = params();
+    options.runConfig.max_time_minutes = 10;
+    const executor = await create(options);
+    const realNow = Date.now();
+    let mockNow = realNow;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => mockNow);
+    // Turn 1's single prompt burns 11 minutes — past the 10-minute cap.
+    const prompt = vi.fn().mockImplementation(() => {
+      mockNow += 11 * 60_000;
+      return Promise.resolve({ stopReason: 'end_turn' });
+    });
+    (
+      executor as unknown as {
+        connection: { prompt: typeof prompt; cancel: () => Promise<void> };
+      }
+    ).connection = { prompt, cancel: async () => {} };
+    const delivered: string[] = [];
+    options.eventEmitter!.on(AgentEventType.EXTERNAL_MESSAGE, (event) => {
+      delivered.push(String((event as { text?: unknown }).text));
+    });
+    // Turn 1 ends via the round-bottom budget guard (TIMEOUT); durationMs=11min.
+    await executor.execute(context('first'));
+    expect(prompt).toHaveBeenCalledTimes(1);
+    // Turn 2 (continuation, resetStats:false): the cumulative budget is already
+    // spent, so the round-top guard breaks TIMEOUT before any dispatch. The entry
+    // input ('second') must NOT be recorded as delivered — the peer never gets
+    // it. Moving the emit back above the guard turns this red (delivered becomes
+    // ['second']).
+    await executor.execute(context('second'), undefined, { resetStats: false });
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(delivered).toEqual([]);
+    expect(executor.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+    nowSpy.mockRestore();
+  });
   it('does not send a prompt for an already-aborted turn', async () => {
     const executor = await create(params('prompt-exit'));
     await executor.execute(context(), AbortSignal.abort());
@@ -892,12 +956,20 @@ describe.skipIf(process.platform === 'win32')('real ACP subprocess', () => {
   });
   it('carries the action arguments into the approval confirmation (R11-5)', async () => {
     const options = params('permission');
-    let seenPrompt: unknown;
+    let seenDetails:
+      | { prompt?: unknown; renderPromptAsPlainText?: unknown }
+      | undefined;
     options.eventEmitter!.on(
       AgentEventType.TOOL_WAITING_APPROVAL,
       async (event) => {
-        seenPrompt = (event as { confirmationDetails?: { prompt?: unknown } })
-          .confirmationDetails?.prompt;
+        seenDetails = (
+          event as {
+            confirmationDetails?: {
+              prompt?: unknown;
+              renderPromptAsPlainText?: unknown;
+            };
+          }
+        ).confirmationDetails;
         await event.respond(ToolConfirmationOutcome.ProceedOnce);
       },
     );
@@ -908,7 +980,12 @@ describe.skipIf(process.platform === 'win32')('real ACP subprocess', () => {
     // already renders as buttons. The fixture peer asks permission for a Write
     // whose rawInput carries {command: 'rm -rf ./build'}. Reverting the prompt
     // back to the option-names join turns this red (no command string).
-    expect(String(seenPrompt)).toContain('rm -rf ./build');
+    expect(String(seenDetails?.prompt)).toContain('rm -rf ./build');
+    // The payload is foreign-process text, so the dialog must render it as plain
+    // text — otherwise markdown in it (a glob `**`, a `[label](url)`) is eaten
+    // or mis-rendered, misrepresenting what the user approves. Removing the flag
+    // turns this red. (R11-5 fix)
+    expect(seenDetails?.renderPromptAsPlainText).toBe(true);
   });
   it('isolates duplicate outstanding tool IDs and ignores stale approval callbacks', async () => {
     const options = params('permission-duplicate');

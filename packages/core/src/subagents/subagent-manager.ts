@@ -8,7 +8,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
-import { parseDocument } from 'yaml';
+import { isScalar, parseDocument, visit } from 'yaml';
 import {
   parse as parseYaml,
   stringify as stringifyYaml,
@@ -1629,6 +1629,10 @@ export class SubagentManager {
     // If project level is requested but project root is same as home directory,
     // return empty array to avoid conflicts between project and global agents
     if (level === 'project' && isHomeDirectory) {
+      // No fresh scan happens on this path, so clear any refusal a prior scan
+      // recorded for the level — otherwise loadSubagent keeps throwing a stale
+      // refusal for a file this path no longer reads. (R12-4)
+      this.executorRefusals.set(level, new Map());
       return [];
     }
 
@@ -1675,7 +1679,10 @@ export class SubagentManager {
       this.executorRefusals.set(level, refusals);
       return subagents;
     } catch (_error) {
-      // Directory doesn't exist or can't be read
+      // Directory doesn't exist or can't be read. Clear any refusal a prior
+      // scan recorded for this level so a stale entry cannot keep refusing a
+      // by-name dispatch for a file that no longer exists or is unreadable. (R12-4)
+      this.executorRefusals.set(level, new Map());
       return [];
     }
   }
@@ -1787,6 +1794,39 @@ export async function loadSubagentFromDir(
   }
 }
 
+/**
+ * R12-5: returns true when a raw-text `executor:` probe match at `matchIndex`
+ * lies inside a block scalar (`description: |` or `>`), i.e. the match is prose
+ * documenting the executor syntax, not a real claim. The R10-1 probe is
+ * indentation-tolerant, so without this a `description: |` line reading
+ * `executor: acp` would hoist into a claim and hard-refuse an in-process
+ * definition that merely carries an unrelated tolerated YAML quirk. Fail-closed:
+ * if the AST walk itself throws, return false so the match stays a claim.
+ */
+function probeMatchInsideBlockScalar(
+  document: ReturnType<typeof parseDocument>,
+  matchIndex: number,
+): boolean {
+  try {
+    let inside = false;
+    visit(document, (_key, node) => {
+      if (
+        isScalar(node) &&
+        (node.type === 'BLOCK_LITERAL' || node.type === 'BLOCK_FOLDED') &&
+        node.range &&
+        node.range[0] <= matchIndex &&
+        matchIndex < node.range[1]
+      ) {
+        inside = true;
+      }
+    });
+    return inside;
+  } catch {
+    // A failed walk must not drop a real claim; leave the match as a claim.
+    return false;
+  }
+}
+
 function parseSubagentContent(
   content: string,
   filePath: string,
@@ -1831,7 +1871,16 @@ function parseSubagentContent(
     const executorClaimMatch = /^[ \t]*["']?executor["']?[ \t]*:/m.exec(
       frontmatterYaml,
     );
-    claimsExecutor = hasExecutor || executorClaimMatch !== null;
+    // R12-5: a probe match lying inside a block scalar is prose (a
+    // `description: |`/`>` documenting the executor syntax), not a claim —
+    // exclude it so the refusal guards below do not fire on an in-process
+    // definition that only mentions `executor:` in prose. A genuine top-level
+    // (even TAB-misindented) executor key is not inside a block scalar, so it
+    // stays a claim and the R10-1/R9-2 refusals still hold.
+    const probeIsClaim =
+      executorClaimMatch !== null &&
+      !probeMatchInsideBlockScalar(document, executorClaimMatch.index);
+    claimsExecutor = hasExecutor || probeIsClaim;
     try {
       const nodeName = document.has('name') ? document.get('name') : undefined;
       if (typeof nodeName === 'string' && nodeName !== '')

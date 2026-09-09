@@ -1580,9 +1580,26 @@ export class BackgroundAgentResumeService {
       };
     }
 
-    const subagentConfig = await this.config
-      .getSubagentManager()
-      .loadSubagent(subagentName);
+    let subagentConfig: SubagentConfig | null;
+    try {
+      subagentConfig = await this.config
+        .getSubagentManager()
+        .loadSubagent(subagentName);
+    } catch (error) {
+      // loadSubagent throws a recorded executor-block refusal (R10-2/R11) when a
+      // same-named definition failed to load. This is resume *discovery*, not a
+      // dispatch, so surface it as the existing "unavailable" shape — the row
+      // stays listed with a resumeBlockedReason — instead of letting the throw
+      // escape into the per-sidecar catch, which would drop the row entirely.
+      return {
+        agentName: subagentName,
+        isFork: false,
+        unavailableReason:
+          error instanceof Error
+            ? error.message
+            : `Subagent "${subagentName}" is no longer available.`,
+      };
+    }
     if (!subagentConfig) {
       return {
         agentName: subagentName,

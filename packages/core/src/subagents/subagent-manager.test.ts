@@ -1871,6 +1871,74 @@ You are a helpful assistant.`;
       );
     });
 
+    it('clears a stale executor refusal when the directory later becomes unreadable (R12-4)', async () => {
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      // First scan: a malformed-executor file records a refusal for 'explore'.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue(['explore.md'] as any);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: Explore\ndescription: Test\nexecutor:\n  kind: ACP\n  command: npx\n---\nPrompt',
+      );
+      await expect(manager.loadSubagent('Explore')).rejects.toThrow(
+        /invalid executor block/,
+      );
+      // The directory then disappears / becomes unreadable (git checkout of a
+      // branch with no agents dir, rm -rf, an unreadable dir). Without resetting
+      // the level's refusals on the scan-failure path, loadSubagent keeps
+      // throwing the stale refusal for a file that no longer exists, leaving the
+      // builtin permanently unreachable. With the reset, the scan returns [] and
+      // the dispatch falls through to the builtin again. Deleting the catch reset
+      // turns this red (the second call rejects with the stale error).
+      vi.mocked(fs.readdir).mockRejectedValue(
+        new Error('ENOENT: no such directory'),
+      );
+      const resolved = await manager.loadSubagent('Explore');
+      expect(resolved?.isBuiltin).toBe(true);
+    });
+
+    it('does not refuse an in-process definition whose block-scalar prose mentions executor: (R12-5)', async () => {
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue(['foo.md'] as any);
+      // A `description: |` block scalar documents the executor syntax as prose; a
+      // duplicate `name:` key is a tolerated YAML quirk (control: it loads
+      // alone). The raw-text probe matches the prose `executor:` line, so without
+      // the block-scalar exclusion `claimsExecutor` is true and astLostExecutor
+      // refuses (the duplicate key makes has('executor') false). With the
+      // exclusion the prose match is not a claim, no refusal is recorded, and the
+      // in-process definition loads — reverting the exclusion turns this red
+      // (loadSubagent rejects /invalid executor block/).
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: foo\nname: foo\ndescription: |\n  Reviews code. To run externally use:\n  executor: acp\n  for details.\n---\nPrompt',
+      );
+      const config = await manager.loadSubagent('foo');
+      expect(config).not.toBeNull();
+      expect(config!.name).toBe('foo');
+      expect(config!.executor).toBeUndefined();
+    });
+
+    it('does not refuse an in-process definition whose folded-block-scalar prose mentions executor: (R12-5)', async () => {
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue(['foo.md'] as any);
+      // Same as above but with a folded block scalar (`description: >`).
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: foo\nname: foo\ndescription: >\n  Reviews code. To run externally use:\n  executor: acp\n  for details.\n---\nPrompt',
+      );
+      const config = await manager.loadSubagent('foo');
+      expect(config).not.toBeNull();
+      expect(config!.executor).toBeUndefined();
+    });
+
     it('refuses a by-name dispatch for an executor-claiming file that fails an earlier validation (R11-1)', async () => {
       // A project file declares an executor but OMITS the description, so it
       // fails the earlier required-field validation BEFORE the executor block is

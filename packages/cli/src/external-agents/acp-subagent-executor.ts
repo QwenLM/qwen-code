@@ -491,11 +491,21 @@ class AcpSubagentExecutor implements SubagentExecutor {
         'External ACP agents cannot import in-process conversation history',
       );
     }
-    const system = renderSubagentSystemPrompt(
-      this.params.promptConfig,
-      context,
-      this.params.runtimeContext,
-    );
+    // A continuation turn re-enters on the same live ACP session, which has held
+    // the system-prompt bundle since turn 1 (NewSessionRequest carries only cwd/
+    // mcpServers — the prompt content block is the bundle's only channel, so the
+    // FIRST turn must still send it). Re-rendering and re-sending it on every
+    // continuation would duplicate the whole bundle (system prompt + rules +
+    // memory hierarchy) per turn, billed by the peer and pushing its context
+    // toward compaction. Continuations send only the task. (R12-1)
+    const continuation = this.started;
+    const system = continuation
+      ? ''
+      : renderSubagentSystemPrompt(
+          this.params.promptConfig,
+          context,
+          this.params.runtimeContext,
+        );
     const task = String(context.get('task_prompt') ?? 'Get Started!');
     // The first turn's task is seeded into the transcript as the initial user
     // prompt by the dispatcher; a continuation turn (a resident external agent
@@ -503,7 +513,6 @@ class AcpSubagentExecutor implements SubagentExecutor {
     // as a user-side record here or the JSONL transcript loses every message
     // after the first — the in-process sibling emits the same EXTERNAL_MESSAGE
     // on continuation.
-    const continuation = this.started;
     await this.runTurn(
       [
         ...(system ? [{ type: 'text' as const, text: system }] : []),
@@ -605,7 +614,11 @@ class AcpSubagentExecutor implements SubagentExecutor {
         this.terminateMode = AgentTerminateMode.CANCELLED;
         return;
       }
-      if (inputs) this.emitInputs(inputs);
+      // R12-2: the entry inputs are emitted at the loop's commit point (after
+      // the round-top budget guard), not here — emitting now would record them
+      // as delivered even when the guard breaks an over-budget continuation
+      // without ever dispatching the prompt.
+      const entryRound = this.round;
       let next = prompt;
       do {
         this.round++;
@@ -637,6 +650,13 @@ class AcpSubagentExecutor implements SubagentExecutor {
           this.terminateMode = AgentTerminateMode.TIMEOUT;
           break;
         }
+        // Record the caller's entry messages as delivered only now that the
+        // budget guard has committed to dispatching this round, and only on the
+        // entry round. Keyed on entryRound, NOT this.round === 1, because
+        // resetStats:false preserves this.round across continuations, so a
+        // continuation's first round is >= 2. Emitting before the prompt keeps
+        // user-before-assistant order in the JSONL transcript. (R12-2)
+        if (inputs && this.round === entryRound + 1) this.emitInputs(inputs);
         const result = await this.wait(
           this.connection.prompt({ sessionId: this.sessionId, prompt: next }),
           remaining,
@@ -1070,6 +1090,10 @@ class AcpSubagentExecutor implements SubagentExecutor {
             // authorizing — not just the option labels the dialog already
             // renders as buttons (R11-5). Bounded and control-stripped.
             prompt: describeExternalAction(params.toolCall),
+            // The prompt is a foreign-process payload; render it as plain text,
+            // never markdown — otherwise the dialog would eat glob `**` and
+            // render links, misrepresenting what the user approves. (R11-5 fix)
+            renderPromptAsPlainText: true,
             hideAlwaysAllow: true,
           },
           respond: async (outcome) =>
