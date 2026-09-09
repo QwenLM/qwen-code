@@ -106,6 +106,29 @@ describe('readTaskOutputTail', () => {
     });
   });
 
+  it('strips an unterminated string leader whose payload reaches a newline', () => {
+    // A DCS/SOS/PM/APC payload can never cross a newline, so a leader
+    // whose terminator was lost is stripped whole at the line end
+    // instead of leaking its leader byte and payload as text.
+    const outputFile = makeOutputFile('\u001bPq#0;2;0;0;0!~\nreal line\n');
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: '\nreal line',
+      truncated: false,
+    });
+  });
+
+  it('strips BEL-terminated string sequences whole', () => {
+    // BEL is a valid string terminator: the payload stops at it and the
+    // real output after it survives.
+    const outputFile = makeOutputFile('AAA\u001bP0;title\u0007BBB\n');
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'AAABBB',
+      truncated: false,
+    });
+  });
+
   it('deletes only the ESC of a residual lone ESC, keeping the byte after it', () => {
     // A bare ESC that survives to the capture file (a child writing one,
     // or the tail window opening mid-escape) is not an Fe leader, so the
@@ -148,9 +171,12 @@ describe('readTaskOutputTail', () => {
       'frame 10%\rframe 45%\rframe 99%\ndone\n',
     );
 
+    // Collapsing redraw frames discards real bytes inside the served
+    // window, so the tail reports the loss instead of certifying the
+    // window as complete.
     expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
       text: 'frame 99%\ndone',
-      truncated: false,
+      truncated: true,
     });
   });
 
@@ -159,7 +185,19 @@ describe('readTaskOutputTail', () => {
 
     expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
       text: 'first\nthird',
-      truncated: false,
+      truncated: true,
+    });
+  });
+
+  it('flags collapsed carriage-return records as truncated', () => {
+    // Bare CR as a record separator (a tr '\n' '\r' log, a serial or
+    // device logger): the collapse keeps only the final record, so the
+    // flag must say the window is not everything the command wrote.
+    const outputFile = makeOutputFile('rec 1\rrec 2\rrec 3');
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'rec 3',
+      truncated: true,
     });
   });
 

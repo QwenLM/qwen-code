@@ -63,7 +63,10 @@ import {
   atomicWriteFile,
   atomicWriteFileSync,
 } from '../utils/atomicFileWrite.js';
-import { MAX_TASK_OUTPUT_TAIL_BYTES } from '../services/backgroundShellRegistry.js';
+import {
+  MAX_TASK_OUTPUT_TAIL_BYTES,
+  stripOutputControlChars,
+} from '../services/backgroundShellRegistry.js';
 
 const debugLogger = createDebugLogger('MONITOR');
 
@@ -79,10 +82,13 @@ const PARTIAL_LINE_BUFFER_CAP = 4096;
 // bytes, so a lost BEL releases the hold at the next newline instead of
 // swallowing every real line that follows it; a CSI still waiting for
 // its final byte; an Fe escape (charset designation et al.) waiting for
-// its final byte; a lone ESC; or an SS2/SS3/DCS/SOS/PM/APC leader.
+// its final byte; a lone ESC; an SS2/SS3 leader; or an in-flight
+// DCS/SOS/PM/APC — the whole sequence is held, not just its leader, so a
+// payload straddling chunks is stripped as one sequence instead of
+// leaking its remainder as text.
 /* eslint-disable no-control-regex */
 const TRAILING_PARTIAL_ESCAPE_REGEX =
-  /\x1b(?:\][\x20-\x7e]*|\[[\x30-\x3f]*[\x20-\x2f]*|[\x20-\x2f]*|[NOPX^_])$/;
+  /\x1b(?:\][\x20-\x7e]*|\[[\x30-\x3f]*[\x20-\x2f]*|[\x20-\x2f]*|[NO]|[PX^_][^\x07\x1b\n\r]*)$/;
 /* eslint-enable no-control-regex */
 // The extra byte preserves readTaskOutputTail's `truncated` signal after the
 // capture starts discarding older output.
@@ -575,10 +581,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
         // Release the held-back partial escape and the decoder's trailing
         // bytes so a sequence or codepoint straddling the final chunk is
         // still stripped and captured before the output file closes.
-        const tail = stripAnsi(buf.heldEscape + buf.decoder.end());
+        const rawTail = buf.heldEscape + buf.decoder.end();
         buf.heldEscape = '';
+        writeOutputCapture(stripOutputControlChars(rawTail));
+        const tail = stripAnsi(rawTail);
         if (tail.length > 0) {
-          writeOutputCapture(tail);
           buf.value += tail;
         }
         const trimmed = buf.value.trim();
@@ -677,20 +684,23 @@ class MonitorToolInvocation extends BaseToolInvocation<
       // function, so each owns a decoder (a shared one would corrupt the
       // other stream's buffered trailing bytes).
       const decoded = buffer.heldEscape + buffer.decoder.write(data);
-      // Hold back a trailing incomplete escape sequence: ansi-regex leaves
-      // a chunk-final lone ESC (or ESC + bracket) intact and the next
-      // chunk would reconstitute the whole sequence inside the capture
-      // file.
+      // Hold back a trailing incomplete escape sequence so the next chunk
+      // reconstitutes it before the stripper runs; stripping a
+      // chunk-final fragment would persist the reassembled sequence's
+      // payload as text.
       const holdMatch = TRAILING_PARTIAL_ESCAPE_REGEX.exec(decoded);
       const held =
         holdMatch !== null && holdMatch[0].length <= PARTIAL_LINE_BUFFER_CAP
           ? holdMatch[0]
           : '';
       buffer.heldEscape = held;
-      const text = stripAnsi(
-        held.length > 0 ? decoded.slice(0, -held.length) : decoded,
-      );
-      writeOutputCapture(text);
+      const stable = held.length > 0 ? decoded.slice(0, -held.length) : decoded;
+      // The capture file is plain text: it shares the served tail's own
+      // stripper so writer and reader agree on one ECMA-48 grammar.
+      // stripAnsi cannot fill that role — it matches a DCS leader `ESC P`
+      // as a complete two-byte escape and would persist the payload.
+      writeOutputCapture(stripOutputControlChars(stable));
+      const text = stripAnsi(stable);
       buffer.value += text;
 
       // Guard against unbounded partial-line accumulation. If a command emits

@@ -45,19 +45,23 @@ export const MAX_TASK_OUTPUT_TAIL_BYTES = 64 * 1024;
 // terminator. Scoped to this strip rather than the shared
 // TERMINAL_*_REGEX constants, whose banner/label consumers replace with
 // a space and pin the narrower grammar.
-// The OSC rule's newline lookahead strips an unterminated leader whole,
-// payload included, instead of leaking it as text. The Fe rule requires
-// an intermediate byte: a bare residual ESC falls to the per-character
-// backstop, which deletes only the ESC instead of eating the real byte
-// after it.
+// The OSC and string rules share one shape: BEL is a terminator and
+// outside the payload class, and the newline lookahead strips an
+// unterminated leader whole, payload included, instead of leaking it as
+// text. In the terminator group `\x1b\\` must stay first: putting the
+// lookahead ahead of it matches at the ST's own ESC and leaks the
+// backslash as text. The Fe rule requires an intermediate byte: a bare
+// residual ESC falls to the per-character backstop, which deletes only
+// the ESC instead of eating the real byte after it.
 const TAIL_OSC_REGEX =
   /\x1b\][^\x07\x1b\n\r]*(?:\x07|\x1b\\|(?=[\x1b\n\r])|$)/g;
-const TAIL_STRING_REGEX = /\x1b[PX^_][^\x1b\n\r]*(?:\x1b\\|(?=\x1b)|$)/g;
+const TAIL_STRING_REGEX =
+  /\x1b[PX^_][^\x07\x1b\n\r]*(?:\x07|\x1b\\|(?=[\x1b\n\r])|$)/g;
 const TAIL_CSI_REGEX = /\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/g;
 const TAIL_FE_ESC_REGEX = /\x1b[\x20-\x2f]+[\x30-\x7e]/g;
 /* eslint-enable no-control-regex */
 
-function stripOutputControlChars(text: string): string {
+export function stripOutputControlChars(text: string): string {
   // Whole sequences first: the per-character loop below only deletes the
   // ESC byte, so a sequence reaching it would leave its bracket,
   // parameters, and final letter behind as readable text.
@@ -90,21 +94,38 @@ function stripOutputControlChars(text: string): string {
  * only the frame after its last CR — with a fallback to the latest
  * non-empty frame so a line that ends right after a redraw's final CR
  * still shows the frame it drew.
+ *
+ * `droppedFrames` reports whether the collapse discarded any non-empty
+ * frame. A redraw stream drops frames by design, but the same collapse
+ * applied to CR-delimited records destroys whole records — nothing
+ * separates the two shapes, so the loss is reported and folded into
+ * `truncated` rather than guessed at.
  */
-function normalizeOutputCarriageReturns(text: string): string {
-  if (!text.includes('\r')) return text;
-  return text
+function normalizeOutputCarriageReturns(text: string): {
+  text: string;
+  droppedFrames: boolean;
+} {
+  if (!text.includes('\r')) return { text, droppedFrames: false };
+  let droppedFrames = false;
+  const normalized = text
     .replace(/\r\n/g, '\n')
     .split('\n')
     .map((line) => {
       if (!line.includes('\r')) return line;
       const frames = line.split('\r');
+      let kept: string | undefined;
       for (let i = frames.length - 1; i >= 0; i--) {
-        if (frames[i]!.length > 0) return frames[i]!;
+        if (frames[i]!.length === 0) continue;
+        if (kept === undefined) {
+          kept = frames[i]!;
+        } else {
+          droppedFrames = true;
+        }
       }
-      return '';
+      return kept ?? '';
     })
     .join('\n');
+  return { text: normalized, droppedFrames };
 }
 
 export type TaskOutputTailResult =
@@ -142,16 +163,17 @@ export function readTaskOutputTail(
       }
     }
 
-    const text = normalizeOutputCarriageReturns(
+    const { text, droppedFrames } = normalizeOutputCarriageReturns(
       stripOutputControlChars(
         buffer.subarray(sliceOffset, bytesRead).toString('utf8'),
       ),
-    ).trimEnd();
+    );
+    const trimmed = text.trimEnd();
 
-    if (!text) return undefined;
+    if (!trimmed) return undefined;
     return {
-      text,
-      truncated: start > 0,
+      text: trimmed,
+      truncated: start > 0 || droppedFrames,
     };
   } catch (error) {
     debugLogger.warn(`Failed to read task output tail:`, error);

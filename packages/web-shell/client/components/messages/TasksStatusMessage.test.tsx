@@ -171,7 +171,7 @@ describe('process task output', () => {
 
       expect(getTaskOutputMock).toHaveBeenCalledWith(task.id, task.kind);
       expect(container.textContent).toContain('first line\nlatest line');
-      expect(container.textContent).toContain('Showing the latest 64 KiB');
+      expect(container.textContent).toContain('Showing the latest output');
     },
   );
 

@@ -780,6 +780,42 @@ describe('MonitorTool', () => {
       });
     });
 
+    it('strips a whole DCS sequence from the capture and the served tail', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // strip-ansi matches a DCS leader `ESC P` as a complete two-byte
+      // escape, so a writer composing stripAnsi persists the payload as
+      // plain text. The capture must strip the whole sequence so the
+      // payload never reaches the served tail.
+      mockChild.stdout.emit('data', Buffer.from('\u001bPtmux;payload\u001b\\'));
+      mockChild.stdout.emit('data', Buffer.from('real line\n'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('real line\n');
+      });
+      expect(
+        readTaskOutputTail(task.outputFile, MAX_TASK_OUTPUT_TAIL_BYTES),
+      ).toEqual({ text: 'real line', truncated: false });
+    });
+
+    it('reassembles a DCS split across stdout chunks before stripping', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // The hold-back must hold an in-flight string sequence, not just a
+      // bare leader: stripping a chunk-final fragment would persist the
+      // reassembled payload's remainder as text.
+      mockChild.stdout.emit('data', Buffer.from('\u001bPtmux;pay'));
+      mockChild.stdout.emit('data', Buffer.from('load\u001b\\real line\n'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('real line\n');
+      });
+    });
+
     it('releases a held unterminated OSC leader when a newline arrives', async () => {
       const invocation = createInvocation({ command: 'tail -f app.log' });
 
@@ -787,16 +823,17 @@ describe('MonitorTool', () => {
       const task = monitorRegistry.getRunning()[0]!;
       // An OSC leader whose BEL terminator was lost (a log line cut
       // mid-escape, a child killed mid-sequence): the hold-back is bounded
-      // to printable bytes, so the real output after the leader is
-      // captured and emitted instead of swallowed waiting for a
-      // terminator that never arrives.
+      // to printable bytes, and once the following newline proves the
+      // terminator never comes the capture stripper removes the leader
+      // whole — the payload must not persist as ordinary text.
       mockChild.stdout.emit('data', Buffer.from('\u001b]0;deploy started'));
       mockChild.stdout.emit('data', Buffer.from('\nINFO build ok\n'));
       await vi.waitFor(() => {
-        expect(readFileSync(task.outputFile, 'utf8')).toContain(
-          'INFO build ok',
-        );
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('\nINFO build ok\n');
       });
+      expect(
+        readTaskOutputTail(task.outputFile, MAX_TASK_OUTPUT_TAIL_BYTES),
+      ).toEqual({ text: '\nINFO build ok', truncated: false });
       expect(task.eventCount).toBeGreaterThan(0);
       mockChild._emitClose(0);
     });
@@ -824,15 +861,15 @@ describe('MonitorTool', () => {
       const task = monitorRegistry.getRunning()[0]!;
       // An unterminated OSC longer than PARTIAL_LINE_BUFFER_CAP (4096) must
       // be written immediately rather than accumulated in memory waiting
-      // for a terminator that may never arrive.
+      // for a terminator that may never arrive. The capture stripper
+      // removes the unterminated leader whole once its BEL arrives, so
+      // only the real byte that followed it persists.
       const overlongPartial = '\u001b]' + 'a'.repeat(5000);
       mockChild.stdout.emit('data', Buffer.from(overlongPartial));
       mockChild.stdout.emit('data', Buffer.from('\u0007c\n'));
       mockChild._emitClose(0);
       await vi.waitFor(() => {
-        expect(readFileSync(task.outputFile, 'utf8')).toBe(
-          overlongPartial + '\u0007c\n',
-        );
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('c\n');
       });
     });
 
@@ -842,7 +879,8 @@ describe('MonitorTool', () => {
       await invocation.execute(new AbortController().signal);
       const task = monitorRegistry.getRunning()[0]!;
       // Ends mid-escape and mid-codepoint: both tails are released at close
-      // rather than silently dropped from the capture file.
+      // rather than silently dropped from the capture file. The dangling
+      // ESC is stripped whole; the readable bytes that followed it stay.
       const chunk = Buffer.concat([
         Buffer.from('tail \u001b['),
         Buffer.from([0xe6]),
@@ -850,9 +888,7 @@ describe('MonitorTool', () => {
       mockChild.stdout.emit('data', chunk);
       mockChild._emitClose(0);
       await vi.waitFor(() => {
-        expect(readFileSync(task.outputFile, 'utf8')).toBe(
-          'tail \u001b[\ufffd',
-        );
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('tail [\ufffd');
       });
     });
 
