@@ -467,7 +467,8 @@ describe('ProviderSetupSteps', () => {
     });
 
     const frame = lastFrame() ?? '';
-    expect(frame).toContain('Recommended models · from the provider');
+    expect(frame).toContain('Models · from the provider');
+    expect(frame).not.toContain('Other models from the provider');
     expect(frame).toContain('custom-model');
     expect(frame).toContain('MiniMax-M3');
     expect(frame).toContain('MiniMax-M4');
@@ -481,15 +482,22 @@ describe('ProviderSetupSteps', () => {
     expect(frame).toMatch(/◉\uFE0E\s+MiniMax-M3/);
     expect(frame).toMatch(/○\uFE0E\s+MiniMax-M4/);
     expect(frame).toMatch(/○\uFE0E\s+custom-model/);
-    const lines = frame.split('\n');
-    const otherHeadingLine = lines.findIndex((line) =>
-      line.includes('Other models from the provider'),
+    const modelRows = frame.split('\n');
+    expect(
+      modelRows.findIndex((line) => /◉\uFE0E\s+MiniMax-M3/.test(line)),
+    ).toBeLessThan(
+      modelRows.findIndex((line) => /○\uFE0E\s+MiniMax-M4/.test(line)),
     );
-    expect(otherHeadingLine).toBeGreaterThan(
-      lines.findIndex((line) => /◉\uFE0E\s+MiniMax-M3/.test(line)),
+    expect(
+      modelRows.findIndex((line) => /○\uFE0E\s+MiniMax-M4/.test(line)),
+    ).toBeLessThan(
+      modelRows.findIndex((line) => /○\uFE0E\s+custom-model/.test(line)),
     );
-    expect(otherHeadingLine).toBeLessThan(
-      lines.findIndex((line) => /○\uFE0E\s+MiniMax-M4/.test(line)),
+    expect(frame).toContain(
+      'Checked models are applied on submit but not copied into the input.',
+    );
+    expect(frame).toContain(
+      '↑↓/Tab to switch input, search, and models, Space to toggle models',
     );
     await act(async () => {
       pressLatestKey('x', 'x');
@@ -503,7 +511,7 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
-  it('lists provider-only models without the recommended endorsement', async () => {
+  it('lists provider-only models in the unified provider catalog', async () => {
     discoverProviderModelsMock.mockResolvedValue([
       { id: 'served-unknown-a' },
       { id: 'served-unknown-b' },
@@ -517,8 +525,8 @@ describe('ProviderSetupSteps', () => {
     await act(async () => {});
 
     const frame = lastFrame() ?? '';
-    expect(frame).not.toContain('Recommended models · from the provider');
-    expect(frame).toContain('Other models from the provider');
+    expect(frame).toContain('Models · from the provider');
+    expect(frame).not.toContain('Other models from the provider');
     expect(frame).toMatch(/○\uFE0E\s+served-unknown-a/);
     expect(frame).toMatch(/○\uFE0E\s+served-unknown-b/);
     unmount();
