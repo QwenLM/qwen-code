@@ -5136,6 +5136,58 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('does not record a stale-session removal in the current session turn navigation', async () => {
+    // A stale-session removal resolves against a foreign session, so its
+    // prompt id must never be written into the current session's
+    // turn-navigation store: recording it there would drop the current
+    // session's own turn from turn navigation. Deleting the
+    // `sessionId === undefined` guard on the `recordPromptRemoved` call makes
+    // this assertion fail.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_turn_navigation'],
+    });
+    const session = createMockSession({
+      sessionId: 'session-current',
+      clientId: 'client-current',
+      removePendingPrompt: vi.fn(async () => ({ removed: true })),
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+    let navigationStore:
+      | ReturnType<typeof useDaemonTurnNavigationStore>
+      | undefined;
+    let navigation: DaemonTurnNavigationSnapshot | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      navigationStore = useDaemonTurnNavigationStore();
+      navigation = useDaemonTurnNavigationState();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await vi.waitFor(() => expect(navigation?.mode).toBe('ready'));
+    });
+
+    const recordPromptRemoved = vi.spyOn(
+      navigationStore!,
+      'recordPromptRemoved',
+    );
+
+    await expect(
+      requireActions(actions).removePendingPrompt('pending-old', {
+        sessionId: 'session-old',
+      }),
+    ).resolves.toEqual({ removed: true });
+
+    expect(recordPromptRemoved).not.toHaveBeenCalled();
+  });
+
   it('routes mid-turn message removal through the matching session owner', async () => {
     const removeMidTurnMessage = vi.fn(async () => ({ removed: true }));
     const session = createMockSession({
@@ -10464,9 +10516,9 @@ describe('DaemonSessionProvider', () => {
       maxReconnectDelayMs: 1,
     });
 
+    let prompt: Promise<unknown> | undefined;
     await act(async () => {
-      const prompt = requireActions(actions).sendPrompt('hello');
-      void prompt.catch(() => {});
+      prompt = requireActions(actions).sendPrompt('hello');
       await flushPromises();
     });
     expect(settlements).toEqual([]);
@@ -10474,6 +10526,17 @@ describe('DaemonSessionProvider', () => {
     await act(async () => {
       resyncGate.resolve();
       await reloaded.promise;
+      await flushPromises();
+    });
+
+    // The epoch reset aborts the local binding, so the submitter's promise
+    // resolves as `cancelled` while the replayed terminal publishes a
+    // `completed` settlement. Pin the cancelled resolution so the
+    // contradiction is observable instead of silently discarded.
+    const pending = prompt;
+    if (!pending) throw new Error('prompt was not started');
+    await act(async () => {
+      await expect(pending).resolves.toEqual({ stopReason: 'cancelled' });
       await flushPromises();
     });
 
@@ -10558,9 +10621,9 @@ describe('DaemonSessionProvider', () => {
       maxReconnectDelayMs: 1,
     });
 
+    let prompt: Promise<unknown> | undefined;
     await act(async () => {
-      const prompt = requireActions(actions).sendPrompt('hello');
-      void prompt.catch(() => {});
+      prompt = requireActions(actions).sendPrompt('hello');
       await flushPromises();
     });
     expect(settlements).toEqual([]);
@@ -10568,6 +10631,16 @@ describe('DaemonSessionProvider', () => {
     await act(async () => {
       resyncGate.resolve();
       await reloaded.promise;
+      await flushPromises();
+    });
+
+    // The epoch reset aborts the local binding (promise resolves `cancelled`)
+    // while the destroyed terminal publishes a `failed` settlement. Observe
+    // the cancelled resolution so the two verdicts can't drift out of view.
+    const pending = prompt;
+    if (!pending) throw new Error('prompt was not started');
+    await act(async () => {
+      await expect(pending).resolves.toEqual({ stopReason: 'cancelled' });
       await flushPromises();
     });
 
@@ -10660,9 +10733,9 @@ describe('DaemonSessionProvider', () => {
       maxReconnectDelayMs: 1,
     });
 
+    let prompt: Promise<unknown> | undefined;
     await act(async () => {
-      const prompt = requireActions(actions).sendPrompt('hello');
-      void prompt.catch(() => {});
+      prompt = requireActions(actions).sendPrompt('hello');
       await flushPromises();
     });
     await act(async () => {
@@ -10674,6 +10747,16 @@ describe('DaemonSessionProvider', () => {
     await act(async () => {
       resyncGate.resolve();
       await reloaded.promise;
+      await flushPromises();
+    });
+
+    // `cancel()` aborts the local binding, so the submitter's promise resolves
+    // `cancelled` — matching the replayed `cancelled` settlement below. Observe
+    // the promise to keep this consistent with the resync siblings above.
+    const pending = prompt;
+    if (!pending) throw new Error('prompt was not started');
+    await act(async () => {
+      await expect(pending).resolves.toEqual({ stopReason: 'cancelled' });
       await flushPromises();
     });
 
