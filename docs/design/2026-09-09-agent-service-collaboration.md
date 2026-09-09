@@ -39,7 +39,7 @@
 | 执行会话 | 按任务隔离，可恢复；不要求每个身份永久占用进程 |
 | run / 执行尝试 | 一次有起止状态的执行；同一任务会话可以承载多次 run |
 
-外部身份用服务来源与远端 Agent ID 区分，本地 `@` 名字只是别名。服务提供方统一管理来自多个调用方的容量；调用方自己的限流不能代替它。
+外部身份用服务来源与远端 Agent ID 区分，本地 `@` 名字只是别名。服务提供方统一管理来自多个调用方的容量；调用方自己的限流不能代替它。现有调用方侧按线程树的 token 闸门不覆盖远端消耗；远端用量是否随 Task/Message 回报、是否必需，须在 P1 冻结契约时确定，否则本地预算对远端任务没有意义。
 
 不建立新的全局身份目录或一次性设计大而全 schema。第一条外部路径落实时，再增加必要的外部引用和任务关联字段；不把已有 `runtimeId` 同时当作 Host、服务地址、Agent ID 和权限。
 
@@ -101,6 +101,8 @@ flowchart TB
 
 受管 Host 的回传和工具写入，还要在权威任务存储事务内验证当前 run/attempt 和执行所有权。服务型远端只回传其有权报告的远端事实，由调用方映射，不能写本地任意 `thread_*`。不通过网络共享本地 JSON 文件。
 
+当前本地 run 帧的信任边界由三处共同维持：bridge 对所有调用方剥离 `qwen.daemon.agentRun`、只从 daemon 请求上下文重注入、mid-turn 队列仅在没有 originatorClientId 时透传。最后一条是对调用方标识的否定检查，今天成立但此前未在任何契约中声明；一条恰好带上 originatorClientId 的 daemon 内部路径会静默丢帧。外部提交的任务映射到本地 run 帧不得经过 `_meta`，P1 须为此定义独立通道。
+
 ## 5. Codex 与其他 runtime
 
 Codex 适配器放在 Codex 执行机器上，负责本地任务映射到 `thread/start`、`thread/resume`、`turn/start`、`turn/steer`、`turn/interrupt` 和事件。按实际安装版本协商支持范围，不能把 App Server 全部管理能力直接暴露给调用方。
@@ -135,6 +137,10 @@ Codex 适配器放在 Codex 执行机器上，负责本地任务映射到 `threa
 
 第一版开关在启动时解析，变更要求重启，不设计隐蔽的热切换。停用前提示有活跃本地或远端任务，需要显式排空或取消；重启关闭后保留记录但不自动续跑，不谎称远端已经停止。重新启用先核对原任务状态，不能新派一份。凭证撤销与关闭功能不是同一个操作。
 
+“不能新派一份”与现有恢复逻辑直接冲突，需要一个明确的搁浅状态。现状：dispatcher 每次 tick 对每个 `running` 的 run 询问运行时本体是否还在；本体缺席且 `attempts < 2` 就重排队再启动，这是崩溃恢复。开关关闭后 dispatcher 不跑，`running` 的 run 原样留在存储里；重开时 dispatcher 看到它、发现本体已随重启消失，就会按崩溃处理——自动重派。恢复逻辑无法区分“崩溃”与“被开关搁浅”，只靠“状态未知”标签挡不住它。决定：关闭生效时（含停用前排空未完成、daemon 异常退出的情况），把 `running` / `finishing` 的本地 run 置为独立的搁浅终态并记录原因；重开后它们出现在 UI 里等人处置——由人决定作为新 run 重派还是取消，系统不自动做。远端任务同理，但先在 P2 定义。
+
+开关关闭后恢复 `sourceType: agent` 的已有会话，决定：拒绝以协作身份恢复，按失败关闭处理，不降级为普通会话。一个顶着 Agent 名字、却没有 persona 和工具的会话，比明确拒绝更具误导性；而降级还会让“不对普通会话套用协作逻辑”这条契约在边界上变得模糊。
+
 “无影响”指可观察的原有行为与模型输入不增加协作副作用，不保证代码零改动或绝对零性能开销。源码读取不能证明该契约，需要计划中的关闭对照观测。
 
 ## 7. 当前明确的实现差距
@@ -149,6 +155,15 @@ Codex 适配器放在 Codex 执行机器上，负责本地任务映射到 `threa
 | `server.ts` 直接注册 Host enrollment/heartbeat 路由 | 关闭时不提供该入口；注册自身有认证并不等于满足实验开关 |
 | `session-dispatch-port.ts` 对非 local runtime 返回 unavailable | 保留为本地实现；新增明确的服务型接入，不将未知远端退回本地 |
 | H2 假设主端提供 persona/tool snapshot | 仅适用受管 Host；已有服务拥有自己配置，不按 H2 重建它 |
+| `config.ts` 另一处按 `sessionSourceType === 'agent'` 分支 | 与 `createToolRegistry` 同一开关，不留第二个真值来源 |
+| `acpAgent.ts` 在 `sourceType: agent` 会话创建/恢复时应用 persona | 开关关闭时拒绝以协作身份恢复（§6 决定） |
+| `Session.ts` + `agent-run-meta.ts` 从 `_meta` 建立 run 帧 | 开关关闭时不建立帧；帧缺席时六个 `thread_*` 本已拒绝，此处是双保险不是唯一防线 |
+| `bridge.ts` 剥离/重注入 `agentRun`，mid-turn 队列按 `!originatorClientId` 透传 | 机制保留并写入 §4；P1 为外部任务另定通道 |
+| `session-dispatch-port.ts` 向每个派发注入 `agentRun` | 开关关闭时 port 与 host owner 都不创建，而非创建后再拒绝 |
+| `acpAgent.ts` 以 Agent 名为会话命名 | 随会话创建被拒一并消失；不单独加开关 |
+| web-shell `App.tsx` 的 `'agents'` 面板、命令与导航 | 按 daemon capability 消费；关闭时不渲染入口，不只隐藏按钮 |
+
+以上共约十二处，为 P0 的检查表；此前只列四处不是全部。
 
 ## 8. 替代旧计划的边界与暂不做的事
 
