@@ -204,7 +204,11 @@ npm run preflight  # Full check: clean → install → format → lint → build
 
 1. **Design doc for non-trivial work** — write one in `docs/design/` if the
    change touches multiple files or involves design decisions. Skip for small
-   bugfixes.
+   bugfixes. Provide both an English `<name>.md` and a Chinese
+   `<name>.zh-CN.md` version in the same directory, following the
+   [design documentation requirements](docs/design/README.md). Add reciprocal
+   language links and keep both versions complete and synchronized in the same
+   change, including when updating an existing design.
 2. **Test plan for behavioral changes** — write an E2E test plan in
    `.qwen/e2e-tests/` when the change affects user-observable behavior. Dry-run
    against the global `qwen` CLI first to confirm the baseline.
@@ -270,6 +274,10 @@ things a reviewer of _this_ codebase must check — not general advice.
   longer applies.
 - **A missing test for changed behavior is a Suggestion, not a Critical**, unless
   the untested path is itself the defect.
+- **Check design documentation in both languages.** New or updated designs
+  must include linked English and Chinese versions with matching structure,
+  decisions, constraints, and acceptance criteria. A translation gap alone is
+  a Suggestion, not a Critical.
 
 ## GitHub Operations
 

@@ -41,6 +41,7 @@ vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
   getDaemonToken: () => 'token',
   hasReloadSurvivableDaemonToken: () => testState.tokenSurvivesReload,
+  persistDaemonToken: vi.fn(),
   removeDaemonTokenFromUrl: vi.fn(),
   waitForDaemonTokenMessage: vi.fn(),
 }));
@@ -196,7 +197,7 @@ describe('StandaloneApp', () => {
     );
     expect(
       testState.props?.webShellProps.composerToolbarAdditionalActions,
-    ).toEqual(['addMenu']);
+    ).toEqual(['addMenu', 'plan']);
     expect(testState.props?.webShellProps.environmentPanel?.items).toContain(
       'artifacts',
     );
