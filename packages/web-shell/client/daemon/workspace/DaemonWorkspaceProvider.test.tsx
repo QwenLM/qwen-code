@@ -419,6 +419,35 @@ describe('DaemonWorkspaceProvider', () => {
     },
   );
 
+  it('publishes the initial error when a cached reader retries immediately', async () => {
+    let rejectInitial!: (reason: Error) => void;
+    sdkMocks.capabilities.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => (rejectInitial = reject)),
+    );
+    let context: DaemonWorkspaceContextValue | undefined;
+    function Harness() {
+      context = useDaemonWorkspace();
+      return null;
+    }
+    await renderWithProvider(<Harness />);
+    const initialError = new Error('initial discovery failed');
+    const recovered = { workspaceCwd: '/recovered', features: [] };
+    sdkMocks.capabilities.mockResolvedValueOnce(recovered);
+    const retriedRead = context!.getCapabilities!().catch(() =>
+      context!.getCapabilities!(),
+    );
+
+    await act(async () => {
+      rejectInitial(initialError);
+      await expect(retriedRead).resolves.toBe(recovered);
+    });
+
+    expect(sdkMocks.capabilities).toHaveBeenCalledTimes(2);
+    expect(context?.status).toBe('error');
+    expect(context?.error).toBe(initialError);
+    expect(context?.capabilities).toBeUndefined();
+  });
+
   it('makes superseded refreshes resolve to the accepted successor', async () => {
     let context: DaemonWorkspaceContextValue | undefined;
     function Harness() {

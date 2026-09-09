@@ -184,12 +184,31 @@ describe('WorkspaceSessionProvider targets', () => {
       );
     });
     expect(mocks.providerMounts).toBe(0);
+    expect(container.textContent).toContain(
+      'The workspace service could not be reached.',
+    );
     const retry = Array.from(container.querySelectorAll('button')).find(
       (button) => button.textContent === 'Try again',
     );
     expect(retry).toBeDefined();
     await act(async () => retry?.click());
     expect(mocks.workspace.refreshCapabilities).toHaveBeenCalledOnce();
+  });
+
+  it('shows the reason initial session workspace discovery failed', async () => {
+    mocks.workspace = {
+      ...mocks.workspace,
+      status: 'error',
+      capabilities: undefined,
+      error: new Error('502 Daemon restarting'),
+    };
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider sessionId="session-a" webShellProps={{}} />,
+      );
+    });
+    expect(mocks.providerMounts).toBe(0);
+    expect(container.textContent).toContain('502 Daemon restarting');
   });
 
   it('keeps the app mounted when opening a standalone session from a workspace', async () => {

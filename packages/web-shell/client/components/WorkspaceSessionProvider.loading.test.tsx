@@ -80,6 +80,12 @@ it.each(
           if (capabilityAttempts === 1 && initialFailure === 'network') {
             throw new TypeError('Failed to fetch');
           }
+          if (initialFailure !== 'none' && capabilityAttempts === 2) {
+            return new Response(
+              JSON.stringify({ error: 'Retry discovery failed' }),
+              { status: 503, headers: { 'Content-Type': 'application/json' } },
+            );
+          }
           if (
             failRefresh ||
             (capabilityAttempts === 1 && initialFailure === 'http')
@@ -199,10 +205,19 @@ it.each(
       if (initialFailure !== 'none') {
         expect(loadBodies).toHaveLength(0);
         expect(observeLiveStateSupport).not.toHaveBeenCalled();
+        expect(container.textContent).toContain(
+          initialFailure === 'http' ? 'HTTP 502' : 'Failed to fetch',
+        );
         const retry = Array.from(container.querySelectorAll('button')).find(
           (button) => button.textContent === 'Try again',
         );
         expect(retry).toBeDefined();
+        await act(async () => {
+          retry!.click();
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        });
+        expect(container.textContent).toContain('Retry discovery failed');
+        expect(loadBodies).toHaveLength(0);
         await act(async () => {
           retry!.click();
           await new Promise((resolve) => setTimeout(resolve, 100));
@@ -213,7 +228,7 @@ it.each(
       });
       const transcript = container.querySelector('output');
       expect(transcript?.textContent).toBe('connected:session-a:1');
-      expect(capabilityAttempts).toBe(initialFailure === 'none' ? 1 : 2);
+      expect(capabilityAttempts).toBe(initialFailure === 'none' ? 1 : 3);
       expect(observeLiveStateSupport).toHaveBeenCalledWith(true);
       expect(observeLiveStateSupport).not.toHaveBeenCalledWith(false);
       expect(loadBodies).toHaveLength(1);
@@ -224,7 +239,7 @@ it.each(
         container.querySelector('button')!.click();
         await new Promise((resolve) => setTimeout(resolve, 100));
       });
-      expect(capabilityAttempts).toBe(initialFailure === 'none' ? 2 : 3);
+      expect(capabilityAttempts).toBe(initialFailure === 'none' ? 2 : 4);
       expect(container.querySelector('output')).toBe(transcript);
       expect(transcript?.textContent).toBe('connected:session-a:1');
       expect(loadBodies).toHaveLength(1);

@@ -1,5 +1,7 @@
 # Web Shell cold session initialization
 
+[English](web-shell-cold-session-loading.md) | [简体中文](web-shell-cold-session-loading.zh-CN.md)
+
 Opening an existing session without an explicit workspace mounted the session
 provider before workspace capabilities arrived. Publishing the primary workspace
 then changed its session context and restarted restoration. A reproduction using
@@ -14,8 +16,11 @@ session whose capabilities are already known.
 Initial discovery failures must publish the workspace error even after the
 failed promise is removed from the cache. Track the request generation so a
 late failure cannot replace a newer refresh or a different client's state.
+Cached reads do not publish workspace state and must not suppress the initial
+error when another reader immediately retries a failed request.
 The error screen's retry action performs a fresh discovery request; restoration
-starts only after that request succeeds.
+starts only after that request succeeds. Display the current error message so
+both initial and retry failures retain their diagnostic reason.
 
 Seed the session connection with those known capabilities on its first render.
 Otherwise activity consumers briefly select catalog fallback before discovering

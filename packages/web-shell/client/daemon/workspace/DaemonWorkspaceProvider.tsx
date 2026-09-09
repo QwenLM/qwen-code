@@ -76,7 +76,6 @@ export function DaemonWorkspaceProvider({
       capabilitiesGenerationRef.current++;
     }
     if (!capabilitiesPromiseRef.current) {
-      capabilitiesGenerationRef.current++;
       const promise = client.capabilities().catch((error: unknown) => {
         if (capabilitiesPromiseRef.current === promise) {
           capabilitiesPromiseRef.current = undefined;

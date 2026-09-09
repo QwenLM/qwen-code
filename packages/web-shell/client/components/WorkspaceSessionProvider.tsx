@@ -252,7 +252,9 @@ function WorkspaceSessionProviderWorkspace({
     return (
       <WorkspaceUnavailableState
         title={t('workspace.loadFailed')}
-        description={t('workspace.loadFailedDescription')}
+        description={
+          workspace.error?.message ?? t('workspace.loadFailedDescription')
+        }
         actionLabel={t('common.retry')}
         theme={webShellProps.theme}
         icon={<WifiOffIcon />}
