@@ -801,6 +801,13 @@ const PROTOCOL_ITEMS = [
     value: AuthType.USE_OPENAI,
   },
   {
+    key: AuthType.USE_OPENAI_RESPONSES,
+    title: t('OpenAI Responses'),
+    label: t('OpenAI Responses'),
+    description: t('OpenAI Responses API — streaming reasoning + tool use'),
+    value: AuthType.USE_OPENAI_RESPONSES,
+  },
+  {
     key: AuthType.USE_ANTHROPIC,
     title: t('Anthropic-compatible'),
     label: t('Anthropic-compatible'),
