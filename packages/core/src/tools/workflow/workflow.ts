@@ -71,6 +71,7 @@ import type {
   WorkflowDispatchTraceStatus,
   WorkflowTask,
 } from '../../agents/workflow-run-registry.js';
+import { buildFailureLines } from '../../agents/workflow-failure-lines.js';
 import {
   buildResumeCall,
   hasUninlinableResumeArgs,
@@ -139,14 +140,15 @@ const WORKFLOW_PARAM_SCHEMA = {
         'agent() opts: `{ label?, phase?, schema?, model?, agentType?, isolation?, workingDir?, stallMs? }`. ' +
         '`schema` (JSON Schema object): the subagent must deliver its result ' +
         'by calling `structured_output` with arguments matching the schema; ' +
-        'agent() resolves to the validated object. Two failed attempts produce ' +
-        'a terminal error "subagent completed without calling StructuredOutput ' +
-        '(after 2 in-conversation nudges)". ' +
+        'agent() resolves to the validated object. After two in-conversation ' +
+        'nudges without a valid result, it resolves to null and the failure is ' +
+        'recorded as "subagent completed without calling StructuredOutput ' +
+        '(after 2 in-conversation nudges)"; check for null. ' +
         '`agentType` (string): resolves against the declarative-agents registry ' +
         '(`.qwen/agents/<name>.md`, project then user then built-in). Unresolved ' +
-        'names throw "agent({agentType}): agent type ' +
+        'names make the admitted agent() resolve to null and record "agent({agentType}): agent type ' +
         "'X'" +
-        ' not found". ' +
+        ' not found"; check for null. ' +
         '`model` (string): per-call model override; routes provider correctly ' +
         'via the subagent runtime view. ' +
         '`isolation`: `' +
@@ -154,10 +156,11 @@ const WORKFLOW_PARAM_SCHEMA = {
         '` provisions a fresh git worktree under ' +
         '`<projectRoot>/.qwen/worktrees/agent-<7hex>`; the worktree is auto-removed ' +
         'if no changes, otherwise the path and branch are returned alongside the ' +
-        "result. `'remote'` throws \"agent({isolation:'remote'}) is not available " +
-        'in this build" (parity with upstream). isolation=worktree refuses to ' +
-        'run when the parent working tree has uncommitted changes (the subagent ' +
-        'would see a stale HEAD). ' +
+        "result. `'remote'` makes the admitted agent() resolve to null and records " +
+        '"agent({isolation:\'remote\'}) is not available in this build" ' +
+        '(parity with upstream). isolation=worktree also resolves to null and ' +
+        'records a refusal when the parent working tree has uncommitted changes ' +
+        '(the subagent would see a stale HEAD). ' +
         '`workingDir` (string): pin the subagent to an EXISTING git worktree of ' +
         'this repository that the caller owns — nothing is created and nothing ' +
         'is removed. Use it when the directory the agent must work in already ' +
@@ -183,11 +186,16 @@ const WORKFLOW_PARAM_SCHEMA = {
         `\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`) and resolves to a ` +
         'position-aligned array — a thunk that throws, or resolves to a ' +
         'non-JSON-serializable value, becomes `null` at its index ' +
-        '(errors-as-data); parallel() itself rejects only on invalid ' +
-        'arguments or abort. `pipeline(items, ...stages)` runs each item ' +
-        'through the stages (staggered, no inter-stage barrier); a stage ' +
-        'that throws, returns `null`, or returns a non-JSON-serializable ' +
-        'value drops that item to `null`. Pass ' +
+        '(errors-as-data); parallel() itself rejects on invalid arguments, ' +
+        'abort, or a run-level token/agent-cap refusal. ' +
+        '`pipeline(items, ...stages)` runs each item ' +
+        'through the stages (staggered, no inter-stage barrier); an ordinary ' +
+        'stage error, `null`, or non-JSON-serializable value drops that item ' +
+        'to `null`, while a run-level refusal rejects the batch. A bare ' +
+        'sequential `await agent()` ' +
+        'follows the same rule: an agent that fails on its own terms ' +
+        'resolves to `null` there too, so the fan-out and the sequential ' +
+        'form never disagree about what a broken agent means. Pass ' +
         'THUNKS to parallel, not eager calls: `parallel([() => agent(...)])`, ' +
         'not `parallel([agent(...)])`. At most ' +
         `${DEFAULT_MAX_AGENTS_PER_RUN} agent() calls per run ` +
@@ -654,14 +662,19 @@ function buildRunTrailer(
     lines.push(`journal: ${sanitizeLine(handle.journalPath)}`);
   }
   const entry = handle.registry?.get(handle.runId);
+  let failedCount = 0;
   if (entry) {
     const countByStatus = (status: WorkflowDispatchTraceStatus): number =>
       entry.dispatches.reduce(
         (n, dispatch) => (dispatch.status === status ? n + 1 : n),
         0,
       );
+    const respawned = entry.agentsRespawned ?? 0;
+    failedCount = countByStatus('failed');
     lines.push(
-      `agents: ${entry.dispatches.length} dispatched · ${countByStatus('completed')} completed · ${countByStatus('cached')} cached · ${countByStatus('failed')} failed · ${countByStatus('cancelled')} cancelled`,
+      `agents: ${entry.dispatches.length} dispatched` +
+        (respawned > 0 ? ` (${respawned} re-ran from a prior run)` : '') +
+        ` · ${countByStatus('completed')} completed · ${countByStatus('cached')} cached · ${failedCount} failed · ${countByStatus('cancelled')} cancelled`,
     );
   }
   const spent = handle.budget.spent();
@@ -670,6 +683,19 @@ function buildRunTrailer(
       ? `tokens: ${spent} spent (no cap)`
       : `tokens: ${spent} / ${handle.budget.total} spent`,
   );
+  // Which agents came back empty and why. A script that reads `null` for a
+  // failed agent may well return a perfectly well-formed result built from
+  // the survivors, so a run can look successful while a third of its fan-out
+  // is missing. The count on the agents line says how many; this says which.
+  const failures = entry ? buildFailureLines(entry) : [];
+  if (failures.length > 0 && entry) {
+    lines.push(
+      `failures (${failedCount}):`,
+      ...failures.map((line) =>
+        clampForDisplay(sanitizeLine(line), TRAILER_LOG_LINE_CHARS),
+      ),
+    );
+  }
   // Built by the shared resume builder, the same one the background
   // completion notification uses: this string is copied verbatim into the
   // next tool call, and a second implementation would drift on `args` —
@@ -1144,7 +1170,7 @@ Reach for one to be comprehensive (decompose the work and cover every part in pa
 
 **Runtime** — see the \`script\` parameter for the detailed authoring contract.
 
-\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. \`workflow()\` runs a saved workflow inline under this run's caps and nests one level only — a workflow reached through \`workflow()\` cannot call \`workflow()\` itself, and doing so throws. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope, lower precedence when both define the same name); \`workflow('<name>')\` resolves against those two directories, while \`scriptPath\` takes an absolute path to a script inside either of them or inside the generated-scripts root (\`$QWEN_CODE_PROJECT_DIR/workflows/generated\` — the per-project runtime dir, not the project tree — where a tool emitting a one-run script writes it; never a slash command, never resolvable by name); a path outside those roots is refused. Default \`max(2, min(16, cpus-2))\` agents in flight per run (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. Each subagent attempt is separately capped at ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS} turns (\`${WORKFLOW_SUBAGENT_MAX_TURNS_ENV}\`) and ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES} minutes (\`${WORKFLOW_SUBAGENT_MAX_MINUTES_ENV}\`) — an attempt that hits either becomes \`null\` in \`parallel()\`/\`pipeline()\`, indistinguishable from a missing agent, so raise them for legitimately long work. A per-run output-token cap may also be in effect: read \`budget.total\` (\`null\` = uncapped) before committing to a large fan-out, because once the cap is reached every further \`agent()\` call is refused — a bare sequential \`await agent()\` sees the rejection, while inside \`parallel()\`/\`pipeline()\` the refused slot becomes \`null\` and the script keeps running on partial results. Per-call \`agent({ schema, agentType, model, isolation: 'worktree', workingDir, stallMs })\` covers structured-output contracts, declarative-agent selection, model override, git-worktree-isolated subagents, pinning an agent to a caller-owned worktree, and the no-progress stall watchdog (\`stallMs: 0\` disables it). \`resumeFromRunId\` resumes a prior run — agent() calls whose rolling prefix-hash matches the journal are served from cache for the longest unchanged prefix. Every run hands back its runId, the script's path on disk (an inline script is persisted, so a resume edits that file rather than re-sending the source) and its journal path; the journal holds one result line per completed agent, so read it before diagnosing an empty or surprising result. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.
+\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. \`workflow()\` runs a saved workflow inline under this run's caps and nests one level only — a workflow reached through \`workflow()\` cannot call \`workflow()\` itself, and doing so throws. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope, lower precedence when both define the same name); \`workflow('<name>')\` resolves against those two directories, while \`scriptPath\` takes an absolute path to a script inside either of them or inside the generated-scripts root (\`$QWEN_CODE_PROJECT_DIR/workflows/generated\` — the per-project runtime dir, not the project tree — where a tool emitting a one-run script writes it; never a slash command, never resolvable by name); a path outside those roots is refused. Default \`max(2, min(16, cpus-2))\` agents in flight per run (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. Each subagent attempt is separately capped at ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS} turns (\`${WORKFLOW_SUBAGENT_MAX_TURNS_ENV}\`) and ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES} minutes (\`${WORKFLOW_SUBAGENT_MAX_MINUTES_ENV}\`) — raise them for legitimately long work. \`agent()\` resolves to \`null\` when that admitted agent fails on its own — including turn/time caps, model or setup errors, missing structured output, and exhausted stall retries — and it does so for a bare \`await agent()\` exactly as it does inside \`parallel()\`/\`pipeline()\`, so check for \`null\` wherever you read a result. Call-shape validation failures — such as an empty prompt, an unsupported option combination, or an invalid option value — reject a bare call; inside \`parallel()\`/\`pipeline()\`, the surrounding ordinary thunk or stage rejection becomes a position-aligned \`null\`. Run-level rejections no later call could survive — the token budget, the ${DEFAULT_MAX_AGENTS_PER_RUN}-agent cap, and cancellation — throw and end a \`parallel()\`/\`pipeline()\` batch. An admitted agent that fails and settles to \`null\` still counts as dispatched and is named, with its error, in the run's failures list; a \`null\` returned by an ordinary thunk or stage is not an agent dispatch. A per-run output-token cap may also be in effect: read \`budget.total\` (\`null\` = uncapped) before committing to a large fan-out, because once the cap is reached every further \`agent()\` call is refused. Per-call \`agent({ schema, agentType, model, isolation: 'worktree', workingDir, stallMs })\` covers structured-output contracts, declarative-agent selection, model override, git-worktree-isolated subagents, pinning an agent to a caller-owned worktree, and the no-progress stall watchdog (\`stallMs: 0\` disables it). \`resumeFromRunId\` resumes a prior run — agent() calls whose rolling prefix-hash matches the journal are served from cache for the longest unchanged prefix. Every run hands back its runId, the script's path on disk (an inline script is persisted, so a resume edits that file rather than re-sending the source) and its journal path; the journal holds one result line per completed agent, so read it before diagnosing an empty or surprising result. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.
 
 **Scout first, then orchestrate**
 

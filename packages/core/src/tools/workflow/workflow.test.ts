@@ -25,6 +25,7 @@ import { ToolErrorType } from '../tool-error.js';
 import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budget.js';
 import { matchesRule, parseRule } from '../../permissions/rule-parser.js';
 import { convertToFunctionResponse } from '../../core/coreToolScheduler.js';
+import { WorkflowAgentFailedError } from '../../agents/runtime/workflow-agent-failure.js';
 
 function fakeConfig(): Config {
   return {} as unknown as Config;
@@ -148,6 +149,24 @@ describe('WorkflowTool', () => {
     // path back, and resumes by re-sending the whole source.
     expect(description).toMatch(/Every run hands back its runId/);
     expect(description).toMatch(/read it before diagnosing/);
+    // The null/throw split is the contract a script is written against: a
+    // model that does not know `agent()` can resolve to `null` writes code
+    // that treats a failed agent's absence as a value.
+    expect(description).toMatch(
+      /`agent\(\)` resolves to `null` when that admitted agent fails on its own/,
+    );
+    expect(description).toMatch(/exhausted stall retries/);
+    expect(description).not.toMatch(/user stopped it/);
+    expect(description).toMatch(/Call-shape validation failures/);
+    expect(description).toMatch(
+      /Run-level rejections no later call could survive/,
+    );
+    expect(description).toMatch(
+      /named, with its error, in the run's failures list/,
+    );
+    expect(description).toMatch(
+      /a `null` returned by an ordinary thunk or stage is not an agent dispatch/,
+    );
   });
 
   // Both parameter descriptions describe the same persisted file — the one
@@ -632,6 +651,16 @@ await agent('scan package.json')
     );
     expect(scriptDescription).toContain(MAX_WORKFLOW_AGENTS_ENV);
     expect(scriptDescription).toContain(MAX_WORKFLOW_CONCURRENCY_ENV);
+    expect(scriptDescription).toContain('it resolves to null');
+    expect(scriptDescription).toContain(
+      'subagent completed without calling StructuredOutput (after 2 in-conversation nudges)',
+    );
+    expect(scriptDescription).toContain('run-level token/agent-cap refusal');
+    expect(scriptDescription).not.toContain('Unresolved names throw');
+    expect(scriptDescription).not.toContain("'remote' throws");
+    expect(scriptDescription).toContain(
+      'Unresolved names make the admitted agent() resolve to null',
+    );
     // Both halves must agree on the agent cap, whatever it is.
     expect(tool.description).toContain(
       `${DEFAULT_MAX_AGENTS_PER_RUN} agents total`,
@@ -805,7 +834,7 @@ await agent('scan package.json')
       .spyOn(WorkflowJournal.prototype, 'load')
       .mockImplementation(async () => {
         expect(registry.cancelStarting('wf_1234abcd')).toBe(true);
-        return { results: new Map(), started: new Map() };
+        return { results: new Map(), started: new Map(), failed: new Set() };
       });
 
     try {
@@ -851,7 +880,7 @@ await agent('scan package.json')
       .spyOn(WorkflowJournal.prototype, 'load')
       .mockImplementation(async () => {
         expect(registry.cancelStarting('wf_1234abcd')).toBe(true);
-        return { results: new Map(), started: new Map() };
+        return { results: new Map(), started: new Map(), failed: new Set() };
       });
 
     try {
@@ -890,7 +919,7 @@ await agent('scan package.json')
       .spyOn(WorkflowJournal.prototype, 'load')
       .mockImplementation(async () => {
         caller.abort();
-        return { results: new Map(), started: new Map() };
+        return { results: new Map(), started: new Map(), failed: new Set() };
       });
 
     try {
@@ -1780,6 +1809,33 @@ await agent('scan package.json')
       await expect(fs.stat(result.journalPath!)).resolves.toBeDefined();
     });
 
+    it('annotates the dispatched count when a resume re-runs an agent', async () => {
+      const { config } = storedConfig();
+      const first = await new WorkflowTool(config, {
+        dispatch: async () => {
+          throw new WorkflowAgentFailedError('first attempt failed', 'error');
+        },
+      })
+        .build({ script: `return await agent('one');` })
+        .execute(new AbortController().signal);
+      const runId = first.scriptPath!.match(/(wf_[0-9a-f]+)\.js$/)![1];
+
+      const resumed = await new WorkflowTool(config, {
+        dispatch: async () => 'recovered',
+      })
+        .build({
+          scriptPath: first.scriptPath,
+          resumeFromRunId: runId,
+        })
+        .execute(new AbortController().signal);
+
+      const trailer = (resumed.llmContent as Array<{ text: string }>)[1]!.text;
+      expect(trailer).toContain(
+        'agents: 1 dispatched (1 re-ran from a prior run) · 1 completed',
+      );
+      expect(trailer).not.toContain('· 1 respawned');
+    });
+
     it('omits the file lines when the config has no storage', async () => {
       const registry = new WorkflowRunRegistry();
       const config = {
@@ -1806,6 +1862,92 @@ await agent('scan package.json')
     // The failure path is where the logs matter: `returnDisplay` carries them
     // for the user, but the scheduler replaces it with `error.message` for the
     // model, so without this part the model sees the message alone.
+    // A workflow can return a perfectly well-formed result built from the
+    // agents that DID come back, so "completed" is not evidence the fan-out
+    // was whole. The failures section is what makes the gap visible.
+    it('names the failed agents in the trailer of a successful run', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async (prompt: string) => {
+          if (prompt === 'bad') {
+            throw new WorkflowAgentFailedError(
+              'Workflow subagent did not complete (terminate mode: MAX_TURNS).',
+              'max_turns',
+              'MAX_TURNS',
+            );
+          }
+          return `r:${prompt}`;
+        },
+      })
+        .build({
+          script:
+            'const out = await parallel([' +
+            "() => agent('good', { label: 'good' }), " +
+            "() => agent('bad', { label: 'flaky' })]); " +
+            'return out;',
+        })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Array<{ text: string }>;
+      // The script's own value is untouched: the failed slot is `null`.
+      expect(JSON.parse(parts[0].text)).toEqual(['r:good', null]);
+      const trailer = parts[1].text;
+      expect(trailer).toContain('1 failed');
+      expect(trailer).toContain('failures (1):');
+      expect(trailer).toContain('[flaky] Workflow subagent did not complete');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('omits the failures section when every agent came back', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'fine',
+      })
+        .build({ script: "return await agent('x');" })
+        .execute(new AbortController().signal);
+
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+      expect(trailer).not.toContain('failures (');
+      // `respawned` is a resume-only fact; a fresh run must not report a
+      // fifth outcome that is always zero.
+      expect(trailer).not.toContain('respawned');
+    });
+
+    // The contract the description states, end to end through the real
+    // sandbox: a sequential `await agent()` reads `null` for an agent that
+    // failed on its own, and the run still succeeds.
+    it('hands a sequential await agent() null instead of ending the run', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => {
+          throw new WorkflowAgentFailedError('model errored', 'error', 'ERROR');
+        },
+      })
+        .build({
+          script:
+            "const a = await agent('x'); " +
+            "return a === null ? 'agent failed' : 'agent said ' + a;",
+        })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Array<{ text: string }>;
+      expect(parts[0].text).toBe('agent failed');
+      expect(result.error).toBeUndefined();
+      expect(parts[1].text).toContain('failures (1):');
+
+      // The record actually reaches the file a resume will read. The
+      // orchestrator tests pin WHEN it is written against an in-memory
+      // journal and the journal tests pin the append itself; this is the
+      // one place both halves are exercised through a real run.
+      const lines = (await fs.readFile(result.journalPath!, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(lines.map((line) => line['type'])).toEqual(['started', 'failed']);
+      expect(lines[1]['key']).toBe(lines[0]['key']);
+      expect(lines[1]['agentId']).toBe(lines[0]['agentId']);
+    });
+
     it('carries the trailer and the last log lines on the failure path', async () => {
       const { config } = storedConfig();
       const result = await new WorkflowTool(config, {
