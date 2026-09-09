@@ -1024,18 +1024,21 @@ you need input. A plain final answer is not a thread hand-off.
 
 Eight rules:
 
-- **The binding is structural.** At the actual background-turn seam, wrap each
-  invocation in `runWithAgentRunContext({agentId, runId, threadId}, fn)`. The
-  existing resident continuation re-enters `runBackgroundTurn` and
-  `runWithAgentContext` for every turn, so a nested `AsyncLocalStorage` frame is
-  valid here. Do not wrap the lifetime launch once, and do not use a mutable
-  process-global "current run" register that can leak across async work.
+- **The binding is structural.** At the ACP session's per-prompt execution seam,
+  parse the daemon-supplied structured `agentRun` metadata and wrap the turn in
+  `runWithAgentRunContext({agentId, runId, threadId}, fn)`. The same Agent and
+  task reuse one session across later runs, so the binding must be re-entered
+  for every prompt. Do not bind once at session creation, and do not use a
+  mutable process-global "current run" register that can leak across async
+  work.
 - **Mutating tools trust only ambient identity.** Posting/status tools accept no
-  thread, author, run, or idempotency id from the model. `thread_create` always
-  creates under the current thread. They read the ambient triple, then verify it
-  still names a persisted `running` run on that thread. `thread_read` may take a
-  workspace thread id because it is read-only; its returned content is still
-  untrusted. HTTP routes derive human identity from their authenticated surface.
+  thread, author, run, or idempotency id from the model. Agent-side
+  `thread_create` always creates under the current thread and requires an
+  enabled peer assignee; the human UI may still create an unassigned thread.
+  They read the ambient triple, then verify it still names a persisted
+  `running` run on that thread. `thread_read` may take a workspace thread id
+  because it is read-only; its returned content is still untrusted. HTTP routes
+  derive human identity from their authenticated surface.
   This mirrors the production lesson behind Multica's resumed-session parent
   validation in `handler/comment.go`.
 - **Every turn includes title, body, status, and recent N posts.** The delta is

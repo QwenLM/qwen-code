@@ -27,7 +27,7 @@ Current run ids, timestamps and limitations are recorded in
 | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Persistent identities and separate sessions         | Existing leader/worker reused across tasks; leader continuation preserves its session id. A fresh no-definition Agent reproduced its durable marker and independent workspace-Agent role from the corrected live system instruction. A later task appeared as `identity-proof · Session title acceptance` in the ordinary session list. Sessions share one ACP process. |
 | Concurrent same-thread handoff and human acceptance | Clean three-run peer handoff; 8,999 ms overlapping run lifetimes; both results submitted and Chrome Mark done succeeded.                                                                           |
-| Child delegation and parent report                  | Earlier ACP demo reached done on child and parent, with manual startup retries; not a clean first-attempt run.                                                                                     |
+| Child delegation and parent report                  | Clean first-attempt ACP run: one assigned child, worker review, parent report, same-session leader continuation, and root review.                                                                   |
 | Live human input                                    | Same-run mid-turn transcript and consumed window verified; final review contains the correction. Late-drain/crash cases remain open.                                                               |
 | Initial input receipt                               | A real assigned run persisted its initial prompt, consumed the matching trigger and reached review. The transcript-before-receipt crash window remains to be force-killed.                         |
 | Cancellation                                        | Working → stopping → cancelled observed; usage retained; unresponsive-child case remains open.                                                                                                     |
@@ -191,6 +191,38 @@ closed the parent with `thread_review`. Chrome first refused parent acceptance
 with `descendants_not_done`; after the person accepted the child, both records
 were marked `done`. No new agent was created. The run also exposed the scoped
 package mention and redundant child-done wake defects recorded above.
+
+**Clean ACP-session close and delegation observation (2026-09-10).** A
+one-action run first exposed that `thread_review` made its run durably stale but
+the ACP session only honored `ToolResult.terminateTurn` for Goal turns. The
+model consequently entered later rounds and its repeated mutations were
+rejected by the ambient run guard. The session turn loop now honors the tool
+contract for every non-channel turn. Session
+`a68bd0d4-e2ad-5420-8503-ac407e4ecd8d` then ended after exactly one model round
+and one successful `thread_review`, with no later transcript entry.
+
+Two live leader attempts also omitted the optional `assignee` argument while
+trying to delegate, creating an inert child before correcting themselves.
+Agent-side `thread_create` now requires an enabled peer; human task creation
+still permits no assignee. A clean retry created exactly one child,
+`th_2c237856-918b-4a4a-a50e-d9e1abc8a06b`, assigned it to `demo-worker`, and
+closed the first leader run with `waiting`. The worker reported
+`@qwen-code/qwen-code` and `>=22.0.0` and closed with `review`. The parent report
+was persisted 52 ms after the worker run ended, and the leader continuation
+started 834 ms after that end. Both leader runs reused session
+`58fe22b4-3da5-504e-9ca6-3ce51567621e`; the worker used
+`9bdfdf83-c3ab-5e22-8c3a-de5047e936cc`. Root
+`th_bc67cbb7-fc68-4257-b27c-678e99f218b7` ended `in_review`. The live source
+daemon and Chrome supplied this evidence; no test suite, build, lint,
+typecheck, or CI was run.
+
+The same daemon then exercised human unblock on root
+`th_8a7640ba-58fb-4106-87d0-f7c7e73ad5f5`. The first run asked exactly
+`Which root file should I inspect?`, closed `blocked`, and stopped after its
+single `thread_block` call. A human reply of `package.json` booked one successor
+run, which read the file and closed `review`. Both runs used session
+`c8dcd281-8403-5499-9c52-2ede456b94cf`; the reply id appears in the successor's
+trigger and consumed sets, and no duplicate run was created.
 
 **Direct steering and concurrency observation (2026-09-07).** In thread
 `th_6c12d77c-7d8a-4cd5-a535-2030a4c06d45`, a human post made while Alice's run

@@ -181,7 +181,7 @@ abstract class CloseInvocation<
         context,
         request: this.request(),
       });
-      return ok(this.success());
+      return { ...ok(this.success()), terminateTurn: true };
     } catch (error) {
       if (error instanceof RunCloseRejectedError) {
         return failed(error.message);
@@ -356,7 +356,7 @@ export interface ThreadCreateParams {
   title: string;
   body?: string;
   acceptanceCriteria?: string;
-  assignee?: string;
+  assignee: string;
 }
 
 class ThreadCreateInvocation extends BaseToolInvocation<
@@ -404,15 +404,16 @@ class ThreadCreateInvocation extends BaseToolInvocation<
               thread.title.trim().toLowerCase() === title.toLowerCase(),
           );
           if (existing) return { child: existing, reused: true as const };
-          const assignee = this.params.assignee
-            ? findAgentByName(agents, this.params.assignee.replace(/^@/, ''))
-            : undefined;
-          if (this.params.assignee && !assignee) {
+          const assignee = findAgentByName(
+            agents,
+            this.params.assignee.replace(/^@/, ''),
+          );
+          if (!assignee) {
             throw new Error(
               `No agent named "${this.params.assignee}" in this workspace. Use one of the peers listed in your run frame.`,
             );
           }
-          if (assignee?.enabled === false) {
+          if (assignee.enabled === false) {
             throw new Error(
               `Agent "${assignee.name}" is disabled and cannot take work.`,
             );
@@ -428,16 +429,8 @@ class ThreadCreateInvocation extends BaseToolInvocation<
               : {}),
             createdBy: context.agentId,
             parentThreadId: context.threadId,
-            ...(assignee ? { assigneeAgentId: assignee.id } : {}),
+            assigneeAgentId: assignee.id,
           });
-          if (!assignee) {
-            return {
-              child: await transaction.writeThread(child),
-              booked: 0,
-              assignee: undefined,
-              reused: false as const,
-            };
-          }
           // Assignment is a structured trigger through the same admission
           // path, so it cannot bypass budgets, the queue limit, or the
           // outcome model. It is system-authored but keeps the run that
@@ -470,13 +463,11 @@ class ThreadCreateInvocation extends BaseToolInvocation<
         );
       }
       return ok(
-        created.assignee
-          ? `Created sub-thread ${created.child.id} and assigned ${mentionToken(created.assignee)}.${
-              created.booked > 0
-                ? ' Their work has been queued.'
-                : ' No run was booked — check the thread for the reason.'
-            }${shares}`
-          : `Created sub-thread ${created.child.id} with no assignee; it stays idle until someone is mentioned on it.${shares}`,
+        `Created sub-thread ${created.child.id} and assigned ${mentionToken(created.assignee)}.${
+          created.booked > 0
+            ? ' Their work has been queued.'
+            : ' No run was booked — check the thread for the reason.'
+        }${shares}`,
       );
     } catch (error) {
       return failed(error instanceof Error ? error.message : String(error));
@@ -494,10 +485,11 @@ export class ThreadCreateTool extends BaseDeclarativeTool<
     super(
       ThreadCreateTool.Name,
       'ThreadCreate',
-      'Split a sub-task out of the thread you are working on and optionally ' +
-        'assign a peer to it. The sub-thread always hangs off your current ' +
+      'Split a sub-task out of the thread you are working on and assign a ' +
+        'peer to it. The sub-thread always hangs off your current ' +
         'thread and shares its budget, so splitting work cannot mint more ' +
-        'model time.',
+        'model time. Pass assignee in this call; naming a peer in the title ' +
+        'or body does not assign them.',
       Kind.Other,
       {
         type: 'object',
@@ -521,7 +513,7 @@ export class ThreadCreateTool extends BaseDeclarativeTool<
               'Name of an enabled peer to assign, as listed in your run frame. Assigning starts them.',
           },
         },
-        required: ['title'],
+        required: ['title', 'assignee'],
         additionalProperties: false,
       },
       true,

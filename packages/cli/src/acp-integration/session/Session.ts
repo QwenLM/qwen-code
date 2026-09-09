@@ -571,8 +571,8 @@ type RunToolResult = {
   memoryWriteCandidates?: MemoryWriteCandidate[];
   /**
    * A tool in this batch asked to end the turn once its result is recorded.
-   * Mirrors `ToolResult.terminateTurn`, which today only `update_goal` sets
-   * when verification or evidence checkpointing needs a turn boundary.
+   * Mirrors `ToolResult.terminateTurn` for tools that create a durable turn
+   * boundary, such as Goal checkpoints and workspace-agent hand-offs.
    */
   terminateTurn?: boolean;
 };
@@ -6275,9 +6275,8 @@ export class Session implements SessionContext {
                     };
                   }
                   if (
-                    await this.#endGoalTurnAfterToolRun(
+                    await this.#endTurnAfterToolRun(
                       toolRun,
-                      goalTurn,
                       channelTurn,
                       responseCapture.channelDelivery !== undefined,
                     )
@@ -7339,9 +7338,8 @@ export class Session implements SessionContext {
           };
         }
         if (
-          await this.#endGoalTurnAfterToolRun(
+          await this.#endTurnAfterToolRun(
             toolRun,
-            options.goalTurn,
             options.channelTurn ?? false,
             options.responseCapture?.channelDelivery !== undefined,
           )
@@ -8038,16 +8036,11 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Ends a Goal turn whose tool batch asked for it, mirroring the interactive
-   * and headless paths.
+   * Ends a turn whose tool batch asked for it.
    *
-   * `update_goal` sets the flag when verification or evidence checkpointing
-   * needs a turn boundary. Feeding a queued proposal back to the model leaves
-   * it parked: the objective is already satisfied, so the model has nothing
-   * left to do but call the Goal tools again, and the runtime rejects every
-   * later proposal for the same turn. Observed runs looped between the two
-   * Goal tools until a human cancelled them, with the turn count never leaving
-   * zero.
+   * Goal checkpoints and workspace-agent hand-offs both make later work in
+   * the same physical model turn stale. Feeding the tool response back to the
+   * model only invites rejected calls against an already-closed run.
    *
    * The batch's own responses are preserved so the transcript keeps a
    * response for every call, but mid-turn user input is deliberately left
@@ -8058,20 +8051,15 @@ export class Session implements SessionContext {
    * their final tool-free response; ending on the tool batch would return or
    * submit an empty response because only a tool-free response is committed
    * as the channel final.
-   *
-   * Returns false outside a Goal turn, where nothing sets the flag today and
-   * a turn has no verification boundary to reach.
    */
-  async #endGoalTurnAfterToolRun(
+  async #endTurnAfterToolRun(
     toolRun: RunToolResult,
-    goalTurn: AcpGoalTurn | undefined,
     channelTurn: boolean,
     hasChannelDelivery: boolean,
   ): Promise<boolean> {
     // Loop protection keeps its own stop path, with the telemetry and the
     // context message that go with it, so it wins a batch that trips both.
     if (
-      !goalTurn ||
       toolRun.terminateTurn !== true ||
       toolRun.loopDetected ||
       channelTurn ||
