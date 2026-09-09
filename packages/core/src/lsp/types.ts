@@ -587,6 +587,12 @@ export interface LspProcessDiagnostics {
   exitSignal?: string | null;
 }
 
+export type LspTextDocumentSync =
+  | 0
+  | 1
+  | 2
+  | { openClose?: boolean; change?: 0 | 1 | 2 };
+
 /**
  * Handle for managing an LSP server instance.
  */
@@ -597,6 +603,8 @@ export interface LspServerHandle {
   status: LspServerStatus;
   /** Active connection to the server */
   connection?: LspConnectionInterface;
+  /** Synchronization capability from this connection's initialize response. */
+  textDocumentSync?: LspTextDocumentSync;
   /** Server process (for stdio transport) */
   process?: ChildProcess;
   /** Error that caused failure */

@@ -34,7 +34,7 @@ import {
 } from './constants.js';
 import { LspConfigLoader } from './LspConfigLoader.js';
 import { LspResponseNormalizer } from './LspResponseNormalizer.js';
-import { LspServerManager } from './LspServerManager.js';
+import { LspServerManager } from './lsp-server-manager.js';
 import type {
   LspConnectionInterface,
   LspServerHandle,
@@ -87,7 +87,10 @@ export class NativeLspService {
   private configLoader: LspConfigLoader;
   private serverManager: LspServerManager;
   private normalizer: LspResponseNormalizer;
-  private openedDocuments = new Map<string, Set<string>>();
+  private openedDocuments = new Map<
+    string,
+    Map<string, { text: string; version: number }>
+  >();
   private lastConnections = new Map<string, LspConnectionInterface>();
   private reinitializeQueue: Promise<unknown> = Promise.resolve();
   private reinitializeAbortController: AbortController | undefined;
@@ -303,7 +306,7 @@ export class NativeLspService {
     for (const name of serverNames) {
       const documents = this.openedDocuments.get(name);
       if (documents) {
-        snapshots.set(name, new Set(documents));
+        snapshots.set(name, new Set(documents.keys()));
       }
     }
     return snapshots;
@@ -333,7 +336,7 @@ export class NativeLspService {
       for (const uri of documents) {
         this.throwIfReinitializeAborted(signal);
         try {
-          openedAny = this.sendDocumentOpen(name, handle, uri) || openedAny;
+          openedAny = this.synchronizeDocument(name, handle, uri) || openedAny;
         } catch (error) {
           debugLogger.warn(
             `Failed to replay document ${uri} for LSP server ${name}:`,
@@ -473,107 +476,106 @@ export class NativeLspService {
     );
   }
 
-  /**
-   * Ensure a document is open on the given LSP server. Sends textDocument/didOpen
-   * if not already tracked, then waits for the server to process the file before
-   * returning. This delay prevents empty results when the server hasn't analyzed
-   * the file yet.
-   *
-   * @param serverName - The name of the LSP server
-   * @param handle - The server handle with an active connection
-   * @param uri - The document URI to open
-   * @returns true if a new didOpen was sent; false if already open or failed
-   */
-  private async ensureDocumentOpen(
+  /** Synchronize disk text before a query; only a new didOpen needs warmup delay. */
+  private async ensureDocumentSynchronized(
     serverName: string,
     handle: LspServerHandle & { connection: LspConnectionInterface },
     uri: string,
   ): Promise<boolean> {
-    const lastConnection = this.lastConnections.get(serverName);
-    if (lastConnection && lastConnection !== handle.connection) {
-      this.openedDocuments.delete(serverName);
+    const justOpened = this.synchronizeDocument(serverName, handle, uri);
+    if (justOpened) {
+      // Preserve the indexing delay for servers that cannot answer immediately.
+      await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
     }
-
-    if (!this.sendDocumentOpen(serverName, handle, uri)) {
-      return false;
-    }
-
-    // Wait for the LSP server to process the newly opened document.
-    // Without this delay, requests sent immediately after didOpen may return
-    // empty results because the server hasn't finished analyzing the file.
-    await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
-
-    return true;
+    return justOpened;
   }
 
-  private sendDocumentOpen(
+  private synchronizeDocument(
     serverName: string,
     handle: LspServerHandle & { connection: LspConnectionInterface },
     uri: string,
+    languageId?: string,
   ): boolean {
     if (!uri.startsWith('file://')) {
       return false;
     }
-
-    const openedForServer = this.openedDocuments.get(serverName);
-    if (openedForServer?.has(uri)) {
-      return false;
-    }
-
-    let filePath: string;
-    try {
-      filePath = fileURLToPath(uri);
-    } catch (error) {
-      debugLogger.warn(`Failed to resolve file path for ${uri}:`, error);
-      return false;
-    }
-
-    let text: string;
-    try {
-      text = fs.readFileSync(filePath, 'utf-8');
-    } catch (error) {
-      debugLogger.warn(
-        `Failed to read file for LSP didOpen: ${filePath}`,
-        error,
+    if (
+      !handle.connection ||
+      this.serverManager.getHandles().get(serverName) !== handle
+    ) {
+      throw new Error(
+        `LSP server ${serverName} connection is no longer active`,
       );
+    }
+    if (this.lastConnections.get(serverName) !== handle.connection) {
+      this.openedDocuments.delete(serverName);
+    }
+
+    // Read failures must reach the query's catch, not permit a stale request.
+    const filePath = fileURLToPath(uri);
+    const text = fs.readFileSync(filePath, 'utf-8');
+    const documents =
+      this.openedDocuments.get(serverName) ??
+      new Map<string, { text: string; version: number }>();
+    const previous = documents.get(uri);
+    if (previous?.text === text) {
       return false;
     }
 
-    const languageId = this.resolveLanguageId(filePath, handle) ?? 'plaintext';
-
-    handle.connection.send({
-      jsonrpc: '2.0',
-      method: 'textDocument/didOpen',
-      params: {
-        textDocument: {
-          uri,
-          languageId,
-          version: 1,
-          text,
+    const sync = handle.textDocumentSync;
+    const change = typeof sync === 'number' ? sync : (sync?.change ?? 0);
+    const openClose =
+      typeof sync === 'number' ? sync !== 0 : (sync?.openClose ?? false);
+    const version = previous ? previous.version + 1 : 1;
+    if (!previous && openClose) {
+      handle.connection.send({
+        jsonrpc: '2.0',
+        method: 'textDocument/didOpen',
+        params: {
+          textDocument: {
+            uri,
+            languageId:
+              languageId ??
+              this.resolveLanguageId(filePath, handle) ??
+              'plaintext',
+            version,
+            text,
+          },
         },
-      },
-    });
-
+      });
+    } else if (previous) {
+      if (change !== 1 && change !== 2) {
+        throw new Error(
+          `LSP server ${serverName} cannot synchronize changed document ${uri}: textDocumentSync.change is None or absent`,
+        );
+      }
+      const contentChange: { text: string; range?: LspRange } = { text };
+      if (change === 2) {
+        // Whole-range replacement still sends all text; use a minimal diff only
+        // if large-file measurements justify it. LSP defaults to UTF-16: JS
+        // length counts code units, and CRLF is one newline.
+        const lines = previous.text.split(/\r\n|\r|\n/);
+        contentChange.range = {
+          start: { line: 0, character: 0 },
+          end: {
+            line: lines.length - 1,
+            character: lines[lines.length - 1]!.length,
+          },
+        };
+      }
+      handle.connection.send({
+        jsonrpc: '2.0',
+        method: 'textDocument/didChange',
+        params: {
+          textDocument: { uri, version },
+          contentChanges: [contentChange],
+        },
+      });
+    }
+    documents.set(uri, { text, version });
+    this.openedDocuments.set(serverName, documents);
     this.lastConnections.set(serverName, handle.connection);
-    const nextOpened = openedForServer ?? new Set<string>();
-    nextOpened.add(uri);
-    this.openedDocuments.set(serverName, nextOpened);
-
-    return true;
-  }
-
-  /**
-   * Register a URI that was opened externally (e.g. by warmupTypescriptServer)
-   * so that ensureDocumentOpen does not send a duplicate textDocument/didOpen.
-   *
-   * @param serverName - The name of the LSP server
-   * @param uri - The document URI to track as already opened
-   */
-  private trackExternallyOpenedDocument(serverName: string, uri: string): void {
-    const openedForServer =
-      this.openedDocuments.get(serverName) ?? new Set<string>();
-    openedForServer.add(uri);
-    this.openedDocuments.set(serverName, openedForServer);
+    return !previous && openClose;
   }
 
   private resolveLanguageId(
@@ -599,7 +601,11 @@ export class NativeLspService {
       return false;
     }
     const openedForServer = this.openedDocuments.get(serverName);
-    if (openedForServer && openedForServer.size > 0) {
+    if (
+      this.lastConnections.get(serverName) === handle.connection &&
+      openedForServer &&
+      openedForServer.size > 0
+    ) {
       return true;
     }
 
@@ -609,7 +615,7 @@ export class NativeLspService {
     }
 
     const uri = pathToFileURL(filePath).toString();
-    const didOpen = await this.ensureDocumentOpen(
+    const didOpen = await this.ensureDocumentSynchronized(
       serverName,
       handle as LspServerHandle & { connection: LspConnectionInterface },
       uri,
@@ -719,13 +725,19 @@ export class NativeLspService {
     handle: LspServerHandle,
     force = false,
   ): Promise<void> {
-    const warmupUri = await this.serverManager.warmupTypescriptServer(
+    if (!handle.connection) {
+      return;
+    }
+    const connectedHandle = handle as LspServerHandle & {
+      connection: LspConnectionInterface;
+    };
+    await this.serverManager.warmupTypescriptServer(
       handle,
+      (uri, languageId) => {
+        this.synchronizeDocument(serverName, connectedHandle, uri, languageId);
+      },
       force,
     );
-    if (warmupUri) {
-      this.trackExternallyOpenedDocument(serverName, warmupUri);
-    }
   }
 
   /**
@@ -845,12 +857,12 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        const justOpened = await this.ensureDocumentOpen(
+        await this.warmupAndTrack(name, handle);
+        const justOpened = await this.ensureDocumentSynchronized(
           name,
           handle,
           location.uri,
         );
-        await this.warmupAndTrack(name, handle);
 
         let response = await handle.connection.request(
           'textDocument/definition',
@@ -915,12 +927,12 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        const justOpened = await this.ensureDocumentOpen(
+        await this.warmupAndTrack(name, handle);
+        const justOpened = await this.ensureDocumentSynchronized(
           name,
           handle,
           location.uri,
         );
-        await this.warmupAndTrack(name, handle);
 
         let response = await handle.connection.request(
           'textDocument/references',
@@ -980,12 +992,12 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        const justOpened = await this.ensureDocumentOpen(
+        await this.warmupAndTrack(name, handle);
+        const justOpened = await this.ensureDocumentSynchronized(
           name,
           handle,
           location.uri,
         );
-        await this.warmupAndTrack(name, handle);
 
         let response = await handle.connection.request(
           'textDocument/hover',
@@ -1028,8 +1040,12 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        const justOpened = await this.ensureDocumentOpen(name, handle, uri);
         await this.warmupAndTrack(name, handle);
+        const justOpened = await this.ensureDocumentSynchronized(
+          name,
+          handle,
+          uri,
+        );
 
         let response = await handle.connection.request(
           'textDocument/documentSymbol',
@@ -1107,12 +1123,12 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        const justOpened = await this.ensureDocumentOpen(
+        await this.warmupAndTrack(name, handle);
+        const justOpened = await this.ensureDocumentSynchronized(
           name,
           handle,
           location.uri,
         );
-        await this.warmupAndTrack(name, handle);
 
         let response = await handle.connection.request(
           'textDocument/implementation',
@@ -1178,12 +1194,12 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        const justOpened = await this.ensureDocumentOpen(
+        await this.warmupAndTrack(name, handle);
+        const justOpened = await this.ensureDocumentSynchronized(
           name,
           handle,
           location.uri,
         );
-        await this.warmupAndTrack(name, handle);
 
         let response = await handle.connection.request(
           'textDocument/prepareCallHierarchy',
@@ -1247,6 +1263,7 @@ export class NativeLspService {
     for (const [name, handle] of handles) {
       try {
         await this.warmupAndTrack(name, handle);
+        await this.ensureDocumentSynchronized(name, handle, item.uri);
         const response = await handle.connection.request(
           'callHierarchy/incomingCalls',
           {
@@ -1294,6 +1311,7 @@ export class NativeLspService {
     for (const [name, handle] of handles) {
       try {
         await this.warmupAndTrack(name, handle);
+        await this.ensureDocumentSynchronized(name, handle, item.uri);
         const response = await handle.connection.request(
           'callHierarchy/outgoingCalls',
           {
@@ -1338,10 +1356,11 @@ export class NativeLspService {
     const allDiagnostics: LspDiagnostic[] = [];
 
     for (const [name, handle] of handles) {
-      try {
-        await this.ensureDocumentOpen(name, handle, uri);
-        await this.warmupAndTrack(name, handle);
+      // A sync failure must reject, not report incomplete diagnostics as clean.
+      await this.warmupAndTrack(name, handle);
+      await this.ensureDocumentSynchronized(name, handle, uri);
 
+      try {
         // Request pull diagnostics if the server supports it
         const response = await handle.connection.request(
           'textDocument/diagnostic',
@@ -1444,8 +1463,8 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        await this.ensureDocumentOpen(name, handle, uri);
         await this.warmupAndTrack(name, handle);
+        await this.ensureDocumentSynchronized(name, handle, uri);
 
         // Convert context diagnostics to LSP format
         const lspDiagnostics = context.diagnostics.map((d: LspDiagnostic) =>

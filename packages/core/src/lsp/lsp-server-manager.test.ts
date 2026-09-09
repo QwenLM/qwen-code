@@ -11,12 +11,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config as CoreConfig } from '../config/config.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
-import { LspServerManager } from './LspServerManager.js';
+import { LspServerManager } from './lsp-server-manager.js';
 import { LspConnectionFactory } from './LspConnectionFactory.js';
 import type {
   LspConnectionInterface,
   LspConnectionResult,
   LspServerConfig,
+  LspTextDocumentSync,
 } from './types.js';
 
 const debugLoggerMock = vi.hoisted(() => ({
@@ -106,6 +107,50 @@ describe('LspServerManager', () => {
   afterEach(() => {
     vi.useRealTimers();
   });
+
+  it.each<LspTextDocumentSync | undefined>([
+    0,
+    1,
+    2,
+    undefined,
+    { openClose: true, change: 2 },
+    { openClose: false, change: 0 },
+  ])(
+    'retains initialize textDocumentSync %j on the ready handle',
+    async (textDocumentSync) => {
+      const manager = createTrustedManager();
+      const connection = createMockConnection({
+        initialize: vi.fn(async () => ({ capabilities: { textDocumentSync } })),
+      });
+      const createSocket = vi
+        .spyOn(LspConnectionFactory, 'createSocketConnection')
+        .mockResolvedValue({ connection } as Awaited<
+          ReturnType<typeof LspConnectionFactory.createSocketConnection>
+        >);
+      try {
+        manager.setServerConfigs([
+          {
+            ...serverConfig,
+            command: undefined,
+            transport: 'socket',
+            socket: { port: 1234 },
+          },
+        ]);
+        await manager.startAll();
+        expect(manager.getHandles().get('clangd')).toMatchObject({
+          status: 'READY',
+          textDocumentSync,
+        });
+        expect(connection.initialize).toHaveBeenCalledOnce();
+        expect(connection.send).toHaveBeenCalledWith(
+          expect.objectContaining({ method: 'initialized' }),
+        );
+      } finally {
+        await manager.stopAll();
+        createSocket.mockRestore();
+      }
+    },
+  );
 
   describe('reconcileServerConfigs', () => {
     it('starts added servers', async () => {
