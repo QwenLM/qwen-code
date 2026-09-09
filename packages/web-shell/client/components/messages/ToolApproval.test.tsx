@@ -73,6 +73,8 @@ function rerender(
   planTodos?: readonly TodoItem[],
   language: WebShellLanguage = 'en',
   generateContent?: SessionContentGenerator,
+  planExecutionMode?: string,
+  disabled?: boolean,
 ): void {
   act(() =>
     root!.render(
@@ -83,6 +85,8 @@ function rerender(
           keyboardActive={keyboardActive}
           planTodos={planTodos}
           generateContent={generateContent}
+          planExecutionMode={planExecutionMode}
+          disabled={disabled}
         />
       </I18nProvider>,
     ),
@@ -95,11 +99,21 @@ function render(
   planTodos?: readonly TodoItem[],
   language: WebShellLanguage = 'en',
   generateContent?: SessionContentGenerator,
+  planExecutionMode?: string,
+  disabled?: boolean,
 ): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  rerender(keyboardActive, req, planTodos, language, generateContent);
+  rerender(
+    keyboardActive,
+    req,
+    planTodos,
+    language,
+    generateContent,
+    planExecutionMode,
+    disabled,
+  );
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -315,6 +329,69 @@ describe('ToolApproval accessibility', () => {
     rerender(undefined, request, undefined, 'zh-CN');
     expect(container!.textContent).toContain('是否继续？');
     expect(container!.textContent).not.toContain('确认计划并开始协作？');
+  });
+
+  it('blocks plan handoff clicks and shortcuts while disabled, then allows confirmation', () => {
+    render(undefined, request, undefined, 'en', undefined, undefined, true);
+    act(() => optionButtons()[1].click());
+    pressKey(container!.querySelector('[role="alertdialog"]')!, '2');
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(optionButtons().every((button) => button.disabled)).toBe(true);
+    rerender(undefined, request, undefined, 'en', undefined, undefined, false);
+    act(() => optionButtons()[1].click());
+    expect(onConfirm).toHaveBeenCalledWith(request.id, 'proceed');
+  });
+
+  it('re-arms a plan handoff after the parent rejects a same-tick busy confirmation', async () => {
+    onConfirm.mockRejectedValueOnce(
+      new Error('Approval mode is still pending'),
+    );
+    render();
+    await act(async () => optionButtons()[1].click());
+    act(() => optionButtons()[1].click());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses the latest execution permission without automatically approving the plan', () => {
+    const req: PermissionRequest = {
+      ...planRequest,
+      options: [
+        { id: 'restore_previous', label: 'Restore YOLO', kind: 'allow_once' },
+        { id: 'proceed_always', label: 'Auto edits', kind: 'allow_always' },
+        { id: 'proceed_once', label: 'Default', kind: 'allow_once' },
+        { id: 'cancel', label: 'Cancel', kind: 'reject_once' },
+      ],
+    };
+    render(undefined, req, undefined, 'en', undefined, 'yolo');
+    expect(optionLabels()).toEqual([
+      'Continue planning',
+      'Approve and execute · Full Access',
+    ]);
+    rerender(undefined, req, undefined, 'en', undefined, 'default');
+    expect(optionLabels()).toEqual([
+      'Continue planning',
+      'Approve and execute · Ask Approval',
+    ]);
+    expect(onConfirm).not.toHaveBeenCalled();
+    act(() => optionButtons()[1].click());
+    expect(onConfirm).toHaveBeenCalledWith(req.id, 'restore_previous');
+  });
+
+  it('does not invent a plan approval option missing from the server request', () => {
+    render(undefined, planRequest, undefined, 'en', undefined, 'yolo');
+    expect(optionButtons().map((button) => button.dataset.optionId)).toEqual([
+      'reject',
+    ]);
+    act(() => optionButtons()[0].click());
+    expect(onConfirm).toHaveBeenCalledWith(planRequest.id, 'reject');
+  });
+
+  it('keeps ordinary tool permissions unchanged when a plan execution mode is supplied', () => {
+    render(undefined, request, undefined, 'en', undefined, 'yolo');
+    expect(optionButtons().map((button) => button.dataset.optionId)).toEqual([
+      'reject',
+      'proceed',
+    ]);
   });
 
   it('keeps restore_previous distinct from confirm in a Workflow approval', () => {
