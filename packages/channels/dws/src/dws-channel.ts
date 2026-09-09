@@ -65,6 +65,7 @@ const TODO_CHAT_PREFIX = 'todo:';
 const IM_DELIVERY_RETRY_BASE_MS = 5_000;
 const IM_DELIVERY_RETRY_MAX_MS = 5 * 60_000;
 const IM_DELIVERY_MAX_ATTEMPTS = 16;
+const IM_DELIVERY_MAX_LOCAL_DEFERRALS = 32;
 const MAX_PENDING_IM_DELIVERIES = 100;
 const MAX_IM_DELIVERY_CONTENT_CHARS = 12_000;
 const IM_DELIVERY_TRUNCATION_NOTICE =
@@ -123,6 +124,7 @@ interface PersistedImDelivery {
   directTarget?: Extract<DwsImTarget, { kind: 'direct' }>;
   isGroup?: boolean;
   attempts: number;
+  localDeferrals?: number;
   nextRetryAt: number;
 }
 
@@ -414,6 +416,9 @@ function isPersistedImDelivery(value: unknown): value is PersistedImDelivery {
     (delivery.isGroup === undefined || typeof delivery.isGroup === 'boolean') &&
     Number.isSafeInteger(delivery.attempts) &&
     delivery.attempts >= 0 &&
+    (delivery.localDeferrals === undefined ||
+      (Number.isSafeInteger(delivery.localDeferrals) &&
+        delivery.localDeferrals >= 0)) &&
     Number.isSafeInteger(delivery.nextRetryAt) &&
     delivery.nextRetryAt >= 0
   );
@@ -1300,7 +1305,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       return;
     }
     if (!this.connected) {
-      this.deferImDelivery(delivery, new Error('channel disconnected'));
+      this.deferImDelivery(
+        delivery,
+        new Error('channel disconnected'),
+        'local',
+      );
       return;
     }
     const authorization = this.imDeliveryAuthorization(delivery);
@@ -1308,6 +1317,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.deferImDelivery(
         delivery,
         new Error('stored pairing approval could not be confirmed'),
+        'local',
       );
       return;
     }
@@ -1404,9 +1414,13 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     return this.config.senderPolicy === 'pairing' ? 'unknown' : 'denied';
   }
 
-  private deferImDelivery(delivery: PersistedImDelivery, error: unknown): void {
+  private deferImDelivery(
+    delivery: PersistedImDelivery,
+    error: unknown,
+    retryKind: 'delivery' | 'local' = 'delivery',
+  ): void {
     if (!(this.cursor.pendingImDeliveries ?? []).includes(delivery)) return;
-    const delay = this.scheduleImDeliveryRetry(delivery);
+    const delay = this.scheduleImDeliveryRetry(delivery, retryKind);
     try {
       this.saveCursor();
     } catch (saveError) {
@@ -1415,8 +1429,20 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       );
     }
     if (delay === undefined) {
+      if (retryKind === 'local') {
+        process.stderr.write(
+          `[Channel:${this.name}] abandoning a completed DWS IM reply after ${delivery.localDeferrals} consecutive local deferrals without reaching transport; ${imDeliveryLogContext(delivery)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+        );
+        return;
+      }
       process.stderr.write(
         `[Channel:${this.name}] abandoning a completed DWS IM reply after ${delivery.attempts} failed delivery attempts; ${imDeliveryLogContext(delivery)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+      );
+      return;
+    }
+    if (retryKind === 'local') {
+      process.stderr.write(
+        `[Channel:${this.name}] DWS IM delivery is locally deferred; retrying the pre-send check in ${delay}ms without consuming the delivery-attempt budget; ${imDeliveryLogContext(delivery)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
       );
       return;
     }
@@ -1427,16 +1453,25 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
 
   private scheduleImDeliveryRetry(
     delivery: PersistedImDelivery,
+    retryKind: 'delivery' | 'local' = 'delivery',
   ): number | undefined {
-    delivery.attempts += 1;
-    if (delivery.attempts >= IM_DELIVERY_MAX_ATTEMPTS) {
+    const retryCount =
+      retryKind === 'local'
+        ? (delivery.localDeferrals = (delivery.localDeferrals ?? 0) + 1)
+        : (delivery.attempts += 1);
+    if (retryKind === 'delivery') delivery.localDeferrals = 0;
+    const maxRetries =
+      retryKind === 'local'
+        ? IM_DELIVERY_MAX_LOCAL_DEFERRALS
+        : IM_DELIVERY_MAX_ATTEMPTS;
+    if (retryCount >= maxRetries) {
       this.cursor.pendingImDeliveries = (
         this.cursor.pendingImDeliveries ?? []
       ).filter((pending) => pending !== delivery);
       return undefined;
     }
     const delay = Math.min(
-      IM_DELIVERY_RETRY_BASE_MS * 2 ** Math.min(delivery.attempts - 1, 16),
+      IM_DELIVERY_RETRY_BASE_MS * 2 ** Math.min(retryCount - 1, 16),
       IM_DELIVERY_RETRY_MAX_MS,
     );
     delivery.nextRetryAt = Date.now() + delay;

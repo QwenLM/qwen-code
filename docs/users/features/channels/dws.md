@@ -85,11 +85,11 @@ When a message quotes another DingTalk message, the quoted text is included as r
 
 `startReaction` is the emoji character or DingTalk reaction name added while an accepted task is running; an omitted or empty value uses the default `🤔`. `endReaction` replaces it after the task completes, fails, or is cancelled; an omitted or empty value disables the end reaction.
 
-### Reply Delivery
+### IM Reply Delivery
 
-A completed reply is checkpointed before its first send and retried in the background without rerunning the task. The backoff starts at five seconds, doubles, and caps at five minutes. A reply is abandoned after 16 failed delivery attempts, and is dropped immediately when its sender, group, or direct-message authorization is definitively revoked. These drops are reported on channel stderr, not sent as chat notifications.
+A completed group @ or direct-message reply is checkpointed before its first send and retried in the background without rerunning the task. The backoff starts at five seconds, doubles, and caps at five minutes. A reply is abandoned after 16 failed delivery attempts. Local deferrals caused by a disconnected channel or an unreadable pairing approval use a separate limit of 32 consecutive checks, so they do not consume the transport-attempt budget. A reply is dropped immediately when its sender, group, or direct-message authorization is definitively revoked. The queue holds up to 100 replies and evicts the oldest entry regardless of its attempt count when full; switching the configured DWS profile clears the queue. These drops are reported on channel stderr, not sent as chat notifications.
 
-Replies longer than 12,000 code points are truncated, with `[Response truncated for DWS delivery.]` appended to the message the recipient sees. The end reaction marks task completion, not reply delivery, so a retried reply can arrive after that reaction appears.
+Queued IM replies longer than 12,000 code points are truncated, with `[Response truncated for DWS delivery.]` appended to the message the recipient sees. Document-comment and native-todo comment replies do not use this queued retry or truncation path: each turn makes one comment-send call, unknown outcomes are swallowed, and definitive failures propagate to the existing inbound-turn retry policy. The end reaction marks task completion, not reply delivery, so a retried IM reply can arrive after that reaction appears.
 
 ## Document Mentions
 

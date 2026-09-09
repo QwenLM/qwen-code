@@ -8795,12 +8795,26 @@ describe('DwsChannel', () => {
       expect(bridge.prompt).toHaveBeenCalledOnce();
       expect(channel.pendingImDeliveries()).toHaveLength(1);
 
-      approval.mockReturnValueOnce(false).mockReturnValue(true);
-      vi.advanceTimersByTime(5_000);
-      await channel.poll();
+      approval.mockReturnValue(false);
+      for (let deferral = 1; deferral <= 17; deferral += 1) {
+        const [delivery] = channel.pendingImDeliveries() as Array<{
+          attempts: number;
+          localDeferrals?: number;
+          nextRetryAt: number;
+        }>;
+        vi.setSystemTime(delivery!.nextRetryAt);
+        await channel.poll();
+        expect(channel.pendingImDeliveries()).toEqual([
+          expect.objectContaining({
+            attempts: 1,
+            localDeferrals: deferral,
+          }),
+        ]);
+      }
       expect(client.replyToImMessage).toHaveBeenCalledOnce();
       expect(channel.pendingImDeliveries()).toHaveLength(1);
 
+      approval.mockReturnValue(true);
       const retryAt = (
         channel.pendingImDeliveries()[0] as { nextRetryAt: number }
       ).nextRetryAt;
@@ -8810,6 +8824,126 @@ describe('DwsChannel', () => {
       expect(channel.pendingImDeliveries()).toEqual([]);
     } finally {
       approval.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds local IM delivery deferrals separately from delivery attempts', async () => {
+    vi.useFakeTimers();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const approval = vi.spyOn(PairingStore.prototype, 'isGroupApproved');
+    try {
+      vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
+      const name = 'bounded-group-approval-deferral-dws';
+      const config = makeConfig({ groupPolicy: 'pairing' });
+      const client = new FakeDwsClient();
+      const { channel } = await readyPolicyChannel(client, config, name);
+      await client.emit(
+        0,
+        message('user_im_message_receive_at', 'pair-group', 'pair this group'),
+      );
+      const code = client.sendImMessage.mock.calls[0]?.[1]?.match(
+        /pairing code is: ([A-Z0-9]+)/u,
+      )?.[1];
+      expect(code).toBeDefined();
+      expect(new PairingStore(name, config.cwd).approve(code!)).not.toBeNull();
+      client.sendImMessage.mockClear();
+      client.replyToImMessage.mockRejectedValueOnce(
+        new DwsCommandError('rate limited', 'unknown'),
+      );
+      await client.emit(
+        0,
+        message('user_im_message_receive_at', 'bounded-reply', 'review this'),
+      );
+
+      approval.mockReturnValue(false);
+      for (let deferral = 1; deferral <= 32; deferral += 1) {
+        const [delivery] = channel.pendingImDeliveries() as Array<{
+          nextRetryAt: number;
+        }>;
+        vi.setSystemTime(delivery!.nextRetryAt);
+        await channel.poll();
+      }
+
+      expect(client.replyToImMessage).toHaveBeenCalledOnce();
+      expect(channel.pendingImDeliveries()).toEqual([]);
+      expect(
+        stderr.mock.calls.some(([text]) =>
+          String(text).includes(
+            'after 32 consecutive local deferrals without reaching transport',
+          ),
+        ),
+      ).toBe(true);
+    } finally {
+      approval.mockRestore();
+      stderr.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('persists disconnected delivery deferrals without spending delivery attempts', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
+      const name = 'disconnected-im-delivery-deferral-dws';
+      const client = new FakeDwsClient();
+      client.replyToImMessage.mockRejectedValueOnce(
+        new DwsCommandError('rate limited', 'unknown'),
+      );
+      const first = await readyPolicyChannel(client, makeConfig(), name);
+      await client.emit(
+        0,
+        message('user_im_message_receive_at', 'disconnected-reply', 'review'),
+      );
+      first.channel.disconnect();
+
+      for (let deferral = 1; deferral <= 17; deferral += 1) {
+        const [delivery] = first.channel.pendingImDeliveries() as Array<{
+          attempts: number;
+          localDeferrals?: number;
+          nextRetryAt: number;
+        }>;
+        vi.setSystemTime(delivery!.nextRetryAt);
+        await (
+          first.channel as unknown as {
+            attemptImDelivery(delivery: unknown): Promise<void>;
+          }
+        ).attemptImDelivery(delivery);
+        expect(first.channel.pendingImDeliveries()).toEqual([
+          expect.objectContaining({
+            attempts: 1,
+            localDeferrals: deferral,
+          }),
+        ]);
+      }
+      expect(client.replyToImMessage).toHaveBeenCalledOnce();
+
+      const restartedClient = new FakeDwsClient();
+      restartedClient.replyToImMessage.mockRejectedValueOnce(
+        new DwsCommandError('rate limited again', 'unknown'),
+      );
+      const restarted = await readyPolicyChannel(
+        restartedClient,
+        makeConfig(),
+        name,
+      );
+      const [persisted] = restarted.channel.pendingImDeliveries() as Array<{
+        nextRetryAt: number;
+      }>;
+      vi.setSystemTime(persisted!.nextRetryAt);
+      await restarted.channel.poll();
+      expect(restarted.channel.pendingImDeliveries()).toEqual([
+        expect.objectContaining({ attempts: 2, localDeferrals: 0 }),
+      ]);
+
+      const [retry] = restarted.channel.pendingImDeliveries() as Array<{
+        nextRetryAt: number;
+      }>;
+      vi.setSystemTime(retry!.nextRetryAt);
+      await restarted.channel.poll();
+      expect(restartedClient.replyToImMessage).toHaveBeenCalledTimes(2);
+      expect(restarted.channel.pendingImDeliveries()).toEqual([]);
+    } finally {
       vi.useRealTimers();
     }
   });
