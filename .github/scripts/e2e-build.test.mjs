@@ -486,10 +486,10 @@ describe('e2e build artifact upload retry (e2e.yml build job)', () => {
     // (its conclusion is success; only its outcome is failure), so the retry
     // would never run while a substring pin still reads green.
     assert.equal(retry.if, "${{ steps.upload-build.outcome == 'failure' }}");
-    // v4+ 409s a same-name upload only against an artifact finalized in
-    // this run attempt — a stall aborts before finalize and reserves
-    // nothing, so overwrite guards the finalize-then-fail window: an
-    // attempt that finalized e2e-build and only then reported failure.
+    // The action creates the artifact record before any bytes move, so a
+    // failed first attempt can leave the e2e-build name taken and 409 a
+    // same-name retry; overwrite is delete-then-upload and a no-op when
+    // nothing exists.
     assert.equal(retry.with.overwrite, true);
     // Both attempts publish the same payload under the same name; the
     // missing-archive guard rides on both so a pack regression fails
@@ -521,9 +521,10 @@ describe('e2e build artifact upload retry (e2e.yml build job)', () => {
       pack.run.includes('"${RUNNER_TEMP}/' + archive + '"'),
       'pack step must write the archive the upload publishes',
     );
-    assert.ok(
-      first.with.path.startsWith('${{ runner.temp }}/'),
-      'the upload must publish from the runner temp directory the pack step writes to',
+    assert.equal(
+      first.with.path,
+      '${{ runner.temp }}/' + archive,
+      'the upload must publish the exact file the pack step writes',
     );
     assert.ok(
       buildSteps.indexOf(pack) < buildSteps.indexOf(first) &&
