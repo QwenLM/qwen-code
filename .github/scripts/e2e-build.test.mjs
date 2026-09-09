@@ -508,14 +508,22 @@ describe('e2e build artifact upload retry (e2e.yml build job)', () => {
       first.uses,
       'both attempts must run the same action pin',
     );
-    // Pin the handoff, not just the agreement: a pack-to-upload drift
-    // (rename or reorder) fails every leg at download time while two
-    // mutually consistent path: strings would still read green.
+    // Pin the handoff, not just the agreement: the deepEqual above only
+    // compares the two upload with: blocks to each other, so a directory
+    // drift moving both together would stay green. The two sides spell
+    // one directory differently — the shell ${RUNNER_TEMP} in the pack
+    // run vs. the ${{ runner.temp }} expression in the upload with: — so
+    // pin each literal separately rather than comparing them as one.
     const pack = buildSteps.find((s) => s.name === 'Pack build outputs');
     assert.ok(pack, "the build job must have a 'Pack build outputs' step");
+    const archive = first.with.path.split('/').pop();
     assert.ok(
-      pack.run.includes(first.with.path.split('/').pop()),
+      pack.run.includes('"${RUNNER_TEMP}/' + archive + '"'),
       'pack step must write the archive the upload publishes',
+    );
+    assert.ok(
+      first.with.path.startsWith('${{ runner.temp }}/'),
+      'the upload must publish from the runner temp directory the pack step writes to',
     );
     assert.ok(
       buildSteps.indexOf(pack) < buildSteps.indexOf(first) &&
