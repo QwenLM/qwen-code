@@ -12,7 +12,10 @@ const readOwnSessionRecord = vi.fn();
 const listMessageablePeers = vi.fn();
 const sendPeerFrame = vi.fn();
 
-vi.mock('../services/session-registry.js', () => ({
+vi.mock('../services/session-registry.js', async () => ({
+  ...(await vi.importActual<typeof import('../services/session-registry.js')>(
+    '../services/session-registry.js',
+  )),
   readOwnSessionRecord: (...args: unknown[]) => readOwnSessionRecord(...args),
 }));
 vi.mock('./uds-client.js', async () => {
@@ -72,6 +75,7 @@ function peer(
     ref,
     cwd,
     pid: 100,
+    kind: 'tui',
     ipcPath: `/tmp/${sessionId}.sock`,
     startedAt: 1_000,
   };
