@@ -236,11 +236,19 @@ export async function scanMemoryMetadataCorpusStatus(params: {
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
           throw error;
         }
+        const validation = validateStructuredAutoMemoryDocument(content);
         files.push({
           scope,
           root,
           sourceHash: hash(`${relativePath}\0${content}`),
-          legacy: !validateStructuredAutoMemoryDocument(content).valid,
+          // A frontmatter-malformed file is unmigratable (the candidate scan
+          // excludes it) and invisible to recall either way; counting it as
+          // legacy would pin the corpus to legacy mode forever.
+          legacy:
+            !validation.valid &&
+            !validation.missingOrInvalidFields.includes(
+              'frontmatter-malformed',
+            ),
         });
       }
       return files;

@@ -12,6 +12,7 @@ import {
   type AutoMemoryType,
 } from './types.js';
 import {
+  MAX_USAGE_SCENARIO_CHARS,
   sanitizeAutoMemoryPromptField,
   type MemorySourceStatus,
   type ScannedAutoMemoryDocument,
@@ -19,6 +20,10 @@ import {
 import { createHash } from 'node:crypto';
 
 const OVERVIEW_CHAR_BUDGET = 6_000;
+export const ROUTER_CHAR_BUDGET = 6_000;
+// Headroom kept for the truncation notice line so the rendered router stays
+// within ROUTER_CHAR_BUDGET after the notice is appended.
+const ROUTER_TRUNCATION_RESERVE = 96;
 const CATEGORY_KEYWORD_LIMIT = 12;
 const SCOPE_ORDER: readonly AutoMemoryScope[] = ['project', 'user', 'team'];
 const CATEGORY_ORDER: readonly AutoMemoryTreeCategoryKey[] = [
@@ -85,9 +90,13 @@ function toAutoMemoryTreeLeaf(
 ): AutoMemoryTreeLeaf {
   const ref = toAutoMemoryRef(doc);
   const description = sanitizeAutoMemoryPromptField(doc.description, 512);
+  // The scenario side is sanitized twice (once by the parser's usage_scenarios
+  // fallback, once by sanitizeList below); sanitize the comparison side the
+  // same number of times or the dedup misses when the 64-char cut lands on
+  // whitespace (the second pass trims what the first left behind).
   const descriptionAsScenario = sanitizeAutoMemoryPromptField(
-    doc.description,
-    64,
+    sanitizeAutoMemoryPromptField(doc.description, MAX_USAGE_SCENARIO_CHARS),
+    MAX_USAGE_SCENARIO_CHARS,
   ).toLocaleLowerCase('en-US');
   return {
     memoryRef: ref,
@@ -377,13 +386,39 @@ function renderAutoMemoryGlobalRouter(
     lines.push('No managed memory entries are currently visible.');
     return lines.join('\n');
   }
-  tree.categories.forEach((category, categoryIndex) => {
-    if (categoryIndex > 0) lines.push('');
+  // The scan feeding the router is deliberately uncapped (recall must see
+  // every memory), so the size bound lives here in the render: leaves past
+  // the budget stay fetchable through search_memory instead of inflating the
+  // injected prompt without limit.
+  let remaining =
+    ROUTER_CHAR_BUDGET - header.join('\n').length - ROUTER_TRUNCATION_RESERVE;
+  let omitted = 0;
+  let firstVisibleCategory = true;
+  tree.categories.forEach((category) => {
+    const visibleLeaves: AutoMemoryTreeLeaf[] = [];
+    for (const leaf of category.leaves) {
+      const line = `├── [${leaf.memoryRef}] ${leaf.title}`;
+      if (line.length + 1 > remaining) {
+        omitted += 1;
+        continue;
+      }
+      remaining -= line.length + 1;
+      visibleLeaves.push(leaf);
+    }
+    if (visibleLeaves.length === 0) return;
+    if (!firstVisibleCategory) lines.push('');
+    firstVisibleCategory = false;
     lines.push(category.category);
-    category.leaves.forEach((leaf, leafIndex) => {
-      const marker = leafIndex === category.leaves.length - 1 ? '└──' : '├──';
+    visibleLeaves.forEach((leaf, leafIndex) => {
+      const marker = leafIndex === visibleLeaves.length - 1 ? '└──' : '├──';
       lines.push(`${marker} [${leaf.memoryRef}] ${leaf.title}`);
     });
   });
+  if (omitted > 0) {
+    lines.push(
+      '',
+      `… ${omitted} more ${omitted === 1 ? 'memory' : 'memories'} not shown — use search_memory to find them.`,
+    );
+  }
   return lines.join('\n');
 }

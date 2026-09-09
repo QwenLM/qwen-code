@@ -9857,6 +9857,55 @@ describe('Session', () => {
       expect(observed).toEqual([rootContext, undefined, undefined]);
     });
 
+    it('resets per-turn memory state on every cron-fired prompt', async () => {
+      let cronCallback: ((job: { prompt: string }) => void) | undefined;
+      const scheduler = {
+        size: 1,
+        hasPendingWork: true,
+        start: vi.fn((callback: (job: { prompt: string }) => void) => {
+          cronCallback = callback;
+        }),
+        stop: vi.fn(),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementation(() => Promise.resolve(createEmptyStream()));
+      const internals = session as unknown as {
+        cronCompletion: Promise<void> | null;
+      };
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'root prompt' }],
+      });
+      const resetsAfterUserTurn =
+        mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn.mock.calls
+          .length;
+
+      cronCallback?.({ prompt: 'scheduled prompt' });
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      await vi.waitFor(() => {
+        expect(internals.cronCompletion).toBeNull();
+      });
+      cronCallback?.({ prompt: 'scheduled prompt again' });
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      await vi.waitFor(() => {
+        expect(internals.cronCompletion).toBeNull();
+      });
+
+      expect(
+        mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn.mock.calls
+          .length,
+      ).toBe(resetsAfterUserTurn + 2);
+    });
+
     it('records the latest file history snapshot after makeSnapshot', async () => {
       const latestSnapshot = {
         promptId: 'test-session-id########1',

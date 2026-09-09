@@ -5,11 +5,16 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { MemorySourceStatus, ScannedAutoMemoryDocument } from './scan.js';
+import {
+  sanitizeAutoMemoryPromptField,
+  type MemorySourceStatus,
+  type ScannedAutoMemoryDocument,
+} from './scan.js';
 import {
   buildAutoMemoryTree,
   createAutoMemoryTreeSnapshot,
   renderAutoMemoryFocusedSubtree,
+  ROUTER_CHAR_BUDGET,
   toAutoMemoryRef,
 } from './tree.js';
 
@@ -62,6 +67,24 @@ describe('auto memory tree rendering', () => {
     expect(focused).not.toContain('适用：');
   });
 
+  it('dedupes the legacy description fallback when the 64-char cut lands on a space', () => {
+    // Char 64 is the space: the first sanitize pass leaves it trailing, the
+    // scenario side's second pass trims it, so a once-sanitized comparison
+    // misses the dedup.
+    const description = `${'a'.repeat(63)} more words beyond the cut`;
+    const memory = doc('project/legacy-space-cut.md', {
+      description,
+      // The parser's legacy usage_scenarios fallback output: the description
+      // sanitized once to the scenario budget.
+      usageScenarios: [sanitizeAutoMemoryPromptField(description, 64)],
+    });
+
+    const focused = renderAutoMemoryFocusedSubtree([memory]).prompt;
+
+    expect(focused).toContain('摘要：');
+    expect(focused).not.toContain('适用：');
+  });
+
   it('builds a two-level tree sorted by fixed category order', () => {
     const tree = buildAutoMemoryTree([
       doc('feedback/test.md', {
@@ -81,6 +104,34 @@ describe('auto memory tree rendering', () => {
     expect(tree.categories[0]?.leaves[0]?.memoryRef).toBe(
       'project:project/intro.md',
     );
+  });
+
+  it('bounds the router prompt and discloses truncation beyond the budget', () => {
+    const manyDocs = Array.from({ length: 500 }, (_, index) =>
+      doc(`project/topic-${String(index).padStart(3, '0')}.md`, {
+        title: `Topic ${index}`,
+        mtimeMs: index,
+      }),
+    );
+
+    const { routerPrompt } = createAutoMemoryTreeSnapshot(
+      manyDocs,
+      sourceStatus,
+    );
+
+    expect(routerPrompt.length).toBeLessThanOrEqual(ROUTER_CHAR_BUDGET);
+    expect(routerPrompt).toContain('use search_memory to find them');
+  });
+
+  it('renders every leaf uncapped when the router fits the budget', () => {
+    const { routerPrompt } = createAutoMemoryTreeSnapshot(
+      [doc('project/one.md'), doc('project/two.md')],
+      sourceStatus,
+    );
+
+    expect(routerPrompt).toContain('project:project/one.md');
+    expect(routerPrompt).toContain('project:project/two.md');
+    expect(routerPrompt).not.toContain('not shown');
   });
 
   it('deduplicates all child keywords before limiting category summaries', () => {

@@ -9236,6 +9236,14 @@ export class Session implements SessionContext {
                 _meta: { source: item.source },
               });
 
+              // Cron-fired prompts stream through the chat directly and never
+              // enter LlmClient.sendMessageStream, so core's per-turn reset is
+              // not on this path; without it a claimed search_memory signature
+              // or exhausted body ref would persist across cron turns.
+              this.config
+                .getMemoryManager()
+                .resetExhaustedBodyRefsForCurrentTurn();
+
               // Prepend session-level system reminders (same rationale as the
               // user-query path in #executePrompt).
               const cronReminders = await this.#buildInitialSystemReminders();

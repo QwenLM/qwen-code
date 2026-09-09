@@ -7913,6 +7913,7 @@ describe('Server Config (config.ts)', () => {
       autoMemoryPrompt: 'legacy prompt',
     });
     vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
+    vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
     vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
     vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(false);
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
@@ -7951,6 +7952,36 @@ describe('Server Config (config.ts)', () => {
     await expect(
       config.confirmMemoryRecallTransition(transition!),
     ).resolves.toBe(false);
+  });
+
+  it('prepareMemoryRecallTransition stays inert in safe mode', async () => {
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      memoryRecallMode: 'legacy',
+      memoryRecallModeInitialized: true,
+      memoryCorpusRevision: 'legacy-revision',
+      autoMemoryPrompt: '',
+    });
+    vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
+    // The production predicate adds `&& !isSafeMode()`; keep the mock pointed
+    // at it so the gate being exercised is the one client.ts relies on.
+    vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(false);
+    vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
+    const scan = vi
+      .fn()
+      .mockResolvedValue({ ready: true, revision: 'structured-revision' });
+    Object.assign(config, {
+      scanMemoryRecallCorpusStatus: scan,
+      buildAutoMemoryPromptForMode: vi
+        .fn()
+        .mockResolvedValue('structured prompt'),
+    });
+
+    await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
+      undefined,
+    );
+    expect(scan).not.toHaveBeenCalled();
+    expect(config.getMemoryRecallMode()).toBe('legacy');
   });
 
   it('refreshHierarchicalMemory should include appended auto-memory in the context warning estimate', async () => {

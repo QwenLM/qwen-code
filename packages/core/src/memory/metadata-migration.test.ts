@@ -133,6 +133,36 @@ describe('memory metadata migration', () => {
     await expect(fs.readFile(filePath, 'utf-8')).resolves.toBe(original);
   });
 
+  it('does not let a frontmatter-malformed file pin the corpus to legacy', async () => {
+    await write(
+      'project/structured.md',
+      [
+        '---',
+        'name: Structured',
+        'description: Complete metadata',
+        'type: project',
+        'category: project_introduction',
+        'keywords:',
+        '  - memory migration',
+        '  - structured memory',
+        'usage_scenarios:',
+        '  - Testing migration',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+    await write('project/broken.md', '---\ntype: project\nUnclosed body');
+
+    const status = await scanMemoryMetadataCorpusStatus({
+      projectRoot,
+      teamMemoryEnabled: false,
+      trustedProject: true,
+    });
+
+    expect(status.ready).toBe(true);
+    expect(status.legacyFiles).toBe(0);
+  });
+
   it('excludes protected pinned files from migration and readiness', async () => {
     const userRoot = getUserAutoMemoryRoot();
     const pinnedFile = path.join(

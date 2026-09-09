@@ -1510,6 +1510,69 @@ describe('MemoryPressureMonitor', () => {
       ]);
     });
 
+    it('falls back to the blanket wipe when an evicted memory body is unresolved', async () => {
+      const markMemoryBodiesEvictedFromHistory = vi.fn();
+      const markAllMemoryBodiesEvictedFromHistory = vi.fn();
+      const toolHistory: Content[] = [];
+      for (let index = 0; index < 7; index += 1) {
+        const callId = `memory_${index}`;
+        toolHistory.push(
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: callId,
+                  name: 'search_memory',
+                  args: { mode: 'fetch', refs: [`project:${index}.md`] },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: callId,
+                  name: 'search_memory',
+                  response: {
+                    // Unparseable output (e.g. scheduler-truncated): the body
+                    // refs cannot be recovered, so the eviction is unresolved.
+                    output: '{"mode":"fetch","results":[{"ref":"project:0.md"',
+                  },
+                },
+              },
+            ],
+          },
+        );
+      }
+      const config = createMockConfig({
+        llmClient: {
+          isInitialized: () => true,
+          getChat: () => ({
+            getHistoryShallow: () => toolHistory,
+            setHistory: vi.fn(),
+          }),
+        },
+      });
+      vi.spyOn(config, 'getMemoryManager').mockReturnValue({
+        markMemoryBodiesEvictedFromHistory,
+        markAllMemoryBodiesEvictedFromHistory,
+      } as unknown as ReturnType<Config['getMemoryManager']>);
+      const monitor = new MemoryPressureMonitor(config, {
+        ...DEFAULT_PRESSURE_CONFIG,
+        cleanupCooldownMs: 0,
+      });
+
+      setMemUsage(11 * 1024 * 1024 * 1024);
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+
+      expect(markAllMemoryBodiesEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(markMemoryBodiesEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
     it('overrides positive toolResultsThresholdMinutes to 0', async () => {
       const setHistory = vi.fn();
       // 7 tool results with threshold=60 → overridden to 0, all get compacted

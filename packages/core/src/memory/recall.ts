@@ -8,7 +8,9 @@ import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
+  MAX_USAGE_SCENARIO_CHARS,
   rereadAutoMemoryDocument,
+  sanitizeAutoMemoryPromptField,
   scanAllAutoMemoryTopicDocuments,
   scanAllUserAutoMemoryTopicDocuments,
   scanAutoMemorySnapshot,
@@ -242,10 +244,26 @@ function scoreDocument(
 ): number {
   const title = normalizeRecallText(doc.title);
   const description = normalizeRecallText(doc.description);
-  const keywords = normalizeRecallText(doc.keywords.join(' '));
+  // The legacy usage_scenarios fallback (scan.ts parseUsageScenarios) derives
+  // the scenario from the description truncated to the scenario budget, so
+  // compare against that truncated form too — a 64-char prefix never equals
+  // the full description and would otherwise score the same text twice.
+  const descriptionAsScenario = normalizeRecallText(
+    sanitizeAutoMemoryPromptField(doc.description, MAX_USAGE_SCENARIO_CHARS),
+  );
+  const keywords = normalizeRecallText(
+    doc.keywords
+      .filter((keyword) => normalizeRecallText(keyword) !== title)
+      .join(' '),
+  );
   const usageScenarios = normalizeRecallText(
     doc.usageScenarios
-      .filter((scenario) => normalizeRecallText(scenario) !== description)
+      .filter((scenario) => {
+        const normalized = normalizeRecallText(scenario);
+        return (
+          normalized !== description && normalized !== descriptionAsScenario
+        );
+      })
       .join(' '),
   );
   const body = normalizeRecallText(
@@ -576,6 +594,9 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         scopes: teamMemoryEnabled ? ['project', 'user', 'team'] : undefined,
         teamMemoryEnabled,
         trustedProject: options.config?.isTrustedFolder?.() ?? false,
+        // Match the legacy branch's uncapped universe: capping here would
+        // drop the oldest memories from every structured recall surface.
+        uncapped: true,
         documentCache: options.documentCache,
       });
   const scanDurationMs = Date.now() - t0;

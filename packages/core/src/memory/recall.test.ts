@@ -13,6 +13,7 @@ import {
 import type { Config } from '../config/config.js';
 import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
 import {
+  parseAutoMemoryTopicDocument,
   rereadAutoMemoryDocument,
   scanAllAutoMemoryTopicDocuments,
   scanAllUserAutoMemoryTopicDocuments,
@@ -319,6 +320,78 @@ describe('auto-memory relevant recall', () => {
     expect(
       selectRelevantAutoMemoryDocuments('unrelated weather', docs),
     ).toEqual([]);
+  });
+
+  it('does not double-score text echoed across metadata fields', () => {
+    const parseDoc = (
+      relativePath: string,
+      frontmatter: string[],
+    ): ScannedAutoMemoryDocument => {
+      const doc = parseAutoMemoryTopicDocument(
+        `/tmp/${relativePath}`,
+        ['---', ...frontmatter, '---', '', 'unrelated body text'].join('\n'),
+        1,
+        relativePath,
+        'project',
+      );
+      expect(doc).not.toBeNull();
+      return doc!;
+    };
+
+    // >64 chars: the legacy usage_scenarios fallback is the description cut
+    // at 64 chars, which can never string-equal the full description.
+    const description = `tersemarker ${'x'.repeat(70)}`;
+    const echoDoc = parseDoc('echo.md', [
+      'type: project',
+      'name: Unrelated name',
+      `description: ${description}`,
+    ]);
+    expect(echoDoc.usageScenarios).toHaveLength(1);
+    const titleDoc = parseDoc('title.md', [
+      'type: project',
+      'name: tersemarker handbook',
+      'description: Completely unrelated operational text',
+      'usage_scenarios: []',
+    ]);
+    // Pre-fix the echoed scenario scored the same text a second time (+3),
+    // outranking the exact title match.
+    expect(
+      selectRelevantAutoMemoryDocuments('tersemarker', [echoDoc, titleDoc]),
+    ).toEqual([titleDoc, echoDoc]);
+
+    const dupKeywordDoc = parseDoc('dup-keyword.md', [
+      'type: project',
+      'name: tersemarker',
+      'description: Completely unrelated operational text',
+      'keywords:',
+      '  - tersemarker',
+      'usage_scenarios: []',
+    ]);
+    const richDoc = parseDoc('rich.md', [
+      'type: project',
+      'name: tersemarker notes',
+      'description: tersemarker in the description',
+      'usage_scenarios: []',
+    ]);
+    // Pre-fix the title-duplicating keyword scored 4+4=8, beating the
+    // title+description 4+3=7 of a genuinely richer match.
+    expect(
+      selectRelevantAutoMemoryDocuments('tersemarker', [
+        dupKeywordDoc,
+        richDoc,
+      ]),
+    ).toEqual([richDoc, dupKeywordDoc]);
+  });
+
+  it('scans the structured memory universe uncapped like the legacy branch', async () => {
+    await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', 'latency', {
+      config,
+    });
+
+    expect(scanAutoMemorySnapshot).toHaveBeenCalledWith(
+      '/tmp/project',
+      expect.objectContaining({ uncapped: true }),
+    );
   });
 
   it('uses keywords and usage scenarios in heuristic mode', () => {
