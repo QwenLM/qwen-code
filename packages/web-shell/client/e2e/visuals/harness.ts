@@ -102,7 +102,9 @@ export async function gotoSession(
   await page.goto(
     `/session/${encodeURIComponent(scenario.sessionId)}?${query.toString()}`,
   );
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   await expect(page.locator('html')).toHaveClass(new RegExp(`theme-${theme}`));
   await completeReplay(
     page,
@@ -126,7 +128,9 @@ export async function gotoNewSession(
 ): Promise<void> {
   await primeTheme(page, theme);
   await page.goto(`/?theme=${theme}`);
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   await expect(page.locator('html')).toHaveClass(new RegExp(`theme-${theme}`));
 }
 
