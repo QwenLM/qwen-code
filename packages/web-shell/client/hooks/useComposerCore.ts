@@ -1,4 +1,5 @@
 import {
+  createElement,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -10,6 +11,7 @@ import {
   type DragEventHandler,
 } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { FileTypeIcon } from '../components/FileTypeIcon';
 import {
   Decoration,
   EditorView,
@@ -78,11 +80,22 @@ import { isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
 import {
   createInputAnnotationsFromComposerTags,
+  getComposerTagDisplay,
   getComposerTagIconUrl,
+  getComposerTagLabel,
   getComposerTagSerialized,
+  getComposerTagValue,
   isBuiltinComposerTagIconUrl,
   isPreviewableFileComposerTag,
   parseUserMessageContentSafely,
+} from '../utils/composerTag';
+// Re-exported for existing importers; the definitions moved to
+// utils/composerTag.ts so read-only consumers can reach them without pulling
+// CodeMirror in (#11031).
+export {
+  getComposerTagDisplay,
+  getComposerTagLabel,
+  getComposerTagValue,
 } from '../utils/composerTag';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from '../components/messages/Markdown';
@@ -480,18 +493,6 @@ function serializeComposerTags(tags: readonly WebShellComposerTag[]): string {
   return tags.map(serializeComposerTag).join('\n');
 }
 
-export function getComposerTagLabel(tag: WebShellComposerTag): string {
-  return tag.label?.trim() ?? '';
-}
-
-export function getComposerTagValue(tag: WebShellComposerTag): string {
-  return tag.value?.trim() ?? '';
-}
-
-export function getComposerTagDisplay(tag: WebShellComposerTag): string {
-  return getComposerTagValue(tag) || getComposerTagLabel(tag) || tag.id;
-}
-
 export function buildComposerPrompt(
   text: string,
   tags: readonly WebShellComposerTag[],
@@ -661,6 +662,18 @@ class ComposerTagWidget extends WidgetType {
         });
       });
     }
+    const hasCustomTooltip =
+      this.tag.tooltip !== undefined && this.tag.tooltip !== null;
+    if (isPreviewableFileComposerTag(this.tag)) {
+      chip.style.verticalAlign = 'middle';
+      chip.style.background = 'var(--chat-editor-bg-primary)';
+      chip.style.borderRadius = '8px';
+      chip.style.minHeight = '28px';
+      chip.style.fontFamily = 'var(--font-sans,system-ui,sans-serif)';
+      if (!hasCustomTooltip) {
+        chip.title = getComposerTagValue(this.tag);
+      }
+    }
     const rawTagLabel = getComposerTagLabel(this.tag);
     const tagValue = getComposerTagValue(this.tag);
     const tagLabel = this.tag.kind ? '' : rawTagLabel;
@@ -698,7 +711,22 @@ class ComposerTagWidget extends WidgetType {
       }
     }
 
-    if (!renderedCustomContent && safeIconUrl) {
+    if (
+      !renderedCustomContent &&
+      isPreviewableFileComposerTag(this.tag) &&
+      !this.tag.icon &&
+      safeIconUrl === getComposerTagIconUrl('file')
+    ) {
+      const icon = document.createElement('span');
+      icon.style.cssText =
+        'display:inline-flex;width:16px;height:16px;flex:0 0 auto;margin-left:8px;color:var(--muted-foreground);';
+      icon.setAttribute('aria-hidden', 'true');
+      this.contentRoot = createRoot(icon);
+      this.contentRoot.render(
+        createElement(FileTypeIcon, { name: tagValue, size: 16 }),
+      );
+      chip.appendChild(icon);
+    } else if (!renderedCustomContent && safeIconUrl) {
       const icon = document.createElement('span');
       icon.style.cssText =
         'display:block;width:12px;height:12px;flex:0 0 auto;margin-left:7px;background:currentColor;mask:var(--composer-tag-icon-url) center / contain no-repeat;-webkit-mask:var(--composer-tag-icon-url) center / contain no-repeat;';
@@ -1101,9 +1129,7 @@ export interface UseComposerCoreOptions {
   /**
    * Whether the composer may react to FILE drags at all (drag highlight and
    * drop ingestion on the inline image/text lane). `false` leaves paste
-   * working but makes file drag-and-drop inert, matching a host that
-   * force-disables file upload via `fileUploadEnabled={false}`. Defaults to
-   * `true`.
+   * working but makes attachment drag-and-drop inert. Defaults to `true`.
    */
   fileDragEnabled?: boolean;
   placeholderText?: string;
@@ -1907,6 +1933,7 @@ export function useComposerCore(
   const imageTransferHandlers = useMemo<ComposerImageTransferHandlers>(
     () => ({
       onPasteCapture: (event) => {
+        if (event.clipboardData.getData('text/plain')) return;
         if (enqueueImageTransfer(event.clipboardData, 'paste')) {
           event.preventDefault();
           event.stopPropagation();
@@ -1982,7 +2009,7 @@ export function useComposerCore(
     if (disabled) clearImageDragState();
   }, [clearImageDragState, disabled]);
   useEffect(() => {
-    // A host flipping `fileUploadEnabled` to false mid-drag gates the
+    // Disabling attachment drags mid-drag gates the
     // leave handler, so a depth already counted would never drain; clear
     // the highlight explicitly instead of waiting for dragend/blur.
     if (fileDragEnabled === false) clearImageDragState();

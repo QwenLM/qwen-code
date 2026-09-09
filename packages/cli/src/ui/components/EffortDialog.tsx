@@ -8,10 +8,8 @@ import type React from 'react';
 import { useCallback } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
-import {
-  REASONING_EFFORT_TIERS,
-  type ReasoningEffort,
-} from '@qwen-code/qwen-code-core';
+import { REASONING_EFFORT_TIERS } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
+import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
@@ -22,6 +20,7 @@ interface EffortDialogProps {
 
   /** The currently active effort, used to pre-select the list. */
   currentEffort?: ReasoningEffort;
+  efforts?: readonly ReasoningEffort[];
 }
 
 const EFFORT_DESCRIPTIONS: Record<ReasoningEffort, string> = {
@@ -35,20 +34,21 @@ const EFFORT_DESCRIPTIONS: Record<ReasoningEffort, string> = {
 export function EffortDialog({
   onSelect,
   currentEffort,
+  efforts = REASONING_EFFORT_TIERS,
 }: EffortDialogProps): React.JSX.Element {
-  const items = REASONING_EFFORT_TIERS.map((tier) => ({
+  const items = efforts.map((tier) => ({
     label: `${tier} — ${t(EFFORT_DESCRIPTIONS[tier])}`,
     value: tier,
     key: tier,
   }));
 
-  // Only pre-select when an effort is actually configured. When it's unset,
-  // start the cursor at the top (index 0) rather than highlighting 'high',
-  // which would mislead the user into thinking 'high' is their current setting
-  // when in fact the model/provider default applies.
-  const initialIndex = currentEffort
-    ? Math.max(0, REASONING_EFFORT_TIERS.indexOf(currentEffort))
-    : 0;
+  // Pre-select only a tier this model actually exposes. An unset effort starts
+  // at the top rather than highlighting 'high', and so does a tier the global
+  // `model.reasoningEffort` carried over from another model (only ACP sessions
+  // reconcile it) — either way the cursor must not read as "this tier is
+  // current", or a bare Enter silently overwrites the stored value with it.
+  const configuredIndex = currentEffort ? efforts.indexOf(currentEffort) : -1;
+  const initialIndex = Math.max(0, configuredIndex);
 
   const handleSelect = useCallback(
     (effort: ReasoningEffort) => {
@@ -89,10 +89,15 @@ export function EffortDialog({
         isFocused
         showNumbers
       />
-      {!currentEffort && (
+      {configuredIndex === -1 && (
         <Box marginTop={1}>
           <Text color={theme.text.secondary} wrap="truncate">
-            {t('No effort configured — using the model/provider default.')}
+            {currentEffort
+              ? t(
+                  '{{effort}} is not available for this model — using the model/provider default.',
+                  { effort: currentEffort },
+                )
+              : t('No effort configured — using the model/provider default.')}
           </Text>
         </Box>
       )}

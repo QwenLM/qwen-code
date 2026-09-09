@@ -371,7 +371,7 @@ function SessionOverviewPanelInner({
   const currentWorkspaceCwd =
     connection.workspaceCwd || workspaceCwd || primaryCwd;
 
-  // Live-state (2s channel) is the sidebar's refresh path: it patches the
+  // Live-state is the sidebar's refresh path: it patches the
   // catalog store's sessions with hasActivePrompt / isWaitingForPermission /
   // isWaitingForUserQuestion and coordinates full-catalog reconciles only when
   // something actually changed. Adopt it only when trusted live-state routes
@@ -402,11 +402,12 @@ function SessionOverviewPanelInner({
       false) &&
     liveStateWorkspaceCwds.length > 0;
   // Live state only replaces catalog/status polling when this panel runs the
-  // channel itself. When the sidebar owns it, its trusted-only coverage can
-  // miss workspaces this panel shows — so this panel keeps polling then.
+  // channel itself. When another view owns it, keep the fallback because that
+  // view may cover a narrower workspace set.
   const liveStateActive = manageLiveState && liveStateEnabled;
   useWorkspaceSessionLiveState(workspace.client, {
     enabled: liveStateActive,
+    pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
     workspaceCwds: liveStateWorkspaceCwds,
     groupWorkspaceCwds: [],
   });

@@ -76,10 +76,18 @@ env:
   SHELLCHECK_VERSION: '0.11.0'
   YAMLLINT_VERSION: '1.35.1'
   # Single source of truth for the .github/scripts node:test suites — run by
-  # BOTH the github_ci_only helper step and the full-profile helper step,
-  # both in `lint_and_static`, so a new helper test can't be added to one
-  # path and silently dropped from the other.
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs'
+  # BOTH helper steps in `lint_and_static` (the github_ci_only fast lane and
+  # the full-profile one), so a new helper test can't be added to one path
+  # and silently dropped from the other. The fast lane runs before ANY
+  # dependency install in that job — its setup-node, self-hosted node and
+  # `npm ci` steps are all gated on the full profile — so it takes only
+  # HELPER_TESTS_DEP_FREE, suites whose import closure is node: builtins
+  # alone. HELPER_TESTS keeps the full list: the full-profile helper step
+  # re-runs every suite after `npm ci`, and a push to main always classifies
+  # `full` (classify_pr computes a profile only for pull_request), so what
+  # the fast lane skips is still re-checked post-merge.
+  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -829,7 +837,7 @@ jobs:
     # OUTCOME — no vitest unit-test run, whose flake was measured failing
     # 41% of post-merge runs in the week of the split — not lightness: the
     # bundle-closure check builds and bundles the CLI, the helper-suite
-    # steps execute the 24-file HELPER_TESTS battery (most spawn
+    # steps execute the 26-file HELPER_TESTS battery (most spawn
     # subprocesses), and the lane runs on the same contended pool as
     # everything else, which is what the routed 90/45 ceiling below prices.
     # One honest limit, recorded so the required-check follow-up is argued
@@ -1039,6 +1047,25 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: '.github/scripts/check-workflow-size.sh'
 
+      # A green lane proves the branch passes the gate AS THE BRANCH defines
+      # it — the checkout above is refs/pull/N/head by deliberate trade-off —
+      # not as the base defines it. #11117 flipped Prettier --write →
+      # --check on main while #11216's branch still ran --write; it merged
+      # green and reddened every later full-profile PR (#11378 cleaned up).
+      # Fail a branch whose base has since changed a gate-defining file.
+      # PRs only: merge_group validates the prospective merged tree and push
+      # validates the base itself. docs_only runs no lint lane, so there is
+      # no stale green to catch; github_ci_only runs lint.js lanes in the
+      # helper step below, so it is covered. Seconds of API calls before the
+      # expensive steps; details in the script's header.
+      - name: 'Check lint gate freshness'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}"
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          BASE_REF: '${{ github.event.pull_request.base.ref }}'
+          HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+        run: 'node .github/scripts/check-lint-gate-freshness.mjs'
+
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
       - name: 'Set up Node.js 22.x (hosted)'
@@ -1108,11 +1135,11 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
         timeout-minutes: 5
         run: |-
-          # Keep this path dependency-free; script formatting is checked when those files hit full CI.
+          # Keep this path dependency-free: it runs before any dependency install in this job (setup-node, self-hosted node and `npm ci` above are all gated on the full profile), so only the node-builtin-only HELPER_TESTS_DEP_FREE suites run here. The full-profile helper step below re-runs the complete HELPER_TESTS list after `npm ci`, and script formatting is checked when those files hit full CI.
           node scripts/lint.js --setup
           node scripts/lint.js --actionlint
           node scripts/lint.js --yamllint
-          node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}
+          node --test --test-concurrency=1 ${{ env.HELPER_TESTS_DEP_FREE }}
 
       - name: 'Audit critical runtime dependencies'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
@@ -1202,6 +1229,19 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check:serve-fast-path-bundle'
 
+      # cli sources name core modules by path (`.../config/storage.js`). In the
+      # repo those resolve through tsconfig paths or vitest aliases; in the
+      # published package neither exists and Node resolves them against core's
+      # `exports`, where one `./*` entry carries all of them. Nothing else
+      # exercises that entry, so without this a change to it — or to the
+      # dist layout — leaves every suite green and breaks `qwen` at startup.
+      # Runs after the step above has already built the workspace.
+      - name: 'Check core subpath exports resolve'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm run build --workspace=packages/core
+          npm run check:core-subpath-exports
+
       # The `github_ci_only` profile runs the .github/scripts helper tests, but a
       # `full` PR that touches those scripts skips that path and `npm run
       # test:ci` (vitest) does not collect `node:test` files — so run them here
@@ -1264,15 +1304,18 @@ jobs:
         needs.classify_pr.outputs.skip_ci != 'true' &&
         needs.test.outputs.ci_profile == 'full'
       }}
-    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    # The same commit repeatedly lost browser resources or exceeded the
+    # document performance budget on ECS, while both gates passed on hosted.
+    # Keep this browser job hosted without relaxing its test assertions.
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 20
     permissions:
       contents: 'read'
     steps:
-      # Self-hosted runners reuse the workspace; a prior containerised job can
-      # leave root-owned, read-only files anywhere in it. Restore ownership and
-      # write permission unconditionally before checkout — see the test job's
-      # 'Restore workspace ownership' step for why probing first is unsafe.
+      # Retain the shared-pool recovery steps so rerouting needs only a runner
+      # change. Hosted workspaces are fresh; on a reused workspace a prior
+      # containerised job can leave root-owned, read-only files. Restore them
+      # unconditionally before checkout, as in the test job.
       - name: 'Restore workspace ownership'
         run: |-
           set -uo pipefail
@@ -1283,11 +1326,9 @@ jobs:
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
-      # Same pre-checkout recovery as the test job: this job lands on the
-      # same reused pool, so leftover review worktrees and branches from an
-      # interrupted review would break this checkout too. The
-      # `.qwen.root-orig` name's provenance (an external recovery tool) is
-      # documented on the test job's copy.
+      # Keep this retained sweep pinned to the test job's hardened recovery
+      # recipe, even while hosted. The `.qwen.root-orig` name's provenance
+      # (an external recovery tool) is documented on the test job's copy.
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
@@ -1413,9 +1454,8 @@ jobs:
           npm config set fetch-retries 5
           npm config set fetch-timeout 300000
 
-      # Same pre-install admission check as the test job (#10035): this job
-      # lands on the same self-hosted pool and installs before the gate would
-      # otherwise have freed space for it.
+      # Retained for a future shared-pool reroute: apply the test job's
+      # pre-install admission check (#10035) before dependency installation.
       - name: 'Disk floor gate (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'

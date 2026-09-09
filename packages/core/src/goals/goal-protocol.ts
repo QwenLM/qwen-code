@@ -21,8 +21,16 @@ export const GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON =
  * stalled checkpoint is a busy turn, two is a pattern, three is the loop.
  */
 export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
+
+/**
+ * How many consecutive autonomous turns a Goal may make no progress on before
+ * it stops. Same three as the checkpoint stall bound, and for the same
+ * reason: one quiet turn is a pause for thought, two is a pattern, three is
+ * the loop.
+ */
+export const GOAL_NO_PROGRESS_TURN_LIMIT = 3;
 export const GOAL_CHECKPOINT_STALLED_REASON =
-  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and each check either came back with a full claim list or a result that could not be folded into claims at all, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
+  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and each check either came back with a full claim list, came back with a result that could not be folded into claims, or did not come back at all, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
 
 /**
  * Default autonomous spend window armed on a newly created Goal, in model
@@ -188,14 +196,26 @@ export interface GoalRecord {
   /**
    * Consecutive checkpoint checks that failed to relieve an overflowing
    * evidence window: the checkpoint came back full (see
-   * `isGoalCheckpointStalled`) or the verifier result could not be folded
-   * into claims at all. Persisted on the record rather than held in memory
-   * so a daemon restart or session resume cannot launder the count; absent
-   * means zero. Reset by any checkpoint check that finds room, and by every
-   * control action that starts a different evidence window: edit, replace,
-   * and the resume of an evidence-limited Goal.
+   * `isGoalCheckpointStalled`), the verifier result could not be folded
+   * into claims at all, or the check itself failed -- a provider error or
+   * a verifier that never answered before its timeout. Persisted on the
+   * record rather than held in memory so a daemon restart or session
+   * resume cannot launder the count; absent means zero. Reset by any
+   * checkpoint check that finds room, and by every control action that
+   * starts a different evidence window: edit, replace, and the resume of
+   * an evidence-limited Goal.
    */
   checkpointStalls?: number;
+  /**
+   * Consecutive autonomous turns that recorded neither a tool result nor a
+   * terminal proposal. A model that only restates status never reaches the
+   * verifier and never spends a checkpoint, so nothing else bounds it short
+   * of the token budget. Persisted like `checkpointStalls` so a restart
+   * cannot launder the count; absent means zero. Reset by any turn that
+   * records a tool result or a proposal, by a turn the user's own text
+   * drove, and by edit, replace, and resume.
+   */
+  noProgressTurns?: number;
   lastReason?: string;
   /**
    * Set alongside `lastReason` whenever the runtime stops a Goal at one of the
@@ -257,6 +277,13 @@ export type GoalControlRequest =
       action: 'pause';
       expectedGoalId: string;
       expectedRevision: number;
+      /**
+       * Why the Goal is being paused, in the user's words rather than the
+       * model's. A pause without one clears `lastReason`: a stopped Goal
+       * showing the previous turn's verifier rejection reads as the reason
+       * it stopped, which it is not.
+       */
+      reason?: string;
     }
   | {
       action: 'resume';
@@ -327,6 +354,114 @@ export function validateGoalProposalReason(reason: string): string | null {
     return `Goal proposal reason exceeds ${GOAL_PROPOSAL_REASON_MAX_BYTES} UTF-8 bytes`;
   }
   return null;
+}
+
+/** Upper bound on a pause reason, which a user reads in a card. */
+export const GOAL_PAUSE_REASON_MAX_CHARACTERS = 500;
+
+export function validateGoalPauseReason(reason: string): string | null {
+  if (!reason.trim()) return 'Goal pause reason must not be empty';
+  // The bound is in code points, but UTF-16 length is an upper bound on the
+  // code-point count, so a short string is legal without counting at all.
+  // Only a candidate that could still be over gets walked, and the walk stops
+  // one past the limit -- this route is network-reachable and synchronous on
+  // the CLI's event loop, so the work has to scale with the limit rather than
+  // with whatever the caller sent.
+  if (reason.length > GOAL_PAUSE_REASON_MAX_CHARACTERS) {
+    let codePoints = 0;
+    for (const _codePoint of reason) {
+      if (++codePoints > GOAL_PAUSE_REASON_MAX_CHARACTERS) {
+        return `Goal pause reason exceeds ${GOAL_PAUSE_REASON_MAX_CHARACTERS} characters`;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * The pause reasons every host shares.
+ *
+ * They are constants rather than per-host prose so that the same event reads
+ * the same way in the TUI card, `/goal`, an ACP client, and a headless
+ * `goal_state` event -- and so a test can assert on the event rather than on
+ * one host's wording.
+ */
+export const GOAL_PAUSE_REASON_USER_INTERRUPT =
+  'Interrupted by the user. Run /goal resume to continue.';
+export const GOAL_PAUSE_REASON_COMMAND = 'Paused with /goal pause.';
+export const GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT =
+  'The session token limit was exceeded before the model request. Start a new session or increase sessionTokenLimit in settings.json before resuming the Goal.';
+export const GOAL_PAUSE_REASON_STOP_HOOK_CAP =
+  'A Stop hook blocked this session too many times in a row. Run /goal resume to continue.';
+/**
+ * A session that began closing while its Goal turn was in flight. The close
+ * can still be abandoned -- a drain timeout or a failed flush releases the
+ * gate and the session keeps serving -- so this states what is durably true
+ * at the moment of the stop rather than asserting the session is gone.
+ */
+export const GOAL_PAUSE_REASON_SESSION_DISPOSED =
+  'The session started closing before the turn finished. Run /goal resume to continue.';
+/**
+ * A headless run that ended while its Goal was still going. It is not a
+ * failure, and it must not tell the reader to run a slash command in a
+ * process that has already exited.
+ */
+export const GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED =
+  'The headless run finished before the Goal did. Resume the Goal in a later run.';
+/**
+ * A Goal whose autonomous turns stopped producing anything to judge. The
+ * next step is the user's: resume to try the same objective again, or edit
+ * it into one the model can act on and then resume it -- editing alone
+ * leaves a paused Goal paused.
+ *
+ * Runtime-emitted and headless-reachable, so it names no slash command; and
+ * it says "nothing to judge" rather than "no tool results", because
+ * `get_goal` and `update_goal` results are recorded but deliberately do not
+ * count as progress.
+ */
+export const GOAL_PAUSE_REASON_NO_PROGRESS =
+  'Three Goal turns in a row recorded nothing to judge and no proposal. Resume the Goal to try again, or edit its objective into one the model can act on and then resume it.';
+
+function truncateGoalPauseReason(reason: string): string {
+  const codePoints = [...reason];
+  return codePoints.length <= GOAL_PAUSE_REASON_MAX_CHARACTERS
+    ? reason
+    : `${codePoints.slice(0, GOAL_PAUSE_REASON_MAX_CHARACTERS - 1).join('')}\u2026`;
+}
+
+/** The pause reason for a Goal turn that failed rather than being stopped. */
+export function goalPauseReasonForFailure(message: string): string {
+  const detail = message.trim();
+  return truncateGoalPauseReason(
+    detail
+      ? `The Goal turn could not finish: ${detail}. Run /goal resume to continue.`
+      : 'The Goal turn could not finish. Run /goal resume to continue.',
+  );
+}
+
+/**
+ * The pause reason for a headless Goal turn that died with an error. Same
+ * register as `GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED` -- it names the failure
+ * without claiming the run ended cleanly, and without pointing at a slash
+ * command in a process that has already exited.
+ */
+export function goalPauseReasonForHeadlessFailure(message: string): string {
+  const detail = message.trim();
+  return truncateGoalPauseReason(
+    detail
+      ? `The headless run stopped: ${detail}. Resume the Goal in a later run.`
+      : 'The headless run stopped before the Goal turn finished. Resume the Goal in a later run.',
+  );
+}
+
+/** The pause reason for a headless run that hit one of its own budgets. */
+export function goalPauseReasonForRunBudget(budget: string): string {
+  const detail = budget.trim();
+  return truncateGoalPauseReason(
+    detail
+      ? `The headless run stopped at its ${detail} budget. Resume the Goal in a later run.`
+      : 'The headless run stopped at a budget. Resume the Goal in a later run.',
+  );
 }
 
 export type GoalStateCause =

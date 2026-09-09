@@ -6045,9 +6045,7 @@ describe('OpenAIContentConverter', () => {
       };
       const tools = [
         {
-          functionDeclarations: [
-            { name: 'stable', parametersJsonSchema },
-          ],
+          functionDeclarations: [{ name: 'stable', parametersJsonSchema }],
         },
       ] as Tool[];
       const compileStrict = vi.spyOn(SchemaValidator, 'compileStrict');

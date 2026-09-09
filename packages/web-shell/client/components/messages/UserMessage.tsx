@@ -11,9 +11,13 @@ import {
 } from 'react';
 import { CalendarClockIcon, PencilIcon, RefreshCwIcon } from 'lucide-react';
 import { FileTypeIcon } from '../FileTypeIcon';
+import { FileAttachmentContent } from '../FileAttachmentContent';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
+  getComposerTagDisplay,
   getComposerTagIconUrl,
+  getComposerTagLabel,
+  getComposerTagValue,
   getComposerTagViewModel,
   isBuiltinComposerTagIconUrl,
   isPreviewableFileComposerTag,
@@ -31,11 +35,6 @@ import type {
 } from '../../customization';
 import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
 import type { ImageTabSource } from '../artifacts/ArtifactPanel';
-import {
-  getComposerTagDisplay,
-  getComposerTagLabel,
-  getComposerTagValue,
-} from '../../hooks/useComposerCore';
 import { useI18n } from '../../i18n';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { cssUrlVar } from '../../utils/cssUrlVar';
@@ -418,14 +417,10 @@ export const UserMessage = memo(function UserMessage({
                     }
                   }}
                 >
-                  <FileTypeIcon
+                  <FileAttachmentContent
                     name={file.name}
                     mimeType={file.mimeType}
-                    size={16}
-                    className={styles.chatFileIcon}
-                    aria-hidden="true"
                   />
-                  <span className={styles.chatFileName}>{file.name}</span>
                 </span>
               );
             })}
@@ -561,7 +556,7 @@ export function ReadonlyComposerTag({
       : undefined;
   return (
     <span
-      className={`${styles.messageTag}${
+      className={`${styles.messageTag}${isPreviewableFileComposerTag(tag) ? ` ${styles.fileTag}` : ''}${
         clickable ? ` ${styles.messageTagClickable}` : ''
       }`}
       role={clickable ? 'button' : undefined}
@@ -587,13 +582,22 @@ export function ReadonlyComposerTag({
     >
       {custom ?? (
         <>
-          {safeIconUrl && (
+          {isPreviewableFileComposerTag(tag) &&
+          !tag.icon &&
+          safeIconUrl === getComposerTagIconUrl('file') ? (
+            <FileTypeIcon
+              name={tagValue}
+              size={16}
+              className={styles.fileTagIcon}
+              aria-hidden="true"
+            />
+          ) : safeIconUrl ? (
             <span
               className={styles.messageTagIcon}
               style={cssUrlVar('--user-message-tag-icon-url', safeIconUrl)}
               aria-hidden="true"
             />
-          )}
+          ) : null}
           {tagLabel && (
             <span className={styles.messageTagLabel}>{tagLabel}</span>
           )}

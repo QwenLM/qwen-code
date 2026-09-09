@@ -20,6 +20,7 @@ import {
   type TranscriptReplayGapInput,
 } from '@qwen-code/qwen-code-core/transcriptRecords';
 import {
+  GOAL_PAUSE_REASON_COMMAND,
   isGoalCheckpointBookkeepingRecord,
   parseGoalSnapshotV2,
   parseGoalStateCause,
@@ -1286,6 +1287,17 @@ function projectGoalControlCommand(
         ? `/goal edit ${snapshot.goal.objective}`
         : undefined;
     case 'pause':
+      // Only a pause the user typed replays as the user typing it. The
+      // runtime writes `pause` records of its own -- the no-progress bound
+      // stops an idle Goal with no one at the keyboard -- and attributing
+      // those to the user would assert the opposite of what happened. The
+      // paused card that follows carries `lastReason` either way. A record
+      // written before pauses carried reasons keeps the historical
+      // projection.
+      return snapshot.goal?.lastReason === undefined ||
+        snapshot.goal.lastReason === GOAL_PAUSE_REASON_COMMAND
+        ? `/goal ${cause}`
+        : undefined;
     case 'resume':
     case 'clear':
       return `/goal ${cause}`;

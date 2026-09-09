@@ -11,6 +11,7 @@ import {
   LiveHostCoordinator,
   LiveUnavailableError,
 } from './live-host-coordinator.js';
+import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 import {
   LIVE_HOST_BUNDLE_ID,
   LIVE_HOST_PROTOCOL_VERSION,
@@ -114,6 +115,179 @@ afterEach(() => {
 });
 
 describe('LiveHostCoordinator', () => {
+  it.each(['toggle', 'new'] as const)(
+    'retains a Host %s ownership admission refusal in status',
+    async (action) => {
+      const failure = new ConversationRuntimeOwnershipError(
+        'conversation_runtime_in_use',
+        true,
+        { cause: new Error('/private/locator pid=1234 nonce=secret') },
+      );
+      const beforeStart = vi
+        .fn<() => Promise<void>>()
+        .mockRejectedValueOnce(failure)
+        .mockResolvedValue(undefined);
+      const onStart = vi.fn();
+      const value = coordinator({ handlers: { beforeStart, onStart } });
+      const socket = connectReady(value);
+      socket.receive({ type: 'host.action', action });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(beforeStart).toHaveBeenCalledOnce();
+      expect(onStart).not.toHaveBeenCalled();
+      expect
+        .soft(
+          socket
+            .messages()
+            .filter((message) => message.type === 'host.state')
+            .at(-1),
+        )
+        .toMatchObject({
+          status: { state: 'error', message: failure.message },
+        });
+      expect.soft(value.getStatus()).toMatchObject({
+        available: true,
+        state: 'error',
+        message: failure.message,
+      });
+      expect(JSON.stringify(socket.messages())).not.toContain('/private');
+      expect(JSON.stringify(value.getStatus())).not.toContain('secret');
+      socket.close();
+      const reconnected = connectReady(value);
+      expect
+        .soft(
+          reconnected
+            .messages()
+            .find((message) => message.type === 'host.welcome'),
+        )
+        .toMatchObject({
+          status: { state: 'error', message: failure.message },
+        });
+      reconnected.receive({ type: 'host.action', action });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(onStart).toHaveBeenCalledOnce();
+      expect(value.getStatus().message).toBeUndefined();
+    },
+  );
+
+  it('retains a sanitized arbitrary admission failure', async () => {
+    const value = coordinator({
+      handlers: {
+        beforeStart: async () => {
+          throw new Error('/private/locator pid=1234 nonce=secret');
+        },
+      },
+    });
+    const socket = connectReady(value);
+    socket.receive({ type: 'host.action', action: 'toggle' });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(
+      socket
+        .messages()
+        .filter((message) => message.type === 'host.state')
+        .at(-1),
+    ).toMatchObject({
+      status: { state: 'error', message: 'Live Voice failed to start.' },
+    });
+    expect.soft(value.getStatus()).toMatchObject({
+      available: true,
+      state: 'error',
+      message: 'Live Voice failed to start.',
+    });
+    expect(JSON.stringify(socket.messages())).not.toContain('/private');
+    expect(JSON.stringify(value.getStatus())).not.toContain('secret');
+  });
+
+  it.each(['stop', 'deactivate', 'dispose', 'detach'] as const)(
+    'invalidates an admission pending before %s',
+    async (action) => {
+      let admit!: () => void;
+      const beforeStart = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            admit = resolve;
+          }),
+      );
+      const onStart = vi.fn();
+      const value = coordinator({ handlers: { beforeStart, onStart } });
+      const socket = connectReady(value);
+      const pending = value.requestStart('resume');
+      expect(beforeStart).toHaveBeenCalledOnce();
+      if (action === 'detach') socket.close();
+      else await value[action]();
+      admit();
+      await pending;
+      expect(onStart).not.toHaveBeenCalled();
+      expect(value.getStatus().callId).toBeUndefined();
+      expect(
+        socket
+          .messages()
+          .some((message) => message.type === 'host.capture_screen_context'),
+      ).toBe(false);
+    },
+  );
+
+  it.each(['toggle', 'new'] as const)(
+    'routes Host %s through admission and discards a superseded rejection',
+    async (action) => {
+      let reject!: (error: Error) => void;
+      const beforeStart = vi.fn(
+        () =>
+          new Promise<void>((_resolve, rejectPromise) => {
+            reject = rejectPromise;
+          }),
+      );
+      const onStart = vi.fn();
+      const value = coordinator({ handlers: { beforeStart, onStart } });
+      const socket = connectReady(value);
+      socket.receive({ type: 'host.action', action });
+      expect(beforeStart).toHaveBeenCalledOnce();
+      value.stop();
+      const messages = socket.sent.length;
+      reject(new Error('private locator details'));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(onStart).not.toHaveBeenCalled();
+      expect(socket.sent).toHaveLength(messages);
+    },
+  );
+
+  it('cancels a delayed replacement when a later admission arrives', async () => {
+    let finishStop!: () => void;
+    let admitLatest!: () => void;
+    const onStart = vi.fn();
+    const beforeStart = vi
+      .fn<() => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const value = coordinator({
+      handlers: {
+        beforeStart,
+        onStart,
+        onStop: () =>
+          new Promise<void>((resolve) => {
+            finishStop = resolve;
+          }),
+      },
+    });
+    connectReady(value);
+    await value.requestStart('resume');
+    await value.requestStart('new');
+    beforeStart.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          admitLatest = resolve;
+        }),
+    );
+    const pending = value.requestStart('new');
+    finishStop();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(onStart).toHaveBeenCalledOnce();
+    admitLatest();
+    await pending;
+    expect(onStart).toHaveBeenCalledTimes(2);
+    expect(onStart).toHaveBeenLastCalledWith(
+      expect.objectContaining({ mode: 'new' }),
+    );
+  });
+
   it('routes one correlated Appshot only for the active Live session', async () => {
     const value = coordinator();
     const socket = connectReady(value);

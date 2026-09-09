@@ -14,6 +14,7 @@ import {
   isGoalEvidenceProofKind,
   isGoalLimitKind,
   isGoalTokenBudgetSpent,
+  validateGoalPauseReason,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
   type GoalRecord,
@@ -51,6 +52,12 @@ export interface GoalTurnFinishedTransition {
    * and was delivered to the model.
    */
   windDownTurnId?: string;
+  /**
+   * The no-progress streak this turn leaves behind: zero clears it, a count
+   * records it. Absent leaves it untouched, which is the honest answer when
+   * the runtime has no way to tell a quiet turn from a busy one.
+   */
+  noProgressTurns?: number;
 }
 
 export class GoalConflictError extends Error {
@@ -124,6 +131,7 @@ export function reduceGoalControl(
       evidenceCursor: copyCursor(transition.cursor),
       evidenceCheckpoint: undefined,
       checkpointStalls: undefined,
+      noProgressTurns: undefined,
       ...rearmedTokenBudget(current, transition.tokenBudgetGrant),
       lastReason: undefined,
       limitKind: undefined,
@@ -137,7 +145,15 @@ export function reduceGoalControl(
         snapshotOf(current),
       );
     }
-    return transitionGoal(current, transition.now, { status: 'paused' });
+    // A pause without a reason clears `lastReason` rather than keeping it.
+    // The field is rendered as the reason the Goal is in its current state,
+    // and the value it would otherwise hold is the previous turn's verifier
+    // rejection -- which explains why the Goal was still running, not why it
+    // stopped.
+    return transitionGoal(current, transition.now, {
+      status: 'paused',
+      lastReason: request.reason,
+    });
   }
 
   if (current.status === 'complete') {
@@ -163,6 +179,7 @@ export function reduceGoalControl(
     // accounting across the Goal's whole life.
     return transitionGoal(current, transition.now, {
       status: 'active',
+      noProgressTurns: undefined,
       ...rearmedTokenBudget(current, transition.tokenBudgetGrant),
       lastReason: undefined,
       limitKind: undefined,
@@ -191,14 +208,27 @@ export function reduceGoalControl(
       // a different one, so carrying it over would spend the new window's
       // allowance on the old window's failures.
       checkpointStalls: undefined,
+      noProgressTurns: undefined,
       ...rearmedTokenBudget(current, transition.tokenBudgetGrant),
       lastReason: undefined,
       limitKind: undefined,
     });
   }
+  // A resumed Goal must not keep carrying the prose that explained why it
+  // stopped: `lastReason` is rendered as the reason for the *current* state,
+  // and several surfaces show it for an active Goal. Only a pause is cleared
+  // here -- a `blocked` Goal's accepted-blocker text and a `usage_limited`
+  // Goal's limit reason still describe why that Goal needed a resume, and
+  // `isEvidenceLimited` reads the latter as the pre-`limitKind` marker.
+  // The streak is cleared on every resume, including the resume of a Goal
+  // this very bound stopped: resuming is the user asking for another run at
+  // the objective, and starting that run three-quarters of the way to the
+  // stop would end it after a single quiet turn.
   return transitionGoal(current, transition.now, {
     status: 'active',
+    noProgressTurns: undefined,
     ...rearmedTokenBudget(current, transition.tokenBudgetGrant),
+    ...(current.status === 'paused' ? { lastReason: undefined } : {}),
   });
 }
 
@@ -221,6 +251,15 @@ export function reduceGoalTurnFinished(
     ...(transition.windDownTurnId === undefined
       ? {}
       : { windDownTurnId: transition.windDownTurnId }),
+    // Zero is spelled as no field, the same way the record persists it.
+    ...(transition.noProgressTurns === undefined
+      ? {}
+      : {
+          noProgressTurns:
+            transition.noProgressTurns > 0
+              ? transition.noProgressTurns
+              : undefined,
+        }),
   });
 }
 
@@ -257,7 +296,31 @@ export function parseGoalControlRequest(
         value['expectedGoalId'],
         value['expectedRevision'],
       );
-    case 'pause':
+    case 'pause': {
+      if (
+        !hasOnlyKeys(value, [
+          'action',
+          'expectedGoalId',
+          'expectedRevision',
+          'reason',
+        ]) ||
+        !isExpectedVersion(value)
+      ) {
+        return undefined;
+      }
+      const reason = value['reason'];
+      if (reason !== undefined) {
+        if (typeof reason !== 'string' || validateGoalPauseReason(reason)) {
+          return undefined;
+        }
+      }
+      return {
+        action: 'pause',
+        expectedGoalId: value['expectedGoalId'],
+        expectedRevision: value['expectedRevision'],
+        ...(reason === undefined ? {} : { reason }),
+      };
+    }
     case 'resume':
     case 'clear':
       if (
@@ -485,6 +548,9 @@ function transitionGoal(
   if ('windDownTurnId' in changes && changes.windDownTurnId === undefined) {
     delete transitioned.windDownTurnId;
   }
+  if ('noProgressTurns' in changes && changes.noProgressTurns === undefined) {
+    delete transitioned.noProgressTurns;
+  }
   return transitioned;
 }
 
@@ -534,6 +600,7 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       'updatedAt',
       'evidenceCheckpoint',
       'checkpointStalls',
+      'noProgressTurns',
       'lastReason',
       'limitKind',
     ]) ||
@@ -559,6 +626,8 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     !isGoalEvidenceCheckpoint(value['evidenceCheckpoint']) ||
     (value['checkpointStalls'] !== undefined &&
       !isNonNegativeInteger(value['checkpointStalls'])) ||
+    (value['noProgressTurns'] !== undefined &&
+      !isNonNegativeInteger(value['noProgressTurns'])) ||
     (value['lastReason'] !== undefined &&
       typeof value['lastReason'] !== 'string') ||
     (value['limitKind'] !== undefined &&
@@ -601,6 +670,9 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     // Zero is spelled as no field; a persisted 0 restores the same way.
     ...(value['checkpointStalls']
       ? { checkpointStalls: value['checkpointStalls'] }
+      : {}),
+    ...(value['noProgressTurns']
+      ? { noProgressTurns: value['noProgressTurns'] }
       : {}),
     ...(value['lastReason'] === undefined
       ? {}
