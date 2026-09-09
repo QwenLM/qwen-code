@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   deriveSessionName,
+  describeSessionKind,
   getSessionRecordPath,
   getSessionRegistryDir,
   listLiveSessions,
@@ -17,6 +18,7 @@ import {
   registerSession,
   resetRegisteredRecordPathForTest,
   unregisterSession,
+  SESSION_KINDS,
   SESSION_REGISTRY_SCHEMA_VERSION,
   readOwnSessionRecord,
 } from './session-registry.js';
@@ -217,6 +219,25 @@ describe('deriveSessionName', () => {
   });
 });
 
+describe('describeSessionKind', () => {
+  it('reads a record without a kind as the interactive UI', () => {
+    // The one caller-visible consequence of the field being optional: a
+    // record written before it existed came from the interactive UI,
+    // because nothing else registered then.
+    expect(describeSessionKind(undefined)).toBe('tui');
+    expect(describeSessionKind('')).toBe('tui');
+  });
+
+  it('passes every other kind through, known or not', () => {
+    for (const kind of SESSION_KINDS) {
+      expect(describeSessionKind(kind)).toBe(kind);
+    }
+    // A build that knows more kinds than this one is describing itself
+    // accurately; showing its own word beats showing "unknown".
+    expect(describeSessionKind('relay-2')).toBe('relay-2');
+  });
+});
+
 describe('registerSession', () => {
   it('writes a record for this process and lists it back', async () => {
     const before = Date.now();
@@ -252,6 +273,54 @@ describe('registerSession', () => {
       await fs.readFile(getSessionRecordPath(), 'utf8'),
     ) as Record<string, unknown>;
     expect(raw['pidNs']).toBe(readPidNamespaceId());
+  });
+
+  it('records what kind of session registered, defaulting to tui', async () => {
+    await registerSession({ sessionId: 's1', cwd: '/w/app', kind: 'serve' });
+    expect((await listLiveSessions())[0]?.kind).toBe('serve');
+
+    await unregisterSession();
+    resetRegisteredRecordPathForTest();
+    // The default is not cosmetic: every caller that omits the field is an
+    // interactive terminal, and a listing that showed them as unknown
+    // would read as a bug in the common case.
+    await registerSession({ sessionId: 's1', cwd: '/w/app' });
+    expect((await listLiveSessions())[0]?.kind).toBe('tui');
+  });
+
+  it('records an explicit name in place of the derived one', async () => {
+    await registerSession({
+      sessionId: 's1',
+      cwd: '/w/app',
+      kind: 'external',
+      name: 'live',
+    });
+    expect((await listLiveSessions())[0]?.name).toBe('live');
+  });
+
+  it('flattens and bounds an explicit name, and falls back when it empties', async () => {
+    await registerSession({
+      sessionId: 's1',
+      cwd: '/w/app',
+      // A name reaches a fixed-width table and a peer listing, so it gets
+      // what a peer-supplied label gets rather than being trusted whole.
+      name: `voice bridge\n${'x'.repeat(80)}`,
+    });
+    const flattened = (await listLiveSessions())[0]?.name ?? '';
+    expect(flattened).not.toContain('\n');
+    expect(Array.from(flattened)).toHaveLength(40);
+    expect(flattened.endsWith('…')).toBe(true);
+
+    await unregisterSession();
+    resetRegisteredRecordPathForTest();
+    // Nothing left to address the session by: the derived name is a
+    // working handle, and an empty one would be unaddressable.
+    await registerSession({
+      sessionId: 's1',
+      cwd: '/w/app',
+      name: '\u0000\u0007',
+    });
+    expect((await listLiveSessions())[0]?.name).toMatch(/^app-[0-9a-f]{2}$/);
   });
 
   it('records an explicit null qwenVersion when it is omitted', async () => {
@@ -1302,6 +1371,31 @@ describe('listLiveSessions', () => {
     expect(await listLiveSessions()).toEqual([liveBody()]);
   });
 
+  it('keeps a kind it has never heard of, as its writer wrote it', async () => {
+    // Forward compatibility: a newer build may register a kind this one
+    // does not know, and replacing it with a guess would lose the one
+    // thing the record actually says about itself.
+    await writeRaw(`${process.pid}.json`, liveBody({ kind: 'relay-2' }));
+    expect((await listLiveSessions())[0]?.kind).toBe('relay-2');
+  });
+
+  it.each([
+    ['not a string', 42],
+    ['empty', ''],
+    ['uppercase', 'Serve'],
+    ['over sixteen characters', 'a'.repeat(17)],
+    ['shaped like a path', '../../etc'],
+  ])(
+    'drops a kind that is %s, rather than passing it on',
+    async (_what, kind) => {
+      // Dropped, not defaulted: absent has a meaning of its own, and
+      // `describeSessionKind` is the single place that decides how it reads.
+      // A record is otherwise usable, so the field goes and the record stays.
+      await writeRaw(`${process.pid}.json`, liveBody({ kind }));
+      expect(await listLiveSessions()).toEqual([liveBody()]);
+    },
+  );
+
   it.each([
     ['a string schemaVersion', { schemaVersion: '1' }],
     ['no schemaVersion at all', { schemaVersion: undefined }],
@@ -1384,6 +1478,21 @@ describe('readOwnSessionRecord', () => {
       cwd: '/w/app',
       ipcPath: '/tmp/self.sock',
     });
+  });
+
+  it('round-trips the inbox token beside the address, dropping both on clear', async () => {
+    await registerSession({ sessionId: 's1', cwd: '/w/app' });
+    await patchSessionRecord({ ipcPath: '/tmp/self.sock', ipcToken: 'tok-1' });
+    expect(await readOwnSessionRecord()).toMatchObject({
+      ipcPath: '/tmp/self.sock',
+      ipcToken: 'tok-1',
+    });
+
+    await patchSessionRecord({ ipcPath: undefined, ipcToken: undefined });
+    const cleared = await readOwnSessionRecord();
+    expect(cleared).not.toBeNull();
+    expect(cleared).not.toHaveProperty('ipcPath');
+    expect(cleared).not.toHaveProperty('ipcToken');
   });
 
   it("is null for a foreign record sitting at this pid's path", async () => {

@@ -31,12 +31,14 @@ import {
   AgentHeadless,
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
-import { AgentEventType } from '../../agents/runtime/agent-events.js';
+import {
+  AgentEventEmitter,
+  AgentEventType,
+} from '../../agents/runtime/agent-events.js';
 import type {
   AgentToolCallEvent,
   AgentToolResultEvent,
   AgentApprovalRequestEvent,
-  AgentEventEmitter,
 } from '../../agents/runtime/agent-events.js';
 import { partToString } from '../../utils/partUtils.js';
 import { AuthType } from '../../core/contentGenerator.js';
@@ -212,7 +214,9 @@ describe('AgentTool', () => {
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
       getTeamManager: vi.fn().mockReturnValue(undefined),
       isAgentTeamEnabled: vi.fn().mockReturnValue(false),
+      isTodoWriteEnabled: vi.fn().mockReturnValue(true),
       getApprovalMode: vi.fn().mockReturnValue('default'),
+      getSessionWorkflowPlanRevision: vi.fn().mockReturnValue(undefined),
       getModel: vi.fn().mockReturnValue('parent-model'),
       getContentGeneratorConfig: vi.fn().mockReturnValue({
         model: 'parent-model',
@@ -391,6 +395,22 @@ describe('AgentTool', () => {
       expect(tool.description).toContain('Writing a fork prompt');
     });
 
+    it('states the background-agent discipline outside the fork section', async () => {
+      const tool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(tool.description).toContain('## Working with background agents');
+      expect(tool.description).toContain("Don't relaunch");
+      // The rules are stated once for every background agent; the fork
+      // section defers to them instead of carrying a fork-scoped copy.
+      expect(tool.description).toContain(
+        'The background-agent rules above apply to background forks unchanged.',
+      );
+      expect(tool.description).not.toContain(
+        'For a background fork, do not read or tail its output',
+      );
+    });
+
     it('advertises background execution as the default with a foreground opt-out', async () => {
       const tool = new AgentTool(config);
       await vi.runAllTimersAsync();
@@ -566,6 +586,19 @@ describe('AgentTool', () => {
         'current todo list',
       );
       expect(agentTool.description).toContain('set `todo_id`');
+    });
+
+    it('omits the todo association when todo_write is disabled', async () => {
+      vi.mocked(config.isTodoWriteEnabled).mockReturnValue(false);
+      const tool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const properties = tool.schema.parametersJsonSchema as {
+        properties: { todo_id?: unknown };
+      };
+      expect(properties.properties.todo_id).toBeUndefined();
+      expect(tool.description).not.toContain('todo_id');
+      tool.dispose();
     });
 
     it('declares fork_turns for fork agents without a none option', () => {
@@ -798,6 +831,33 @@ describe('AgentTool', () => {
       expect(result).toBe(
         'Parameter "todo_id" must be a non-empty string of at most 500 characters.',
       );
+    });
+
+    it('requires an approved Workflow todo ID for top-level agents', () => {
+      vi.mocked(config.getSessionWorkflowPlanRevision).mockReturnValue({
+        planId: 'plan-1',
+        sourceCallId: 'todo-call',
+        todoIds: ['inspect-ui'],
+      });
+
+      vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+      expect(agentTool.validateToolParams(validParams)).toContain(
+        'cannot start until the Session Workflow plan is approved',
+      );
+      vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
+
+      expect(agentTool.validateToolParams(validParams)).toContain(
+        '"todo_id" is required',
+      );
+      expect(
+        agentTool.validateToolParams({ ...validParams, todo_id: 'other' }),
+      ).toContain('must match the approved Session Workflow');
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          todo_id: 'inspect-ui',
+        }),
+      ).toBeNull();
     });
 
     it('should reject empty subagent_type', async () => {
@@ -5608,6 +5668,7 @@ describe('AgentTool', () => {
       const toolCall = resultSnapshot?.toolCalls?.find(
         (entry) => entry.callId === 'call-read-1',
       );
+      expect(resultSnapshot?.toolCalls).toHaveLength(1);
       expect(toolCall?.args).toEqual({ path: '/test.ts' });
       expect(toolCall?.responseParts).toBe(responseParts);
       expect(toolCall?.boundaryArtifact).toEqual({
@@ -5663,6 +5724,38 @@ describe('AgentTool', () => {
       expect(toolCall).not.toHaveProperty('args');
       expect(toolCall).not.toHaveProperty('responseParts');
       expect(toolCall).not.toHaveProperty('boundaryArtifact');
+    });
+
+    it('retains invoked skill names for Session Workflow agents', async () => {
+      vi.mocked(config.getSessionWorkflowPlanRevision).mockReturnValue({
+        planId: 'plan-1',
+        sourceCallId: 'todo-call',
+        todoIds: ['inspect-skill'],
+      });
+      const snapshots: AgentResultDisplay[] = [];
+      const runtimeEmitter = new AgentEventEmitter();
+      const invocation = createInvocationWithEventDrivenAgent(() => {});
+      vi.mocked(mockAgent.getCore).mockReturnValue({
+        modelConfig: { model: 'subagent-model' },
+        getEventEmitter: () => runtimeEmitter,
+      } as ReturnType<AgentHeadless['getCore']>);
+      vi.mocked(mockAgent.execute).mockImplementation(async () => {
+        runtimeEmitter.emit(AgentEventType.TOOL_CALL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-skill-1',
+          name: 'skill',
+          args: { skill: 'repo-ops' },
+          description: 'Loading repo-ops',
+          timestamp: Date.now(),
+        } satisfies AgentToolCallEvent);
+      });
+
+      await invocation.execute(undefined, (output) => {
+        snapshots.push(output as AgentResultDisplay);
+      });
+
+      expect(snapshots.at(-1)?.skills).toEqual(['repo-ops']);
     });
 
     it('should clear pendingConfirmation when TOOL_RESULT arrives for the pending tool (IDE accept path)', async () => {
@@ -6010,7 +6103,13 @@ describe('AgentTool', () => {
       ).createInvocation(params);
       const updates: AgentResultDisplay[] = [];
       const result = await invocation.execute(undefined, (output) => {
-        updates.push(output as AgentResultDisplay);
+        const display = output as AgentResultDisplay;
+        if (display.subagentSessionReady) {
+          expect(mockRegistry.register).toHaveBeenCalled();
+          expect(attachSpy).toHaveBeenCalled();
+          expect(writeMetaSpy).toHaveBeenCalled();
+        }
+        updates.push(display);
       });
 
       const llmText = partToString(result.llmContent);
@@ -6022,6 +6121,16 @@ describe('AgentTool', () => {
       expect(llmText).toContain(`or ${ToolNames.TASK_STOP} to cancel.`);
       expect(llmText).not.toContain('with to:');
       expect(llmText).not.toContain('Use send_message with task_id:');
+      // The result must not invite the parent to poll the transcript: the
+      // completion notification is the only supported way to read a result.
+      expect(llmText).not.toContain('check progress');
+      expect(llmText).not.toContain('tail on the output file');
+      expect(llmText).toContain('<task-notification>');
+      expect(llmText).toContain(
+        'Do not treat the agent as cancelled or relaunch it',
+      );
+      // The path is still reported, for review once the agent is done.
+      expect(llmText).toContain('output_file:');
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({
           description: 'Start monitor',
@@ -6051,7 +6160,14 @@ describe('AgentTool', () => {
       const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('background');
       expect(display.executionMode).toBe('background');
+      expect(
+        (result.returnDisplay as AgentResultDisplay).subagentSessionReady,
+      ).toBe(true);
+      expect(
+        updates.some((update) => update.subagentSessionReady === true),
+      ).toBe(true);
       expect(updates[0]).toMatchObject({
+        subagentSessionReady: false,
         status: 'running',
         executionMode: 'background',
       });
@@ -6331,6 +6447,45 @@ describe('AgentTool', () => {
       expect(mockSubagentDispose).not.toHaveBeenCalled();
     });
 
+    it('clears the completed run summary in the hot continuation patch', async () => {
+      const patchMetaSpy = vi.spyOn(transcript, 'patchAgentMeta');
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.waitFor(() => {
+        expect(mockRegistry.complete).toHaveBeenCalledTimes(1);
+      });
+
+      const resident = mockRegistry.registerResidentAgent.mock.calls[0]?.[1] as
+        | { continue: (message: string) => boolean }
+        | undefined;
+      expect(resident).toBeDefined();
+      expect(resident?.continue('Now inspect the helper')).toBe(true);
+
+      // The hot continuation patch must clear run N-1's terminal summary —
+      // mirroring the cold-resume patch — so a crash mid-continuation cannot
+      // leave discovery restoring the completed run's stats/activities as the
+      // live run's state.
+      const runningPatch = patchMetaSpy.mock.calls.find(
+        ([, update]) => update.status === 'running' && update.resumeCount === 1,
+      );
+      expect(runningPatch).toBeDefined();
+      // toMatchObject treats undefined as absent, so assert key presence.
+      expect(runningPatch?.[1]).toHaveProperty('stats', undefined);
+      expect(runningPatch?.[1]).toHaveProperty('recentActivities', undefined);
+
+      await vi.waitFor(() => {
+        expect(mockRegistry.complete).toHaveBeenCalledTimes(2);
+      });
+      patchMetaSpy.mockRestore();
+    });
+
     it('claims finishing-window input before publishing completion', async () => {
       mockRegistry.drainMessages
         .mockReturnValueOnce(['late correction'])
@@ -6555,6 +6710,8 @@ describe('AgentTool', () => {
     });
 
     it('runs in the foreground when run_in_background is false', async () => {
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
       ).createInvocation({
@@ -6565,14 +6722,27 @@ describe('AgentTool', () => {
       });
       const updates: AgentResultDisplay[] = [];
       const result = await invocation.execute(undefined, (output) => {
-        updates.push(output as AgentResultDisplay);
+        const display = output as AgentResultDisplay;
+        if (display.subagentSessionReady) {
+          expect(mockRegistry.register).toHaveBeenCalled();
+          expect(attachSpy).toHaveBeenCalled();
+          expect(writeMetaSpy).toHaveBeenCalled();
+        }
+        updates.push(display);
       });
 
       expect(partToString(result.llmContent)).toBe('Monitor done');
       expect((result.returnDisplay as AgentResultDisplay).executionMode).toBe(
         'foreground',
       );
+      expect(
+        (result.returnDisplay as AgentResultDisplay).subagentSessionReady,
+      ).toBe(true);
+      expect(
+        updates.some((update) => update.subagentSessionReady === true),
+      ).toBe(true);
       expect(updates[0]).toMatchObject({
+        subagentSessionReady: false,
         status: 'running',
         executionMode: 'foreground',
       });
@@ -6706,6 +6876,9 @@ describe('AgentTool', () => {
         expect((result.returnDisplay as AgentResultDisplay).status).toBe(
           'failed',
         );
+        expect(
+          (result.returnDisplay as AgentResultDisplay).subagentSessionReady,
+        ).toBe(false);
         expect(attachSpy).not.toHaveBeenCalled();
         expect(mockAgent.execute).not.toHaveBeenCalled();
         expect(mockRegistry.complete).not.toHaveBeenCalled();

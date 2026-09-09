@@ -152,6 +152,10 @@ describe('Feishu markdown utilities', () => {
       expect(splitChunks('')).toEqual(['']);
     });
 
+    it('rejects a code-fence limit that cannot make progress', () => {
+      expect(() => splitChunks('```\nabc\n```', 4)).toThrow(RangeError);
+    });
+
     it('splits long text into chunks', () => {
       const line = 'a'.repeat(100) + '\n';
       const text = line.repeat(50); // 5050 chars > 4000
@@ -178,6 +182,20 @@ describe('Feishu markdown utilities', () => {
       expect(chunks.length).toBe(2);
       expect(chunks[0]!.length).toBe(4000);
       expect(chunks[1]!.length).toBe(1000);
+    });
+
+    it('does not split surrogate pairs at an odd chunk boundary', () => {
+      const text = '😀'.repeat(2500);
+      const chunks = splitChunks(text, 3999);
+
+      expect(chunks.join('')).toBe(text);
+      chunks.forEach((chunk) => {
+        expect(chunk.length).toBeLessThanOrEqual(3999);
+        const last = chunk.charCodeAt(chunk.length - 1);
+        const first = chunk.charCodeAt(0);
+        expect(last < 0xd800 || last > 0xdbff).toBe(true);
+        expect(first < 0xdc00 || first > 0xdfff).toBe(true);
+      });
     });
 
     it('accounts for the closing fence when a code line lands near the limit', () => {

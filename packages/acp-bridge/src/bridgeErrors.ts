@@ -348,7 +348,7 @@ export class SessionShellDisabledError extends Error {
 
 /**
  * Thrown when a direct daemon shell command has no client id bound to the
- * addressed session. The bearer token authenticates the caller to the daemon;
+ * addressed session. Deployment policy authorizes the caller to the daemon;
  * this error means the caller has not proven ownership of the session.
  */
 export class SessionShellClientRequiredError extends Error {
@@ -623,10 +623,12 @@ export class SessionBusyError extends Error {
 export class WorkspaceDrainingError extends Error {
   readonly code = 'workspace_draining';
   readonly workspaceCwd: string;
-  constructor(workspaceCwd: string) {
+  override readonly cause: unknown;
+  constructor(workspaceCwd: string, cause?: unknown) {
     super(`Workspace ${JSON.stringify(workspaceCwd)} is being removed`);
     this.name = 'WorkspaceDrainingError';
     this.workspaceCwd = workspaceCwd;
+    this.cause = cause;
   }
 }
 
@@ -700,5 +702,31 @@ export class CdWhilePromptActiveError extends Error {
     );
     this.name = 'CdWhilePromptActiveError';
     this.sessionId = sessionId;
+  }
+}
+
+/**
+ * Admission refusal for a session whose worktree ownership is being
+ * transferred to a replacement session (worktree reset). The daemon arms the
+ * barrier before the transfer's first side effect, so every prompt source and
+ * every other writer that could reach the session's checkout or cwd fails
+ * closed for its duration; the session id in the message is the superseded
+ * one.
+ */
+export class SessionResetPendingError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(
+      `Session ${sessionId} is mid worktree reset; prompt admission is closed until the reset completes`,
+    );
+    this.name = 'SessionResetPendingError';
+    this.sessionId = sessionId;
+  }
+}
+
+export class McpAuthenticationInProgressError extends Error {
+  constructor() {
+    super('Another MCP authentication is already in progress');
+    this.name = 'McpAuthenticationInProgressError';
   }
 }

@@ -31,16 +31,24 @@ import type {
 import type {
   ChatRecord,
   Config,
+  ContentGeneratorConfig,
   Extension,
   LlmChat,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
   AuthType,
+  GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
+  GOAL_PAUSE_REASON_SESSION_DISPOSED,
+  GOAL_PAUSE_REASON_STOP_HOOK_CAP,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  MAX_BACKGROUND_NOTIFICATION_QUEUE,
+  goalPauseReasonForFailure,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
+import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
 import { SettingScope } from '../../config/settings.js';
 import type {
   AgentSideConnection,
@@ -77,6 +85,8 @@ const addToolArgumentsAttributesSpy = vi.hoisted(() => vi.fn());
 const addToolCallResultAttributesSpy = vi.hoisted(() => vi.fn());
 const logLoopDetectedSpy = vi.hoisted(() => vi.fn());
 const logRepeatedToolFailureGuardSpy = vi.hoisted(() => vi.fn());
+const deleteWorkflowSnapshotSpy = vi.hoisted(() => vi.fn());
+const listWorkflowSnapshotsSpy = vi.hoisted(() => vi.fn());
 const agentTelemetry = vi.hoisted(() => ({
   span: {},
   getActiveInteractionSpan: vi.fn(),
@@ -154,6 +164,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       logRepeatedToolFailureGuardSpy(...args);
       return actual.logRepeatedToolFailureGuard(...args);
     },
+    deleteWorkflowSnapshot: deleteWorkflowSnapshotSpy,
+    listWorkflowSnapshots: listWorkflowSnapshotsSpy,
     // Transparent recording wrapper: records the constructor deps, then behaves
     // exactly like the real resolver (subclass → instanceof + methods preserved).
     LoopTickResolver: class extends actual.LoopTickResolver {
@@ -512,6 +524,12 @@ describe('Session', () => {
   };
   let mockLlmClient: {
     getChat: ReturnType<typeof vi.fn>;
+    getHistoryTail: ReturnType<typeof vi.fn>;
+    getTrustedUserAnswers: ReturnType<typeof vi.fn>;
+    recordTrustedUserAnswers: ReturnType<typeof vi.fn>;
+    setHistory: ReturnType<typeof vi.fn>;
+    stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
+    truncateHistory: ReturnType<typeof vi.fn>;
     isInitialized: ReturnType<typeof vi.fn>;
     refreshSystemInstruction: ReturnType<typeof vi.fn>;
     setTools: ReturnType<typeof vi.fn>;
@@ -560,8 +578,19 @@ describe('Session', () => {
     getFunctionDeclarationsFiltered: ReturnType<typeof vi.fn>;
   };
   let mockWorkflowRunRegistry: {
+    setCompletionCallback: ReturnType<typeof vi.fn>;
+    setStatusChangeCallback: ReturnType<typeof vi.fn>;
+    setSnapshotPersistedCallback: ReturnType<typeof vi.fn>;
+    clearStatusChangeCallback: ReturnType<typeof vi.fn>;
     setApprovalRequestCallback: ReturnType<typeof vi.fn>;
     resolvePendingApproval: ReturnType<typeof vi.fn>;
+    get: ReturnType<typeof vi.fn>;
+    getHandle: ReturnType<typeof vi.fn>;
+    isStarting: ReturnType<typeof vi.fn>;
+    listStartingRunIds: ReturnType<typeof vi.fn>;
+    removeTerminal: ReturnType<typeof vi.fn>;
+    list: ReturnType<typeof vi.fn>;
+    abortAll: ReturnType<typeof vi.fn>;
   };
   let mockGoalRuntime: {
     getSnapshot: ReturnType<typeof vi.fn>;
@@ -676,6 +705,10 @@ describe('Session', () => {
     addToolCallResultAttributesSpy.mockClear();
     logLoopDetectedSpy.mockReset();
     logRepeatedToolFailureGuardSpy.mockReset();
+    deleteWorkflowSnapshotSpy.mockReset();
+    deleteWorkflowSnapshotSpy.mockResolvedValue(true);
+    listWorkflowSnapshotsSpy.mockReset();
+    listWorkflowSnapshotsSpy.mockResolvedValue([]);
     agentTelemetry.getActiveInteractionSpan.mockReset();
     agentTelemetry.addAgentInputMessageAttributes.mockReset();
     agentTelemetry.captures.length = 0;
@@ -725,6 +758,16 @@ describe('Session', () => {
     } as unknown as LlmChat;
     mockLlmClient = {
       getChat: vi.fn().mockReturnValue(mockChat),
+      getHistoryTail: vi.fn().mockReturnValue([]),
+      getTrustedUserAnswers: vi.fn().mockReturnValue([]),
+      recordTrustedUserAnswers: vi.fn(),
+      setHistory: vi.fn((history: Content[]) => mockChat.setHistory(history)),
+      stripOrphanedUserEntriesFromHistory: vi.fn(() =>
+        mockChat.stripOrphanedUserEntriesFromHistory(),
+      ),
+      truncateHistory: vi.fn((count: number) =>
+        mockChat.truncateHistory(count),
+      ),
       isInitialized: vi.fn().mockReturnValue(true),
       refreshSystemInstruction: vi.fn().mockResolvedValue(undefined),
       setTools: vi.fn().mockResolvedValue(undefined),
@@ -785,8 +828,19 @@ describe('Session', () => {
       ),
     };
     mockWorkflowRunRegistry = {
+      setCompletionCallback: vi.fn(),
+      setStatusChangeCallback: vi.fn(),
+      setSnapshotPersistedCallback: vi.fn(),
+      clearStatusChangeCallback: vi.fn(),
       setApprovalRequestCallback: vi.fn(),
       resolvePendingApproval: vi.fn().mockResolvedValue(true),
+      get: vi.fn().mockReturnValue(undefined),
+      getHandle: vi.fn().mockReturnValue(undefined),
+      isStarting: vi.fn().mockReturnValue(false),
+      listStartingRunIds: vi.fn().mockReturnValue([]),
+      removeTerminal: vi.fn().mockReturnValue(false),
+      list: vi.fn().mockReturnValue([]),
+      abortAll: vi.fn(),
     };
 
     mockChatRecordingService = {
@@ -894,7 +948,13 @@ describe('Session', () => {
       getChatRecordingService: vi
         .fn()
         .mockReturnValue(mockChatRecordingService),
+      getSessionService: vi.fn().mockReturnValue({
+        setSessionPrBoundCallback: vi.fn(),
+      }),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
+      getDisabledTools: vi.fn().mockReturnValue(new Set<string>()),
+      getPermissionManager: vi.fn().mockReturnValue(null),
+      isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getToolInvocationGuard: vi.fn().mockReturnValue(undefined),
       getFileService: vi.fn().mockReturnValue(fileService),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
@@ -910,6 +970,7 @@ describe('Session', () => {
       getDebugMode: vi.fn().mockReturnValue(false),
       getAuthType: vi.fn().mockImplementation(() => currentAuthType),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
+      reloadModelProvidersConfig: vi.fn(),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
@@ -944,6 +1005,10 @@ describe('Session', () => {
       getWorkflowRunRegistry: vi.fn().mockReturnValue(mockWorkflowRunRegistry),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      isSkillEnabled: vi.fn(
+        (skill: { name: string }) =>
+          !mockConfig.getDisabledSkillNames().has(skill.name.toLowerCase()),
+      ),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
       setCurrentSessionScheduledTaskCreator: vi.fn(),
@@ -973,6 +1038,7 @@ describe('Session', () => {
       workspace: { settings: {} },
       setValue: vi.fn(),
       reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
     } as unknown as LoadedSettings;
 
     getAvailableCommandsSpy = vi.mocked(nonInteractiveCliCommands)
@@ -1012,6 +1078,82 @@ describe('Session', () => {
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
+  });
+
+  it('captures the Session Workflow gate from settings at construction instead of tracking the live view', () => {
+    const setSessionWorkflowEnabledProvider = vi.fn();
+    const merged: Record<string, unknown> = {
+      experimental: { sessionWorkflow: true },
+    };
+    const gateSettings = {
+      get merged() {
+        return merged;
+      },
+      isTrusted: false,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      setValue: vi.fn(),
+      reloadScopeFromDisk: vi.fn(() => {
+        merged['experimental'] = { sessionWorkflow: false };
+      }),
+    } as unknown as LoadedSettings;
+    const gateConfig = {
+      ...mockConfig,
+      setSessionWorkflowEnabledProvider,
+    } as unknown as Config;
+
+    const gateSession = new Session(
+      'gate-session-id',
+      gateConfig,
+      mockClient,
+      gateSettings,
+    );
+
+    const provider = setSessionWorkflowEnabledProvider.mock.calls.at(-1)?.[0];
+    expect(provider).toBeDefined();
+    expect(provider?.()).toBe(true);
+
+    // reloadSkillSettings (the reload a workspaceSkillsRefresh performs on
+    // every live session) swaps the session's own workspace view; the gate
+    // must not silently flip with no change event and no plan-revision
+    // cleanup — gate changes flow through the daemon's explicit writers.
+    gateSession.reloadSkillSettings();
+    expect(
+      (merged['experimental'] as Record<string, unknown>)['sessionWorkflow'],
+    ).toBe(false);
+    expect(provider?.()).toBe(true);
+  });
+
+  it('reloads model providers from the session-owned settings', () => {
+    const modelProviders = {
+      idealab: [{ id: 'qwen3', baseUrl: 'https://idealab.example/v1' }],
+    };
+    Object.assign(mockSettings.merged, {
+      modelProviders,
+      providerProtocol: { idealab: 'openai' },
+    });
+
+    session.reloadModelProvidersFromDisk();
+
+    expect(mockSettings.reloadScopesFromDiskAtomically).toHaveBeenCalledWith([
+      SettingScope.User,
+      SettingScope.Workspace,
+    ]);
+    expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalledWith(
+      modelProviders,
+      { idealab: 'openai' },
+    );
+  });
+
+  it('does not apply stale model providers when a settings scope cannot reload', () => {
+    vi.mocked(mockSettings.reloadScopesFromDiskAtomically).mockReturnValueOnce(
+      false,
+    );
+
+    expect(() => session.reloadModelProvidersFromDisk()).toThrow(
+      'Unable to reload model-provider settings from disk.',
+    );
+    expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
   });
 
   it('bounds textual tool results at the live ACP delivery boundary', async () => {
@@ -1108,7 +1250,9 @@ describe('Session', () => {
       );
     }
 
-    function holdIds(category: 'agent' | 'notification' | 'shell'): string[] {
+    function holdIds(
+      category: 'agent' | 'notification' | 'shell' | 'workflow',
+    ): string[] {
       return session
         .collectActiveWorkHolds()
         .filter((hold) => hold.category === category)
@@ -1208,6 +1352,54 @@ describe('Session', () => {
       session.dispose();
     });
 
+    it('holds executing workflow runs but never paused ones', () => {
+      mockWorkflowRunRegistry.list.mockReturnValue([
+        { runId: 'wf-running', status: 'running' },
+        { runId: 'wf-pausing', status: 'pausing' },
+        { runId: 'wf-paused', status: 'paused' },
+        { runId: 'wf-complete', status: 'completed' },
+      ]);
+      createReportingSession();
+
+      // Mirrors the registry's hasRunningEntries(): a paused run executes
+      // nothing and no backstop would ever release the hold, so it must
+      // not pin the session forever.
+      expect(holdIds('workflow')).toEqual(['wf-running', 'wf-pausing']);
+      expect(session.isIdle()).toBe(false);
+
+      mockWorkflowRunRegistry.list.mockReturnValue([
+        { runId: 'wf-paused', status: 'paused' },
+      ]);
+      expect(session.collectActiveWorkHolds()).toEqual([]);
+      expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('holds a workflow run that is reserved but not yet registered', () => {
+      // Between `reserveStart` and `register` the run has no `list()`
+      // entry, yet the registry's hasRunningEntries() and the liveness
+      // gates already count it as live. A daemon conditional close that
+      // read no hold here disposed the session and aborted the start
+      // under the client that just asked for it.
+      mockWorkflowRunRegistry.listStartingRunIds.mockReturnValue([
+        'wf-starting',
+      ]);
+      mockWorkflowRunRegistry.list.mockReturnValue([
+        { runId: 'wf-paused', status: 'paused' },
+      ]);
+      createReportingSession();
+
+      expect(holdIds('workflow')).toEqual(['wf-starting']);
+      expect(session.isIdle()).toBe(false);
+
+      // Registration takes over with the entry's own running hold; a
+      // failed or cancelled start drops the reservation.
+      mockWorkflowRunRegistry.listStartingRunIds.mockReturnValue([]);
+      expect(session.collectActiveWorkHolds()).toEqual([]);
+      expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
     it('tracks shell status changes and retracts only its callback', () => {
       createReportingSession();
       const statusChanged =
@@ -1289,6 +1481,37 @@ describe('Session', () => {
         expect(session.collectActiveWorkHolds()).toEqual([]),
       );
       expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('holds a queued workflow completion notification', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      createReportingSession();
+      const releaseCloseGate = session.beginClose();
+      const notify =
+        mockWorkflowRunRegistry.setCompletionCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { runId: string; status: 'completed' },
+        ) => void;
+
+      notify('Workflow completed.', '<task-notification />', {
+        runId: 'wf-queued',
+        status: 'completed',
+      });
+
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(holdIds('notification')).toEqual(['wf-queued']);
+      expect(session.isIdle()).toBe(false);
+
+      releaseCloseGate();
+      await vi.waitFor(() =>
+        expect(session.collectActiveWorkHolds()).toEqual([]),
+      );
       session.dispose();
     });
 
@@ -2422,6 +2645,13 @@ describe('Session', () => {
         titleSource: 'auto',
       },
     );
+    expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+      sessionId: 'persisted-session-id',
+      update: {
+        sessionUpdate: 'session_info_update',
+        title: 'Durable title',
+      },
+    });
   });
 
   describe('managed auto-memory', () => {
@@ -2712,6 +2942,1017 @@ describe('Session', () => {
     expect(textParts(notificationCall.message)).toContain(reminder);
   });
 
+  it('delivers background workflow completions through the session queue', async () => {
+    mockChat.sendMessageStream = vi
+      .fn()
+      .mockImplementation(async () => createEmptyStream());
+    const callback = mockWorkflowRunRegistry.setCompletionCallback.mock
+      .calls[0][0] as (
+      displayText: string,
+      modelText: string,
+      meta: {
+        runId: string;
+        status: 'completed' | 'failed';
+        todoWorkChainId?: string;
+      },
+    ) => void;
+
+    callback('Workflow completed.', '<task-notification/>', {
+      runId: 'wf_1234abcd',
+      status: 'completed',
+    });
+
+    await vi.waitFor(() =>
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
+        [{ text: '<task-notification/>' }],
+        'Workflow completed.',
+        expect.objectContaining({
+          taskId: 'wf_1234abcd',
+          status: 'completed',
+          kind: 'workflow',
+        }),
+      ),
+    );
+  });
+
+  it('adds terminal workflow status changes to the session history cache', () => {
+    const callback = mockWorkflowRunRegistry.setStatusChangeCallback.mock
+      .calls[0][0] as (entry: core.WorkflowTask) => void;
+    callback({
+      id: 'wf_saved',
+      kind: 'workflow',
+      runId: 'wf_saved',
+      description: 'Review and fix',
+      meta: { name: 'review-and-fix', description: 'Review and fix' },
+      status: 'completed',
+      startTime: 1_000,
+      endTime: 2_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: ['Inspect'],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 1,
+      agentsCompleted: 1,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 500,
+      tokenBudgetTotal: 2_000,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    });
+
+    expect(session.getWorkflowHistory()).toEqual([
+      expect.objectContaining({
+        runId: 'wf_saved',
+        description: 'Review and fix',
+        status: 'completed',
+      }),
+    ]);
+  });
+
+  it('keeps cached terminal workflow history when its disk write is missing', async () => {
+    const callback = mockWorkflowRunRegistry.setStatusChangeCallback.mock
+      .calls[0][0] as (entry: core.WorkflowTask) => void;
+    callback({
+      id: 'wf-unpersisted',
+      kind: 'workflow',
+      runId: 'wf-unpersisted',
+      description: 'Unpersisted run',
+      meta: null,
+      status: 'completed',
+      startTime: 1_000,
+      endTime: 2_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    });
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([]);
+
+    await session.refreshWorkflowHistory();
+
+    expect(session.getWorkflowHistory()).toEqual([
+      expect.objectContaining({ runId: 'wf-unpersisted' }),
+    ]);
+  });
+
+  it('does not republish a run deleted while a refresh was still reading the disk', async () => {
+    // Refresh reads the directory and then merges without a claim, while
+    // deletion holds one: a delete that lands between the read and the
+    // merge was overwritten by the stale listing, and the run came back
+    // until the next refresh.
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_stale',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    session = new Session(
+      'racing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    let finishStaleRead!: (snapshots: Array<typeof snapshot>) => void;
+    listWorkflowSnapshotsSpy.mockImplementationOnce(
+      () =>
+        new Promise<Array<typeof snapshot>>((resolve) => {
+          finishStaleRead = resolve;
+        }),
+    );
+    const staleRefresh = session.refreshWorkflowHistory();
+    await vi.waitFor(() => expect(finishStaleRead).toBeDefined());
+
+    // The delete's own refresh sees the file, then removes it.
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+    await expect(session.deleteWorkflowHistory(snapshot.runId)).resolves.toBe(
+      true,
+    );
+    expect(session.getWorkflowHistory()).toEqual([]);
+
+    // The read that began before the delete now completes with the
+    // pre-delete listing.
+    finishStaleRead([snapshot]);
+    await staleRefresh;
+
+    expect(session.getWorkflowHistory()).toEqual([]);
+
+    // A later refresh that genuinely finds the run again (a retry reuses
+    // the runId) must not be suppressed by the old deletion.
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+    await session.refreshWorkflowHistory();
+    expect(session.getWorkflowHistory()).toEqual([
+      expect.objectContaining({ runId: 'wf_stale' }),
+    ]);
+  });
+
+  it('does not republish a run a sibling session deleted while this refresh was still reading the disk', async () => {
+    // The deletion-sequence marker is per-Session, but the store and the
+    // delete entrance are process-wide: session A's delete landing while
+    // session B's refresh had already read the directory left nothing in
+    // B to filter the stale listing, and B republished the run A's
+    // client was just told was gone. The delete handler now marks the
+    // deletion in every sibling, under its claim.
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_cross',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    const deleting = new Session(
+      'deleting-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    session = new Session(
+      'observing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    try {
+      let finishStaleRead!: (snapshots: Array<typeof snapshot>) => void;
+      listWorkflowSnapshotsSpy.mockImplementationOnce(
+        () =>
+          new Promise<Array<typeof snapshot>>((resolve) => {
+            finishStaleRead = resolve;
+          }),
+      );
+      const staleRefresh = session.refreshWorkflowHistory();
+      await vi.waitFor(() => expect(finishStaleRead).toBeDefined());
+
+      // The deleting session's own refresh sees the file, then removes
+      // it, and the handler propagates the deletion to the observer.
+      listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+      await expect(
+        deleting.deleteWorkflowHistory(snapshot.runId),
+      ).resolves.toBe(true);
+      session.noteExternalWorkflowDeletion(snapshot.runId);
+      expect(session.getWorkflowHistory()).toEqual([]);
+
+      // The observer's read that began before the delete now completes
+      // with the pre-delete listing.
+      finishStaleRead([snapshot]);
+      await staleRefresh;
+
+      expect(session.getWorkflowHistory()).toEqual([]);
+
+      // A later refresh that genuinely finds the run again (a retry
+      // reuses the runId) is not suppressed by the old deletion.
+      listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+      await session.refreshWorkflowHistory();
+      expect(session.getWorkflowHistory()).toEqual([
+        expect.objectContaining({ runId: 'wf_cross' }),
+      ]);
+    } finally {
+      deleting.dispose();
+    }
+  });
+
+  it('drops persisted workflow history deleted by another session', async () => {
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_abcd',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    const deletingSession = new Session(
+      'deleting-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    session = new Session(
+      'observing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+
+    await expect(
+      deletingSession.deleteWorkflowHistory(snapshot.runId),
+    ).resolves.toBe(true);
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([]);
+
+    await session.refreshWorkflowHistory();
+
+    expect(session.getWorkflowHistory()).toEqual([]);
+  });
+
+  it('lets a newer persisted snapshot win over a stale cached one', async () => {
+    const callback = mockWorkflowRunRegistry.setStatusChangeCallback.mock
+      .calls[0][0] as (entry: core.WorkflowTask) => void;
+    callback({
+      id: 'wf_reused',
+      kind: 'workflow',
+      runId: 'wf_reused',
+      description: 'Stale cached run',
+      meta: null,
+      status: 'failed',
+      startTime: 1_000,
+      endTime: 2_000,
+      error: 'old error',
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    });
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([
+      {
+        runId: 'wf_reused',
+        meta: null,
+        status: 'completed' as const,
+        script: 'return 1;',
+        phases: [],
+        agentsDispatched: 0,
+        agentsCompleted: 0,
+        tokensSpent: 0,
+        tokenBudgetTotal: null,
+        perPhaseTokens: [],
+        recentLogs: [],
+        startTime: 3_000,
+        endTime: 4_000,
+      },
+    ]);
+
+    await session.refreshWorkflowHistory();
+
+    // The persisted copy is the newer authoritative projection of the
+    // reused runId; the stale callback cache must not shadow it.
+    expect(session.getWorkflowHistory()).toEqual([
+      expect.objectContaining({
+        runId: 'wf_reused',
+        status: 'completed',
+        startTime: 3_000,
+        endTime: 4_000,
+      }),
+    ]);
+  });
+
+  it('does not resurrect a sibling-deleted run cached through the status callback', async () => {
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_abcd',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    const deletingSession = new Session(
+      'deleting-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    const observingSession = new Session(
+      'observing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    // The observing session caches the terminal run through the
+    // status-change callback, exactly as it lands before the runner's
+    // snapshot write.
+    const callback =
+      mockWorkflowRunRegistry.setStatusChangeCallback.mock.calls.at(
+        -1,
+      )?.[0] as (entry: core.WorkflowTask) => void;
+    callback({
+      id: 'wf_abcd',
+      kind: 'workflow',
+      runId: 'wf_abcd',
+      description: 'Callback-cached run',
+      meta: null,
+      status: 'failed',
+      startTime: 1_000,
+      endTime: 2_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    });
+    expect(observingSession.getWorkflowHistory()).toEqual([
+      expect.objectContaining({ runId: 'wf_abcd' }),
+    ]);
+    // The runner then persists the snapshot; the registry notification
+    // retires the observing session's unpersisted cache entry.
+    const snapshotPersisted =
+      mockWorkflowRunRegistry.setSnapshotPersistedCallback.mock.calls.at(
+        -1,
+      )?.[0] as ((runId: string) => void) | undefined;
+    snapshotPersisted?.('wf_abcd');
+
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+    await expect(
+      deletingSession.deleteWorkflowHistory(snapshot.runId),
+    ).resolves.toBe(true);
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([]);
+
+    await observingSession.refreshWorkflowHistory();
+
+    expect(observingSession.getWorkflowHistory()).toEqual([]);
+  });
+
+  it('keeps a sibling-deleted run buried when a late status emission lands after persistence', async () => {
+    // R7-5: the existing non-resurrection test fires the status callback
+    // only BEFORE snapshotPersisted, so it cannot see the real ordering.
+    // The registry's dispatch-drain callbacks emit on TERMINAL entries
+    // with no status gate, and in-flight dispatches keep draining across
+    // the snapshot write — so a terminal emission routinely lands AFTER
+    // retirement, re-inserting the run as "never persisted". A sibling's
+    // deletion was then undone by the next refresh: absent on disk but
+    // present in the stale cache reads as a pending write. Retirement has
+    // to be a latch.
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_abcd',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    const deletingSession = new Session(
+      'deleting-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    const observingSession = new Session(
+      'observing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    const terminalEntry = {
+      id: 'wf_abcd',
+      kind: 'workflow' as const,
+      runId: 'wf_abcd',
+      description: 'Callback-cached run',
+      meta: null,
+      status: 'failed' as const,
+      startTime: 1_000,
+      endTime: 2_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    };
+    const callback =
+      mockWorkflowRunRegistry.setStatusChangeCallback.mock.calls.at(
+        -1,
+      )?.[0] as (entry: core.WorkflowTask) => void;
+    const snapshotPersisted =
+      mockWorkflowRunRegistry.setSnapshotPersistedCallback.mock.calls.at(
+        -1,
+      )?.[0] as ((runId: string) => void) | undefined;
+
+    callback(terminalEntry);
+    snapshotPersisted?.('wf_abcd');
+    // A draining dispatch emits once more on the already-terminal entry,
+    // after retirement. This is the ordering the bug lived in.
+    callback(terminalEntry);
+
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+    await expect(
+      deletingSession.deleteWorkflowHistory(snapshot.runId),
+    ).resolves.toBe(true);
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([]);
+
+    await observingSession.refreshWorkflowHistory();
+    expect(observingSession.getWorkflowHistory()).toEqual([]);
+  });
+
+  it('re-remembers a run whose id is registered again after persistence', async () => {
+    // The latch must not be permanent: a retry reuses the runId, so once
+    // the entry goes active again its next settlement has to be cached
+    // like any other, or a genuine re-run would vanish from the session's
+    // projection until its own snapshot write lands.
+    session.dispose();
+    const observingSession = new Session(
+      'observing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    const base = {
+      id: 'wf_relive',
+      kind: 'workflow' as const,
+      runId: 'wf_relive',
+      description: 'Re-run',
+      meta: null,
+      startTime: 1_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    };
+    const callback =
+      mockWorkflowRunRegistry.setStatusChangeCallback.mock.calls.at(
+        -1,
+      )?.[0] as (entry: core.WorkflowTask) => void;
+    const snapshotPersisted =
+      mockWorkflowRunRegistry.setSnapshotPersistedCallback.mock.calls.at(
+        -1,
+      )?.[0] as ((runId: string) => void) | undefined;
+
+    callback({
+      ...base,
+      status: 'failed',
+      endTime: 2_000,
+    } as core.WorkflowTask);
+    snapshotPersisted?.('wf_relive');
+    // The retry re-registers the same runId and runs.
+    callback({
+      ...base,
+      status: 'running',
+      endTime: undefined,
+    } as core.WorkflowTask);
+    // Its own settlement must be cached again.
+    callback({
+      ...base,
+      status: 'completed',
+      endTime: 3_000,
+    } as core.WorkflowTask);
+
+    expect(observingSession.getWorkflowHistory()).toEqual([
+      expect.objectContaining({ runId: 'wf_relive', status: 'completed' }),
+    ]);
+  });
+
+  it('deletes a run that fell out of the capped history window', async () => {
+    // R7-4: `buildSessionTasksStatus` serializes every registry entry
+    // unconditionally, but deletion gated on membership in the
+    // MAX_RETAINED_SNAPSHOTS window, which `refreshWorkflowHistory`
+    // truncates by startTime. A long run that settles after ~30 newer
+    // ones started stayed listed via the registry yet fell out of the
+    // window — terminal, handle-free, live in no sibling, and permanently
+    // undeletable. Membership must be tested against the uncapped set.
+    session.dispose();
+    const target = {
+      runId: 'wf_oldest',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    // 30 strictly newer snapshots fill the window ahead of the target.
+    const newer = Array.from(
+      { length: core.MAX_RETAINED_SNAPSHOTS },
+      (_, i) => ({
+        ...target,
+        runId: `wf_newer${i}`,
+        startTime: 10_000 + i,
+        endTime: 20_000 + i,
+      }),
+    );
+    const deletingSession = new Session(
+      'deleting-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [],
+    );
+    mockWorkflowRunRegistry.get.mockReturnValue({
+      runId: target.runId,
+      status: 'failed',
+    });
+    mockWorkflowRunRegistry.removeTerminal.mockReturnValueOnce(true);
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([...newer, target]);
+
+    await expect(
+      deletingSession.deleteWorkflowHistory(target.runId),
+    ).resolves.toBe(true);
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledWith(
+      mockConfig,
+      target.runId,
+    );
+    expect(mockWorkflowRunRegistry.removeTerminal).toHaveBeenCalledWith(
+      target.runId,
+    );
+  });
+
+  it('rejects history deletion while a sibling session still owns the run', async () => {
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_deadbeef',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    const siblingRegistry = {
+      get: vi.fn().mockReturnValue({ runId: 'wf_deadbeef', status: 'running' }),
+      getHandle: vi.fn().mockReturnValue(undefined),
+    };
+    const isWorkflowRunLiveInSiblingSession = (runId: string): boolean => {
+      const entry = siblingRegistry.get(runId) as
+        | { status: core.WorkflowStatus }
+        | undefined;
+      if (entry && !core.isTerminalWorkflowStatus(entry.status)) return true;
+      return siblingRegistry.getHandle(runId) !== undefined;
+    };
+    listWorkflowSnapshotsSpy.mockResolvedValue([snapshot]);
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+      isWorkflowRunLiveInSiblingSession,
+    );
+
+    await expect(session.deleteWorkflowHistory(snapshot.runId)).resolves.toBe(
+      false,
+    );
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+
+    // Once the sibling run settles terminal, deletion proceeds.
+    siblingRegistry.get.mockReturnValue({
+      runId: 'wf_deadbeef',
+      status: 'failed',
+    });
+    await expect(session.deleteWorkflowHistory(snapshot.runId)).resolves.toBe(
+      true,
+    );
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledWith(
+      mockConfig,
+      snapshot.runId,
+    );
+  });
+
+  it('does not report a deletion whose registry entry could not be retired', async () => {
+    // `removeTerminal` refuses a live or handle-held entry. Ignoring its
+    // answer reported success for a run that was still registered here,
+    // whose settlement then re-persisted the "deleted" history.
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_stuck',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    listWorkflowSnapshotsSpy.mockResolvedValue([snapshot]);
+    mockWorkflowRunRegistry.get.mockReturnValue({
+      runId: snapshot.runId,
+      status: 'failed',
+    });
+    mockWorkflowRunRegistry.removeTerminal.mockReturnValueOnce(false);
+
+    await expect(session.deleteWorkflowHistory(snapshot.runId)).resolves.toBe(
+      false,
+    );
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+    expect(session.getWorkflowHistory()).toHaveLength(1);
+
+    mockWorkflowRunRegistry.removeTerminal.mockReturnValueOnce(true);
+    await expect(session.deleteWorkflowHistory(snapshot.runId)).resolves.toBe(
+      true,
+    );
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledWith(
+      mockConfig,
+      snapshot.runId,
+    );
+  });
+
+  it('keeps cached history on disk failure and removes it after deletion', async () => {
+    session.dispose();
+    const onActiveWorkChanged = vi.fn();
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      onActiveWorkChanged,
+      [
+        {
+          runId: 'wf_abcd',
+          meta: { name: 'review-and-fix', description: 'Review and fix' },
+          status: 'failed',
+          script: 'return 1;',
+          phases: ['Inspect'],
+          agentsDispatched: 1,
+          agentsCompleted: 0,
+          tokensSpent: 500,
+          tokenBudgetTotal: 2_000,
+          perPhaseTokens: [],
+          recentLogs: [],
+          startTime: 1_000,
+          endTime: 2_000,
+        },
+      ],
+    );
+    listWorkflowSnapshotsSpy.mockResolvedValue(session.getWorkflowHistory());
+
+    deleteWorkflowSnapshotSpy.mockResolvedValueOnce(false);
+    await expect(session.deleteWorkflowHistory('wf_abcd')).resolves.toBe(false);
+    expect(session.getWorkflowHistory()).toHaveLength(1);
+    expect(onActiveWorkChanged).not.toHaveBeenCalled();
+
+    await expect(session.deleteWorkflowHistory('wf_abcd')).resolves.toBe(true);
+
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledWith(
+      mockConfig,
+      'wf_abcd',
+    );
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledTimes(2);
+    expect(session.getWorkflowHistory()).toEqual([]);
+    expect(onActiveWorkChanged).toHaveBeenCalledOnce();
+  });
+
+  it('keeps history unchanged when the requested saved run is unknown', async () => {
+    await expect(session.deleteWorkflowHistory('wf_missing')).resolves.toBe(
+      false,
+    );
+
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+  });
+
+  it('waits for an active run owner to finish persistence before deletion', async () => {
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_pending',
+      meta: null,
+      status: 'completed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    let finishPersistence: (() => void) | undefined;
+    const completion = new Promise<void>((resolve) => {
+      finishPersistence = resolve;
+    });
+    mockWorkflowRunRegistry.getHandle.mockReturnValue({ completion });
+    listWorkflowSnapshotsSpy.mockResolvedValue([snapshot]);
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+
+    const deletion = session.deleteWorkflowHistory(snapshot.runId);
+    await Promise.resolve();
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+
+    finishPersistence?.();
+    await expect(deletion).resolves.toBe(true);
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledWith(
+      mockConfig,
+      snapshot.runId,
+    );
+  });
+
+  it('stops deletion when a retry activates the run during refresh', async () => {
+    const snapshot = {
+      runId: 'wf_abcd',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    let finishRefresh!: () => void;
+    listWorkflowSnapshotsSpy.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishRefresh = () => resolve([snapshot]);
+        }),
+    );
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'failed' });
+
+    const deletion = session.deleteWorkflowHistory(snapshot.runId);
+    await vi.waitFor(() =>
+      expect(listWorkflowSnapshotsSpy).toHaveBeenCalledOnce(),
+    );
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'running' });
+    finishRefresh();
+
+    await expect(deletion).resolves.toBe(false);
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps deletion atomic with a direct workflow resume', async () => {
+    const snapshot = {
+      runId: 'wf_atomic',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    let finishDeletion: ((deleted: boolean) => void) | undefined;
+    deleteWorkflowSnapshotSpy.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishDeletion = resolve;
+        }),
+    );
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'failed' });
+    mockWorkflowRunRegistry.removeTerminal.mockReturnValueOnce(true);
+
+    const deletion = session.deleteWorkflowHistory(snapshot.runId);
+    await vi.waitFor(() =>
+      expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledOnce(),
+    );
+
+    const resumeAttempt = await core.tryWithWorkflowTaskMutation(
+      core.getWorkflowTaskMutationKey(mockConfig, snapshot.runId),
+      async () => true,
+    );
+    expect(resumeAttempt).toEqual({ acquired: false });
+
+    finishDeletion?.(true);
+    await expect(deletion).resolves.toBe(true);
+  });
+
+  it('rejects history deletion while the workflow is starting', async () => {
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'failed' });
+    mockWorkflowRunRegistry.isStarting.mockReturnValue(true);
+
+    await expect(session.deleteWorkflowHistory('wf_starting')).resolves.toBe(
+      false,
+    );
+
+    expect(listWorkflowSnapshotsSpy).not.toHaveBeenCalled();
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects history deletion while the workflow is active', async () => {
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'paused' });
+
+    await expect(session.deleteWorkflowHistory('wf_active')).resolves.toBe(
+      false,
+    );
+
+    expect(mockWorkflowRunRegistry.getHandle).not.toHaveBeenCalled();
+    expect(listWorkflowSnapshotsSpy).not.toHaveBeenCalled();
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+  });
+
   it('does not infer Todo ownership from Todo Stop Guard lineage', async () => {
     mockChat.sendMessageStream = vi
       .fn()
@@ -2868,6 +4109,44 @@ describe('Session', () => {
     });
 
     await session.waitForActiveTurnsToSettle();
+  });
+
+  it('polls rather than spins when the active turn publishes no completion', async () => {
+    // `historyMutationActive` blocks `#hasActiveTurn()` without publishing a
+    // completion promise, so the wait has nothing to await. Yielding on
+    // `setImmediate` alone would cycle the event loop as fast as it can turn
+    // and burn a core for the whole wait — on the conditional-close path that
+    // is the full drain budget. Counting the yields is the observable proxy:
+    // the polled wait makes none from this path.
+    const releaseMutation = session.beginHistoryMutation();
+    const immediateSpy = vi.spyOn(globalThis, 'setImmediate');
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      let settled = false;
+      const waiting = session.waitForActiveTurnsToSettle().then(() => {
+        settled = true;
+      });
+      // The hold is still up, so the wait must still be waiting. Without this
+      // a `#hasActiveTurn()` that stopped consulting `historyMutationActive`
+      // would resolve at once and both yield counts below would be vacuously
+      // zero — the test would pass while pinning nothing.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(settled).toBe(false);
+      releaseMutation();
+      await waiting;
+      expect(settled).toBe(true);
+      expect(immediateSpy).toHaveBeenCalledTimes(0);
+      // The poll has to be a real interval, and the constant is module-local
+      // so the literal has to be spelled here. A 0ms `setTimeout` still hands
+      // back a macrotask, so the count above stays green while the loop
+      // re-arms as fast as the event loop turns — the same spin, one level
+      // down. Two re-arms is the floor: 50ms of holding at 10ms allows ~5.
+      const polls = timeoutSpy.mock.calls.filter((call) => call[1] === 10);
+      expect(polls.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      immediateSpy.mockRestore();
+      timeoutSpy.mockRestore();
+    }
   });
 
   it('rejects a prompt when the close gate starts during writer admission', async () => {
@@ -4185,9 +5464,9 @@ describe('Session', () => {
   // `_meta.qwenTodoApproval` binding instead of poking the private
   // `activeTodoPlanRevision` field. Mirrors the it.each harness in the
   // prompt describe block.
-  async function runExitPlanModeApprovalPrompt(): Promise<
-    Parameters<AgentSideConnection['requestPermission']>[0]
-  > {
+  async function runExitPlanModeApprovalPrompt(
+    onConfirm = vi.fn().mockResolvedValue(undefined),
+  ): Promise<Parameters<AgentSideConnection['requestPermission']>[0]> {
     let mode = ApprovalMode.PLAN;
     const hookSpy = vi
       .spyOn(core, 'firePermissionRequestHook')
@@ -4206,7 +5485,7 @@ describe('Session', () => {
         title: 'Approve plan',
         plan: 'Original plan',
         hideAlwaysAllow: true,
-        onConfirm: vi.fn().mockResolvedValue(undefined),
+        onConfirm,
       }),
       getDescription: vi.fn().mockReturnValue('Plan:'),
       toolLocations: vi.fn().mockReturnValue([]),
@@ -4257,6 +5536,424 @@ describe('Session', () => {
     return calls.at(-1)![0];
   }
 
+  it('forwards the expected Plan execution policy from permission response to confirmation', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+      async () => ({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        expectedPlanExecutionMode: 'yolo',
+      }),
+    );
+
+    await runExitPlanModeApprovalPrompt(onConfirm);
+
+    expect(onConfirm).toHaveBeenCalledWith(
+      core.ToolConfirmationOutcome.ProceedOnce,
+      expect.objectContaining({ expectedPlanExecutionMode: 'yolo' }),
+    );
+  });
+
+  describe('DAC plan approval through Session', () => {
+    let mode: ApprovalMode;
+    let policy: ApprovalMode | undefined;
+    let revision: number;
+
+    beforeEach(() => {
+      mode = ApprovalMode.PLAN;
+      policy = ApprovalMode.YOLO;
+      revision = 1;
+      mockConfig.getApprovalMode = vi.fn(() => mode);
+      mockConfig.getPlanExecutionMode = vi.fn(() => policy);
+      mockConfig.getPrePlanMode = vi.fn(() => ApprovalMode.DEFAULT);
+      mockConfig.getApprovalModeRevision = vi.fn(() => revision);
+      mockConfig.setApprovalMode = vi.fn((next) => {
+        mode = next;
+        policy = undefined;
+        revision++;
+      });
+      mockConfig.getTeamManager = vi.fn();
+      mockConfig.savePlan = vi.fn();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockToolRegistry.getTool.mockReturnValue(
+        new ExitPlanModeTool(mockConfig),
+      );
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-dac-plan',
+                  name: core.ToolNames.EXIT_PLAN_MODE,
+                  args: { plan: 'DAC plan' },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+    });
+
+    it.each([undefined, ApprovalMode.YOLO])(
+      'consumes a missing or stale DAC policy (%s) as a tool error and keeps Plan',
+      async (expectedPlanExecutionMode) => {
+        vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+          async () => {
+            policy = ApprovalMode.AUTO_EDIT;
+            return {
+              outcome: { outcome: 'selected', optionId: 'restore_previous' },
+              ...(expectedPlanExecutionMode
+                ? { expectedPlanExecutionMode }
+                : {}),
+            };
+          },
+        );
+
+        const result = await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'approve the plan' }],
+        });
+
+        expect(result.stopReason).toBe('end_turn');
+        expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'call-dac-plan',
+                response: {
+                  error: expect.stringContaining(
+                    'Execution permission changed',
+                  ),
+                },
+              }),
+            }),
+          ],
+          expect.objectContaining({
+            status: 'error',
+            errorType: core.ToolErrorType.EXECUTION_DENIED,
+            executionStatus: 'not_started',
+          }),
+        );
+        expect(mode).toBe(ApprovalMode.PLAN);
+        expect(policy).toBe(ApprovalMode.AUTO_EDIT);
+        expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+        expect(mockConfig.savePlan).not.toHaveBeenCalled();
+      },
+    );
+
+    it('settles an old approval after manual Plan exit without executing its plan', async () => {
+      let respond!: (response: RequestPermissionResponse) => void;
+      vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            respond = resolve;
+          }),
+      );
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'approve the plan' }],
+      });
+      await vi.waitFor(() =>
+        expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+      );
+
+      await session.setMode({ sessionId: 'test-session-id', modeId: 'yolo' });
+      expect(mode).toBe(ApprovalMode.YOLO);
+      respond({
+        outcome: { outcome: 'selected', optionId: 'restore_previous' },
+      });
+
+      expect((await prompt).stopReason).toBe('end_turn');
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        [
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({
+              id: 'call-dac-plan',
+              response: {
+                output: expect.stringContaining('Plan approval is stale'),
+              },
+            }),
+          }),
+        ],
+        expect.objectContaining({ status: 'success' }),
+      );
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledOnce();
+      expect(mockConfig.savePlan).not.toHaveBeenCalled();
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(mode).toBe(ApprovalMode.YOLO);
+    });
+  });
+
+  function enableSessionWorkflowRevisionContext(): void {
+    let revision:
+      | { planId: string; sourceCallId: string; todoIds: readonly string[] }
+      | undefined;
+    mockConfig.isSessionWorkflowEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.setSessionWorkflowPlanRevision = vi.fn((next) => {
+      revision = next;
+    });
+    mockConfig.clearSessionWorkflowPlanRevision = vi.fn(() => {
+      revision = undefined;
+    });
+    mockConfig.getSessionWorkflowPlanRevision = vi.fn(() => revision);
+  }
+
+  describe('Session Workflow plan revision context', () => {
+    it('captures Todo IDs only for an enabled, active revision', async () => {
+      const setRevision = vi.fn();
+      const clearRevision = vi.fn();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.isSessionWorkflowEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.setSessionWorkflowPlanRevision = setRevision;
+      mockConfig.clearSessionWorkflowPlanRevision = clearRevision;
+
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      expect(setRevision).toHaveBeenCalledWith({
+        planId: 'plan-1',
+        sourceCallId: 'todo-call-1',
+        todoIds: ['inspect', 'ship'],
+      });
+      expect(clearRevision).toHaveBeenCalledOnce();
+    });
+
+    it('requires both the Workflow marker and complete Todo identity', async () => {
+      const setRevision = vi.fn();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.isSessionWorkflowEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.setSessionWorkflowPlanRevision = setRevision;
+      mockConfig.clearSessionWorkflowPlanRevision = vi.fn();
+
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+        ],
+        _meta: {
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      expect(setRevision).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['an in-progress plan', ['in_progress']],
+      ['a partially completed plan', ['completed', 'pending']],
+    ] as const)('does not bind %s for approval', async (_label, statuses) => {
+      const setRevision = vi.fn();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.isSessionWorkflowEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.setSessionWorkflowPlanRevision = setRevision;
+      mockConfig.clearSessionWorkflowPlanRevision = vi.fn();
+
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: statuses.map((status, index) => ({
+          content: `Step ${index + 1}`,
+          priority: 'medium',
+          status,
+          _meta: { qwenTodo: { id: `step-${index + 1}` } },
+        })),
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      expect(setRevision).not.toHaveBeenCalled();
+    });
+
+    it('keeps the last pending approval snapshot across status-only updates', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      const planUpdate: SessionUpdate = {
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      };
+      await session.sendUpdate(planUpdate);
+
+      await session.sendUpdate({
+        ...planUpdate,
+        entries: [{ ...planUpdate.entries[0]!, status: 'in_progress' }],
+        _meta: {
+          ...planUpdate._meta,
+          qwenTranscript: { planToolCallId: 'todo-call-2' },
+        },
+      });
+
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+        }),
+      );
+    });
+
+    it('clears the pending approval snapshot when the plan structure changes', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Changed scope',
+            priority: 'medium',
+            status: 'in_progress',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-2' },
+        },
+      });
+
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
+      );
+    });
+
+    it('keeps the approved Todo IDs frozen during execution updates', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      await runExitPlanModeApprovalPrompt();
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'in_progress',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+          {
+            content: 'Unapproved follow-up',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'follow-up' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-2' },
+        },
+      });
+
+      expect(mockConfig.getSessionWorkflowPlanRevision?.()).toEqual({
+        planId: 'plan-1',
+        sourceCallId: 'todo-call-1',
+        todoIds: ['inspect'],
+      });
+    });
+
+    it('clears the revision context on session disposal', () => {
+      const clearRevision = vi.fn();
+      mockConfig.clearSessionWorkflowPlanRevision = clearRevision;
+
+      session.dispose();
+
+      expect(clearRevision).toHaveBeenCalledOnce();
+    });
+  });
+
   describe('setMode', () => {
     it.each([
       ['plan', ApprovalMode.PLAN],
@@ -4270,6 +5967,22 @@ describe('Session', () => {
       });
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(expected);
+    });
+
+    it('reports the execution policy when entering Plan', async () => {
+      mockConfig.getPrePlanMode = vi.fn(() => ApprovalMode.YOLO);
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'plan',
+      });
+
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/mode-update',
+        expect.objectContaining({
+          currentModeId: 'plan',
+          planExecutionMode: 'yolo',
+        }),
+      );
     });
 
     it('emits a current_mode_update extNotification after switching (A2)', async () => {
@@ -4304,19 +6017,40 @@ describe('Session', () => {
       );
     });
 
-    it('clears the active Todo plan revision when transitioning into plan mode', async () => {
-      mockConfig.getApprovalMode = vi
-        .fn()
-        .mockReturnValue(ApprovalMode.DEFAULT);
+    it('clears the active Todo plan revision when changing mode', async () => {
+      enableSessionWorkflowRevisionContext();
+      // Capture requires PLAN mode: sending this update in DEFAULT would never
+      // bind a revision, and the assertion below would pass vacuously.
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       await session.sendUpdate({
         sessionUpdate: 'plan',
-        entries: [{ content: 'Ship', priority: 'medium', status: 'pending' }],
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
         _meta: {
+          qwenSessionWorkflow: true,
           qwenTodoPlan: { id: 'plan-1' },
           qwenTranscript: { planToolCallId: 'todo-call-1' },
         },
       });
 
+      const bound = await runExitPlanModeApprovalPrompt();
+      expect(bound.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+        }),
+      );
+
+      // A user-driven transition into plan mode from a non-plan mode starts a
+      // fresh approval cycle, so the bound revision must be dropped.
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
       await session.setMode({
         sessionId: 'test-session-id',
         modeId: 'plan',
@@ -4331,11 +6065,20 @@ describe('Session', () => {
     });
 
     it('preserves the active Todo plan revision when re-selecting plan mode', async () => {
+      enableSessionWorkflowRevisionContext();
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       await session.sendUpdate({
         sessionUpdate: 'plan',
-        entries: [{ content: 'Ship', priority: 'medium', status: 'pending' }],
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
         _meta: {
+          qwenSessionWorkflow: true,
           qwenTodoPlan: { id: 'plan-1' },
           qwenTranscript: { planToolCallId: 'todo-call-1' },
         },
@@ -4352,6 +6095,159 @@ describe('Session', () => {
           qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
         }),
       );
+    });
+
+    it('keeps the approved Todo plan revision when switching between non-plan modes', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      // Approving via exit_plan_mode stamps the revision and leaves PLAN.
+      const bound = await runExitPlanModeApprovalPrompt();
+      expect(bound.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+        }),
+      );
+
+      // The approved plan keeps executing in the new mode, so a non-plan →
+      // non-plan switch (default → auto-edit) touches no approval cycle and
+      // must not disarm the revision mid-execution. (After the helper, the
+      // current mode is DEFAULT.)
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'auto-edit',
+      });
+
+      expect(mockConfig.getSessionWorkflowPlanRevision?.()).toEqual({
+        planId: 'plan-1',
+        sourceCallId: 'todo-call-1',
+        todoIds: ['ship'],
+      });
+    });
+
+    it('clears the active Todo plan revision when leaving plan mode', async () => {
+      enableSessionWorkflowRevisionContext();
+      // Capture requires PLAN mode: bind the revision while the session is
+      // still in PLAN, then leave PLAN before any approval happens.
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      // Leaving PLAN abandons the draft approval cycle: the bound revision
+      // must be dropped so a later exit_plan_mode approval cannot reuse it.
+      // getApprovalMode still reports PLAN here, so this exercises the
+      // PLAN → DEFAULT exit side of the transition (the entry side is
+      // covered by the 'when changing mode' case above).
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'default',
+      });
+
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
+      );
+    });
+  });
+
+  describe('output style turn reminder', () => {
+    function armStyle(styleName: string | undefined) {
+      mockConfig.getOutputStyle = vi
+        .fn()
+        .mockReturnValue(
+          styleName ? core.getBuiltInOutputStyle(styleName) : undefined,
+        );
+      mockConfig.getSystemPrompt = vi.fn().mockReturnValue(undefined);
+      mockConfig.getExperimentalZedIntegration = vi.fn().mockReturnValue(true);
+      mockConfig.isInteractive = vi.fn().mockReturnValue(false);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'ok' }] } }],
+            },
+          },
+        ]),
+      );
+    }
+
+    it('sends the active style reminder with every ACP prompt', async () => {
+      armStyle('Concise');
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      expect(textParts(firstSentMessage())).toContainEqual(
+        expect.stringMatching(
+          /^<system-reminder>\nConcise output style is active\. Be concise:.*\n<\/system-reminder>$/s,
+        ),
+      );
+    });
+
+    it('sends nothing when no style is active', async () => {
+      armStyle(undefined);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      expect(
+        textParts(firstSentMessage()).some((text) =>
+          text.includes('output style is active'),
+        ),
+      ).toBe(false);
+    });
+
+    it('stays silent when a custom system prompt carries no style section', async () => {
+      armStyle('Concise');
+      mockConfig.getSystemPrompt = vi.fn().mockReturnValue('You are terse.');
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      expect(
+        textParts(firstSentMessage()).some((text) =>
+          text.includes('output style is active'),
+        ),
+      ).toBe(false);
     });
   });
 
@@ -4414,31 +6310,60 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
-      await session.sendUpdate({
-        sessionUpdate: 'plan',
-        entries: [{ content: 'old', priority: 'medium', status: 'pending' }],
-        _meta: {
-          qwenTodoPlan: { id: 'old-plan' },
-          qwenTranscript: { planToolCallId: 'old-call' },
-        },
-      });
 
       const result = session.rewindToTurn(1);
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
       expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
-      const request = await runExitPlanModeApprovalPrompt();
-      expect(request.toolCall._meta).toEqual(
-        expect.not.objectContaining({
-          qwenTodoApproval: expect.anything(),
-        }),
-      );
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         1,
         { truncatedCount: 2 },
         [],
+      );
+    });
+
+    it('clears the active Todo plan revision when rewinding', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'old',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'old' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'old-plan' },
+          qwenTranscript: { planToolCallId: 'old-call' },
+        },
+      });
+      const bound = await runExitPlanModeApprovalPrompt();
+      expect(bound.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'old-plan', sourceCallId: 'old-call' },
+        }),
+      );
+
+      session.rewindToTurn(1);
+
+      const rewound = await runExitPlanModeApprovalPrompt();
+      expect(rewound.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
       );
     });
 
@@ -4738,10 +6663,20 @@ describe('Session', () => {
     });
 
     it('clears the active Todo plan revision when restoring history', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       await session.sendUpdate({
         sessionUpdate: 'plan',
-        entries: [{ content: 'old', priority: 'medium', status: 'pending' }],
+        entries: [
+          {
+            content: 'old',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'old' } },
+          },
+        ],
         _meta: {
+          qwenSessionWorkflow: true,
           qwenTodoPlan: { id: 'old-plan' },
           qwenTranscript: { planToolCallId: 'old-call' },
         },
@@ -4817,6 +6752,84 @@ describe('Session', () => {
   });
 
   describe('setModel', () => {
+    function installReasoningPreference(
+      selection: 'none' | 'low' | 'max',
+      options: {
+        trusted?: boolean;
+        thinkingMandatory?: boolean;
+        defaultReasoning?: ContentGeneratorConfig['reasoning'];
+      } = {},
+    ) {
+      type ReasoningSettingsLayer = {
+        settings: { model: { reasoningEffort?: typeof selection } };
+        originalSettings: { model: { reasoningEffort?: typeof selection } };
+      };
+      const user: ReasoningSettingsLayer = {
+        settings: { model: { reasoningEffort: selection } },
+        originalSettings: { model: { reasoningEffort: selection } },
+      };
+      const workspace = structuredClone(user);
+      const live: Partial<ContentGeneratorConfig> & { model: string } = {
+        model: currentModel,
+        ...(options.thinkingMandatory ? { thinkingMandatory: true } : {}),
+        reasoning: selection === 'none' ? false : { effort: selection },
+      };
+      const rebuildable: Partial<ContentGeneratorConfig> =
+        structuredClone(live);
+      Object.assign(mockSettings, {
+        isTrusted: options.trusted === true,
+        user,
+        workspace,
+        forScope: vi.fn((scope: SettingScope) =>
+          scope === SettingScope.Workspace ? workspace : user,
+        ),
+        merged: { model: { reasoningEffort: selection } },
+        recomputeMerged: vi.fn(() => {
+          const value =
+            (options.trusted
+              ? workspace.settings.model.reasoningEffort
+              : undefined) ?? user.settings.model.reasoningEffort;
+          mockSettings.merged.model =
+            value === undefined ? {} : { reasoningEffort: value };
+        }),
+      });
+      vi.mocked(mockSettings.setValue).mockImplementation(
+        (scope, key, value) => {
+          if (key !== 'model.reasoningEffort') return;
+          const target = scope === SettingScope.Workspace ? workspace : user;
+          target.settings.model.reasoningEffort = value as
+            | typeof selection
+            | undefined;
+          target.originalSettings.model.reasoningEffort = value as
+            | typeof selection
+            | undefined;
+          mockSettings.recomputeMerged();
+        },
+      );
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        live as ReturnType<Config['getContentGeneratorConfig']>,
+      );
+      Object.assign(mockConfig, {
+        getModelsConfig: vi.fn(() => ({
+          getGenerationConfig: () => rebuildable,
+        })),
+        getResolvedModelConfig: vi.fn(() => ({
+          generationConfig: { reasoning: options.defaultReasoning },
+        })),
+      });
+      switchModelSpy.mockImplementation(
+        async (authType: AuthType, modelId: string) => {
+          currentAuthType = authType;
+          currentModel = modelId;
+          live.model = modelId;
+          rebuildable.model = modelId;
+          live.reasoning = options.defaultReasoning;
+          rebuildable.reasoning = options.defaultReasoning;
+        },
+      );
+      return { user, workspace, live, rebuildable };
+    }
+
     it('sets model via config and returns current model', async () => {
       const requested = `qwen3-coder-plus(${AuthType.USE_OPENAI})`;
       vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
@@ -5078,6 +7091,530 @@ describe('Session', () => {
         authType: AuthType.USE_OPENAI,
       });
     });
+
+    it('clears only the live override for a non-persisting ACP model switch', async () => {
+      const state = installReasoningPreference('max');
+
+      await session.setModel(
+        {
+          sessionId: 'test-session-id',
+          modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
+        },
+        { persistDefault: false },
+      );
+
+      expect(state.user.settings.model.reasoningEffort).toBe('max');
+      expect(state.live.reasoning).toBeUndefined();
+      expect(state.rebuildable.reasoning).toBeUndefined();
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+    });
+
+    it.each(['max', 'none'] as const)(
+      'preserves global GPT %s across model switches and reloads',
+      async (selection) => {
+        const state = installReasoningPreference(selection, { trusted: true });
+        const modelId = selection === 'max' ? 'gpt-5.4' : 'gpt-6-astra';
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+        });
+        session.reloadReasoningSelection();
+        expect(state.user.settings.model.reasoningEffort).toBe(selection);
+        expect(state.workspace.settings.model.reasoningEffort).toBe(selection);
+        expect(state.live.reasoning).toEqual(
+          selection === 'max' ? { effort: 'max' } : undefined,
+        );
+        expect(state.rebuildable.reasoning).toEqual(state.live.reasoning);
+        expect(
+          vi
+            .mocked(mockSettings.setValue)
+            .mock.calls.filter((call) => call[1] === 'model.reasoningEffort'),
+        ).toEqual([]);
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `gpt-5.6-sol(${AuthType.USE_OPENAI})`,
+        });
+        expect(state.live.reasoning).toEqual(
+          selection === 'max' ? { effort: 'max' } : false,
+        );
+        expect(state.rebuildable.reasoning).toEqual(state.live.reasoning);
+      },
+    );
+
+    it.each([
+      ['gpt-6-astra', false, undefined],
+      ['gpt-6-astra', true, undefined],
+      ['gpt-5', false, undefined],
+      ['gpt-6-astra', false, false],
+    ] as const)(
+      'reconciles saved off for %s with configured toggleOnly=%s, canDisable=%s',
+      async (modelId, toggleOnly, canDisable) => {
+        const state = installReasoningPreference('none', { trusted: true });
+        Object.assign(mockConfig, {
+          getResolvedModelConfig: vi.fn(() => ({
+            generationConfig: {},
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                ...(toggleOnly
+                  ? { toggleOnly: true }
+                  : { efforts: ['low', 'high'], defaultEffort: 'high' }),
+                disableField: 'reasoning_effort',
+                ...(canDisable === false ? { canDisable } : {}),
+              },
+            },
+          })),
+        });
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+        });
+        session.reloadReasoningSelection();
+        for (const scope of [state.user, state.workspace]) {
+          for (const settings of [scope.settings, scope.originalSettings]) {
+            expect(settings.model).toEqual(
+              canDisable === false ? {} : { reasoningEffort: 'none' },
+            );
+          }
+        }
+        expect(state.live.reasoning).toBeUndefined();
+        expect(state.rebuildable.reasoning).toBeUndefined();
+        expect(
+          vi
+            .mocked(mockSettings.setValue)
+            .mock.calls.filter((call) => call[1] === 'model.reasoningEffort'),
+        ).toHaveLength(canDisable === false ? 2 : 0);
+      },
+    );
+
+    it('reconciles a GPT preference against explicit configured capabilities', async () => {
+      const state = installReasoningPreference('max', { trusted: true });
+      Object.assign(mockConfig, {
+        getResolvedModelConfig: vi.fn(() => ({
+          generationConfig: {},
+          capabilities: {
+            reasoning: {
+              thinking: true,
+              efforts: ['low', 'high'],
+              defaultEffort: 'high',
+              disableField: 'reasoning_effort',
+            },
+          },
+        })),
+      });
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `gpt-5.6-sol(${AuthType.USE_OPENAI})`,
+      });
+      expect(state.user.settings.model).not.toHaveProperty('reasoningEffort');
+      expect(state.workspace.settings.model).not.toHaveProperty(
+        'reasoningEffort',
+      );
+      expect(state.live.reasoning).toBeUndefined();
+      expect(state.rebuildable.reasoning).toBeUndefined();
+    });
+
+    it('deletes an incompatible max preference from both writable scopes without downgrading it', async () => {
+      const state = installReasoningPreference('max', { trusted: true });
+
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
+      });
+
+      expect(state.user.settings.model).not.toHaveProperty('reasoningEffort');
+      expect(state.workspace.settings.model).not.toHaveProperty(
+        'reasoningEffort',
+      );
+      expect(state.live.reasoning).toBeUndefined();
+      expect(state.rebuildable.reasoning).toBeUndefined();
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'model.reasoningEffort',
+        undefined,
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.reasoningEffort',
+        undefined,
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+      expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'model.reasoningEffort',
+        'xhigh',
+        expect.anything(),
+        expect.anything(),
+      );
+
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `claude-opus-4-6(${AuthType.USE_OPENAI})`,
+      });
+      expect(state.live.reasoning).toBeUndefined();
+    });
+
+    it.each([
+      ['low', 'qwen3.8-max', {}, { effort: 'low' }, 'low'],
+      ['none', 'qwen3.7-plus', {}, false, 'none'],
+      [
+        'low',
+        'qwen3.8-max',
+        { defaultReasoning: false },
+        { effort: 'low' },
+        'low',
+      ],
+      [
+        'low',
+        'qwen3.8-max',
+        { defaultReasoning: { budget_tokens: 42000 } },
+        { effort: 'low', budget_tokens: 42000 },
+        'low',
+      ],
+      ['max', 'qwen3.7-plus', { defaultReasoning: false }, false, undefined],
+      ['max', 'qwen3.7-plus', {}, undefined, undefined],
+      ['none', 'qwen-plus', {}, undefined, undefined],
+      [
+        'none',
+        'qwen3.8-max',
+        { thinkingMandatory: true },
+        undefined,
+        undefined,
+      ],
+    ] as const)(
+      'reconciles reasoning %s for %s with %j',
+      async (selection, modelId, options, expected, stored) => {
+        const state = installReasoningPreference(selection, options);
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+        });
+
+        expect(state.live.reasoning).toEqual(expected);
+        expect(state.rebuildable.reasoning).toEqual(expected);
+        expect(state.user.settings.model).toStrictEqual(
+          stored === undefined ? {} : { reasoningEffort: stored },
+        );
+        if (stored !== undefined) {
+          expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+            expect.anything(),
+            'model.reasoningEffort',
+            undefined,
+            expect.anything(),
+            expect.anything(),
+          );
+        }
+        if ('defaultReasoning' in options) {
+          expect(session.getDefaultReasoningConfig()).toEqual(
+            options.defaultReasoning,
+          );
+        }
+      },
+    );
+
+    it('falls back to a compatible persisted tier after dropping a session-only tier', async () => {
+      const state = installReasoningPreference('low');
+      session.setSessionReasoningSelection('max');
+
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
+      });
+
+      expect(state.live.reasoning).toEqual({ effort: 'low' });
+      expect(state.rebuildable.reasoning).toEqual({ effort: 'low' });
+      expect(state.user.settings.model.reasoningEffort).toBe('low');
+    });
+
+    it.each([
+      ['low', { effort: 'low' }, true],
+      ['none', false, true],
+      ['default', undefined, false],
+    ] as const)(
+      'reconciles session-only reasoning %s after a model rebuild',
+      async (selection, expectedReasoning, clearsOverrides) => {
+        const samplingParams = {
+          enable_thinking: false,
+          temperature: 0.2,
+        };
+        const live: Partial<ContentGeneratorConfig> & { model: string } = {
+          model: currentModel,
+          reasoning:
+            selection === 'none'
+              ? false
+              : selection === 'default'
+                ? undefined
+                : { effort: selection },
+        };
+        const rebuildable: Partial<ContentGeneratorConfig> = {};
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+          live as ReturnType<Config['getContentGeneratorConfig']>,
+        );
+        Object.assign(mockConfig, {
+          getModelsConfig: vi.fn(() => ({
+            getGenerationConfig: () => rebuildable,
+          })),
+        });
+        session.setSessionReasoningSelection(selection);
+        switchModelSpy.mockImplementation(async (authType, nextModelId) => {
+          currentAuthType = authType;
+          currentModel = nextModelId;
+          Object.assign(live, {
+            model: nextModelId,
+            reasoning: undefined,
+            samplingParams,
+          });
+          Object.assign(rebuildable, {
+            model: nextModelId,
+            reasoning: undefined,
+            samplingParams,
+          });
+        });
+
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
+        });
+
+        expect(live.reasoning).toEqual(expectedReasoning);
+        expect(live.samplingParams).toEqual(
+          clearsOverrides ? { temperature: 0.2 } : samplingParams,
+        );
+        expect(rebuildable.samplingParams).toEqual(samplingParams);
+        expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+          expect.anything(),
+          'model.reasoningEffort',
+          expect.anything(),
+          expect.anything(),
+          expect.anything(),
+        );
+      },
+    );
+
+    it('retains a compatible preference when switching to a runtime snapshot', async () => {
+      const state = installReasoningPreference('low');
+      const snapshotId = `$runtime|${AuthType.USE_OPENAI}|qwen3.8-max`;
+      Object.assign(mockConfig, {
+        getActiveRuntimeModelSnapshot: vi.fn(() => ({
+          id: snapshotId,
+          modelId: 'qwen3.8-max',
+          authType: AuthType.USE_OPENAI,
+        })),
+      });
+      switchModelSpy.mockImplementationOnce(async () => {
+        currentModel = 'qwen3.8-max';
+        state.live.model = currentModel;
+        state.live.reasoning = undefined;
+        state.rebuildable.reasoning = undefined;
+      });
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `${snapshotId}(${AuthType.USE_OPENAI})`,
+      });
+      expect(state.user.settings.model.reasoningEffort).toBe('low');
+      expect(state.live.reasoning).toEqual({ effort: 'low' });
+      expect(state.rebuildable.reasoning).toEqual({ effort: 'low' });
+    });
+
+    it.each(['low', 'none'] as const)(
+      'retains compatible %s on an opaque route using the resolved base model',
+      async (selection) => {
+        const state = installReasoningPreference(selection);
+        const models = ['one', 'two'].map((name) => ({
+          id: 'qwen3.8-max',
+          label: name,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: `https://${name}.example/v1`,
+          registryBaseUrl: `https://${name}.example/v1`,
+        }));
+        vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(models);
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: buildAcpModelOptions(models)[1]!.modelId,
+        });
+        expect(mockConfig.switchModel).toHaveBeenCalledWith(
+          AuthType.USE_OPENAI,
+          'qwen3.8-max',
+          { baseUrl: 'https://two.example/v1' },
+        );
+        expect(state.user.settings.model.reasoningEffort).toBe(selection);
+        expect(state.live.reasoning).toEqual(
+          selection === 'none' ? false : { effort: selection },
+        );
+      },
+    );
+
+    it('does not treat a runtime snapshot of a previous selection as the model default', () => {
+      installReasoningPreference('none');
+      Object.assign(mockConfig, {
+        getActiveRuntimeModelSnapshot: vi.fn(() => ({
+          generationConfig: { reasoning: { effort: 'max' } },
+        })),
+      });
+      Object.assign(mockSettings.merged.model!, {
+        generationConfig: { reasoning: { budget_tokens: 42000 } },
+      });
+      expect(session.getDefaultReasoningConfig()).toEqual({
+        budget_tokens: 42000,
+      });
+    });
+
+    it.each([
+      ['qwen3.7-plus', 'none', false],
+      ['qwen3.8-max', 'low', true],
+      ['qwen3.8-max', 'max', false],
+    ] as const)(
+      'reloads persisted reasoning for %s with %s after a workspace model rebuild',
+      (modelId, selection, clearsOverrides) => {
+        const state = installReasoningPreference('low');
+        const extraBody = {
+          enable_thinking: false,
+          reasoning_effort: 'xhigh',
+          seed: 7,
+        };
+        const samplingParams = { thinking_budget: 1024, temperature: 0.2 };
+        currentModel = modelId;
+        for (const generation of [state.live, state.rebuildable]) {
+          Object.assign(generation, {
+            model: modelId,
+            reasoning: undefined,
+            extra_body: extraBody,
+            samplingParams,
+          });
+        }
+        vi.mocked(mockSettings.reloadScopeFromDisk).mockImplementation(() => {
+          state.user.settings.model.reasoningEffort = selection;
+          mockSettings.recomputeMerged();
+          return true;
+        });
+        session.reloadReasoningSelection();
+        expect(mockSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
+          SettingScope.User,
+        );
+        expect(mockSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
+          SettingScope.Workspace,
+        );
+        const expected =
+          selection === 'none'
+            ? false
+            : selection === 'low'
+              ? { effort: 'low' }
+              : undefined;
+        expect(state.live.reasoning).toEqual(expected);
+        expect(state.rebuildable.reasoning).toEqual(expected);
+        expect(state.live.extra_body).toEqual(
+          clearsOverrides ? { seed: 7 } : extraBody,
+        );
+        expect(state.live.samplingParams).toEqual(
+          clearsOverrides ? { temperature: 0.2 } : samplingParams,
+        );
+        expect(state.rebuildable.extra_body).toEqual({
+          enable_thinking: false,
+          reasoning_effort: 'xhigh',
+          seed: 7,
+        });
+        expect(state.rebuildable.samplingParams).toEqual({
+          thinking_budget: 1024,
+          temperature: 0.2,
+        });
+      },
+    );
+
+    it('keeps a model switch live when incompatible preference cleanup fails', async () => {
+      const state = installReasoningPreference('max');
+      const setValue = vi.mocked(mockSettings.setValue);
+      const write = setValue.getMockImplementation();
+      setValue.mockImplementation((scope, key, value, ...rest) => {
+        if (key === 'model.reasoningEffort' && value === undefined) {
+          throw new Error('settings are read-only');
+        }
+        return write?.(scope, key, value, ...rest);
+      });
+
+      await expect(
+        session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `qwen3.7-plus(${AuthType.USE_OPENAI})`,
+        }),
+      ).resolves.toBeDefined();
+
+      expect(state.live.reasoning).toBeUndefined();
+      expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
+        modelId: 'qwen3.7-plus',
+        authType: AuthType.USE_OPENAI,
+      });
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        'model.name',
+        'qwen3.7-plus',
+      );
+    });
+
+    it.each(['none', 'default'] as const)(
+      'persists %s in the model scope and removes shadowing tiers',
+      (selection) => {
+        const state = installReasoningPreference('max', { trusted: true });
+        session.persistReasoningSelection(selection);
+        for (const field of ['settings', 'originalSettings'] as const) {
+          expect(state.user[field].model).toStrictEqual(
+            selection === 'default' ? {} : { reasoningEffort: selection },
+          );
+          expect(state.workspace[field].model).not.toHaveProperty(
+            'reasoningEffort',
+          );
+        }
+        expect(mockSettings.merged.model?.reasoningEffort).toBe(
+          selection === 'default' ? undefined : selection,
+        );
+      },
+    );
+
+    it.each(['medium', 'default'] as const)(
+      'preserves scope values when persisting %s fails',
+      (selection) => {
+        const state = installReasoningPreference(
+          selection === 'medium' ? 'low' : 'max',
+          { trusted: true },
+        );
+        if (selection === 'medium') {
+          Object.assign(state.workspace.settings, { modelProviders: {} });
+          Object.assign(state.workspace.originalSettings, {
+            modelProviders: {},
+          });
+          delete state.workspace.settings.model.reasoningEffort;
+          delete state.workspace.originalSettings.model.reasoningEffort;
+          mockSettings.recomputeMerged();
+        }
+        const files = [state.user, state.workspace];
+        const before = files.map((file) => ({ ...file.settings.model }));
+        const setValue = vi.mocked(mockSettings.setValue);
+        const write = setValue.getMockImplementation();
+        setValue.mockImplementation((scope, key, value, ...rest) => {
+          if (
+            key === 'model.reasoningEffort' &&
+            scope ===
+              (selection === 'medium'
+                ? SettingScope.Workspace
+                : SettingScope.User) &&
+            value === (selection === 'medium' ? selection : undefined)
+          ) {
+            throw new Error('settings are read-only');
+          }
+          return write?.(scope, key, value, ...rest);
+        });
+
+        expect(() => session.persistReasoningSelection(selection)).toThrow(
+          'settings are read-only',
+        );
+        files.forEach((file, index) => {
+          expect(file.settings.model).toStrictEqual(before[index]);
+          expect(file.originalSettings.model).toStrictEqual(before[index]);
+        });
+      },
+    );
 
     it('does not persist a shared model default for a standalone session', async () => {
       session.dispose();
@@ -6151,6 +8688,64 @@ describe('Session', () => {
         originatorClientId: 'client-1',
       };
 
+      it.each([false, true])(
+        'records the trusted identity before streaming (display=%s)',
+        async (withDisplayText) => {
+          let currentPromptId = '';
+          mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+            expect(
+              mockChatRecordingService.recordUserMessage,
+            ).toHaveBeenLastCalledWith(
+              'same prompt',
+              undefined,
+              withDisplayText
+                ? { displayText: 'visible prompt', hookContext: '' }
+                : undefined,
+              currentPromptId,
+            );
+            return Promise.resolve(createEmptyStream());
+          });
+          for (const promptId of ['daemon-first', 'daemon-second']) {
+            currentPromptId = promptId;
+            await session.prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt: [{ type: 'text', text: 'same prompt' }],
+                _meta: {
+                  promptId: 'client-supplied-id',
+                  ...(withDisplayText
+                    ? { 'qwen.daemon.promptDisplayText': 'visible prompt' }
+                    : {}),
+                },
+              },
+              { ...trustedContext, promptId },
+            );
+          }
+          expect(
+            mockChatRecordingService.recordUserMessage.mock.calls.map(
+              (args) => args[3],
+            ),
+          ).toEqual(['daemon-first', 'daemon-second']);
+        },
+      );
+
+      it('does not persist a client-supplied identity without a trusted context', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'untrusted identity' }],
+          _meta: { promptId: 'client-supplied-id' },
+        });
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          'untrusted identity',
+          undefined,
+          undefined,
+          undefined,
+        );
+      });
+
       it('records a completed turn_result for a daemon-admitted prompt', async () => {
         mockChat.sendMessageStream = vi
           .fn()
@@ -7141,6 +9736,9 @@ describe('Session', () => {
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
         '原始语音文本',
+        undefined,
+        undefined,
+        trustedContext.promptId,
       );
       expect(textParts(firstSentMessage())).toEqual([
         '<realtime_delegation>trusted model input</realtime_delegation>',
@@ -7191,6 +9789,7 @@ describe('Session', () => {
           hookContext: '',
           attachmentReferences: [imageReference, fileReference],
         },
+        undefined,
       );
     });
 
@@ -7217,6 +9816,7 @@ describe('Session', () => {
         'describe these',
         undefined,
         expect.objectContaining({ attachmentReferences }),
+        undefined,
       );
     });
 
@@ -7245,6 +9845,7 @@ describe('Session', () => {
         expect.objectContaining({
           attachmentReferences: [attachmentReference],
         }),
+        undefined,
       );
     });
 
@@ -7479,7 +10080,13 @@ describe('Session', () => {
         .calls[0][0] as (
         displayText: string,
         modelText: string,
-        meta: { agentId: string; status: string; toolUseId?: string },
+        meta: {
+          agentId: string;
+          status: string;
+          toolUseId?: string;
+          todoWorkChainId?: string;
+          label?: string;
+        },
       ) => void;
 
       callback(
@@ -7489,6 +10096,8 @@ describe('Session', () => {
           agentId: 'agent-1',
           status: 'completed',
           toolUseId: 'tool-1',
+          todoWorkChainId: 'work-chain-1',
+          label: 'worker',
         },
       );
 
@@ -7556,6 +10165,11 @@ describe('Session', () => {
               status: 'completed',
               kind: 'agent',
               toolUseId: 'tool-1',
+              label: 'worker',
+              turnId: expect.stringMatching(
+                /^test-session-id########notification\d+$/,
+              ),
+              turnComplete: true,
             },
           },
         },
@@ -7570,10 +10184,773 @@ describe('Session', () => {
       );
     });
 
-    it('attaches structured agent metadata built from the canonical entry label', async () => {
+    it('marks only the final response segment of a background notification turn complete', async () => {
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/test.txt' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'file contents',
+          }),
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'I will inspect first.' }] } },
+                ],
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'The final finding.' }] } },
+                ],
+              },
+            },
+          ]),
+        );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; label?: string },
+      ) => void;
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+        label: 'worker',
+      });
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              source: 'background_notification_response',
+              backgroundTask: expect.objectContaining({ turnComplete: true }),
+            }),
+          }),
+        });
+      });
+      const responses = (
+        mockClient.sessionUpdate as ReturnType<typeof vi.fn>
+      ).mock.calls
+        .map(([params]) => params as SessionNotification)
+        .filter(
+          (params) =>
+            params.update._meta?.['source'] ===
+            'background_notification_response',
+        );
+      const responseTurnIds = responses.map(
+        (params) =>
+          (
+            params.update._meta?.['backgroundTask'] as
+              | { turnId?: string }
+              | undefined
+          )?.turnId,
+      );
+      expect(responseTurnIds[0]).toMatch(
+        /^test-session-id########notification\d+$/,
+      );
+      expect(responseTurnIds[1]).toBe(responseTurnIds[0]);
+      expect(responses).toEqual([
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: { type: 'text', text: 'I will inspect first.' },
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'agent-1',
+                turnComplete: false,
+              }),
+            }),
+          }),
+        }),
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: { type: 'text', text: 'The final finding.' },
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'agent-1',
+                turnComplete: true,
+              }),
+            }),
+          }),
+        }),
+      ]);
+    });
+
+    it('marks a buffered background response partial when a later model iteration fails', async () => {
+      const flushTurn = vi.fn().mockResolvedValue(undefined);
+      const interceptUpdate = vi.fn(async (update: SessionUpdate) => {
+        await session.sendUpdate(update);
+      });
+      session.messageRewriter = {
+        interceptUpdate,
+        flushTurn,
+        waitForPendingRewrites: vi.fn().mockResolvedValue(undefined),
+      } as unknown as Session['messageRewriter'];
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/test.txt' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'file contents',
+          }),
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'Partial finding.' }] } },
+                ],
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockRejectedValueOnce(new Error('model failed'));
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; label?: string },
+      ) => void;
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+        label: 'worker',
+      });
+
+      const sessionUpdate = mockClient.sessionUpdate as ReturnType<
+        typeof vi.fn
+      >;
+      await vi.waitFor(() => {
+        expect(
+          sessionUpdate.mock.calls.filter(
+            ([params]) =>
+              (params as SessionNotification).update._meta?.['source'] ===
+              'background_notification_response',
+          ),
+        ).toHaveLength(2);
+      });
+      const responseCallIndexes = sessionUpdate.mock.calls
+        .map(([params], index) => ({
+          index,
+          params: params as SessionNotification,
+        }))
+        .filter(
+          ({ params }) =>
+            params.update._meta?.['source'] ===
+            'background_notification_response',
+        );
+      const responses = responseCallIndexes.map(({ params }) => params);
+      expect(responses).toEqual([
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: { type: 'text', text: 'Partial finding.' },
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'agent-1',
+                turnComplete: false,
+              }),
+            }),
+          }),
+        }),
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: { type: 'text', text: '' },
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'agent-1',
+                turnComplete: true,
+                partial: true,
+              }),
+            }),
+          }),
+        }),
+      ]);
+      const endTurnCallIndex = (
+        mockClient.extNotification as ReturnType<typeof vi.fn>
+      ).mock.calls.findIndex(
+        ([method, params]) =>
+          method === '_qwencode/end_turn' &&
+          (params as { source?: string }).source === 'background_notification',
+      );
+      expect(endTurnCallIndex).toBeGreaterThanOrEqual(0);
+      expect(
+        sessionUpdate.mock.invocationCallOrder[
+          responseCallIndexes.at(-1)!.index
+        ],
+      ).toBeLessThan(
+        (mockClient.extNotification as ReturnType<typeof vi.fn>).mock
+          .invocationCallOrder[endTurnCallIndex]!,
+      );
+      const terminalUpdateIndex = interceptUpdate.mock.calls.findIndex(
+        ([update]) => {
+          const backgroundTask = update._meta?.['backgroundTask'] as
+            | { turnComplete?: boolean }
+            | undefined;
+          return (
+            update._meta?.['source'] === 'background_notification_response' &&
+            backgroundTask?.turnComplete === true
+          );
+        },
+      );
+      expect(terminalUpdateIndex).toBeGreaterThanOrEqual(0);
+      expect(
+        interceptUpdate.mock.invocationCallOrder[terminalUpdateIndex],
+      ).toBeLessThan(flushTurn.mock.invocationCallOrder.at(-1)!);
+      expect(flushTurn.mock.invocationCallOrder.at(-1)).toBeLessThan(
+        (mockClient.extNotification as ReturnType<typeof vi.fn>).mock
+          .invocationCallOrder[endTurnCallIndex]!,
+      );
+    });
+
+    it('completes a buffered response when the final model iteration is empty', async () => {
+      const flushTurn = vi.fn().mockResolvedValue(undefined);
+      const waitForPendingRewrites = vi.fn().mockResolvedValue(undefined);
+      const interceptUpdate = vi.fn(async (update: SessionUpdate) => {
+        await session.sendUpdate(update);
+      });
+      session.messageRewriter = {
+        interceptUpdate,
+        flushTurn,
+        waitForPendingRewrites,
+      } as unknown as Session['messageRewriter'];
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/test.txt' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'file contents',
+          }),
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'Buffered finding.' }] } },
+                ],
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string },
+      ) => void;
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+
+      await vi.waitFor(() => {
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          '_qwencode/end_turn',
+          expect.objectContaining({ source: 'background_notification' }),
+        );
+      });
+      const terminalUpdateIndex = interceptUpdate.mock.calls.findIndex(
+        ([update]) => {
+          const content = (
+            update as { content?: { type?: string; text?: string } }
+          ).content;
+          const backgroundTask = update._meta?.['backgroundTask'] as
+            | { turnComplete?: boolean }
+            | undefined;
+          return (
+            content?.type === 'text' &&
+            content.text === '' &&
+            backgroundTask?.turnComplete === true
+          );
+        },
+      );
+      const endTurnCallIndex = (
+        mockClient.extNotification as ReturnType<typeof vi.fn>
+      ).mock.calls.findIndex(
+        ([method, params]) =>
+          method === '_qwencode/end_turn' &&
+          (params as { source?: string }).source === 'background_notification',
+      );
+      expect(terminalUpdateIndex).toBeGreaterThanOrEqual(0);
+      expect(
+        interceptUpdate.mock.invocationCallOrder[terminalUpdateIndex],
+      ).toBeLessThan(flushTurn.mock.invocationCallOrder.at(-1)!);
+      // The marker must come from inside the model loop, where a flushTurn
+      // still follows it; emitting it after the loop leaves its _meta latched
+      // onto the next user turn's rewritten summary.
+      expect(
+        interceptUpdate.mock.invocationCallOrder[terminalUpdateIndex],
+      ).toBeLessThan(waitForPendingRewrites.mock.invocationCallOrder.at(-1)!);
+      expect(flushTurn.mock.invocationCallOrder.at(-1)).toBeLessThan(
+        (mockClient.extNotification as ReturnType<typeof vi.fn>).mock
+          .invocationCallOrder[endTurnCallIndex]!,
+      );
+    });
+
+    it('completes a buffered background response when the turn is cancelled', async () => {
+      let toolStarted!: () => void;
+      const toolRunning = new Promise<void>((resolve) => {
+        toolStarted = resolve;
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/test.txt' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn(async (...args: unknown[]) => {
+            const signal = args.find(
+              (arg): arg is AbortSignal => arg instanceof AbortSignal,
+            );
+            toolStarted();
+            if (signal && !signal.aborted) {
+              await new Promise<void>((resolve) => {
+                signal.addEventListener('abort', () => resolve(), {
+                  once: true,
+                });
+              });
+            }
+            return {
+              llmContent: 'file contents',
+              returnDisplay: 'file contents',
+            };
+          }),
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'Partial finding.' }] } },
+                ],
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; label?: string },
+      ) => void;
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+        label: 'worker',
+      });
+
+      await toolRunning;
+      await session.cancelPendingPrompt();
+
+      const extNotification = mockClient.extNotification as ReturnType<
+        typeof vi.fn
+      >;
+      await vi.waitFor(() => {
+        expect(extNotification).toHaveBeenCalledWith('_qwencode/end_turn', {
+          sessionId: 'test-session-id',
+          reason: 'cancelled',
+          source: 'background_notification',
+        });
+      });
+
+      const sessionUpdate = mockClient.sessionUpdate as ReturnType<
+        typeof vi.fn
+      >;
+      const markerIndex = sessionUpdate.mock.calls.findIndex(([params]) => {
+        const update = (params as SessionNotification).update;
+        const backgroundTask = update._meta?.['backgroundTask'] as
+          | { turnComplete?: boolean; partial?: boolean }
+          | undefined;
+        return (
+          update._meta?.['source'] === 'background_notification_response' &&
+          backgroundTask?.turnComplete === true &&
+          backgroundTask?.partial === true
+        );
+      });
+      expect(markerIndex).toBeGreaterThanOrEqual(0);
+      expect(
+        (sessionUpdate.mock.calls[markerIndex]![0] as SessionNotification)
+          .update,
+      ).toMatchObject({
+        content: { type: 'text', text: '' },
+      });
+      const endTurnIndex = extNotification.mock.calls.findIndex(
+        ([method, params]) =>
+          method === '_qwencode/end_turn' &&
+          (params as { source?: string }).source === 'background_notification',
+      );
+      expect(endTurnIndex).toBeGreaterThanOrEqual(0);
+      expect(sessionUpdate.mock.invocationCallOrder[markerIndex]).toBeLessThan(
+        extNotification.mock.invocationCallOrder[endTurnIndex]!,
+      );
+    });
+
+    it('completes a buffered background response cancelled mid-stream', async () => {
+      let thirdStreamStarted!: () => void;
+      const thirdStream = new Promise<void>((resolve) => {
+        thirdStreamStarted = resolve;
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/test.txt' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'file contents',
+          }),
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'Partial finding.' }] } },
+                ],
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockImplementationOnce(
+          async (
+            _model: string,
+            params: { config: { abortSignal: AbortSignal } },
+          ) => {
+            const signal = params.config.abortSignal;
+            thirdStreamStarted();
+            return (async function* () {
+              await new Promise<void>((resolve) => {
+                if (signal.aborted) {
+                  resolve();
+                  return;
+                }
+                signal.addEventListener('abort', () => resolve(), {
+                  once: true,
+                });
+              });
+              yield {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'Never delivered.' }] } },
+                  ],
+                },
+              };
+            })();
+          },
+        );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; label?: string },
+      ) => void;
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+        label: 'worker',
+      });
+
+      await thirdStream;
+      await session.cancelPendingPrompt();
+
+      const extNotification = mockClient.extNotification as ReturnType<
+        typeof vi.fn
+      >;
+      await vi.waitFor(() => {
+        expect(extNotification).toHaveBeenCalledWith('_qwencode/end_turn', {
+          sessionId: 'test-session-id',
+          reason: 'cancelled',
+          source: 'background_notification',
+        });
+      });
+
+      const sessionUpdate = mockClient.sessionUpdate as ReturnType<
+        typeof vi.fn
+      >;
+      const markerIndex = sessionUpdate.mock.calls.findIndex(([params]) => {
+        const update = (params as SessionNotification).update;
+        const backgroundTask = update._meta?.['backgroundTask'] as
+          | { turnComplete?: boolean; partial?: boolean }
+          | undefined;
+        return (
+          update._meta?.['source'] === 'background_notification_response' &&
+          backgroundTask?.turnComplete === true &&
+          backgroundTask?.partial === true
+        );
+      });
+      expect(markerIndex).toBeGreaterThanOrEqual(0);
+      const endTurnIndex = extNotification.mock.calls.findIndex(
+        ([method, params]) =>
+          method === '_qwencode/end_turn' &&
+          (params as { source?: string }).source === 'background_notification',
+      );
+      expect(sessionUpdate.mock.invocationCallOrder[markerIndex]).toBeLessThan(
+        extNotification.mock.invocationCallOrder[endTurnIndex]!,
+      );
+      expect(
+        sessionUpdate.mock.calls.some(
+          ([params]) =>
+            (
+              (params as SessionNotification).update as {
+                content?: { text?: string };
+              }
+            ).content?.text === 'Never delivered.',
+        ),
+      ).toBe(false);
+    });
+
+    it('labels a background shell response from its registry entry', async () => {
+      mockBackgroundShellRegistry.getAll.mockReturnValue([
+        { id: 'shell-1', status: 'completed', description: 'npm test' },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'The shell finished successfully.' }],
+                    },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background shell' }],
+      });
+
+      const callback = mockBackgroundShellRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+      callback(
+        'Background shell "npm test" completed.',
+        '<task-notification><kind>shell</kind></task-notification>',
+        { shellId: 'shell-1', status: 'completed' },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'The shell finished successfully.',
+            },
+            _meta: {
+              source: 'background_notification_response',
+              qwenDiscreteMessage: true,
+              backgroundTask: {
+                taskId: 'shell-1',
+                status: 'completed',
+                kind: 'shell',
+                toolUseId: undefined,
+                label: 'npm test',
+                turnId: expect.stringMatching(
+                  /^test-session-id########notification\d+$/,
+                ),
+                turnComplete: true,
+              },
+            },
+          },
+        });
+      });
+    });
+
+    it('does not emit an empty completion marker without buffered response text', async () => {
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string },
+      ) => void;
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+
+      await vi.waitFor(() => {
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          '_qwencode/end_turn',
+          expect.objectContaining({ source: 'background_notification' }),
+        );
+      });
+      expect(
+        (mockClient.sessionUpdate as ReturnType<typeof vi.fn>).mock.calls.some(
+          ([params]) =>
+            (params as SessionNotification).update._meta?.['source'] ===
+            'background_notification_response',
+        ),
+      ).toBe(false);
+    });
+
+    it('attaches structured agent metadata built from the canonical entry label', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'done' }] } }],
+              },
+            },
+          ]),
+        );
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'agent-1',
@@ -7634,6 +11011,60 @@ describe('Session', () => {
           description: 'Explore: worker task',
         }),
       );
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            content: { type: 'text', text: 'done' },
+            _meta: expect.objectContaining({
+              source: 'background_notification_response',
+              backgroundTask: expect.objectContaining({
+                label: 'worker task',
+                turnComplete: true,
+              }),
+            }),
+          }),
+        });
+      });
+    });
+
+    it('does not use an agent description as the response label', async () => {
+      mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'done' }] } }],
+            },
+          },
+        ]),
+      );
+
+      await expect(
+        session.enqueueBackgroundNotification({
+          displayText: 'Background agent completed.',
+          modelText: '<task-notification />',
+          taskId: 'agent-without-label',
+          status: 'completed',
+          kind: 'agent',
+          structured: { description: 'Explore: worker task' },
+        }),
+      ).resolves.toEqual({ accepted: true });
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            content: { type: 'text', text: 'done' },
+            _meta: expect.objectContaining({
+              source: 'background_notification_response',
+              backgroundTask: expect.not.objectContaining({
+                label: expect.anything(),
+              }),
+            }),
+          }),
+        });
+      });
     });
 
     it('attaches structured monitor metadata with event and dropped-line counts', async () => {
@@ -8196,6 +11627,120 @@ describe('Session', () => {
           request.eventName === 'MessageDisplay' && request.input.is_final,
       );
       expect(finals).toHaveLength(0);
+    });
+
+    it('completes buffered notification output when cancellation stops a tool run', async () => {
+      let releaseTool!: () => void;
+      let reportToolStarted!: () => void;
+      const toolStarted = new Promise<void>((resolve) => {
+        reportToolStarted = resolve;
+      });
+      const toolGate = new Promise<void>((resolve) => {
+        releaseTool = resolve;
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/test.txt' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn(async () => {
+            reportToolStarted();
+            await toolGate;
+            return {
+              llmContent: 'file contents',
+              returnDisplay: 'file contents',
+            };
+          }),
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'Buffered finding.' }] } },
+                ],
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string },
+      ) => void;
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+
+      await toolStarted;
+      const cancel = session.cancelPendingPrompt();
+      releaseTool();
+      await cancel;
+      await vi.waitFor(() => {
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          '_qwencode/end_turn',
+          {
+            sessionId: 'test-session-id',
+            reason: 'cancelled',
+            source: 'background_notification',
+          },
+        );
+      });
+
+      const sessionUpdate = mockClient.sessionUpdate as ReturnType<
+        typeof vi.fn
+      >;
+      const markerIndex = sessionUpdate.mock.calls.findIndex(([params]) => {
+        const update = (params as SessionNotification).update;
+        const content = (
+          update as { content?: { type?: string; text?: string } }
+        ).content;
+        const backgroundTask = update._meta?.['backgroundTask'] as
+          | { partial?: boolean; turnComplete?: boolean }
+          | undefined;
+        return (
+          content?.type === 'text' &&
+          content.text === '' &&
+          update._meta?.['source'] === 'background_notification_response' &&
+          backgroundTask?.turnComplete === true &&
+          backgroundTask.partial === true
+        );
+      });
+      const endTurnIndex = (
+        mockClient.extNotification as ReturnType<typeof vi.fn>
+      ).mock.calls.findIndex(
+        ([method, params]) =>
+          method === '_qwencode/end_turn' &&
+          (params as { source?: string }).source === 'background_notification',
+      );
+      expect(markerIndex).toBeGreaterThanOrEqual(0);
+      expect(sessionUpdate.mock.invocationCallOrder[markerIndex]).toBeLessThan(
+        (mockClient.extNotification as ReturnType<typeof vi.fn>).mock
+          .invocationCallOrder[endTurnIndex]!,
+      );
     });
 
     it('cancels an in-flight background notification prompt', async () => {
@@ -9105,9 +12650,292 @@ describe('Session', () => {
               status: 'completed',
               kind: 'shell',
               toolUseId: undefined,
+              turnId: expect.stringMatching(
+                /^test-session-id########notification\d+$/,
+              ),
+              turnComplete: true,
             },
           },
         },
+      });
+    });
+
+    // The queue is bounded. ACP filters interim monitor pulses before they
+    // are ever queued, so every queued entry here is a terminal result and
+    // eviction stays oldest-first; what changes is that the loss is recorded
+    // instead of vanishing into a debug log.
+    it('records what queue overflow discarded instead of losing it silently', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValue(
+        new Error('turn admission closed for overflow test'),
+      );
+
+      const shellCallback = mockBackgroundShellRegistry.setNotificationCallback
+        .mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+
+      // Enqueued synchronously, so all 21 land before any drain runs.
+      for (let index = 0; index < 20; index++) {
+        shellCallback('shell done', `<shell-${index} />`, {
+          shellId: `shell-${index}`,
+          status: 'completed',
+        });
+      }
+      debugLoggerWarnSpy.mockClear();
+      shellCallback('shell done', '<shell-20 />', {
+        shellId: 'shell-20',
+        status: 'completed',
+      });
+
+      const internals = session as unknown as {
+        notificationQueue: Array<{ taskId: string }>;
+        notificationProcessing: boolean;
+        droppedNotifications: { count: number };
+      };
+      expect(internals.notificationQueue).toHaveLength(20);
+      expect(internals.notificationQueue[0]?.taskId).toBe('shell-1');
+      expect(
+        internals.notificationQueue.some((item) => item.taskId === 'shell-20'),
+      ).toBe(true);
+      expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+        'Notification queue overflow: evicting task=shell-0 kind=shell',
+      );
+      // The eviction is remembered, so the next turn can report it.
+      expect(internals.droppedNotifications.count).toBe(1);
+
+      internals.notificationProcessing = true;
+      await session.cancelPendingPrompt();
+      expect(internals.notificationQueue).toHaveLength(0);
+      expect(internals.droppedNotifications.count).toBe(0);
+      internals.notificationProcessing = false;
+    });
+
+    it('tells the model what queue overflow discarded on the next notification turn', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+      mockBackgroundShellRegistry.getAll.mockReturnValue([
+        { id: 'shell-1', description: 'npm test' },
+      ]);
+
+      const shellCallback = mockBackgroundShellRegistry.setNotificationCallback
+        .mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+
+      for (let index = 0; index < 21; index++) {
+        shellCallback('shell done', `<shell-${index} />`, {
+          shellId: `shell-${index}`,
+          status: 'completed',
+        });
+      }
+
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      await vi.waitFor(() => {
+        expect(sendMessageStream.mock.calls.length).toBeGreaterThanOrEqual(2);
+      });
+
+      // The evicted result never reaches the model, but its loss does — ahead
+      // of the notification that displaced it, so the model reads it first.
+      const notificationCall = sendMessageStream.mock.calls[1];
+      const parts = (
+        notificationCall[1] as { message: Array<{ text: string }> }
+      ).message;
+      expect(parts[0]?.text).toContain('<kind>queue</kind>');
+      expect(parts[0]?.text).toContain('1 shell result (shell-0)');
+      expect(parts[0]?.text).toContain(
+        'The affected tasks were not stopped or deleted.',
+      );
+      expect(parts[1]?.text).toBe('<shell-1 />');
+
+      const sessionUpdateCalls = vi.mocked(mockClient.sessionUpdate).mock.calls;
+      const summaryUpdateIndex = sessionUpdateCalls.findIndex(
+        ([{ update }]) =>
+          update._meta?.backgroundTask?.kind === 'queue' &&
+          update._meta.backgroundTask.status === 'dropped',
+      );
+      const survivingUpdateIndex = sessionUpdateCalls.findIndex(
+        ([{ update }]) => update._meta?.backgroundTask?.taskId === 'shell-1',
+      );
+      expect(summaryUpdateIndex).toBeGreaterThanOrEqual(0);
+      expect(summaryUpdateIndex).toBeLessThan(survivingUpdateIndex);
+      const recordingCalls = mockChatRecordingService.recordNotification.mock
+        .calls as unknown as Array<
+        [Array<{ text: string }>, string, { taskId: string } | undefined]
+      >;
+      const summaryRecordIndex = recordingCalls.findIndex(([recordedParts]) =>
+        recordedParts[0]?.text.includes('<kind>queue</kind>'),
+      );
+      const itemRecordIndex = recordingCalls.findIndex(([recordedParts]) =>
+        recordedParts[0]?.text.includes('<shell-1 />'),
+      );
+      expect(summaryRecordIndex).toBeGreaterThanOrEqual(0);
+      expect(summaryRecordIndex).toBeLessThan(itemRecordIndex);
+      expect(recordingCalls[summaryRecordIndex]?.[1]).toBe(
+        'Dropped 1 background notification (queue full): 1 shell result (shell-0).',
+      );
+      expect(recordingCalls[summaryRecordIndex]?.[2]).toBeUndefined();
+      expect(recordingCalls[itemRecordIndex]).toEqual([
+        [{ text: '<shell-1 />' }],
+        'shell done',
+        expect.objectContaining({
+          taskId: 'shell-1',
+          commandLabel: 'npm test',
+        }),
+      ]);
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'Dropped 1 background notification (queue full): 1 shell result (shell-0).',
+          },
+          _meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: { kind: 'queue', status: 'dropped' },
+          },
+        },
+      });
+    });
+
+    it('records an overflow summary without duplicating a persisted notification', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const internals = session as unknown as {
+        pendingPrompt: AbortController | null;
+        notificationQueue: Array<{ taskId: string }>;
+        droppedNotifications: { count: number };
+      };
+      internals.pendingPrompt = new AbortController();
+      const shellCallback = mockBackgroundShellRegistry.setNotificationCallback
+        .mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+      for (let index = 0; index <= MAX_BACKGROUND_NOTIFICATION_QUEUE; index++) {
+        shellCallback('shell done', `<shell-${index} />`, {
+          shellId: `shell-${index}`,
+          status: 'completed',
+        });
+      }
+      expect(internals.droppedNotifications.count).toBe(1);
+      internals.notificationQueue = [];
+      internals.pendingPrompt = null;
+      mockChatRecordingService.recordNotification.mockClear();
+
+      await session.enqueueBackgroundNotification({
+        displayText: 'Worker completed.',
+        modelText: '<worker-persisted />',
+        taskId: 'worker-persisted',
+        status: 'completed',
+        kind: 'agent',
+      });
+
+      await vi.waitFor(() =>
+        expect(mockChatRecordingService.recordNotification).toHaveBeenCalled(),
+      );
+      const summaryRecord =
+        mockChatRecordingService.recordNotification.mock.calls[0];
+      expect(
+        mockChatRecordingService.recordNotification,
+      ).toHaveBeenCalledOnce();
+      expect(summaryRecord?.[0]).toEqual([
+        { text: expect.stringContaining('<kind>queue</kind>') },
+      ]);
+      expect(summaryRecord?.[0]).not.toContainEqual({
+        text: '<worker-persisted />',
+      });
+      expect(summaryRecord?.[1]).toContain('Dropped 1 background notification');
+      expect(summaryRecord?.[2]).toBeUndefined();
+    });
+
+    it('reports a persisted live-delivery miss as recorded rather than lost', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const internals = session as unknown as {
+        pendingPrompt: AbortController | null;
+        notificationQueue: Array<{ taskId: string }>;
+        droppedNotifications: { count: number };
+      };
+      internals.pendingPrompt = new AbortController();
+      const shellCallback = mockBackgroundShellRegistry.setNotificationCallback
+        .mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+
+      await session.enqueueBackgroundNotification({
+        displayText: 'Worker completed.',
+        modelText: '<worker-persisted />',
+        taskId: 'worker-persisted',
+        status: 'completed',
+        kind: 'agent',
+      });
+      for (let index = 0; index < MAX_BACKGROUND_NOTIFICATION_QUEUE; index++) {
+        shellCallback('shell done', `<shell-${index} />`, {
+          shellId: `shell-${index}`,
+          status: 'completed',
+        });
+      }
+      expect(internals.droppedNotifications.count).toBe(1);
+      expect(
+        internals.notificationQueue.some(
+          (item) => item.taskId === 'worker-persisted',
+        ),
+      ).toBe(false);
+
+      internals.notificationQueue = [];
+      internals.pendingPrompt = null;
+      mockChatRecordingService.recordNotification.mockClear();
+      shellCallback('survivor', '<shell-survivor />', {
+        shellId: 'shell-survivor',
+        status: 'completed',
+      });
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalled(),
+      );
+
+      const notificationCall = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[0];
+      const parts = (
+        notificationCall?.[1] as { message: Array<{ text: string }> }
+      ).message;
+      expect(parts[0]?.text).toContain(
+        'The recorded results remain available in the session transcript.',
+      );
+      expect(parts[0]?.text).not.toContain('/tasks');
+      expect(parts[0]?.text).not.toContain('was dropped before delivery');
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: expect.objectContaining({
+          content: {
+            type: 'text',
+            text: 'Recorded but not delivered live (queue full): 1 agent result (worker-persisted).',
+          },
+          _meta: expect.objectContaining({
+            backgroundTask: { kind: 'queue', status: 'recorded' },
+          }),
+        }),
       });
     });
 
@@ -9146,6 +12974,9 @@ describe('Session', () => {
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
         '3',
+        undefined,
+        undefined,
+        undefined,
       );
       expect(mockLlmClient.tryCompressChat).toHaveBeenCalledWith(
         'test-session-id########3',
@@ -9174,6 +13005,7 @@ describe('Session', () => {
         'internal channel instructions\n\nhello',
         undefined,
         { displayText: 'hello', hookContext: '' },
+        undefined,
       );
       expect(
         agentTelemetry.addAgentInputMessageAttributes,
@@ -12539,23 +16371,37 @@ describe('Session', () => {
       });
     });
 
-    describe('shell heartbeat forwarding', () => {
-      const runShellToolCall = async (
+    describe('tool progress forwarding', () => {
+      const runProgressToolCall = async (
         execute: ReturnType<typeof vi.fn>,
+        toolName = 'run_shell_command',
+        requiresApproval = false,
       ): Promise<void> => {
         const tool = {
-          name: 'run_shell_command',
+          name: toolName,
           kind: core.Kind.Execute,
           build: vi.fn().mockReturnValue({
             params: { command: 'quiet-soak-test' },
-            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDefaultPermission: vi
+              .fn()
+              .mockResolvedValue(requiresApproval ? 'ask' : 'allow'),
+            getConfirmationDetails: vi.fn().mockResolvedValue({
+              type: 'info',
+              title: 'Launch agent?',
+              prompt: 'Review changes',
+              onConfirm: vi.fn(),
+            }),
             getDescription: vi.fn().mockReturnValue('quiet-soak-test'),
             toolLocations: vi.fn().mockReturnValue([]),
             execute,
           }),
         };
         mockToolRegistry.getTool.mockReturnValue(tool);
-        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(
+            requiresApproval ? ApprovalMode.DEFAULT : ApprovalMode.YOLO,
+          );
 
         await (
           session as unknown as {
@@ -12575,7 +16421,7 @@ describe('Session', () => {
         ).runToolCalls(
           new AbortController().signal,
           'prompt-heartbeat',
-          [{ id: 'shell_hb_1', name: 'run_shell_command', args: {} }],
+          [{ id: 'shell_hb_1', name: toolName, args: {} }],
           {
             totalToolCalls: 0,
             invalidToolParamErrors: new Map(),
@@ -12598,6 +16444,115 @@ describe('Session', () => {
                 ?.shellProgress !== undefined,
           );
 
+      it('forwards agent readiness before execution settles, once, and ignores late updates', async () => {
+        let emit: ((chunk: unknown) => void) | undefined;
+        let finish!: () => void;
+        const finished = new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        const execute = vi.fn(
+          async (
+            _signal: AbortSignal,
+            updateOutput?: (chunk: unknown) => void,
+          ) => {
+            emit = updateOutput;
+            await finished;
+            return { llmContent: 'done', returnDisplay: 'done' };
+          },
+        );
+        const updates = () =>
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.map(([params]) => params.update)
+            .filter(
+              (update) => update._meta?.['subagentSessionReady'] === true,
+            );
+        const running = runProgressToolCall(execute, 'agent');
+        try {
+          await vi.waitFor(() => expect(emit).toBeDefined());
+          const progress = {
+            type: 'task_execution',
+            subagentSessionReady: true,
+          };
+          emit?.({ ...progress, subagentSessionReady: false });
+          expect(updates()).toHaveLength(0);
+          emit?.(progress);
+          emit?.(progress);
+          await vi.waitFor(() => expect(updates()).toHaveLength(1));
+          expect(updates()[0]).toMatchObject({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'shell_hb_1',
+            _meta: { toolName: 'agent', subagentSessionReady: true },
+          });
+          expect(updates()[0]).not.toHaveProperty('rawOutput');
+        } finally {
+          finish();
+          await running;
+        }
+        emit?.({ type: 'task_execution', subagentSessionReady: true });
+        expect(updates()).toHaveLength(1);
+      });
+
+      it('starts an approved agent as creating before execution without preparation frames', async () => {
+        vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        });
+        let emit: ((chunk: unknown) => void) | undefined;
+        let finish!: () => void;
+        const finished = new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        const execute = vi.fn(
+          async (
+            _signal: AbortSignal,
+            updateOutput?: (chunk: unknown) => void,
+          ) => {
+            emit = updateOutput;
+            await finished;
+            return { llmContent: 'done', returnDisplay: 'done' };
+          },
+        );
+        const readinessUpdates = () =>
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.map(([params]) => params.update)
+            .filter(
+              (update) =>
+                typeof update._meta?.['subagentSessionReady'] === 'boolean',
+            );
+        const running = runProgressToolCall(execute, 'agent', true);
+        try {
+          await vi.waitFor(() => expect(emit).toBeDefined());
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+          expect(readinessUpdates()).toEqual([
+            expect.objectContaining({
+              sessionUpdate: 'tool_call',
+              toolCallId: 'shell_hb_1',
+              status: 'in_progress',
+              _meta: expect.objectContaining({ subagentSessionReady: false }),
+            }),
+          ]);
+          const updates = vi.mocked(mockClient.sessionUpdate).mock;
+          const startIndex = updates.calls.findIndex(
+            ([params]) =>
+              params.update._meta?.['subagentSessionReady'] === false,
+          );
+          expect(updates.invocationCallOrder[startIndex]).toBeLessThan(
+            execute.mock.invocationCallOrder[0],
+          );
+          emit?.({ type: 'task_execution', subagentSessionReady: true });
+          await vi.waitFor(() => expect(readinessUpdates()).toHaveLength(2));
+          expect(readinessUpdates()[1]).toMatchObject({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'shell_hb_1',
+            _meta: { toolName: 'agent', subagentSessionReady: true },
+          });
+        } finally {
+          finish();
+          await running;
+        }
+      });
+
       it('forwards shell heartbeats as meta-only in_progress updates', async () => {
         const heartbeat = {
           type: 'shell_progress' as const,
@@ -12616,7 +16571,7 @@ describe('Session', () => {
           },
         );
 
-        await runShellToolCall(execute);
+        await runProgressToolCall(execute);
 
         const updates = heartbeatUpdates();
         expect(updates).toHaveLength(1);
@@ -12645,7 +16600,7 @@ describe('Session', () => {
           },
         );
 
-        await runShellToolCall(execute);
+        await runProgressToolCall(execute);
         expect(heartbeatUpdates()).toHaveLength(0);
 
         // A heartbeat tick racing the settle path must not regress the
@@ -12675,7 +16630,7 @@ describe('Session', () => {
           },
         );
 
-        await runShellToolCall(execute);
+        await runProgressToolCall(execute);
 
         const spanCall = endSpanSpy.mock.calls.find(
           ([, meta]) =>
@@ -16123,6 +20078,100 @@ describe('Session', () => {
         expect(
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith([midTurnPart], 'please also check tests');
+      }, 20_000);
+
+      it('keeps a logger failure inside late drain recovery from escaping', async () => {
+        // Regression for the timeout branch's `.catch(() => {})` guard: the
+        // recovery is best-effort by construction, and anything thrown after
+        // the drain race — the debug logger among them — would escape a bare
+        // `void` as an unhandled rejection and end the daemon process. Same
+        // shape as the recovery test above, but the module-graph logger mock
+        // faults exactly on the recovery's own debug line, and the run must
+        // surface zero escaped rejections (vitest fails a file on one).
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi
+              .fn()
+              .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+          }),
+        };
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+
+        let resolveLate: (value: { messages: string[] }) => void = () => {};
+        const latePromise = new Promise<{ messages: string[] }>((res) => {
+          resolveLate = res;
+        });
+        let drainCalls = 0;
+        mockClient.extMethod = vi.fn((method: string) => {
+          if (method !== 'craft/drainMidTurnQueue') return Promise.resolve({});
+          drainCalls += 1;
+          return drainCalls === 1
+            ? latePromise
+            : Promise.resolve({ messages: [] });
+        });
+
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'c',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValue(createEmptyStream());
+
+        // Fault through the module graph (sessionIdContext.run in a real turn
+        // bypasses any process-wide logger session): the recovery's own debug
+        // line throws, everything else logs normally.
+        debugLoggerDebugSpy.mockImplementation((message: unknown) => {
+          if (
+            typeof message === 'string' &&
+            message.includes('timed-out drain')
+          ) {
+            throw new Error('debug logger unavailable');
+          }
+        });
+
+        const unhandled = vi.fn();
+        process.on('unhandledRejection', unhandled);
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text' as const, text: 'read file' }],
+          });
+
+          // The daemon's late answer lands; flush so the recovery race
+          // settles and its throwing logger call runs inside this test.
+          resolveLate({ messages: ['late message'] });
+          await new Promise((r) => setTimeout(r, 0));
+          await new Promise((r) => setImmediate(r));
+
+          // The recovery did reach its debug line (the fault actually fired).
+          expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+            expect.stringContaining('timed-out drain'),
+          );
+          expect(unhandled).not.toHaveBeenCalled();
+        } finally {
+          process.off('unhandledRejection', unhandled);
+          debugLoggerDebugSpy.mockImplementation(() => {});
+        }
       }, 20_000);
 
       it('keeps mid-turn drain enabled after a transient error', async () => {
@@ -19883,6 +23932,9 @@ describe('Session', () => {
         expect(finishedSpy).toHaveBeenCalledTimes(1);
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           '/btw question',
+          undefined,
+          undefined,
+          undefined,
         );
         expect(
           mockChatRecordingService.recordSlashCommand,
@@ -19980,12 +24032,91 @@ describe('Session', () => {
         });
         mockChatRecordingService.recordUserMessage.mockClear();
 
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/advisor check my work' }],
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: '/advisor check my work' }],
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-advisor',
+          },
+        );
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          '/advisor check my work',
+          undefined,
+          undefined,
+          'daemon-advisor',
+        );
+      });
+
+      it.each([
+        ['skill', CommandKind.SKILL],
+        ['custom command', CommandKind.FILE],
+      ])(
+        'keeps attachments when a %s expands into a model prompt',
+        async (_, kind) => {
+          vi.mocked(
+            nonInteractiveCliCommands.handleSlashCommand,
+          ).mockResolvedValueOnce({
+            type: 'submit_prompt',
+            content: [{ text: 'Expanded skill prompt' }],
+            resolvedCommand: {
+              name: 'price-sheet',
+              kind,
+            },
+          });
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: '/price-sheet update these prices' },
+              { type: 'image', mimeType: 'image/png', data: 'QUJD' },
+              {
+                type: 'resource',
+                resource: {
+                  uri: 'attachment:///notes.txt',
+                  mimeType: 'text/plain',
+                  text: 'hello',
+                },
+              },
+            ],
+          });
+
+          expect(firstSentMessage()).toEqual([
+            { text: '@attachment:///notes.txt' },
+            { inlineData: { mimeType: 'image/png', data: 'QUJD' } },
+            { text: 'File: attachment:///notes.txt\nhello' },
+            { text: 'Expanded skill prompt' },
+          ]);
+        },
+      );
+
+      it('does not forward attachments from built-in commands', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Expanded built-in prompt' }],
+          resolvedCommand: {
+            name: 'remember',
+            kind: CommandKind.BUILT_IN,
+          },
         });
 
-        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalled();
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: '/remember this' },
+            { type: 'image', mimeType: 'image/png', data: 'QUJD' },
+          ],
+        });
+
+        expect(firstSentMessage()).toEqual([
+          { text: 'Expanded built-in prompt' },
+        ]);
       });
 
       it('preserves an expanded slash prompt cancelled before model send', async () => {
@@ -20675,6 +24806,14 @@ describe('Session', () => {
           expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
         });
 
+        // A turn that ends with no pausing cause must not pause at all. This
+        // is what keeps the pause decision and the pause reason one list: a
+        // future cause that pauses without being named would land on the
+        // failure arm, and nothing else in the suite would see it.
+        expect(mockGoalRuntime.dispatch).not.toHaveBeenCalledWith(
+          expect.objectContaining({ action: 'pause' }),
+        );
+
         const optionsFor = (callId: string) =>
           mockChatRecordingService.recordToolResult.mock.calls.find(
             (call: unknown[]) =>
@@ -21005,6 +25144,61 @@ describe('Session', () => {
         );
       });
 
+      it('carries the spend figures into the continuation prompt', async () => {
+        // `usage` is optional on both sides of the host hop, so a dropped
+        // copy typechecks and shows up only as a prompt that lost its budget
+        // line on this host.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-usage',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 4,
+            activeTimeMs: 0,
+            tokensUsed: 1_234,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === 'goal-runtime:turn-usage' ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        expect(boundGoalHost).toBeDefined();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+          usage: { tokensUsed: 1_234, tokenBudget: 30_000_000, turnCount: 4 },
+        });
+
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalled();
+        });
+        const request = (mockChat.sendMessageStream as ReturnType<typeof vi.fn>)
+          .mock.calls[0]?.[1] as { message: Array<Record<string, unknown>> };
+        expect(
+          request.message.some(
+            (part) =>
+              typeof part['text'] === 'string' &&
+              (part['text'] as string).includes(
+                'Token budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
+              ),
+          ),
+        ).toBe(true);
+      });
+
       it('settles a Goal turn whose prompt rejects before the turn body runs', async () => {
         // `prompt()` rejects ahead of the try whose finally settles the turn
         // when `assertCanStartTurn` throws — a session that began closing
@@ -21269,6 +25463,691 @@ describe('Session', () => {
         }
       });
 
+      describe('a tool that ends the turn', () => {
+        const activeGoalSnapshot = {
+          v: 2 as const,
+          activity: 'running' as const,
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'write a poem',
+            status: 'active' as const,
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        };
+
+        /**
+         * Mocks every tool as an allowed read, with `update_goal` alone
+         * reporting that it wants the turn to end -- the shape
+         * `UpdateGoalTool` returns when verification or checkpointing needs a
+         * turn boundary.
+         */
+        const mockToolsWithTerminatingUpdateGoal = (
+          updateGoalTerminates = true,
+          missingToolNames: readonly string[] = [],
+        ) => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockToolRegistry.getTool.mockImplementation((name: string) =>
+            missingToolNames.includes(name)
+              ? undefined
+              : {
+                  name,
+                  displayName: name,
+                  kind: core.Kind.Read,
+                  build: vi.fn().mockReturnValue({
+                    params: {},
+                    getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                    getDescription: vi.fn().mockReturnValue(name),
+                    toolLocations: vi.fn().mockReturnValue([]),
+                    execute: vi.fn().mockResolvedValue(
+                      name === 'update_goal'
+                        ? {
+                            llmContent: '{"proposalRecorded":true}',
+                            returnDisplay: 'Proposal queued for verification',
+                            ...(updateGoalTerminates
+                              ? { terminateTurn: true }
+                              : {}),
+                          }
+                        : { llmContent: 'ok', returnDisplay: 'ok' },
+                    ),
+                  }),
+                },
+          );
+        };
+
+        const streamCalling = (...calls: Array<{ id: string; name: string }>) =>
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: calls.map((call) => ({ ...call, args: {} })),
+              },
+            },
+          ]);
+
+        it('ends a Goal turn without another model request', async () => {
+          // The proposal only reaches the verifier at a turn boundary, so a
+          // continuation that keeps the turn alive parks it indefinitely:
+          // the objective is already met, and the runtime refuses every
+          // later proposal for the same turn.
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-terminating-tool',
+          };
+          const turnKey = 'goal-runtime:turn-terminating-tool';
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          agentTelemetry.getActiveInteractionSpan.mockReturnValue(
+            agentTelemetry.span,
+          );
+          mockToolsWithTerminatingUpdateGoal();
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            )
+            .mockResolvedValue(createEmptyStream());
+
+          expect(boundGoalHost).toBeDefined();
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'write a poem',
+          });
+
+          await vi.waitFor(() => {
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+          });
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          // Settled as a completed iteration, not paused as a failure.
+          expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+          // The turn ends, but its own tool response still has to reach the
+          // transcript, or the next request carries a call with no result.
+          expect(mockChat.addHistory).toHaveBeenCalledWith({
+            role: 'user',
+            parts: expect.arrayContaining([
+              expect.objectContaining({
+                functionResponse: expect.objectContaining({
+                  id: 'call-update',
+                }) as unknown,
+              }),
+            ]) as unknown,
+          });
+          expect(mockClient.extNotification).toHaveBeenCalledWith(
+            '_qwencode/end_turn',
+            expect.objectContaining({ reason: 'end_turn', source: 'goal' }),
+          );
+          expect(agentTelemetry.captures[0]?.writeToSpan).toHaveBeenCalledWith(
+            agentTelemetry.span,
+          );
+        });
+
+        it('runs managed memory effects after an early Goal turn end', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-user-terminating-tool',
+          };
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.beginTurn.mockReturnValue(permit);
+          mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+          mockToolsWithTerminatingUpdateGoal();
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'finish the goal' }],
+          });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+          expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
+          expect(mockMemoryManager.scheduleDream).toHaveBeenCalledOnce();
+        });
+
+        it('waits for a requested delivery final without a channel marker', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-channel-terminating-tool',
+          };
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.beginTurn.mockReturnValue(permit);
+          mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+          mockToolsWithTerminatingUpdateGoal();
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            )
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    candidates: [
+                      {
+                        content: { parts: [{ text: 'final answer' }] },
+                        finishReason: 'STOP',
+                      },
+                    ],
+                  },
+                },
+              ]),
+            );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'finish the goal' }],
+            _meta: {
+              'qwen.daemon.channelDelivery': {
+                deliveryId: 'goal-channel-final',
+                target: {
+                  channelName: 'dingtalk',
+                  type: 'user',
+                  id: 'user-1',
+                },
+              },
+            },
+          });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          await vi.waitFor(() => {
+            expect(mockClient.extMethod).toHaveBeenCalledWith(
+              'qwen/control/channel-delivery',
+              expect.objectContaining({
+                deliveryId: 'goal-channel-final',
+                text: 'final answer',
+              }),
+            );
+          });
+        });
+
+        it('waits for a channel final without delivery metadata', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-channel-prompt-terminating-tool',
+          };
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.beginTurn.mockReturnValue(permit);
+          mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+          mockToolsWithTerminatingUpdateGoal();
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            )
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    candidates: [
+                      {
+                        content: { parts: [{ text: 'channel final' }] },
+                        finishReason: 'STOP',
+                      },
+                    ],
+                  },
+                },
+              ]),
+            );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'finish the goal' }],
+            _meta: { 'qwen.channel.prompt': true },
+          });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+            expect.objectContaining({
+              update: expect.objectContaining({
+                content: expect.objectContaining({ text: 'channel final' }),
+              }) as unknown,
+            }),
+          );
+        });
+
+        it('lets loop protection override a terminating Goal tool', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-terminating-tool-loop',
+          };
+          const turnKey = 'goal-runtime:turn-terminating-tool-loop';
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          mockToolsWithTerminatingUpdateGoal(true, ['missing_tool']);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling(
+                { id: 'call-update', name: 'update_goal' },
+                { id: 'call-missing-1', name: 'missing_tool' },
+                { id: 'call-missing-2', name: 'missing_tool' },
+                { id: 'call-missing-3', name: 'missing_tool' },
+              ),
+            );
+
+          expect(boundGoalHost).toBeDefined();
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'write a poem',
+          });
+
+          await vi.waitFor(() => {
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+          });
+          const preservedText = vi
+            .mocked(mockChat.addHistory)
+            .mock.calls.flatMap(([message]) => message.parts ?? [])
+            .flatMap((part) => (part.text ? [part.text] : []));
+          expect(preservedText).toContain(
+            'System: this turn was terminated because the model exceeded tool-call safety limits. Try a different approach on the next turn.',
+          );
+        });
+
+        it('keeps a Goal turn running when no tool asked to end it', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-open-proposal',
+          };
+          const turnKey = 'goal-runtime:turn-open-proposal';
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          mockToolsWithTerminatingUpdateGoal(false);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            )
+            .mockResolvedValue(createEmptyStream());
+
+          expect(boundGoalHost).toBeDefined();
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'write a poem',
+          });
+
+          await vi.waitFor(() => {
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+          });
+          // An audit-only proposal keeps the turn going: the model is meant
+          // to carry on until it stops on its own.
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        });
+
+        it('ends a Goal turn on the last call of a multi-call batch', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-terminating-batch',
+          };
+          const turnKey = 'goal-runtime:turn-terminating-batch';
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          mockToolsWithTerminatingUpdateGoal();
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling(
+                { id: 'call-read', name: 'read_file' },
+                { id: 'call-update', name: 'update_goal' },
+              ),
+            )
+            .mockResolvedValue(createEmptyStream());
+
+          expect(boundGoalHost).toBeDefined();
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'write a poem',
+          });
+
+          await vi.waitFor(() => {
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+          });
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          // Every call in the batch keeps its response, not just the one
+          // that ended the turn: a preserved batch missing a response
+          // leaves the transcript unusable for the next request.
+          const preserved = vi
+            .mocked(mockChat.addHistory)
+            .mock.calls.map(([message]) => message)
+            .find((message) =>
+              (message as Content)?.parts?.some(
+                (part) =>
+                  (part as { functionResponse?: { id?: string } })
+                    .functionResponse?.id === 'call-update',
+              ),
+            ) as Content;
+          expect(preserved).toBeDefined();
+          expect(
+            preserved.parts?.map(
+              (part) =>
+                (part as { functionResponse?: { id?: string } })
+                  .functionResponse?.id,
+            ),
+          ).toEqual(expect.arrayContaining(['call-read', 'call-update']));
+        });
+
+        it('ends a Goal turn from inside a Stop hook continuation', async () => {
+          // A blocking Stop hook runs its continuation on a second loop that
+          // executes tools of its own, so the Goal tools are reachable from
+          // there too -- and a turn parked there is parked just as hard.
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-stop-hook',
+          };
+          const turnKey = 'goal-runtime:turn-stop-hook';
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          mockToolsWithTerminatingUpdateGoal();
+          let stopCalls = 0;
+          mockConfig.getMessageBus = vi.fn().mockReturnValue({
+            request: vi.fn().mockImplementation(async (request) => {
+              if (request.eventName !== 'Stop') {
+                return { success: true, output: {} };
+              }
+              stopCalls++;
+              return stopCalls === 1
+                ? {
+                    success: true,
+                    output: { decision: 'block', reason: 'keep going' },
+                  }
+                : { success: true, output: {} };
+            }),
+          });
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((name: string) => name === 'Stop');
+          mockChat.sendMessageStream = vi
+            .fn()
+            // The turn itself ends quietly, which is what fires the hook.
+            .mockResolvedValueOnce(createEmptyStream())
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            )
+            .mockResolvedValue(createEmptyStream());
+
+          expect(boundGoalHost).toBeDefined();
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'write a poem',
+          });
+
+          await vi.waitFor(() => {
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+          });
+          // The turn's own request plus the hook's continuation, and no
+          // third request carrying the Goal tool's result back.
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+        });
+
+        it.each([
+          {
+            route: 'channel prompt',
+            meta: { 'qwen.channel.prompt': true },
+          },
+          {
+            route: 'requested delivery',
+            meta: {
+              'qwen.daemon.channelDelivery': {
+                deliveryId: 'goal-channel-stop-hook',
+                target: {
+                  channelName: 'dingtalk',
+                  type: 'user',
+                  id: 'user-1',
+                },
+              },
+            },
+            deliveryId: 'goal-channel-stop-hook',
+          },
+        ])(
+          'publishes a $route final after a Stop hook continuation ends a Goal turn',
+          async ({ meta, deliveryId }) => {
+            const permit: core.GoalTurnPermit = {
+              goalId: 'goal-1',
+              revision: 1,
+              turnId: `turn-channel-stop-hook-${deliveryId ?? 'prompt'}`,
+            };
+            mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+            mockGoalRuntime.beginTurn.mockReturnValue(permit);
+            mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+            mockToolsWithTerminatingUpdateGoal();
+            let stopCalls = 0;
+            mockConfig.getMessageBus = vi.fn().mockReturnValue({
+              request: vi.fn().mockImplementation(async (request) => {
+                if (request.eventName !== 'Stop') {
+                  return { success: true, output: {} };
+                }
+                stopCalls++;
+                return stopCalls === 1
+                  ? {
+                      success: true,
+                      output: { decision: 'block', reason: 'keep going' },
+                    }
+                  : { success: true, output: {} };
+              }),
+            });
+            mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+            mockConfig.hasHooksForEvent = vi
+              .fn()
+              .mockImplementation((name: string) => name === 'Stop');
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValueOnce(createEmptyStream())
+              .mockResolvedValueOnce(
+                streamCalling({ id: 'call-update', name: 'update_goal' }),
+              )
+              .mockResolvedValueOnce(
+                createStreamWithChunks([
+                  {
+                    type: core.StreamEventType.CHUNK,
+                    value: {
+                      candidates: [
+                        {
+                          content: { parts: [{ text: 'channel final' }] },
+                          finishReason: 'STOP',
+                        },
+                      ],
+                    },
+                  },
+                ]),
+              );
+
+            await session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'finish the goal' }],
+              _meta: meta,
+            });
+
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+            if (deliveryId) {
+              await vi.waitFor(() => {
+                expect(mockClient.extMethod).toHaveBeenCalledWith(
+                  'qwen/control/channel-delivery',
+                  expect.objectContaining({
+                    deliveryId,
+                    text: 'channel final',
+                  }),
+                );
+              });
+            } else {
+              expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+                expect.objectContaining({
+                  update: expect.objectContaining({
+                    content: expect.objectContaining({ text: 'channel final' }),
+                  }) as unknown,
+                }),
+              );
+            }
+          },
+        );
+
+        it.each([
+          ['before the Stop hook', false],
+          ['after the Stop hook', true],
+        ])(
+          'ends a Goal turn from mid-turn input drained %s',
+          async (_route, armAfterStopHook) => {
+            session.dispose();
+            (
+              mockSettings as unknown as {
+                merged: Record<string, unknown>;
+              }
+            ).merged = {
+              experimental: { todoStopGuard: true },
+              tools: { todoWrite: { enabled: true } },
+            };
+            mockConfig.getBareMode = vi.fn().mockReturnValue(false);
+            mockConfig.isSafeMode = vi.fn().mockReturnValue(false);
+            session = new Session(
+              'test-session-id',
+              mockConfig,
+              mockClient,
+              mockSettings,
+            );
+
+            const permit: core.GoalTurnPermit = {
+              goalId: 'goal-1',
+              revision: 1,
+              turnId: `turn-mid-turn-drain-${armAfterStopHook ? 'after' : 'before'}`,
+            };
+            const turnKey = `goal-runtime:${permit.turnId}`;
+            mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+            mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+              key === turnKey ? permit : undefined,
+            );
+            mockToolsWithTerminatingUpdateGoal();
+
+            const internals = session as unknown as {
+              todoStopGuard: {
+                observeTodoWrite(
+                  resultDisplay: unknown,
+                  allowArm: boolean,
+                ): boolean;
+              };
+            };
+            const armGuard = () =>
+              internals.todoStopGuard.observeTodoWrite(
+                {
+                  type: 'todo_list',
+                  todos: [
+                    {
+                      id: 'task-1',
+                      content: 'finish task',
+                      status: 'pending',
+                    },
+                  ],
+                },
+                true,
+              );
+
+            if (armAfterStopHook) {
+              mockConfig.getMessageBus = vi.fn().mockReturnValue({
+                request: vi.fn().mockImplementation(async (request) => {
+                  if (request.eventName === 'Stop') armGuard();
+                  return { success: true, output: {} };
+                }),
+              });
+              mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+              mockConfig.hasHooksForEvent = vi
+                .fn()
+                .mockImplementation((name: string) => name === 'Stop');
+            } else {
+              mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+            }
+
+            mockClient.extMethod = vi.fn().mockImplementation(async () => ({
+              messages: ['finish the goal'],
+              hasQueuedPrompt: false,
+            }));
+            const firstStream = armAfterStopHook
+              ? async () => createEmptyStream()
+              : async () => {
+                  armGuard();
+                  return createEmptyStream();
+                };
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockImplementationOnce(firstStream)
+              .mockResolvedValueOnce(
+                streamCalling({ id: 'call-update', name: 'update_goal' }),
+              )
+              .mockRejectedValue(new Error('unexpected extra model request'));
+
+            expect(boundGoalHost).toBeDefined();
+            await boundGoalHost!.startGoalTurn({
+              permit,
+              continuationContext: 'write a poem',
+            });
+
+            await vi.waitFor(() => {
+              expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+            });
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+            expect(mockClient.extMethod).toHaveBeenCalledWith(
+              'craft/drainMidTurnQueue',
+              {
+                sessionId: 'test-session-id',
+                todoStopGuardWatchQueuedPrompt: true,
+              },
+            );
+          },
+        );
+
+        it('ignores the flag outside a Goal turn', async () => {
+          // Nothing but the Goal tool sets it today, and an ordinary turn
+          // has no verification boundary to reach, so an ordinary turn must
+          // keep the tool loop it has always had.
+          mockGoalRuntime.getSnapshot.mockReturnValue({
+            v: 2,
+            activity: 'idle',
+            goal: null,
+          });
+          mockToolsWithTerminatingUpdateGoal();
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            )
+            .mockResolvedValue(createEmptyStream());
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'go' }],
+          });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        });
+      });
+
       it('pauses without counting a Goal turn cancelled before the model request', async () => {
         // `modelStarted` decides whether settlement records an iteration.
         // A user cancel still pauses the Goal before that point; releasing
@@ -21324,11 +26203,387 @@ describe('Session', () => {
             action: 'pause',
             expectedGoalId: permit.goalId,
             expectedRevision: permit.revision,
+            reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
           });
         });
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
         expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
         expect(mockGoalRuntime.releaseTurn).not.toHaveBeenCalledWith(turnKey);
+      });
+
+      it('releases a pre-model Goal permit when recording its pause fails', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-close-write-failure',
+        };
+        const turnKey = 'goal-runtime:turn-close-write-failure';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: permit.goalId,
+            revision: permit.revision,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockGoalRuntime.dispatch.mockRejectedValueOnce(
+          new Error('write failed'),
+        );
+        let cancelClose: (() => void) | undefined;
+        mockChatRecordingService.recordGoalRuntimeMessage.mockImplementation(
+          () => {
+            cancelClose = session.beginClose();
+            void session.cancelPendingPrompt();
+          },
+        );
+
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey, {
+            requeue: false,
+          });
+        });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+        cancelClose?.();
+      });
+
+      it('does not restart a failed Goal when recording its pause fails', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-provider-failure',
+        };
+        const turnKey = 'goal-runtime:turn-provider-failure';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: permit.goalId,
+            revision: permit.revision,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          (async function* () {
+            yield* [];
+            throw new Error('provider stream failed');
+          })(),
+        );
+        mockGoalRuntime.dispatch.mockRejectedValueOnce(
+          new Error('write failed'),
+        );
+
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+            action: 'pause',
+            expectedGoalId: permit.goalId,
+            expectedRevision: permit.revision,
+            reason: goalPauseReasonForFailure('provider stream failed'),
+          });
+        });
+        expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey, {
+          requeue: false,
+        });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      });
+
+      it('does not restart a Goal when recording its session-token-limit pause fails', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-output-limit',
+        };
+        const turnKey = 'goal-runtime:turn-output-limit';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: permit.goalId,
+            revision: permit.revision,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockLlmClient.tryCompressChat.mockResolvedValue({
+          originalTokenCount: 999,
+          newTokenCount: 999,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockGoalRuntime.dispatch.mockRejectedValueOnce(
+          new Error('write failed'),
+        );
+
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+            action: 'pause',
+            expectedGoalId: permit.goalId,
+            expectedRevision: permit.revision,
+            reason: GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
+          });
+        });
+        expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey, {
+          requeue: false,
+        });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+
+      it('does not restart a model-started Goal when recording session closure fails', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-session-close',
+        };
+        const turnKey = 'goal-runtime:turn-session-close';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: permit.goalId,
+            revision: permit.revision,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(
+            async (
+              _model: string,
+              request: { config: { abortSignal: AbortSignal } },
+            ) =>
+              (async function* () {
+                if (!request.config.abortSignal.aborted) {
+                  await new Promise<void>((resolve) =>
+                    request.config.abortSignal.addEventListener(
+                      'abort',
+                      () => resolve(),
+                      { once: true },
+                    ),
+                  );
+                }
+                yield* [];
+              })(),
+          );
+        mockGoalRuntime.dispatch.mockRejectedValueOnce(
+          new Error('write failed'),
+        );
+
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+        });
+        const cancelClose = session.beginClose();
+        await session.cancelPendingPrompt();
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+            action: 'pause',
+            expectedGoalId: permit.goalId,
+            expectedRevision: permit.revision,
+            reason: GOAL_PAUSE_REASON_SESSION_DISPOSED,
+          });
+        });
+        expect(mockGoalRuntime.dispatch).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+          }),
+        );
+        expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey, {
+          requeue: false,
+        });
+        cancelClose();
+      });
+
+      it('does not claim the session closed when a started close is abandoned', async () => {
+        // A close can be abandoned -- a drain timeout or a failed flush
+        // releases the gate and the session keeps serving -- so the reason
+        // this stop records has to stay true in that outcome too.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-close-abandoned',
+        };
+        const turnKey = 'goal-runtime:turn-close-abandoned';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: permit.goalId,
+            revision: permit.revision,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(
+            async (
+              _model: string,
+              request: { config: { abortSignal: AbortSignal } },
+            ) =>
+              (async function* () {
+                if (!request.config.abortSignal.aborted) {
+                  await new Promise<void>((resolve) =>
+                    request.config.abortSignal.addEventListener(
+                      'abort',
+                      () => resolve(),
+                      { once: true },
+                    ),
+                  );
+                }
+                yield* [];
+              })(),
+          );
+
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+        });
+        const cancelClose = session.beginClose();
+        await session.cancelPendingPrompt();
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith(
+            expect.objectContaining({ action: 'pause' }),
+          );
+        });
+
+        // The close is abandoned; the session is serving again.
+        cancelClose();
+        const reopen = session.beginClose();
+        reopen();
+
+        const pauseCall = mockGoalRuntime.dispatch.mock.calls.find(
+          (call) => call[0].action === 'pause',
+        ) as [{ reason?: string }];
+        expect(pauseCall[0].reason).toBe(GOAL_PAUSE_REASON_SESSION_DISPOSED);
+        // The session did not close, so the record must not say it did.
+        expect(pauseCall[0].reason).not.toMatch(/^The session closed/);
+      });
+
+      it('records session closure for a Goal turn still waiting in the queue', async () => {
+        // `beginClose` stops the queue draining but leaves what is already
+        // queued, so this arm settles a turn that never reached the model.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-queued-close',
+        };
+        const turnKey = 'goal-runtime:turn-queued-close';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: permit.goalId,
+            revision: permit.revision,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        const cancelClose = session.beginClose();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+        await session.cancelPendingPrompt();
+
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+            action: 'pause',
+            expectedGoalId: permit.goalId,
+            expectedRevision: permit.revision,
+            reason: GOAL_PAUSE_REASON_SESSION_DISPOSED,
+          });
+        });
+        expect(mockGoalRuntime.dispatch).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+          }),
+        );
+        cancelClose();
       });
 
       it('releases a claimed Goal permit when the prompt is cancelled in the claim window', async () => {
@@ -21675,6 +26930,7 @@ describe('Session', () => {
           action: 'pause',
           expectedGoalId: permit.goalId,
           expectedRevision: permit.revision,
+          reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
         });
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
         expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
@@ -21725,6 +26981,8 @@ describe('Session', () => {
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           'hello',
           permit,
+          undefined,
+          undefined,
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
       });
@@ -24171,13 +29429,14 @@ describe('Session', () => {
     it.each([
       ['live update', 'live', true],
       ['history replay', 'replay', false],
-      ['failed replacement', 'failed', false],
+      ['failed replacement', 'failed', true],
       ['mode transition', 'cleared', false],
       ['empty plan update', 'empty-entries', false],
       ['plan update without identity', 'missing-meta', false],
     ] as const)(
       'keeps exit_plan_mode approval revision correct after %s',
       async (_label, revisionSource, expectsRevision) => {
+        enableSessionWorkflowRevisionContext();
         let mode = ApprovalMode.PLAN;
         const hookSpy = vi
           .spyOn(core, 'firePermissionRequestHook')
@@ -24249,9 +29508,11 @@ describe('Session', () => {
               content: 'Ship',
               priority: 'medium',
               status: 'pending',
+              _meta: { qwenTodo: { id: 'ship' } },
             },
           ],
           _meta: {
+            qwenSessionWorkflow: true,
             qwenTodoPlan: { id: 'plan-1' },
             qwenTranscript: { planToolCallId: 'todo-call-1' },
           },
@@ -24375,6 +29636,180 @@ describe('Session', () => {
         });
       },
     );
+
+    it.each([
+      [
+        'Session revision is cleared',
+        async () => session.clearActiveTodoPlanRevision(),
+      ],
+      [
+        'Config revision is cleared',
+        async () => mockConfig.clearSessionWorkflowPlanRevision?.(),
+      ],
+      [
+        'revision identity is replaced',
+        async () =>
+          session.sendUpdate({
+            sessionUpdate: 'plan',
+            entries: [
+              {
+                content: 'Ship',
+                priority: 'medium',
+                status: 'pending',
+                _meta: { qwenTodo: { id: 'ship' } },
+              },
+            ],
+            _meta: {
+              qwenSessionWorkflow: true,
+              qwenTodoPlan: { id: 'plan-1' },
+              qwenTranscript: { planToolCallId: 'todo-call-2' },
+            },
+          }),
+      ],
+    ] as const)(
+      'cancels a revision-bound plan exit when the %s',
+      async (_label, invalidateRevision) => {
+        enableSessionWorkflowRevisionContext();
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+        let resolvePermission!: (
+          response: Awaited<
+            ReturnType<AgentSideConnection['requestPermission']>
+          >,
+        ) => void;
+        vi.mocked(mockClient.requestPermission).mockReturnValue(
+          new Promise((resolve) => {
+            resolvePermission = resolve;
+          }),
+        );
+        await session.sendUpdate({
+          sessionUpdate: 'plan',
+          entries: [
+            {
+              content: 'Ship',
+              priority: 'medium',
+              status: 'pending',
+              _meta: { qwenTodo: { id: 'ship' } },
+            },
+          ],
+          _meta: {
+            qwenSessionWorkflow: true,
+            qwenTodoPlan: { id: 'plan-1' },
+            qwenTranscript: { planToolCallId: 'todo-call-1' },
+          },
+        });
+
+        const prompt = runExitPlanModeApprovalPrompt();
+        await vi.waitFor(() =>
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+        );
+        expect(
+          vi.mocked(mockClient.requestPermission).mock.calls[0]?.[0].toolCall
+            ._meta,
+        ).toEqual(
+          expect.objectContaining({
+            qwenTodoApproval: {
+              planId: 'plan-1',
+              sourceCallId: 'todo-call-1',
+            },
+          }),
+        );
+
+        await invalidateRevision();
+        resolvePermission({
+          outcome: {
+            outcome: 'selected',
+            optionId: core.ToolConfirmationOutcome.ProceedOnce,
+          },
+        });
+        await prompt;
+
+        expect(
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.filter(
+              ([params]) =>
+                params.update.sessionUpdate === 'current_mode_update',
+            ),
+        ).toHaveLength(0);
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          expect.arrayContaining([
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                response: {
+                  error: expect.stringContaining('Workflow revision changed'),
+                },
+              }),
+            }),
+          ]),
+          expect.objectContaining({
+            status: 'cancelled',
+            executionStatus: 'not_started',
+          }),
+        );
+      },
+    );
+
+    it('rechecks a revision-bound plan exit after pre-tool hooks', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      let resolvePreToolUse!: (result: { shouldProceed: boolean }) => void;
+      const preToolUseSpy = vi
+        .spyOn(core, 'firePreToolUseHook')
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolvePreToolUse = resolve;
+          }),
+        );
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      try {
+        const prompt = runExitPlanModeApprovalPrompt();
+        await vi.waitFor(() => expect(preToolUseSpy).toHaveBeenCalledOnce());
+        session.clearActiveTodoPlanRevision();
+        resolvePreToolUse({ shouldProceed: true });
+        await prompt;
+      } finally {
+        preToolUseSpy.mockRestore();
+      }
+
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.filter(
+            ([params]) => params.update.sessionUpdate === 'current_mode_update',
+          ),
+      ).toHaveLength(0);
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({
+              response: {
+                error: expect.stringContaining('Workflow revision changed'),
+              },
+            }),
+          }),
+        ]),
+        expect.objectContaining({
+          status: 'cancelled',
+          executionStatus: 'not_started',
+        }),
+      );
+    });
 
     it('clears the captured revision when enter_plan_mode execution enters plan mode', async () => {
       let mode = ApprovalMode.DEFAULT;
@@ -24996,6 +30431,203 @@ describe('Session', () => {
           'Auto mode denial counters reset after fallback approval',
         ),
       );
+    });
+
+    function configureAutoModeShellFallback(options: {
+      callId: string;
+      command: string;
+      denialState: core.AutoModeDenialState;
+      classifierResults?: Array<Record<string, unknown>>;
+    }) {
+      let denialState = options.denialState;
+      const generateJson = vi.fn();
+      for (const result of options.classifierResults ?? []) {
+        generateJson.mockResolvedValueOnce(result);
+      }
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      const onConfirm = vi.fn().mockResolvedValue(undefined);
+      const invocation = {
+        params: { command: options.command },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Need permission',
+          command: options.command,
+          rootCommand: 'python',
+          onConfirm,
+        }),
+        getDescription: vi.fn().mockReturnValue('Run command'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.AUTO);
+      mockConfig.getCwd = vi.fn().mockReturnValue('/repo');
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(undefined);
+      mockConfig.getAutoModeSettings = vi.fn().mockReturnValue({});
+      mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({ generateJson });
+      mockConfig.getAutoModeDenialState = vi
+        .fn()
+        .mockImplementation(() => denialState);
+      mockConfig.setAutoModeDenialState = vi
+        .fn()
+        .mockImplementation((next: core.AutoModeDenialState) => {
+          denialState = next;
+        });
+      (
+        mockLlmClient as unknown as {
+          getHistoryTail: ReturnType<typeof vi.fn>;
+        }
+      ).getHistoryTail = vi.fn().mockReturnValue([]);
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: {
+          outcome: 'selected',
+          optionId: core.ToolConfirmationOutcome.ProceedOnce,
+        },
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: options.callId,
+                  name: core.ToolNames.SHELL,
+                  args: { command: options.command },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      return {
+        execute,
+        generateJson,
+        getDenialState: () => denialState,
+        onConfirm,
+      };
+    }
+
+    it('routes an exact ACP retry to manual approval without reclassifying it', async () => {
+      const command = 'python -c "print(1)"';
+      const { execute, generateJson, getDenialState, onConfirm } =
+        configureAutoModeShellFallback({
+          callId: 'call-exact-auto-retry',
+          command,
+          denialState: {
+            consecutiveBlock: 1,
+            consecutiveUnavailable: 0,
+            totalBlock: 1,
+            totalUnavailable: 0,
+            pendingManualRetryFingerprint: core.getAutoModeActionFingerprint(
+              core.ToolNames.SHELL,
+              { command },
+              '/repo',
+            ),
+          },
+        });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'retry tool' }],
+      });
+
+      expect(generateJson).not.toHaveBeenCalled();
+      expect(mockClient.requestPermission).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCall: expect.objectContaining({
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                content: expect.objectContaining({
+                  text: expect.stringContaining('previously blocked'),
+                }),
+              }),
+            ]),
+          }),
+        }),
+      );
+      const permissionRequest = vi.mocked(mockClient.requestPermission).mock
+        .calls[0][0];
+      expect(permissionRequest.options).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            optionId:
+              core.ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+          }),
+        ]),
+      );
+      expect(onConfirm).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+        { answers: undefined },
+      );
+      expect(execute).toHaveBeenCalledOnce();
+      expect(getDenialState()).toEqual({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 1,
+        totalUnavailable: 0,
+      });
+    });
+
+    it('routes the current ACP threshold block to manual approval', async () => {
+      const command = 'python -c "print(1)"';
+      const { execute, generateJson, getDenialState } =
+        configureAutoModeShellFallback({
+          callId: 'call-current-threshold',
+          command,
+          denialState: {
+            consecutiveBlock: 2,
+            consecutiveUnavailable: 0,
+            totalBlock: 2,
+            totalUnavailable: 0,
+          },
+          classifierResults: [
+            { shouldBlock: true },
+            {
+              thinking: 'confirmed',
+              shouldBlock: true,
+              reason: 'unsafe command',
+            },
+          ],
+        });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run tool' }],
+      });
+
+      expect(generateJson).toHaveBeenCalledTimes(2);
+      expect(mockClient.requestPermission).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCall: expect.objectContaining({
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                content: expect.objectContaining({
+                  text: expect.stringContaining('consecutive denial limit'),
+                }),
+              }),
+            ]),
+          }),
+        }),
+      );
+      expect(execute).toHaveBeenCalledOnce();
+      expect(getDenialState()).toEqual({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 3,
+        totalUnavailable: 0,
+      });
     });
 
     describe('in-session cron MessageDisplay', () => {
@@ -25659,6 +31291,7 @@ describe('Session', () => {
             action: 'pause',
             expectedGoalId: 'goal-1',
             expectedRevision: 3,
+            reason: GOAL_PAUSE_REASON_STOP_HOOK_CAP,
           });
         });
 
@@ -27477,6 +33110,139 @@ describe('Session', () => {
         mockSettings,
       );
     }
+
+    const trustedAnswerQuestions = [
+      {
+        question: 'Create the marker?',
+        header: 'Marker',
+        options: [
+          { label: 'Yes', description: 'Create only /tmp/marker.' },
+          { label: 'No', description: 'Do not create it.' },
+        ],
+      },
+    ];
+
+    class AskUserQuestionTool {
+      readonly name = core.ToolNames.ASK_USER_QUESTION;
+      readonly kind = core.Kind.Think;
+      readonly displayName = this.name;
+      readonly description = this.name;
+      readonly canUpdateOutput = false;
+      readonly isOutputMarkdown = true;
+      readonly build = vi.fn().mockReturnValue({
+        params: { questions: trustedAnswerQuestions },
+        execute: vi.fn().mockResolvedValue({
+          llmContent:
+            'User has provided the following answers:\n\n**Marker**: Yes',
+        }),
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        requiresUserInteraction: vi.fn().mockReturnValue(true),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'ask_user_question',
+          title: 'Please answer the following question(s):',
+          questions: trustedAnswerQuestions,
+          onConfirm: vi.fn().mockResolvedValue(undefined),
+        }),
+        getDescription: vi.fn().mockReturnValue(this.name),
+        toolLocations: vi.fn().mockReturnValue([]),
+      });
+    }
+
+    function useBuiltinAskUserQuestionTool() {
+      mockToolRegistry.getTool.mockReturnValue(new AskUserQuestionTool());
+    }
+
+    async function runAskUserQuestion(signal = new AbortController().signal) {
+      return (session as unknown as ToolCallInternals).runToolCalls(
+        signal,
+        'prompt-auq',
+        [
+          {
+            id: 'call-auq',
+            name: core.ToolNames.ASK_USER_QUESTION,
+            args: { questions: trustedAnswerQuestions },
+          },
+        ],
+      );
+    }
+
+    it('records an accepted built-in ask_user_question host answer', async () => {
+      useBuiltinAskUserQuestionTool();
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        answers: { '0': 'Yes' },
+      });
+
+      await runAskUserQuestion();
+
+      expect(mockLlmClient.recordTrustedUserAnswers).toHaveBeenCalledOnce();
+      expect(mockLlmClient.recordTrustedUserAnswers).toHaveBeenCalledWith(
+        'call-auq',
+        trustedAnswerQuestions,
+        { '0': 'Yes' },
+      );
+    });
+
+    it.each([
+      [
+        'cancelled',
+        async () => {
+          vi.mocked(mockClient.requestPermission).mockResolvedValue({
+            outcome: { outcome: 'cancelled' },
+          });
+          await runAskUserQuestion();
+        },
+      ],
+      [
+        'permission error',
+        async () => {
+          vi.mocked(mockClient.requestPermission).mockRejectedValue(
+            new Error('host unavailable'),
+          );
+          await runAskUserQuestion();
+        },
+      ],
+      [
+        'aborted response',
+        async () => {
+          const controller = new AbortController();
+          vi.mocked(mockClient.requestPermission).mockImplementation(
+            async () => {
+              controller.abort();
+              return {
+                outcome: { outcome: 'selected', optionId: 'proceed_once' },
+                answers: { '0': 'Yes' },
+              };
+            },
+          );
+          await runAskUserQuestion(controller.signal);
+        },
+      ],
+    ])(
+      'does not record a %s ask_user_question response',
+      async (_name, run) => {
+        useBuiltinAskUserQuestionTool();
+        await run();
+        expect(mockLlmClient.recordTrustedUserAnswers).not.toHaveBeenCalled();
+      },
+    );
+
+    it('does not trust a same-named shadow ask_user_question tool', async () => {
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool(
+          core.ToolNames.ASK_USER_QUESTION,
+          vi.fn().mockResolvedValue({ llmContent: 'shadow result' }),
+        ),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        answers: { '0': 'Yes' },
+      });
+
+      await runAskUserQuestion();
+
+      expect(mockLlmClient.recordTrustedUserAnswers).not.toHaveBeenCalled();
+    });
 
     it('blocks standalone worktree actions before building the tool', async () => {
       recreateStandaloneSession();
@@ -30633,7 +36399,24 @@ describe('Session', () => {
             update.sessionUpdate === 'tool_call_update' &&
             update._meta?.provenance === 'subagent',
         );
-      expect(subagentUpdates).toEqual([]);
+      // Filter out the new subagentProgress frames, as they are intentionally
+      // emitted before the cancellation check to keep the parent card live.
+      // The new contract allows the pre cancellation approval progress update.
+
+      const progressUpdates = subagentUpdates.filter(
+        (update: { _meta?: { subagentProgress?: boolean } }) =>
+          update?._meta?.subagentProgress,
+      );
+      expect(progressUpdates).toHaveLength(1);
+      expect(progressUpdates[0].content?.[0]?.content?.text).toContain(
+        'Waiting for permission',
+      );
+
+      const nonProgressUpdates = subagentUpdates.filter(
+        (update: { _meta?: { subagentProgress?: boolean } }) =>
+          !update?._meta?.subagentProgress,
+      );
+      expect(nonProgressUpdates).toEqual([]);
     });
 
     it('aborts sibling Agent calls in the same batch after nested ask_user_question cancellation', async () => {
@@ -32285,6 +38068,26 @@ describe('Session', () => {
       expect(
         mockBackgroundShellRegistry.setNotificationCallback,
       ).toHaveBeenLastCalledWith(undefined);
+      expect(
+        mockWorkflowRunRegistry.setCompletionCallback,
+      ).toHaveBeenLastCalledWith(undefined);
+      expect(
+        mockWorkflowRunRegistry.clearStatusChangeCallback,
+      ).toHaveBeenCalledWith(expect.any(Function));
+      // R7-10: mirror the agent registry. A workflow run that outlives
+      // its session's removal is invisible to the delete-history liveness
+      // gate, and its settlement snapshot write recreates history a
+      // sibling session just deleted. Abort must precede the callback
+      // teardown so the cancellation still reaches this session's own
+      // bookkeeping.
+      expect(mockWorkflowRunRegistry.abortAll).toHaveBeenCalled();
+      expect(
+        mockWorkflowRunRegistry.abortAll.mock.invocationCallOrder.at(-1),
+      ).toBeLessThan(
+        mockWorkflowRunRegistry.setCompletionCallback.mock.invocationCallOrder.at(
+          -1,
+        )!,
+      );
     });
 
     it('aborts an active notificationAbortController and nulls the reference', () => {
@@ -32564,11 +38367,17 @@ describe('Session', () => {
         bare?: boolean;
         plan?: boolean;
         disableHooks?: boolean;
+        todoWriteEnabled?: boolean;
       } = {},
     ) {
       session.dispose();
       (mockSettings as unknown as { merged: Record<string, unknown> }).merged =
-        { experimental: { todoStopGuard: true } };
+        {
+          experimental: { todoStopGuard: true },
+          ...(options.todoWriteEnabled === false
+            ? {}
+            : { tools: { todoWrite: { enabled: true } } }),
+        };
       mockConfig.getBareMode = vi.fn().mockReturnValue(options.bare ?? false);
       mockConfig.isSafeMode = vi.fn().mockReturnValue(options.safe ?? false);
       mockConfig.getApprovalMode = vi
@@ -32702,6 +38511,58 @@ describe('Session', () => {
         return typeof next === 'function' ? next() : next;
       });
     }
+
+    it('disables the guard and warns when todo_write is disabled', async () => {
+      debugLoggerWarnSpy.mockClear();
+      rebuildSessionWithGuard({ todoWriteEnabled: false });
+      installPendingTodoTool();
+      queuePendingTodoThenNaturalStops();
+
+      await runGuardPrompt();
+
+      expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+        'experimental.todoStopGuard requires tools.todoWrite.enabled; the Todo Stop Guard is disabled.',
+      );
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.some(
+            ([params]) =>
+              params.update.sessionUpdate === 'agent_message_chunk' &&
+              params.update._meta?.['source'] === 'todo_stop_guard',
+          ),
+      ).toBe(false);
+    });
+
+    it.each([
+      ['safe mode', { safe: true }],
+      ['bare mode', { bare: true }],
+    ] as const)('suppresses the missing Todo warning in %s', (_name, mode) => {
+      debugLoggerWarnSpy.mockClear();
+      rebuildSessionWithGuard({ ...mode, todoWriteEnabled: false });
+
+      expect(debugLoggerWarnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('tools.todoWrite.enabled'),
+      );
+    });
+
+    it('returns actionable Todo enablement guidance from daemon tool calls', async () => {
+      rebuildSessionWithGuard({ todoWriteEnabled: false });
+      mockToolRegistry.getTool.mockReturnValue(undefined);
+      queuePendingTodoThenNaturalStops();
+
+      await runGuardPrompt();
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      const followUp = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[1][1] as {
+        message: unknown;
+      };
+      expect(JSON.stringify(followUp.message)).toContain(
+        'tools.todoWrite.enabled',
+      );
+    });
 
     it('cleans up an admitted retry cancelled during previous-turn drain', async () => {
       rebuildSessionWithGuard();
@@ -36112,6 +41973,77 @@ describe('Session', () => {
       internals.notificationProcessing = false;
     });
 
+    it('classifies workflow notifications from the captured baseline', () => {
+      const baselineWorkflow = {
+        runId: 'baseline-workflow',
+        status: 'running',
+      };
+      let currentWorkflow: typeof baselineWorkflow | undefined =
+        baselineWorkflow;
+      mockWorkflowRunRegistry.list.mockImplementation(() =>
+        currentWorkflow ? [currentWorkflow] : [],
+      );
+      mockWorkflowRunRegistry.get.mockImplementation((runId: string) =>
+        currentWorkflow?.runId === runId ? currentWorkflow : undefined,
+      );
+      rebuildSessionWithGuard();
+      const internals = session as unknown as {
+        notificationProcessing: boolean;
+        notificationQueue: Array<{
+          taskId: string;
+          continuesTodoStopGuardWorkChain: boolean;
+        }>;
+      };
+      internals.notificationProcessing = true;
+      const callback =
+        mockWorkflowRunRegistry.setCompletionCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: {
+            runId: string;
+            status: 'completed';
+            todoWorkChainId?: string;
+          },
+        ) => void;
+
+      callback('baseline result', '<baseline-workflow />', {
+        runId: 'baseline-workflow',
+        status: 'completed',
+        todoWorkChainId: 'stale-chain',
+      });
+      currentWorkflow = {
+        runId: 'baseline-workflow',
+        status: 'running',
+      };
+      callback('retry result', '<retry-workflow />', {
+        runId: 'baseline-workflow',
+        status: 'completed',
+      });
+      currentWorkflow = undefined;
+      callback('new result', '<new-workflow />', {
+        runId: 'new-workflow',
+        status: 'completed',
+      });
+
+      expect(internals.notificationQueue).toEqual([
+        expect.objectContaining({
+          taskId: 'baseline-workflow',
+          continuesTodoStopGuardWorkChain: false,
+        }),
+        expect.objectContaining({
+          taskId: 'baseline-workflow',
+          continuesTodoStopGuardWorkChain: true,
+        }),
+        expect.objectContaining({
+          taskId: 'new-workflow',
+          continuesTodoStopGuardWorkChain: true,
+        }),
+      ]);
+      internals.notificationProcessing = false;
+    });
+
     it('commits and rolls back existing-agent lineage around send_message execution', async () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
@@ -36967,6 +42899,7 @@ describe('Session', () => {
       const internals = session as unknown as {
         notificationProcessing: boolean;
         notificationQueue: Array<{ taskId: string }>;
+        droppedNotifications: { count: number };
       };
       internals.notificationProcessing = true;
       const callback =
@@ -36999,6 +42932,7 @@ describe('Session', () => {
       expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
         'Notification queue overflow: dropping related task=related-agent-20 kind=agent because all queued items are related',
       );
+      expect(internals.droppedNotifications.count).toBe(1);
       internals.notificationProcessing = false;
     });
 

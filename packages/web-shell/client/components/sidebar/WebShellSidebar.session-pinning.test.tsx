@@ -36,6 +36,8 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
           | { qwenCodeVersion: string; features: string[] }
           | undefined,
         client: {
+          // Default no content-search hits; search tests override per test.
+          searchWorkspaceSessions: vi.fn().mockResolvedValue({ results: [] }),
           workspaceByCwd: vi.fn(() => ({
             listWorkspaceSessions: vi.fn().mockResolvedValue([]),
             listSessionGroups: vi.fn().mockResolvedValue({
@@ -1585,5 +1587,225 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
       container.querySelectorAll('input[aria-label="Rename: Secondary member"]')
         .length,
     ).toBe(1);
+  });
+});
+
+describe('WebShellSidebar content-search ghosts', () => {
+  const defaultGroupsCatalog = {
+    groups: [],
+    colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+  };
+
+  function mockDesignGroupCatalog(): void {
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'design-group',
+          name: 'Design',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+  }
+
+  beforeEach(() => {
+    workspace.client.searchWorkspaceSessions.mockResolvedValue({
+      results: [],
+    });
+  });
+
+  function ghostHit(
+    sessionId: string,
+    over: Partial<DaemonSessionSummary> = {},
+  ): {
+    session: DaemonSessionSummary;
+    snippet: string;
+  } {
+    return {
+      session: makeSession(sessionId, {
+        displayName: `Ghost ${sessionId}`,
+        ...over,
+      }),
+      snippet: 'qdrant excerpt',
+    };
+  }
+
+  function sessionRowCount(displayName: string): number {
+    return Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    ).filter((node) => node.textContent?.startsWith(displayName)).length;
+  }
+
+  async function typeSearchQuery(text: string): Promise<void> {
+    const searchButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(searchButton).not.toBeNull();
+    act(() => {
+      searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+    const searchInput = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    );
+    expect(searchInput).not.toBeNull();
+    act(() => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setValue.call(searchInput, text);
+      searchInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    // Past the hook's 300ms debounce plus the mocked daemon round-trip.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+    await flushSidebar();
+  }
+
+  it('renders a pinned ghost hit with its snippet in the flat list', async () => {
+    connection.capabilities = { qwenCodeVersion: '1.2.3', features: [] };
+    workspace.capabilities = connection.capabilities;
+    workspace.client.searchWorkspaceSessions.mockResolvedValue({
+      results: [
+        ghostHit('pinned', {
+          isPinned: true,
+          pinnedAt: '2026-01-02T00:00:00.000Z',
+        }),
+      ],
+    });
+
+    renderSidebar();
+    await flushSidebar();
+    await typeSearchQuery('qdrant');
+
+    // R2-2: the ghost is pinned, but no Pinned-section source carries it,
+    // so the pinned-row filters must not make it vanish (R3-2).
+    expect(sessionRowCount('Ghost pinned')).toBe(1);
+    expect(container.textContent).toContain('qdrant excerpt');
+  });
+
+  it('renders a pinned ghost hit in the Ungrouped section when organization is enabled', async () => {
+    mockDesignGroupCatalog();
+    // The group section must survive the query filter for the sectioned
+    // renderer to exist at all (empty sections are hidden while searching),
+    // and an ungrouped session must exist at first sync so the Ungrouped
+    // section registers as known (mid-session-new sections auto-collapse).
+    const member = makeSession('design-member', {
+      displayName: 'qdrant design member',
+      groupId: 'design-group',
+    });
+    active.sessions = [member, makeSession('plain', { displayName: 'plain' })];
+    active.data = active.sessions;
+    workspace.client.searchWorkspaceSessions.mockResolvedValue({
+      results: [
+        ghostHit('pinned', {
+          isPinned: true,
+          pinnedAt: '2026-01-02T00:00:00.000Z',
+        }),
+      ],
+    });
+
+    renderSidebar();
+    await flushSidebar();
+    await typeSearchQuery('qdrant');
+
+    const ungrouped = container.querySelector<HTMLElement>(
+      'section[aria-label="Ungrouped"]',
+    );
+    expect(ungrouped).not.toBeNull();
+    expect(ungrouped?.textContent).toContain('Ghost pinned');
+    expect(ungrouped?.textContent).toContain('qdrant excerpt');
+    expect(sessionRowCount('Ghost pinned')).toBe(1);
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
+  it('renders a pinned content hit exactly once, whoever the Pinned section carries', async () => {
+    const ghost = ghostHit('pinned', {
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    workspace.client.searchWorkspaceSessions.mockResolvedValue({
+      results: [ghost],
+    });
+    // The pinned page carries the session while the loaded catalog page
+    // does not — the Pinned section owns the row (R4-1 passive arm).
+    pinned.sessions = [ghost.session];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+    await typeSearchQuery('qdrant');
+
+    expect(sessionRowCount('Ghost pinned')).toBe(1);
+    expect(
+      pinnedListTitles().some((title) => title.startsWith('Ghost pinned')),
+    ).toBe(true);
+
+    // Inverse arm: the pinned page settles WITHOUT the session — the ghost
+    // exemption keeps it visible, exactly once, in the main list.
+    pinned.sessions = [];
+    pinned.data = pinned.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(sessionRowCount('Ghost pinned')).toBe(1);
+  });
+
+  it('mounts the rename form for a pinned ghost row in the org section renderer', async () => {
+    mockDesignGroupCatalog();
+    // The group section must survive the query filter for the sectioned
+    // renderer to exist at all (empty sections are hidden while searching),
+    // and an ungrouped session must exist at first sync so the Ungrouped
+    // section registers as known (mid-session-new sections auto-collapse).
+    const member = makeSession('design-member', {
+      displayName: 'qdrant design member',
+      groupId: 'design-group',
+    });
+    active.sessions = [member, makeSession('plain', { displayName: 'plain' })];
+    active.data = active.sessions;
+    const ghost = ghostHit('pinned', {
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    workspace.client.searchWorkspaceSessions.mockResolvedValue({
+      results: [ghost],
+    });
+    // Rename for non-current sessions requires workspace metadata
+    // capabilities the harness doesn't enable; the current session always
+    // renames, mirroring the existing single-rename-form test.
+    connection.sessionId = 'pinned';
+
+    renderSidebar();
+    await flushSidebar();
+    await typeSearchQuery('qdrant');
+
+    const ungrouped = container.querySelector<HTMLElement>(
+      'section[aria-label="Ungrouped"]',
+    );
+    expect(ungrouped).not.toBeNull();
+    const ghostRow = Array.from(
+      ungrouped!.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('Ghost pinned'));
+    expect(ghostRow).not.toBeUndefined();
+    act(() => {
+      ghostRow!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    // R4-2: the ghost never renders in the Pinned section, so the section
+    // renderer's renameFormDisabled must not suppress the form here.
+    expect(
+      container.querySelectorAll('input[aria-label="Rename: Ghost pinned"]')
+        .length,
+    ).toBe(1);
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });
 });

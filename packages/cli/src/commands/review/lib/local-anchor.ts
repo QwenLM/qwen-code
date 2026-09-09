@@ -765,9 +765,28 @@ export function stateIdOf(
  * skip.
  */
 export function readLocalCache(path: string): LocalReviewCache | null {
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(path);
+  } catch {
+    return null;
+  }
+  return readLocalCacheFromBytes(bytes);
+}
+
+/**
+ * The parse half of `readLocalCache`, over bytes already in hand — for the
+ * caller that must make its decision AND its stamp projections of ONE read
+ * (`capture-local`'s stop path: a ledger edit landing between a decision
+ * read and a second stamp read would be baked into the stamp and invisible
+ * to the compose fence).
+ */
+export function readLocalCacheFromBytes(
+  bytes: Buffer,
+): LocalReviewCache | null {
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(path, 'utf8'));
+    raw = JSON.parse(bytes.toString('utf8'));
   } catch {
     return null;
   }

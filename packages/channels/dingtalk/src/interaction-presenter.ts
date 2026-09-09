@@ -3,12 +3,17 @@ import { sanitizeSenderName } from '@qwen-code/channel-base';
 import type {
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
   ChannelUserInputRequestContext,
   SessionTarget,
   UserInputPresentationResult,
 } from '@qwen-code/channel-base';
+import { escapeDingTalkMarkdown } from './markdown.js';
 import { stripPartialImageMarker } from './outbound-image.js';
 import type { QuestionCardController } from './question-card-controller.js';
+import type { PermissionCardController } from './permission-card-controller.js';
+import type { DingtalkPresentationPhase } from './presentation-phase.js';
+import { isChinesePresentationLanguage } from './presentation-phase.js';
 import {
   CONTENT_LIMIT,
   TRUNCATION_MARKER,
@@ -25,6 +30,7 @@ interface RunPresentation {
   activeSegmentId?: string;
   senderPrefix?: string;
   senderRawPrefix?: string;
+  sourceLabel?: string;
   cardDelivered?: { text: string; chatId: string; sessionId: string };
   terminal: boolean;
 }
@@ -38,14 +44,26 @@ interface SegmentPresentation {
 export interface DingtalkInteractionPresenterOptions {
   statusCards?: StatusCardController;
   questionCards?: QuestionCardController;
-  sendFallback?(chatId: string, text: string, sessionId: string): Promise<void>;
+  permissionCards?: PermissionCardController;
+  /**
+   * Effective Qwen display language. When set to a non-Chinese language the
+   * terminal card copy renders in English; unset keeps the historical
+   * Simplified Chinese copy.
+   */
+  language?: string;
+  sendFallback?(
+    chatId: string,
+    text: string,
+    sessionId: string,
+    sourceLabel?: string,
+  ): Promise<void>;
 }
 
 export interface DingtalkCardSender {
   senderName: string;
 }
 
-function escapeMarkdownText(text: string): string {
+function escapeSenderMarkdownText(text: string): string {
   return text.replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
 }
 
@@ -55,7 +73,7 @@ function formatSenderPrefixes(sender: DingtalkCardSender): {
 } {
   const senderName = sanitizeSenderName(sender.senderName);
   return {
-    senderPrefix: `@${escapeMarkdownText(senderName)}`,
+    senderPrefix: `@${escapeSenderMarkdownText(senderName)}`,
     senderRawPrefix: `@${senderName}`,
   };
 }
@@ -73,6 +91,7 @@ export class DingtalkInteractionPresenter {
     target: { chatId: string; isGroup: boolean },
     sessionId = '',
     sender?: DingtalkCardSender,
+    sourceLabel?: string,
   ): void {
     this.runs.set(runId, {
       runId,
@@ -90,9 +109,11 @@ export class DingtalkInteractionPresenter {
           senderId: ownerId,
           isGroup: target.isGroup,
         },
+        sourceLabel,
       },
       projectionChain: Promise.resolve(),
       ...(target.isGroup && sender ? formatSenderPrefixes(sender) : {}),
+      ...(sourceLabel ? { sourceLabel } : {}),
       terminal: false,
     });
   }
@@ -104,8 +125,20 @@ export class DingtalkInteractionPresenter {
     void this.enqueue(run, () => {
       const statusCards = this.options.statusCards;
       const target = this.cardTarget(statusContext.target);
-      statusCards?.ensure(statusContext, target);
+      statusCards?.replace(
+        statusContext,
+        target,
+        this.withSourcePrefix(run, ''),
+      );
     });
+  }
+
+  updateStatusCardPhase(runId: string, phase: DingtalkPresentationPhase): void {
+    const run = this.runs.get(runId);
+    if (!run || run.terminal) return;
+    void this.enqueue(run, () =>
+      this.options.statusCards?.updateRunPhase(runId, phase),
+    );
   }
 
   appendOutput(segment: ChannelOutputSegmentContext, chunk: string): void {
@@ -136,7 +169,7 @@ export class DingtalkInteractionPresenter {
       this.options.statusCards?.replace(
         statusContext,
         this.cardTarget(statusContext.target),
-        presentation.content,
+        this.withSourcePrefix(run, presentation.content),
       );
     });
   }
@@ -195,11 +228,13 @@ export class DingtalkInteractionPresenter {
           text || presentation.content,
         );
         if (!fallbackText || !this.options.sendFallback) return false;
-        await this.options.sendFallback(
+        await this.sendFallback(
+          run,
           presentation.context.target.chatId,
           fallbackText,
           presentation.context.sessionId,
         );
+        statusCards?.abandon(statusContext.segmentId);
         return true;
       }
       if (reason === 'input_requested') {
@@ -215,11 +250,13 @@ export class DingtalkInteractionPresenter {
           text || presentation.content,
         );
         if (!fallbackText || !this.options.sendFallback) return false;
-        await this.options.sendFallback(
+        await this.sendFallback(
+          run,
           presentation.context.target.chatId,
           fallbackText,
           presentation.context.sessionId,
         );
+        statusCards?.abandon(statusContext.segmentId);
         return true;
       }
       statusCards?.ensure(statusContext, this.cardTarget(statusContext.target));
@@ -234,11 +271,13 @@ export class DingtalkInteractionPresenter {
         text || presentation.content,
       );
       if (!fallbackText || !this.options.sendFallback) return false;
-      await this.options.sendFallback(
+      await this.sendFallback(
+        run,
         presentation.context.target.chatId,
         fallbackText,
         presentation.context.sessionId,
       );
+      statusCards?.abandon(statusContext.segmentId);
       return true;
     });
   }
@@ -261,6 +300,46 @@ export class DingtalkInteractionPresenter {
     return questionCards.present(context, this.cardTarget(context.target));
   }
 
+  presentPermission(
+    context: ChannelPermissionRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    const run = this.runs.get(context.runId);
+    if (
+      !run ||
+      run.terminal ||
+      run.ownerId !== context.owner.id ||
+      run.target.chatId !== context.target.chatId ||
+      run.target.isGroup !== context.target.isGroup
+    ) {
+      return Promise.resolve({ kind: 'unsupported' });
+    }
+    const permissionCards = this.options.permissionCards;
+    if (!permissionCards) return Promise.resolve({ kind: 'unsupported' });
+    return permissionCards.present(context, this.cardTarget(context.target));
+  }
+
+  private terminalCopy(): {
+    failed: string;
+    stopped: string;
+    cancelled: string;
+  } {
+    if (
+      this.options.language !== undefined &&
+      !isChinesePresentationLanguage(this.options.language)
+    ) {
+      return {
+        failed: 'Processing failed, please try again later.',
+        stopped: 'Task stopped',
+        cancelled: 'Task cancelled',
+      };
+    }
+    return {
+      failed: '本次处理失败，请稍后重试。',
+      stopped: '任务已停止',
+      cancelled: '任务已取消',
+    };
+  }
+
   terminalizeRun(
     runId: string,
     terminal: 'completed' | 'failed' | 'cancelled',
@@ -275,6 +354,7 @@ export class DingtalkInteractionPresenter {
         ? 'cancelled'
         : 'expired',
     );
+    this.options.permissionCards?.cancelRun(runId);
     run.terminal = true;
     const activeSegmentId = run.activeSegmentId;
     run.activeSegmentId = undefined;
@@ -282,6 +362,7 @@ export class DingtalkInteractionPresenter {
       this.segments.delete(activeSegmentId);
       this.addTerminalSegment(activeSegmentId);
     }
+    const copy = this.terminalCopy();
     const finalization = this.enqueue(run, async () => {
       if (terminal === 'failed') {
         const statusContext = this.ensureStatusContext(run);
@@ -291,7 +372,7 @@ export class DingtalkInteractionPresenter {
         );
         this.options.statusCards?.fail(
           statusContext.segmentId,
-          this.withSenderPrefix(run, '本次处理失败，请稍后重试。'),
+          this.withSenderPrefix(run, copy.failed),
         );
         await this.redeliverCardDeliveredContent(run);
       } else if (terminal === 'cancelled') {
@@ -302,7 +383,7 @@ export class DingtalkInteractionPresenter {
             this.cardTarget(statusContext.target),
             this.withSenderPrefix(
               run,
-              detail === 'cancel_command' ? '任务已停止' : '任务已取消',
+              detail === 'cancel_command' ? copy.stopped : copy.cancelled,
             ),
           );
         }
@@ -320,7 +401,12 @@ export class DingtalkInteractionPresenter {
             statusContext.segmentId,
             '',
             (retained) =>
-              retained ? this.withSenderPrefix(run, retained) : retained,
+              retained
+                ? this.withSenderPrefix(
+                    run,
+                    this.withoutRenderedSourcePrefix(run, retained),
+                  )
+                : retained,
           );
         }
       }
@@ -369,7 +455,8 @@ export class DingtalkInteractionPresenter {
     const delivered = run.cardDelivered;
     if (!delivered || !this.options.sendFallback) return;
     run.cardDelivered = undefined;
-    await this.options.sendFallback(
+    await this.sendFallback(
+      run,
       delivered.chatId,
       delivered.text,
       delivered.sessionId,
@@ -398,18 +485,44 @@ export class DingtalkInteractionPresenter {
   }
 
   private withSenderPrefix(run: RunPresentation, content: string): string {
-    if (!run.senderPrefix) return this.boundContent(content);
+    const prefixes = [
+      run.senderPrefix,
+      run.sourceLabel ? escapeDingTalkMarkdown(run.sourceLabel) : undefined,
+    ].filter((value): value is string => Boolean(value));
+    if (prefixes.length === 0) return this.boundContent(content);
     const body = this.withoutExistingSenderPrefix(run, content);
-    if (!body) return run.senderPrefix;
+    const prefix = prefixes.join('\n\n');
+    if (!body) return prefix;
     const separator = '\n\n';
     const bodyLimit = Math.max(
       0,
-      CONTENT_LIMIT - run.senderPrefix.length - separator.length,
+      CONTENT_LIMIT - prefix.length - separator.length,
     );
-    return `${run.senderPrefix}${separator}${this.boundContent(
-      body,
-      bodyLimit,
+    return `${prefix}${separator}${this.boundContent(body, bodyLimit)}`;
+  }
+
+  private withSourcePrefix(run: RunPresentation, content: string): string {
+    if (!run.sourceLabel) return this.boundContent(content);
+    const sourceLabel = escapeDingTalkMarkdown(run.sourceLabel);
+    if (!content) return sourceLabel;
+    return `${sourceLabel}\n\n${this.boundContent(
+      content,
+      Math.max(0, CONTENT_LIMIT - sourceLabel.length - 2),
     )}`;
+  }
+
+  private async sendFallback(
+    run: RunPresentation,
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    if (!this.options.sendFallback) return;
+    if (run.sourceLabel) {
+      await this.options.sendFallback(chatId, text, sessionId, run.sourceLabel);
+      return;
+    }
+    await this.options.sendFallback(chatId, text, sessionId);
   }
 
   private withoutExistingSenderPrefix(
@@ -434,6 +547,17 @@ export class DingtalkInteractionPresenter {
       if (!removed) break;
     }
     return body;
+  }
+
+  private withoutRenderedSourcePrefix(
+    run: RunPresentation,
+    content: string,
+  ): string {
+    if (!run.sourceLabel) return content;
+    const rendered = escapeDingTalkMarkdown(run.sourceLabel);
+    if (content === rendered) return '';
+    const prefix = `${rendered}\n\n`;
+    return content.startsWith(prefix) ? content.slice(prefix.length) : content;
   }
 
   private ensureStatusContext(

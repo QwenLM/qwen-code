@@ -6,7 +6,7 @@
 
 import * as vscode from 'vscode';
 import { execFile } from 'child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { QwenAgentManager } from '../../services/qwenAgentManager.js';
@@ -155,6 +155,7 @@ export class WebViewProvider {
   // a diff, auto-allow read/execute, or auto-reject on cancel).
   private pendingPermissionRequest: RequestPermissionRequest | null = null;
   private pendingPermissionResolve: ((optionId: string) => void) | null = null;
+  private readonly webShellPermissionOwners = new Map<vscode.Webview, string>();
   // Track a pending ask user question request and its resolver
   private pendingAskUserQuestionRequest: AskUserQuestionRequest | null = null;
   private pendingAskUserQuestionResolve:
@@ -205,6 +206,11 @@ export class WebViewProvider {
     this.agentManager = new QwenAgentManager();
     this.conversationStore = new ConversationStore(context);
     this.panelManager = new PanelManager(extensionUri, () => {
+      for (const webview of this.webShellPermissionOwners.keys()) {
+        if (webview !== this.attachedWebview) {
+          this.webShellPermissionOwners.delete(webview);
+        }
+      }
       // Panel dispose callback — unblock any pending ACP Promises
       if (this.pendingPermissionResolve) {
         this.pendingPermissionResolve('cancel');
@@ -942,6 +948,7 @@ export class WebViewProvider {
 
     // Clean up when the view is disposed
     webviewView.onDidDispose(() => {
+      this.webShellPermissionOwners.delete(webview);
       this.attachedWebview = null;
       // Disconnect the ACP agent process to prevent orphan processes
       this.agentManager.disconnect();
@@ -1932,7 +1939,19 @@ export class WebViewProvider {
     message: { type: string; data?: unknown },
     webview: vscode.Webview,
   ): Promise<boolean> {
+    if (message.type === 'webShellPermissionState') {
+      const data = message.data as
+        | { pending?: unknown; requestId?: unknown }
+        | undefined;
+      if (data?.pending === true && typeof data.requestId === 'string') {
+        this.webShellPermissionOwners.set(webview, data.requestId);
+      } else {
+        this.webShellPermissionOwners.delete(webview);
+      }
+      return true;
+    }
     if (message.type === 'webShellSessionChanged') {
+      this.webShellPermissionOwners.delete(webview);
       const data = message.data as
         | { sessionId?: unknown; workspaceCwd?: unknown }
         | undefined;
@@ -1947,6 +1966,7 @@ export class WebViewProvider {
       return true;
     }
     if (message.type === 'webShellReady') {
+      this.webShellPermissionOwners.delete(webview);
       const workspaceCwd =
         (vscode.window.activeTextEditor
           ? vscode.workspace.getWorkspaceFolder(
@@ -1967,23 +1987,85 @@ export class WebViewProvider {
         handle.dispose();
       }
       try {
+        const canonicalWorkspaceCwd = existsSync(workspaceCwd)
+          ? realpathSync.native(workspaceCwd)
+          : workspaceCwd;
         const runtime = await this.daemonProcess.start(
           resolveQwenCliEntryPath(
             this.extensionUri,
             this.context.extensionMode,
           ),
-          workspaceCwd,
+          canonicalWorkspaceCwd,
         );
         const serializedSessionId = getRestorableDaemonSessionId(
           this.messageHandler.getCurrentConversationId(),
         );
-        const viewSessionId = this.isViewHost
-          ? getRestorableDaemonSessionId(
-              this.context.workspaceState.get<string>(
-                webShellSessionStateKey(workspaceCwd),
-              ),
-            )
-          : undefined;
+        let viewSessionId: string | undefined;
+        if (this.isViewHost) {
+          // Ids persisted before this canonicalization are keyed by the
+          // folder's raw (symlinked) spelling. Read that entry once so
+          // upgrading does not silently start a fresh sidebar conversation —
+          // and retire it in the same bootstrap. The only writer
+          // (`webShellSessionChanged`) keys off the canonical spelling the
+          // payload below carries, so an alias entry left behind is never
+          // overwritten or cleared: a session the user has since cleared would
+          // be resurrected by the fallback on every later bootstrap, with no
+          // action able to clear it again.
+          const canonicalKey = webShellSessionStateKey(canonicalWorkspaceCwd);
+          const canonicalSessionId =
+            this.context.workspaceState.get<string>(canonicalKey);
+          const legacyKey = webShellSessionStateKey(workspaceCwd);
+          const legacySessionId =
+            canonicalWorkspaceCwd !== workspaceCwd
+              ? this.context.workspaceState.get<string>(legacyKey)
+              : undefined;
+          if (legacySessionId !== undefined) {
+            // Move the id rather than dropping it: the canonical key's only
+            // other writer (`webShellSessionChanged`) does not run until the
+            // shell has attached, so retiring the alias first would lose the
+            // binding for good if this bootstrap is interrupted before the
+            // echo. Both writes are best-effort — neither is needed for this
+            // bootstrap, whose id comes from the fallback below, and a
+            // rejecting `Memento.update` (locked `state.vscdb`, full disk,
+            // read-only profile) must not abort a bootstrap whose daemon has
+            // already started. Leaving the alias entry behind is safe because
+            // the next bootstrap reads it and retries the migration.
+            const migrated = getRestorableDaemonSessionId(legacySessionId);
+            const migrationSettled =
+              canonicalSessionId === undefined && migrated !== undefined
+                ? await this.context.workspaceState
+                    .update(canonicalKey, migrated)
+                    .then(
+                      () => true,
+                      (error: unknown) => {
+                        logger.warn(
+                          '[WebViewProvider] Failed to migrate legacy web-shell session key:',
+                          error,
+                        );
+                        return false;
+                      },
+                    )
+                : true;
+            if (migrationSettled) {
+              await this.context.workspaceState
+                .update(legacyKey, undefined)
+                .then(
+                  () => undefined,
+                  (error: unknown) => {
+                    logger.warn(
+                      '[WebViewProvider] Failed to retire legacy web-shell session key:',
+                      error,
+                    );
+                  },
+                );
+            }
+          }
+          // The fallback binds an id to a folder's *spelling* rather than to
+          // folder identity, so it is only sound as this one-shot migration.
+          viewSessionId = getRestorableDaemonSessionId(
+            canonicalSessionId ?? legacySessionId,
+          );
+        }
         const restoredSessionId = this.isViewHost
           ? viewSessionId
           : serializedSessionId;
@@ -1992,7 +2074,16 @@ export class WebViewProvider {
           data: {
             ...runtime,
             clientId: this.daemonClientId,
-            workspaceCwd,
+            workspaceCwd: canonicalWorkspaceCwd,
+            // The daemon matches workspaces by canonical path, but every
+            // `activeEditorChanged` sender posts VS Code's raw
+            // `editor.document.uri.fsPath`, which keeps the folder's symlinked
+            // spelling. The webview needs both to relativize the active file:
+            // with only the canonical one the prefix strip misses and the
+            // prompt silently degrades from `@src/foo.ts` to `@foo.ts`.
+            ...(canonicalWorkspaceCwd !== workspaceCwd
+              ? { editorWorkspaceCwd: workspaceCwd }
+              : {}),
             hostKind: this.isViewHost ? 'view' : 'panel',
             ...(restoredSessionId ? { sessionId: restoredSessionId } : {}),
           },
@@ -2360,7 +2451,9 @@ export class WebViewProvider {
    * Whether there is a pending permission decision awaiting an option.
    */
   hasPendingPermission(): boolean {
-    return !!this.pendingPermissionResolve;
+    return (
+      this.webShellPermissionOwners.size > 0 || !!this.pendingPermissionResolve
+    );
   }
 
   /** Get current ACP mode id (if known). */
@@ -2384,7 +2477,36 @@ export class WebViewProvider {
    */
   respondToPendingPermission(
     choice: { optionId: string } | 'accept' | 'allow' | 'reject' | 'cancel',
+    context?: { fromDiffEditor?: boolean; permissionRequestId?: string },
   ): void {
+    // Web-shell approvals are bound to the request id stored on the managed
+    // diff. The target web shell validates that exact id again before voting,
+    // so an original file or a stale/stacked diff cannot resolve another
+    // session's approval.
+    if (
+      typeof choice === 'string' &&
+      context?.fromDiffEditor &&
+      context.permissionRequestId
+    ) {
+      const decision =
+        choice === 'accept' || choice === 'allow'
+          ? 'allow'
+          : choice === 'cancel' || choice === 'reject'
+            ? 'reject'
+            : undefined;
+      const webview = decision
+        ? Array.from(this.webShellPermissionOwners).find(
+            ([, requestId]) => requestId === context.permissionRequestId,
+          )?.[0]
+        : undefined;
+      if (webview && decision) {
+        void webview.postMessage({
+          type: 'webShellPermissionDecision',
+          data: { decision, requestId: context.permissionRequestId },
+        });
+      }
+      return;
+    }
     if (!this.pendingPermissionResolve || !this.pendingPermissionRequest) {
       return; // nothing to do
     }

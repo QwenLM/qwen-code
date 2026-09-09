@@ -242,9 +242,7 @@ function getSubcommandArgumentHint(
 ): string | undefined {
   if (!argumentHint) return undefined;
   const match = argumentHint.match(
-    new RegExp(
-      `(?:^|\\||\\[)\\s*${escapeRegExp(name)}(?:\\s+([^|\\]]+))?`,
-    ),
+    new RegExp(`(?:^|\\||\\[)\\s*${escapeRegExp(name)}(?:\\s+([^|\\]]+))?`),
   );
   const suffix = match?.[1]?.trim();
   return suffix || undefined;
@@ -553,9 +551,7 @@ export function getSlashCommandCompletionResult(
           id: command,
           label: node.name,
           detail: node.description || undefined,
-          ...(node.argumentHint
-            ? { argumentHint: node.argumentHint }
-            : {}),
+          ...(node.argumentHint ? { argumentHint: node.argumentHint } : {}),
           apply: `${command} `,
           ...(isSkillList ? { type: 'skill' as const } : {}),
           ...(!node.children?.length && !node.argumentHint
@@ -616,8 +612,7 @@ export function getSlashCommandCompletionResult(
         ...(showCommandInfo && command.description
           ? { type: 'command-info' as const }
           : {}),
-        ...(command.autoSubmit &&
-        !hasSubcommandPicker(command, language)
+        ...(command.autoSubmit && !hasSubcommandPicker(command, language)
           ? { autoSubmit: true }
           : {}),
       };
@@ -715,9 +710,7 @@ export function slashCompletionSource(
           detail: n.description || undefined,
           ...(n.argumentHint ? { argumentHint: n.argumentHint } : {}),
           apply: `${command} `,
-          ...(n.children?.length || n.argumentHint
-            ? {}
-            : { autoSubmit: true }),
+          ...(n.children?.length || n.argumentHint ? {} : { autoSubmit: true }),
         };
       });
 

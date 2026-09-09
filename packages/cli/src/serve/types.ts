@@ -59,8 +59,14 @@ export interface ServeOptions {
   port: number;
   /**
    * Bearer token required on every request. Optional when bound to loopback
-   * (developer convenience); required when bound beyond loopback (boot fails
-   * without one — see runQwenServe).
+   * (developer convenience). On a non-loopback bind with neither this option
+   * nor QWEN_SERVER_TOKEN set, runQwenServe generates an ephemeral bearer and
+   * prints it once instead of refusing; read it back from
+   * `RunHandle.resolvedToken` — the only programmatic channel: the generated
+   * value is never written back into `QWEN_SERVER_TOKEN` in the daemon's own
+   * environment (spawned channel workers receive it as `QWEN_DAEMON_TOKEN`).
+   * An explicitly empty value is a supplied source, not an absent one, and
+   * still fails the remote-bind check.
    */
   token?: string;
   mode: ServeMode;
@@ -190,7 +196,8 @@ export interface ServeOptions {
   requireAuth?: boolean;
   /**
    * Opt in to direct session shell execution. The effective policy also
-   * requires a configured bearer token and a session-bound client id.
+   * requires either a configured bearer token or trusted-loopback mode, plus
+   * a session-bound client id.
    */
   enableSessionShell?: boolean;
   /**
@@ -300,7 +307,7 @@ export interface ServeOptions {
     timeoutMs?: number;
   };
   /**
-   * Cross-origin allowlist for browser webui
+   * Cross-origin allowlist for browser clients
    * deployments.
    */
   allowOrigins?: string[];
@@ -320,12 +327,19 @@ export interface ServeOptions {
    * Per-SSE-connection idle deadline.
    */
   writerIdleTimeoutMs?: number;
-  /** Non-negative ms to keep ACP child alive after last session closes. 0 = immediate kill (default). */
+  /** ACP child auto-reap delay. Keepalive windows may extend it. */
   channelIdleTimeoutMs?: number;
   /** Session reaper scan interval in ms. 0 = disabled. Default: 60000. */
   sessionReapIntervalMs?: number;
   /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
   sessionIdleTimeoutMs?: number;
+  /**
+   * Grace period after a prompt settles before an otherwise-idle session may
+   * be auto-closed, in ms. 0 = disabled (original behavior). Set to a value
+   * greater than the client's max SSE poll interval to prevent session rebuilds
+   * for poll-based clients. Default: 0.
+   */
+  sessionPromptSettledCloseGraceMs?: number;
   /**
    * ACP child request timeout, including the `initialize` handshake,
    * in ms. Must be a positive
@@ -406,6 +420,8 @@ export interface CapabilitiesEnvelope {
    * additive to v=1; older v=1 daemons omit it.
    */
   qwenCodeVersion?: string;
+  /** Process-wide live-state polling interval in milliseconds; older daemons omit it. */
+  sessionLiveStatePollIntervalMs?: number;
   mode: ServeMode;
   features: string[];
   /**
@@ -441,6 +457,7 @@ export interface CapabilitiesEnvelope {
     displayName?: string;
     primary: boolean;
     trusted: boolean;
+    workflowsEnabled?: boolean;
     removable?: boolean;
     kind?: 'live';
   }>;
@@ -560,6 +577,11 @@ export interface ServeAuthProviderInstallResult {
   modelId?: string;
   baseUrl?: string;
   message: string;
+  runtimeSync?: ServeModelProviderRuntimeSyncResult;
+}
+
+export interface ServeModelProviderRuntimeSyncResult {
+  status: 'applied' | 'deferred' | 'failed';
 }
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;

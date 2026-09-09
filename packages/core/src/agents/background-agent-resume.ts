@@ -25,6 +25,7 @@ import {
   normalizeResumedAgentDepth,
   readAgentMeta,
   patchAgentMeta,
+  getAgentMetaTerminalSummary,
   attachJsonlTranscriptWriter,
   type AgentMeta,
 } from './agent-transcript.js';
@@ -211,11 +212,17 @@ function reconcileResumedApprovalMode(
 function persistBackgroundCancellation(
   metaPath: string,
   persistedStatus: 'running' | 'cancelled',
+  sessionWorkflow: boolean,
+  stats?: AgentCompletionStats,
+  recentActivities?: AgentTask['recentActivities'],
 ): void {
   patchAgentMeta(metaPath, {
     status: persistedStatus,
     lastUpdatedAt: new Date().toISOString(),
     lastError: undefined,
+    ...(sessionWorkflow
+      ? getAgentMetaTerminalSummary(stats, recentActivities)
+      : {}),
   });
 }
 
@@ -322,7 +329,10 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
   const stableForBranch = [...filtered];
   while (stableForBranch.length > 0) {
     const last = stableForBranch[stableForBranch.length - 1]!;
-    if (isWhitespaceOnlyAssistant(last)) {
+    if (
+      isWhitespaceOnlyAssistant(last) ||
+      (last.type === 'system' && last.subtype === 'agent_session_ready')
+    ) {
       stableForBranch.pop();
       continue;
     }
@@ -542,6 +552,9 @@ export class BackgroundAgentResumeService {
           (target.isFork && !recovery.forkBootstrap
             ? LEGACY_FORK_RESUME_BLOCKED_REASON
             : undefined);
+        const persistedSummary = meta.sessionWorkflow
+          ? getAgentMetaTerminalSummary(meta.stats, meta.recentActivities)
+          : {};
 
         const registration: AgentTaskRegistration = {
           agentId: meta.agentId,
@@ -574,6 +587,7 @@ export class BackgroundAgentResumeService {
           parentAgentId: meta.parentAgentId,
           depth: meta.depth,
           model: meta.model ?? meta.persistedCliFlags?.model,
+          ...persistedSummary,
         };
         if (meta.status === 'completed') {
           (registration as AgentTask).notified = true;
@@ -1055,6 +1069,11 @@ export class BackgroundAgentResumeService {
         agentColor: target.subagentConfig?.color ?? meta.agentColor,
         resumeCount: nextResumeCount,
         lastError: undefined,
+        // The previous incarnation's terminal summary must not survive into the
+        // restarted run: a crash mid-resume would otherwise leave discovery
+        // restoring run N-1's stats/activities as the interrupted run's state.
+        stats: undefined,
+        recentActivities: undefined,
       });
 
       const pendingMessages = [
@@ -1293,6 +1312,12 @@ export class BackgroundAgentResumeService {
                 status: 'completed',
                 lastUpdatedAt: new Date().toISOString(),
                 lastError: undefined,
+                ...(meta.sessionWorkflow
+                  ? getAgentMetaTerminalSummary(
+                      stats,
+                      registry.get(meta.agentId)?.recentActivities,
+                    )
+                  : {}),
               });
               registry.complete(meta.agentId, finalText, stats);
             } else if (terminateMode === AgentTerminateMode.CANCELLED) {
@@ -1301,6 +1326,9 @@ export class BackgroundAgentResumeService {
                 metaPath,
                 registry.get(meta.agentId)?.persistedCancellationStatus ??
                   'cancelled',
+                meta.sessionWorkflow === true,
+                stats,
+                registry.get(meta.agentId)?.recentActivities,
               );
             } else {
               const failureText =
@@ -1310,6 +1338,12 @@ export class BackgroundAgentResumeService {
                 status: 'failed',
                 lastUpdatedAt: new Date().toISOString(),
                 lastError: failureText,
+                ...(meta.sessionWorkflow
+                  ? getAgentMetaTerminalSummary(
+                      stats,
+                      registry.get(meta.agentId)?.recentActivities,
+                    )
+                  : {}),
               });
             }
             break;
@@ -1321,26 +1355,29 @@ export class BackgroundAgentResumeService {
             `[BackgroundAgentResume] Background agent failed: ${errorMessage}`,
           );
           if (turnAbortController.signal.aborted) {
-            registry.finalizeCancelled(
-              meta.agentId,
-              errorMessage,
-              getCompletionStats(subagent, liveToolCallCount),
-            );
+            const stats = getCompletionStats(subagent, liveToolCallCount);
+            registry.finalizeCancelled(meta.agentId, errorMessage, stats);
             persistBackgroundCancellation(
               metaPath,
               registry.get(meta.agentId)?.persistedCancellationStatus ??
                 'cancelled',
+              meta.sessionWorkflow === true,
+              stats,
+              registry.get(meta.agentId)?.recentActivities,
             );
           } else {
-            registry.fail(
-              meta.agentId,
-              errorMessage,
-              getCompletionStats(subagent, liveToolCallCount),
-            );
+            const stats = getCompletionStats(subagent, liveToolCallCount);
+            registry.fail(meta.agentId, errorMessage, stats);
             patchAgentMeta(metaPath, {
               status: 'failed',
               lastUpdatedAt: new Date().toISOString(),
               lastError: errorMessage,
+              ...(meta.sessionWorkflow
+                ? getAgentMetaTerminalSummary(
+                    stats,
+                    registry.get(meta.agentId)?.recentActivities,
+                  )
+                : {}),
             });
           }
         } finally {
@@ -1424,6 +1461,10 @@ export class BackgroundAgentResumeService {
             lastUpdatedAt: new Date().toISOString(),
             lastError: undefined,
             resumeCount: hotResumeCount,
+            // See the cold-resume patch: the completed run's summary must not
+            // describe the continuation that is starting here.
+            stats: undefined,
+            recentActivities: undefined,
           });
 
           const nextContextState = new ContextState();
@@ -1577,9 +1618,13 @@ export class BackgroundAgentResumeService {
       },
     );
     if (entry.metaPath) {
+      const meta = readAgentMeta(entry.metaPath);
       patchAgentMeta(entry.metaPath, {
         lastError: undefined,
         status: 'completed',
+        ...(meta?.sessionWorkflow === true
+          ? getAgentMetaTerminalSummary(entry.stats, entry.recentActivities)
+          : {}),
       });
     }
     return restored;

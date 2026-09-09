@@ -3,6 +3,7 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import express from 'express';
 import request from 'supertest';
@@ -648,7 +649,7 @@ describe('workspace memory remember routes', () => {
     });
   });
 
-  it('requires auth for task polling', async () => {
+  it('requires authority when trusted mode is omitted from the gate', async () => {
     const bridge = buildBridgeStub({});
     const app = buildApp(bridge, {
       tokenConfigured: false,

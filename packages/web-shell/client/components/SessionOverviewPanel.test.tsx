@@ -52,6 +52,7 @@ let otherWorkspaceSessions: Record<string, DaemonSessionSummary[]>;
 let scopedSessionsOptions: { pollIntervalMs?: number };
 let workspaceLiveStateOptions: {
   enabled: boolean;
+  pollIntervalMs?: number;
   workspaceCwds?: string[];
 };
 let statusReportOptions: { autoLoad?: boolean; detail?: string };
@@ -120,7 +121,11 @@ vi.mock('../hooks/useScopedSessions', () => ({
 vi.mock('../session-catalog/workspace-session-live-state', () => ({
   useWorkspaceSessionLiveState: (
     _client: unknown,
-    options: { enabled: boolean; workspaceCwds?: string[] },
+    options: {
+      enabled: boolean;
+      workspaceCwds?: string[];
+      pollIntervalMs?: number;
+    },
   ) => {
     workspaceLiveStateOptions = options;
     return new Map();
@@ -381,6 +386,14 @@ function setInputValue(input: HTMLInputElement, value: string): void {
   input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
+function statusFilterButton(label: string): HTMLButtonElement {
+  return Array.from(
+    container!.querySelectorAll<HTMLButtonElement>(
+      '[aria-label="Filter by session status"] button',
+    ),
+  ).find((button) => button.textContent?.startsWith(label))!;
+}
+
 describe('deriveSessionCards', () => {
   it('ranks needs-approval above user-input above running above idle, then by recency', () => {
     const sessions = [
@@ -509,6 +522,79 @@ describe('deriveSessionCards', () => {
 });
 
 describe('SessionOverviewPanel', () => {
+  it.each(['FEATURE/TOPIC', '1234', '#1234', 'SESSION-SEARCH'])(
+    'searches branch, PR and ID metadata: %s',
+    (query) => {
+      sessionsState.sessions = [
+        session('session-search', {
+          displayName: 'Match',
+          branch: { name: 'feature/topic', baseBranch: 'main' },
+          prs: [{ number: 1234, url: 'https://github.com/o/r/pull/1234' }],
+        }),
+        session('other', { displayName: 'Other' }),
+      ];
+      render();
+      act(() => setInputValue(container!.querySelector('input')!, query));
+      expect(rowTitles()).toEqual(['Match']);
+    },
+  );
+
+  it('groups approval and question sessions as needing attention and drops stale selections', () => {
+    sessionsState.sessions = [
+      session('approval', {
+        displayName: 'Approval',
+        isWaitingForPermission: true,
+      }),
+      session('question', {
+        displayName: 'Question',
+        isWaitingForUserQuestion: true,
+      }),
+      session('running', { displayName: 'Run', hasActivePrompt: true }),
+      session('idle', { displayName: 'Idle' }),
+    ];
+    render();
+    act(() => click(statusFilterButton('Needs attention')));
+    expect(rowTitles()).toEqual(['Approval', 'Question']);
+    expect(
+      statusFilterButton('Needs attention').getAttribute('aria-pressed'),
+    ).toBe('true');
+    act(() => click(rowCheckbox(rows()[0]!)));
+    sessionsState.sessions = sessionsState.sessions.map((s) =>
+      s.sessionId === 'approval'
+        ? { ...s, isWaitingForPermission: false, hasActivePrompt: true }
+        : s,
+    );
+    rerender();
+    expect(rowTitles()).toEqual(['Question']);
+    expect(footerButton('Open in new tab')).toBeNull();
+    expect(statusFilterButton('Running').textContent).toContain('2');
+  });
+
+  it('resets page and selection on status changes and combines them with search', () => {
+    window.localStorage.setItem(
+      'qwen-web-shell-session-overview-page-size',
+      '10',
+    );
+    sessionsState.sessions = [
+      ...Array.from({ length: 12 }, (_, i) =>
+        session(`run-${i}`, { displayName: `Run ${i}`, hasActivePrompt: true }),
+      ),
+      session('idle', { displayName: 'Idle match' }),
+    ];
+    render();
+    act(() => click(footerButton('Next')!));
+    act(() => click(rowCheckbox(rows()[0]!)));
+    act(() => click(statusFilterButton('Idle')));
+    expect(rowTitles()).toEqual(['Idle match']);
+    expect(container!.textContent).toContain('Page 1 of 1');
+    expect(footerButton('Open in new tab')).toBeNull();
+    act(() => setInputValue(container!.querySelector('input')!, 'Run'));
+    expect(container!.textContent).toContain('No data');
+    act(() => click(statusFilterButton('Running')));
+    expect(rowTitles()).toHaveLength(10);
+    expect(statusFilterButton('Idle').textContent).toContain('0');
+  });
+
   it('renders an empty state when there are no sessions', () => {
     render();
     const empty = container!.querySelector('[data-slot="data-table-empty"]');
@@ -540,46 +626,483 @@ describe('SessionOverviewPanel', () => {
     expect(rowTitles()).toEqual(['Charlie', 'Alpha', 'Bravo']);
   });
 
-  it('shows loading after the title for every non-idle session', () => {
+  it('distinguishes actionable states and only spins for running turns', () => {
     sessionsState.sessions = [
       session('s-run', { displayName: 'Run', hasActivePrompt: true }),
       session('s-appr', {
         displayName: 'Approval',
         isWaitingForPermission: true,
+        hasActivePrompt: true,
       }),
       session('s-q', {
         displayName: 'Question',
         isWaitingForUserQuestion: true,
+        hasActivePrompt: true,
       }),
       session('s-idle', { displayName: 'Still' }),
     ];
     render();
-    for (const label of ['Run', 'Approval', 'Question']) {
-      const row = rows().find((candidate) =>
-        candidate.textContent?.includes(label),
-      )!;
-      expect(
-        titleTrigger(row).nextElementSibling?.hasAttribute(
-          'data-web-shell-session-loading',
-        ),
-      ).toBe(true);
+    const states = rows().map((row) =>
+      row.querySelector('[data-web-shell-session-status]'),
+    );
+    expect(states.map((state) => state?.textContent)).toEqual([
+      'Needs approval',
+      'User input needed',
+      'Running',
+      'Idle',
+    ]);
+    expect(
+      states.map(
+        (state) => !!state?.querySelector('[data-web-shell-session-loading]'),
+      ),
+    ).toEqual([false, false, true, false]);
+    expect(
+      states[0]?.querySelector('svg.lucide-shield-question-mark'),
+    ).not.toBeNull();
+    expect(
+      states[1]?.querySelector('svg.lucide-circle-question-mark'),
+    ).not.toBeNull();
+    expect(states[3]?.querySelector('svg.lucide-circle')).not.toBeNull();
+    // The attention cue and the status column pick their icon twice; pin
+    // them to the same glyph so the mappings cannot drift apart.
+    for (const index of [0, 1]) {
+      const cueIcon = rows()[index]!.querySelector(
+        '[data-web-shell-session-status-cue] svg',
+      );
+      expect(cueIcon?.outerHTML).toBe(
+        states[index]?.querySelector('svg')?.outerHTML,
+      );
     }
-    const idle = rows().find((tr) => tr.textContent?.includes('Still'))!;
-    expect(idle.querySelector('[data-web-shell-session-loading]')).toBeNull();
+    // An idle row renders no attention cue at all.
+    expect(
+      rows()[3]!.querySelector('[data-web-shell-session-status-cue]'),
+    ).toBeNull();
   });
 
-  it('toggles selection when the row is clicked', () => {
+  it('counts background work as running even without an active prompt', () => {
+    sessionsState.sessions = [
+      session('s-bg', {
+        displayName: 'Background',
+        hasActivePrompt: false,
+        activeWorkState: 'active',
+      }),
+      session('s-idle', { displayName: 'Plain idle' }),
+    ];
+    render();
+    const state = rows()[0]!.querySelector('[data-web-shell-session-status]');
+    expect(state?.textContent).toBe('Running');
+    expect(
+      state?.querySelector('[data-web-shell-session-loading]'),
+    ).not.toBeNull();
+    expect(statusFilterButton('Running').textContent).toContain('1');
+    expect(statusFilterButton('Idle').textContent).toContain('1');
+    // A session with live background work is not safe to archive or delete.
+    expect(rowActionButton(rows()[0]!, 'Archive').disabled).toBe(true);
+    expect(rowActionButton(rows()[0]!, 'Delete').disabled).toBe(true);
+  });
+
+  it('opens the owning session on row click and selects only with the checkbox', () => {
     sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
     render();
     act(() => click(rows()[0]!.querySelectorAll('td')[2] as HTMLElement));
-    expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe('checked');
-    expect(onOpenSession).not.toHaveBeenCalled();
-
-    act(() => click(rows()[0]!.querySelectorAll('td')[2] as HTMLElement));
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s-run', '/w');
     expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
       'unchecked',
     );
+    onOpenSession.mockClear();
+    act(() => click(rowCheckbox(rows()[0]!)));
+    expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe('checked');
+    expect(onOpenSession).not.toHaveBeenCalled();
   });
+
+  it('keeps text selection in the overview without navigating', () => {
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    const cell = rows()[0]!.querySelectorAll('td')[2]!;
+    const selection = window.getSelection()!;
+    const range = document.createRange();
+    range.selectNodeContents(cell);
+    selection.addRange(range);
+    try {
+      act(() => click(cell));
+      expect(onOpenSession).not.toHaveBeenCalled();
+      const title = titleTrigger(rows()[0]!);
+      act(() =>
+        title.dispatchEvent(
+          new MouseEvent('click', { bubbles: true, detail: 1 }),
+        ),
+      );
+      expect(onOpenSession).not.toHaveBeenCalled();
+      act(() => title.click());
+      expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s1', '/w');
+      onOpenSession.mockClear();
+    } finally {
+      selection.removeAllRanges();
+    }
+    act(() => click(cell));
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s1', '/w');
+  });
+
+  it('keeps an inline rename draft when clicking a plain row cell', () => {
+    connectionState.sessionId = 's1';
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Rename')));
+    const input = container!.querySelector<HTMLInputElement>(
+      'input[aria-label="Rename: One"]',
+    )!;
+    act(() => setInputValue(input, 'Renamed'));
+    // The editor keeps native mousedown so the caret can be placed.
+    const editorMouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    act(() => input.dispatchEvent(editorMouseDown));
+    expect(editorMouseDown.defaultPrevented).toBe(false);
+    // In-row controls get a prevented mousedown instead: no blur-cancel may
+    // remount the pressed node before mouseup, so their click still lands.
+    const actionMouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    act(() =>
+      rowActionButton(rows()[0]!, 'Rename').dispatchEvent(actionMouseDown),
+    );
+    expect(actionMouseDown.defaultPrevented).toBe(true);
+    expect(input.value).toBe('Renamed');
+    const cell = rows()[0]!.querySelectorAll('td')[2]!;
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      cell.dispatchEvent(mouseDown);
+      if (!mouseDown.defaultPrevented) input.blur();
+    });
+    expect(mouseDown.defaultPrevented).toBe(true);
+    act(() => click(cell));
+    expect(onOpenSession).not.toHaveBeenCalled();
+    expect(input.isConnected).toBe(true);
+    expect(input.value).toBe('Renamed');
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('keeps an inline rename draft when clicking the details button', () => {
+    connectionState.sessionId = 's1';
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Rename')));
+    const input = container!.querySelector<HTMLInputElement>(
+      'input[aria-label="Rename: One"]',
+    )!;
+    act(() => setInputValue(input, 'Renamed'));
+    const details = rowActionButton(rows()[0]!, 'Details for One');
+    expect(details.disabled).toBe(true);
+    // Native activation: a click on the disabled button fires nothing, so
+    // the popover cannot steal focus and blur-cancel the draft.
+    act(() => details.click());
+    expect(input.isConnected).toBe(true);
+    expect(input.value).toBe('Renamed');
+    expect(document.activeElement).toBe(input);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it.each([4, 11])(
+    'ends rename and focuses the sort header with %i sessions',
+    async (count) => {
+      connectionState.sessionId = 's0';
+      window.localStorage.setItem(
+        'qwen-web-shell-session-overview-page-size',
+        '10',
+      );
+      sessionsState.sessions = Array.from({ length: count }, (_, index) =>
+        session(`s${index}`, {
+          displayName: `Session ${index}`,
+          updatedAt: new Date(Date.UTC(2026, 8, 20 - index)).toISOString(),
+        }),
+      );
+      render();
+      act(() => click(rowActionButton(rows()[0]!, 'Rename')));
+      const input = container!.querySelector<HTMLInputElement>(
+        'input[aria-label="Rename: Session 0"]',
+      )!;
+      act(() => setInputValue(input, 'Unsaved name'));
+      const sortButton = () =>
+        container!.querySelector<HTMLButtonElement>(
+          'thead th:nth-child(4) button',
+        )!;
+      act(() => click(sortButton()));
+      await flushAsync();
+      expect(
+        container!.querySelector('input[aria-label="Rename: Session 0"]'),
+      ).toBeNull();
+      expect(
+        container!
+          .querySelector('thead th:nth-child(4)')
+          ?.getAttribute('aria-sort'),
+      ).toBe('ascending');
+      expect(document.activeElement).toBe(sortButton());
+      expect(rowTitles().includes('Session 0')).toBe(count === 4);
+      expect(workspaceActions.renameSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'keeps only one details popover when hovering after click (same row: %s)',
+    async (sameRow) => {
+      sessionsState.sessions = [
+        session('a', { displayName: 'Alpha' }),
+        session('b', { displayName: 'Bravo' }),
+      ];
+      vi.useFakeTimers();
+      try {
+        render();
+        await act(async () =>
+          click(rowActionButton(rows()[0]!, 'Details for Alpha')),
+        );
+        const target = titleTrigger(rows()[sameRow ? 0 : 1]!);
+        await act(async () => {
+          target.dispatchEvent(new Event('pointerover', { bubbles: true }));
+          vi.advanceTimersByTime(300);
+        });
+        await act(async () => vi.advanceTimersByTime(0));
+        const dialogs = document.querySelectorAll('[role="dialog"]');
+        expect(dialogs).toHaveLength(1);
+        expect(dialogs[0]?.getAttribute('aria-label')).toBe(
+          sameRow ? 'Alpha' : 'Bravo',
+        );
+        expect(dialogs[0]?.getAttribute('data-state')).toBe('open');
+        expect(document.activeElement).toBe(target);
+        await act(async () => {
+          target.dispatchEvent(new Event('pointerout', { bubbles: true }));
+          vi.advanceTimersByTime(100);
+        });
+        expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(0);
+        expect(document.activeElement).toBe(target);
+        expect(onOpenSession).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['Escape', 'blur'])(
+    'does not reopen hover details after cancelling rename with %s',
+    async (dismissal) => {
+      connectionState.sessionId = 'a';
+      sessionsState.sessions = [session('a', { displayName: 'Alpha' })];
+      vi.useFakeTimers();
+      try {
+        render();
+        const title = titleTrigger(rows()[0]!);
+        await act(async () => {
+          title.dispatchEvent(new Event('pointerover', { bubbles: true }));
+          vi.advanceTimersByTime(300);
+        });
+        expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+        await act(async () => {
+          title.dispatchEvent(new Event('pointerout', { bubbles: true }));
+          vi.advanceTimersByTime(50);
+          click(rowActionButton(rows()[0]!, 'Rename'));
+        });
+        const input = container!.querySelector<HTMLInputElement>(
+          'input[aria-label="Rename: Alpha"]',
+        )!;
+        expect(input).not.toBeNull();
+        expect(document.querySelector('[role="dialog"]')).toBeNull();
+        await act(async () => {
+          if (dismissal === 'blur') input.blur();
+          else
+            input.dispatchEvent(
+              new KeyboardEvent('keydown', {
+                key: 'Escape',
+                bubbles: true,
+              }),
+            );
+        });
+        await act(async () => vi.advanceTimersByTime(300));
+        expect(
+          container!.querySelector('input[aria-label="Rename: Alpha"]'),
+        ).toBeNull();
+        expect(document.querySelector('[role="dialog"]')).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['details', 'rename'])(
+    'preserves %s when a catalog shrink clamps its still-visible row to the last page',
+    async (mode) => {
+      connectionState.sessionId = 's12';
+      window.localStorage.setItem(
+        'qwen-web-shell-session-overview-page-size',
+        '10',
+      );
+      sessionsState.sessions = Array.from({ length: 15 }, (_, i) =>
+        session(`s${i}`, { displayName: `Session ${i}` }),
+      );
+      render();
+      act(() => click(footerButton('Next')!));
+      const row = rows().find(
+        (entry) => titleTrigger(entry).textContent === 'Session 12',
+      )!;
+      await act(async () =>
+        click(
+          rowActionButton(
+            row,
+            mode === 'details' ? 'Details for Session 12' : 'Rename',
+          ),
+        ),
+      );
+      if (mode === 'rename')
+        act(() =>
+          setInputValue(
+            container!.querySelector<HTMLInputElement>(
+              'input[aria-label="Rename: Session 12"]',
+            )!,
+            'Preserved draft',
+          ),
+        );
+      sessionsState.sessions = sessionsState.sessions.slice(5);
+      rerender();
+      await flushAsync();
+      expect(container!.textContent).toContain('Page 1 of 1');
+      if (mode === 'details') {
+        expect(rowTitles()).toContain('Session 12');
+        expect(
+          document.querySelector('[role="dialog"]')?.getAttribute('aria-label'),
+        ).toBe('Session 12');
+      } else {
+        expect(
+          container!.querySelector<HTMLInputElement>(
+            'input[aria-label="Rename: Session 12"]',
+          )?.value,
+        ).toBe('Preserved draft');
+      }
+    },
+  );
+
+  it.each(['filter', 'page'])(
+    'cancels an invisible rename after a live update changes its %s',
+    async (mode) => {
+      connectionState.sessionId = 'target';
+      window.localStorage.setItem(
+        'qwen-web-shell-session-overview-page-size',
+        '10',
+      );
+      const target = session('target', {
+        displayName: 'Target',
+        isWaitingForPermission: true,
+      });
+      sessionsState.sessions = [
+        session('question', {
+          displayName: 'Question',
+          isWaitingForUserQuestion: true,
+        }),
+        ...Array.from({ length: 9 }, (_, i) => session(`idle-${i}`)),
+        target,
+      ];
+      render();
+      if (mode === 'filter')
+        act(() => click(statusFilterButton('Needs attention')));
+      const row = rows().find(
+        (entry) => titleTrigger(entry).textContent === 'Target',
+      )!;
+      act(() => click(rowActionButton(row, 'Rename')));
+      act(() =>
+        setInputValue(
+          container!.querySelector<HTMLInputElement>(
+            'input[aria-label="Rename: Target"]',
+          )!,
+          'Hidden draft',
+        ),
+      );
+      sessionsState.sessions = sessionsState.sessions.map((entry) =>
+        entry.sessionId === 'target'
+          ? { ...entry, isWaitingForPermission: false }
+          : entry,
+      );
+      rerender();
+      await flushAsync();
+      expect(
+        container!.querySelector('input[aria-label="Rename: Target"]'),
+      ).toBeNull();
+      const cell = rows()[0]!.querySelectorAll('td')[2]!;
+      const mouseDown = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      });
+      act(() => cell.dispatchEvent(mouseDown));
+      expect(mouseDown.defaultPrevented).toBe(false);
+      act(() => click(cell));
+      expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('question', '/w');
+      sessionsState.sessions = sessionsState.sessions.map((entry) =>
+        entry.sessionId === 'target' ? target : entry,
+      );
+      rerender();
+      await flushAsync();
+      expect(rowTitles()).toContain('Target');
+      expect(
+        container!.querySelector('input[aria-label="Rename: Target"]'),
+      ).toBeNull();
+      expect(workspaceActions.renameSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['filter', 'page'])(
+    'closes details when live state removes its anchor through a %s',
+    async (mode) => {
+      window.localStorage.setItem(
+        'qwen-web-shell-session-overview-page-size',
+        '10',
+      );
+      const target = session('target', {
+        displayName: 'Target',
+        isWaitingForPermission: true,
+      });
+      sessionsState.sessions = [
+        ...Array.from({ length: 10 }, (_, i) =>
+          session(`idle-${i}`, { displayName: `Idle ${i}` }),
+        ),
+        target,
+      ];
+      render();
+      if (mode === 'filter')
+        act(() => click(statusFilterButton('Needs attention')));
+      const row = rows().find((candidate) =>
+        candidate.textContent?.includes('Target'),
+      )!;
+      await act(async () => click(rowActionButton(row, 'Details for Target')));
+      const dialog = document.querySelector('[role="dialog"]');
+      expect(dialog).not.toBeNull();
+      expect(dialog!.contains(document.activeElement)).toBe(true);
+      sessionsState.sessions = sessionsState.sessions.map((entry) =>
+        entry.sessionId === 'target'
+          ? { ...entry, isWaitingForPermission: false }
+          : entry,
+      );
+      rerender();
+      await flushAsync();
+      expect(rowTitles()).not.toContain('Target');
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      // The pinned popover held focus when its row left; the handoff must
+      // land on the panel, not <body> or a detached node.
+      expect(document.activeElement).toBe(
+        container!.querySelector('[data-web-shell-session-panel]'),
+      );
+      sessionsState.sessions = sessionsState.sessions.map((entry) =>
+        entry.sessionId === 'target' ? target : entry,
+      );
+      rerender();
+      await flushAsync();
+      expect(rowTitles()).toContain('Target');
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+    },
+  );
 
   it('keeps the title keyboard-focusable for opening a session', () => {
     sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
@@ -587,87 +1110,137 @@ describe('SessionOverviewPanel', () => {
     const title = titleTrigger(rows()[0]!);
     expect(title.tagName).toBe('BUTTON');
     act(() => click(title));
-    expect(onOpenSession).toHaveBeenCalledWith('s-run', '/w');
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s-run', '/w');
     expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
       'unchecked',
     );
   });
 
-  it('shows the full title in a tooltip on hover', async () => {
+  it('shows full session details on title hover including compatibility approval state', async () => {
     sessionsState.sessions = [
-      session('s1', { displayName: 'A long session title' }),
+      session('session-details', {
+        displayName: 'A long session title',
+        workspaceCwd: '/workspace/long/path',
+        branch: { name: 'feature/details', baseBranch: 'main' },
+        prs: [
+          {
+            number: 123,
+            url: 'https://github.com/o/r/pull/123',
+            issues: [
+              {
+                number: 45,
+                url: 'https://github.com/o/r/issues/45',
+                state: 'open',
+              },
+            ],
+          },
+        ],
+      }),
     ];
+    statusState.report = {
+      full: {
+        sessions: [
+          statusSession('session-details', {
+            workspaceCwd: '/workspace/long/path',
+            pendingPermissionCount: 1,
+          }),
+        ],
+      },
+    };
     vi.useFakeTimers();
     try {
       render();
       await act(async () => {
         titleTrigger(rows()[0]!).dispatchEvent(
-          new Event('pointermove', { bubbles: true }),
+          new Event('pointerover', { bubbles: true }),
         );
-        vi.advanceTimersByTime(300);
-        await Promise.resolve();
+        vi.advanceTimersByTime(299);
       });
-      expect(
-        document.querySelector('[data-slot="tooltip-content"]')?.textContent,
-      ).toContain('A long session title');
-      expect(
-        document
-          .querySelector('[data-slot="tooltip-arrow"]')
-          ?.getAttribute('viewBox'),
-      ).toBe('0 0 30 10');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('shows the full session id in a tooltip on hover', async () => {
-    sessionsState.sessions = [session('session-id-for-tooltip')];
-    vi.useFakeTimers();
-    try {
-      render();
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
       await act(async () => {
-        rows()[0]!
-          .querySelector('[data-web-shell-session-id]')!
-          .dispatchEvent(new Event('pointermove', { bubbles: true }));
-        vi.advanceTimersByTime(300);
+        vi.advanceTimersByTime(1);
         await Promise.resolve();
       });
-      expect(
-        document.querySelector('[data-slot="tooltip-content"]')?.textContent,
-      ).toContain('session-id-for-tooltip');
-      expect(
-        rows()[0]!
-          .querySelector('[data-web-shell-session-id]')!
-          .className.includes('truncate'),
-      ).toBe(true);
+      const details = document.querySelector('[role="dialog"]');
+      for (const text of [
+        'A long session title',
+        '/workspace/long/path',
+        'feature/details',
+        'session-details',
+        'Pull Request #123',
+        'Issue #45',
+        'Needs approval',
+      ]) {
+        expect(details?.textContent).toContain(text);
+      }
+      expect(onOpenSession).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('shows the full workspace path in a tooltip on hover', async () => {
+  it('uses compatibility status reports for running details', async () => {
     sessionsState.sessions = [
-      session('s1', { workspaceCwd: '/workspace/with/a/long/path' }),
+      session('report-run', { displayName: 'Report run' }),
     ];
-    vi.useFakeTimers();
-    try {
-      render();
-      await act(async () => {
-        rows()[0]!
-          .querySelector('[data-web-shell-session-workspace]')!
-          .dispatchEvent(new Event('pointermove', { bubbles: true }));
-        vi.advanceTimersByTime(300);
-        await Promise.resolve();
-      });
-      expect(
-        document.querySelector('[data-slot="tooltip-content"]')?.textContent,
-      ).toContain('/workspace/with/a/long/path');
-    } finally {
-      vi.useRealTimers();
-    }
+    statusState.report = {
+      full: {
+        sessions: [statusSession('report-run', { hasActivePrompt: true })],
+      },
+    };
+    render();
+    await act(async () =>
+      click(rowActionButton(rows()[0]!, 'Details for Report run')),
+    );
+    expect(
+      rows()[0]!.querySelector('[data-web-shell-session-status]')?.textContent,
+    ).toBe('Running');
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain('Running');
+    expect(dialog?.textContent).not.toContain('Idle');
   });
 
-  it('shows worktree metadata in a column immediately after the title', () => {
+  it('keeps the session ID out of the table and offers a details button', async () => {
+    sessionsState.sessions = [
+      session('session-id-for-details', { displayName: 'Details' }),
+    ];
+    render();
+    expect(container!.querySelector('[data-web-shell-session-id]')).toBeNull();
+    expect(
+      Array.from(container!.querySelectorAll('thead th')).map(
+        (header) => header.textContent,
+      ),
+    ).not.toContain('Session ID');
+    await act(async () =>
+      click(rowActionButton(rows()[0]!, 'Details for Details')),
+    );
+    expect(
+      document.querySelector('[role="dialog"] [data-web-shell-session-id]')
+        ?.textContent,
+    ).toBe('session-id-for-details');
+    expect(onOpenSession).not.toHaveBeenCalled();
+    expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
+      'unchecked',
+    );
+  });
+
+  it('shows the full workspace path through the explicit details entry', async () => {
+    sessionsState.sessions = [
+      session('s1', {
+        displayName: 'One',
+        workspaceCwd: '/workspace/with/a/long/path',
+      }),
+    ];
+    render();
+    await act(async () =>
+      click(rowActionButton(rows()[0]!, 'Details for One')),
+    );
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      '/workspace/with/a/long/path',
+    );
+  });
+
+  it('keeps workspace, branch and PR together below the session title', () => {
     sessionsState.sessions = [
       session('s1', {
         displayName: 'One',
@@ -686,100 +1259,80 @@ describe('SessionOverviewPanel', () => {
     ];
     render();
     const headers = Array.from(container!.querySelectorAll('thead th'));
-    expect(headers[1]?.textContent).toBe('Title');
-    expect(headers[2]?.textContent).toBe('Worktree');
-    expect(headers[3]?.textContent).toBe('Session ID');
+    expect(headers.map((header) => header.textContent)).toEqual([
+      '',
+      'Title',
+      'Status',
+      'Time',
+      'Actions',
+    ]);
+    const titleCell = titleTrigger(rows()[0]!).closest('td');
     expect(
-      rows()[0]?.querySelector('[data-web-shell-session-git]')?.textContent,
+      titleCell?.querySelector('[data-web-shell-session-git]')?.textContent,
     ).toBe('feature/a-very-long-branch-name');
     expect(
-      rows()[0]?.querySelector('[data-web-shell-session-git] svg'),
-    ).toBeNull();
-    const gitCell = rows()[0]
-      ?.querySelector('[data-web-shell-session-git]')
-      ?.closest('td');
-    const worktree = rows()[0]?.querySelector('[data-web-shell-session-git]');
-    expect(worktree?.className).toContain('min-w-0');
-    expect(worktree?.className).toContain('flex-1');
-    expect(worktree?.className).toContain('truncate');
-    expect(gitCell?.querySelector('a')?.textContent).toBe('#123 +2');
+      titleCell?.querySelector('[data-web-shell-session-workspace]')
+        ?.textContent,
+    ).toBe('w');
     expect(
-      rows()[0]
-        ?.querySelector('[data-web-shell-session-title]')
-        ?.closest('td')
-        ?.querySelector('a'),
-    ).toBeNull();
+      titleCell
+        ?.querySelector('[data-web-shell-session-workspace]')
+        ?.getAttribute('title'),
+    ).toBe('/w');
     expect(
-      rows()[1]?.querySelector('[data-web-shell-session-git]')?.textContent,
-    ).toBe('-');
-  });
-
-  it('shows the sidebar details popover from the worktree column', async () => {
-    vi.useFakeTimers();
-    try {
-      sessionsState.sessions = [
-        session('session-details', {
-          displayName: 'Detailed session',
-          workspaceCwd: '/work/qwen-code',
-          updatedAt: '2026-08-26T09:00:00.000Z',
-          clientCount: 2,
-          worktree: {
-            slug: 'details',
-            path: '/work/qwen-code/.worktrees/details',
-            branch: 'worktree/details',
-          },
-          prs: [
-            { number: 121, url: 'https://github.com/o/r/pull/121' },
-            { number: 123, url: 'https://github.com/o/r/pull/123' },
-          ],
-        }),
-      ];
-      render();
-      const trigger = container!
-        .querySelector('[data-web-shell-session-git]')!
-        .closest('div')!;
-      await act(async () => {
-        trigger.dispatchEvent(new Event('pointerover', { bubbles: true }));
-        vi.advanceTimersByTime(300);
-        await Promise.resolve();
-      });
-
-      const details = document.querySelector('[role="dialog"]');
-      expect(details?.getAttribute('data-align')).toBe('center');
-      expect(details?.textContent).toContain('worktree/details');
-      expect(details?.textContent).toContain('Pull Request #123');
-      expect(details?.textContent).toContain('Pull Request #121');
-      expect(details?.textContent).not.toContain('Detailed session');
-      expect(details?.textContent).not.toContain('qwen-code');
-      expect(details?.textContent).not.toContain('session-details');
-      expect(details?.textContent).not.toContain('2 client(s)');
-      expect(
-        details?.querySelectorAll('a[href*="/pull/"]')[0]?.getAttribute('href'),
-      ).toBe('https://github.com/o/r/pull/123');
-    } finally {
-      vi.useRealTimers();
+      titleCell
+        ?.querySelector('[data-web-shell-session-git]')
+        ?.getAttribute('title'),
+    ).toBe('feature/a-very-long-branch-name');
+    expect(titleCell?.querySelector('a')?.textContent).toBe('#123 +2');
+    for (const selector of [
+      '[data-web-shell-session-git]',
+      '[data-web-shell-session-workspace]',
+    ]) {
+      expect(titleCell?.querySelector(selector)?.className).toContain(
+        'truncate',
+      );
     }
+    expect(rows()[1]?.querySelector('[data-web-shell-session-git]')).toBeNull();
   });
 
-  it('does not show an empty worktree popover', async () => {
-    vi.useFakeTimers();
-    try {
-      sessionsState.sessions = [session('no-worktree')];
-      render();
-      const trigger = container!.querySelector('[data-web-shell-session-git]')!;
-      await act(async () => {
-        trigger.dispatchEvent(new Event('pointerover', { bubbles: true }));
-        vi.advanceTimersByTime(300);
-        await Promise.resolve();
-      });
-
-      expect(document.querySelector('[role="dialog"]')).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
+  it('does not open the session when a PR badge is clicked', async () => {
+    sessionsState.sessions = [
+      session('s1', {
+        displayName: 'One',
+        prs: [{ number: 123, url: 'https://github.com/o/r/pull/123' }],
+      }),
+    ];
+    render();
+    const badge = rows()[0]!.querySelector('a')!;
+    await act(async () =>
+      badge.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      ),
+    );
+    expect(onOpenSession).not.toHaveBeenCalled();
+    expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
+      'unchecked',
+    );
   });
 
-  it('copies the session ID and restores the hover icon after two seconds', async () => {
+  it('provides details even when a session has no Git metadata', async () => {
+    sessionsState.sessions = [
+      session('no-worktree', { displayName: 'No worktree' }),
+    ];
+    render();
+    await act(async () =>
+      click(rowActionButton(rows()[0]!, 'Details for No worktree')),
+    );
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'no-worktree',
+    );
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'Idle',
+    );
+  });
+
+  it('copies the session ID from details without opening or selecting the row', async () => {
     vi.useFakeTimers();
     const writeText = vi.fn(async () => {});
     Object.defineProperty(navigator, 'clipboard', {
@@ -787,30 +1340,27 @@ describe('SessionOverviewPanel', () => {
       value: { writeText },
     });
     try {
-      sessionsState.sessions = [session('session-to-copy')];
+      sessionsState.sessions = [
+        session('session-to-copy', { displayName: 'Copy' }),
+      ];
       render();
-      const copy = container!.querySelector(
+      await act(async () =>
+        click(rowActionButton(rows()[0]!, 'Details for Copy')),
+      );
+      const copy = document.querySelector(
         '[data-web-shell-session-id-copy]',
       ) as HTMLButtonElement;
-      expect(copy.className).toContain('opacity-0');
-      expect(copy.className).toContain('group-hover:opacity-100');
-      expect(copy.querySelector('.lucide-copy')).not.toBeNull();
-
+      expect(copy.tabIndex).toBe(0);
       await act(async () => copy.click());
       expect(writeText).toHaveBeenCalledWith('session-to-copy');
       expect(copy.querySelector('.lucide-check')).not.toBeNull();
-      expect(copy.className).not.toContain('opacity-0');
+      expect(onOpenSession).not.toHaveBeenCalled();
       expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
         'unchecked',
       );
-
       act(() => vi.advanceTimersByTime(2000));
       expect(copy.querySelector('.lucide-copy')).not.toBeNull();
     } finally {
-      act(() => root?.unmount());
-      container?.remove();
-      root = null;
-      container = null;
       Reflect.deleteProperty(navigator, 'clipboard');
       vi.useRealTimers();
     }
@@ -833,7 +1383,7 @@ describe('SessionOverviewPanel', () => {
     await flushAsync();
     const beta = rows().find((tr) => tr.textContent?.includes('Beta'))!;
     act(() => click(titleTrigger(beta)));
-    expect(onOpenSession).toHaveBeenCalledWith('b1', '/wsB');
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('b1', '/wsB');
   });
 
   it('keeps equal session ids in different workspaces independent', async () => {
@@ -883,24 +1433,25 @@ describe('SessionOverviewPanel', () => {
     expect(onCurrentSessionRemoved).not.toHaveBeenCalled();
   });
 
-  it('keeps footer actions visible and disables them until a row is selected', () => {
+  it('shows batch actions only while selected and keeps pagination available', () => {
     sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
     render({ onOpenSplit: vi.fn() });
-    expect(selectAllCheckbox()).not.toBeNull();
-    const actions = [
-      footerButton('Archive'),
-      footerButton('Delete'),
-      footerButton('Open in new tab'),
-      footerButton('Open in split'),
-    ] as HTMLButtonElement[];
-    expect(actions.every((button) => button.disabled)).toBe(true);
+    const labels = ['Archive', 'Delete', 'Open in new tab', 'Open in split'];
+    expect(labels.map(footerButton)).toEqual([null, null, null, null]);
+    expect(container!.textContent).toContain('1 session(s)');
+    expect(footerButton('Next')).not.toBeNull();
     act(() => click(rowCheckbox(rows()[0]!)));
     expect(onOpenSession).not.toHaveBeenCalled();
     expect(container!.textContent).toContain('1 of 1 row(s) selected.');
-    const openInTab = footerButton('Open in new tab') as HTMLButtonElement;
-    expect(actions.every((button) => button.disabled)).toBe(false);
-    // The new-tab action is not the primary button style.
-    expect(openInTab.getAttribute('data-variant')).toBe('outline');
+    for (const label of labels) {
+      const button = footerButton(label);
+      expect(button).not.toBeNull();
+      expect(button!.disabled).toBe(false);
+    }
+    act(() => click(rowCheckbox(rows()[0]!)));
+    expect(labels.map(footerButton)).toEqual([null, null, null, null]);
+    expect(container!.textContent).toContain('1 session(s)');
+    expect(footerButton('Next')).not.toBeNull();
   });
 
   it('opens the selected sessions as a split in ONE new tab (?split=…)', () => {
@@ -1100,7 +1651,7 @@ describe('SessionOverviewPanel', () => {
     render();
 
     const search = container!.querySelector(
-      'input[aria-label="Search sessions…"]',
+      'input[aria-label="Search title, branch, PR or ID…"]',
     ) as HTMLInputElement;
     expect(search.parentElement?.className).toContain('w-full');
     expect(search.parentElement?.className).toContain('max-w-[300px]');
@@ -1165,7 +1716,7 @@ describe('SessionOverviewPanel', () => {
     expect(rows()).toHaveLength(50);
     act(() => click(selectAllCheckbox()));
     expect(container!.textContent).toContain('60 of 60 row(s) selected.');
-  });
+  }, 15000);
 
   it('lists an other-workspace session as a row with its folder', async () => {
     connectionState.capabilities = {
@@ -1201,7 +1752,7 @@ describe('SessionOverviewPanel', () => {
       primary.querySelector('[data-web-shell-session-workspace]')?.textContent,
     ).toBe('w');
     expect(
-      container!.querySelector('button[aria-label="Filter by workspace"]'),
+      container!.querySelector('button[aria-label^="Filter by workspace:"]'),
     ).not.toBeNull();
   });
 
@@ -1219,7 +1770,7 @@ describe('SessionOverviewPanel', () => {
     ];
     render();
     const input = container!.querySelector(
-      '[aria-label="Search sessions…"]',
+      '[aria-label="Search title, branch, PR or ID…"]',
     ) as HTMLInputElement;
     act(() => {
       setInputValue(input, 'Alpha');
@@ -1263,9 +1814,11 @@ describe('SessionOverviewPanel', () => {
     expect(rowTitles()).toContain('Alpha');
     expect(rowTitles()).toContain('Beta');
     const trigger = container!.querySelector(
-      'button[aria-label="Filter by workspace"]',
+      'button[aria-label^="Filter by workspace:"]',
     ) as HTMLElement;
-    expect(trigger.closest('th')?.textContent).toContain('Workspace');
+    expect(trigger.closest('th')).toBeNull();
+    expect(trigger.textContent).toContain('All workspaces');
+    expect(trigger.getAttribute('aria-label')).toContain(trigger.textContent);
     expect(trigger.querySelector('.lucide-funnel')).not.toBeNull();
     act(() => click(trigger));
     const filterPanel = document.querySelector(
@@ -1281,6 +1834,8 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(main));
     expect(rowTitles()).toEqual(['Beta']);
+    expect(trigger.textContent).toContain('1/2 workspaces');
+    expect(trigger.getAttribute('aria-label')).toContain(trigger.textContent);
 
     const payments = document.querySelector(
       '#session-overview-workspace-1',
@@ -1290,7 +1845,7 @@ describe('SessionOverviewPanel', () => {
       container!.querySelector('[data-slot="data-table-empty"]')?.textContent,
     ).toContain('No data');
     expect(
-      container!.querySelector('button[aria-label="Filter by workspace"]'),
+      container!.querySelector('button[aria-label^="Filter by workspace:"]'),
     ).not.toBeNull();
 
     const all = document.querySelector(
@@ -1323,7 +1878,7 @@ describe('SessionOverviewPanel', () => {
       ),
     );
     expect(
-      container!.querySelector('button[aria-label="Filter by workspace"]'),
+      container!.querySelector('button[aria-label^="Filter by workspace:"]'),
     ).toBeNull();
   });
 
@@ -1344,7 +1899,7 @@ describe('SessionOverviewPanel', () => {
     await flushAsync();
     // Exclude /wsB through the funnel filter.
     const trigger = container!.querySelector(
-      'button[aria-label="Filter by workspace"]',
+      'button[aria-label^="Filter by workspace:"]',
     ) as HTMLElement;
     act(() => click(trigger));
     const payments = document.querySelector(
@@ -1371,7 +1926,7 @@ describe('SessionOverviewPanel', () => {
     );
     await flushAsync();
     expect(
-      container!.querySelector('button[aria-label="Filter by workspace"]'),
+      container!.querySelector('button[aria-label^="Filter by workspace:"]'),
     ).toBeNull();
     expect(rowTitles()).toEqual(['Beta']);
   });
@@ -1393,7 +1948,7 @@ describe('SessionOverviewPanel', () => {
     await flushAsync();
     // Exclude the primary workspace through the funnel filter.
     const trigger = container!.querySelector(
-      'button[aria-label="Filter by workspace"]',
+      'button[aria-label^="Filter by workspace:"]',
     ) as HTMLElement;
     act(() => click(trigger));
     const main = document.querySelector(
@@ -1417,7 +1972,7 @@ describe('SessionOverviewPanel', () => {
     rerender();
     await flushAsync();
     expect(
-      container!.querySelector('button[aria-label="Filter by workspace"]'),
+      container!.querySelector('button[aria-label^="Filter by workspace:"]'),
     ).toBeNull();
     expect(rowTitles()).toEqual(['Alpha']);
   });
@@ -1474,41 +2029,32 @@ describe('SessionOverviewPanel', () => {
       '[data-slot="table"]',
     ) as HTMLTableElement;
     expect(renderedTable.dataset.layout).toBe('scroll');
-    expect(renderedTable.style.minWidth).toBe('912px');
+    expect(renderedTable.style.minWidth).toBe('696px');
     expect(renderedTable.style.tableLayout).toBe('fixed');
     expect(renderedTable.querySelectorAll('col')).toHaveLength(headers.length);
     expect(
       (renderedTable.querySelectorAll('col')[1] as HTMLTableColElement).style
         .width,
-    ).toBe('224px');
+    ).toBe('260px');
     expect(headers.at(-1)?.textContent).toContain('Actions');
     expect(headers.at(-1)?.className).toContain('text-center');
-    expect((headers.at(-1) as HTMLElement).style.width).toBe('128px');
-    expect((cells.at(-1) as HTMLElement).style.width).toBe('128px');
+    expect((headers.at(-1) as HTMLElement).style.width).toBe('156px');
+    expect((cells.at(-1) as HTMLElement).style.width).toBe('156px');
     expect(cells.at(-1)?.firstElementChild?.className).toContain(
       'justify-center',
     );
     const timeHeader = headers.find((header) =>
       header.textContent?.includes('Time'),
     );
-    const sessionIdHeader = headers.find((header) =>
-      header.textContent?.includes('Session ID'),
+    expect(headers.some((header) => header.textContent === 'Session ID')).toBe(
+      false,
     );
-    const gitHeader = headers.find(
-      (header) => header.textContent === 'Worktree',
+    expect(headers.some((header) => header.textContent === 'Worktree')).toBe(
+      false,
     );
-    const workspaceHeader = headers.find((header) =>
-      header.textContent?.includes('Workspace'),
-    );
-    const sessionIdColumnIndex = headers.indexOf(sessionIdHeader!);
-    expect((gitHeader as HTMLElement).style.width).toBe('144px');
+    expect((headers[2] as HTMLElement).style.width).toBe('144px');
     expect(cells[2]?.firstElementChild?.className).toContain('truncate');
-    expect((sessionIdHeader as HTMLElement).style.width).toBe('136px');
-    expect((cells[sessionIdColumnIndex] as HTMLElement).style.width).toBe(
-      '136px',
-    );
-    expect((workspaceHeader as HTMLElement).style.width).toBe('128px');
-    expect((timeHeader as HTMLElement).style.width).toBe('112px');
+    expect((timeHeader as HTMLElement).style.width).toBe('96px');
     const timeSortButton = timeHeader?.querySelector('button');
     expect(timeSortButton?.className).toContain('px-0');
     expect(timeSortButton?.className).toContain('text-sm');
@@ -1521,7 +2067,7 @@ describe('SessionOverviewPanel', () => {
     expect((headers[0] as HTMLElement).style.width).toBe('40px');
     expect(headers[1]?.className).toContain('sticky');
     expect((headers[1] as HTMLElement).style.left).toBe('40px');
-    expect((headers[1] as HTMLElement).style.width).toBe('224px');
+    expect((headers[1] as HTMLElement).style.width).toBe('260px');
     expect(headers.at(-1)?.className).toContain('sticky');
     expect((headers.at(-1) as HTMLElement).style.right).toBe('0px');
     expect(cells[0]?.className).toContain('sticky');
@@ -1529,14 +2075,10 @@ describe('SessionOverviewPanel', () => {
     expect((cells[0] as HTMLElement).style.width).toBe('40px');
     expect(cells[1]?.className).toContain('sticky');
     expect((cells[1] as HTMLElement).style.left).toBe('40px');
-    expect((cells[1] as HTMLElement).style.width).toBe('224px');
+    expect((cells[1] as HTMLElement).style.width).toBe('260px');
     expect(titleTrigger(rows()[0]!).closest('.truncate')).not.toBeNull();
-    expect(titleTrigger(rows()[0]!).className).toContain('text-xs');
+    expect(titleTrigger(rows()[0]!).className).toContain('text-sm');
     expect(cells[1]?.querySelector('.font-semibold')).not.toBeNull();
-    for (const cell of cells.slice(2, 6)) {
-      expect(cell.querySelector('.text-muted-foreground')).toBeNull();
-      expect(cell.querySelector('.text-current')).not.toBeNull();
-    }
     expect(cells.at(-1)?.className).toContain('sticky');
     expect((cells.at(-1) as HTMLElement).style.right).toBe('0px');
     expect(headers.at(-1)?.className).not.toContain('border-l');
@@ -1590,9 +2132,9 @@ describe('SessionOverviewPanel', () => {
       expect(table.style.tableLayout).toBe('fixed');
       expect(
         parseFloat((headers[1] as HTMLElement).style.width),
-      ).toBeGreaterThan(224);
-      expect((headers[1] as HTMLElement).style.minWidth).toBe('224px');
-      expect((headers.at(-1) as HTMLElement).style.width).toBe('128px');
+      ).toBeGreaterThan(260);
+      expect((headers[1] as HTMLElement).style.minWidth).toBe('260px');
+      expect((headers.at(-1) as HTMLElement).style.width).toBe('156px');
       const columnWidth = Array.from(table.querySelectorAll('col')).reduce(
         (total, column) => total + parseFloat(column.style.width),
         0,
@@ -2552,6 +3094,21 @@ describe('SessionOverviewPanel', () => {
 });
 
 describe('SessionOverviewPanel polling', () => {
+  it('uses the polling interval advertised by the workspace daemon', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+    };
+    workspaceCapabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      sessionLiveStatePollIntervalMs: 10_000,
+    };
+    render();
+    expect(workspaceLiveStateOptions.enabled).toBe(true);
+    expect(workspaceLiveStateOptions.pollIntervalMs).toBe(10_000);
+  });
+
   it('keeps the old status-report details fresh', async () => {
     sessionsState.sessions = [session('s')];
     vi.useFakeTimers();

@@ -28,6 +28,7 @@ import {
   sanitizeDisplayText,
   sanitizeLogText,
   sanitizePromptText,
+  stripMessagePrefix,
   truncateCodePoints,
 } from '@qwen-code/channel-base';
 import { testBotMention, stripBotMention } from './mention.js';
@@ -311,6 +312,7 @@ interface PendingFinalDelivery {
   sourceMessageId?: string;
   actor?: string;
   triggerKind?: string;
+  sourceLabel?: string;
 }
 
 type InboundTaskState =
@@ -384,6 +386,8 @@ function isInboundEnvelope(value: unknown): value is Envelope | undefined {
       Array.isArray(envelope.attachments)) &&
     (envelope.metadata === undefined ||
       typeof envelope.metadata === 'string') &&
+    (envelope.bypassMessagePrefix === undefined ||
+      envelope.bypassMessagePrefix === true) &&
     (envelope.alreadyPrefixed === undefined ||
       envelope.alreadyPrefixed === true)
   );
@@ -466,6 +470,23 @@ function buildTriggerGuidance(reason: string): string {
   return `For ${reason}, output exactly ${NO_REPLY_SENTINEL} when a public reply is unnecessary.`;
 }
 
+function isPersistedSourceLabel(value: unknown): value is string {
+  if (
+    typeof value !== 'string' ||
+    value.length < 3 ||
+    value.length > 256 ||
+    !value.startsWith('[') ||
+    !value.endsWith(']')
+  ) {
+    return false;
+  }
+  for (let index = 1; index < value.length - 1; index++) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return false;
+  }
+  return true;
+}
+
 function isPendingFinalDelivery(value: unknown): value is PendingFinalDelivery {
   const item = value as PendingFinalDelivery;
   return (
@@ -476,7 +497,8 @@ function isPendingFinalDelivery(value: unknown): value is PendingFinalDelivery {
     typeof item.chatId === 'string' &&
     typeof item.threadId === 'string' &&
     typeof item.fullText === 'string' &&
-    typeof item.sessionId === 'string'
+    typeof item.sessionId === 'string' &&
+    (item.sourceLabel === undefined || isPersistedSourceLabel(item.sourceLabel))
   );
 }
 
@@ -504,7 +526,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
-    config.blockStreaming = 'off';
     config.instructions = [
       config.instructions?.trim(),
       GITHUB_PUBLICATION_INSTRUCTIONS,
@@ -661,20 +682,27 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     chatId: string,
     threadId: string | undefined,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
-    await this.createIssueComment(chatId, threadId, text);
+    await this.createIssueComment(
+      chatId,
+      threadId,
+      this.formatMarkdownAttributedText(text, sourceLabel),
+    );
   }
 
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     await this.publishFinalResponse(
       chatId,
       this.getResponseThreadId(sessionId),
       text,
       sessionId,
+      sourceLabel ?? this.getResponseSourceLabel(sessionId),
     );
   }
 
@@ -683,6 +711,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     threadId: string | undefined,
     fullText: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     const threadMatch = threadId?.match(/^(issue|pr):(\d+)$/);
     const metadata = this.getResponseMetadata(sessionId);
@@ -725,7 +754,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const comment = await this.createIssueComment(
         chatId,
         threadId,
-        fullText,
+        this.formatMarkdownAttributedText(fullText, sourceLabel),
         3,
         isDefiniteNoWriteGithubError,
       );
@@ -756,6 +785,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             chatId,
             threadId,
             fullText,
+            sourceLabel,
           });
         } catch (persistError) {
           throw new Error(
@@ -805,6 +835,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       chatId: string;
       threadId: string;
       fullText: string;
+      sourceLabel?: string;
     },
   ): void {
     const record: PendingFinalDelivery = {
@@ -827,6 +858,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       sourceMessageId: input.sourceMessageId,
       actor: input.actor,
       triggerKind: input.triggerKind,
+      sourceLabel: input.sourceLabel,
     };
     const pending = this.readPendingFinalDeliveries(true).filter(
       (item) => item.id !== record.id,
@@ -871,7 +903,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         const comment = await this.createIssueComment(
           record.chatId,
           record.threadId,
-          record.fullText,
+          this.formatMarkdownAttributedText(
+            record.fullText,
+            record.sourceLabel,
+          ),
           3,
           isDefiniteNoWriteGithubError,
           signal,
@@ -1409,6 +1444,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         reason === 'review_requested'
           ? `Review requested: ${displayTitle}`
           : `Issue assigned: ${displayTitle}`,
+      bypassMessagePrefix: true,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -1428,7 +1464,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       await this.processCommentLane(ctx, false, true);
       return;
     }
-    const allComments = (await this.fetchNewComments(ctx)).filter((comment) => {
+    const newComments = (await this.fetchNewComments(ctx)).filter((comment) => {
       const key = comment.node_id || String(comment.id);
       const sender = (comment.user?.login || 'unknown').toLowerCase();
       return (
@@ -1436,18 +1472,31 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.gate.isAllowed(sender)
       );
     });
-    const comments = allComments.slice(-MAX_AGGREGATE_COMMENTS);
-    if (comments.length === 0) return;
-
-    for (const comment of allComments) {
+    for (const comment of newComments) {
       this.recordDispatchedComment(comment.node_id || String(comment.id));
     }
+    const messagePrefix = this.configuredMessagePrefix();
+    const comments = newComments
+      .flatMap((comment) => {
+        const rawBody = comment.body || '';
+        const body = messagePrefix
+          ? stripMessagePrefix(
+              this.botUsername
+                ? stripBotMention(rawBody, this.botUsername)
+                : rawBody,
+              messagePrefix,
+            )
+          : rawBody.trim();
+        return body === undefined ? [] : [{ comment, body }];
+      })
+      .slice(-MAX_AGGREGATE_COMMENTS);
+    if (comments.length === 0) return;
 
-    const first = comments[0]!;
+    const first = comments[0]!.comment;
     const summary = comments
       .map(
-        (comment) =>
-          `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText((comment.body || '').trim(), MAX_AGGREGATE_COMMENT_CHARS)}`,
+        ({ comment, body }) =>
+          `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText(body, MAX_AGGREGATE_COMMENT_CHARS)}`,
       )
       .join('\n');
     const envelope: Envelope = {
@@ -1459,6 +1508,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       messageId: String(first.id),
       text: `Review these new comments and output exactly ${NO_REPLY_SENTINEL} if no public reply is needed:\n${summary}`,
       displayText: summary,
+      bypassMessagePrefix: true,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -1466,7 +1516,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     };
 
     await this.dispatchEnvelope(envelope, ctx.issueNumber, {
-      dispatchedComments: allComments.map(
+      dispatchedComments: newComments.map(
         (comment) => comment.node_id || String(comment.id),
       ),
     });
@@ -1732,6 +1782,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           posted = await this.postErrorComment(
             envelope.chatId,
             task.issueNumber,
+            this.getInboundErrorSourceLabel(envelope),
           );
         }
         this.transitionInboundTask(task.id, 'failed', {
@@ -2151,6 +2202,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private async postErrorComment(
     chatId: string,
     issueNumber: number,
+    sourceLabel?: string,
   ): Promise<boolean> {
     try {
       await this.githubApi(
@@ -2159,7 +2211,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             owner: chatId.split('/')[0],
             repo: chatId.split('/')[1],
             issue_number: issueNumber,
-            body: '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+            body: this.formatMarkdownAttributedText(
+              '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+              sourceLabel,
+            ),
           }),
         `postErrorComment(${chatId}#${issueNumber})`,
       );

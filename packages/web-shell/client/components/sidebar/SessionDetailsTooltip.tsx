@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type ReactElement } from 'react';
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactElement,
+} from 'react';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
   CheckIcon,
@@ -11,9 +18,18 @@ import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { writeClipboardText } from '../../utils/clipboard';
 import { isExternalOpenUrl } from '../../utils/externalOpen';
-import { workspaceBasename } from '../../utils/workspace';
-import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
-import { SessionPrStateIcon, sessionPrStateLabel } from '../SessionPrStateIcon';
+import {
+  Popover,
+  PopoverAnchor,
+  PopoverContent,
+  PopoverTrigger,
+} from '../ui/popover';
+import {
+  SessionIssueStateIcon,
+  SessionPrStateIcon,
+  sessionIssueStateLabel,
+  sessionPrStateLabel,
+} from '../SessionPrStateIcon';
 import styles from './WebShellSidebar.module.css';
 import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
 
@@ -22,7 +38,12 @@ interface SessionDetailsTooltipProps {
   label: string;
   time: string;
   completedUnread: boolean;
-  worktreeOnly?: boolean;
+  workspaceLabel?: string;
+  openOnClick?: boolean;
+  ownerToken?: string;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  side?: 'right' | 'bottom';
   children: ReactElement;
 }
 
@@ -31,12 +52,19 @@ export function SessionDetailsTooltip({
   label,
   time,
   completedUnread,
-  worktreeOnly = false,
+  workspaceLabel,
+  openOnClick = false,
+  ownerToken,
+  open: controlledOpen,
+  onOpenChange,
+  side = 'right',
   children,
 }: SessionDetailsTooltipProps) {
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const open = controlledOpen ?? uncontrolledOpen;
+  const setOpen = onOpenChange ?? setUncontrolledOpen;
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>(
     'idle',
   );
@@ -44,20 +72,51 @@ export function SessionDetailsTooltip({
   const copyResetTimerRef = useRef<number | undefined>(undefined);
   const openTimerRef = useRef<number | undefined>(undefined);
   const closeTimerRef = useRef<number | undefined>(undefined);
-  const anchorRef = useRef<HTMLDivElement | null>(null);
+  const anchorRef = useRef<HTMLElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const copyButtonRef = useRef<HTMLButtonElement>(null);
+  const restoreFocusRef = useRef(false);
+  // The overview shares one token so its own entry points replace each
+  // other; every other instance keeps its own, so a hover elsewhere (e.g.
+  // the sidebar) never moves focus out of this popover.
+  const selfOwnerToken = useId();
+  const detailsOwner = ownerToken ?? selfOwnerToken;
   const collisionBoundary = open
-    ? resolveSessionDetailsCollisionBoundary(
-        anchorRef.current?.closest<HTMLElement>('aside') ?? null,
-      )
+    ? side === 'bottom'
+      ? [
+          anchorRef.current?.closest<HTMLElement>('[data-pane-session-id]'),
+          anchorRef.current?.closest<HTMLElement>('[data-web-shell-root]'),
+        ].filter((element): element is HTMLElement => Boolean(element))
+      : resolveSessionDetailsCollisionBoundary(anchorRef.current)
     : null;
   const folderPath = session.workspaceCwd;
-  const folderName = workspaceBasename(folderPath);
   const branch = session.worktree?.branch ?? session.branch?.name;
-  const status = session.hasActivePrompt
-    ? t('sidebar.running')
-    : completedUnread
-      ? t('sidebar.completedUnread')
-      : t('sidebar.clients', { count: session.clientCount ?? 0 });
+  const prs = [...(session.prs ?? [])]
+    .reverse()
+    .filter((pr) => isExternalOpenUrl(pr.url));
+  // Stacked PRs can close the same issue; list it once, under its newest PR.
+  const seenIssueUrls = new Set<string>();
+  const issues = prs
+    .flatMap((pr) => pr.issues ?? [])
+    .filter(
+      (issue) =>
+        isExternalOpenUrl(issue.url) &&
+        !seenIssueUrls.has(issue.url) &&
+        seenIssueUrls.add(issue.url),
+    );
+  const status = session.isWaitingForPermission
+    ? t('sessionsOverview.status.needsApproval')
+    : session.isWaitingForUserQuestion
+      ? t('sessionsOverview.status.askUserQuestion')
+      : session.hasActivePrompt
+        ? t('sidebar.running')
+        : session.activeWorkState === 'active'
+          ? t('sidebar.activeWork')
+          : session.activeWorkState === 'unknown'
+            ? t('sidebar.activityUnknown')
+            : completedUnread
+              ? t('sidebar.completedUnread')
+              : `${t('sessionsOverview.status.idle')} · ${t('sidebar.clients', { count: session.clientCount ?? 0 })}`;
 
   useEffect(() => {
     return () => {
@@ -68,22 +127,62 @@ export function SessionDetailsTooltip({
     };
   }, []);
 
+  // A click-pinned popover unmounts together with its anchor row (e.g. live
+  // state re-sorts the row off the page). Layout cleanups run before the
+  // row's DOM is removed, so if the popover still holds focus, hand it to
+  // the panel root here — otherwise the browser drops it to <body>.
+  useLayoutEffect(() => {
+    return () => {
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- read at unmount, a mount-time copy would always be null
+      const content = contentRef.current;
+      if (!content) return;
+      let active: Element | null = content.ownerDocument.activeElement;
+      while (active?.shadowRoot?.activeElement) {
+        active = active.shadowRoot.activeElement;
+      }
+      if (!active || !content.contains(active)) return;
+      anchorRef.current
+        ?.closest<HTMLElement>('[data-web-shell-session-panel]')
+        ?.focus({ preventScroll: true });
+    };
+  }, []);
+
   useEffect(() => {
     copyAttemptRef.current += 1;
     window.clearTimeout(copyResetTimerRef.current);
     setCopyStatus('idle');
-  }, [session.sessionId]);
+    if (!open) {
+      window.clearTimeout(openTimerRef.current);
+      window.clearTimeout(closeTimerRef.current);
+    }
+  }, [session.sessionId, open]);
 
   const cancelClose = () => window.clearTimeout(closeTimerRef.current);
   const openAfterDelay = () => {
     cancelClose();
     if (open) return;
     window.clearTimeout(openTimerRef.current);
-    openTimerRef.current = window.setTimeout(() => setOpen(true), 300);
+    openTimerRef.current = window.setTimeout(() => {
+      const anchor = anchorRef.current;
+      let activeElement = anchor?.ownerDocument.activeElement;
+      while (activeElement?.shadowRoot?.activeElement) {
+        activeElement = activeElement.shadowRoot.activeElement;
+      }
+      // Move focus before replacing its owner so the new hover stays open.
+      if (
+        activeElement?.closest(
+          `[data-web-shell-session-details-content="${detailsOwner}"]`,
+        )
+      ) {
+        anchor?.focus({ preventScroll: true });
+      }
+      setOpen(true);
+    }, 300);
   };
   const close = () => {
     window.clearTimeout(openTimerRef.current);
     cancelClose();
+    restoreFocusRef.current = true;
     setOpen(false);
     copyAttemptRef.current += 1;
     window.clearTimeout(copyResetTimerRef.current);
@@ -95,67 +194,97 @@ export function SessionDetailsTooltip({
     closeTimerRef.current = window.setTimeout(close, 100);
   };
   const handleOpenChange = (nextOpen: boolean) => {
-    if (nextOpen) setOpen(true);
-    else close();
+    if (nextOpen) {
+      restoreFocusRef.current = false;
+      setOpen(true);
+    } else close();
   };
 
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
-      <PopoverAnchor
-        ref={anchorRef}
-        asChild
-        onPointerEnter={(event) => {
-          if (event.currentTarget.contains(event.target as Node)) {
-            openAfterDelay();
-          }
-        }}
-        onPointerLeave={closeAfterDelay}
-        onPointerDownCapture={close}
-        onClick={() => handleOpenChange(false)}
-      >
-        {children}
-      </PopoverAnchor>
+      {openOnClick ? (
+        <PopoverTrigger
+          ref={(node) => {
+            anchorRef.current = node;
+          }}
+          asChild
+        >
+          {children}
+        </PopoverTrigger>
+      ) : (
+        <PopoverAnchor
+          ref={(node) => {
+            anchorRef.current = node;
+          }}
+          asChild
+          onPointerEnter={(event) => {
+            if (event.currentTarget.contains(event.target as Node)) {
+              openAfterDelay();
+            }
+          }}
+          onPointerLeave={closeAfterDelay}
+          onPointerDownCapture={close}
+          onClick={() => handleOpenChange(false)}
+        >
+          {children}
+        </PopoverAnchor>
+      )}
       <PopoverContent
-        side="right"
-        align={worktreeOnly ? 'center' : 'start'}
+        ref={contentRef}
+        side={side}
+        align="start"
         sideOffset={0}
         collisionBoundary={collisionBoundary ?? undefined}
         collisionPadding={8}
         updatePositionStrategy="always"
         showArrow
         role="dialog"
+        data-web-shell-session-details-content={detailsOwner}
         aria-label={label}
-        onOpenAutoFocus={(event) => event.preventDefault()}
-        onPointerEnter={cancelClose}
-        onPointerLeave={closeAfterDelay}
-        className={styles.sessionDetailsTooltip}
+        onOpenAutoFocus={(event) => {
+          if (!openOnClick) {
+            event.preventDefault();
+            return;
+          }
+          requestAnimationFrame(() => {
+            copyButtonRef.current?.scrollIntoView({ block: 'nearest' });
+          });
+        }}
+        onPointerEnter={openOnClick ? undefined : cancelClose}
+        onCloseAutoFocus={(event) => {
+          if (!restoreFocusRef.current) event.preventDefault();
+        }}
+        onPointerLeave={openOnClick ? undefined : closeAfterDelay}
+        onClick={(event) => event.stopPropagation()}
+        className={`${styles.sessionDetailsTooltip} max-h-(--radix-popover-content-available-height)`}
       >
-        {!worktreeOnly && (
-          <>
-            <div className={styles.sessionDetailsHeader}>
-              <span className={styles.sessionDetailsTitle} title={label}>
-                {label}
-              </span>
-              {time && (
-                <span className={styles.sessionDetailsTime}>{time}</span>
-              )}
-            </div>
-            <div className={styles.sessionDetailsRow}>
-              <FolderClosedIcon aria-hidden="true" />
-              <span title={folderPath}>{folderName}</span>
-            </div>
-          </>
-        )}
-        {branch && (
-          <div className={styles.sessionDetailsRow}>
-            <GitBranchIcon aria-hidden="true" />
-            <span title={branch}>{branch}</span>
+        <div className="flex min-h-0 flex-col gap-2.5 overflow-y-auto overscroll-contain">
+          <div className={styles.sessionDetailsHeader}>
+            <span
+              className={`${styles.sessionDetailsTitle} !whitespace-normal break-words`}
+            >
+              {label}
+            </span>
+            {time && <span className={styles.sessionDetailsTime}>{time}</span>}
           </div>
-        )}
-        {[...(session.prs ?? [])]
-          .reverse()
-          .filter((pr) => isExternalOpenUrl(pr.url))
-          .map((pr, index) => {
+          <div className={styles.sessionDetailsRow}>
+            <FolderClosedIcon aria-hidden="true" />
+            <span
+              className="!whitespace-normal break-all"
+              title={workspaceLabel ?? folderPath}
+            >
+              {workspaceLabel ?? folderPath}
+            </span>
+          </div>
+          {branch && (
+            <div className={styles.sessionDetailsRow}>
+              <GitBranchIcon aria-hidden="true" />
+              <span className="!whitespace-normal break-all" title={branch}>
+                {branch}
+              </span>
+            </div>
+          )}
+          {prs.map((pr, index) => {
             const stateLabel = sessionPrStateLabel(t, pr.state);
             return (
               // Index composite: a hand-edited sidecar can carry duplicate
@@ -185,64 +314,95 @@ export function SessionDetailsTooltip({
               </div>
             );
           })}
-        {!worktreeOnly && (
-          <>
-            <div className={styles.sessionDetailsRow}>
-              <RadioTowerIcon aria-hidden="true" />
-              <span>{status}</span>
-            </div>
-            <div className={styles.sessionDetailsIdRow}>
-              <span title={session.sessionId}>{session.sessionId}</span>
-              <button
-                type="button"
-                tabIndex={-1}
-                className={styles.sessionDetailsCopyButton}
-                aria-label={t('sidebar.copySessionId')}
-                title={t('sidebar.copySessionId')}
-                onClick={() => {
-                  const copyAttempt = ++copyAttemptRef.current;
-                  void writeClipboardText(session.sessionId)
-                    .then(() => {
-                      if (copyAttemptRef.current === copyAttempt) {
-                        setCopyStatus('copied');
-                        window.clearTimeout(copyResetTimerRef.current);
-                        copyResetTimerRef.current = window.setTimeout(() => {
-                          if (copyAttemptRef.current === copyAttempt) {
-                            setCopyStatus('idle');
-                          }
-                        }, 2000);
-                      }
-                    })
-                    .catch(() => {
-                      if (copyAttemptRef.current === copyAttempt) {
-                        setCopyStatus('failed');
-                      }
-                    });
-                }}
+          {issues.map((issue, index) => {
+            const stateLabel = sessionIssueStateLabel(t, issue.state);
+            return (
+              <div
+                className={styles.sessionDetailsRow}
+                key={`issue-${index}-${issue.number}`}
               >
-                {copyStatus === 'copied' ? (
-                  <CheckIcon aria-hidden="true" />
-                ) : (
-                  <CopyIcon aria-hidden="true" />
-                )}
-              </button>
-              <span
-                className={
-                  copyStatus === 'copied'
-                    ? 'sr-only'
-                    : styles.sessionDetailsCopied
-                }
-                aria-live="polite"
-              >
-                {copyStatus === 'copied'
-                  ? t('sidebar.sessionIdCopied')
-                  : copyStatus === 'failed'
-                    ? t('sidebar.copySessionIdFailed')
-                    : ''}
-              </span>
-            </div>
-          </>
-        )}
+                <SessionIssueStateIcon state={issue.state} />
+                <a
+                  href={issue.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={issue.url}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openExternalLink(event, issue.url);
+                  }}
+                >
+                  {t('sidebar.sessionIssue', { number: issue.number })}
+                  {stateLabel ? (
+                    <span className="sr-only">{` · ${stateLabel}`}</span>
+                  ) : null}
+                </a>
+              </div>
+            );
+          })}
+          <div className={styles.sessionDetailsRow}>
+            <RadioTowerIcon aria-hidden="true" />
+            <span>{status}</span>
+          </div>
+          <div className={styles.sessionDetailsIdRow}>
+            <span
+              className="!whitespace-normal break-all"
+              data-web-shell-session-id
+              title={session.sessionId}
+            >
+              {session.sessionId}
+            </span>
+            <button
+              type="button"
+              ref={copyButtonRef}
+              tabIndex={openOnClick ? undefined : -1}
+              className={styles.sessionDetailsCopyButton}
+              data-web-shell-session-id-copy
+              aria-label={t('sidebar.copySessionId')}
+              title={t('sidebar.copySessionId')}
+              onClick={() => {
+                const copyAttempt = ++copyAttemptRef.current;
+                void writeClipboardText(session.sessionId)
+                  .then(() => {
+                    if (copyAttemptRef.current === copyAttempt) {
+                      setCopyStatus('copied');
+                      window.clearTimeout(copyResetTimerRef.current);
+                      copyResetTimerRef.current = window.setTimeout(() => {
+                        if (copyAttemptRef.current === copyAttempt) {
+                          setCopyStatus('idle');
+                        }
+                      }, 2000);
+                    }
+                  })
+                  .catch(() => {
+                    if (copyAttemptRef.current === copyAttempt) {
+                      setCopyStatus('failed');
+                    }
+                  });
+              }}
+            >
+              {copyStatus === 'copied' ? (
+                <CheckIcon aria-hidden="true" />
+              ) : (
+                <CopyIcon aria-hidden="true" />
+              )}
+            </button>
+            <span
+              className={
+                copyStatus === 'copied'
+                  ? 'sr-only'
+                  : styles.sessionDetailsCopied
+              }
+              aria-live="polite"
+            >
+              {copyStatus === 'copied'
+                ? t('sidebar.sessionIdCopied')
+                : copyStatus === 'failed'
+                  ? t('sidebar.copySessionIdFailed')
+                  : ''}
+            </span>
+          </div>
+        </div>
       </PopoverContent>
     </Popover>
   );

@@ -206,6 +206,13 @@ interface RuntimeConfig {
   token?: string;
   clientId?: string;
   workspaceCwd?: string;
+  /**
+   * The workspace path as VS Code spells it, sent only when it differs from
+   * the canonical `workspaceCwd` (a symlinked folder). Every
+   * `activeEditorChanged` payload carries a raw `uri.fsPath`, so relativizing
+   * the active file has to accept either spelling.
+   */
+  editorWorkspaceCwd?: string;
   sessionId?: string;
   hostKind?: 'view' | 'panel';
 }
@@ -323,10 +330,13 @@ export function EmbeddedApp() {
   const [switchingSessionId, setSwitchingSessionId] = useState<string>();
   const [creatingSession, setCreatingSession] = useState(false);
   const [editingMessage, setEditingMessage] = useState<EditingMessage>();
-  const latestSubmittedPromptRef = useRef<{
-    sessionId: string;
-    prompt: string;
-  } | undefined>(undefined);
+  const latestSubmittedPromptRef = useRef<
+    | {
+        sessionId: string;
+        prompt: string;
+      }
+    | undefined
+  >(undefined);
   const sessionSwitchStartedAtRef = useRef(0);
   const sessionSwitchTimerRef = useRef<
     ReturnType<typeof setTimeout> | undefined
@@ -337,6 +347,7 @@ export function EmbeddedApp() {
   const currentModelIdRef = useRef<string | undefined>(undefined);
   const transcriptBlocksRef = useRef<readonly DaemonTranscriptBlock[]>([]);
   const openPermissionDiffsRef = useRef(new Map<string, string>());
+  const webShellPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const focusedPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const contextMenuRowKeyRef = useRef<string | null>(null);
   const previousActiveFilePathRef = useRef<string | undefined>(undefined);
@@ -489,37 +500,74 @@ export function EmbeddedApp() {
   );
 
   const closeOpenPermissionDiffs = useCallback(() => {
-    for (const path of openPermissionDiffsRef.current.values()) {
-      vscode.postMessage({ type: 'closeDiff', data: { path } });
+    for (const [requestId, path] of openPermissionDiffsRef.current) {
+      vscode.postMessage({ type: 'closeDiff', data: { path, requestId } });
     }
     openPermissionDiffsRef.current.clear();
+    if (webShellPermissionRequestIdRef.current) {
+      webShellPermissionRequestIdRef.current = undefined;
+      vscode.postMessage({
+        type: 'webShellPermissionState',
+        data: { pending: false },
+      });
+    }
   }, [vscode]);
 
   const updateTranscript = useCallback(
     (blocks: readonly DaemonTranscriptBlock[]) => {
       transcriptBlocksRef.current = blocks;
       const pendingIds = new Set<string>();
-      let permissionToFocus: string | undefined;
-      for (const block of blocks) {
-        if (block.kind !== 'permission' || block.resolved) {
-          continue;
+      const pendingPermission = blocks.find(
+        (block) => block.kind === 'permission' && !block.resolved,
+      );
+      const permissionToFocus =
+        pendingPermission?.kind === 'permission'
+          ? pendingPermission.requestId
+          : undefined;
+      if (pendingPermission?.kind === 'permission') {
+        const diff = permissionDiffPreview(pendingPermission);
+        if (diff) {
+          const { path, oldText, newText } = diff;
+          pendingIds.add(pendingPermission.requestId);
+          if (
+            !openPermissionDiffsRef.current.has(pendingPermission.requestId)
+          ) {
+            openPermissionDiffsRef.current.set(
+              pendingPermission.requestId,
+              path,
+            );
+            vscode.postMessage({
+              type: 'openDiff',
+              data: {
+                path,
+                oldText,
+                newText,
+                source: 'web-shell',
+                requestId: pendingPermission.requestId,
+              },
+            });
+          }
         }
-        permissionToFocus = block.requestId;
-        const diff = permissionDiffPreview(block);
-        if (!diff) continue;
-        const { path, oldText, newText } = diff;
-        pendingIds.add(block.requestId);
-        if (openPermissionDiffsRef.current.has(block.requestId)) continue;
-        openPermissionDiffsRef.current.set(block.requestId, path);
-        vscode.postMessage({
-          type: 'openDiff',
-          data: { path, oldText, newText, source: 'web-shell' },
-        });
       }
       for (const [requestId, path] of openPermissionDiffsRef.current) {
         if (pendingIds.has(requestId)) continue;
         openPermissionDiffsRef.current.delete(requestId);
-        vscode.postMessage({ type: 'closeDiff', data: { path } });
+        vscode.postMessage({
+          type: 'closeDiff',
+          data: { path, requestId },
+        });
+      }
+      const pendingDiffRequestId = pendingIds.values().next().value as
+        | string
+        | undefined;
+      if (webShellPermissionRequestIdRef.current !== pendingDiffRequestId) {
+        webShellPermissionRequestIdRef.current = pendingDiffRequestId;
+        vscode.postMessage({
+          type: 'webShellPermissionState',
+          data: pendingDiffRequestId
+            ? { pending: true, requestId: pendingDiffRequestId }
+            : { pending: false },
+        });
       }
       if (
         permissionToFocus &&
@@ -640,6 +688,52 @@ export function EmbeddedApp() {
         // it, `runtime` is set and that branch is gone, so the same failure
         // would be invisible — show it over the transcript instead.
         if (runtimeRef.current) setHostNotice({ tone: 'error', text });
+      } else if (message.type === 'webShellPermissionDecision') {
+        const decisionData = message.data as {
+          decision?: unknown;
+          requestId?: unknown;
+        } | null;
+        const decision = decisionData?.decision;
+        const requestId = decisionData?.requestId;
+        const isHostDecision =
+          event.source === window.parent &&
+          requestId === webShellPermissionRequestIdRef.current;
+        if (
+          (decision === 'allow' || decision === 'reject') &&
+          typeof requestId === 'string' &&
+          isHostDecision
+        ) {
+          const response = shellRef.current?.respondToPendingPermission?.(
+            requestId,
+            decision,
+          );
+          if (!response) {
+            // The shell is not mounted yet, so the vote would die without a
+            // rejection for `.catch` to see.
+            if (runtimeRef.current) {
+              setHostNotice({
+                tone: 'info',
+                text: t('permission.voteNotApplied'),
+              });
+            }
+          } else {
+            void response
+              .then((handled) => {
+                // A resolved `false` drops the vote as silently as a
+                // rejection would — e.g. while catching up after a session
+                // switch — but it is also the normal result when the
+                // approval was resolved elsewhere one tick earlier. Notify
+                // without the hard-error state reset of `handleShellError`.
+                if (!handled) {
+                  setHostNotice({
+                    tone: 'info',
+                    text: t('permission.voteNotApplied'),
+                  });
+                }
+              })
+              .catch(handleShellError);
+          }
+        }
       } else if (message.type === 'error') {
         const text = (message.data as { message?: unknown } | null)?.message;
         if (typeof text === 'string') setHostNotice({ tone: 'error', text });
@@ -807,7 +901,20 @@ export function EmbeddedApp() {
     window.addEventListener('message', receiveBootstrap);
     vscode.postMessage({ type: 'webShellReady', data: {} });
     return () => window.removeEventListener('message', receiveBootstrap);
-  }, [clearInsight, closeOpenPermissionDiffs, t, updateTranscript, vscode]);
+  }, [
+    clearInsight,
+    closeOpenPermissionDiffs,
+    handleShellError,
+    t,
+    updateTranscript,
+    vscode,
+  ]);
+
+  const sessionTransitionLabel = creatingSession
+    ? t('session.creating')
+    : switchingSessionId
+      ? t('session.switching')
+      : undefined;
 
   if (!runtime) {
     return (
@@ -940,33 +1047,6 @@ export function EmbeddedApp() {
           }}
         />
       )}
-      {(switchingSessionId || creatingSession) && (
-        <div
-          role="status"
-          style={{
-            position: 'absolute',
-            inset: '30px 0 0',
-            zIndex: 900,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 8,
-            background:
-              'color-mix(in srgb, var(--vscode-sideBar-background) 82%, transparent)',
-            color: 'var(--vscode-descriptionForeground)',
-            backdropFilter: 'blur(2px)',
-          }}
-        >
-          <LoaderCircle
-            size={18}
-            aria-hidden="true"
-            style={{ animation: 'qwen-vscode-spin 0.8s linear infinite' }}
-          />
-          <span>
-            {creatingSession ? t('session.creating') : t('session.switching')}
-          </span>
-        </div>
-      )}
       <div
         style={{
           display: 'flex',
@@ -1024,7 +1104,21 @@ export function EmbeddedApp() {
           >
             {sessionTitle}
           </span>
-          <ChevronDown size={15} strokeWidth={1.8} aria-hidden="true" />
+          {sessionTransitionLabel ? (
+            <span
+              role="status"
+              aria-label={sessionTransitionLabel}
+              style={{ display: 'inline-flex' }}
+            >
+              <LoaderCircle
+                size={15}
+                aria-hidden="true"
+                style={{ animation: 'qwen-vscode-spin 0.8s linear infinite' }}
+              />
+            </span>
+          ) : (
+            <ChevronDown size={15} strokeWidth={1.8} aria-hidden="true" />
+          )}
         </button>
         <span style={{ flex: 1 }} />
         <button
@@ -1293,6 +1387,7 @@ export function EmbeddedApp() {
           header={{ items: [] }}
           onSessionIdChange={(sessionId) => {
             if (switchingSessionId && sessionId !== switchingSessionId) return;
+            webShellPermissionRequestIdRef.current = undefined;
             clearInsight();
             setEditingMessage(undefined);
             vscode.postMessage({
@@ -1335,6 +1430,7 @@ export function EmbeddedApp() {
           sidebar={false}
           compactThinking
           collapseCompletedTurns
+          hostOwnsEditDiffPreview
           composerToolbarActions={COMPOSER_TOOLBAR_ACTIONS}
           mainModelFilter={isVsCodeModelVisible}
           compactComposerOverlays
@@ -1396,6 +1492,9 @@ export function EmbeddedApp() {
           }}
           messageTurnOutputs={['file']}
           onFileReviewOpen={openReviewDiff}
+          onWorkspaceFileOpen={(path) =>
+            vscode.postMessage({ type: 'openFile', data: { path } })
+          }
           onInsightReportOpen={(path) =>
             vscode.postMessage({
               type: 'openInsightReport',
@@ -1439,16 +1538,27 @@ export function EmbeddedApp() {
             }
 
             if (!activeFile || !includeActiveFile) return undefined;
-            const normalizedWorkspace = runtime.workspaceCwd?.replace(
-              /\\/g,
-              '/',
-            );
             const normalizedFile = activeFile.filePath.replace(/\\/g, '/');
-            const relativePath =
-              normalizedWorkspace &&
-              normalizedFile.startsWith(`${normalizedWorkspace}/`)
-                ? normalizedFile.slice(normalizedWorkspace.length + 1)
-                : activeFile.fileName;
+            // `workspaceCwd` is canonical — the daemon matches workspaces by
+            // realpath — while `activeFile.filePath` is VS Code's raw
+            // `uri.fsPath`, so in a symlinked folder the two sit in different
+            // path spaces. Try both spellings: on a miss the strip silently
+            // degrades to a bare basename, the prompt says `@foo.ts` instead
+            // of `@src/foo.ts`, and the picker-annotation dedup below misses
+            // with it.
+            const workspacePrefixes = [
+              runtime.workspaceCwd,
+              runtime.editorWorkspaceCwd,
+            ]
+              .filter((cwd): cwd is string => Boolean(cwd))
+              .map((cwd) => cwd.replace(/\\/g, '/'));
+            let relativePath = activeFile.fileName;
+            for (const prefix of workspacePrefixes) {
+              if (normalizedFile.startsWith(`${prefix}/`)) {
+                relativePath = normalizedFile.slice(prefix.length + 1);
+                break;
+              }
+            }
             const reference = `@${relativePath}`;
             const selectedLines = activeFile.selection
               ? ` (selected lines ${activeFile.selection.startLine}-${activeFile.selection.endLine})`

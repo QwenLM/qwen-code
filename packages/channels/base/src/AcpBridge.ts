@@ -17,11 +17,14 @@ import type {
 import {
   ACP_PRIVATE_PARENT_CAPABILITY_ENV,
   ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
+  CHANNEL_BTW_METHOD,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  parseBackgroundResponseContext,
   resolvePromptImages,
   type AvailableCommand,
   type ChannelAgentBridge,
+  type ChannelBtwResult,
   type ChannelAgentBridgePromptOptions,
   type ChannelAgentBridgeSessionOptions,
   type ChannelLoopToolHandler,
@@ -89,6 +92,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
   private readonly knownSessionIds = new Set<string>();
   private readonly sessionBindingTokens = new Map<string, object | undefined>();
+  private readonly toolCallKindsBySession = new Map<
+    string,
+    Map<string, string>
+  >();
   private channelLoopMcpRegistered = false;
   private channelLoopMcpRegistration: Promise<void> | null = null;
   private readonly pendingPermissions = new Map<
@@ -153,6 +160,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       this.resolvePendingPermissions();
       this.knownSessionIds.clear();
       this.sessionBindingTokens.clear();
+      this.toolCallKindsBySession.clear();
       this.connection = null;
       this.child = null;
       this.emit('disconnected', code, signal);
@@ -227,14 +235,39 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     void this.registerChannelLoopMcpServer();
   }
 
+  private async applySessionApprovalMode(
+    conn: ClientSideConnection,
+    sessionId: string,
+    approvalMode: string | undefined,
+  ): Promise<void> {
+    if (!approvalMode) return;
+    try {
+      await conn.setSessionMode({ sessionId, modeId: approvalMode });
+    } catch (error) {
+      await conn
+        .extMethod('qwen/control/session/close', { sessionId })
+        .catch((closeError: unknown) => {
+          process.stderr.write(
+            `[AcpBridge] Failed to close session ${sanitizeLogText(sessionId, 128)} after approval mode error: ${sanitizeLogText(closeError instanceof Error ? closeError.message : String(closeError), 512)}\n`,
+          );
+        });
+      throw error;
+    }
+  }
+
   async newSession(
     cwd: string,
-    _options?: ChannelAgentBridgeSessionOptions,
+    options?: ChannelAgentBridgeSessionOptions,
     bindingToken?: object,
   ): Promise<string> {
     const conn = this.ensureConnection();
     await this.registerChannelLoopMcpServer();
     const response = await conn.newSession({ cwd, mcpServers: [] });
+    await this.applySessionApprovalMode(
+      conn,
+      response.sessionId,
+      options?.approvalMode,
+    );
     this.knownSessionIds.add(response.sessionId);
     this.sessionBindingTokens.set(response.sessionId, bindingToken);
     return response.sessionId;
@@ -243,7 +276,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   async loadSession(
     sessionId: string,
     cwd: string,
-    _options?: ChannelAgentBridgeSessionOptions,
+    options?: ChannelAgentBridgeSessionOptions,
     bindingToken?: object,
   ): Promise<string> {
     const conn = this.ensureConnection();
@@ -253,6 +286,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       cwd,
       mcpServers: [],
     });
+    await this.applySessionApprovalMode(conn, sessionId, options?.approvalMode);
     this.knownSessionIds.add(sessionId);
     this.sessionBindingTokens.set(sessionId, bindingToken);
     return sessionId;
@@ -315,6 +349,36 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     return chunks.join('') || slashCommandOutput;
   }
 
+  async btw(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<ChannelBtwResult> {
+    if (!this.knownSessionIds.has(sessionId)) {
+      throw new Error(`Unknown ACP session ${sessionId}`);
+    }
+    if (signal?.aborted) {
+      throw createAbortError();
+    }
+    const response = await withAbortSignal(
+      this.ensureConnection().extMethod(CHANNEL_BTW_METHOD, {
+        sessionId,
+        question,
+      }),
+      signal,
+    );
+    if (
+      response['sessionId'] !== sessionId ||
+      (response['answer'] !== null && typeof response['answer'] !== 'string')
+    ) {
+      throw new Error('Invalid BTW response from ACP agent');
+    }
+    return {
+      sessionId,
+      answer: response['answer'] as string | null,
+    };
+  }
+
   async cancelSession(sessionId: string): Promise<void> {
     const conn = this.ensureConnection();
     try {
@@ -336,6 +400,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     }
     if (!this.knownSessionIds.delete(sessionId)) return;
     this.sessionBindingTokens.delete(sessionId);
+    this.toolCallKindsBySession.delete(sessionId);
     this.resolvePendingPermissions(sessionId);
 
     const conn = this.connection;
@@ -365,6 +430,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.resolvePendingPermissions();
     this.knownSessionIds.clear();
     this.sessionBindingTokens.clear();
+    this.toolCallKindsBySession.clear();
     if (this.child) {
       this.child.kill();
       this.child = null;
@@ -399,11 +465,22 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         if (meta?.['qwenDiscreteMessage'] === true) {
           if (
             meta['source'] === 'background_notification_response' &&
-            meta['rewritten'] !== true &&
-            content?.type === 'text' &&
-            content.text
+            meta['rewritten'] !== true
           ) {
-            this.emit('backgroundResponse', sessionId, content.text);
+            const context = parseBackgroundResponseContext(
+              meta['backgroundTask'],
+            );
+            if (
+              content?.type === 'text' &&
+              (content.text || context?.turnComplete)
+            ) {
+              this.emit(
+                'backgroundResponse',
+                sessionId,
+                content.text ?? '',
+                context,
+              );
+            }
           } else if (
             meta['source'] === 'vision_bridge_notice' &&
             content?.type === 'text' &&
@@ -424,19 +501,55 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         }
         break;
       }
-      case 'tool_call': {
+      case 'tool_call':
+      case 'tool_call_update': {
+        const toolCallId = (update['toolCallId'] as string) || '';
+        if (!toolCallId) break;
+        const explicitKind =
+          typeof update['kind'] === 'string' ? update['kind'] : '';
+        const meta = update['_meta'] as Record<string, unknown> | undefined;
+        if (
+          type === 'tool_call_update' &&
+          !explicitKind &&
+          update['status'] === 'in_progress' &&
+          (meta?.['shellProgress'] !== undefined ||
+            meta?.['subagentProgress'] === true)
+        ) {
+          // Matches the DaemonChannelBridge guard: kindless in_progress frames
+          // carrying only shell or subagent progress are heartbeats, not phase
+          // changes, and must not restore the slot kind onto the reaction/card.
+          break;
+        }
+        let sessionKinds = this.toolCallKindsBySession.get(sessionId);
+        const kind = explicitKind || sessionKinds?.get(toolCallId);
+        if (!kind) break;
+        if (type === 'tool_call' || explicitKind) {
+          const kinds = sessionKinds ?? new Map<string, string>();
+          kinds.set(toolCallId, kind);
+          this.toolCallKindsBySession.set(sessionId, kinds);
+          sessionKinds = kinds;
+        }
         const event: ToolCallEvent = {
           sessionId,
-          toolCallId: update['toolCallId'] as string,
-          kind: (update['kind'] as string) || '',
+          toolCallId,
+          kind,
           title: (update['title'] as string) || '',
           status: (update['status'] as string) || 'pending',
           rawInput: update['rawInput'] as Record<string, unknown> | undefined,
         };
-        if (event.status === 'pending' || event.status === 'in_progress') {
+        if (
+          type === 'tool_call' &&
+          (event.status === 'pending' || event.status === 'in_progress')
+        ) {
           this.emitResponseBoundary(sessionId);
         }
         this.emit('toolCall', event);
+        if (event.status === 'completed' || event.status === 'failed') {
+          sessionKinds?.delete(toolCallId);
+          if (sessionKinds?.size === 0) {
+            this.toolCallKindsBySession.delete(sessionId);
+          }
+        }
         break;
       }
       case 'plan': {
@@ -678,6 +791,30 @@ async function withTimeout<T>(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+async function withAbortSignal<T>(
+  operation: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return operation;
+  if (signal.aborted) throw createAbortError();
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(createAbortError());
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([operation, aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
+}
+
+function createAbortError(): Error {
+  const error = new Error('BTW request aborted');
+  error.name = 'AbortError';
+  return error;
 }
 
 function isSkippedMcpRegistration(result: unknown): boolean {

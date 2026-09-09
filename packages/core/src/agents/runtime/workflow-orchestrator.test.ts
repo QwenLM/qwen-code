@@ -22,12 +22,21 @@ import {
   DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
   DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
 } from './workflow-orchestrator.js';
-import type { ApprovalMode, Config } from '../../config/config.js';
+import type {
+  ApprovalMode,
+  Config,
+  SessionWorkflowPlanRevision,
+} from '../../config/config.js';
 import { AgentEventType, type AgentEventEmitter } from './agent-events.js';
 import { ToolConfirmationOutcome } from '../../tools/tools.js';
 import { WorkflowRunRegistry } from '../workflow-run-registry.js';
 import { WorkflowRunner } from './workflow-runner.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
+import {
+  isWorkflowAgentFailedError,
+  WorkflowAgentCapExceededError,
+  WorkflowAgentFailedError,
+} from './workflow-agent-failure.js';
 
 // FIX-C3 (TST-2-C1): use vi.hoisted so `created` is initialised before the
 // vi.mock factory runs AND remains accessible inside tests for assertion +
@@ -357,17 +366,16 @@ describe('WorkflowOrchestrator', () => {
     expect(a.runId).not.toBe(c.runId);
   });
 
-  // TST-C2: a dispatch rejection must propagate out through the sandbox.
-  it('propagates dispatch rejection through the script', async () => {
+  it('settles an unclassified dispatch rejection to null', async () => {
     const orchestrator = new WorkflowOrchestrator(async () => {
       throw new Error('agent-crashed');
     });
     await expect(
       orchestrator.run({
-        script: 'await agent("x"); return 0;',
+        script: 'const value = await agent("x"); return value;',
         args: undefined,
       }),
-    ).rejects.toThrow(/agent-crashed/);
+    ).resolves.toMatchObject({ result: null });
   });
 
   // P4b Round 5 (wenshao): the emitter field on WorkflowRunRequest and
@@ -448,7 +456,7 @@ describe('WorkflowOrchestrator', () => {
         args: undefined,
         emitter,
       }),
-    ).rejects.toThrow(/dispatch-boom/);
+    ).resolves.toMatchObject({ result: 0 });
 
     expect(completions).toHaveLength(1);
     expect(completions[0]).toEqual({
@@ -834,8 +842,8 @@ describe('WorkflowOrchestrator', () => {
     //
     // With the slot-acquire re-check, the gate observes budget mutations
     // from already-completed in-flight dispatches at slot-acquire time, so
-    // queued thunks that arrive AFTER the budget is busted are refused
-    // (the parallel() batch collapses them to `null`).
+    // queued thunks that arrive AFTER the budget is busted are refused and
+    // the run-level limit rejects the batch.
     const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
     const budget = new WorkflowBudgetImpl(100);
     const scheduler = new WorkflowDispatchScheduler(1);
@@ -850,31 +858,115 @@ describe('WorkflowOrchestrator', () => {
     // 10 thunks — far more than the budget (100 / 40 ≈ 3 successful).
     // The slot-acquire gate must reject the rest BEFORE this.dispatch
     // runs, so `dispatchCalls` is exactly 3, NOT 10.
-    const outcome = await orchestrator.run({
-      script: `const results = await parallel(Array.from({length: 10}, () => () => agent('q'))); return results;`,
-      args: undefined,
-      budget,
-      scheduler,
-      emitter: {
-        agentDispatched: () => dispatched++,
-        agentCompleted: () => completed++,
-      },
-    });
-    // parallel() treats budget rejections as errors-as-data → null per slot.
-    expect(Array.isArray(outcome.result)).toBe(true);
-    const results = outcome.result as unknown[];
-    expect(results).toHaveLength(10);
-    const successes = results.filter((r) => r === 'ok').length;
-    const nulls = results.filter((r) => r === null).length;
-    expect(successes + nulls).toBe(10);
+    await expect(
+      orchestrator.run({
+        script: `const results = await parallel(Array.from({length: 10}, () => () => agent('q'))); return results;`,
+        args: undefined,
+        budget,
+        scheduler,
+        emitter: {
+          agentDispatched: () => dispatched++,
+          agentCompleted: () => completed++,
+        },
+      }),
+    ).rejects.toThrow(/exceeded the token budget/);
     // ASSERT it doesn't reach 10 (the without-fix overshoot value):
     // with the scheduler pinned to limit 1, slot-acquire re-checks are
     // serialized, so exactly 3 dispatches pass (spent 0/40/80 at acquire;
     // cap 100).
     expect(dispatchCalls).toBe(3);
-    expect(successes).toBe(3);
     expect(dispatched).toBe(10);
     expect(completed).toBe(dispatched);
+  });
+
+  it('reports respawns only after the slot-acquire budget gate admits them', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const { buildReplay, deriveAgentKey, deriveArgsSeed } = await import(
+      './workflow-journal.js'
+    );
+    const budget = new WorkflowBudgetImpl(100);
+    const scheduler = new WorkflowDispatchScheduler(1);
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      budget.recordSpent(40);
+      return 'ok';
+    });
+    let key = deriveArgsSeed(undefined);
+    const priorEntries: Array<import('./workflow-journal.js').JournalEntry> =
+      [];
+    for (let i = 0; i < 10; i++) {
+      key = deriveAgentKey(key, 'q', {});
+      priorEntries.push({
+        type: 'started',
+        key,
+        agentId: String(i + 1),
+      });
+    }
+    const { journal, entries } = memoryJournal();
+    const respawns: string[] = [];
+
+    await expect(
+      orchestrator.run({
+        script: `return await parallel(Array.from({length: 10}, () => () => agent('q')));`,
+        args: undefined,
+        budget,
+        scheduler,
+        journal,
+        resumeReplay: buildReplay(priorEntries),
+        emitter: { resumeRespawn: (line) => respawns.push(line) },
+      }),
+    ).rejects.toThrow(/exceeded the token budget/);
+
+    expect(dispatchCalls).toBe(3);
+    expect(entries.filter((entry) => entry.type === 'started')).toHaveLength(3);
+    expect(respawns).toHaveLength(3);
+  });
+
+  it('does not invent prior attempts across repeated budget-limited resumes', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const { buildReplay } = await import('./workflow-journal.js');
+    const { journal, entries } = memoryJournal();
+    const script = `return await parallel(Array.from({length: 10}, (_, i) => () => agent('slot' + i)));`;
+    for (let round = 0; round < 4; round++) {
+      const budget = new WorkflowBudgetImpl(100);
+      const dispatched: string[] = [];
+      const respawns: string[] = [];
+      const orchestrator = new WorkflowOrchestrator(async (prompt) => {
+        dispatched.push(prompt);
+        budget.recordSpent(40);
+        return prompt;
+      });
+      const run = orchestrator.run({
+        script,
+        args: undefined,
+        budget,
+        scheduler: new WorkflowDispatchScheduler(1),
+        journal,
+        resumeReplay: buildReplay(entries),
+        emitter: { resumeRespawn: (line) => respawns.push(line) },
+      });
+      if (round < 3) {
+        await expect(run).rejects.toThrow(/exceeded the token budget/);
+      } else {
+        await expect(run).resolves.toMatchObject({
+          result: Array.from({ length: 10 }, (_, i) => `slot${i}`),
+        });
+      }
+      expect(dispatched).toEqual(
+        Array.from(
+          { length: Math.min(3, 10 - round * 3) },
+          (_, i) => `slot${round * 3 + i}`,
+        ),
+      );
+      expect(respawns).toEqual([]);
+      const starts = entries.filter((entry) => entry.type === 'started');
+      expect(starts).toHaveLength(Math.min(10, (round + 1) * 3));
+      expect(entries.filter((entry) => entry.type === 'result')).toHaveLength(
+        starts.length,
+      );
+      expect(entries.filter((entry) => entry.type === 'failed')).toEqual([]);
+    }
   });
 
   // R1 #4 fix landed in production code (debugLogger.warn at both gate
@@ -952,18 +1044,14 @@ describe('WorkflowOrchestrator', () => {
       agentCompleted: (label?: string, error?: string) =>
         completions.push({ label, error }),
     };
-    let caught: unknown;
-    try {
-      await orchestrator.run({
+    await expect(
+      orchestrator.run({
         script: `await agent('q1'); return 'done';`,
         args: undefined,
         budget,
         emitter,
-      });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(Error);
+      }),
+    ).resolves.toMatchObject({ result: 'done' });
     expect(completions).toHaveLength(1);
     expect(completions[0]?.error).toBe('dispatch-boom');
     // R3 #1 contract: error arm now fires budgetUpdated with the
@@ -1027,18 +1115,14 @@ describe('WorkflowOrchestrator', () => {
     const emitter = {
       budgetUpdated: (spent: number) => budgetUpdates.push(spent),
     };
-    let caught: unknown;
-    try {
-      await orchestrator.run({
+    await expect(
+      orchestrator.run({
         script: `await agent('q1'); return 'done';`,
         args: undefined,
         emitter,
         // budget intentionally omitted
-      });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(Error);
+      }),
+    ).resolves.toMatchObject({ result: 'done' });
     expect(budgetUpdates).toEqual([]);
   });
 
@@ -1086,11 +1170,7 @@ describe('WorkflowOrchestrator', () => {
     expect(outcome.result).toBe('parent:nested-agent:inner');
   });
 
-  it('merges nested workflow logs into the parent run logs', async () => {
-    // R11-22: nested logs (here the unconsumed-rejection mirror) reach
-    // no production surface on the nested sandbox's own buffer — the
-    // orchestrator reads getLogs() only on the top-level sandbox. The
-    // merge must surface a failed nested dispatch in the parent run.
+  it('does not mirror an unconsumed agent failure after it settles to null', async () => {
     const orchestrator = new WorkflowOrchestrator(() =>
       Promise.reject(new Error('nested-boom')),
     );
@@ -1102,19 +1182,14 @@ describe('WorkflowOrchestrator', () => {
         logAppended: (line) => appendedLogs.push(line),
       },
       resolveSavedWorkflow: async () => ({
-        // The fire-and-forget dispatch fails but the nested script
-        // still completes — the only trace of the failure is the
-        // nested mirror line, which the merge must carry upward.
+        // The dispatch trace and failures list carry the failure. The agent
+        // promise resolves to null, so it is not an unhandled rejection.
         script: `agent('x'); return 'child-done';`,
       }),
     });
     expect(outcome.result).toBe('parent:child-done');
-    expect(outcome.logs).toContain(
-      'dispatch failed (result not consumed): nested-boom',
-    );
-    expect(appendedLogs).toEqual([
-      'dispatch failed (result not consumed): nested-boom',
-    ]);
+    expect(outcome.logs).toEqual([]);
+    expect(appendedLogs).toEqual([]);
   });
 
   it('keeps a nested agent result behind the shared pause gate', async () => {
@@ -1482,7 +1557,311 @@ describe('WorkflowOrchestrator', () => {
     expect(entries).toHaveLength(0);
   });
 
-  it('assigns journal ids before paused parallel dispatches can dequeue', async () => {
+  // ── Agent-level failures settle to null ───────────────────────────────
+  //
+  // A sequential `await agent()` used to throw for the same outcome a
+  // `parallel()` slot turned into `null`, so one broken agent ended a
+  // sequential script and merely dented a fan-out. These pin the two shapes
+  // to the same contract, and pin what the journal records either way.
+
+  function memoryJournal(): {
+    journal: import('./workflow-journal.js').WorkflowJournal;
+    entries: Array<import('./workflow-journal.js').JournalEntry>;
+  } {
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal = {
+      path: 'mem',
+      append: async (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+      },
+      drain: () => Promise.resolve(),
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    return { journal, entries };
+  }
+
+  it('settles a sequential agent() to null when the agent itself failed', async () => {
+    const { journal, entries } = memoryJournal();
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      throw new WorkflowAgentFailedError(
+        'did not complete (terminate mode: MAX_TURNS).',
+        'max_turns',
+        'MAX_TURNS',
+      );
+    });
+
+    const outcome = await orchestrator.run({
+      script: `const a = await agent('x'); return a === null ? 'saw null' : 'saw ' + a;`,
+      args: undefined,
+      journal,
+    });
+
+    expect(outcome.result).toBe('saw null');
+    // started, then failed — never a result.
+    expect(entries.map((e) => e.type)).toEqual(['started', 'failed']);
+    const started = entries[0] as { key: string; agentId: string };
+    const failed = entries[1] as { key: string; agentId: string };
+    expect(failed.key).toBe(started.key);
+    expect(failed.agentId).toBe(started.agentId);
+  });
+
+  it('gives a parallel() slot the same null, and journals it the same way', async () => {
+    const { journal, entries } = memoryJournal();
+    const orchestrator = new WorkflowOrchestrator(async (prompt) => {
+      if (prompt === 'bad') {
+        throw new Error('model errored before classification');
+      }
+      return `r:${prompt}`;
+    });
+
+    const outcome = await orchestrator.run({
+      script: `return await parallel([() => agent('good'), () => agent('bad')]);`,
+      args: undefined,
+      journal,
+    });
+
+    expect(outcome.result).toEqual(['r:good', null]);
+    expect(entries.filter((e) => e.type === 'failed')).toHaveLength(1);
+    expect(entries.filter((e) => e.type === 'result')).toHaveLength(1);
+  });
+
+  // A run-level failure is still a run failure: the script does not get to
+  // carry on past a budget or cap exhaustion, and the journal must not call
+  // the admitted agent itself failed.
+  it('propagates a run-level dispatch failure without a failed record', async () => {
+    const { journal, entries } = memoryJournal();
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      throw new WorkflowAgentCapExceededError(1000);
+    });
+
+    await expect(
+      orchestrator.run({
+        script: `return await agent('x');`,
+        args: undefined,
+        journal,
+      }),
+    ).rejects.toThrow(/maximum of 1000 agent\(\) calls/);
+
+    expect(entries.map((e) => e.type)).toEqual(['started']);
+  });
+
+  // The one outcome that is NOT the dispatch's own. Every key open when the
+  // user cancels was merely interrupted, and marking those failed would tell
+  // the next resume the agents are broken when nothing about them is.
+  it('writes no failed record when the run itself was aborted', async () => {
+    const { journal, entries } = memoryJournal();
+    const controller = new AbortController();
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      controller.abort();
+      throw new Error(
+        'Workflow subagent did not complete (terminate mode: CANCELLED).',
+      );
+    });
+
+    await expect(
+      orchestrator.run({
+        script: `return await agent('x');`,
+        args: undefined,
+        journal,
+        abortOnTimeout: controller,
+      }),
+    ).rejects.toThrow();
+
+    expect(entries.filter((e) => e.type === 'failed')).toHaveLength(0);
+    expect(entries.filter((e) => e.type === 'started')).toHaveLength(1);
+  });
+
+  // ── Resume says why a call is running live again ──────────────────────
+
+  it.each([
+    [true, 'failed in the previous run'],
+    [false, 'was interrupted'],
+  ])('reports a respawn with wasFailed=%s', async (wasFailed, _description) => {
+    const { buildReplay } = await import('./workflow-journal.js');
+    const key = (await import('./workflow-journal.js')).deriveAgentKey(
+      (await import('./workflow-journal.js')).deriveArgsSeed(undefined),
+      'x',
+      {},
+    );
+    const priorEntries: Array<import('./workflow-journal.js').JournalEntry> = [
+      { type: 'started', key, agentId: '1' },
+      ...(wasFailed
+        ? ([{ type: 'failed', key, agentId: '1' }] as Array<
+            import('./workflow-journal.js').JournalEntry
+          >)
+        : []),
+    ];
+    const journal = {
+      path: 'mem',
+      append: async () => {},
+      drain: () => Promise.resolve(),
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+
+    const respawns: string[] = [];
+    const orchestrator = new WorkflowOrchestrator(async () => 'live');
+    const outcome = await orchestrator.run({
+      script: `return await agent('x');`,
+      args: undefined,
+      journal,
+      resumeReplay: buildReplay(priorEntries),
+      emitter: {
+        resumeRespawn: (line) => respawns.push(line),
+      },
+    });
+
+    const expected = wasFailed
+      ? '[resume] re-running an agent: it failed in the previous run'
+      : '[resume] respawning an agent: interrupted in a previous run (1 prior attempt)';
+    expect(respawns).toEqual([expected]);
+    expect(outcome.logs).toContain(expected);
+  });
+
+  // The ordinary interrupted fan-out: one agent was still in flight when the
+  // run stopped, its sibling had already finished. On resume the unfinished
+  // one is a respawn; the finished one re-runs only because the prefix
+  // invariant sends everything after a miss live, which is a fact about the
+  // run, not about that agent.
+  it('does not report a respawn for a completed call dragged live by the invariant', async () => {
+    const { buildReplay, deriveAgentKey, deriveArgsSeed } = await import(
+      './workflow-journal.js'
+    );
+    const keyA = deriveAgentKey(deriveArgsSeed(undefined), 'a', {});
+    const keyB = deriveAgentKey(keyA, 'b', {});
+    const journal = {
+      path: 'mem',
+      append: async () => {},
+      drain: () => Promise.resolve(),
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+
+    const respawns: string[] = [];
+    const dispatched: string[] = [];
+    const orchestrator = new WorkflowOrchestrator(async (prompt) => {
+      dispatched.push(prompt);
+      return `live:${prompt}`;
+    });
+
+    const outcome = await orchestrator.run({
+      script: `await agent('a', { label: 'inflight' }); return await agent('b', { label: 'finished' });`,
+      args: undefined,
+      journal,
+      resumeReplay: buildReplay([
+        // 'a' was in flight when the run stopped: started, never resulted.
+        { type: 'started', key: keyA, agentId: '1' },
+        // 'b' had already come back.
+        { type: 'started', key: keyB, agentId: '2' },
+        { type: 'result', key: keyB, agentId: '2', result: 'from the journal' },
+      ]),
+      emitter: {
+        resumeRespawn: (line) => respawns.push(line),
+      },
+    });
+
+    // Both run live — that part is the existing invariant and is unchanged.
+    expect(dispatched).toEqual(['a', 'b']);
+    expect(outcome.result).toBe('live:b');
+    // Only the one that never finished is a respawn.
+    expect(respawns).toEqual([
+      '[resume] respawning "inflight": interrupted in a previous run (1 prior attempt)',
+    ]);
+  });
+
+  it('reports no respawn when the journal had a result to replay', async () => {
+    const { buildReplay, deriveAgentKey, deriveArgsSeed } = await import(
+      './workflow-journal.js'
+    );
+    const key = deriveAgentKey(deriveArgsSeed(undefined), 'x', {});
+    const journal = {
+      path: 'mem',
+      append: async () => {},
+      drain: () => Promise.resolve(),
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const respawns: unknown[] = [];
+    let dispatched = 0;
+
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatched += 1;
+      return 'live';
+    });
+    const outcome = await orchestrator.run({
+      script: `return await agent('x');`,
+      args: undefined,
+      journal,
+      resumeReplay: buildReplay([
+        { type: 'started', key, agentId: '1' },
+        { type: 'result', key, agentId: '1', result: 'cached' },
+      ]),
+      emitter: {
+        resumeRespawn: (...args: unknown[]) => respawns.push(args),
+      },
+    });
+
+    expect(outcome.result).toBe('cached');
+    expect(dispatched).toBe(0);
+    expect(respawns).toHaveLength(0);
+  });
+
+  it('does not journal or report a respawn when the budget gate refuses it', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const { buildReplay, deriveAgentKey, deriveArgsSeed } = await import(
+      './workflow-journal.js'
+    );
+    const budget = new WorkflowBudgetImpl(1);
+    budget.recordSpent(1);
+    const key = deriveAgentKey(deriveArgsSeed(undefined), 'x', {});
+    const { journal, entries } = memoryJournal();
+    const respawns: string[] = [];
+    const dispatch = vi.fn(async () => 'unused');
+
+    await new WorkflowOrchestrator(dispatch).run({
+      script: `try { await agent('x'); } catch (error) { return error.message; }`,
+      args: undefined,
+      budget,
+      journal,
+      resumeReplay: buildReplay([{ type: 'started', key, agentId: 'prior' }]),
+      emitter: { resumeRespawn: (line) => respawns.push(line) },
+    });
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(entries).toEqual([]);
+    expect(respawns).toEqual([]);
+  });
+
+  it('does not journal or report a respawn when the agent cap refuses it', async () => {
+    const previous = process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+    process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '1';
+    try {
+      const { buildReplay, deriveAgentKey, deriveArgsSeed } = await import(
+        './workflow-journal.js'
+      );
+      const keyA = deriveAgentKey(deriveArgsSeed(undefined), 'a', {});
+      const keyB = deriveAgentKey(keyA, 'b', {});
+      const { journal, entries } = memoryJournal();
+      const respawns: string[] = [];
+      const dispatch = vi.fn(async (prompt: string) => prompt);
+
+      await new WorkflowOrchestrator(dispatch).run({
+        script: `await agent('a'); try { await agent('b'); } catch (error) { return error.message; }`,
+        args: undefined,
+        journal,
+        resumeReplay: buildReplay([
+          { type: 'started', key: keyB, agentId: 'prior' },
+        ]),
+        emitter: { resumeRespawn: (line) => respawns.push(line) },
+      });
+
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(entries.map((entry) => entry.type)).toEqual(['started', 'result']);
+      expect(entries.some((entry) => entry.key === keyB)).toBe(false);
+      expect(respawns).toEqual([]);
+    } finally {
+      if (previous === undefined) {
+        delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      } else {
+        process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = previous;
+      }
+    }
+  });
+
+  it('preserves call-order journal ids without recording paused calls as started', async () => {
     const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
     const journal = {
       append: (entry: import('./workflow-journal.js').JournalEntry) => {
@@ -1493,6 +1872,7 @@ describe('WorkflowOrchestrator', () => {
     const scheduler = new WorkflowDispatchScheduler(1);
     scheduler.pause();
     let dispatchCalls = 0;
+    let queued = 0;
     const orchestrator = new WorkflowOrchestrator(async (prompt) => {
       dispatchCalls++;
       return prompt;
@@ -1507,19 +1887,25 @@ describe('WorkflowOrchestrator', () => {
       args: undefined,
       journal,
       scheduler,
+      emitter: { dispatchQueued: () => queued++ },
     });
-    await vi.waitFor(() =>
-      expect(entries.filter((entry) => entry.type === 'started')).toHaveLength(
-        3,
-      ),
-    );
-    const started = entries.filter((entry) => entry.type === 'started');
-    expect(started.map((entry) => entry.agentId)).toEqual(['1', '2', '3']);
-    expect(new Set(started.map((entry) => entry.key)).size).toBe(3);
+    await vi.waitFor(() => expect(queued).toBe(3));
+    expect(entries).toEqual([]);
     expect(dispatchCalls).toBe(0);
 
     scheduler.resume();
     await expect(run).resolves.toMatchObject({ result: ['a', 'b', 'c'] });
+    const started = entries.filter((entry) => entry.type === 'started');
+    expect(started.map((entry) => entry.agentId)).toEqual(['1', '2', '3']);
+    expect(new Set(started.map((entry) => entry.key)).size).toBe(3);
+    const results = entries.filter((entry) => entry.type === 'result');
+    expect(results).toEqual(
+      started.map((entry, i) => ({
+        ...entry,
+        type: 'result',
+        result: ['a', 'b', 'c'][i],
+      })),
+    );
   });
 
   it('appends an in-flight result before the paused result gate opens', async () => {
@@ -1595,7 +1981,7 @@ describe('WorkflowOrchestrator', () => {
 
     controller.abort();
 
-    await expect(run).rejects.toThrow('dispatch-boom');
+    await expect(run).resolves.toMatchObject({ result: null });
   });
 
   it('delivers a successful dispatch result when cancellation aborts its pause gate', async () => {
@@ -2280,6 +2666,32 @@ describe('createProductionDispatch', () => {
     },
   );
 
+  // The message above is the same for every mode; the CLASS is not, and that
+  // is what decides whether the script sees `null` or the run ends. An agent
+  // that burned its turns or errored out failed on its own; CANCELLED is
+  // ambiguous at this depth (a stall, a user skip and a run abort all land
+  // here), so it stays a plain Error for the stall wrapper to classify.
+  it.each([
+    ['MAX_TURNS', 'max_turns'],
+    ['TIMEOUT', 'timeout'],
+    ['ERROR', 'error'],
+  ])('classifies %s as an agent-level failure', async (mode, kind) => {
+    nextTerminateMode.value = mode;
+    const dispatch = createProductionDispatch(fakeConfig());
+    const caught = await dispatch('hello', { label: 'h1' }).catch((e) => e);
+    expect(isWorkflowAgentFailedError(caught)).toBe(true);
+    expect((caught as WorkflowAgentFailedError).kind).toBe(kind);
+    expect((caught as WorkflowAgentFailedError).terminateMode).toBe(mode);
+  });
+
+  it('leaves CANCELLED unclassified for the stall wrapper', async () => {
+    nextTerminateMode.value = 'CANCELLED';
+    const dispatch = createProductionDispatch(fakeConfig());
+    const caught = await dispatch('hello', { label: 'h1' }).catch((e) => e);
+    expect(caught).toBeInstanceOf(Error);
+    expect(isWorkflowAgentFailedError(caught)).toBe(false);
+  });
+
   // ── R1 (#1 + #3): token reporting across all terminate modes ──────────
 
   beforeEach(() => {
@@ -2471,6 +2883,30 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       const cap = Math.max(2, Math.min(16, os.availableParallelism() - 2));
       expect(peak).toBe(cap);
     });
+
+    it('propagates run-level failures wrapped by Promise.any', async () => {
+      const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+      const budget = new WorkflowBudgetImpl(1);
+      budget.recordSpent(1);
+      const budgetOrchestrator = new WorkflowOrchestrator(async () => 'unused');
+      await expect(
+        budgetOrchestrator.run({
+          script: `return await parallel([() => Promise.any([Promise.any([agent('x')])])]);`,
+          args: undefined,
+          budget,
+        }),
+      ).rejects.toThrow(/exceeded the token budget/);
+
+      const capOrchestrator = new WorkflowOrchestrator(async () => {
+        throw new WorkflowAgentCapExceededError(1000);
+      });
+      await expect(
+        capOrchestrator.run({
+          script: `return await parallel([() => Promise.any([agent('x')])]);`,
+          args: undefined,
+        }),
+      ).rejects.toThrow(/maximum of 1000 agent\(\) calls/);
+    });
   });
 
   describe('pipeline()', () => {
@@ -2626,18 +3062,58 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
 
     it('the cap counts agents launched via parallel() — a fan-out cannot bypass it', async () => {
       const orchestrator = new WorkflowOrchestrator(async () => 'ok');
-      const outcome = await orchestrator.run({
-        script: `return await parallel(
-          Array.from({ length: ${DEFAULT_MAX_AGENTS_PER_RUN + 1} }, () => () => agent("x"))
-        );`,
-        args: undefined,
-      });
-      const arr = outcome.result as Array<string | null>;
-      // Exactly 1000 dispatches succeed; the one over the cap becomes null.
-      expect(arr.filter((v) => v === 'ok')).toHaveLength(
-        DEFAULT_MAX_AGENTS_PER_RUN,
+      await expect(
+        orchestrator.run({
+          script: `return await parallel(
+            Array.from({ length: ${DEFAULT_MAX_AGENTS_PER_RUN + 1} }, () => () => agent("x"))
+          );`,
+          args: undefined,
+        }),
+      ).rejects.toThrow(
+        new RegExp(`${DEFAULT_MAX_AGENTS_PER_RUN} agent\\(\\) calls per run`),
       );
-      expect(arr.filter((v) => v === null)).toHaveLength(1);
+    });
+
+    it('rejects a pipeline when an agent hits the run-level cap', async () => {
+      const previous = process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '1';
+      try {
+        const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+        await expect(
+          orchestrator.run({
+            script: `return await pipeline(['a', 'b'], (_prev, item) => agent(item));`,
+            args: undefined,
+          }),
+        ).rejects.toThrow(/maximum of 1 agent\(\) call/);
+      } finally {
+        if (previous === undefined) {
+          delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+        } else {
+          process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = previous;
+        }
+      }
+    });
+
+    it('preserves a run-level cap rejection through nested fan-out', async () => {
+      const previous = process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '1';
+      try {
+        const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+        await expect(
+          orchestrator.run({
+            script: `return await parallel([
+              () => parallel([() => agent('a'), () => agent('b')])
+            ]);`,
+            args: undefined,
+          }),
+        ).rejects.toThrow(/maximum of 1 agent\(\) call/);
+      } finally {
+        if (previous === undefined) {
+          delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+        } else {
+          process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = previous;
+        }
+      }
     });
   });
 
@@ -2883,15 +3359,14 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '3';
       try {
         const orchestrator = new WorkflowOrchestrator(async () => 'ok');
-        const outcome = await orchestrator.run({
-          script: `return await parallel(
-            Array.from({ length: 4 }, () => () => agent("x"))
-          );`,
-          args: undefined,
-        });
-        const arr = outcome.result as Array<string | null>;
-        expect(arr.filter((v) => v === 'ok')).toHaveLength(3);
-        expect(arr.filter((v) => v === null)).toHaveLength(1);
+        await expect(
+          orchestrator.run({
+            script: `return await parallel(
+              Array.from({ length: 4 }, () => () => agent("x"))
+            );`,
+            args: undefined,
+          }),
+        ).rejects.toThrow(/maximum of 3 agent\(\) calls per run/);
       } finally {
         if (prev === undefined)
           delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
@@ -2931,10 +3406,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   type StubSubagentCall = {
     config: { name?: string; model?: string; disallowedTools?: string[] };
     runtimeContextSame: boolean;
+    /** The exact Config the dispatch handed to the runtime agent. */
+    runtimeContext: Config;
     /** What the subagent's Config answers for "where am I?". */
     runtimeTargetDir?: string;
     runtimeIgnoreFiles?: string;
-    runtimeContext: Config;
     options?: {
       runConfigOverrides?: unknown;
       taskName?: string;
@@ -2992,6 +3468,22 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const cfg = {
       createToolRegistry: async () => fakeRegistry,
       getToolRegistry: () => fakeRegistry,
+      // Session Workflow plan-revision state mirroring Config's shape: an
+      // own field mutated by methods that assign `this.<field>` (config.ts
+      // set/clearSessionWorkflowPlanRevision). On an un-shimmed
+      // Object.create wrapper that assignment lands as an OWN property of
+      // the wrapper and shadows this base state — the write-through tests
+      // below assert exactly that contract.
+      sessionWorkflowPlanRevision: 'approved-revision' as unknown,
+      setSessionWorkflowPlanRevision(
+        this: Record<string, unknown>,
+        revision: unknown,
+      ) {
+        this['sessionWorkflowPlanRevision'] = revision;
+      },
+      clearSessionWorkflowPlanRevision(this: Record<string, unknown>) {
+        this['sessionWorkflowPlanRevision'] = undefined;
+      },
       // Derived dispatch contexts layer an approval profile over the
       // worktree profile; the derivation snapshots the base mode through
       // these methods.
@@ -3032,11 +3524,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
           const call: StubSubagentCall = {
             config: subagentConfig,
             runtimeContextSame: runtimeContext === cfg,
+            runtimeContext,
             runtimeTargetDir: runtimeContext.getTargetDir(),
             runtimeIgnoreFiles: runtimeContext
               .getFileService?.()
               .getQwenIgnoreFileNamesDisplay(),
-            runtimeContext,
             options: {
               runConfigOverrides: options?.runConfigOverrides,
               taskName: options?.taskName,
@@ -3628,6 +4120,56 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(result).toEqual({ ok: true, value: 42 });
   });
 
+  // R7-1: the schema wrapper is the second un-shimmed Object.create builder
+  // — an agent({schema}) dispatch hands the subagent a Config whose
+  // prototype revision methods would otherwise assign an own shadow of the
+  // session-global state. The write-through must reach the base.
+  it('schema-mode override writes Session Workflow revision mutations through to the base Config', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'CANCELLED', // schema dispatch aborts after capture
+        runWithEmitter: (emitter) => {
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { ok: true },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 2,
+          });
+        },
+      }),
+    });
+
+    await createProductionDispatch(config)('extract', {
+      schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+    });
+
+    const runtime = calls[0]!.runtimeContext;
+    expect(runtime).not.toBe(config);
+    runtime.clearSessionWorkflowPlanRevision();
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
+    expect(
+      (config as unknown as Record<string, unknown>)[
+        'sessionWorkflowPlanRevision'
+      ],
+    ).toBeUndefined();
+  });
+
   it('R1 #1: schema-mode SUCCESS records tokens via onTokens (was missing before fix)', async () => {
     nextOutputTokens.value = 555;
     const { config } = fakeConfigWithMgr({
@@ -3734,11 +4276,14 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       }),
     });
     const dispatch = createProductionDispatch(config);
-    await expect(
-      dispatch('extract', {
-        schema: { type: 'object' },
-      }),
-    ).rejects.toThrow(
+    const caught = await dispatch('extract', {
+      schema: { type: 'object' },
+    }).catch((error) => error);
+    expect(isWorkflowAgentFailedError(caught)).toBe(true);
+    expect((caught as WorkflowAgentFailedError).kind).toBe(
+      'no_structured_output',
+    );
+    expect(String(caught)).toMatch(
       /subagent completed without calling StructuredOutput \(after 2 in-conversation nudges\)\./,
     );
   });
@@ -4136,6 +4681,74 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     );
     expect(helper.calls[0]!.runtimeContextSame).toBe(false);
     expect(helper.calls[0]!.runtimeIgnoreFiles).toContain('.cursorignore');
+  });
+
+  // R7-1: todo_write is not in WORKFLOW_SUBAGENT_DISALLOWED_TOOLS, so a
+  // divergent todo_write inside a directory-scoped workflow agent calls
+  // clearSessionWorkflowPlanRevision on the wrapper. Without the
+  // write-through shim, the prototype method assigns
+  // `this.sessionWorkflowPlanRevision = undefined` as an OWN property of
+  // the wrapper — the root Config keeps the stale approved revision and
+  // keeps rejecting top-level Agent launches against a plan that no longer
+  // exists. The shim must forward the mutation to the base.
+  it('workingDir override writes Session Workflow revision mutations through to the base Config', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'pinned', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(helper.config)('hi', {
+      workingDir: '.qwen/tmp/review-pr-7',
+    });
+
+    const runtime = helper.calls[0]!.runtimeContext;
+    expect(runtime).not.toBe(helper.config);
+
+    const sentinel: SessionWorkflowPlanRevision = {
+      planId: 'plan-1',
+      sourceCallId: 'call-1',
+      todoIds: ['t1'],
+    };
+    runtime.setSessionWorkflowPlanRevision(sentinel);
+    runtime.clearSessionWorkflowPlanRevision();
+
+    // Forwarded to the base: the wrapper carries no own shadow of the
+    // field, and the base's revision is what actually changed.
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
+    const base = helper.config as unknown as Record<string, unknown>;
+    expect(base['sessionWorkflowPlanRevision']).toBeUndefined();
+    runtime.setSessionWorkflowPlanRevision(sentinel);
+    expect(base['sessionWorkflowPlanRevision']).toBe(sentinel);
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
+  });
+
+  // R7-1 sibling: the isolation-worktree dispatch wrapper carries the same
+  // write-through contract as the workingDir one — todo_write is not
+  // disallowed, so a divergent todo_write inside the isolated agent must
+  // forward revision mutations to the base instead of shadowing them.
+  it("isolation:'worktree' override writes Session Workflow revision mutations through to the base Config", async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'isolated', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(helper.config)('hi', {
+      isolation: 'worktree',
+    });
+
+    const runtime = helper.calls[0]!.runtimeContext;
+    expect(runtime).not.toBe(helper.config);
+
+    const sentinel: SessionWorkflowPlanRevision = {
+      planId: 'plan-isolated',
+      sourceCallId: 'call-isolated',
+      todoIds: ['t1'],
+    };
+    runtime.setSessionWorkflowPlanRevision(sentinel);
+    runtime.clearSessionWorkflowPlanRevision();
+
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
+    const base = helper.config as unknown as Record<string, unknown>;
+    expect(base['sessionWorkflowPlanRevision']).toBeUndefined();
+    runtime.setSessionWorkflowPlanRevision(sentinel);
+    expect(base['sessionWorkflowPlanRevision']).toBe(sentinel);
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
   });
 
   it('workingDir rejects invalid values before dispatch', async () => {

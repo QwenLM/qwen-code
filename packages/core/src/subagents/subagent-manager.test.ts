@@ -2307,6 +2307,7 @@ bad`);
         });
         vi.spyOn(mockConfig, 'getModelsConfig').mockReturnValue({
           getResolvedModel: vi.fn().mockReturnValue(undefined),
+          getGenerationConfig: vi.fn().mockReturnValue({}),
         } as unknown as ReturnType<Config['getModelsConfig']>);
       });
 
@@ -2574,6 +2575,62 @@ bad`);
         await result.dispose();
 
         expect(unregisterSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not register hooks for a project-level subagent in an untrusted folder', async () => {
+        const addAgentHooksSpy = vi.fn().mockReturnValue(vi.fn());
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({ addAgentHooks: addAgentHooksSpy }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(false);
+
+        const result = await manager.createAgentHeadless(
+          {
+            ...baseConfig,
+            level: 'project',
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: 'Bash',
+                  hooks: [{ type: 'command', command: 'echo' }],
+                },
+              ],
+            },
+          },
+          mockConfig,
+        );
+
+        expect(addAgentHooksSpy).not.toHaveBeenCalled();
+        // The agent itself is still created — only the hooks are gated.
+        expect(result).toHaveProperty('subagent');
+        await result.dispose();
+      });
+
+      it('registers hooks for a project-level subagent in a trusted folder', async () => {
+        const addAgentHooksSpy = vi.fn().mockReturnValue(vi.fn());
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({ addAgentHooks: addAgentHooksSpy }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(true);
+
+        const result = await manager.createAgentHeadless(
+          {
+            ...baseConfig,
+            level: 'project',
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: 'Bash',
+                  hooks: [{ type: 'command', command: 'echo' }],
+                },
+              ],
+            },
+          },
+          mockConfig,
+        );
+
+        expect(addAgentHooksSpy).toHaveBeenCalledTimes(1);
+        await result.dispose();
       });
 
       it('dispose unregisters even when execute() never runs (early-exit leak fix)', async () => {

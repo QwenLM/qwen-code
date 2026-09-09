@@ -99,7 +99,6 @@ describe('updateWorkspaceSkillSettingLists', () => {
         { disabled: ['orphan'], enabled: [] },
         'Review',
         true,
-        true,
       ),
     ).toEqual({ disabled: ['orphan'], enabled: ['Review'] });
   });
@@ -113,20 +112,18 @@ describe('updateWorkspaceSkillSettingLists', () => {
         },
         'review',
         false,
-        true,
       ),
     ).toEqual({ disabled: ['orphan', 'review'], enabled: ['other'] });
   });
 
-  it('does not add a redundant opt-in for an ordinary skill', () => {
+  it('records an explicit opt-in even without a default disable', () => {
     expect(
       updateWorkspaceSkillSettingLists(
         { disabled: ['review'], enabled: [] },
         'review',
         true,
-        false,
       ),
-    ).toEqual({ disabled: [], enabled: [] });
+    ).toEqual({ disabled: [], enabled: ['review'] });
   });
 
   it('does not reorder an already canonical hard disable', () => {
@@ -134,7 +131,6 @@ describe('updateWorkspaceSkillSettingLists', () => {
       updateWorkspaceSkillSettingLists(
         { disabled: ['review', 'orphan'], enabled: [] },
         'review',
-        false,
         false,
       ),
     ).toEqual({ disabled: ['review', 'orphan'], enabled: [] });
@@ -154,14 +150,14 @@ describe('computeWorkspaceSkillListUpdates', () => {
           name: 'review',
           wasEnabled: false,
           isEnabled: true,
-          defaultDisabled: false,
         },
       ],
     );
 
     expect(result.disabled).toEqual(['orphan']);
     expect(result.disabledChanged).toBe(true);
-    expect(result.enabledChanged).toBe(false);
+    expect(result.enabled).toEqual(['review']);
+    expect(result.enabledChanged).toBe(true);
   });
 
   it('preserves workspace declarations that duplicate higher-scope entries', () => {
@@ -173,7 +169,6 @@ describe('computeWorkspaceSkillListUpdates', () => {
           name: 'review',
           wasEnabled: false,
           isEnabled: true,
-          defaultDisabled: false,
         },
       ],
     );
@@ -191,7 +186,6 @@ describe('computeWorkspaceSkillListUpdates', () => {
           name: 'review',
           wasEnabled: true,
           isEnabled: true,
-          defaultDisabled: false,
         },
       ],
     );
@@ -210,7 +204,6 @@ describe('computeWorkspaceSkillListUpdates', () => {
           name: 'Review',
           wasEnabled: false,
           isEnabled: true,
-          defaultDisabled: true,
         },
       ],
     );

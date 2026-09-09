@@ -20,7 +20,10 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
-import { APPROVAL_MODES } from '@qwen-code/qwen-code-core';
+import {
+  APPROVAL_MODES,
+  SESSION_PR_URL_MAX_LENGTH,
+} from '@qwen-code/qwen-code-core';
 import type { BridgeEvent, EventBus } from './eventBus.js';
 // Wire constants shared with the child-side caller (`Session.ts`) and, for the
 // SSE event type, the SDK validator + browser consumer — single sources of truth
@@ -825,11 +828,14 @@ export class BridgeClient implements Client {
      * Called by the A2 `current_mode_update` demux when the agent
      * switches approval mode in-session (exit_plan_mode, ProceedAlways,
      * /mode). `previous` is read from the bridge state cache.
+     * `planExecutionMode` is the validated non-Plan execution policy while
+     * modeId is Plan; undefined outside Plan or when no valid policy is sent.
      */
     private readonly onModePromoted?: (
       entry: BridgeClientSessionEntry,
       modeId: string,
       originatorClientId: string | undefined,
+      planExecutionMode?: string,
     ) => void,
     /**
      * Reverse tool channel (issue #5626, Phase 2). Resolves the
@@ -2185,7 +2191,9 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/recording-degraded`,
    * `qwen/notify/session/prompt-suggestion` (followup assist),
    * `qwen/notify/session/artifact-event` (hook artifacts),
-   * `qwen/notify/session/terminal-sequence`, and
+   * `qwen/notify/session/terminal-sequence`,
+   * `qwen/notify/session/pr-binding` (shell-detected `gh pr create`
+   * bindings — catalog mark only, the child persists the sidecar), and
    * `_qwencode/end_turn` (background-notification and goal turns), and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
@@ -2205,14 +2213,15 @@ export class BridgeClient implements Client {
     if (method === ACTIVE_WORK_NOTIFICATION_METHOD) {
       const snapshot = parseActiveWorkSnapshot(params);
       if (snapshot) {
-        // Sessions the child claims but this channel does not own are dropped
-        // rather than rejecting the whole snapshot: the rest of it is still
-        // usable, and a channel must never influence another channel's state.
+        // Retain rows while a Session is registering so the bridge can apply
+        // a report that races the newSession response.
         this.onActiveWork?.({
           v: ACTIVE_WORK_HEARTBEAT_VERSION,
           seq: snapshot.seq,
-          sessions: snapshot.sessions.filter((session) =>
-            this.ownsSession(session.sessionId),
+          sessions: snapshot.sessions.filter(
+            (session) =>
+              this.ownsSession(session.sessionId) ||
+              this.hasSessionSpawnInFlight(),
           ),
         });
       }
@@ -2433,6 +2442,50 @@ export class BridgeClient implements Client {
       } catch {
         /* bus already closed */
       }
+      return;
+    }
+    if (method === 'qwen/notify/session/pr-binding') {
+      // The child persists the PR sidecar itself (the daemon never sees the
+      // write); this notification only carries the catalog-clock mark so
+      // version-watching clients refetch the catalog that now includes the
+      // binding — the same propagation automatic title updates use. Validate
+      // the payload anyway: sessionId becomes a log/lookup key and the url a
+      // rendered link target on other consumers of this channel.
+      const sessionId = params['sessionId'];
+      const pr = params['pr'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        pr === null ||
+        typeof pr !== 'object' ||
+        Array.isArray(pr)
+      ) {
+        return;
+      }
+      const record = pr as Record<string, unknown>;
+      const number = record['number'];
+      const url = record['url'];
+      if (
+        typeof number !== 'number' ||
+        !Number.isInteger(number) ||
+        number <= 0 ||
+        typeof url !== 'string' ||
+        url.length === 0 ||
+        url.length > SESSION_PR_URL_MAX_LENGTH ||
+        !/^https?:\/\//i.test(url) ||
+        // Mirrors the bridge's hasControlCharacter: the url lands in an
+        // audit line, so control characters would forge log lines.
+        Array.from(url).some((character) => {
+          const code = character.charCodeAt(0);
+          return code <= 31 || code === 127;
+        })
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      this.onSessionCatalogChanged?.();
       return;
     }
     if (method === 'qwen/notify/session/recording-degraded') {
@@ -2799,6 +2852,14 @@ export class BridgeClient implements Client {
       );
       return;
     }
+    const selected = params['planExecutionMode'];
+    const planExecutionMode =
+      currentModeId === 'plan' &&
+      typeof selected === 'string' &&
+      selected !== 'plan' &&
+      KNOWN_APPROVAL_MODES.has(selected)
+        ? selected
+        : undefined;
     const entry = this.resolveEntry(sessionId);
     if (!entry) {
       writeStderrLine(
@@ -2817,6 +2878,7 @@ export class BridgeClient implements Client {
         entry,
         currentModeId,
         entry.activePromptOriginatorClientId,
+        planExecutionMode,
       );
     } else {
       // Fallback path (no `onModePromoted` injected — tests / non-bridge
@@ -2840,6 +2902,7 @@ export class BridgeClient implements Client {
           previous: 'default',
           next: currentModeId,
           persisted: false,
+          ...(planExecutionMode ? { planExecutionMode } : {}),
         },
         ...(entry.activePromptOriginatorClientId
           ? { originatorClientId: entry.activePromptOriginatorClientId }

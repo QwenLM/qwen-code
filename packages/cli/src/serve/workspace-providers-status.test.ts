@@ -131,6 +131,36 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(second.current?.modelId).toBe('model-b(openai)');
   });
 
+  it('treats a non-positive contextWindowSize as unset in the catalog', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'model-zero' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'model-zero',
+            name: 'Model Zero',
+            generationConfig: { contextWindowSize: 0 },
+          },
+          {
+            id: 'model-big',
+            name: 'Model Big',
+            generationConfig: { contextWindowSize: 8192 },
+          },
+        ],
+      },
+    });
+
+    const status = await provider(workspace, false);
+    const models = status.providers.flatMap((entry) => entry.models);
+    const zero = models.find((model) => model.baseModelId === 'model-zero');
+    const big = models.find((model) => model.baseModelId === 'model-big');
+
+    expect(zero?.contextLimit).toBeGreaterThan(0);
+    expect(big?.contextLimit).toBe(8192);
+  });
+
   it('returns the workspace approval mode', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
@@ -314,6 +344,175 @@ describe('createWorkspaceProvidersStatusProvider', () => {
         .filter((model) => model !== stable)
         .every((model) => model.configOptions === undefined),
     ).toBe(true);
+  });
+
+  it.each([
+    {
+      persisted: 'medium' as const,
+      thinkingMandatory: false,
+      currentValue: 'medium',
+    },
+    {
+      persisted: 'none' as const,
+      thinkingMandatory: false,
+      currentValue: 'none',
+    },
+    {
+      persisted: 'max' as const,
+      thinkingMandatory: false,
+      currentValue: 'xhigh',
+    },
+    {
+      persisted: 'none' as const,
+      thinkingMandatory: true,
+      currentValue: 'xhigh',
+    },
+  ])(
+    'projects persisted reasoning $persisted as $currentValue when mandatory=$thinkingMandatory',
+    async ({ persisted, thinkingMandatory, currentValue }) => {
+      const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+      await writeUserSettings({
+        security: { auth: { selectedType: 'openai' } },
+        model: { name: 'qwen3.8-max', reasoningEffort: persisted },
+        modelProviders: {
+          openai: [
+            {
+              id: 'qwen3.8-max',
+              name: 'Qwen 3.8 Max',
+              generationConfig: { thinkingMandatory },
+            },
+          ],
+        },
+      });
+
+      const result = await provider(workspace, false);
+      const stable = result.providers
+        .flatMap((entry) => entry.models)
+        .find((model) => model.baseModelId === 'qwen3.8-max');
+      expect(stable?.configOptions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'reasoning_effort',
+            currentValue,
+          }),
+        ]),
+      );
+    },
+  );
+
+  it.each([
+    {
+      name: 'saved off with a native nested override',
+      model: 'gpt-5.5',
+      persisted: 'none',
+      generationConfig: { extra_body: { reasoning: { effort: 'high' } } },
+      currentValue: 'none',
+      metadata: { enableValue: 'default' },
+    },
+    {
+      name: 'raw off without a saved preference',
+      model: 'gpt-5.5',
+      generationConfig: { samplingParams: { reasoning_effort: 'none' } },
+      currentValue: 'none',
+      metadata: { canEnable: false },
+    },
+    {
+      name: 'OpenRouter raw on without a saved preference',
+      model: 'gpt-5.4',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      generationConfig: { samplingParams: { reasoning_effort: 'high' } },
+      currentValue: 'high',
+      metadata: { enableValue: 'default' },
+    },
+    {
+      name: 'OpenRouter raw off with a saved tier',
+      model: 'gpt-5.5',
+      persisted: 'high',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      generationConfig: { extra_body: { reasoning: { enabled: false } } },
+      currentValue: 'none',
+      metadata: { canEnable: false },
+    },
+    {
+      name: 'provider default disables the raw reset',
+      model: 'gpt-5.5',
+      persisted: 'none',
+      generationConfig: {
+        reasoning: false,
+        extra_body: { reasoning: { effort: 'high' } },
+      },
+      currentValue: 'none',
+      metadata: { canEnable: false },
+    },
+    {
+      name: 'provider defaults ignore top-level raw restrictions',
+      model: 'gpt-5.5',
+      persisted: 'none',
+      generationConfig: {},
+      currentValue: 'none',
+      metadata: {},
+    },
+    {
+      name: 'provider disabled default without a saved preference',
+      model: 'gpt-5.5',
+      generationConfig: {
+        reasoning: false,
+        extra_body: { reasoning: { effort: 'high' } },
+      },
+      currentValue: 'none',
+      metadata: { canEnable: false },
+    },
+    {
+      name: 'mandatory model removes raw off and uses its default tier',
+      model: 'gpt-6-astra',
+      persisted: 'high',
+      generationConfig: { extra_body: { reasoning_effort: 'none' } },
+      currentValue: 'medium',
+      metadata: { enableValue: 'default', thinkingMandatory: true },
+    },
+  ])('projects cold reasoning controls: $name', async (testCase) => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      $version: 4,
+      security: { auth: { selectedType: 'openai' } },
+      model: {
+        name: testCase.model,
+        reasoningEffort: testCase.persisted,
+        generationConfig: { extra_body: { reasoning_effort: 'none' } },
+      },
+      modelProviders: {
+        openai: [
+          {
+            id: testCase.model,
+            baseUrl: testCase.baseUrl ?? 'https://api.openai.com/v1',
+            generationConfig: testCase.generationConfig,
+          },
+        ],
+      },
+    });
+    const settingsBefore = await fs.readFile(
+      path.join(qwenHome, 'settings.json'),
+      'utf8',
+    );
+    const result = await provider(workspace, false);
+    const options = result.providers
+      .flatMap((entry) => entry.models)
+      .find((model) => model.baseModelId === testCase.model)?.configOptions;
+    expect(options).toEqual([
+      expect.objectContaining({
+        id: 'reasoning_effort',
+        currentValue: testCase.currentValue,
+        _meta: {
+          'qwenCode/reasoning': {
+            defaultEffort: 'medium',
+            ...testCase.metadata,
+          },
+        },
+      }),
+    ]);
+    expect(
+      await fs.readFile(path.join(qwenHome, 'settings.json'), 'utf8'),
+    ).toBe(settingsBefore);
   });
 
   it('does not project reasoning preview onto opaque route models', async () => {

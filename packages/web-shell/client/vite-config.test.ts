@@ -7,7 +7,10 @@
 import { describe, expect, it } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ConfigEnv, ProxyOptions, UserConfig } from 'vite';
-import viteConfig, { QUALIFIED_VOICE_STREAM_PROXY } from '../vite.config';
+import viteConfig, {
+  QUALIFIED_ACP_WS_PROXY,
+  QUALIFIED_VOICE_STREAM_PROXY,
+} from '../vite.config';
 
 function loadConfig(): UserConfig {
   const factory = viteConfig as (env: ConfigEnv) => UserConfig;
@@ -40,12 +43,39 @@ describe('Web Shell Voice development proxy', () => {
   });
 });
 
+describe('Web Shell local-files development proxy', () => {
+  it('proxies qualified ACP WebSocket upgrades for secondary workspaces', () => {
+    const config = loadConfig();
+    const proxy = config.server?.proxy;
+    const qualified = proxy?.[QUALIFIED_ACP_WS_PROXY];
+
+    expect(qualified).not.toBeTypeOf('string');
+    expect(
+      qualified && typeof qualified !== 'string' ? qualified.ws : false,
+    ).toBe(true);
+    expect(new RegExp(QUALIFIED_ACP_WS_PROXY).test('/workspaces/id/acp')).toBe(
+      true,
+    );
+    expect(new RegExp(QUALIFIED_ACP_WS_PROXY).test('/acp')).toBe(false);
+    expect(new RegExp(QUALIFIED_ACP_WS_PROXY).test('/workspaces/a/b/acp')).toBe(
+      false,
+    );
+  });
+});
+
 describe('Web Shell MCP App development proxy', () => {
   it('proxies the sandbox document to the daemon', () => {
     const sandboxProxy = loadConfig().server?.proxy?.['/mcp-app-sandbox'];
     expect(sandboxProxy).not.toBeTypeOf('string');
     expect(sandboxProxy).toBeDefined();
     expect((sandboxProxy as ProxyOptions).bypass).toBeUndefined();
+  });
+});
+
+describe('Web Shell standalone session development proxy', () => {
+  it('proxies standalone session routes to the daemon', () => {
+    const proxy = loadConfig().server?.proxy;
+    expect(proxy?.['/standalone/sessions']).toBe(proxy?.['/session']);
   });
 });
 
@@ -64,5 +94,40 @@ describe('Web Shell client source proxy bypass', () => {
     expect(
       options.bypass?.(request, {} as unknown as ServerResponse, options),
     ).toBe(request.url);
+  });
+
+  it('serves live source modules instead of proxying them', () => {
+    const liveProxy = loadConfig().server?.proxy?.['/live'];
+    expect(liveProxy).not.toBeTypeOf('string');
+    expect(liveProxy).toBeDefined();
+    const options = liveProxy as ProxyOptions;
+    const request = {
+      method: 'GET',
+      url: '/live/useLiveVoice.ts',
+      headers: { 'sec-fetch-dest': 'script' },
+    } as unknown as IncomingMessage;
+
+    expect(
+      options.bypass?.(request, {} as unknown as ServerResponse, options),
+    ).toBe(request.url);
+  });
+});
+
+describe('Web Shell daemon API proxy coverage', () => {
+  it.each(['/standalone', '/live'])('proxies %s API routes', (prefix) => {
+    const proxy = loadConfig().server?.proxy?.[prefix];
+    expect(proxy).not.toBeTypeOf('string');
+    expect(proxy).toBeDefined();
+    const options = proxy as ProxyOptions;
+    const request = {
+      method: 'GET',
+      url: `${prefix}/status`,
+      headers: { accept: '*/*' },
+    } as unknown as IncomingMessage;
+
+    // API fetches must NOT bypass to the shell; undefined means "proxy it".
+    expect(
+      options.bypass?.(request, {} as unknown as ServerResponse, options),
+    ).toBeUndefined();
   });
 });

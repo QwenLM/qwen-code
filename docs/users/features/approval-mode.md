@@ -303,6 +303,9 @@ reason inline and decide whether to switch to Ask Permissions Mode for that step
       // Optional: route ALL shell commands (including read-only ones like
       // ls, cat) through the classifier for defense-in-depth.
       // "classifyAllShell": true,
+      // Optional: send MCP tool calls to the classifier by name only
+      // (arguments are forwarded by default).
+      // "mcp": { "forwardArguments": false },
     },
   },
 }
