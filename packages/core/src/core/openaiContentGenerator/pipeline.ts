@@ -263,6 +263,23 @@ function isSSECompatibleContentType(contentType: string | null): boolean {
 }
 
 /**
+ * True when the response carries user-visible model output: any candidate
+ * part without the `thought` flag (text, functionCall, inlineData, …).
+ * Mirrors LlmChat's delivered-content notion (its
+ * `hasNonThoughtCandidateParts`), which excludes thought parts — a
+ * thought-only prefix must still count as nothing delivered.
+ */
+function hasNonThoughtCandidateParts(
+  response: GenerateContentResponse,
+): boolean {
+  return Boolean(
+    response.candidates?.some((candidate) =>
+      candidate.content?.parts?.some((part) => !part.thought),
+    ),
+  );
+}
+
+/**
  * Thrown when the HTTP 200 response to a streaming request has a content-type
  * incompatible with SSE (e.g. `text/html` from a gateway block page). Carries
  * bounded diagnostic metadata so the user/maintainer can distinguish "model
@@ -551,6 +568,11 @@ export class ContentGenerationPipeline {
     // function-call parts from the finish chunk).
     let pendingFinishResponse: GenerateContentResponse | null = null;
     let finishYielded = false;
+    // Whether any user-visible content (a non-thought part) has been yielded
+    // on this stream. The error-path flush below consults it before
+    // withholding a parked tool-call finish: it must mirror LlmChat's
+    // delivered-content notion, which excludes thought parts.
+    let contentYielded = false;
     let pendingFinishProtocolTagSanitized:
       | NonNullable<RequestContext['protocolTagSanitized']>
       | undefined;
@@ -678,6 +700,7 @@ export class ContentGenerationPipeline {
             // Keep pendingFinishResponse alive so late-arriving usage
             // metadata can still be merged (see finishYielded block above).
           } else {
+            contentYielded ||= hasNonThoughtCandidateParts(response);
             logPendingProtocolTagSanitized(response, sanitization);
             yield response;
           }
@@ -738,12 +761,19 @@ export class ContentGenerationPipeline {
       // returns, so the Stage 2d flush above cannot double-yield this
       // response.
       //
-      // A parked finish carrying a functionCall stays parked: the converter
-      // emits functionCall parts only on the finish chunk, and releasing one
-      // here would flip LlmChat's delivered flags (streamYieldedContentChunk,
+      // A parked finish carrying a functionCall stays parked only while
+      // nothing user-visible was delivered: the converter emits functionCall
+      // parts only on the finish chunk, and releasing one here would flip
+      // LlmChat's delivered flags (streamYieldedContentChunk,
       // streamYieldedFunctionCall) and shut the transport replay gate that
-      // recovers exactly this cut, while the post-completion acceptance arm
-      // this flush feeds excludes tool calls anyway.
+      // recovers exactly this cut. Once content has been yielded that gate
+      // is already shut, so withholding buys no recovery — it would strand
+      // the model's decided tool call: LlmChat would see prose, no
+      // functionCall, and no finish reason, so the continuation arm would
+      // resume over the delivered prose while the call never reaches
+      // error-path persistence or the scheduler's repair flow. Releasing it
+      // here puts the cut on the same footing as the Anthropic
+      // deferred-batch release gate.
       // TypeScript narrows pendingFinishResponse to null here (its only
       // assignments sit inside the handleChunkMerging callback), so the
       // property access needs the same explicit cast as the finishYielded
@@ -752,7 +782,11 @@ export class ContentGenerationPipeline {
       const parkedHasToolCall = parked?.candidates?.some((candidate) =>
         candidate.content?.parts?.some((part) => part.functionCall),
       );
-      if (pendingFinishResponse && !finishYielded && !parkedHasToolCall) {
+      if (
+        pendingFinishResponse &&
+        !finishYielded &&
+        (!parkedHasToolCall || contentYielded)
+      ) {
         logPendingProtocolTagSanitized(
           pendingFinishResponse,
           pendingFinishProtocolTagSanitized,

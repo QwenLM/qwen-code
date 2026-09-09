@@ -5182,6 +5182,154 @@ describe('ContentGenerationPipeline', () => {
       expect(results).toEqual([]);
       expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
     });
+
+    it('releases a parked functionCall finish once content was delivered when the stream fails', async () => {
+      // Sibling of the withhold case above: the withhold protects LlmChat's
+      // transport replay gate, which is open only while nothing user-visible
+      // was delivered. Once prose has reached the caller that gate is already
+      // shut, so withholding buys no recovery — it only strands the model's
+      // decided tool call. The parked finish must be released so the
+      // delivered functionCall flips LlmChat's delivered flags and the
+      // error-path persistence plus the scheduler's repair flow take over.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const streamError = new Error('stream failed after finish');
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'prose-chunk',
+            choices: [
+              {
+                delta: { content: 'Let me read that file. ' },
+                finish_reason: null,
+              },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          yield {
+            id: 'finish-chunk',
+            choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          throw streamError;
+        },
+      };
+      const proseResponse = new GenerateContentResponse();
+      proseResponse.candidates = [
+        {
+          content: {
+            parts: [{ text: 'Let me read that file. ' }],
+            role: 'model',
+          },
+          index: 0,
+        },
+      ];
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
+        .mockReturnValueOnce(proseResponse)
+        .mockReturnValueOnce(finishResponse);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      const results: GenerateContentResponse[] = [];
+      await expect(async () => {
+        for await (const result of resultGenerator) {
+          results.push(result);
+        }
+      }).rejects.toThrow(streamError);
+      // Both the prose and the released finish reach the caller ahead of the
+      // rejection.
+      expect(results).toEqual([proseResponse, finishResponse]);
+      expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
+    });
+
+    it('withholds a parked functionCall finish when only thought content was delivered', async () => {
+      // The delivered-content flag mirrors LlmChat's notion, which excludes
+      // thought parts: a thought-only prefix persists nothing on the error
+      // path and leaves the transport replay gate open, so the parked
+      // tool-call finish stays withheld exactly as when nothing was
+      // delivered at all.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const streamError = new Error('stream failed after finish');
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'thought-chunk',
+            choices: [
+              {
+                delta: { content: 'Let me plan this out.' },
+                finish_reason: null,
+              },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          yield {
+            id: 'finish-chunk',
+            choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          throw streamError;
+        },
+      };
+      const thoughtResponse = new GenerateContentResponse();
+      thoughtResponse.candidates = [
+        {
+          content: {
+            parts: [{ text: 'Let me plan this out.', thought: true }],
+            role: 'model',
+          },
+          index: 0,
+        },
+      ];
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
+        .mockReturnValueOnce(thoughtResponse)
+        .mockReturnValueOnce(finishResponse);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      const results: GenerateContentResponse[] = [];
+      await expect(async () => {
+        for await (const result of resultGenerator) {
+          results.push(result);
+        }
+      }).rejects.toThrow(streamError);
+      // The thought reached the caller but does not count as delivered
+      // content, so the tool-call finish stays parked.
+      expect(results).toEqual([thoughtResponse]);
+      expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('buildResponseFormat endpoint gate', () => {

@@ -10983,6 +10983,131 @@ describe('LlmChat', async () => {
         ).toBe(true);
       });
 
+      it('delivers a prose-prefixed parked tool-call finish through the real pipeline instead of continuing', async () => {
+        // End-to-end over the real OpenAI pipeline and converter: the
+        // converter emits functionCall parts only on the finish chunk, and
+        // streaming parks that chunk for the trailing usage metadata, so the
+        // gateway error frame lands while the tool call is still parked. The
+        // prose that already reached the caller has shut the transport replay
+        // gate, so withholding the finish buys no recovery — it only strands
+        // the model's decided tool call and leaves LlmChat to inject a
+        // continuation whose fabricated tail folds into durable history.
+        // Releasing the finish lets the delivered functionCall shut the
+        // continuation gate instead, and error-path persistence plus the
+        // scheduler's repair flow take over.
+        vi.useFakeTimers();
+        try {
+          const upstreamError = Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          });
+          const openaiChunk = (
+            id: string,
+            delta: Record<string, unknown>,
+            finishReason: string | null = null,
+          ) =>
+            ({
+              id,
+              created: 1,
+              model: 'test-model',
+              choices: [{ index: 0, delta, finish_reason: finishReason }],
+            }) as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+          const create = vi
+            .fn()
+            .mockImplementationOnce(async () =>
+              (async function* () {
+                yield openaiChunk('chunk-prose', {
+                  content: 'Let me read that file. ',
+                });
+                yield openaiChunk('chunk-tool-open', {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'call_1',
+                      type: 'function',
+                      function: {
+                        name: 'read_file',
+                        arguments: '{"file_path":"a.sql"}',
+                      },
+                    },
+                  ],
+                });
+                yield openaiChunk('chunk-finish', {}, 'tool_calls');
+                throw upstreamError;
+              })(),
+            )
+            // Tripwire: consumed only if the cut is wrongly resumed.
+            .mockImplementationOnce(async () =>
+              (async function* () {
+                yield openaiChunk('chunk-tail', {
+                  content: 'fabricated tail',
+                });
+                yield openaiChunk('chunk-tail-finish', {}, 'stop');
+              })(),
+            );
+          const provider = {
+            buildClient: () =>
+              ({ chat: { completions: { create } } }) as unknown as OpenAI,
+            buildRequest: (request: OpenAI.Chat.ChatCompletionCreateParams) =>
+              request,
+            buildHeaders: () => ({}),
+            getDefaultGenerationConfig: () => ({}),
+          } as OpenAICompatibleProvider;
+          const generator = new OpenAIContentGenerator(
+            { model: 'test-model', authType: AuthType.USE_OPENAI },
+            mockConfig,
+            provider,
+          );
+          vi.mocked(mockConfig.getContentGenerator).mockReturnValue(generator);
+          vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+            model: 'test-model',
+            authType: AuthType.USE_OPENAI,
+          });
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-upstream-statusless-parked-toolcall',
+          );
+          const events: StreamEvent[] = [];
+          let caughtError: unknown;
+          const collecting = (async () => {
+            try {
+              for await (const event of stream) events.push(event);
+            } catch (error) {
+              caughtError = error;
+            }
+          })();
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(5_000);
+          await collecting;
+
+          // One attempt only: the delivered functionCall shuts both the
+          // replay and the continuation gates.
+          expect(create).toHaveBeenCalledTimes(1);
+          expect(
+            events.filter(
+              (event) =>
+                event.type === StreamEventType.RETRY && event.isContinuation,
+            ),
+          ).toHaveLength(0);
+          // The error propagates — the turn must not be recorded as a
+          // successful continuation.
+          expect(caughtError).toBeDefined();
+          // The delivered functionCall reaches history on the error path,
+          // paired for the scheduler's repair flow.
+          expect(
+            chat
+              .getHistory()
+              .at(-1)
+              ?.parts?.some((part) => part.functionCall?.name === 'read_file'),
+          ).toBe(true);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('replays rather than continues when only a thought was delivered', async () => {
         // The reported failure mode: thinking models emit reasoning within
         // seconds, so gating replay on "any chunk yielded" made it
