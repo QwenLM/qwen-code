@@ -15,6 +15,8 @@ import {
 } from './contentGenerator.js';
 import { GoogleGenAI } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { LoggingContentGenerator } from './loggingContentGenerator/index.js';
+import { RateLimitedContentGenerator } from './rateLimitedContentGenerator.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
@@ -687,6 +689,150 @@ describe('createContentGenerator - ERR_MODULE_NOT_FOUND handling', () => {
       expect(err.message).toMatch(/openai/);
       expect(err.cause).toBe(moduleError);
     }
+  });
+});
+
+describe('createContentGenerator request concurrency wrapping (#3409)', () => {
+  const baseMockConfig = {
+    getUsageStatisticsEnabled: () => false,
+    getContentGeneratorConfig: () => ({}),
+    getCliVersion: () => '1.0.0',
+  } as unknown as Config;
+
+  const buildGoogleGenAIMock = () => {
+    const mockGenerator = { models: {} } as unknown as GoogleGenAI;
+    vi.mocked(GoogleGenAI).mockImplementation(() => mockGenerator as never);
+  };
+
+  // createContentGenerator now returns a LazyContentGenerator; preload()
+  // resolves to the inner LoggingContentGenerator the wrapping assertions need.
+  const loadLoggingGenerator = async (
+    generator: ContentGenerator,
+  ): Promise<LoggingContentGenerator> => {
+    const lazy = generator as unknown as {
+      preload: () => Promise<ContentGenerator>;
+    };
+    return (await lazy.preload()) as LoggingContentGenerator;
+  };
+
+  const originalEnv = process.env['QWEN_REQUEST_CONCURRENCY'];
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env['QWEN_REQUEST_CONCURRENCY'];
+    } else {
+      process.env['QWEN_REQUEST_CONCURRENCY'] = originalEnv;
+    }
+  });
+
+  it('does not wrap with rate-limiter when no concurrency is configured', async () => {
+    buildGoogleGenAIMock();
+    delete process.env['QWEN_REQUEST_CONCURRENCY'];
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        apiKey: 'test-api-key',
+        authType: AuthType.USE_GEMINI,
+      },
+      baseMockConfig,
+    );
+    const logging = await loadLoggingGenerator(generator);
+    expect(logging.getWrapped()).not.toBeInstanceOf(
+      RateLimitedContentGenerator,
+    );
+  });
+
+  it('wraps with RateLimitedContentGenerator when requestConcurrency is set', async () => {
+    buildGoogleGenAIMock();
+    delete process.env['QWEN_REQUEST_CONCURRENCY'];
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        apiKey: 'test-api-key',
+        authType: AuthType.USE_GEMINI,
+        requestConcurrency: 4,
+      },
+      baseMockConfig,
+    );
+    const logging = await loadLoggingGenerator(generator);
+    const wrapped = logging.getWrapped();
+    expect(wrapped).toBeInstanceOf(RateLimitedContentGenerator);
+    const limiter = (wrapped as RateLimitedContentGenerator).getLimiter();
+    expect(limiter.limit).toBe(4);
+  });
+
+  it('falls back to QWEN_REQUEST_CONCURRENCY env var when config is unset', async () => {
+    buildGoogleGenAIMock();
+    process.env['QWEN_REQUEST_CONCURRENCY'] = '6';
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        apiKey: 'test-api-key',
+        authType: AuthType.USE_GEMINI,
+      },
+      baseMockConfig,
+    );
+    const logging = await loadLoggingGenerator(generator);
+    const wrapped = logging.getWrapped();
+    expect(wrapped).toBeInstanceOf(RateLimitedContentGenerator);
+    expect((wrapped as RateLimitedContentGenerator).getLimiter().limit).toBe(6);
+  });
+
+  it('config value wins over the env var', async () => {
+    buildGoogleGenAIMock();
+    process.env['QWEN_REQUEST_CONCURRENCY'] = '6';
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        apiKey: 'test-api-key',
+        authType: AuthType.USE_GEMINI,
+        requestConcurrency: 2,
+      },
+      baseMockConfig,
+    );
+    const logging = await loadLoggingGenerator(generator);
+    const wrapped = logging.getWrapped();
+    expect(wrapped).toBeInstanceOf(RateLimitedContentGenerator);
+    expect((wrapped as RateLimitedContentGenerator).getLimiter().limit).toBe(2);
+  });
+
+  it.each([
+    ['0', 0],
+    ['-1', 0],
+    ['nope', 0],
+    ['  ', 0],
+  ])('treats env var %s as unlimited', async (envVal, _expected) => {
+    buildGoogleGenAIMock();
+    process.env['QWEN_REQUEST_CONCURRENCY'] = envVal;
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        apiKey: 'test-api-key',
+        authType: AuthType.USE_GEMINI,
+      },
+      baseMockConfig,
+    );
+    const logging = await loadLoggingGenerator(generator);
+    expect(logging.getWrapped()).not.toBeInstanceOf(
+      RateLimitedContentGenerator,
+    );
+  });
+
+  it('floors fractional config values', async () => {
+    buildGoogleGenAIMock();
+    delete process.env['QWEN_REQUEST_CONCURRENCY'];
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        apiKey: 'test-api-key',
+        authType: AuthType.USE_GEMINI,
+        requestConcurrency: 3.7,
+      },
+      baseMockConfig,
+    );
+    const logging = await loadLoggingGenerator(generator);
+    const wrapped = logging.getWrapped() as RateLimitedContentGenerator;
+    expect(wrapped.getLimiter().limit).toBe(3);
   });
 });
 
