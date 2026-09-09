@@ -600,6 +600,9 @@ function projectSubagentToolUpdate(
         ...(taskDescription ? { taskDescription } : {}),
         ...(status ? { status } : {}),
         ...(isTaskExecutionMode(executionMode) ? { executionMode } : {}),
+        ...(typeof rawOutput['subagentSessionReady'] === 'boolean'
+          ? { subagentSessionReady: rawOutput['subagentSessionReady'] }
+          : {}),
         ...(terminateReason ? { terminateReason } : {}),
         ...(typeof rawOutput['tokenCount'] === 'number'
           ? { tokenCount: rawOutput['tokenCount'] }

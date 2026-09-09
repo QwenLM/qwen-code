@@ -53,6 +53,7 @@ import {
   getAgentCancellationReason,
   getAgentCurrentToolHint,
   getAgentDescription,
+  getSubagentDetailsUnavailableReason,
   getAgentDisplayStatus,
   getAgentType,
   getTaskExecutionRecord,
@@ -1059,6 +1060,7 @@ function areToolLinePropsEqual(
     a.callId === b.callId &&
     a.toolName === b.toolName &&
     a.status === b.status &&
+    a.subagentSessionReady === b.subagentSessionReady &&
     a.startTime === b.startTime &&
     a.endTime === b.endTime &&
     a.subContent === b.subContent &&
@@ -1084,6 +1086,7 @@ function areSubToolsEqual(
       a.callId !== b.callId ||
       a.toolName !== b.toolName ||
       a.status !== b.status ||
+      a.subagentSessionReady !== b.subagentSessionReady ||
       a.endTime !== b.endTime ||
       a.rawOutput !== b.rawOutput ||
       a.args !== b.args ||
@@ -1275,6 +1278,7 @@ export const ToolLine = memo(function ToolLine({
     // show yet — keep the row compact and non-openable; the approval dialog
     // is the single source of interaction.
     const approvalPending = !!hasApproval;
+    const unavailableReason = getSubagentDetailsUnavailableReason(tool);
     const panel = (
       <SubAgentPanel
         tool={tool}
@@ -1317,7 +1321,11 @@ export const ToolLine = memo(function ToolLine({
             <button
               type="button"
               className={`${styles.lineMain} ${styles.lineExpandable} ${styles.lineButton}`}
-              onClick={() => subagentDetails.onOpen(tool)}
+              aria-disabled={!!unavailableReason || undefined}
+              title={unavailableReason ? t(unavailableReason) : undefined}
+              onClick={() => {
+                if (!unavailableReason) subagentDetails.onOpen(tool);
+              }}
             >
               {rowContent}
               <span className={styles.lineChevronRight} aria-hidden="true" />
@@ -1333,7 +1341,13 @@ export const ToolLine = memo(function ToolLine({
             className={`${styles.lineMain} ${
               approvalPending ? '' : styles.lineExpandable
             }`}
-            onClick={approvalPending ? undefined : () => setExpanded(!expanded)}
+            aria-disabled={!!unavailableReason || undefined}
+            title={unavailableReason ? t(unavailableReason) : undefined}
+            onClick={
+              approvalPending || unavailableReason
+                ? undefined
+                : () => setExpanded(!expanded)
+            }
           >
             <AgentIcon />
             <StatusIcon status={isComplete ? info.status : tool.status} />
@@ -1828,6 +1842,10 @@ export const ToolGroup = memo(function ToolGroup({
       !monitorDetailsUnavailable,
   );
   const opensToolDetails = opensSubagentDetails || opensMonitorDetails;
+  const unavailableReason =
+    !compactSummary && singleSubagent
+      ? getSubagentDetailsUnavailableReason(singleSubagent)
+      : undefined;
   const summaryIconTool = hasRunningTool ? (activeTool ?? tools[0]) : tools[0];
   const hasApprovalTool =
     pendingApproval?.toolCallId &&
@@ -1875,10 +1893,11 @@ export const ToolGroup = memo(function ToolGroup({
         <button
           type="button"
           disabled={documentMode}
+          aria-disabled={!!unavailableReason || undefined}
           tabIndex={documentMode ? -1 : undefined}
           className={styles.chatSummary}
           onClick={() => {
-            if (documentMode) return;
+            if (documentMode || unavailableReason) return;
             if (opensSubagentDetails && singleSubagent && subagentDetails) {
               subagentDetails.onOpen(singleSubagent);
               return;
@@ -1893,11 +1912,13 @@ export const ToolGroup = memo(function ToolGroup({
             documentMode || opensToolDetails ? undefined : chatExpanded
           }
           title={
-            documentMode || opensToolDetails
-              ? undefined
-              : showGroupContent
-                ? t('tool.collapseHint')
-                : t('tool.expand')
+            unavailableReason
+              ? t(unavailableReason)
+              : documentMode || opensToolDetails
+                ? undefined
+                : showGroupContent
+                  ? t('tool.collapseHint')
+                  : t('tool.expand')
           }
         >
           <span

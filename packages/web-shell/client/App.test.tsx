@@ -22299,6 +22299,237 @@ describe('App session callbacks', () => {
     },
   );
 
+  it('enables toggle-only Welcome thinking after a saved off preference', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.currentModel = 'qwen3.7-plus';
+    mockConnection.models = [
+      {
+        id: 'qwen3.7-plus',
+        label: 'Qwen',
+        reasoningPreview: {
+          enabled: false,
+          effort: 'default',
+          efforts: [],
+          canDisable: true,
+        },
+      },
+    ];
+    renderApp();
+    await flush();
+    act(() =>
+      testState.latestChatEditorProps?.onSelectReasoningEffort?.(
+        'default',
+        'toggle',
+      ),
+    );
+    await flush();
+    expect(testState.latestChatEditorProps?.reasoning?.enabled).toBe(true);
+  });
+
+  it.each([
+    ['toggle', 'gpt-5.4', false, undefined, undefined],
+    ['toggle', 'gpt-5.5', false, undefined, undefined],
+    ['toggle', 'gpt-5.5', true, undefined, undefined],
+    [undefined, 'gpt-5.4', false, undefined, undefined],
+    [undefined, 'gpt-5.5', false, undefined, undefined],
+    [undefined, 'gpt-5.5', false, false, undefined],
+    [undefined, 'gpt-5.4', true, undefined, 'default'],
+    [undefined, 'gpt-5.5', true, false, undefined],
+  ] as const)(
+    'keeps Welcome on intent tied to its source model (%s, %s, target enabled=%s, canEnable=%s, enableValue=%s)',
+    async (source, targetModel, targetEnabled, canEnable, enableValue) => {
+      const carryTier =
+        source !== 'toggle' && canEnable !== false && enableValue !== 'default';
+      mockConnection.sessionId = undefined;
+      mockConnection.workspaceCwd = '/workspace';
+      mockConnection.currentModel = 'qwen3.8-max';
+      mockConnection.models = [
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen',
+          reasoningPreview: {
+            enabled: false,
+            effort: 'none',
+            efforts: ['low', 'medium', 'xhigh'],
+            defaultEffort: 'xhigh',
+            canDisable: true,
+          },
+        },
+        {
+          id: targetModel,
+          label: 'GPT',
+          reasoningPreview: {
+            enabled: targetEnabled,
+            canEnable,
+            enableValue,
+            effort: 'medium',
+            efforts: ['low', 'medium', 'high', 'xhigh'],
+            defaultEffort: 'medium',
+            canDisable: true,
+          },
+        },
+      ];
+      mockSessionActions.createSession.mockImplementation(async () => {
+        mockConnection.sessionId = 'session-created';
+        return { sessionId: 'session-created' };
+      });
+      renderApp();
+      await flush();
+      act(() =>
+        testState.latestChatEditorProps?.onSelectReasoningEffort?.(
+          'xhigh',
+          source,
+        ),
+      );
+      await flush();
+      expect(testState.latestChatEditorProps?.reasoning).toMatchObject({
+        enabled: true,
+        effort: 'xhigh',
+      });
+      act(() => testState.latestChatEditorProps?.onSelectModel?.(targetModel));
+      await flush();
+      expect(testState.latestChatEditorProps?.reasoning).toMatchObject(
+        carryTier
+          ? { enabled: true, effort: 'xhigh' }
+          : { enabled: targetEnabled, effort: 'medium' },
+      );
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first prompt');
+        await vi.waitFor(() =>
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce(),
+        );
+      });
+      if (!carryTier) {
+        expect(mockSessionActions.setReasoningEffort).not.toHaveBeenCalled();
+      } else {
+        expect(mockSessionActions.setReasoningEffort).toHaveBeenCalledWith(
+          'xhigh',
+          { persist: true },
+        );
+      }
+    },
+  );
+
+  it.each([
+    { enabled: false, canEnable: false },
+    { enabled: true, effort: 'high', enableValue: 'default' },
+  ] as const)(
+    'drops a pending Welcome tier when refreshed metadata blocks it: %j',
+    async (blockedState) => {
+      mockConnection.sessionId = undefined;
+      mockConnection.workspaceCwd = '/workspace';
+      mockConnection.currentModel = 'gpt-5.5';
+      const reasoningPreview = {
+        enabled: false,
+        effort: 'medium',
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        canDisable: true,
+      };
+      mockConnection.models = [
+        { id: 'gpt-5.5', label: 'GPT', reasoningPreview },
+      ];
+      mockSessionActions.createSession.mockImplementation(async () => {
+        mockConnection.sessionId = 'session-created';
+        return { sessionId: 'session-created' };
+      });
+      const { rerender } = renderApp();
+      await flush();
+      act(() =>
+        testState.latestChatEditorProps?.onSelectReasoningEffort?.('xhigh'),
+      );
+      await flush();
+      expect(testState.latestChatEditorProps?.reasoning).toMatchObject({
+        enabled: true,
+        effort: 'xhigh',
+      });
+      mockConnection.models = [
+        {
+          id: 'gpt-5.5',
+          label: 'GPT',
+          reasoningPreview: { ...reasoningPreview, ...blockedState },
+        },
+      ];
+      rerender();
+      await flush();
+      expect(testState.latestChatEditorProps?.reasoning).toEqual({
+        ...reasoningPreview,
+        ...blockedState,
+      });
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first prompt');
+        await vi.waitFor(() =>
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce(),
+        );
+      });
+      expect(mockSessionActions.setReasoningEffort).not.toHaveBeenCalled();
+      expect(mockSessionActions.releaseSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['max', false],
+    ['none', false],
+    ['max', true],
+    ['none', true],
+  ] as const)(
+    'uses the target Welcome preview without resetting %s (pending=%s)',
+    async (selection, pending) => {
+      const sourceModel = selection === 'max' ? 'gpt-6-astra' : 'gpt-5.5';
+      const targetModel = selection === 'max' ? 'gpt-5.4' : 'gpt-6-astra';
+      const targetPreview = {
+        enabled: true,
+        effort: selection === 'max' ? 'xhigh' : 'medium',
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        canDisable: selection === 'max',
+      };
+      mockConnection.sessionId = undefined;
+      mockConnection.workspaceCwd = '/workspace';
+      mockConnection.currentModel = sourceModel;
+      mockConnection.models = [
+        {
+          id: sourceModel,
+          label: sourceModel,
+          reasoningPreview: {
+            enabled: selection !== 'none',
+            effort: selection,
+            efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+            defaultEffort: 'medium',
+            canDisable: selection === 'none',
+          },
+        },
+        {
+          id: targetModel,
+          label: targetModel,
+          reasoningPreview: targetPreview,
+        },
+      ];
+      mockSessionActions.createSession.mockImplementation(async () => {
+        mockConnection.sessionId = 'session-created';
+        return { sessionId: 'session-created' };
+      });
+      renderApp();
+      await flush();
+      if (pending) {
+        act(() =>
+          testState.latestChatEditorProps?.onSelectReasoningEffort?.(selection),
+        );
+        await flush();
+      }
+      act(() => testState.latestChatEditorProps?.onSelectModel?.(targetModel));
+      await flush();
+      expect(testState.latestChatEditorProps?.reasoning).toEqual(targetPreview);
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first prompt');
+        await vi.waitFor(() =>
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce(),
+        );
+      });
+      expect(mockSessionActions.setReasoningEffort).not.toHaveBeenCalled();
+    },
+  );
+
   it('commits the first prompt after creating its session', async () => {
     mockConnection.sessionId = undefined;
     mockSessionActions.createSession.mockImplementation(async () => {
