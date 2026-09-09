@@ -55,6 +55,8 @@ export interface AdmissibleNotification {
    * evicted before anything else.
    */
   interim?: boolean;
+  /** The result was durably recorded before live delivery was attempted. */
+  persisted?: boolean;
 }
 
 /** What the caller should do with an incoming notification. */
@@ -158,7 +160,7 @@ interface DroppedGroup {
 }
 
 function groupKey(item: AdmissibleNotification): string {
-  return `${item.kind}:${item.kind === 'monitor' && item.interim ? 'interim' : 'terminal'}`;
+  return `${item.persisted ? 'recorded' : 'dropped'}:${item.kind}:${item.kind === 'monitor' && item.interim ? 'interim' : 'terminal'}`;
 }
 
 /**
@@ -200,40 +202,53 @@ export class DroppedNotificationTally {
 
   /**
    * Returns the summary for everything recorded since the last call and
-   * resets. `undefined` when nothing was dropped.
+   * resets. `undefined` when there is nothing to report.
    */
-  take(): { displayText: string; modelText: string } | undefined {
+  take():
+    | {
+        displayText: string;
+        modelText: string;
+        status: 'dropped' | 'recorded';
+      }
+    | undefined {
     if (this.total === 0) return undefined;
 
     const clauses: string[] = [];
     let supersededPulseClause: string | undefined;
     let supersededPulseCount = 0;
+    const recordedClauses: string[] = [];
+    let recordedCount = 0;
     let hasInspectableLoss = false;
     let hasCronLoss = false;
     for (const kind of Object.keys(
       GROUP_ORDER,
     ) as BackgroundNotificationKind[]) {
       for (const interim of GROUP_ORDER[kind]) {
-        const group = this.groups.get(groupKey({ kind, interim }));
-        if (!group) continue;
-        const noun = droppedNoun(kind, interim, group.count);
-        const elided = group.count - group.ids.length;
-        const names =
-          group.ids.length > 0
-            ? ` (${group.ids.join(', ')}${elided > 0 ? `, +${elided}` : ''})`
-            : '';
-        if (kind === 'monitor' && interim) {
-          supersededPulseCount = group.count;
-          supersededPulseClause = `${group.count} superseded ${noun}${names} ${group.count === 1 ? 'was' : 'were'} not delivered`;
-        } else {
-          clauses.push(`${group.count} ${noun}${names}`);
-          hasInspectableLoss ||= kind !== 'cron';
-          hasCronLoss ||= kind === 'cron';
+        for (const persisted of [false, true]) {
+          const group = this.groups.get(groupKey({ kind, interim, persisted }));
+          if (!group) continue;
+          const noun = droppedNoun(kind, interim, group.count);
+          const elided = group.count - group.ids.length;
+          const names =
+            group.ids.length > 0
+              ? ` (${group.ids.join(', ')}${elided > 0 ? `, +${elided}` : ''})`
+              : '';
+          if (persisted) {
+            recordedCount += group.count;
+            recordedClauses.push(`${group.count} ${noun}${names}`);
+          } else if (kind === 'monitor' && interim) {
+            supersededPulseCount = group.count;
+            supersededPulseClause = `${group.count} superseded ${noun}${names} ${group.count === 1 ? 'was' : 'were'} not delivered`;
+          } else {
+            clauses.push(`${group.count} ${noun}${names}`);
+            hasInspectableLoss ||= kind !== 'cron';
+            hasCronLoss ||= kind === 'cron';
+          }
         }
       }
     }
 
-    const droppedTotal = this.total - supersededPulseCount;
+    const droppedTotal = this.total - supersededPulseCount - recordedCount;
     const totalNoun =
       droppedTotal === 1
         ? 'background notification'
@@ -246,6 +261,9 @@ export class DroppedNotificationTally {
     const displayText = [
       droppedClause,
       supersededPulseClause ? `${supersededPulseClause}.` : undefined,
+      recordedCount > 0
+        ? `Recorded but not delivered live (queue full): ${recordedClauses.join(', ')}.`
+        : undefined,
     ]
       .filter((clause): clause is string => clause !== undefined)
       .join(' ');
@@ -258,6 +276,15 @@ export class DroppedNotificationTally {
     if (supersededPulseClause) {
       summaryParts.push(`${supersededPulseClause}.`);
     }
+    if (recordedCount > 0) {
+      const noun =
+        recordedCount === 1
+          ? 'background notification was'
+          : 'background notifications were';
+      summaryParts.push(
+        `${recordedCount} ${noun} already recorded but not delivered in a live notification turn: ${recordedClauses.join(', ')}. The recorded results remain available in the session transcript.`,
+      );
+    }
     if (hasInspectableLoss) {
       summaryParts.push(
         'The affected tasks were not stopped or deleted. Check their current state with /tasks or by reading the task output files before acting on this turn.',
@@ -269,9 +296,11 @@ export class DroppedNotificationTally {
       );
     }
     const summary = summaryParts.join(' ');
-    const modelText = `<task-notification>\n<kind>queue</kind>\n<status>dropped</status>\n<summary>${summary}</summary>\n</task-notification>`;
+    const status: 'dropped' | 'recorded' =
+      droppedTotal === 0 && supersededPulseCount === 0 ? 'recorded' : 'dropped';
+    const modelText = `<task-notification>\n<kind>queue</kind>\n<status>${status}</status>\n<summary>${summary}</summary>\n</task-notification>`;
 
     this.clear();
-    return { displayText, modelText };
+    return { displayText, modelText, status };
   }
 }

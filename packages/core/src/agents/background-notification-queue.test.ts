@@ -88,6 +88,19 @@ describe('decideNotificationAdmission', () => {
     });
   });
 
+  it('never lets pulse priority override protection', () => {
+    const queue = [
+      pulse('mon_protected'),
+      ...fill(MAX_BACKGROUND_NOTIFICATION_QUEUE - 1, (i) => shell(`bg_${i}`)),
+    ];
+
+    expect(
+      decideNotificationAdmission(queue, shell('bg_new'), {
+        isProtected: (item) => item.kind === 'monitor',
+      }),
+    ).toEqual({ action: 'evict', index: 1, evicted: shell('bg_0') });
+  });
+
   it('passes the queue index to the protection predicate', () => {
     const queue = fill(MAX_BACKGROUND_NOTIFICATION_QUEUE, (i) =>
       shell(`bg_${i}`),
@@ -209,6 +222,81 @@ describe('DroppedNotificationTally', () => {
         'before acting on this turn.</summary>\n' +
         '</task-notification>',
     );
+  });
+
+  it('elides distinct task ids beyond the per-group limit', () => {
+    const tally = new DroppedNotificationTally();
+    for (const id of ['bg_1', 'bg_2', 'bg_3', 'bg_4']) {
+      tally.record(shell(id));
+    }
+
+    expect(tally.take()?.displayText).toBe(
+      'Dropped 4 background notifications (queue full): 4 shell results ' +
+        '(bg_1, bg_2, bg_3, +1).',
+    );
+  });
+
+  it('renders every group and both recovery hints in stable order', () => {
+    const tally = new DroppedNotificationTally();
+    tally.record(agent('a_1'));
+    tally.record({ kind: 'workflow', taskId: 'w_1' });
+    tally.record(shell('bg_1'));
+    tally.record({ kind: 'monitor', taskId: 'mon_done' });
+    tally.record(pulse('mon_live'));
+    tally.record({ kind: 'cron', taskId: 'cron_1' });
+
+    const summary = tally.take();
+    expect(summary?.displayText).toBe(
+      'Dropped 5 background notifications (queue full): 1 agent result ' +
+        '(a_1), 1 workflow result (w_1), 1 shell result (bg_1), 1 monitor ' +
+        'result (mon_done), 1 scheduled prompt (cron_1). 1 superseded ' +
+        'monitor pulse (mon_live) was not delivered.',
+    );
+    expect(summary?.modelText).toBe(
+      '<task-notification>\n<kind>queue</kind>\n<status>dropped</status>\n' +
+        '<summary>5 background notifications were dropped before delivery ' +
+        'because the notification queue overflowed: 1 agent result (a_1), ' +
+        '1 workflow result (w_1), 1 shell result (bg_1), 1 monitor result ' +
+        '(mon_done), 1 scheduled prompt (cron_1). 1 superseded monitor pulse ' +
+        '(mon_live) was not delivered. The affected tasks were not stopped ' +
+        'or deleted. Check their current state with /tasks or by reading the ' +
+        'task output files before acting on this turn. The scheduled prompts ' +
+        'were not delivered and will not be retried.</summary>\n' +
+        '</task-notification>',
+    );
+  });
+
+  it('keeps a pulse-only summary out of the dropped headline', () => {
+    const tally = new DroppedNotificationTally();
+    tally.record(pulse('mon_live'));
+
+    const summary = tally.take();
+    expect(summary?.displayText).toBe(
+      '1 superseded monitor pulse (mon_live) was not delivered.',
+    );
+    expect(summary?.modelText).toContain(
+      '<summary>1 superseded monitor pulse (mon_live) was not delivered.</summary>',
+    );
+    expect(summary?.modelText).not.toContain('Dropped 0');
+  });
+
+  it('reports a recorded live-delivery miss separately from loss', () => {
+    const tally = new DroppedNotificationTally();
+    tally.record({ kind: 'agent', taskId: 'worker_1', persisted: true });
+
+    const summary = tally.take();
+    expect(summary?.displayText).toBe(
+      'Recorded but not delivered live (queue full): 1 agent result (worker_1).',
+    );
+    expect(summary?.modelText).toContain(
+      '1 background notification was already recorded but not delivered in a live notification turn',
+    );
+    expect(summary?.modelText).toContain('<status>recorded</status>');
+    expect(summary?.modelText).toContain(
+      'The recorded results remain available in the session transcript.',
+    );
+    expect(summary?.modelText).not.toContain('/tasks');
+    expect(summary?.modelText).not.toContain('was dropped before delivery');
   });
 
   it('uses singular wording for a single drop', () => {

@@ -12389,6 +12389,9 @@ describe('Session', () => {
         sessionId: 'test-session-id',
         prompt: [{ type: 'text', text: 'start background work' }],
       });
+      mockBackgroundShellRegistry.getAll.mockReturnValue([
+        { id: 'shell-1', description: 'npm test' },
+      ]);
 
       const shellCallback = mockBackgroundShellRegistry.setNotificationCallback
         .mock.calls[0][0] as (
@@ -12433,11 +12436,30 @@ describe('Session', () => {
       );
       expect(summaryUpdateIndex).toBeGreaterThanOrEqual(0);
       expect(summaryUpdateIndex).toBeLessThan(survivingUpdateIndex);
-      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
-        expect.any(Array),
-        expect.stringContaining('Dropped 1 background notification'),
-        expect.objectContaining({ taskId: 'shell-1' }),
+      const recordingCalls = mockChatRecordingService.recordNotification.mock
+        .calls as unknown as Array<
+        [Array<{ text: string }>, string, { taskId: string } | undefined]
+      >;
+      const summaryRecordIndex = recordingCalls.findIndex(([recordedParts]) =>
+        recordedParts[0]?.text.includes('<kind>queue</kind>'),
       );
+      const itemRecordIndex = recordingCalls.findIndex(([recordedParts]) =>
+        recordedParts[0]?.text.includes('<shell-1 />'),
+      );
+      expect(summaryRecordIndex).toBeGreaterThanOrEqual(0);
+      expect(summaryRecordIndex).toBeLessThan(itemRecordIndex);
+      expect(recordingCalls[summaryRecordIndex]?.[1]).toBe(
+        'Dropped 1 background notification (queue full): 1 shell result (shell-0).',
+      );
+      expect(recordingCalls[summaryRecordIndex]?.[2]).toBeUndefined();
+      expect(recordingCalls[itemRecordIndex]).toEqual([
+        [{ text: '<shell-1 />' }],
+        'shell done',
+        expect.objectContaining({
+          taskId: 'shell-1',
+          commandLabel: 'npm test',
+        }),
+      ]);
 
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -12496,6 +12518,9 @@ describe('Session', () => {
       );
       const summaryRecord =
         mockChatRecordingService.recordNotification.mock.calls[0];
+      expect(
+        mockChatRecordingService.recordNotification,
+      ).toHaveBeenCalledOnce();
       expect(summaryRecord?.[0]).toEqual([
         { text: expect.stringContaining('<kind>queue</kind>') },
       ]);
@@ -12503,6 +12528,79 @@ describe('Session', () => {
         text: '<worker-persisted />',
       });
       expect(summaryRecord?.[1]).toContain('Dropped 1 background notification');
+      expect(summaryRecord?.[2]).toBeUndefined();
+    });
+
+    it('reports a persisted live-delivery miss as recorded rather than lost', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const internals = session as unknown as {
+        pendingPrompt: AbortController | null;
+        notificationQueue: Array<{ taskId: string }>;
+        droppedNotifications: { count: number };
+      };
+      internals.pendingPrompt = new AbortController();
+      const shellCallback = mockBackgroundShellRegistry.setNotificationCallback
+        .mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+
+      await session.enqueueBackgroundNotification({
+        displayText: 'Worker completed.',
+        modelText: '<worker-persisted />',
+        taskId: 'worker-persisted',
+        status: 'completed',
+        kind: 'agent',
+      });
+      for (let index = 0; index < MAX_BACKGROUND_NOTIFICATION_QUEUE; index++) {
+        shellCallback('shell done', `<shell-${index} />`, {
+          shellId: `shell-${index}`,
+          status: 'completed',
+        });
+      }
+      expect(internals.droppedNotifications.count).toBe(1);
+      expect(
+        internals.notificationQueue.some(
+          (item) => item.taskId === 'worker-persisted',
+        ),
+      ).toBe(false);
+
+      internals.notificationQueue = [];
+      internals.pendingPrompt = null;
+      mockChatRecordingService.recordNotification.mockClear();
+      shellCallback('survivor', '<shell-survivor />', {
+        shellId: 'shell-survivor',
+        status: 'completed',
+      });
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalled(),
+      );
+
+      const notificationCall = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[0];
+      const parts = (
+        notificationCall?.[1] as { message: Array<{ text: string }> }
+      ).message;
+      expect(parts[0]?.text).toContain(
+        'The recorded results remain available in the session transcript.',
+      );
+      expect(parts[0]?.text).not.toContain('/tasks');
+      expect(parts[0]?.text).not.toContain('was dropped before delivery');
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: expect.objectContaining({
+          content: {
+            type: 'text',
+            text: 'Recorded but not delivered live (queue full): 1 agent result (worker-persisted).',
+          },
+          _meta: expect.objectContaining({
+            backgroundTask: { kind: 'queue', status: 'recorded' },
+          }),
+        }),
+      });
     });
 
     it('continues ACP prompt ids after replaying resumed history', async () => {

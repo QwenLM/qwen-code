@@ -428,6 +428,7 @@ export const INTERIM_MONITOR_MIN_TURN_INTERVAL_MS = 10_000;
 interface PendingDroppedSummary {
   displayText: string;
   modelText: string;
+  status: 'dropped' | 'recorded';
   displayed?: boolean;
 }
 
@@ -449,6 +450,12 @@ interface QueuedNotification {
   onDelivered?: () => void;
   onDeliveryFailed?: () => void;
   displayed?: boolean;
+}
+
+function isProtectedNotification(item: QueuedNotification): boolean {
+  return (
+    item.kind === 'agent' || item.kind === 'workflow' || item.kind === 'cron'
+  );
 }
 
 type BufferedStreamEvent =
@@ -3496,6 +3503,7 @@ export const useLlmStream = (
         onDeliveryFailed?: () => void;
         onAdmissionFailed?: () => void;
         onGoalClaimDeferred?: () => void;
+        onRequestStarted?: () => void;
         steerInput?: SteerInput;
         submittedPrompt?: string;
         goal?: QueuedGoalTurn;
@@ -4018,6 +4026,7 @@ export const useLlmStream = (
                   : {}),
             },
           );
+          metadata?.onRequestStarted?.();
 
           const processingResult = await processLlmStreamEvents(
             stream,
@@ -6100,10 +6109,7 @@ export const useLlmStream = (
       const queue = notificationQueueRef.current;
       const admission = decideNotificationAdmission(queue, item, {
         max: MAX_BACKGROUND_NOTIFICATION_QUEUE,
-        isProtected: (queued) =>
-          queued.kind === 'agent' ||
-          queued.kind === 'workflow' ||
-          queued.kind === 'cron',
+        isProtected: isProtectedNotification,
       });
       if (admission.action === 'drop') {
         debugLogger.warn(
@@ -6449,8 +6455,6 @@ export const useLlmStream = (
         };
         const withDroppedSummary = (text: string) =>
           droppedSummary ? `${droppedSummary.modelText}\n\n${text}` : text;
-        // Optimistic: a rejected admission restores it below, mirroring how the
-        // rejected notifications themselves go back on the queue.
         const releaseDroppedSummary = () => {
           pendingDroppedSummaryRef.current = undefined;
         };
@@ -6459,9 +6463,19 @@ export const useLlmStream = (
         };
         const restoreBatch = (batch: QueuedNotification[]) => {
           queue.unshift(...batch);
-          const overflow = queue.splice(MAX_BACKGROUND_NOTIFICATION_QUEUE);
-          for (const item of overflow) {
-            droppedNotificationsRef.current.record(item);
+          while (queue.length > MAX_BACKGROUND_NOTIFICATION_QUEUE) {
+            const admission = decideNotificationAdmission(
+              queue,
+              { ...queue[0]!, interim: false },
+              {
+                max: MAX_BACKGROUND_NOTIFICATION_QUEUE,
+                isProtected: isProtectedNotification,
+              },
+            );
+            const victimIndex =
+              admission.action === 'evict' ? admission.index : queue.length - 1;
+            const [victim] = queue.splice(victimIndex, 1);
+            if (victim) droppedNotificationsRef.current.record(victim);
           }
         };
 
@@ -6471,7 +6485,14 @@ export const useLlmStream = (
         if (targetType === SendMessageType.Cron) {
           const item = queue.shift()!;
           const cronAt = Date.now();
-          displayDroppedSummary(cronAt);
+          if (
+            queue.some(
+              (queued) =>
+                queued.sendMessageType === SendMessageType.Notification,
+            )
+          ) {
+            displayDroppedSummary(cronAt);
+          }
           if (!item.displayed) {
             addItem(
               { type: 'notification' as const, text: item.displayText },
@@ -6517,18 +6538,6 @@ export const useLlmStream = (
           lastInterimMonitorTurnAtRef.current = Date.now();
         }
 
-        const now = Date.now();
-        displayDroppedSummary(now);
-        for (const item of batch) {
-          if (!item.displayed) {
-            addItem(
-              { type: 'notification' as const, text: item.displayText },
-              now,
-            );
-            item.displayed = true;
-          }
-        }
-
         const combinedModelText = batch.map((e) => e.modelText).join('\n\n');
         const combinedDisplayText = batch.map((e) => e.displayText).join('; ');
         releaseDroppedSummary();
@@ -6543,12 +6552,24 @@ export const useLlmStream = (
               restoreBatch(batch);
               restoreDroppedSummary();
             },
-            onDeliveryFailed: restoreDroppedSummary,
             claimGoalTurn: admission.claimGoalTurn,
             onGoalClaimDeferred: () => {
               restoreBatch(batch);
               restoreDroppedSummary();
               setNotificationTrigger((n) => n + 1);
+            },
+            onRequestStarted: () => {
+              const now = Date.now();
+              displayDroppedSummary(now);
+              for (const item of batch) {
+                if (!item.displayed) {
+                  addItem(
+                    { type: 'notification' as const, text: item.displayText },
+                    now,
+                  );
+                  item.displayed = true;
+                }
+              }
             },
           },
         ).catch((error) => {

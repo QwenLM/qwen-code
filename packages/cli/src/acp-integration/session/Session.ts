@@ -1487,12 +1487,13 @@ interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
  * priority takes effect on its own if that filter is ever relaxed.
  */
 function toAdmissibleNotification(
-  item: BackgroundNotificationQueueItem,
+  item: QueuedBackgroundNotification,
 ): AdmissibleNotification {
   return {
     kind: item.kind,
     taskId: item.taskId,
     interim: item.kind === 'monitor' && item.status === 'running',
+    persisted: item.persisted,
   };
 }
 
@@ -10017,34 +10018,30 @@ export class Session implements SessionContext {
             notificationParts.unshift({ text: droppedSummary.modelText });
           }
           if (!item.persisted) {
-            this.config
-              .getChatRecordingService()
-              ?.recordNotification(
-                notificationParts,
-                droppedSummary
-                  ? `${droppedSummary.displayText}\n${item.displayText}`
-                  : item.displayText,
-                {
-                  taskId: item.taskId,
-                  status: item.status,
-                  kind: item.kind,
-                  toolUseId: item.toolUseId,
-                  ...item.structured,
-                },
+            const recording = this.config.getChatRecordingService();
+            if (droppedSummary) {
+              recording?.recordNotification(
+                [{ text: droppedSummary.modelText }],
+                droppedSummary.displayText,
               );
+            }
+            recording?.recordNotification(
+              [{ text: item.modelText }],
+              item.displayText,
+              {
+                taskId: item.taskId,
+                status: item.status,
+                kind: item.kind,
+                toolUseId: item.toolUseId,
+                ...item.structured,
+              },
+            );
           } else if (droppedSummary) {
             this.config
               .getChatRecordingService()
               ?.recordNotification(
                 [{ text: droppedSummary.modelText }],
                 droppedSummary.displayText,
-                {
-                  taskId: item.taskId,
-                  status: item.status,
-                  kind: item.kind,
-                  toolUseId: item.toolUseId,
-                  ...item.structured,
-                },
               );
           }
 
@@ -10302,6 +10299,7 @@ export class Session implements SessionContext {
 
   async #emitDroppedNotificationSummary(summary: {
     displayText: string;
+    status: 'dropped' | 'recorded';
   }): Promise<void> {
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
@@ -10309,7 +10307,7 @@ export class Session implements SessionContext {
       _meta: {
         source: 'background_notification',
         qwenDiscreteMessage: true,
-        backgroundTask: { kind: 'queue', status: 'dropped' },
+        backgroundTask: { kind: 'queue', status: summary.status },
       },
     });
   }
