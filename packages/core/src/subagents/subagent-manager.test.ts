@@ -1870,6 +1870,80 @@ You are a helpful assistant.`;
         /invalid executor block/,
       );
     });
+
+    it('refuses a by-name dispatch for an executor-claiming file that fails an earlier validation (R11-1)', async () => {
+      // A project file declares an executor but OMITS the description, so it
+      // fails the earlier required-field validation BEFORE the executor block is
+      // reached. Without hoisting the claim probe + declared name above those
+      // validations, the file is skipped with nothing recorded and loadSubagent
+      // falls through to the builtin Explore — the substitution R10-2 prevents.
+      // The catch now converts any load failure of an executor-claiming file into
+      // a named executor refusal. Reverting the catch conversion turns this red
+      // (loadSubagent resolves the builtin instead of rejecting).
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue(['explore.md'] as any);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: Explore\nexecutor:\n  kind: acp\n  command: npx\n---\nPrompt',
+      );
+      await expect(manager.loadSubagent('Explore')).rejects.toThrow(
+        /invalid executor block/,
+      );
+    });
+
+    it('keys the executor refusal by the AST-parsed name, so a quoted name still refuses the dispatch (R11-4)', async () => {
+      // parseSimple's parseValue strips only double quotes, so `name: 'Explore'`
+      // (single-quoted) would otherwise be recorded under "'explore'" and miss
+      // the 'explore' dispatch lookup. The refusal must be keyed by the name the
+      // real YAML AST sees. The colon in description forces the astLostExecutor
+      // refusal path; reverting `declaredName ?? name` to `name` turns this red.
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue(['explore.md'] as any);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        "---\nname: 'Explore'\ndescription: Reviews code: fast and careful\nexecutor:\n  kind: ACP\n  command: npx\n---\nPrompt",
+      );
+      await expect(manager.loadSubagent('Explore')).rejects.toThrow(
+        /invalid executor block/,
+      );
+    });
+
+    it('refuses a by-name dispatch for an extension-level executor refusal instead of falling through to a builtin (R10-2 extension leg)', async () => {
+      // Extension agents load via loadSubagentFromDir, which skips + warns on a
+      // refusal — so the directory-scan recording never ran for them and the
+      // R10-2 extension leg read an empty map (a no-op). The refusals are now
+      // carried on the loaded extension and merged into the 'extension' bucket,
+      // so the fall-through refuses. Reverting the merge (dropping the
+      // executorRefusals.set('extension', ...)) turns this red: loadSubagent
+      // resolves the builtin instead of rejecting.
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        {
+          agents: [],
+          agentExecutorRefusals: new Map([
+            [
+              'explore',
+              new SubagentError(
+                'Agent file /ext/agents/explore.md has an invalid executor block: it declares an executor but failed to load.',
+                SubagentErrorCode.INVALID_CONFIG,
+                'Explore',
+              ),
+            ],
+          ]),
+        } as never,
+      ]);
+      // No project/user file declares 'Explore' — only the extension refusal.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue([] as any);
+      await expect(manager.loadSubagent('Explore')).rejects.toThrow(
+        /invalid executor block/,
+      );
+    });
   });
 
   describe('updateSubagent', () => {

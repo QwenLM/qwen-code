@@ -22,6 +22,7 @@ import {
   isUnprovenExternalAgentTreeExit,
   optionKindForOutcome,
   resolvePermissionMode,
+  selectPeerModeId,
   selectPermissionOption,
   selectRejectOption,
 } from './acp-subagent-executor.js';
@@ -47,7 +48,7 @@ connection = new AgentSideConnection(() => ({
   newSession: async () => {
     if (scenario === 'session-exit') process.exit(4);
     if (scenario === 'session-hang') return new Promise(() => {});
-    return {sessionId:'fixture', modes:{currentModeId:'auto', availableModes:scenario === 'no-mode' ? [] : [{id:'default',name:'Ask'},{id:'plan',name:'Plan'}]}};
+    return {sessionId:'fixture', modes:{currentModeId:'auto', availableModes:scenario === 'no-mode' ? [] : scenario === 'claude-modes' ? [{id:'default',name:'Ask'},{id:'acceptEdits',name:'AcceptEdits'},{id:'bypassPermissions',name:'Bypass'}] : scenario === 'qwen-modes' ? [{id:'plan'},{id:'default'},{id:'auto-edit'},{id:'auto'},{id:'yolo'}] : [{id:'default',name:'Ask'},{id:'plan',name:'Plan'}]}};
   },
   setSessionMode: async (params) => {
     if (scenario === 'mode-error') throw new Error('cannot set mode');
@@ -59,7 +60,9 @@ connection = new AgentSideConnection(() => ({
   cancel: async () => { await send({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'CANCEL_RECEIVED'}}); },
   prompt: async (params) => {
     prompts++;
-    if (mode !== 'default' && mode !== 'plan') throw new Error('PROMPT BEFORE SAFE MODE');
+    const safeModes = scenario === 'claude-modes' ? ['default','acceptEdits','bypassPermissions'] : scenario === 'qwen-modes' ? ['plan','default','auto-edit','auto','yolo'] : ['default','plan'];
+    if (!safeModes.includes(mode)) throw new Error('PROMPT BEFORE SAFE MODE');
+    if (scenario === 'claude-modes' || scenario === 'qwen-modes') { await send({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'MODE:'+mode}}); return {stopReason:'end_turn'}; }
     if (scenario === 'prompt-exit') process.exit(5);
     if (scenario === 'prompt-close') { process.stdout.end(); return new Promise(() => {}); }
     if (scenario === 'prompt-hang') return new Promise(() => {});
@@ -94,7 +97,7 @@ connection = new AgentSideConnection(() => ({
     }
     if (scenario.startsWith('permission')) {
       const toolName = scenario === 'permission-question' ? 'AskUserQuestion' : scenario === 'permission-question-snake' ? 'ask_user_question' : 'Write';
-      const request = () => connection.requestPermission({sessionId:'fixture',toolCall:{toolCallId:'same',title:'Write',kind:'edit',_meta:{claudeCode:{toolName}}},options:[{optionId:'once',name:'Once',kind:'allow_once'},{optionId:'always',name:'Always',kind:'allow_always'},{optionId:'no',name:'No',kind:'reject_once'}]});
+      const request = () => connection.requestPermission({sessionId:'fixture',toolCall:{toolCallId:'same',title:'Write',kind:'edit',rawInput:{command:'rm -rf ./build'},_meta:{claudeCode:{toolName}}},options:[{optionId:'once',name:'Once',kind:'allow_once'},{optionId:'always',name:'Always',kind:'allow_always'},{optionId:'no',name:'No',kind:'reject_once'}]});
       const result = scenario === 'permission-duplicate' ? await Promise.all([request(), request()]) : [await request()];
       await send({sessionUpdate:'agent_message_chunk',content:{type:'text',text:JSON.stringify(result)}});
       permissionCount++;
@@ -170,6 +173,35 @@ describe('permission mapping', () => {
     expect(resolvePermissionMode('auto', 'auto-edit')).toBe('acceptEdits');
     expect(resolvePermissionMode(undefined, undefined)).toBe('default');
     expect(resolvePermissionMode('unknown', undefined)).toBe('default');
+  });
+  it('maps host approval vocabulary to policy tokens, never peer mode ids (R11-3)', () => {
+    expect(resolvePermissionMode('yolo', undefined)).toBe('bypass');
+    expect(resolvePermissionMode('bypassPermissions', undefined)).toBe(
+      'bypass',
+    );
+    expect(resolvePermissionMode('auto', undefined)).toBe('acceptEdits');
+    expect(resolvePermissionMode('auto-edit', undefined)).toBe('acceptEdits');
+  });
+  it('selects the peer-advertised alias for a policy, never a host token (R11-3)', () => {
+    // Claude vocabulary: host auto-edit maps to the peer's acceptEdits, never
+    // the qwen-only 'auto' (which a Claude peer does not even advertise).
+    expect(
+      selectPeerModeId('acceptEdits', [
+        'default',
+        'acceptEdits',
+        'bypassPermissions',
+      ]),
+    ).toBe('acceptEdits');
+    // qwen vocabulary: host auto-edit maps to the peer's auto-edit.
+    expect(
+      selectPeerModeId('acceptEdits', ['auto-edit', 'auto', 'default']),
+    ).toBe('auto-edit');
+    expect(selectPeerModeId('bypass', ['bypassPermissions'])).toBe(
+      'bypassPermissions',
+    );
+    expect(selectPeerModeId('bypass', ['yolo'])).toBe('yolo');
+    // No advertised alias → undefined so the caller refuses, not guesses.
+    expect(selectPeerModeId('bypass', ['default', 'plan'])).toBeUndefined();
   });
   it('never grants for non-approval outcomes or widens a single approval', () => {
     expect(optionKindForOutcome(ToolConfirmationOutcome.RestorePrevious)).toBe(
@@ -371,6 +403,56 @@ describe.skipIf(process.platform === 'win32')('real ACP subprocess', () => {
       await expect(create(params(scenario))).rejects.toThrow();
     },
   );
+  it('drives the peer-advertised acceptEdits mode for a host auto-edit approval (R11-3)', async () => {
+    const options = params('claude-modes');
+    options.approvalMode = 'auto-edit';
+    const executor = await create(options);
+    await executor.execute(context());
+    // The peer is told 'acceptEdits' (its own vocabulary), never the qwen-only
+    // 'auto'/'auto-edit' token — the fixture echoes the mode it received.
+    expect(executor.getFinalText()).toContain('MODE:acceptEdits');
+    expect(executor.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+  });
+  it('drives the peer-advertised bypassPermissions mode for a host yolo approval (R11-3)', async () => {
+    const options = params('claude-modes');
+    options.approvalMode = 'yolo';
+    const executor = await create(options);
+    await executor.execute(context());
+    expect(executor.getFinalText()).toContain('MODE:bypassPermissions');
+    expect(executor.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+  });
+  it('refuses creation when the peer advertises no mode for the host bypass policy (R11-3)', async () => {
+    // The default fixture advertises only default+plan; a host yolo approval
+    // maps to the bypass policy, which has no advertised alias → connect must
+    // fail loudly (naming the policy), never silently weaken the mode.
+    const options = params();
+    options.approvalMode = 'yolo';
+    await expect(create(options)).rejects.toThrow(/bypass/);
+  });
+  it('selects the qwen peer auto-edit mode for a host auto-edit approval (R11-3)', async () => {
+    // A qwen-vocabulary peer advertises auto-edit (NOT the Claude-only
+    // acceptEdits), so the old hard-coded 'acceptEdits' id made connect() throw
+    // and killed the delegation. The policy token + alias selection must find
+    // the peer's own auto-edit id and connect must succeed.
+    const options = params('qwen-modes');
+    options.approvalMode = 'auto-edit';
+    const executor = await create(options);
+    await executor.execute(context());
+    expect(executor.getFinalText()).toContain('MODE:auto-edit');
+    expect(executor.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+  });
+  it('selects the qwen peer yolo mode for a host yolo approval, never a weaker auto (R11-3)', async () => {
+    // The old mapping sent host yolo → 'auto', which a qwen peer accepted —
+    // silently running a YOLO delegation in the strictly weaker AUTO mode (and
+    // against a Claude peer, 'auto' is not advertised, so it threw). The bypass
+    // policy must select the peer's yolo id.
+    const options = params('qwen-modes');
+    options.approvalMode = 'yolo';
+    const executor = await create(options);
+    await executor.execute(context());
+    expect(executor.getFinalText()).toContain('MODE:yolo');
+    expect(executor.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+  });
   it.each(['init-hang', 'session-hang', 'mode-hang'])(
     'bounds and reaps a %s handshake',
     async (scenario) => {
@@ -567,6 +649,39 @@ describe.skipIf(process.platform === 'win32')('real ACP subprocess', () => {
     expect(queue).toEqual(['USER MESSAGE FROM PARENT']);
     expect(provider).not.toHaveBeenCalled();
     expect(delivered).toEqual([]);
+    expect(executor.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+    nowSpy.mockRestore();
+  });
+  it('enforces the wall-time budget cumulatively across resetStats:false continuations (R11-2)', async () => {
+    const options = params();
+    options.runConfig.max_time_minutes = 10;
+    const executor = await create(options);
+    const realNow = Date.now();
+    let mockNow = realNow;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => mockNow);
+    // Each prompt burns 7 of the 10 budget minutes (mocked clock), resolving
+    // end_turn immediately so wait() never times out the in-flight round.
+    const prompt = vi.fn().mockImplementation(() => {
+      mockNow += 7 * 60_000;
+      return Promise.resolve({ stopReason: 'end_turn' });
+    });
+    (
+      executor as unknown as {
+        connection: { prompt: typeof prompt; cancel: () => Promise<void> };
+      }
+    ).connection = { prompt, cancel: async () => {} };
+    // Turn 1 (fresh, resetStats default): burns 7min < 10min cap, ends GOAL.
+    await executor.execute(context('first'));
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(executor.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+    // Turn 2 (continuation, stats preserved): the cumulative clock starts at
+    // 7min, leaving only 3min. Its prompt burns 7min more, pushing the
+    // cumulative elapsed (14min) past the 10min cap, so the turn is cut off
+    // TIMEOUT. Without subtracting this.durationMs, turn 2 would get a fresh
+    // per-turn 10min budget, its 7min prompt would fit, and it would end GOAL —
+    // a continued agent overrunning the whole-delegation cap.
+    await executor.execute(context('second'), undefined, { resetStats: false });
+    expect(prompt).toHaveBeenCalledTimes(2);
     expect(executor.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
     nowSpy.mockRestore();
   });
@@ -774,6 +889,26 @@ describe.skipIf(process.platform === 'win32')('real ACP subprocess', () => {
     const executor = await create(options);
     await executor.execute(context());
     expect(executor.getFinalText()).toContain('"optionId":"once"');
+  });
+  it('carries the action arguments into the approval confirmation (R11-5)', async () => {
+    const options = params('permission');
+    let seenPrompt: unknown;
+    options.eventEmitter!.on(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      async (event) => {
+        seenPrompt = (event as { confirmationDetails?: { prompt?: unknown } })
+          .confirmationDetails?.prompt;
+        await event.respond(ToolConfirmationOutcome.ProceedOnce);
+      },
+    );
+    const executor = await create(options);
+    await executor.execute(context());
+    // The approval dialog must show WHAT the user is authorizing — the action's
+    // arguments — not just the tool title and the option labels the dialog
+    // already renders as buttons. The fixture peer asks permission for a Write
+    // whose rawInput carries {command: 'rm -rf ./build'}. Reverting the prompt
+    // back to the option-names join turns this red (no command string).
+    expect(String(seenPrompt)).toContain('rm -rf ./build');
   });
   it('isolates duplicate outstanding tool IDs and ignores stale approval callbacks', async () => {
     const options = params('permission-duplicate');

@@ -52,14 +52,66 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+const EXTERNAL_ACTION_PROMPT_MAX = 300;
+
+function stripControlChars(value: string): string {
+  // Strip C0/C1 control characters and DEL; the toolCall payload is foreign-process
+  // data that must never be rendered as markup or terminal escapes. Done by code
+  // point rather than a control-char regex so the source carries no literal control
+  // bytes.
+  let out = '';
+  for (const ch of value) {
+    const code = ch.codePointAt(0) ?? 0;
+    out +=
+      code >= 0x20 && code !== 0x7f && !(code >= 0x80 && code <= 0x9f)
+        ? ch
+        : ' ';
+  }
+  return out;
+}
+
+/**
+ * Renders an external action's arguments into the approval prompt so the user
+ * sees WHAT they are authorizing, not just the option labels. `rawInput` is an
+ * unvalidated payload from a foreign process, so the rendering is bounded in
+ * length and control characters are stripped — never forwarded as markup (R11-5).
+ */
+export function describeExternalAction(
+  toolCall: RequestPermissionRequest['toolCall'],
+): string {
+  const title = stripControlChars(
+    toolCall.title ?? toolCall.kind ?? 'External action',
+  );
+  const raw = toolCall.rawInput;
+  if (!isRecord(raw)) return title;
+  const detail = stripControlChars(JSON.stringify(raw));
+  const rendered = `${title}: ${detail}`;
+  return rendered.length > EXTERNAL_ACTION_PROMPT_MAX
+    ? `${rendered.slice(0, EXTERNAL_ACTION_PROMPT_MAX)}…`
+    : rendered;
+}
+
+/**
+ * The host approval policy as a peer-vocabulary-independent token. Peer ACP mode
+ * ids differ per peer (Claude: `acceptEdits` / `bypassPermissions`; qwen:
+ * `auto-edit` / `auto` / `yolo`), so resolvePermissionMode maps the host policy
+ * to a TOKEN and connect() picks the id the peer actually advertises via
+ * `POLICY_MODE_ALIASES` (R11-3) — a new peer vocabulary needs no new case here.
+ * The mapping never WIDENS the host policy: a weaker host mode must not select a
+ * stronger peer mode.
+ */
+export type ExternalPermissionPolicy =
+  | 'default'
+  | 'plan'
+  | 'acceptEdits'
+  | 'bypass';
+
 export function resolvePermissionMode(
   permissionMode: string | undefined,
   approvalMode: string | undefined,
-): string {
+): ExternalPermissionPolicy {
   switch ((approvalMode ?? permissionMode ?? '').trim().toLowerCase()) {
     case 'auto':
-    case 'yolo':
-      return 'auto';
     case 'acceptedits':
     case 'auto-edit':
       return 'acceptEdits';
@@ -67,10 +119,31 @@ export function resolvePermissionMode(
       return 'plan';
     case 'bypasspermissions':
     case 'bypass':
-      return 'bypassPermissions';
+    case 'yolo':
+      return 'bypass';
     default:
       return 'default';
   }
+}
+
+// The ranked peer-mode-id aliases per host policy token, canonical-first.
+// connect() selects the first alias the peer advertises and refuses if none is,
+// so a host policy that has no peer counterpart fails loudly (naming the policy)
+// instead of silently running the peer in a weaker mode.
+const POLICY_MODE_ALIASES: Record<ExternalPermissionPolicy, string[]> = {
+  bypass: ['bypassPermissions', 'yolo'],
+  acceptEdits: ['acceptEdits', 'auto-edit', 'auto'],
+  plan: ['plan'],
+  default: ['default'],
+};
+
+export function selectPeerModeId(
+  policy: ExternalPermissionPolicy,
+  availableModeIds: readonly string[],
+): string | undefined {
+  return POLICY_MODE_ALIASES[policy].find((id) =>
+    availableModeIds.includes(id),
+  );
 }
 
 export function optionKindForOutcome(
@@ -355,17 +428,17 @@ class AcpSubagentExecutor implements SubagentExecutor {
     if (!session.sessionId)
       throw new Error('External ACP agent returned no sessionId');
     this.sessionId = session.sessionId;
-    const modeId = resolvePermissionMode(
+    const policy = resolvePermissionMode(
       this.params.permissionMode,
       this.params.approvalMode,
     );
-    if (
-      !session.modes?.availableModes.some(
-        (mode: { id: string }) => mode.id === modeId,
-      )
-    ) {
+    const availableIds =
+      session.modes?.availableModes.map((mode: { id: string }) => mode.id) ??
+      [];
+    const modeId = selectPeerModeId(policy, availableIds);
+    if (!modeId) {
       throw new Error(
-        `External ACP agent does not advertise permission mode ${modeId}`,
+        `External ACP agent does not advertise any mode for the host's ${policy} approval policy (advertised: ${availableIds.join(', ') || 'none'})`,
       );
     }
     await this.connection.setSessionMode({ sessionId: this.sessionId, modeId });
@@ -536,10 +609,19 @@ class AcpSubagentExecutor implements SubagentExecutor {
       let next = prompt;
       do {
         this.round++;
+        // The wall-time budget is CUMULATIVE across a resident agent's
+        // continuation turns, matching the in-process sibling's preserveStats
+        // base: `durationMs` holds prior turns' elapsed time (reset only when
+        // `resetStats` is not false), so subtracting it makes max_time_minutes a
+        // cap on the whole delegation rather than a fresh per-turn budget that a
+        // continued agent could overrun. (R11-2)
         const remaining =
           timeoutMs === undefined
             ? undefined
-            : Math.max(0, timeoutMs - (Date.now() - this.turnStartedAt));
+            : Math.max(
+                0,
+                timeoutMs - this.durationMs - (Date.now() - this.turnStartedAt),
+              );
         // Stop before dispatching a round whose budget is already spent. Without
         // this, `remaining` clamps to 0 and `connection.prompt(...)` is evaluated
         // — a new, billed model turn really reaches the peer — one tick before
@@ -579,7 +661,10 @@ class AcpSubagentExecutor implements SubagentExecutor {
         const remainingNext =
           timeoutMs === undefined
             ? undefined
-            : Math.max(0, timeoutMs - (Date.now() - this.turnStartedAt));
+            : Math.max(
+                0,
+                timeoutMs - this.durationMs - (Date.now() - this.turnStartedAt),
+              );
         if (remainingNext !== undefined && remainingNext <= 0) {
           this.terminateMode = AgentTerminateMode.TIMEOUT;
           break;
@@ -981,7 +1066,10 @@ class AcpSubagentExecutor implements SubagentExecutor {
           confirmationDetails: {
             type: 'info',
             title: params.toolCall.title ?? 'External action',
-            prompt: params.options.map((option) => option.name).join(' / '),
+            // Carry the action's arguments so the user sees WHAT they are
+            // authorizing — not just the option labels the dialog already
+            // renders as buttons (R11-5). Bounded and control-stripped.
+            prompt: describeExternalAction(params.toolCall),
             hideAlwaysAllow: true,
           },
           respond: async (outcome) =>
