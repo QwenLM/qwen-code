@@ -402,6 +402,28 @@ export async function convertLlmToolsToOpenAI(
                 sourcePatternProperties !== null &&
                 !Array.isArray(sourcePatternProperties) &&
                 Object.keys(sourcePatternProperties).length === 0);
+            const sourceProperties = (
+              sourceSchema as Record<string, unknown> | undefined
+            )?.['properties'];
+            const sourceAdditionalProperties = (
+              sourceSchema as Record<string, unknown> | undefined
+            )?.['additionalProperties'];
+            // The source has to DECLARE an empty argument list, not merely be
+            // closed. `properties: {}` is what a zero-argument tool writes,
+            // and MCP servers emit it without `additionalProperties: false` --
+            // gating on closedness alone left that shape, the common one once
+            // any MCP server is configured, still serialized as a bare
+            // `{ "type": "object" }` and still rejected (#11410). A schema
+            // with no `properties` key says nothing about its arguments, and
+            // an explicitly permissive `additionalProperties` says it accepts
+            // some; both keep `parameters`.
+            const declaresEmptyArgumentList =
+              typeof sourceProperties === 'object' &&
+              sourceProperties !== null &&
+              !Array.isArray(sourceProperties) &&
+              Object.keys(sourceProperties).length === 0 &&
+              (sourceAdditionalProperties === false ||
+                sourceAdditionalProperties === undefined);
             parameters = convertSchema(parameters, schemaCompliance);
             // #7315: gateways enforcing OpenAI's structured-output contract
             // promote every property to required when an object level has
@@ -415,9 +437,7 @@ export async function convertLlmToolsToOpenAI(
             );
             if (
               canValidateLocally &&
-              (sourceSchema as Record<string, unknown>)[
-                'additionalProperties'
-              ] === false &&
+              declaresEmptyArgumentList &&
               hasNoPatternProperties &&
               parameters['type'] === 'object' &&
               Object.keys(parameters).length === 1

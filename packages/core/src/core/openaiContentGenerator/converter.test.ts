@@ -6121,6 +6121,17 @@ describe('OpenAIContentConverter', () => {
         properties: {},
         additionalProperties: false,
       };
+      // Says nothing about its arguments -- not the same claim as an empty
+      // argument list, so it keeps `parameters`.
+      const unspecifiedSchema = {
+        type: 'object',
+      };
+      // Explicitly accepts arguments it does not name; also keeps them.
+      const permissiveSchema = {
+        type: 'object',
+        properties: {},
+        additionalProperties: true,
+      };
       const unsupportedSchema = {
         $schema: 'https://json-schema.org/draft/2019-09/schema',
         type: 'object',
@@ -6148,6 +6159,8 @@ describe('OpenAIContentConverter', () => {
             { name: 'supported', parametersJsonSchema: supportedSchema },
             { name: 'open', parametersJsonSchema: openSchema },
             { name: 'draft_2020', parametersJsonSchema: draft2020Schema },
+            { name: 'unspecified', parametersJsonSchema: unspecifiedSchema },
+            { name: 'permissive', parametersJsonSchema: permissiveSchema },
             { name: 'unsupported', parametersJsonSchema: unsupportedSchema },
             {
               name: 'unsupported_vocabulary',
@@ -6169,12 +6182,18 @@ describe('OpenAIContentConverter', () => {
 
       expect(result.map(({ function: declaration }) => declaration)).toEqual([
         { name: 'supported', description: '' },
+        { name: 'open', description: '' },
+        { name: 'draft_2020', description: '' },
         {
-          name: 'open',
+          name: 'unspecified',
           description: '',
           parameters: { type: 'object' },
         },
-        { name: 'draft_2020', description: '' },
+        {
+          name: 'permissive',
+          description: '',
+          parameters: { type: 'object', additionalProperties: true },
+        },
         {
           name: 'unsupported',
           description: '',
