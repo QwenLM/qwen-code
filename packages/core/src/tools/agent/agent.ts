@@ -3563,8 +3563,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   deriveSubagentOutcomeMetadata({
                     terminateMode,
                     signalAborted:
-                      turnAbortController.signal.aborted &&
-                      !progressTimeout,
+                      turnAbortController.signal.aborted && !progressTimeout,
                     resultSummaryPresent: Boolean(
                       subagentRawText && subagentRawText.length > 0,
                     ),
