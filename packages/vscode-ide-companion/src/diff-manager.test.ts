@@ -114,6 +114,32 @@ describe('DiffManager path resolution', () => {
     );
   });
 
+  it('closes the entry the caller specified, not just the first same-file entry, when two sessions hold the same file open with different content', async () => {
+    // Two entries for the same file coexist because hasExistingDiff only
+    // dedupes on identical old/new content: a webview permission-preview
+    // diff opened with the absolute form, and a second session's differently
+    // proposed edit opened with the relative form.
+    await diffManager.showDiff('/test/workspace1/src/foo.ts', 'o1', 'n1');
+    const firstRightUri = executeCommand.mock.calls.find(
+      (call) => call[0] === 'vscode.diff',
+    )?.[2];
+
+    await diffManager.showDiff('src/foo.ts', 'o2', 'n2');
+    const secondRightUri = executeCommand.mock.calls
+      .filter((call) => call[0] === 'vscode.diff')
+      .at(-1)?.[2];
+
+    openTextDocument.mockImplementation((uri: unknown) => ({
+      getText: () => (uri === secondRightUri ? 'n2' : 'n1'),
+    }));
+
+    // Closing with the same form the second entry was opened with must
+    // close the second entry, not silently fall back to the first one that
+    // happens to share a resolvedFilePath.
+    await expect(diffManager.closeDiff('src/foo.ts')).resolves.toBe('n2');
+    expect(firstRightUri).not.toBe(secondRightUri);
+  });
+
   it('echoes the path the diff was opened with, not the one used to close', async () => {
     await diffManager.showDiff('src/foo.ts', 'old', 'new');
     await diffManager.closeDiff('/test/workspace1/src/foo.ts');
@@ -121,6 +147,20 @@ describe('DiffManager path resolution', () => {
     expect(notifications).toHaveLength(1);
     expect(notifications[0].params).toMatchObject({
       filePath: 'src/foo.ts',
+      content: 'new content',
+    });
+  });
+
+  it('echoes the caller-supplied path byte for byte, even when it is not normalize-stable', async () => {
+    // The CLI keys its pending openDiff promise by the exact string it sent.
+    // If the echo comes back normalized, a key like 'src/./foo.ts' no longer
+    // matches, and the CLI's promise for it never settles.
+    await diffManager.showDiff('src/./foo.ts', 'old', 'new');
+    await diffManager.closeDiff('src/foo.ts');
+
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0].params).toMatchObject({
+      filePath: 'src/./foo.ts',
       content: 'new content',
     });
   });

@@ -60,9 +60,11 @@ export interface ShowDiffOptions {
 
 // Information about a diff view that is currently open.
 interface DiffInfo {
-  // The path exactly as the caller supplied it (normalized only). The CLI keys
+  // The path exactly as the caller supplied it, byte for byte. The CLI keys
   // its pending openDiff promises by the string it sent, so this is what has to
-  // go back out in the accepted/closed notifications.
+  // go back out in the accepted/closed notifications. Must never be normalized
+  // or resolved, or the echo stops matching the CLI's key for any path that
+  // wasn't already in normalized form.
   originalFilePath: string;
   // The same file resolved against the workspace. Everything that has to match
   // a path — closing, deduping, focusing, active-editor tracking — compares
@@ -315,7 +317,7 @@ export class DiffManager {
     this.diffContentProvider.setContent(rightDocUri, newContent);
 
     this.addDiffDocument(rightDocUri, {
-      originalFilePath: normalizedPath,
+      originalFilePath: filePath,
       resolvedFilePath: resolvedPath,
       oldContent,
       newContent,
@@ -370,18 +372,34 @@ export class DiffManager {
     suppressNotification = false,
     permissionRequestId?: string,
   ) {
-    const resolvedPath = resolveWorkspacePath(path.normalize(filePath));
+    const normalizedPath = path.normalize(filePath);
+    const resolvedPath = resolveWorkspacePath(normalizedPath);
+    // DiffManager is a per-window singleton shared by every surface and
+    // session, so two entries can legitimately share a resolvedFilePath: a
+    // webview permission-preview diff and a CLI session's proposed edit on
+    // the same file, with different content. Matching on resolvedFilePath
+    // alone and taking the first insertion-order hit can close the wrong
+    // caller's diff and hand its content back to a different session, which
+    // the tool scheduler then writes out as that session's "user edit". Prefer
+    // the entry whose originalFilePath is the same form the caller used; only
+    // fall back to the first resolvedFilePath match (preserving the existing
+    // cross-form close guarantee) when nothing matches the exact form.
     let openDiff: DiffInfo | undefined;
+    let fallbackDiff: DiffInfo | undefined;
     for (const [, diffInfo] of this.diffDocuments.entries()) {
       if (
         diffInfo.resolvedFilePath === resolvedPath &&
         (permissionRequestId === undefined ||
           diffInfo.permissionRequestId === permissionRequestId)
       ) {
-        openDiff = diffInfo;
-        break;
+        if (path.normalize(diffInfo.originalFilePath) === normalizedPath) {
+          openDiff = diffInfo;
+          break;
+        }
+        fallbackDiff ??= diffInfo;
       }
     }
+    openDiff ??= fallbackDiff;
 
     if (openDiff) {
       const uriToClose = openDiff.rightDocUri;
