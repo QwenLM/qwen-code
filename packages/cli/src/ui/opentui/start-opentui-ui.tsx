@@ -451,6 +451,7 @@ export async function startOpenTuiUI(
         sessionId: config.getSessionId(),
         cwd: config.getTargetDir(),
         qwenVersion: version,
+        kind: 'tui',
       }),
     );
     registerCleanup(() => config.unregisterSessionRegistry());
