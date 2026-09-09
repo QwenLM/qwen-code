@@ -60,6 +60,9 @@ describe('StandaloneApp', () => {
     act(() => root.unmount());
     container.remove();
     vi.unstubAllGlobals();
+    // A failing assertion mid-test must not leak the console.error spy into
+    // later tests in this file.
+    vi.restoreAllMocks();
   });
 
   it('reloads the page when the root error fallback retry is clicked', () => {
@@ -67,9 +70,7 @@ describe('StandaloneApp', () => {
     const reload = vi.fn();
     vi.stubGlobal('location', { ...window.location, reload });
     // The boundary logs the caught error; keep the test output clean.
-    const consoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
 
     act(() => root.render(<StandaloneApp daemonToken="token" />));
 
@@ -81,7 +82,6 @@ describe('StandaloneApp', () => {
     });
 
     expect(reload).toHaveBeenCalledTimes(1);
-    consoleError.mockRestore();
   });
 
   it('keeps the controlled session target in sync with URL changes', () => {
