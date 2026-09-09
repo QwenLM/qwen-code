@@ -251,6 +251,12 @@ export interface BridgeRestoreSessionRequest {
   liveReplayMode?: LiveReplayMode;
   /** Keep inherited fork records as model context without replaying them. */
   hideInheritedHistory?: boolean;
+  /**
+   * Explicit mode to apply on restore. When omitted, the bridge replays the
+   * mode it remembered for this session id (best-effort — a rejecting child
+   * does not fail the restore); when no mode is remembered, the child's
+   * cold-load settings win.
+   */
   approvalMode?: ApprovalMode;
   /**
    * Persisted parent lineage recovered from the transcript by the caller (the
@@ -2198,6 +2204,11 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * Change the approval mode of a live session and broadcast an
    * `approval_mode_changed` event. `opts.persist === true` also writes
    * `tools.approvalMode` to workspace settings.
+   *
+   * The bridge remembers the selected mode for this session id for the
+   * daemon's lifetime and replays it best-effort when the session is
+   * cold-restored after its ACP child was torn down; `persist` remains the
+   * only durability switch across a daemon restart.
    */
   setSessionApprovalMode(
     sessionId: string,

@@ -2319,7 +2319,7 @@ Response:
 }
 ```
 
-`state` mirrors ACP's `LoadSessionResponse` — `models` is a `SessionModelState`, `modes` a `SessionModeState`, `configOptions` an array of `SessionConfigOption`. Missing fields are agent-decided. Late attachers (the `attached: true` paths below) get the SAME `state` snapshot the original load caller saw — the daemon caches it on the entry; runtime mutations (e.g. `model_switched`) are delivered on the SSE stream, not on subsequent attach responses.
+`state` mirrors ACP's `LoadSessionResponse` — `models` is a `SessionModelState`, `modes` a `SessionModeState`, `configOptions` an array of `SessionConfigOption`. Missing fields are agent-decided. Late attachers (the `attached: true` paths below) get the SAME `state` snapshot the original load caller saw — the daemon caches it on the entry; runtime mutations (e.g. `model_switched`) are delivered on the SSE stream, not on subsequent attach responses. One correction: when a cold restore replays a remembered approval mode (see `POST /session/:id/approval-mode`), the cached snapshot's `modes.currentModeId` is updated to the replayed mode before late attachers are served.
 
 `attached: true` means the session was already live (either from a prior `session/load`/`session/resume`, or because a coalesced concurrent caller raced just ahead).
 
@@ -2334,6 +2334,7 @@ The replay-window byte caps apply after the child has reconstructed the persiste
 - `404` — persisted session id doesn't exist (`SessionNotFoundError`).
 - `400` — `workspace_mismatch` (same shape as `POST /session`).
 - `403` — `untrusted_workspace` when `cwd` targets an untrusted non-primary workspace.
+- `403` — `trust_gate` when the request carries an explicit `approvalMode` that requires a trusted folder in an untrusted workspace (same mapping as `POST /session/:id/approval-mode`). A remembered mode replayed on a mode-less load is best-effort and never produces this error.
 - `503` — `session_limit_exceeded` (counts against `--max-sessions`; in-flight restores are accounted for too).
 - `504` — `session_restore_timeout`; retryable, with a `Retry-After` derived from the restore budget (clamped to 5-120s) because the same session id stays fenced until late cleanup settles.
 - `504` — `init_timeout`; NOT retryable, no `Retry-After`, no `sideEffectPossible`, no fence installed. Emitted when channel initialization times out before the restore request is dispatched (the `ensureChannel` stage); the restore was never attempted, so no session id is fenced and no cleanup is pending.
@@ -3003,6 +3004,8 @@ Request:
 ```
 
 `mode` must be one of `'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo'` (mirror of core's `ApprovalMode` enum; the SDK exports `DAEMON_APPROVAL_MODES` for runtime validation). `persist` defaults to `false`.
+
+The daemon also remembers the last explicitly selected mode per session id — set through this route, or supplied as `approvalMode` on `session/load`, `session/resume`, or an attach — and replays it best-effort when that session is cold-restored after its ACP child was torn down (idle reap or crash): a `session/load` or `session/resume` that omits `approvalMode` re-applies the remembered mode, while one that carries `approvalMode` overrides it. This memory lasts for the daemon's lifetime only and is never written to settings — `persist` remains the only cross-restart durability switch. The memory is dropped when the session's mode changes from any other origin (an in-session mode change such as an approved plan exit, or a workspace-wide persisted write), when the session is killed, or when the child rejects the replay; a rejected replay never fails the load — the daemon logs the rejection, forgets the mode, and completes the restore on the child's cold-load mode. A mode supplied at session creation (`POST /session`) is NOT remembered: the daemon cannot distinguish a caller's deliberate create-time choice from a client's echo of the settings-derived mode, so an integrator that owns a mode must re-send it on load/resume.
 
 Response (200):
 
