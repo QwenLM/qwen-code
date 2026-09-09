@@ -561,4 +561,58 @@ describe('activate', () => {
       registrySpy.mockRestore();
     });
   });
+
+  describe('permission diff dismissal fan-out', () => {
+    // This subscription is the middle hop of the dismissal chain and the only
+    // place the two ends connect; dropping it leaves the shell locked on a
+    // diff the user already closed (#10557). Pin it by driving the listener
+    // `activate` registers and asserting the fan-out reaches the provider.
+    it('forwards a closed permission diff to every permission-aware provider', async () => {
+      vi.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        statusText: 'Internal Server Error',
+      } as Response);
+
+      const provider = {
+        hasPendingPermission: vi.fn(() => false),
+        respondToPendingPermission: vi.fn(),
+        notifyPermissionDiffClosed: vi.fn(),
+        dispose: vi.fn(),
+      };
+      const registrySpy = vi
+        .spyOn(ChatProviderRegistry.prototype, 'getPermissionAwareProviders')
+        .mockReturnValue([provider] as never);
+
+      // `vscode.EventEmitter` is mocked as `vi.fn(() => ({ event: vi.fn(), … }))`,
+      // so the handler registered on `diffManager.onDidClosePermissionDiff` lands
+      // in that emitter's `event.mock.calls`. Clear prior activations, then drive
+      // every listener captured by this one.
+      vi.mocked(vscode.EventEmitter).mockClear();
+      await activate(context);
+
+      const emitters = vi
+        .mocked(vscode.EventEmitter)
+        .mock.results.map((r) => r.value) as unknown as Array<{
+        event: { mock: { calls: unknown[][] } };
+      }>;
+      const listeners = emitters.flatMap((e) => {
+        const calls = e.event.mock.calls;
+        return calls.map((call) => call[0]) as Array<(arg: unknown) => void>;
+      });
+      expect(listeners.length).toBeGreaterThan(0);
+
+      for (const listener of listeners) {
+        try {
+          listener({ permissionRequestId: 'req-1' });
+        } catch {
+          // Listeners on other emitters expect a different payload shape.
+        }
+      }
+
+      expect(provider.notifyPermissionDiffClosed).toHaveBeenCalledWith(
+        'req-1',
+      );
+      registrySpy.mockRestore();
+    });
+  });
 });

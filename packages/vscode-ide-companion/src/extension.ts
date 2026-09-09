@@ -250,8 +250,18 @@ export async function activate(context: vscode.ExtensionContext) {
     // at (#10557).
     diffManager.onDidClosePermissionDiff(({ permissionRequestId }) => {
       try {
-        for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
-          []) {
+        const providers =
+          chatProviderRegistry?.getPermissionAwareProviders() ?? [];
+        if (providers.length === 0) {
+          // The only silent drop on the dismissal chain with nothing below it:
+          // no chat surface is listening, so the request's owner never learns
+          // the diff is gone. Log it the way the open direction does (#10557).
+          logger.log(
+            '[Extension] Permission diff closed, no permission-aware provider to notify',
+          );
+          return;
+        }
+        for (const provider of providers) {
           provider.notifyPermissionDiffClosed(permissionRequestId);
         }
       } catch (err) {
