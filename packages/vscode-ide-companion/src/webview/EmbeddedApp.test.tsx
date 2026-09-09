@@ -816,6 +816,118 @@ describe('EmbeddedApp host wiring', () => {
       vi.useRealTimers();
     }
   });
+
+  it('merges allowlisted pre-cutover sessions into the history list', async () => {
+    // v0.21-era conversations were recorded without source attribution, so
+    // the vscode-scoped catalog query cannot return them. The host ships the
+    // legacy ids it still has in globalState; the panel then claims exactly
+    // those sessions back from the daemon's default catalog — without
+    // surfacing unattributed CLI sessions or browser-stamped ones.
+    sdkMocks.listWorkspaceSessionsPage.mockImplementation(
+      (options?: { sourceType?: string }) => {
+        if (options?.sourceType === 'vscode') {
+          return Promise.resolve({
+            sessions: [
+              {
+                sessionId: 'vscode-1',
+                workspaceCwd: '/workspace',
+                displayName: 'Current chat',
+                sourceType: 'vscode',
+                updatedAt: '2026-09-09T12:00:00.000Z',
+              },
+            ],
+            nextCursor: undefined,
+          });
+        }
+        if (options?.sourceType === 'default') {
+          return Promise.resolve({
+            sessions: [
+              {
+                sessionId: 'legacy-1',
+                workspaceCwd: '/workspace',
+                displayName: 'Pre-upgrade chat',
+                updatedAt: '2026-08-01T12:00:00.000Z',
+              },
+              {
+                sessionId: 'cli-1',
+                workspaceCwd: '/workspace',
+                displayName: 'Terminal chat',
+                updatedAt: '2026-08-02T12:00:00.000Z',
+              },
+              {
+                sessionId: 'web-1',
+                workspaceCwd: '/workspace',
+                displayName: 'Browser chat',
+                sourceType: 'default',
+                updatedAt: '2026-08-03T12:00:00.000Z',
+              },
+            ],
+            nextCursor: undefined,
+          });
+        }
+        return Promise.resolve({ sessions: [], nextCursor: undefined });
+      },
+    );
+
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrap',
+            data: {
+              baseUrl: 'http://localhost:4141',
+              clientId: 'client-1',
+              workspaceCwd: '/workspace',
+              sessionId: 'session-1',
+              hostKind: 'panel',
+              legacyConversationIds: ['legacy-1', 'never-recorded'],
+            },
+          },
+        }),
+      );
+      // The remount effect refetches the vscode page, then pages the default
+      // catalog for allowlisted ids — both are sequential awaits.
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+    });
+
+    const historyButton = container.querySelector(
+      'button[aria-haspopup="dialog"]',
+    ) as HTMLButtonElement;
+    expect(historyButton).not.toBeNull();
+    await act(async () => {
+      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    // Opening the dropdown triggers the first-page load, which now includes
+    // the legacy-catalog scan; wait for its rows instead of fixed flushes.
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('[data-session-id="legacy-1"]'),
+      ).not.toBeNull();
+    });
+
+    expect(
+      document.querySelector('[data-session-id="vscode-1"]'),
+    ).not.toBeNull();
+    // Neither the unattributed CLI session nor the browser-stamped one is
+    // allowlisted, so the panel must not claim them.
+    expect(document.querySelector('[data-session-id="cli-1"]')).toBeNull();
+    expect(document.querySelector('[data-session-id="web-1"]')).toBeNull();
+
+    const defaultCatalogCalls = sdkMocks.listWorkspaceSessionsPage.mock.calls
+      .map(([options]) => options)
+      .filter(
+        (options) => (options as { sourceType?: string })?.sourceType === 'default',
+      );
+    expect(defaultCatalogCalls.length).toBeGreaterThan(0);
+    expect(defaultCatalogCalls[0]).toMatchObject({
+      archiveState: 'active',
+      pageSize: 100,
+    });
+  });
 });
 
 describe('web shell permission decision messages', () => {
