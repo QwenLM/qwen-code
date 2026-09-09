@@ -13,7 +13,7 @@
  *
  * Footer mirrors the original: `➜ project · session · git:(branch) · model ·
  * context% used` plus an approval-mode row. The loading indicator
- * (self-contained 120ms spinner + rotating witty phrase + elapsed seconds)
+ * (self-contained spinner + rotating witty phrase + elapsed seconds)
  * sits above the composer while a turn is in flight.
  */
 
@@ -26,6 +26,10 @@ import { fmtTokens } from '../components/stats-helpers.js';
 import { C } from './theme.js';
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+// 80ms matches cli-spinners' `dots`, the spinner ink's responding indicator
+// uses, and the OpenTUI compaction spinner — so both renderers tick alike.
+const SPINNER_INTERVAL_MS = 80;
 
 /** Original witty loading phrases (i18n WITTY_LOADING_PHRASES, en subset). */
 const WITTY_LOADING_PHRASES = [
@@ -49,13 +53,13 @@ const randomPhrase = () =>
   ];
 
 /**
- * Self-contained spinner: owns its 120ms frame timer so the high-frequency tick
+ * Self-contained spinner: owns its frame timer so the high-frequency tick
  * re-renders ONLY this 1-cell component, not the whole transcript tree.
  */
 function Spinner() {
   const [frame, setFrame] = useState(0);
   useEffect(() => {
-    const spin = setInterval(() => setFrame((f) => f + 1), 120);
+    const spin = setInterval(() => setFrame((f) => f + 1), SPINNER_INTERVAL_MS);
     return () => clearInterval(spin);
   }, []);
   return (
