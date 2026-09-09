@@ -245,6 +245,9 @@ export function validateSettingValue(
     default:
       return `Settings of type '${def.type}' cannot be modified via this API`;
   }
+  if (def.excludedValues?.some((excluded) => Object.is(excluded, value))) {
+    return `Value must not be ${String(value)}`;
+  }
   return undefined;
 }
 

@@ -1420,6 +1420,9 @@ export function createGoalRuntime(
                 ...structuredClone(recovery.payload.snapshot),
                 activity: 'idle',
               };
+              if (recoveredSnapshot.goal?.status === 'active') {
+                recoveredSnapshot.goal.updatedAt = Date.now();
+              }
               blockedAudit = recovery.payload.blockedAudit
                 ? normalizeRecoveredBlockedAudit(recovery.payload.blockedAudit)
                 : undefined;

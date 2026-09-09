@@ -44,8 +44,9 @@ of active time, reaching the user through the same hand-off, the same
 
 Out of scope: showing the ceilings in the status card, pill, or Web Shell
 strip; changing what `tokensUsed` measures; per-turn or per-tool-call bounds;
-and any change to the `Budget:` line in the objective template beyond
-correcting the documentation that describes it.
+and making the objective's advisory `Budget:` line configure runtime state.
+The template and examples do name the two settings so users do not mistake
+that advisory line for an enforced ceiling.
 
 ## Design
 
@@ -92,9 +93,10 @@ authorization the user did not give.
 **Defaults are nothing, not a number.** Unlike the token budget, an absent or
 invalid setting arms no ceiling at all. A cadence is a scope the operator
 chooses; there is no number the project could pick on their behalf that would
-be more right than "no ceiling". `0` and `-1` are explicit opt-outs, and the
-runtime spells "arm nothing" as a non-finite grant, because `Infinity` would
-not survive the JSON journal.
+be more right than "no ceiling". The CLI accepts `-1` as the explicit opt-out
+and rejects `0` as a likely typo. Runtime embedders normalize either opt-out to
+a non-finite grant, and "arm nothing" is stored as no field because `Infinity`
+would not survive the JSON journal.
 
 **Caps are typo guards.** `GOAL_MAX_TURNS_CAP` is 10,000 turns and
 `GOAL_MAX_ACTIVE_MINUTES_CAP` is one week of active time. Neither is a policy
@@ -104,12 +106,12 @@ same way it rejects `model.goalTokenBudget`, so a misplaced zero surfaces as a
 message rather than as a Goal that silently runs unbounded.
 
 **Named `model.goalMaxTurns` and `model.goalMaxActiveMinutes`.** A `goals.*`
-settings group exists, but it holds the model-proposal consent setting: it is
-`requiresRestart: true` and ignores workspace scope. The two existing Goal
-budget settings live under `model.*`, take effect without a restart, and are
-settable per workspace, and they already have a three-layer validation path
-(`validateGoalTokenBudget` → `resolveGoalTokenBudget` → `ConfigParameters`).
-These two are budgets, so they follow their siblings.
+settings group exists, but it holds the model-proposal consent setting and
+ignores workspace scope. Goal budgets already live under `model.*`, so the new
+settings follow that namespace and its three-layer validation path. Their
+values are captured when `Config` and the Goal runtime are constructed, so the
+schema declares `requiresRestart: true`; `/config` must not claim a live
+session applied a ceiling it will not re-read.
 
 **The hand-off prompt stops naming the token budget.** The hosts carry a plain
 `windDown` boolean, so the wind-down line cannot say which ceiling was
@@ -133,23 +135,31 @@ would be a figure on every turn that nothing acts on.
 - `packages/core/src/goals/goal-runtime.ts`: the two grants on
   `CreateGoalRuntimeOptions`, `spentBudget`, and its use in
   `queueContinuation`, `stopForSpentBudget`, `finishTurn`'s no-progress yield
-  list, and `flushContinuation`'s `usage`.
+  list, `flushContinuation`'s `usage`, and rebasing an active record's clock
+  when a persisted session is restored so offline time is not charged.
+- `packages/core/src/goals/goal-tools.ts` and the bundled `/goal-draft` skill:
+  the model-visible objective examples identify advisory budgets and point to
+  the settings that enforce ceilings.
 - `packages/core/src/goals/goal-continuation-prompt.ts`: the widened
   `GoalContinuationUsage`, the multi-segment budget line, the wind-down line.
 - `packages/core/src/config/config.ts`: the two parameters, their caps,
   validators and normalizers, the two grants, and the runtime wiring.
 - `packages/cli/src/utils/runBudget.ts`, `packages/cli/src/config/config.ts`,
-  `packages/cli/src/config/settingsSchema.ts`: startup validation, resolution,
-  and the two schema entries, plus the regenerated
+  `packages/cli/src/config/settingsSchema.ts`, `settingsUtils.ts`, and the JSON
+  Schema generator: startup and write-path validation, resolution, restart
+  notices, and the two schema entries, plus the regenerated
   `packages/vscode-ide-companion/schemas/settings.schema.json`.
 - `packages/sdk-typescript/src/daemon/types.ts` and
   `packages/web-shell/client/daemon/session/mappers.ts`: the two new
   `limitKind` values and the two new record fields. The Web Shell parser
   rebuilds the record from an explicit whitelist, so a field it does not name
   is dropped on the live path.
+- `packages/web-shell/client/i18n.tsx` and the user/design documentation: the
+  new-Goal placeholder and examples distinguish model guidance from enforced
+  settings and document the meters precisely.
 
-No host changes. Every surface already renders a `usage_limited` Goal and its
-reason.
+No Goal host interface changes are required. The SDK and Web Shell copies of
+the record still change because they explicitly whitelist its fields.
 
 ## Constraints and risks
 
@@ -159,13 +169,16 @@ reason.
   `usage_limited` stop, so the bound yields to every spent budget, exactly as
   it already yields to the token one.
 - **Time is active time, not wall clock.** A Goal paused overnight resumes
-  with the window it had. This is the only honest reading of a budget the user
-  granted for work, and it falls out of `elapsedActiveTime` already gating on
-  `status === 'active'`.
+  with the window it had, and restoring an `active` journal record rebases its
+  in-flight clock so time while the process did not exist is not charged.
 - **Idle active time still counts.** `elapsedActiveTime` accrues while the
-  status is `active`, including between turns. A Goal left active without a
-  host to continue it therefore spends its time window. That matches what the
-  meter has always measured and what the status card already displays.
+  status is `active` in a running process, including waits and time between
+  turns. A Goal left active without a host to continue it therefore spends its
+  time window until the process exits.
+- **Every finished Goal turn counts.** The turn meter includes user-driven
+  turns as well as autonomous continuations. User turns are not rejected at
+  the ceiling, but spending it makes the next autonomous continuation the
+  wind-down hand-off.
 - **Two out-of-core whitelists.** The SDK's hand-copied union and the Web
   Shell's mapper each enumerate `limitKind` by value. Missing either drops the
   new kinds silently rather than loudly.
@@ -187,15 +200,26 @@ reason.
   path (work turns, one hand-off, `usage_limited` with `turn_budget`, resume
   re-arming ahead of the count); the same for the time budget; active time not
   accruing while paused; one reason when a turn crosses two ceilings; the
-  cadence figures reaching the host; no time figures without a time ceiling;
-  a spent cadence budget outranking the no-progress bound; the stop showing
-  even when the settle write fails.
+  cadence figures reaching the host, including a continuation queued before a
+  host is bound; no time figures without a time ceiling; restore discarding
+  offline time; user-driven turn accounting; token/turn/time precedence; a
+  spent cadence budget outranking the no-progress bound; the stop showing even
+  when the settle write fails.
 - `goal-continuation-prompt.test.ts`: the turn segment beside the token one;
   active minutes only alongside their ceiling; the five whole-prompt pins
   updated for the new prefix and hand-off line.
-- `config.test.ts` in core and cli, and `runBudget.test.ts`: the settings
-  reaching the grants, the defaults being unbounded, each cap accepted and one
-  past it rejected, and every invalid value rejected at startup.
+- `config.test.ts` in core and cli, `settingsSchema.test.ts`,
+  `settingsUtils.test.ts`, `config-command.test.ts`, and `runBudget.test.ts`:
+  the settings reaching the grants, the defaults being unbounded, each cap
+  accepted and one past it rejected, every invalid value rejected at startup
+  and on write, restart notices, and invalid-value diagnostics.
+- `goal-protocol.test.ts`, the bundled-skill test, and the Web Shell mapper
+  tests: reason formatting, objective guidance, and both out-of-core record
+  whitelists.
+- The full CLI package suite covers the prompt assertions in
+  `nonInteractiveCli.test.ts`, `Session.test.ts`, and
+  `use-llm-stream.test.tsx`, plus the explicit core-export mocks in
+  `acpAgent.worktree.test.ts` and `facade.test.ts`.
 - End to end against a real model: a Goal with `model.goalMaxTurns: 2` handing
   off on its third turn and stopping, and `/goal resume` granting another
   window; the same for `model.goalMaxActiveMinutes: 1`.

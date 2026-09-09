@@ -90,6 +90,8 @@ export interface SettingDefinition {
   minimum?: number;
   /** Maximum value for number/integer-type settings. */
   maximum?: number;
+  /** Values rejected even when they fall within the declared range. */
+  excludedValues?: ReadonlyArray<string | number>;
   /**
    * Primitive shapes a field accepted before it was expanded to its current
    * type. The exported JSON Schema wraps the field in `anyOf` so values from
@@ -1648,25 +1650,27 @@ const SETTINGS_SCHEMA = {
         type: 'integer',
         label: 'Goal Max Turns',
         category: 'Model',
-        requiresRestart: false,
+        requiresRestart: true,
         default: undefined as number | undefined,
         description:
-          'Autonomous turn window armed on each new Goal, in Goal turns. A Goal that reaches it gets one wind-down turn to hand off, then stops until you resume it, which authorizes another window on top of the turns already finished. Unset, or -1, runs Goals with no turn ceiling.',
+          'Goal-turn window armed on each new Goal. Every finished Goal turn counts, including user-driven turns; user turns are still admitted at the ceiling, but they can make the next autonomous continuation a wind-down. A Goal that reaches the ceiling gets one wind-down turn to hand off, then stops until you resume it, which authorizes another window on top of the turns already finished. Unset, or -1, runs Goals with no turn ceiling. Zero, values above 10,000, other negative, fractional, or non-number values are rejected at startup. Changes take effect after restart.',
         showInDialog: false,
         minimum: -1,
         maximum: GOAL_MAX_TURNS_CAP,
+        excludedValues: [0],
       },
       goalMaxActiveMinutes: {
         type: 'integer',
         label: 'Goal Max Active Minutes',
         category: 'Model',
-        requiresRestart: false,
+        requiresRestart: true,
         default: undefined as number | undefined,
         description:
-          'Autonomous active-time window armed on each new Goal, in minutes of the wall time the Goal spends running. Time while the Goal is paused or stopped does not count. A Goal that reaches it gets one wind-down turn to hand off, then stops until you resume it, which authorizes another window. Unset, or -1, runs Goals with no time ceiling.',
+          'Active-time window armed on each new Goal, in minutes of wall time while the Goal remains active, including waits and idle time between turns. Time while the Goal is paused, blocked, stopped, or the process is not running does not count. A Goal that reaches the ceiling gets one wind-down turn to hand off, then stops until you resume it, which authorizes another window. Unset, or -1, runs Goals with no time ceiling. Zero, values above 10,080 (one week), other negative, fractional, or non-number values are rejected at startup. Changes take effect after restart.',
         showInDialog: false,
         minimum: -1,
         maximum: GOAL_MAX_ACTIVE_MINUTES_CAP,
+        excludedValues: [0],
       },
       goalCheckpointTimeoutSeconds: {
         type: 'integer',
@@ -1677,7 +1681,7 @@ const SETTINGS_SCHEMA = {
         minimum: 1,
         maximum: GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
         description:
-          'Ceiling on one Goal evidence-checkpoint call, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call; a call that does not finish in time is abandoned as an inconclusive check — the checkpoint stall streak is preserved rather than incremented — and a later turn retries it. Unset uses the built-in default of 180. Must be an integer between 1 and 900; other values are rejected at startup. The call is streamed, so the per-request transport timeout (model.generationConfig.timeout, default 120 s) bounds only connect and first response, and values above 900 are rejected because past the default stream lifetime guard that guard, not this setting, ends the call. The 900 ceiling is fixed: raising QWEN_STREAM_MAX_LIFETIME_MS does not lift it.',
+          'Ceiling on one Goal evidence-checkpoint check, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call. A check whose claims overrun the aggregate byte budget, or include a claim over the per-claim character limit, makes one corrective retry, and both calls share this ceiling. A check that does not finish in time is abandoned as inconclusive; it counts toward the checkpoint stall limit only when the evidence window has overflowed, while a non-overflowing check preserves the streak and retries on a later turn. Unset uses the built-in default of 180. Must be an integer between 1 and 900; other values are rejected at startup. The calls are streamed, so the per-request transport timeout (model.generationConfig.timeout, default 120 s) bounds only connect and first response, and values above 900 are rejected because past the default stream lifetime guard that guard, not this setting, ends the check. The 900 ceiling is fixed: raising QWEN_STREAM_MAX_LIFETIME_MS does not lift it.',
         showInDialog: false,
       },
       maxToolCalls: {

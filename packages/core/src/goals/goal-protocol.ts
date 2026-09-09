@@ -70,7 +70,7 @@ export function isGoalTokenBudgetSpent(
 
 /** The `lastReason` a Goal stops with when `turnCount` reaches its budget. */
 export function goalTurnBudgetReason(turnBudget: number): string {
-  return `The Goal ran its autonomous turn budget (${turnBudget.toLocaleString('en-US')} ${turnBudget === 1 ? 'turn' : 'turns'}). Resume the Goal to authorize another window of turns, or clear it.`;
+  return `The Goal ran its Goal-turn budget (${turnBudget.toLocaleString('en-US')} ${turnBudget === 1 ? 'turn' : 'turns'}). Resume the Goal to authorize another window of turns, or clear it.`;
 }
 
 /**
@@ -103,7 +103,7 @@ function formatGoalActiveTimeBudget(activeTimeBudgetMs: number): string {
 
 /** The `lastReason` a Goal stops with when its active time reaches its budget. */
 export function goalActiveTimeBudgetReason(activeTimeBudgetMs: number): string {
-  return `The Goal ran its autonomous active-time budget (${formatGoalActiveTimeBudget(activeTimeBudgetMs)}). Resume the Goal to authorize another window of time, or clear it.`;
+  return `The Goal ran its active-time budget (${formatGoalActiveTimeBudget(activeTimeBudgetMs)}). Resume the Goal to authorize another window of time, or clear it.`;
 }
 
 /**
@@ -258,18 +258,18 @@ export interface GoalRecord {
   tokenBudget?: number;
   /**
    * The count `turnCount` may reach before autonomous continuation stops and
-   * the Goal waits for the user. Armed and re-armed exactly like
-   * `tokenBudget` (`turnCount + grant` on the resume of a spent Goal), and
-   * absent by default: a turn budget is a cadence the user asks for, not a
-   * runaway-spend guard every Goal needs.
+   * the Goal waits for the user. Every finished Goal turn contributes to the
+   * count, including user-driven turns, although those turns are not rejected
+   * at the ceiling. Armed and re-armed exactly like `tokenBudget` (`turnCount
+   * + grant` on the resume of a spent Goal), and absent by default.
    */
   turnBudget?: number;
   /**
-   * The ceiling on `activeTimeMs` -- the wall time this Goal spends `active`
-   * -- before autonomous continuation stops. Armed and re-armed like the
-   * other budgets, and absent by default. Time paused, blocked, or stopped
-   * does not count against it, so a Goal left overnight resumes with the
-   * window it had.
+   * The ceiling on `activeTimeMs` -- wall time while this Goal stays `active`,
+   * including waits and idle time between turns -- before autonomous
+   * continuation stops. Armed and re-armed like the other budgets, and absent
+   * by default. Time paused, blocked, stopped, or outside a running process
+   * does not count against it.
    */
   activeTimeBudgetMs?: number;
   /**

@@ -1894,13 +1894,22 @@ describe('turn and active-time budgets', () => {
     expect(resumed).not.toHaveProperty('windDownTurnId');
   });
 
-  it('removes a ceiling the resume opts out of, leaving no undefined key behind', () => {
-    const resumed = reduceGoalControl(
+  it('removes a cadence ceiling the resume opts out of, leaving no undefined key behind', () => {
+    const turnResumed = reduceGoalControl(
       turnStopped(),
       control(resume, { turnBudgetGrant: Number.POSITIVE_INFINITY }),
     );
-    expect(resumed).toMatchObject({ status: 'active' });
-    expect(Object.keys(resumed!)).not.toContain('turnBudget');
+    expect(turnResumed).toMatchObject({ status: 'active' });
+    expect(Object.keys(turnResumed!)).not.toContain('turnBudget');
+
+    const timeResumed = reduceGoalControl(
+      timeStopped(),
+      control(resume, {
+        activeTimeBudgetGrantMs: Number.POSITIVE_INFINITY,
+      }),
+    );
+    expect(timeResumed).toMatchObject({ status: 'active' });
+    expect(Object.keys(timeResumed!)).not.toContain('activeTimeBudgetMs');
   });
 
   it('re-arms a spent cadence ceiling on the way through an evidence resume', () => {
@@ -1952,5 +1961,31 @@ describe('turn and active-time budgets', () => {
     // wall clock the record never held.
     const stopped = timeStopped();
     expect(elapsedActiveTime(stopped, 10 ** 9)).toBe(1_800_000);
+  });
+
+  it('re-arms an active time ceiling from elapsed time on edit', () => {
+    const edited = reduceGoalControl(
+      goalRecord({
+        status: 'active',
+        activeTimeMs: 1_799_900,
+        activeTimeBudgetMs: 1_800_000,
+        updatedAt: 0,
+      }),
+      control(
+        {
+          action: 'edit',
+          objective: 'deliver the rest',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        { activeTimeBudgetGrantMs: 600_000 },
+      ),
+    );
+
+    expect(edited).toMatchObject({
+      status: 'active',
+      activeTimeMs: 1_800_100,
+      activeTimeBudgetMs: 2_400_100,
+    });
   });
 });

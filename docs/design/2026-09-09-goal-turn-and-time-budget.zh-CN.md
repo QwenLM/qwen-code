@@ -39,8 +39,9 @@ turns`），于是 `docs/users/features/goals.md` 只好补一句：这么写什
 预算完全相同的交接轮、相同的 `usage_limited` 状态、相同的 resume 语义抵达用户。
 
 不在范围内：在状态卡片、底栏 pill 或 Web Shell 状态条上显示这两道上限；改变
-`tokensUsed` 的计量口径；按轮或按工具调用的上限；以及除了纠正相关文档之外对目标
-模板里 `Budget:` 行的任何改动。
+`tokensUsed` 的计量口径；按轮或按工具调用的上限；以及让目标中仅供模型参考的
+`Budget:` 行直接配置运行时状态。模板与示例会点名两项设置，避免用户把这条参考说明
+误认为已强制执行的上限。
 
 ## 设计
 
@@ -77,8 +78,9 @@ token、轮数、时长的顺序上报。token 预算是默认武装的那一道
 
 **默认是"没有"，不是某个数。** 与 token 预算不同，设置缺省或非法时不武装任何上
 限。节奏是运维自己选的规模；项目替他挑任何一个数，都不会比"没有上限"更正确。
-`0` 与 `-1` 是显式的关闭方式，而运行时把"什么都不武装"表达为一个非有限的 grant
-——因为 `Infinity` 无法在 JSON 日志里存活。
+CLI 只接受 `-1` 作为显式关闭方式，并把 `0` 当作可能的笔误拒绝；运行时嵌入方会把
+关闭值归一化为非有限 grant，而日志用"不写字段"表达"什么都不武装"，因为
+`Infinity` 无法在 JSON 日志里存活。
 
 **cap 是防打错的护栏。** `GOAL_MAX_TURNS_CAP` 是 10,000 轮，
 `GOAL_MAX_ACTIVE_MINUTES_CAP` 是一周的活跃时长。两者都不是对长跑的政策：想要比
@@ -87,11 +89,11 @@ token、轮数、时长的顺序上报。token 预算是默认武装的那一道
 消息，而不是一个悄悄无上限运行的 Goal。
 
 **命名为 `model.goalMaxTurns` 与 `model.goalMaxActiveMinutes`。** 仓库里确实有一
-个 `goals.*` 设置组，但它装的是模型提案的同意设置：`requiresRestart: true`，且忽
-略 workspace 作用域。而现有两个 Goal 预算设置都在 `model.*` 之下，改动免重启、可
-按 workspace 设置，并且已经有一条三层校验链路
-（`validateGoalTokenBudget` → `resolveGoalTokenBudget` → `ConfigParameters`）。
-这两个新设置也是预算，所以跟着它们的同类走。
+个 `goals.*` 设置组，但它装的是模型提案的同意设置，且忽略 workspace 作用域。
+Goal 预算已经位于 `model.*`，所以两项新设置沿用这个命名空间及其三层校验链路。它们
+的值在构造 `Config` 与 Goal runtime 时捕获，因此 schema 声明
+`requiresRestart: true`；`/config` 不能声称当前会话已经应用一项实际上不会重读的
+上限。
 
 **交接轮的提示词不再写死 token 预算。** 三个 host 传的是一个朴素的 `windDown`
 布尔值，所以 wind-down 那一行无法说出是哪道上限到了。现在它指向上面那条预算行，
@@ -111,21 +113,27 @@ token、轮数、时长的顺序上报。token 预算是默认武装的那一道
   的键名清单、校验、再水化，加上 `transitionGoal` 的删键分支。
 - `packages/core/src/goals/goal-runtime.ts`：`CreateGoalRuntimeOptions` 上的两个
   grant、`spentBudget`，以及它在 `queueContinuation`、`stopForSpentBudget`、
-  `finishTurn` 空转让位清单与 `flushContinuation` 的 `usage` 中的使用。
+  `finishTurn` 空转让位清单与 `flushContinuation` 的 `usage` 中的使用；恢复持久化
+  会话时重置活跃记录的进行中时钟，不把离线时间计入。
+- `packages/core/src/goals/goal-tools.ts` 与内置 `/goal-draft` skill：面向模型的目标
+  示例明确 `Budget` 只是参考，并点名真正强制上限的设置。
 - `packages/core/src/goals/goal-continuation-prompt.ts`：放宽后的
   `GoalContinuationUsage`、多段预算行、wind-down 行。
 - `packages/core/src/config/config.ts`：两个参数、它们的 cap、校验器与归一化函
   数、两个 grant，以及与运行时的接线。
 - `packages/cli/src/utils/runBudget.ts`、`packages/cli/src/config/config.ts`、
-  `packages/cli/src/config/settingsSchema.ts`：启动校验、解析与两条 schema 条
-  目，以及重新生成的
+  `packages/cli/src/config/settingsSchema.ts`、`settingsUtils.ts` 与 JSON Schema
+  生成器：启动和写入校验、解析、重启提示与两条 schema 条目，以及重新生成的
   `packages/vscode-ide-companion/schemas/settings.schema.json`。
 - `packages/sdk-typescript/src/daemon/types.ts` 与
   `packages/web-shell/client/daemon/session/mappers.ts`：两个新的 `limitKind`
   取值与两个新的记录字段。Web Shell 的解析器按一份明确的白名单重建记录，所以它
   没有点名的字段会在实时链路上被丢掉。
+- `packages/web-shell/client/i18n.tsx` 与用户/设计文档：新建 Goal 的占位文案和示例
+  区分模型参考与强制设置，并准确说明两种计量。
 
-host 侧零改动。所有界面本来就会渲染 `usage_limited` 的 Goal 及其原因。
+Goal host 接口无需改动；SDK 与 Web Shell 的记录副本仍需更新，因为它们显式枚举
+字段。
 
 ## 约束与风险
 
@@ -133,13 +141,13 @@ host 侧零改动。所有界面本来就会渲染 `usage_limited` 的 Goal 及�
   在同一轮跨过节奏上限的 Goal 应得的是它的交接轮和一个可 resume 的
   `usage_limited` 停机，所以该闸门对每一种已花完的预算让位——正如它本来就对
   token 预算让位一样。
-- **时间是活跃时长，不是墙钟。** 隔夜 pause 的 Goal 恢复时窗口不变。这是对"用户
-  为工作授予的预算"唯一诚实的读法，而它是 `elapsedActiveTime` 本来就以
-  `status === 'active'` 为门的自然结果。
+- **时间是活跃时长，不是墙钟。** 隔夜 pause 的 Goal 恢复时窗口不变；恢复一条
+  `active` 日志记录时也会重置进行中时钟，进程不存在的时间不会被计入。
 - **轮次之间的空闲活跃时长仍然计入。** `elapsedActiveTime` 在状态为 `active` 期
-  间一直累积，包括轮次之间。因此一个处于活跃状态却没有 host 来续跑它的 Goal 会
-  花掉它的时间窗口。这与该计量一贯度量的东西一致，也与状态卡片已经显示的数字
-  一致。
+  间一直累积，包括等待和轮次之间。因此一个处于活跃状态却没有 host 来续跑它的
+  Goal 会持续花掉时间窗口，直到进程退出。
+- **每个完成的 Goal 轮次都计入。** 轮数计量既包括自主续跑，也包括用户驱动的
+  轮次。用户轮次不会因为到达上限而被拒，但它可能让下一次自主续跑变成交接轮。
 - **core 之外有两处白名单。** SDK 手抄的联合类型与 Web Shell 的 mapper 各自按取
   值枚举 `limitKind`。漏掉任何一处，新的 kind 会被静默丢弃而不是报错。
 - **默认关闭意味着没有行为变化。** 两个设置都不设时，没有 Goal 会带上任何一个字
@@ -156,12 +164,20 @@ host 侧零改动。所有界面本来就会渲染 `usage_limited` 的 Goal 及�
 - `goal-runtime.test.ts`：没有 grant 就不武装上限；完整的轮数预算路径（工作轮、
   一次交接、带 `turn_budget` 的 `usage_limited`、resume 前移到计数之前）；时长预
   算的同一套；pause 期间活跃时长不累积；一轮跨两道上限时只报一个原因；节奏数字
-  抵达 host；没有时长上限时不发时长数字；已花完的节奏预算优先于空转闸门；结算写
-  入失败时停机仍然显示。
+  抵达 host，包括 host 绑定前已经排队的续跑；没有时长上限时不发时长数字；恢复时
+  丢弃离线时间；用户轮次计数；token/轮数/时长优先级；已花完的节奏预算优先于空转
+  闸门；结算写入失败时停机仍然显示。
 - `goal-continuation-prompt.test.ts`：轮数段与 token 段并列；活跃分钟仅在其上限
   存在时出现；五处整段提示词固定断言按新前缀与新交接行更新。
-- core 与 cli 的 `config.test.ts` 以及 `runBudget.test.ts`：设置抵达 grant、默认
-  为无上限、每个 cap 本身被接受而超一即被拒、所有非法值在启动时被拒。
+- core 与 cli 的 `config.test.ts`、`settingsSchema.test.ts`、
+  `settingsUtils.test.ts`、`config-command.test.ts` 以及 `runBudget.test.ts`：设置
+  抵达 grant、默认无上限、每个 cap 本身被接受而超一即被拒、所有非法值在启动和
+  写入时被拒、重启提示与非法值诊断。
+- `goal-protocol.test.ts`、内置 skill 测试与 Web Shell mapper 测试：停机原因格式、
+  目标说明，以及 core 之外两处记录白名单。
+- 完整 CLI 包测试覆盖 `nonInteractiveCli.test.ts`、`Session.test.ts` 与
+  `use-llm-stream.test.tsx` 的提示词断言，以及 `acpAgent.worktree.test.ts` 与
+  `facade.test.ts` 的显式 core 导出 mock。
 - 真实模型端到端：`model.goalMaxTurns: 2` 的 Goal 在第三轮交接后停下，`/goal
 resume` 再授一个窗口；`model.goalMaxActiveMinutes: 1` 同理。
 

@@ -168,6 +168,53 @@ describe('session title metadata', () => {
 });
 
 describe('mapReasoningControls', () => {
+  it.each(['default', 'max', null, false, undefined])(
+    'accepts only the explicit reset enable value %j',
+    (enableValue) => {
+      const result = mapReasoningControls([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'none',
+          options: [{ value: 'none' }, { value: 'medium' }],
+          _meta: {
+            'qwenCode/reasoning': { defaultEffort: 'medium', enableValue },
+          },
+        },
+      ]);
+      expect(result).toEqual({
+        enabled: false,
+        effort: 'medium',
+        efforts: ['medium'],
+        defaultEffort: 'medium',
+        ...(enableValue === 'default' ? { enableValue: 'default' } : {}),
+      });
+    },
+  );
+
+  it.each([false, true, 'false', null, undefined])(
+    'preserves only an explicit cannot-enable capability %j for tiered and toggle-only controls',
+    (canEnable) => {
+      for (const toggleOnly of [false, true]) {
+        const result = mapReasoningControls([
+          {
+            id: 'reasoning_effort',
+            currentValue: 'none',
+            options: [
+              { value: 'none' },
+              { value: 'default' },
+              ...(toggleOnly ? [] : [{ value: 'low' }, { value: 'high' }]),
+            ],
+            _meta: { 'qwenCode/reasoning': { canEnable, toggleOnly } },
+          },
+        ]);
+        expect(result?.enabled).toBe(false);
+        if (canEnable === false)
+          expect(result).toHaveProperty('canEnable', false);
+        else expect(result).not.toHaveProperty('canEnable');
+      }
+    },
+  );
+
   it('maps toggle-only reasoning without exposing an effort list', () => {
     expect(
       mapReasoningControls([

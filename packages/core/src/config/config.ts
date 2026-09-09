@@ -172,7 +172,6 @@ import {
   type PostToolBatchToolCall,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
-import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import {
   createGoalRuntime,
   GoalPersistenceUnavailableError,
@@ -1062,15 +1061,16 @@ export interface ConfigParameters {
    */
   goalTokenBudget?: number;
   /**
-   * Autonomous turn window armed on each new Goal, in finished Goal turns.
-   * Absent runs Goals with no turn ceiling, and `-1` says so explicitly.
-   * See `normalizeGoalMaxTurns`.
+   * Goal-turn window armed on each new Goal, in finished Goal turns including
+   * user-driven turns. Absent runs Goals with no turn ceiling, and `-1` says
+   * so explicitly. See `normalizeGoalMaxTurns`.
    */
   goalMaxTurns?: number;
   /**
-   * Autonomous active-time window armed on each new Goal, in minutes of the
-   * wall time the Goal spends `active`. Absent runs Goals with no time
-   * ceiling, and `-1` says so explicitly. See `normalizeGoalMaxActiveMinutes`.
+   * Active-time window armed on each new Goal, in minutes of wall time while
+   * the Goal stays `active` in this process, including waits and idle time.
+   * Absent runs Goals with no time ceiling, and `-1` says so explicitly. See
+   * `normalizeGoalMaxActiveMinutes`.
    */
   goalMaxActiveMinutes?: number;
   /**
@@ -1554,8 +1554,9 @@ export const GOAL_MAX_TURNS_CAP = 10_000;
 /**
  * Largest accepted `model.goalMaxActiveMinutes`: one week of active time.
  *
- * Active time only accrues while the Goal is running, so a week of it is
- * already far past any single authorization a user would grant deliberately.
+ * Active time accrues while the Goal stays active in a running process, so a
+ * week of it is already far past any single authorization a user would grant
+ * deliberately.
  */
 export const GOAL_MAX_ACTIVE_MINUTES_CAP = 7 * 24 * 60;
 
@@ -1577,8 +1578,9 @@ export function isValidGoalMaxTurns(value: unknown): value is number {
  * Unlike the token budget, the default is no ceiling: a turn budget is a
  * cadence a user asks for, not a runaway-spend guard every Goal needs, so an
  * absent or invalid setting arms nothing rather than falling back to a
- * number nobody chose. `0` and `-1` are the explicit opt-outs, and the
- * runtime spells "arm nothing" as a non-finite grant.
+ * number nobody chose. Direct Config embedders may use `0` or `-1` as an
+ * opt-out; the CLI rejects `0` as a likely typo before this layer. The runtime
+ * spells "arm nothing" as a non-finite grant.
  */
 export function normalizeGoalMaxTurns(value: unknown): number {
   if (!isValidGoalMaxTurns(value) || value === -1 || value === 0) {
@@ -1601,8 +1603,8 @@ export function isValidGoalMaxActiveMinutes(value: unknown): value is number {
 }
 
 /**
- * Resolves the operator's Goal active-time budget to the grant the runtime
- * arms, in milliseconds. Defaults to no ceiling, exactly like
+ * Resolves the host's Goal active-time budget to the grant the runtime arms,
+ * in milliseconds. Defaults to no ceiling, exactly like
  * `normalizeGoalMaxTurns`.
  */
 export function normalizeGoalMaxActiveMinutes(value: unknown): number {
@@ -3381,8 +3383,6 @@ export class Config {
             // Execute the appropriate hook based on eventName
             let result;
             let stopHookCount: number | undefined;
-            let hasNonGoalBlockingStopHook: boolean | undefined;
-            let nonGoalBlockingStopReason: string | undefined;
             const input = request.input || {};
             const signal = request.signal;
             switch (request.eventName) {
@@ -3421,32 +3421,6 @@ export class Config {
                   ? createHookOutput('Stop', stopResult.finalOutput)
                   : undefined;
                 stopHookCount = stopResult.allOutputs.length;
-                const goalHookId =
-                  stopResult.finalOutput?.hookSpecificOutput?.[
-                    GOAL_HOOK_ID_OUTPUT_KEY
-                  ];
-                if (typeof goalHookId === 'string') {
-                  const nonGoalBlockingOutputs = stopResult.allOutputs.filter(
-                    (output) =>
-                      output.hookSpecificOutput?.[GOAL_HOOK_ID_OUTPUT_KEY] !==
-                        goalHookId &&
-                      (output.decision === 'block' ||
-                        output.decision === 'deny' ||
-                        output.continue === false),
-                  );
-                  hasNonGoalBlockingStopHook =
-                    nonGoalBlockingOutputs.length > 0;
-                  if (hasNonGoalBlockingStopHook) {
-                    nonGoalBlockingStopReason = nonGoalBlockingOutputs
-                      .map(
-                        (output) =>
-                          output.stopReason ||
-                          output.reason ||
-                          'No reason provided',
-                      )
-                      .join('\n');
-                  }
-                }
                 break;
               }
               case 'MessageDisplay': {
@@ -3575,8 +3549,6 @@ export class Config {
               output: result,
               // Include stop hook count for Stop events
               stopHookCount,
-              hasNonGoalBlockingStopHook,
-              nonGoalBlockingStopReason,
             } as HookExecutionResponse);
           } catch (error) {
             this.debugLogger.warn(`Hook execution failed: ${error}`);
@@ -4460,6 +4432,12 @@ export class Config {
       },
     );
     const newContentGeneratorConfig = config;
+    if (
+      priorReasoning === false &&
+      newContentGeneratorConfig.thinkingMandatory !== true
+    ) {
+      newContentGeneratorConfig.reasoning = false;
+    }
     this.contentGenerator = await createContentGenerator(
       newContentGeneratorConfig,
       this,
@@ -4472,7 +4450,13 @@ export class Config {
     // fires — and the resolved model can differ from the pre-auth one.
     this.publishModelEnv();
 
-    // Re-apply the user's reasoning effort that the provider sync above wiped.
+    // Re-apply the user's reasoning preference that the provider sync wiped.
+    if (
+      priorReasoning === false &&
+      newContentGeneratorConfig.reasoning === false
+    ) {
+      this.modelsConfig.getGenerationConfig().reasoning = false;
+    }
     if (priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
     }
@@ -5362,13 +5346,16 @@ export class Config {
    */
   getReasoningEffortOverride(): ReasoningEffortOverride | undefined {
     const cfg = this.getContentGeneratorConfig();
-    if (
-      !cfg ||
-      !DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg) ||
-      !isTieredEffortWireModel(cfg.model)
-    ) {
+    if (!cfg || !DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg)) {
       return undefined;
     }
+
+    const configuredReasoning = cfg.authType
+      ? this.getResolvedModelConfig(cfg.authType, cfg.model, cfg.baseUrl)
+          ?.capabilities.reasoning
+      : undefined;
+    const tieredModel = isTieredEffortWireModel(cfg.model, configuredReasoning);
+    if (!tieredModel) return undefined;
 
     const currentEffort = this.getReasoningEffort();
     const selected = selectDashScopeThinkingKnob(
@@ -5376,6 +5363,7 @@ export class Config {
       cfg.extra_body,
       cfg.samplingParams,
       currentEffort,
+      tieredModel,
     );
     if (
       !selected ||
@@ -5397,6 +5385,7 @@ export class Config {
         undefined,
         cfg.samplingParams,
         currentEffort,
+        tieredModel,
       );
       if (
         below?.source === 'samplingParams' &&
@@ -5808,7 +5797,7 @@ export class Config {
   }
 
   /**
-   * The autonomous turn window armed on each new Goal, as the runtime's
+   * The Goal-turn window armed on each new Goal, as the runtime's
    * `turnBudgetGrant`: a positive integer, or `Infinity` when no ceiling is
    * configured (the default).
    */
@@ -5817,9 +5806,9 @@ export class Config {
   }
 
   /**
-   * The autonomous active-time window armed on each new Goal, in
-   * milliseconds, as the runtime's `activeTimeBudgetGrantMs`: a positive
-   * number, or `Infinity` when no ceiling is configured (the default).
+   * The active-time window armed on each new Goal, in milliseconds, as the
+   * runtime's `activeTimeBudgetGrantMs`: a positive number, or `Infinity`
+   * when no ceiling is configured (the default).
    */
   getGoalActiveTimeBudgetGrantMs(): number {
     return this.goalActiveTimeBudgetGrantMs;

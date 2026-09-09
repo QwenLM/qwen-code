@@ -140,7 +140,9 @@ Verifier feedback: Checkpoint 2 lacks a source ref.`,
       usage: { tokensUsed: 1_500, tokenBudget: 1_000, turnCount: 2 },
     });
 
-    expect(ordinary).not.toContain('token budget');
+    expect(ordinary).not.toContain(
+      'An autonomous budget for this Goal window is spent',
+    );
     // The hand-off turn is told not to start new work, so the lines asking
     // for a different concrete action are dropped rather than left to
     // contradict it.

@@ -283,6 +283,25 @@ describe('SettingsUtils', () => {
           validateSettingValue(definition, GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP),
         ).toBeUndefined();
       });
+
+      it('refuses zero for Goal cadence settings while accepting -1', async () => {
+        const { getSettingsSchema: getRealSettingsSchema } =
+          await vi.importActual<typeof import('./settingsSchema.js')>(
+            './settingsSchema.js',
+          );
+        const model = getRealSettingsSchema().model.properties;
+
+        for (const definition of [
+          model.goalMaxTurns,
+          model.goalMaxActiveMinutes,
+        ]) {
+          expect(validateSettingValue(definition, 0)).toBe(
+            'Value must not be 0',
+          );
+          expect(validateSettingValue(definition, -1)).toBeUndefined();
+          expect(validateSettingValue(definition, 1)).toBeUndefined();
+        }
+      });
     });
 
     describe('requiresRestart', () => {

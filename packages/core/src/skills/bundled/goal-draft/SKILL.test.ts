@@ -228,8 +228,10 @@ describe('bundled goal-draft skill', () => {
       expect(position).toBeGreaterThan(previous);
       previous = position;
     }
-    expect(template).toContain("<user's stopping agreement");
+    expect(template).toContain("<user's advisory stopping agreement");
     expect(template).toContain('stop as blocked after 20 turns');
+    expect(template).toContain('model.goalMaxTurns');
+    expect(template).toContain('model.goalMaxActiveMinutes');
     expect(template).not.toContain('minutes');
     // parseGoalCommand joins whitespace-separated tokens with single
     // spaces, so a multi-line objective would be flattened anyway.

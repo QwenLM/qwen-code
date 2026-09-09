@@ -71,11 +71,13 @@ is the whole remedy.
 **Which limit wins.** The bound yields to the limits that describe the Goal
 better, on the turn where they coincide.
 
-- A spent token budget. The budget stop lives in the continuation gate, and so
-  does the wind-down hand-off it grants first; pausing on the crossing turn
+- A spent Goal budget. The token, turn, and active-time stops live in the
+  continuation gate, and so does the wind-down hand-off it grants first;
+  pausing on the crossing turn
   would skip both and record an exhausted allowance as an idle pause with no
-  `limitKind`. The bound stands down when `isGoalTokenBudgetSpent` holds, the
-  streak stays on the record, and the gate runs as it would have.
+  `limitKind`. The bound stands down when `spentBudget` finds any spent
+  allowance, the streak stays on the record, and the gate runs as it would
+  have.
 - A checkpoint stall streak. A model that fills the evidence window with prose
   and calls no tool is quiet by this bound's measure and overflowing by the
   checkpoint's, and `update_goal` answers `checkpointRequired` on an
@@ -187,7 +189,7 @@ broadcasts it, and every surface already renders a paused Goal and its reason.
   the ledger could not measure; a resume clears the streak and restores the
   whole allowance; a failed settle write still shows the stop; a waiting user
   turn outranks the bound, including one reserved while the pause record was
-  being written; the checkpoint stall breaker and the token budget each
+  being written; the checkpoint stall breaker and every spent Goal budget
   outrank the bound on the turn where they coincide with it.
 - `transcript-replay.test.ts`: a typed pause replays as `/goal pause`, a
   runtime-written pause replays as the paused card alone, and a pause without

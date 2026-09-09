@@ -412,7 +412,8 @@ describe('SettingsSchema', () => {
         expect(setting.default).toBeUndefined();
         expect(setting.minimum).toBe(-1);
         expect(setting.maximum).toBe(cap);
-        expect(setting.requiresRestart).toBe(false);
+        expect(setting.excludedValues).toEqual([0]);
+        expect(setting.requiresRestart).toBe(true);
         expect(setting.showInDialog).toBe(false);
       }
     });
