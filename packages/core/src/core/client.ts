@@ -4485,8 +4485,7 @@ export class LlmClient {
             return turn;
           }
 
-          const continueReason =
-            stopOutput.stopReason || stopOutput.reason || 'No reason provided';
+          const continueReason = stopOutput.getEffectiveReason();
 
           // Track stop hook iterations
           const currentIterationCount =

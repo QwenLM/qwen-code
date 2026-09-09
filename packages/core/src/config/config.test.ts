@@ -117,7 +117,7 @@ import { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig } from '../skills/types.js';
 import { createSkillScopedAgentConfig } from '../memory/skillReviewAgentPlanner.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
-import { HookSystem } from '../hooks/index.js';
+import { createHookOutput, HookSystem } from '../hooks/index.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type {
   ChatRecord,
@@ -13087,6 +13087,110 @@ describe('Model Switching and Config Updates', () => {
         expected,
       );
       expect(response.success).toBe(true);
+    });
+  });
+
+  describe('Stop dispatch through the hook execution bridge', () => {
+    // The goal-specific half of this suite went with the two response fields
+    // it asserted. What remains is the only exercise of the surviving
+    // `case 'Stop':` branch: without it, deleting that branch or throwing
+    // inside it leaves the whole package green while every configured Stop
+    // hook silently stops blocking.
+    it('forwards the request input positionally, wraps the output, and counts the hooks that ran', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const blockingOutput = {
+        decision: 'block' as const,
+        reason: 'Policy review is still required',
+      };
+      const secondOutput = { continue: true };
+      const fireStopEvent = vi.fn().mockResolvedValue({
+        finalOutput: blockingOutput,
+        allOutputs: [blockingOutput, secondOutput],
+      });
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireStopEvent };
+
+      const controller = new AbortController();
+      const response = await config
+        .getMessageBus()!
+        .request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName: 'Stop',
+            input: {
+              stop_hook_active: true,
+              last_assistant_message: 'last response',
+              context_limit: 1_000,
+              input_tokens: 250,
+            },
+            signal: controller.signal,
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+
+      expect(response.error).toBeUndefined();
+      expect(response.success).toBe(true);
+      // Positional, so swapping the two strings is caught here rather than by
+      // a consumer that happens to read only one of them.
+      expect(fireStopEvent).toHaveBeenCalledWith(
+        true,
+        'last response',
+        { context_usage: 0.25, context_limit: 1_000, input_tokens: 250 },
+        controller.signal,
+      );
+      // Read off the bridge response rather than through a consumer: both
+      // consumers mask a missing value with `?? 1`, so an assertion made
+      // through them would still pass if the producer stopped setting it.
+      expect(response.stopHookCount).toBe(2);
+      // The `createHookOutput('Stop', ...)` wrap. A plain object would carry
+      // the same fields but none of the methods every consumer calls.
+      // The `createHookOutput('Stop', ...)` wrap, asserted on the call rather
+      // than the result: this file replaces the hooks module with a bare mock,
+      // so the wrap returns undefined here. The call is what matters -- without
+      // it no consumer can ask the output whether it blocks.
+      expect(vi.mocked(createHookOutput)).toHaveBeenCalledWith(
+        'Stop',
+        blockingOutput,
+      );
+    });
+
+    it('reports no output when every Stop hook declines to act', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const fireStopEvent = vi.fn().mockResolvedValue({
+        finalOutput: undefined,
+        allOutputs: [],
+      });
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireStopEvent };
+
+      const response = await config
+        .getMessageBus()!
+        .request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName: 'Stop',
+            input: { stop_hook_active: false },
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+
+      expect(response.success).toBe(true);
+      expect(response.output).toBeUndefined();
+      expect(response.stopHookCount).toBe(0);
+      // No final output means nothing to wrap.
+      expect(vi.mocked(createHookOutput)).not.toHaveBeenCalled();
+      // An absent last message is forwarded as the empty string, and usage
+      // figures that cannot be computed are forwarded as undefined.
+      expect(fireStopEvent).toHaveBeenCalledWith(
+        false,
+        '',
+        undefined,
+        undefined,
+      );
     });
   });
 
