@@ -138,6 +138,7 @@ import type {
   PendingSessionLoad,
   SettledPrompt,
 } from './types.js';
+import { useTurnNotificationBinding } from './turn-notification-context.js';
 import { SESSION_TURN_NAVIGATION_FEATURE } from '../../constants/sessions.js';
 import {
   createDaemonTurnNavigationStore,
@@ -1164,6 +1165,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       ? { error: sessionContextResolutionError }
       : {}),
   });
+  const turnNotifications = useTurnNotificationBinding(
+    resolvedBaseUrl,
+    connection,
+  );
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
   const initialClientIdDependencyRef = useRef(clientId);
@@ -2306,6 +2311,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     kind: 'workspace' as const,
                     cwd: activeSession.workspaceCwd,
                   };
+          turnNotifications.remember(
+            activeSession,
+            activeProductSessionContext,
+          );
+          turnNotifications.activate(activeSession);
           const activeWorkspaceScoped =
             activeProductSessionContext.kind === 'workspace';
           runnerSession = activeSession;
@@ -2487,6 +2497,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const markerIndex = replayTarget
               ? sourceEvents.indexOf(replayTarget.marker)
               : -1;
+            const notificationReplayEvents: DaemonEvent[] = [];
             const eventGroups: Array<{
               transcript: DaemonUiEvent[];
               sideEffects: DaemonUiEvent[];
@@ -2543,6 +2554,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     assistantDoneFromTurnEvent(replayEvent, 'error'),
                   );
                 }
+                notificationReplayEvents.push(replayEvent);
                 eventGroups.push({
                   transcript: groupEvents,
                   sideEffects:
@@ -2797,6 +2809,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 passiveAssistantDoneTimerRef,
                 { requireBoundPromptId: true },
               );
+            }
+            if (sessionRef.current === activeSession) {
+              for (const event of notificationReplayEvents) {
+                turnNotifications.observe(activeSession, event, true);
+              }
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
             // Release the raw snapshot only after the injection above
@@ -3469,6 +3486,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   },
                 );
               }
+              if (sessionRef.current === activeSession) {
+                turnNotifications.observe(activeSession, event);
+              }
               const pendingRepair = liveJournalRepairRef.current;
               if (
                 pendingRepair?.sessionId === activeSession.sessionId &&
@@ -4088,6 +4108,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   }, [
     autoConnect,
     autoReconnect,
+    turnNotifications,
     resolvedBaseUrl,
     resolvedToken,
     sessionEffectContext,
@@ -4351,6 +4372,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             client,
             request,
             requestClientId,
+          ).then((owner) =>
+            turnNotifications.remember(owner, {
+              kind: 'workspace',
+              cwd: owner.workspaceCwd,
+            }),
           );
         },
         createDetachedStandaloneSession: (overrides) => {
@@ -4370,7 +4396,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           return DaemonSessionClient.createStandalone(client, {
             ...(modelServiceId !== undefined ? { modelServiceId } : {}),
             ...(approvalMode !== undefined ? { approvalMode } : {}),
-          });
+          }).then((owner) =>
+            turnNotifications.remember(owner, { kind: 'standalone' }),
+          );
         },
         getDefaultSessionContext: () => {
           const error = sessionContextResolutionErrorRef.current;
@@ -4394,6 +4422,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           liveJournalRepairRef.current = undefined;
         },
         onPromptAdmitted: (owner, admission) => {
+          if (sessionRef.current === owner)
+            turnNotifications.admit(owner, admission.promptId);
           if (
             sessionRef.current === owner &&
             turnNavigationStore.getSnapshot().sessionId === owner.sessionId
@@ -4402,6 +4432,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
         },
         onPromptRemoved: (owner, promptId) => {
+          if (sessionRef.current === owner)
+            turnNotifications.remove(owner, promptId);
           if (
             sessionRef.current === owner &&
             turnNavigationStore.getSnapshot().sessionId === owner.sessionId
@@ -4416,6 +4448,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       resolvedBaseUrl,
       resolvedToken,
       restartEventStreamOnPrompt,
+      turnNotifications,
       store,
       turnNavigationStore,
     ],
