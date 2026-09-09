@@ -21,7 +21,11 @@ import {
   TrustGateError,
   matchesServerPattern,
   matchesAnyServerPattern,
+  GOAL_MAX_ACTIVE_MINUTES_CAP,
+  GOAL_MAX_TURNS_CAP,
   GOAL_TOKEN_BUDGET_CAP,
+  normalizeGoalMaxActiveMinutes,
+  normalizeGoalMaxTurns,
   normalizeGoalTokenBudget,
   isValidGoalTokenBudget,
   GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
@@ -3586,6 +3590,91 @@ describe('Server Config (config.ts)', () => {
       }
       expect(isValidGoalTokenBudget(0)).toBe(true);
       expect(isValidGoalTokenBudget(30_000_000)).toBe(true);
+    });
+
+    it('arms each new Goal with the configured cadence ceilings', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        goalMaxTurns: 20,
+        goalMaxActiveMinutes: 30,
+      });
+      expect(config.getGoalTurnBudgetGrant()).toBe(20);
+      expect(config.getGoalActiveTimeBudgetGrantMs()).toBe(1_800_000);
+
+      const runtime = config.getGoalRuntime();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        turnBudget: 20,
+        activeTimeBudgetMs: 1_800_000,
+      });
+    });
+
+    it('runs Goals with no cadence ceiling by default', async () => {
+      // Unlike the token budget, the default is nothing: a cadence is what an
+      // operator asks for, not a guard every Goal needs.
+      const config = new Config({ ...baseParams, chatRecording: true });
+      expect(config.getGoalTurnBudgetGrant()).toBe(Number.POSITIVE_INFINITY);
+      expect(config.getGoalActiveTimeBudgetGrantMs()).toBe(
+        Number.POSITIVE_INFINITY,
+      );
+
+      const runtime = config.getGoalRuntime();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      const goal = runtime.getSnapshot().goal;
+      expect(goal).not.toHaveProperty('turnBudget');
+      expect(goal).not.toHaveProperty('activeTimeBudgetMs');
+    });
+
+    it.each([
+      ['-1 for no ceiling', -1],
+      ['0', 0],
+      ['above the cap', GOAL_MAX_TURNS_CAP + 1],
+      ['fractional', 1.5],
+      ['not a number', '20' as unknown as number],
+    ])('runs Goals with no turn ceiling when goalMaxTurns is %s', (_l, v) => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        goalMaxTurns: v,
+      });
+      expect(config.getGoalTurnBudgetGrant()).toBe(Number.POSITIVE_INFINITY);
+    });
+
+    it.each([
+      ['-1 for no ceiling', -1],
+      ['0', 0],
+      ['above the cap', GOAL_MAX_ACTIVE_MINUTES_CAP + 1],
+      ['fractional', 0.5],
+    ])(
+      'runs Goals with no time ceiling when goalMaxActiveMinutes is %s',
+      (_l, v) => {
+        const config = new Config({
+          ...baseParams,
+          chatRecording: true,
+          goalMaxActiveMinutes: v,
+        });
+        expect(config.getGoalActiveTimeBudgetGrantMs()).toBe(
+          Number.POSITIVE_INFINITY,
+        );
+      },
+    );
+
+    it('accepts each cadence cap itself and rejects one past it', () => {
+      expect(normalizeGoalMaxTurns(GOAL_MAX_TURNS_CAP)).toBe(
+        GOAL_MAX_TURNS_CAP,
+      );
+      expect(normalizeGoalMaxTurns(GOAL_MAX_TURNS_CAP + 1)).toBe(
+        Number.POSITIVE_INFINITY,
+      );
+      expect(normalizeGoalMaxActiveMinutes(GOAL_MAX_ACTIVE_MINUTES_CAP)).toBe(
+        GOAL_MAX_ACTIVE_MINUTES_CAP * 60_000,
+      );
+      expect(
+        normalizeGoalMaxActiveMinutes(GOAL_MAX_ACTIVE_MINUTES_CAP + 1),
+      ).toBe(Number.POSITIVE_INFINITY);
     });
 
     it('arms the checkpoint verifier with the configured timeout', () => {

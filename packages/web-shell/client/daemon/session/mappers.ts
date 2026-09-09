@@ -664,6 +664,8 @@ function getGoalState(
   const activeTimeMs = getNumber(source, 'activeTimeMs');
   const tokensUsed = getNumber(source, 'tokensUsed');
   const tokenBudget = getNumber(source, 'tokenBudget');
+  const turnBudget = getNumber(source, 'turnBudget');
+  const activeTimeBudgetMs = getNumber(source, 'activeTimeBudgetMs');
   const createdAt = getNumber(source, 'createdAt');
   const updatedAt = getNumber(source, 'updatedAt');
   if (
@@ -688,7 +690,9 @@ function getGoalState(
   const limitKind =
     limitKindRaw === 'evidence_catalog' ||
     limitKindRaw === 'checkpoint_request' ||
-    limitKindRaw === 'token_budget'
+    limitKindRaw === 'token_budget' ||
+    limitKindRaw === 'turn_budget' ||
+    limitKindRaw === 'time_budget'
       ? limitKindRaw
       : undefined;
   return {
@@ -704,6 +708,8 @@ function getGoalState(
       activeTimeMs,
       ...(tokensUsed !== undefined ? { tokensUsed } : {}),
       ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+      ...(turnBudget !== undefined ? { turnBudget } : {}),
+      ...(activeTimeBudgetMs !== undefined ? { activeTimeBudgetMs } : {}),
       createdAt,
       updatedAt,
       ...(lastReason ? { lastReason } : {}),

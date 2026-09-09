@@ -1062,6 +1062,18 @@ export interface ConfigParameters {
    */
   goalTokenBudget?: number;
   /**
+   * Autonomous turn window armed on each new Goal, in finished Goal turns.
+   * Absent runs Goals with no turn ceiling, and `-1` says so explicitly.
+   * See `normalizeGoalMaxTurns`.
+   */
+  goalMaxTurns?: number;
+  /**
+   * Autonomous active-time window armed on each new Goal, in minutes of the
+   * wall time the Goal spends `active`. Absent runs Goals with no time
+   * ceiling, and `-1` says so explicitly. See `normalizeGoalMaxActiveMinutes`.
+   */
+  goalMaxActiveMinutes?: number;
+  /**
    * Ceiling on one Goal evidence-checkpoint verifier call, in seconds.
    * Absent or invalid falls back to
    * `GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS`. See
@@ -1528,6 +1540,75 @@ export function isValidGoalTokenBudget(value: unknown): value is number {
     Number.isInteger(value) &&
     (value === -1 || (value >= 0 && value <= GOAL_TOKEN_BUDGET_CAP))
   );
+}
+
+/**
+ * Largest accepted `model.goalMaxTurns`.
+ *
+ * A typo guard on the same reasoning as `GOAL_TOKEN_BUDGET_CAP`, sized well
+ * above any cadence a user would ask for by hand: a Goal that genuinely
+ * wants more turns than this wants no turn ceiling, which is the default.
+ */
+export const GOAL_MAX_TURNS_CAP = 10_000;
+
+/**
+ * Largest accepted `model.goalMaxActiveMinutes`: one week of active time.
+ *
+ * Active time only accrues while the Goal is running, so a week of it is
+ * already far past any single authorization a user would grant deliberately.
+ */
+export const GOAL_MAX_ACTIVE_MINUTES_CAP = 7 * 24 * 60;
+
+/**
+ * True for the values `normalizeGoalMaxTurns` honours: `-1` for no ceiling,
+ * or a positive integer up to `GOAL_MAX_TURNS_CAP`.
+ */
+export function isValidGoalMaxTurns(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    (value === -1 || (value >= 0 && value <= GOAL_MAX_TURNS_CAP))
+  );
+}
+
+/**
+ * Resolves the operator's Goal turn budget to the grant the runtime arms.
+ *
+ * Unlike the token budget, the default is no ceiling: a turn budget is a
+ * cadence a user asks for, not a runaway-spend guard every Goal needs, so an
+ * absent or invalid setting arms nothing rather than falling back to a
+ * number nobody chose. `0` and `-1` are the explicit opt-outs, and the
+ * runtime spells "arm nothing" as a non-finite grant.
+ */
+export function normalizeGoalMaxTurns(value: unknown): number {
+  if (!isValidGoalMaxTurns(value) || value === -1 || value === 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return value;
+}
+
+/**
+ * True for the values `normalizeGoalMaxActiveMinutes` honours: `-1` for no
+ * ceiling, or a positive integer up to `GOAL_MAX_ACTIVE_MINUTES_CAP`.
+ */
+export function isValidGoalMaxActiveMinutes(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    (value === -1 || (value >= 0 && value <= GOAL_MAX_ACTIVE_MINUTES_CAP))
+  );
+}
+
+/**
+ * Resolves the operator's Goal active-time budget to the grant the runtime
+ * arms, in milliseconds. Defaults to no ceiling, exactly like
+ * `normalizeGoalMaxTurns`.
+ */
+export function normalizeGoalMaxActiveMinutes(value: unknown): number {
+  if (!isValidGoalMaxActiveMinutes(value) || value === -1 || value === 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return value * 60_000;
 }
 
 /**
@@ -2409,6 +2490,8 @@ export class Config {
 
   private readonly maxSessionTurns: number;
   private readonly goalTokenBudgetGrant: number;
+  private readonly goalTurnBudgetGrant: number;
+  private readonly goalActiveTimeBudgetGrantMs: number;
   private readonly goalCheckpointTimeoutMs: number;
   private readonly maxSubagentDepth: number;
   private readonly maxWallTimeSeconds: number;
@@ -2728,6 +2811,26 @@ export class Config {
     ) {
       this.debugLogger.warn(
         `Ignoring invalid goalTokenBudget ${String(params.goalTokenBudget)}: expected a non-negative integer or -1 (no budget); using the default of ${GOAL_DEFAULT_TOKEN_BUDGET}.`,
+      );
+    }
+    this.goalTurnBudgetGrant = normalizeGoalMaxTurns(params.goalMaxTurns);
+    if (
+      params.goalMaxTurns !== undefined &&
+      !isValidGoalMaxTurns(params.goalMaxTurns)
+    ) {
+      this.debugLogger.warn(
+        `Ignoring invalid goalMaxTurns ${String(params.goalMaxTurns)}: expected an integer between 1 and ${GOAL_MAX_TURNS_CAP}, or -1 for no turn ceiling; Goals will run with no turn ceiling.`,
+      );
+    }
+    this.goalActiveTimeBudgetGrantMs = normalizeGoalMaxActiveMinutes(
+      params.goalMaxActiveMinutes,
+    );
+    if (
+      params.goalMaxActiveMinutes !== undefined &&
+      !isValidGoalMaxActiveMinutes(params.goalMaxActiveMinutes)
+    ) {
+      this.debugLogger.warn(
+        `Ignoring invalid goalMaxActiveMinutes ${String(params.goalMaxActiveMinutes)}: expected an integer between 1 and ${GOAL_MAX_ACTIVE_MINUTES_CAP}, or -1 for no time ceiling; Goals will run with no time ceiling.`,
       );
     }
     this.goalCheckpointTimeoutMs = normalizeGoalCheckpointTimeoutSeconds(
@@ -5701,6 +5804,24 @@ export class Config {
    */
   getGoalTokenBudgetGrant(): number {
     return this.goalTokenBudgetGrant;
+  }
+
+  /**
+   * The autonomous turn window armed on each new Goal, as the runtime's
+   * `turnBudgetGrant`: a positive integer, or `Infinity` when no ceiling is
+   * configured (the default).
+   */
+  getGoalTurnBudgetGrant(): number {
+    return this.goalTurnBudgetGrant;
+  }
+
+  /**
+   * The autonomous active-time window armed on each new Goal, in
+   * milliseconds, as the runtime's `activeTimeBudgetGrantMs`: a positive
+   * number, or `Infinity` when no ceiling is configured (the default).
+   */
+  getGoalActiveTimeBudgetGrantMs(): number {
+    return this.goalActiveTimeBudgetGrantMs;
   }
 
   /**
@@ -8926,6 +9047,8 @@ export class Config {
         timeoutMs: this.goalCheckpointTimeoutMs,
       }),
       tokenBudgetGrant: this.goalTokenBudgetGrant,
+      turnBudgetGrant: this.goalTurnBudgetGrant,
+      activeTimeBudgetGrantMs: this.goalActiveTimeBudgetGrantMs,
     });
     this.goalRuntime = runtime;
     if (this.goalTurnHost) {

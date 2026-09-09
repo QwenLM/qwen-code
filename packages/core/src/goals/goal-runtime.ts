@@ -31,8 +31,12 @@ import {
   GOAL_NO_PROGRESS_TURN_LIMIT,
   GOAL_PAUSE_REASON_NO_PROGRESS,
   GOAL_STATE_VERSION,
+  goalActiveTimeBudgetReason,
   goalTokenBudgetReason,
+  goalTurnBudgetReason,
+  isGoalActiveTimeBudgetSpent,
   isGoalTokenBudgetSpent,
+  isGoalTurnBudgetSpent,
   isRepeatedBlockerProposal,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
@@ -96,6 +100,17 @@ export interface CreateGoalRuntimeOptions {
    * budgets existed.
    */
   tokenBudgetGrant?: number;
+  /**
+   * The autonomous turn window one user action arms, in finished Goal turns.
+   * Defaults to unbounded: a turn budget is a cadence the user asks for, not
+   * a guard every Goal needs.
+   */
+  turnBudgetGrant?: number;
+  /**
+   * The autonomous active-time window one user action arms, in milliseconds.
+   * Defaults to unbounded, for the same reason as `turnBudgetGrant`.
+   */
+  activeTimeBudgetGrantMs?: number;
 }
 
 /**
@@ -387,6 +402,45 @@ export function createGoalRuntime(
 
   const tokenBudgetGrant =
     options.tokenBudgetGrant ?? GOAL_DEFAULT_TOKEN_BUDGET;
+  const turnBudgetGrant = options.turnBudgetGrant ?? Number.POSITIVE_INFINITY;
+  const activeTimeBudgetGrantMs =
+    options.activeTimeBudgetGrantMs ?? Number.POSITIVE_INFINITY;
+
+  /**
+   * The budget this Goal has spent, if any, and the stop it earns.
+   *
+   * One reader for every ceiling, so the continuation gate, the settle and
+   * the no-progress bound cannot disagree about whether a Goal is out of
+   * allowance. Ordered token, turns, time: when a turn crosses more than one
+   * ceiling at once the Goal stops with a single reason, and the token budget
+   * is the one that is armed by default and so the one a user is likeliest to
+   * be asking about.
+   */
+  const spentBudget = (
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+    now: number,
+  ): { kind: GoalLimitKind; reason: string } | undefined => {
+    if (isGoalTokenBudgetSpent(goal)) {
+      return {
+        kind: 'token_budget',
+        reason: goalTokenBudgetReason(goal.tokenBudget),
+      };
+    }
+    if (isGoalTurnBudgetSpent(goal)) {
+      return {
+        kind: 'turn_budget',
+        reason: goalTurnBudgetReason(goal.turnBudget),
+      };
+    }
+    const elapsed = elapsedActiveTime(goal, now);
+    if (isGoalActiveTimeBudgetSpent(goal, elapsed)) {
+      return {
+        kind: 'time_budget',
+        reason: goalActiveTimeBudgetReason(goal.activeTimeBudgetMs),
+      };
+    }
+    return undefined;
+  };
 
   /**
    * The snapshot a runtime-driven stop settles on, built once so the
@@ -471,10 +525,11 @@ export function createGoalRuntime(
   const stopForSpentBudget = () => {
     void enqueue(async () => {
       const goal = snapshot.goal;
+      const spent = goal ? spentBudget(goal, Date.now()) : undefined;
       if (
         !goal ||
         goal.status !== 'active' ||
-        !isGoalTokenBudgetSpent(goal) ||
+        !spent ||
         currentPermit ||
         pendingProposal ||
         verificationAttempt ||
@@ -482,19 +537,15 @@ export function createGoalRuntime(
       ) {
         return;
       }
-      const reason = goalTokenBudgetReason(goal.tokenBudget);
+      const { kind, reason } = spent;
       let limitedSnapshot: GoalSnapshotV2;
       try {
-        limitedSnapshot = await journalUsageLimitedSettle(
-          goal,
-          reason,
-          'token_budget',
-        );
+        limitedSnapshot = await journalUsageLimitedSettle(goal, reason, kind);
       } catch {
         // A lost settle write must not strand an "active" Goal the gate will
         // never continue: the window is spent either way, so show the stop
         // and let the user's next action surface the persistence loss.
-        limitedSnapshot = usageLimitedSnapshot(goal, reason, 'token_budget');
+        limitedSnapshot = usageLimitedSnapshot(goal, reason, kind);
       }
       if (
         snapshot.goal?.goalId !== goal.goalId ||
@@ -582,6 +633,17 @@ export function createGoalRuntime(
         ? {}
         : { tokenBudget: snapshot.goal.tokenBudget }),
       turnCount: snapshot.goal.turnCount,
+      ...(snapshot.goal.turnBudget === undefined
+        ? {}
+        : { turnBudget: snapshot.goal.turnBudget }),
+      // Elapsed rather than committed: an active Goal's clock is running, and
+      // the figure only ships alongside the ceiling it is measured against.
+      ...(snapshot.goal.activeTimeBudgetMs === undefined
+        ? {}
+        : {
+            activeTimeMs: elapsedActiveTime(snapshot.goal, Date.now()),
+            activeTimeBudgetMs: snapshot.goal.activeTimeBudgetMs,
+          }),
     };
     const verifierFeedback = nextVerifierFeedback;
     nextVerifierFeedback = undefined;
@@ -673,7 +735,7 @@ export function createGoalRuntime(
     ) {
       return;
     }
-    if (isGoalTokenBudgetSpent(snapshot.goal)) {
+    if (spentBudget(snapshot.goal, Date.now())) {
       // A spent window buys one hand-off before it stops. The record marks
       // the hand-off that was delivered and finished; until then -- never
       // granted, dropped before the model saw it, or finished under someone
@@ -1648,9 +1710,9 @@ export function createGoalRuntime(
           // that would have relieved it.
           //
           // The bound yields to the limits that describe the Goal better. A
-          // spent token budget is an allowance that was used up, and the
+          // spent budget is an allowance that was used up, and the
           // continuation gate owes that Goal its wind-down hand-off before
-          // the `token_budget` stop; pausing here would skip both. A Goal
+          // the matching stop; pausing here would skip both. A Goal
           // carrying a checkpoint stall streak is drowning in evidence, not
           // idling -- its prose overflowed the window and `update_goal`
           // answers `checkpointRequired` without recording a proposal -- so
@@ -1661,7 +1723,7 @@ export function createGoalRuntime(
             noProgressTurns !== undefined &&
             noProgressTurns >= GOAL_NO_PROGRESS_TURN_LIMIT &&
             nextGoal.status === 'active' &&
-            !isGoalTokenBudgetSpent(nextGoal) &&
+            !spentBudget(nextGoal, Date.now()) &&
             !(nextGoal.checkpointStalls ?? 0);
           if (heldWindDown) windDownTurnId = undefined;
           const persistedSnapshot: GoalSnapshotV2 = {
@@ -1920,6 +1982,8 @@ export function createGoalRuntime(
               ? { recordId: recordUuid }
               : options.journal.getTranscriptCursor(),
           tokenBudgetGrant,
+          turnBudgetGrant,
+          activeTimeBudgetGrantMs,
         });
         const nextSnapshot: GoalSnapshotV2 = {
           v: GOAL_STATE_VERSION,

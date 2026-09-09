@@ -18,6 +18,8 @@ import {
   ApprovalMode,
   DEFAULT_MAX_SUBAGENT_DEPTH,
   GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+  GOAL_MAX_ACTIVE_MINUTES_CAP,
+  GOAL_MAX_TURNS_CAP,
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
@@ -1641,6 +1643,30 @@ const SETTINGS_SCHEMA = {
         description:
           'Autonomous spend window armed on each new Goal, in tokens as counted by the Goal meter (totalTokenCount summed over every model call the Goal makes in its own turns; side queries and checkpoint verification are not metered). When a Goal spends its window it gets one wind-down turn to hand off, then stops until you resume it, which arms another window. Unset uses the built-in default of 30,000,000; -1 means unlimited. Zero, values above 300,000,000 (10x the default, a typo guard), other negative, fractional, or non-number values are rejected at startup.',
         showInDialog: false,
+      },
+      goalMaxTurns: {
+        type: 'integer',
+        label: 'Goal Max Turns',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as number | undefined,
+        description:
+          'Autonomous turn window armed on each new Goal, in Goal turns. A Goal that reaches it gets one wind-down turn to hand off, then stops until you resume it, which authorizes another window on top of the turns already finished. Unset, or -1, runs Goals with no turn ceiling.',
+        showInDialog: false,
+        minimum: -1,
+        maximum: GOAL_MAX_TURNS_CAP,
+      },
+      goalMaxActiveMinutes: {
+        type: 'integer',
+        label: 'Goal Max Active Minutes',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as number | undefined,
+        description:
+          'Autonomous active-time window armed on each new Goal, in minutes of the wall time the Goal spends running. Time while the Goal is paused or stopped does not count. A Goal that reaches it gets one wind-down turn to hand off, then stops until you resume it, which authorizes another window. Unset, or -1, runs Goals with no time ceiling.',
+        showInDialog: false,
+        minimum: -1,
+        maximum: GOAL_MAX_ACTIVE_MINUTES_CAP,
       },
       goalCheckpointTimeoutSeconds: {
         type: 'integer',
