@@ -1425,18 +1425,51 @@ function SlashCommandPanel({
   );
 }
 
+// The textarea backend cannot receive the CodeMirror keymap, so the arrow
+// hint buttons move the caret directly. An existing selection collapses to
+// its leading edge first, and movement steps whole code points so a caret
+// never lands between an emoji's surrogate halves.
+function moveTextareaCaret(
+  textarea: HTMLTextAreaElement | null,
+  forward: boolean,
+) {
+  if (!textarea) return;
+  const { selectionStart, selectionEnd, value } = textarea;
+  const length = value.length;
+  if (selectionEnd !== selectionStart) {
+    textarea.setSelectionRange(
+      forward ? selectionEnd : selectionStart,
+      forward ? selectionEnd : selectionStart,
+    );
+    return;
+  }
+  let caret = selectionStart;
+  if (forward) {
+    if (caret >= length) return;
+    const next = value.codePointAt(caret) ?? 0;
+    caret += next > 0xffff ? 2 : 1;
+  } else {
+    if (caret <= 0) return;
+    const prev = value.charCodeAt(caret - 1);
+    const beforePrev = caret > 1 ? value.charCodeAt(caret - 2) : 0;
+    const overLowSurrogate =
+      prev >= 0xdc00 &&
+      prev <= 0xdfff &&
+      beforePrev >= 0xd800 &&
+      beforePrev <= 0xdbff;
+    caret -= overLowSurrogate ? 2 : 1;
+  }
+  textarea.setSelectionRange(caret, caret);
+}
+
 function QuickActionsPanel({
   actions,
   onRun,
   onPressKey,
-  showKeyHints = true,
 }: {
   actions: readonly QuickActionItem[];
   onRun: (action: QuickActionItem) => void;
   onPressKey: (item: QuickKeyItem) => void;
-  // The keyboard shortcut grid is pointless without a hardware keyboard, so
-  // the mobile textarea backend hides it.
-  showKeyHints?: boolean;
 }) {
   const { t } = useI18n();
 
@@ -1460,22 +1493,20 @@ function QuickActionsPanel({
             </button>
           ))}
         </div>
-        {showKeyHints && (
-          <div className={styles.quickKeysGrid}>
-            {QUICK_KEY_ITEMS.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className={styles.quickKey}
-                title={t(item.descriptionKey)}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => onPressKey(item)}
-              >
-                <span className={styles.quickKeyLabel}>{item.label}</span>
-              </button>
-            ))}
-          </div>
-        )}
+        <div className={styles.quickKeysGrid}>
+          {QUICK_KEY_ITEMS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={styles.quickKey}
+              title={t(item.descriptionKey)}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => onPressKey(item)}
+            >
+              <span className={styles.quickKeyLabel}>{item.label}</span>
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -2328,14 +2359,46 @@ export const ChatEditor = memo(
       },
       [onSelectModel, core],
     );
+    const showCancelButton = isRunning && !core.hasContent;
+    const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
+
     const dispatchComposerKey = useCallback(
       (event: QuickKeyItem['event']) => {
         if (core.mobileComposer) {
-          // No CodeMirror to dispatch into. History search is the one key
-          // action with a non-keyboard equivalent; the rest are hidden on
-          // the textarea backend.
-          if (event.ctrlKey && event.key === 'r') {
-            core.searchState.openHistorySearch();
+          // No CodeMirror to dispatch into: apply the desktop keymap effects
+          // directly to the textarea backend.
+          switch (event.key) {
+            case 'ArrowUp':
+              core.navigatePrevHistory();
+              return;
+            case 'ArrowDown':
+              core.navigateNextHistory();
+              return;
+            case 'ArrowLeft':
+            case 'ArrowRight':
+              moveTextareaCaret(
+                core.mobileComposer.textareaRef.current,
+                event.key === 'ArrowRight',
+              );
+              return;
+            case 'Escape':
+              // Mirrors the CodeMirror Escape binding: exit shell mode, then
+              // fall through to canceling an in-flight turn.
+              if (core.shellMode) {
+                core.setShellMode(false);
+              } else if (isRunning && !composerPreparing) {
+                onCancel?.();
+              }
+              return;
+            case 'Tab':
+              // Tab accepts completions, which the textarea backend does not
+              // have; nothing to apply.
+              return;
+            case 'r':
+              if (event.ctrlKey) {
+                core.searchState.openHistorySearch();
+              }
+              return;
           }
           return;
         }
@@ -2350,7 +2413,7 @@ export const ChatEditor = memo(
           }),
         );
       },
-      [core],
+      [core, composerPreparing, isRunning, onCancel],
     );
     const runQuickAction = useCallback(
       (action: QuickActionItem) => {
@@ -2510,8 +2573,6 @@ export const ChatEditor = memo(
     const showModeLabel = toolbarLabelVisibility.mode;
     const showPlanLabel = toolbarLabelVisibility.plan;
     const showModelLabel = toolbarLabelVisibility.model;
-    const showCancelButton = isRunning && !core.hasContent;
-    const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
     const mobileVoiceActive = showQuickActions && voiceActive;
 
     useEffect(() => {
@@ -3822,7 +3883,6 @@ export const ChatEditor = memo(
             actions={quickActions}
             onRun={runQuickAction}
             onPressKey={pressQuickKey}
-            showKeyHints={!core.mobileComposer}
           />
         )}
         <Dialog
