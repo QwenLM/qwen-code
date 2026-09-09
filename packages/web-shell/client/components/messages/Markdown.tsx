@@ -4,10 +4,12 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
   type ReactNode,
+  type ComponentProps,
 } from 'react';
 import { useTheme } from '../../themeContext';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
@@ -17,7 +19,7 @@ import {
 } from '../../utils/clipboard';
 import { useCopiedFlash } from '../../hooks/useCopiedFlash';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
-import type { Components, Options } from 'react-markdown';
+import type { Components, Options, ExtraProps } from 'react-markdown';
 import { isMarkdownFenceClosed } from '@datafe-open/markdown-chart';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -38,6 +40,8 @@ import {
 } from '../../customization';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
+import { FootnoteSup } from './FootnoteCard';
+import { rehypeFootnoteCards } from './rehype-footnote-cards';
 import {
   DEFAULT_WEB_SHELL_MARKDOWN_CHART,
   WebShellMarkdownChartProvider,
@@ -765,12 +769,47 @@ export function markdownUrlTransform(
 function MarkdownLink({
   href,
   children,
-}: {
-  href?: string;
-  children?: ReactNode;
-}) {
+  node,
+  id,
+  'aria-label': ariaLabel,
+  'aria-describedby': ariaDescribedBy,
+}: ComponentProps<'a'> & ExtraProps) {
   const renderMode = useTranscriptRenderMode();
   const openExternalLink = useExternalLinkOpener();
+  const footnote =
+    node?.properties.dataFootnoteRef !== undefined ||
+    node?.properties.dataFootnoteBackref !== undefined;
+  if (footnote && href?.startsWith('#')) {
+    return (
+      <a
+        id={id}
+        href={href}
+        className={styles.link}
+        aria-label={ariaLabel}
+        aria-describedby={ariaDescribedBy}
+        data-footnote-ref={
+          node?.properties.dataFootnoteRef !== undefined ? '' : undefined
+        }
+        data-footnote-backref={
+          node?.properties.dataFootnoteBackref !== undefined ? '' : undefined
+        }
+        onClick={(event) => {
+          const root = event.currentTarget.getRootNode() as
+            | Document
+            | ShadowRoot;
+          const target = root.getElementById(href.slice(1));
+          if (!target) return;
+          event.preventDefault();
+          target.scrollIntoView({ block: 'nearest' });
+          if (!target.hasAttribute('tabindex') && target.tagName !== 'BUTTON')
+            target.tabIndex = -1;
+          target.focus({ preventScroll: true });
+        }}
+      >
+        {children}
+      </a>
+    );
+  }
   if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
     if (renderMode !== 'interactive') {
       return <span className={styles.link}>{children}</span>;
@@ -896,6 +935,7 @@ function createComponents(
     pre: MarkdownPre,
     a: MarkdownLink,
     img: MarkdownImage,
+    sup: FootnoteSup,
     table({ children }: { children?: ReactNode }) {
       if (tableMode === 'advanced') {
         const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
@@ -956,6 +996,7 @@ export const Markdown = memo(function Markdown({
   const { markdown, markdownTableMode } = useWebShellCustomization();
   const theme = useTheme();
   const documentMode = useTranscriptRenderMode() === 'document';
+  const footnotePrefix = `footnote-${useId()}-`;
   const sourceMarkdown = source ? markdown : undefined;
 
   const throttledContent = useThrottledValue(content ?? '', isStreaming);
@@ -1035,10 +1076,26 @@ export const Markdown = memo(function Markdown({
   }, [sourceMarkdown?.remarkPlugins]);
 
   const rehypePlugins = useMemo(() => {
-    return sourceMarkdown?.rehypePlugins
-      ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
-      : [rehypeKatex];
-  }, [sourceMarkdown?.rehypePlugins]);
+    return [
+      rehypeKatex,
+      ...(sourceMarkdown?.rehypePlugins ?? []),
+      [
+        rehypeFootnoteCards,
+        {
+          prefix: footnotePrefix,
+          group: !documentMode && !sourceComponents?.sup,
+          safeHref: isSafeHref,
+          safeImage: isSafeImageSrc,
+          transformUrl: markdownUrlTransform,
+        },
+      ],
+    ] satisfies NonNullable<Options['rehypePlugins']>;
+  }, [
+    sourceMarkdown?.rehypePlugins,
+    footnotePrefix,
+    documentMode,
+    sourceComponents?.sup,
+  ]);
   const urlTransform = useMemo(
     () => (url: string) => markdownUrlTransform(url, documentMode),
     [documentMode],

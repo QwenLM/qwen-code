@@ -16,6 +16,11 @@ type MessageValue =
 type Messages = Record<string, MessageValue>;
 
 const EN: Messages = {
+  'footnotes.note': (v) => `Footnote ${v?.number ?? ''}`,
+  'footnotes.references': (v) => `View ${v?.count ?? ''} references`,
+  'footnotes.preview': 'Reference preview',
+  'footnotes.previous': 'Previous reference',
+  'footnotes.next': 'Next reference',
   'git.currentBranch': (v) => `Current Git branch: ${v?.branch ?? ''}`,
   'git.detached': 'Detached HEAD',
   'git.clean': 'Working tree clean',
@@ -3595,6 +3600,11 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
+  'footnotes.note': (v) => `脚注 ${v?.number ?? ''}`,
+  'footnotes.references': (v) => `查看 ${v?.count ?? ''} 条引用`,
+  'footnotes.preview': '引用预览',
+  'footnotes.previous': '上一条引用',
+  'footnotes.next': '下一条引用',
   'git.currentBranch': (v) => `当前 Git 分支：${v?.branch ?? ''}`,
   'git.detached': '游离 HEAD',
   'git.clean': '工作区干净',
