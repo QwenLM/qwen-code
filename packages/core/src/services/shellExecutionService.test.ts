@@ -1841,6 +1841,86 @@ describe('ShellExecutionService', () => {
     });
   });
 
+  describe('Windows bundled ConPTY backend (#11303)', () => {
+    // The inbox ConPTY backend orphans one `conhost.exe --headless` per PTY on
+    // natural shell exit (microsoft/node-pty#965); the bundled backend hosts
+    // the pseudo console in-process, leaving nothing to orphan.
+
+    let capturedReplyListener: ((data: string) => void) | undefined;
+
+    // The forwarder under test subscribes through the terminal's public onData
+    // event; capture every listener a spawned terminal hands to it. The
+    // instance field shadows Terminal's prototype getter, so the service's
+    // subscription lands here instead of xterm's core emitter — the listener
+    // is invoked manually, and the returned disposable stands in for
+    // xterm's own so the cleanup path has something to dispose.
+    class ReplyCapturingTerminal extends pkg.Terminal {
+      override onData: pkg.IEvent<string> = (listener) => {
+        capturedReplyListener = listener;
+        return { dispose: () => undefined };
+      };
+    }
+
+    beforeEach(() => {
+      capturedReplyListener = undefined;
+    });
+
+    it('spawns PTYs with the bundled ConPTY backend on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
+
+      await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(mockPtySpawn.mock.calls[0][2]).toMatchObject({
+        useConptyDll: true,
+      });
+    });
+
+    it('leaves the inbox ConPTY backend alone off Windows', async () => {
+      // beforeEach pins the platform to linux.
+      await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(mockPtySpawn.mock.calls[0][2]).toMatchObject({
+        useConptyDll: false,
+      });
+    });
+
+    it('writes the emulated terminal query replies back to the PTY on Windows', async () => {
+      // Bundled ConPTY answers no queries itself, so an unanswered DA probe
+      // stalls the shell for its full ~2s timeout; the forwarder must carry
+      // the emulated terminal's replies to the PTY.
+      mockPlatform.mockReturnValue('win32');
+      mockLoadXtermHeadless.mockResolvedValueOnce({
+        Terminal: ReplyCapturingTerminal,
+      });
+
+      await simulateExecution('echo hi', (pty) => {
+        expect(capturedReplyListener).toBeDefined();
+        capturedReplyListener!('\x1b[?64;1;22c');
+        expect(mockPtyProcess.write).toHaveBeenCalledWith('\x1b[?64;1;22c');
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+    });
+
+    it('registers no terminal reply forwarder off Windows', async () => {
+      // The gate must not change POSIX behavior at all: no onData
+      // subscription, so nothing can reach pty.write.
+      mockLoadXtermHeadless.mockResolvedValueOnce({
+        Terminal: ReplyCapturingTerminal,
+      });
+
+      await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(capturedReplyListener).toBeUndefined();
+      expect(mockPtyProcess.write).not.toHaveBeenCalled();
+    });
+  });
+
   describe('Binary Output', () => {
     it('should detect binary output and switch to progress events', async () => {
       mockIsBinary.mockReturnValueOnce(true);

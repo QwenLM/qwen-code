@@ -1515,6 +1515,15 @@ export class ShellExecutionService {
           ...getShellContextEnvVars(),
         },
         handleFlowControl: true,
+        // Windows: the inbox ConPTY backend spawns one `conhost.exe
+        // --headless` per PTY, and a natural shell exit orphans it — the
+        // native exit watcher erases the pty baton before JS can reach
+        // ClosePseudoConsole (microsoft/node-pty#965), so the host lives
+        // until the CLI exits (#11303's `+7 conhost for 7 tool commands`).
+        // The bundled-ConPTY backend hosts the pseudo console in-process
+        // instead, leaving no conhost.exe to orphan. Off Windows the option
+        // is inert.
+        useConptyDll: os.platform() === 'win32',
       });
 
       const result = new Promise<ShellExecutionResult>((resolve) => {
@@ -1527,6 +1536,27 @@ export class ShellExecutionService {
           logLevel: 'off',
         });
         headlessTerminal.scrollToTop();
+
+        // Bundled ConPTY (useConptyDll above) answers no terminal queries
+        // itself, so a shell that probes the terminal — PowerShell's DA query
+        // at startup — stalls for its full ~2s timeout unless the emulated
+        // terminal's auto-generated reply is written back (measured 3.22s →
+        // 0.23s per command). Scoped to Windows to keep the POSIX path
+        // byte-identical; the hook dies with headlessTerminal.dispose() in
+        // both the foreground and background-promote cleanups.
+        const queryResponseDisposable =
+          os.platform() === 'win32'
+            ? headlessTerminal.onData((data) => {
+                try {
+                  ptyProcess.write(data);
+                } catch (e) {
+                  // A reply racing shell exit finds a dead PTY — drop it.
+                  debugLogger.warn(
+                    `writing terminal query reply to PTY threw: ${e instanceof Error ? e.message : String(e)}`,
+                  );
+                }
+              })
+            : null;
 
         this.activePtys.set(ptyProcess.pid, { ptyProcess, headlessTerminal });
 
@@ -1813,6 +1843,13 @@ export class ShellExecutionService {
           } catch (e) {
             debugLogger.warn(
               `ptyProcess.removeListener('error') threw during PTY cleanup: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          try {
+            queryResponseDisposable?.dispose();
+          } catch (e) {
+            debugLogger.warn(
+              `queryResponseDisposable.dispose() threw during PTY cleanup: ${e instanceof Error ? e.message : String(e)}`,
             );
           }
           try {
@@ -2291,6 +2328,13 @@ export class ShellExecutionService {
                 (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ?? 'node-pty',
             });
           } finally {
+            try {
+              queryResponseDisposable?.dispose();
+            } catch (e) {
+              debugLogger.warn(
+                `queryResponseDisposable.dispose() threw during background-promote cleanup: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
             try {
               headlessTerminal.dispose();
             } catch (e) {
