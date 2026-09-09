@@ -919,10 +919,7 @@ export class PermissionManager {
           }
         : undefined;
 
-    const denyRules = [
-      ...this.sessionRules.deny,
-      ...this.persistentRules.deny,
-    ];
+    const denyRules = [...this.sessionRules.deny, ...this.persistentRules.deny];
 
     // ── Cross-command virtual-op pass (shell tools only) ─────────────────
     // Mirrors evaluate(): a shell command can be denied by a Read/Edit/Write/
@@ -943,13 +940,7 @@ export class PermissionManager {
         ] as const;
         for (const rule of denyRules) {
           if (
-            matchesRule(
-              rule,
-              ...opMatchArgs,
-              undefined,
-              undefined,
-              'canonical',
-            )
+            matchesRule(rule, ...opMatchArgs, undefined, undefined, 'canonical')
           ) {
             return rule.raw;
           }

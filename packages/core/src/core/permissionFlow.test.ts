@@ -112,7 +112,9 @@ describe('evaluatePermissionFlow', () => {
     // (issue #11405), and must reassure the model the tool is still usable.
     expect(result.denyMessage).toContain('invocation was denied');
     expect(result.denyMessage).toContain('Bash(npm view *)');
-    expect(result.denyMessage).toContain('Other uses of this tool are still permitted');
+    expect(result.denyMessage).toContain(
+      'Other uses of this tool are still permitted',
+    );
   });
 
   it('should return ask permission when PM has no relevant rules', async () => {
