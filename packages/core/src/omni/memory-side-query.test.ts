@@ -15,7 +15,10 @@ import {
   MediaMemoryService,
   MediaResourceRegistry,
 } from '../services/media-memory/index.js';
-import { formatResourceHandleText } from './disclosure.js';
+import {
+  formatResourceHandleText,
+  formatResourcePathText,
+} from './disclosure.js';
 import {
   extractRequestResourceIds,
   formatOmniMemorySideQueryReminder,
@@ -114,18 +117,23 @@ describe('omni memory sideQuery selector', () => {
     } as unknown as Config;
   }
 
-  /** Record one image into the store and bind its session handle. */
-  async function recordAndBind(): Promise<string> {
+  /** Record one image into the store under `fileRef` and bind its session
+   * handle. `sha256` is parameterized so callers can mint a distinct file
+   * VERSION at the same path. */
+  async function recordAndBindFileRef(
+    fileRef: string,
+    sha256: string = 'a'.repeat(64),
+  ): Promise<string> {
     const memory = new MediaMemoryService(path.join(tmpDir, 'omni'));
     const binding = await memory.recordFileRecognized({
-      fileRef: path.join(tmpDir, 'pic.png'),
-      sha256: 'a'.repeat(64),
+      fileRef,
+      sha256,
       mediaType: 'image',
       metadata: { width: 32, height: 32 },
       sizeBytes: 1234,
       mimeType: 'image/png',
       origin: 'user',
-      source: { protocol: 'local', locator: 'pic.png' },
+      source: { protocol: 'local', locator: path.basename(fileRef) },
       recognition: {
         ingestionConfigHash: '',
         detectorVersion: 'omni-sniff-ffprobe/1',
@@ -134,9 +142,14 @@ describe('omni memory sideQuery selector', () => {
     });
     return registry.bind({
       ...binding!,
-      fileRef: path.join(tmpDir, 'pic.png'),
+      fileRef,
       mediaType: 'image',
     }).resourceId;
+  }
+
+  /** Record one image into the store and bind its session handle. */
+  function recordAndBind(): Promise<string> {
+    return recordAndBindFileRef(path.join(tmpDir, 'pic.png'));
   }
 
   describe('extractRequestResourceIds', () => {
@@ -162,6 +175,95 @@ describe('omni memory sideQuery selector', () => {
         { text: formatResourceHandleText('ghost.png', 'media-7-abcdef01') },
       ];
       expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([]);
+    });
+
+    it('recovers the handle from a path-form annotation via resolveByFileRef', async () => {
+      // Model-visible local media is annotated with its absolute path, not
+      // the opaque handle; passive recall must still map that path back to
+      // the session handle so recall keys on both annotation forms.
+      const resourceId = await recordAndBind();
+      const parts = [
+        'plain user text',
+        { text: formatResourcePathText(path.join(tmpDir, 'pic.png')) },
+      ];
+      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
+        resourceId,
+      ]);
+    });
+
+    it('ignores a path-form annotation for a file this session never bound', () => {
+      const parts = [
+        { text: formatResourcePathText(path.join(tmpDir, 'never-seen.png')) },
+      ];
+      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([]);
+    });
+
+    it('resolves a path-form annotation whose filename ends in whitespace', async () => {
+      // A trailing space is a legal POSIX filename char; it rides in the
+      // fileRef and the annotation. Parsing must NOT trim it away, or the
+      // exact-equality resolveByFileRef misses and the file's memory is
+      // silently dropped from passive recall.
+      const fileRef = path.join(tmpDir, 'pic.png ');
+      const resourceId = await recordAndBindFileRef(fileRef);
+      const parts = [{ text: formatResourcePathText(fileRef) }];
+      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
+        resourceId,
+      ]);
+    });
+
+    it('resolves a path-form annotation whose filename ends in a handle-shaped suffix', async () => {
+      // The path form's own 【媒体路径】 marker means the `：` in the filename
+      // is never a handle boundary; the verbatim path resolves to its binding.
+      const fileRef = path.join(tmpDir, 'clip：media-3-9f2cabcd');
+      const resourceId = await recordAndBindFileRef(fileRef);
+      const parts = [{ text: formatResourcePathText(fileRef) }];
+      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
+        resourceId,
+      ]);
+    });
+
+    it('resolves a path form embedded in a line with leading whitespace', async () => {
+      // Annotations can be flattened into a larger part with indentation;
+      // leading whitespace is line formatting, not part of the path.
+      const resourceId = await recordAndBind();
+      const parts = [
+        {
+          text: `context\n   ${formatResourcePathText(
+            path.join(tmpDir, 'pic.png'),
+          )}\nmore`,
+        },
+      ];
+      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
+        resourceId,
+      ]);
+    });
+
+    it('resolves a path form when trailing whitespace is only line formatting', async () => {
+      // Here the FILENAME does not end in whitespace, but the embedded line
+      // carries trailing spaces (formatting). The left-trimmed candidate keeps
+      // them and misses the exact-equality resolveByFileRef; the fully-trimmed
+      // fallback is what resolves it — so this pins that second candidate.
+      const resourceId = await recordAndBind(); // fileRef = <tmp>/pic.png
+      const annotation = formatResourcePathText(path.join(tmpDir, 'pic.png'));
+      const parts = [{ text: `context\n   ${annotation}   \nmore` }];
+      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
+        resourceId,
+      ]);
+    });
+
+    it('resolves a path to the LATEST version bound at that locator', async () => {
+      // Two versions of one file at the same path (re-read after an edit) mint
+      // distinct handles — exercised via the `sha256` parameter. A path names
+      // the file, not a version, so passive recall must key on the version the
+      // model currently sees (the latest), not the first ever bound.
+      const fileRef = path.join(tmpDir, 'pic.png');
+      const first = await recordAndBindFileRef(fileRef, 'a'.repeat(64));
+      const second = await recordAndBindFileRef(fileRef, 'b'.repeat(64));
+      expect(second).not.toBe(first);
+      const parts = [{ text: formatResourcePathText(fileRef) }];
+      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
+        second,
+      ]);
     });
   });
 
@@ -254,6 +356,70 @@ describe('omni memory sideQuery selector', () => {
       // The reminder itself is stripped, not forwarded.
       expect(seenRequest).not.toContain('system-reminder');
       expect(seenRequest).not.toContain('/x/y.ts');
+    });
+
+    it('never forwards a local media path to the selector (path form)', async () => {
+      // A model-visible local file is annotated with its ABSOLUTE PATH. The
+      // selector judges relevance from the question alone and must not receive
+      // the path (home dir, OS username, project layout) — §17.5 "selector 不
+      // 接收原始媒体、大文本或本地路径". The path form put it into the selector call.
+      const fileRef = path.join(tmpDir, 'pic.png');
+      await recordAndBindFileRef(fileRef);
+      let seenRequest = '';
+      runSideQueryMock.mockImplementation((async (
+        _config: unknown,
+        options: { contents: Content[] },
+      ) => {
+        const payload = JSON.parse(
+          (options.contents[0]!.parts![0] as { text: string }).text,
+        );
+        seenRequest = payload.request;
+        return { entryIds: [] };
+      }) as never);
+
+      await runOmniMemorySideQuery({
+        config: sideQueryConfig(),
+        requestParts: [
+          { text: 'what is in this picture?' },
+          { text: formatResourcePathText(fileRef) },
+        ],
+      });
+
+      expect(seenRequest).toContain('what is in this picture?');
+      expect(seenRequest).not.toContain(fileRef);
+      expect(seenRequest).not.toContain(tmpDir);
+    });
+
+    it('keeps marker-prefixed PROSE in the selector request (parse-gated strip)', async () => {
+      // R3-8: stripResourceAnnotationLines must drop only lines that PARSE as
+      // a real annotation, not every line opening with a marker. A user's note
+      // `【媒体资源】清单…` (marker prefix, but no `：<handle>` payload) is
+      // their question — the old prefix-only strip deleted it, so the selector
+      // judged relevance from a truncated question. The parse gate keeps it.
+      const resourceId = await recordAndBind();
+      let seenRequest = '';
+      runSideQueryMock.mockImplementation((async (
+        _config: unknown,
+        options: { contents: Content[] },
+      ) => {
+        seenRequest = JSON.parse(
+          (options.contents[0]!.parts![0] as { text: string }).text,
+        ).request;
+        return { entryIds: [] };
+      }) as never);
+
+      await runOmniMemorySideQuery({
+        config: sideQueryConfig(),
+        requestParts: [
+          { text: '【媒体资源】清单 和 【媒体路径】清单 是我的笔记' },
+          { text: formatResourceHandleText('pic.png', resourceId) },
+        ],
+      });
+
+      // The prose survives; the genuine handle annotation is stripped.
+      expect(seenRequest).toContain('【媒体资源】清单');
+      expect(seenRequest).toContain('【媒体路径】清单');
+      expect(seenRequest).not.toContain(resourceId);
     });
 
     it('degrades to an empty recall with a reason when the selector fails', async () => {

@@ -86,6 +86,76 @@ describe('OmniRecallMediaMemoryTool', () => {
     expect(() => tool.build({ resourceIds: [], query: 'q' })).toThrow();
   });
 
+  it('admits a full absolute path at the schema layer (R3-7)', () => {
+    // The path form passes a whole absolute path as a reference, not a
+    // ~16-char handle. An over-tight maxLength would make Ajv reject the very
+    // path the annotation displayed — before resolution, with no shorter id to
+    // retry. A 301-char path clears the schema (maxLength 4096); it is then
+    // rejected at RECALL as an unknown reference, not at the schema layer.
+    const tool = new OmniRecallMediaMemoryTool(toolConfig());
+    const longPath = '/' + 'x'.repeat(300);
+    expect(() =>
+      tool.build({ resourceIds: [longPath], query: 'q' }),
+    ).not.toThrow();
+  });
+
+  it('counts DISTINCT files, not raw references, against maxFilesPerCall (R3-9)', () => {
+    // One file is addressable two ways — its 【媒体路径】 path and its
+    // 【媒体资源】 handle. A compliant call naming file1 by BOTH plus file2 by
+    // handle is 3 references but 2 DISTINCT files, so with maxFilesPerCall: 2
+    // it must PASS. The old raw-reference count charged 3 > 2 and wrongly
+    // rejected it; resolveBindings dedups per binding downstream, so the cap
+    // must count the same unit.
+    const file1 = path.join(tmpDir, 'one.png');
+    const file2 = path.join(tmpDir, 'two.png');
+    const handle1 = registry.bind({
+      fileId: 'f1',
+      fileVersionId: 'v1',
+      rootFileId: 'f1',
+      fileRef: file1,
+      mediaType: 'image',
+    }).resourceId;
+    const handle2 = registry.bind({
+      fileId: 'f2',
+      fileVersionId: 'v2',
+      rootFileId: 'f2',
+      fileRef: file2,
+      mediaType: 'image',
+    }).resourceId;
+    const tool = new OmniRecallMediaMemoryTool(
+      toolConfig({
+        getOmniMemoryConfig: () => ({
+          ...DEFAULT_OMNI_MEMORY_CONFIG,
+          recall: {
+            ...DEFAULT_OMNI_MEMORY_CONFIG.recall,
+            active: {
+              ...DEFAULT_OMNI_MEMORY_CONFIG.recall.active,
+              maxFilesPerCall: 2,
+            },
+          },
+        }),
+      }),
+    );
+    // [handle1, path-of-file1, handle2] = 3 references, 2 distinct files.
+    expect(() =>
+      tool.build({ resourceIds: [handle1, file1, handle2], query: 'q' }),
+    ).not.toThrow();
+    // A third DISTINCT file still trips the cap.
+    const handle3 = registry.bind({
+      fileId: 'f3',
+      fileVersionId: 'v3',
+      rootFileId: 'f3',
+      fileRef: path.join(tmpDir, 'three.png'),
+      mediaType: 'image',
+    }).resourceId;
+    expect(() =>
+      tool.build({
+        resourceIds: [handle1, handle2, handle3],
+        query: 'q',
+      }),
+    ).toThrow(/maxFilesPerCall/);
+  });
+
   it('returns invalid_tool_params for a handle this session never issued', async () => {
     const tool = new OmniRecallMediaMemoryTool(toolConfig());
     const invocation = tool.build({

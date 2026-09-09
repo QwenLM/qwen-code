@@ -184,7 +184,91 @@ describe('MediaMemoryRecallService — request validation', () => {
         resourceIds: [resourceId, 'media-9-deadbeef'],
         query: 'anything',
       }),
-    ).rejects.toThrow(/not issued in this session/);
+    ).rejects.toThrow(/matches no media delivered this session/);
+  });
+
+  it('resolves the ABSOLUTE PATH shown for a model-visible local source', async () => {
+    // A local file the model read is annotated with its path, not a handle;
+    // the model passes that path to recall, which must reverse it to the
+    // session binding (resolveByFileRef) and recall exactly as the handle
+    // would — not reject it as unknown.
+    const source = await recognizeMovie();
+    await commitDegrade(source);
+    await commitTranscript(source);
+    bindSource(source); // binds fileRef === moviePath
+
+    const result = await recallService().recall({
+      resourceIds: [moviePath],
+      query: 'what happens in the movie',
+    });
+
+    expect(result.status).toBe('hit');
+    expect(result.files).toEqual([
+      {
+        fileId: source.fileId,
+        fileVersionId: source.fileVersionId,
+        current: true,
+        mediaType: 'video',
+      },
+    ]);
+  });
+
+  it('deduplicates a handle and the path form of the same resource', async () => {
+    // The handle and the path resolve to ONE binding; recall must treat the
+    // pair as a single resource. `result.files` collapses by version no
+    // matter what (it is a per-version map), so the dedup this asserts is on
+    // the per-BINDING outputs — gaps and the follow-up advice derived from
+    // them — which WOULD duplicate if resolveBindings kept both identifiers.
+    const source = await recognizeMovie();
+    await commitDegrade(source); // leaves a speech_text gap on this resource
+    const resourceId = bindSource(source);
+
+    const result = await recallService(recallConfig(), {
+      advise: ({ resourceId: rid, gap }) =>
+        gap.reason === 'not_processed' && gap.channels.includes('speech_text')
+          ? [
+              {
+                toolName: 'omni_transcribe',
+                resourceId: rid,
+                arguments: {},
+                reason: 'speech has not been transcribed',
+              },
+            ]
+          : [],
+    }).recall({
+      resourceIds: [resourceId, moviePath],
+      query: 'what happens in the movie',
+    });
+
+    expect(result.files).toEqual([
+      {
+        fileId: source.fileId,
+        fileVersionId: source.fileVersionId,
+        current: true,
+        mediaType: 'video',
+      },
+    ]);
+    // One binding → one gap and one advice, not two of each.
+    expect(result.gaps).toHaveLength(1);
+    expect(result.nextPolicyActions).toEqual([
+      {
+        toolName: 'omni_transcribe',
+        resourceId,
+        arguments: {},
+        reason: 'speech has not been transcribed',
+      },
+    ]);
+  });
+
+  it('still rejects an identifier that is neither a handle nor a bound path', async () => {
+    const source = await recognizeMovie();
+    const resourceId = bindSource(source);
+    await expect(
+      recallService().recall({
+        resourceIds: [resourceId, '/not/a/bound/path.mkv'],
+        query: 'anything',
+      }),
+    ).rejects.toThrow(/matches no media delivered this session/);
   });
 });
 

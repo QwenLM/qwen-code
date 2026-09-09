@@ -13,7 +13,10 @@ import {
   OMNI_OMISSION_TEXT_PREFIX,
   OMNI_TRANSCRIPT_TEXT_PREFIX,
   OMNI_RESOURCE_HANDLE_TEXT_PREFIX,
+  OMNI_RESOURCE_PATH_TEXT_PREFIX,
+  isHarnessAnnotationPart,
   parseResourceHandleText,
+  parseResourcePathText,
   splitAnnotationBody,
   unescapeAnnotationName,
 } from './disclosure.js';
@@ -108,7 +111,12 @@ const debugLogger = createDebugLogger('omni:export');
 export interface OmniTrajectoryMediaAnnotation {
   /** Display name from the annotation (basename or URL base). */
   name: string;
-  /** Session handle, when a 【媒体资源】 annotation was present. */
+  /** Session handle — set only when a 【媒体资源】 annotation showed the HANDLE
+   * form (path-less media). The path form (【媒体路径】, model-visible local
+   * media) leaves this unset: it shows the absolute path, and the exporter is
+   * a pure reader with no live registry, so the entry is keyed by the path
+   * basename instead. A present annotation therefore does NOT imply a
+   * resourceId. */
   resourceId?: string;
   disclosures: string[];
   /** Omission notice text, when the transport guard withheld the bytes. */
@@ -250,10 +258,12 @@ function functionCallOfPart(
   };
 }
 
+/** Remove every `<system-reminder>…</system-reminder>` block. Does NOT trim:
+ * callers decide, because a path-form annotation carries a whitespace-sensitive
+ * filename at the END and a full trim would truncate it (see
+ * `consumeRecordParts`). */
 function stripSystemReminders(text: string): string {
-  return text
-    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
-    .trim();
+  return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '');
 }
 
 interface TurnAccumulator {
@@ -286,18 +296,53 @@ function mediaFor(
  * out of surrounding prose. Returns true when the part was an
  * annotation.
  */
-function consumeAnnotationPart(turn: TurnAccumulator, text: string): boolean {
+function consumeAnnotationPart(
+  turn: TurnAccumulator,
+  text: string,
+  isHarnessAnnotation: boolean,
+): boolean {
   if (text.startsWith(OMNI_RESOURCE_HANDLE_TEXT_PREFIX)) {
     const resourceId = parseResourceHandleText(text);
-    if (!resourceId) return false;
-    // Name = body minus the end-anchored `：<resourceId>` (the id grammar
-    // is harness-minted, so this parse never guesses at the name).
-    const body = text.slice(OMNI_RESOURCE_HANDLE_TEXT_PREFIX.length);
-    const name = unescapeAnnotationName(
-      body.slice(0, body.length - resourceId.length - 1),
-    );
-    mediaFor(turn, name).resourceId = resourceId;
-    return true;
+    if (resourceId) {
+      // Handle form. Name = body minus the end-anchored `：<resourceId>`
+      // (the id grammar is harness-minted, so this parse never guesses at
+      // the name).
+      const body = text.slice(OMNI_RESOURCE_HANDLE_TEXT_PREFIX.length);
+      const name = unescapeAnnotationName(
+        body.slice(0, body.length - resourceId.length - 1),
+      );
+      mediaFor(turn, name).resourceId = resourceId;
+      return true;
+    }
+    return false;
+  }
+  if (text.startsWith(OMNI_RESOURCE_PATH_TEXT_PREFIX)) {
+    // Path form (model-visible local media): the annotation shows the file's
+    // ABSOLUTE PATH and carries no session handle. The exporter is a pure
+    // reader with no live registry (bindings never persist), so it cannot
+    // recover a resourceId — but the media entry must still exist, or the
+    // turn drops its media and the session filter never seeds the file's
+    // memory closure.
+    //
+    // Consume it ONLY when the Part is provenance-tagged as harness-written.
+    // A user paste, or an @-mentioned TEXT file whose content opens with this
+    // marker, is byte-identical prose; consuming it would delete the user's
+    // line from request.text and fabricate a phantom media entry that drags
+    // an unrelated file's closure into the export.
+    if (!isHarnessAnnotation) return false;
+    const filePath = parseResourcePathText(text);
+    if (filePath) {
+      // Key the entry by the path's BASENAME, derived OS-shape-independently:
+      // the grammar is deliberately cross-OS (a trajectory captured on one
+      // host is parsed on another), so host `path.basename` would leave a
+      // Windows drive/UNC path whole and the file-record join — on the local
+      // source locator, `displayName` defaulting to the basename (index.ts) —
+      // would never fire. This split preserves a trailing-whitespace filename
+      // exactly as the recorded locator does.
+      mediaFor(turn, filePath.split(/[\\/]/).pop() ?? filePath);
+      return true;
+    }
+    return false;
   }
   for (const [prefix, apply] of [
     [
@@ -341,10 +386,20 @@ function consumeRecordParts(
     // Reminders are harness plumbing, never annotation carriers — strip
     // them BEFORE annotation matching so a reminder quoting an
     // annotation line cannot be harvested as one.
-    const text = stripSystemReminders(raw);
-    if (!text) continue;
-    if (consumeAnnotationPart(turn, text)) continue;
-    if (collectProse) turn.requestTexts.push(text);
+    const withoutReminders = stripSystemReminders(raw);
+    // Annotation matching left-trims only: the path form carries the file's
+    // ABSOLUTE PATH at the end of the part, and a filename may legally end in
+    // whitespace (POSIX), so a full trim would truncate the name — dropping the
+    // media entry and, with it, the file's memory closure from the export.
+    const forAnnotation = withoutReminders.replace(/^\s+/, '');
+    if (
+      consumeAnnotationPart(turn, forAnnotation, isHarnessAnnotationPart(part))
+    )
+      continue;
+    // Prose: safe to fully trim.
+    const prose = withoutReminders.trim();
+    if (!prose) continue;
+    if (collectProse) turn.requestTexts.push(prose);
   }
 }
 
@@ -614,9 +669,7 @@ function filterToSession(
     for (const media of turn.request.media) mediaNames.add(media.name);
   }
 
-  const filesByVersion = new Map(
-    memory.files.map((f) => [f.fileVersionId, f]),
-  );
+  const filesByVersion = new Map(memory.files.map((f) => [f.fileVersionId, f]));
   const versionsByFile = new Map<string, OmniTrajectoryFileRecord[]>();
   for (const f of memory.files) {
     const list = versionsByFile.get(f.fileId) ?? [];
@@ -747,9 +800,7 @@ export async function writeOmniTrajectoryJsonl(
     // Writing the trajectory over the raw transcript would irreversibly
     // destroy the non-reconstructible source this pipeline exists to
     // capture.
-    throw new Error(
-      'trajectory outPath must differ from the transcript path',
-    );
+    throw new Error('trajectory outPath must differ from the transcript path');
   }
   const records = await exportOmniTrajectory(options);
   await fs.mkdir(path.dirname(outPath), { recursive: true });
