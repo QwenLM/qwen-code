@@ -244,6 +244,29 @@ describe('runBaseTree', () => {
   );
 
   itWhereContainmentExists(
+    'sees a plant named __proto__ — the fence is not a plain-object map',
+    () => {
+      // `inventory[p] = …` on a plain object feeds the prototype setter, so
+      // a file at that name never lands in the record — symmetric on write
+      // and compare, invisible to the fence. The record is Object.create(null).
+      const tree = baseWorktreePath(worktree);
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      expect(run({}, build).note).toContain('reusing it');
+
+      writeFileSync(join(tree, '__proto__'), 'planted');
+      const third = run({}, build);
+      expect(third.note).not.toContain('reusing it');
+      expect(third.note).toContain('no longer passes a reuse check');
+      expect(third.available).toBe(false);
+    },
+  );
+
+  itWhereContainmentExists(
     'declines when an already-recorded ignored file is rewritten IN PLACE',
     () => {
       // Membership cannot see this: the path was recorded at build time and

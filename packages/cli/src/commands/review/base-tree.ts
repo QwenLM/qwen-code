@@ -212,7 +212,10 @@ const FAILED_MARKER = '.qwen-review-base-failed';
  * own unrecorded extra.
  */
 function untrackedInventory(tree: string): Record<string, BuiltTreeStat> {
-  const inventory: Record<string, BuiltTreeStat> = {};
+  // No prototype: a path literally named `__proto__` is a legal filename,
+  // and the plain-object setter would swallow it — recorded nowhere, so a
+  // plant at that path would be invisible to the fence.
+  const inventory: Record<string, BuiltTreeStat> = Object.create(null);
   for (const p of untrackedPaths(tree)) {
     if (p === OK_MARKER || p === FAILED_MARKER) continue;
     const st = lstatSync(join(tree, p));

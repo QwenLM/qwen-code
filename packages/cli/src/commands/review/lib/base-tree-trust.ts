@@ -40,8 +40,8 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
-import { LEASE_PREFIX, REVIEW_LEASE_DIR } from './paths.js';
+import { basename, dirname, join, resolve, sep } from 'node:path';
+import { LEASE_PREFIX, REVIEW_LEASE_DIR, REVIEW_TMP_DIR } from './paths.js';
 
 /** What one legitimately-left file looked like at record time. */
 export interface BuiltTreeStat {
@@ -118,7 +118,26 @@ function sameIdentity(a: number, b: number): boolean {
  * refused here, before anything creates directories two levels up from it.
  */
 function trustRootFor(worktree: string): string {
-  const tmpDir = dirname(resolve(worktree));
+  // Nested geometry (a review launched from inside another review's
+  // worktree): the inner review's own `.qwen` sits inside the OUTER
+  // review's read-write mount, and a trust file written there is readable
+  // AND writable by the outer reviewed code — the record the fence reads
+  // must sit outside every layer, beside the outermost enclosing
+  // repository's lease directory, exactly where `leaseDirectory` puts it.
+  // Lexical, never through git, and never resolved through the filesystem:
+  // a planted pointer or link would choose where the run's state is
+  // written.
+  const resolved = resolve(worktree);
+  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
+  const at = resolved.indexOf(marker);
+  if (at >= 0) {
+    // The FIRST occurrence is the outermost layer; two levels up from it is
+    // the outermost repository root, and its `.qwen` is the answer — the
+    // same path `leaseDirectory` computes for this geometry.
+    const outermostTmp = resolved.slice(0, at + marker.length - 1);
+    return resolve(outermostTmp, '..', '..', '.qwen');
+  }
+  const tmpDir = dirname(resolved);
   const qwenDir = dirname(tmpDir);
   if (
     basename(tmpDir) !== 'tmp' ||
@@ -235,8 +254,14 @@ function sleepSync(ms: number): void {
 /** tmp-then-rename, so lock-free readers on the reuse path never see a half file. */
 function atomicWrite(trustPath: string, value: TrustFile): void {
   const tmp = `${trustPath}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(value)}\n`);
-  renameSync(tmp, trustPath);
+  try {
+    writeFileSync(tmp, `${JSON.stringify(value)}\n`);
+    renameSync(tmp, trustPath);
+  } catch (err) {
+    // The tmp file matches no sweep's glob: take it with us.
+    rmSync(tmp, { force: true });
+    throw err;
+  }
 }
 
 /** How this call found the trust file — the fence's same-run evidence. */

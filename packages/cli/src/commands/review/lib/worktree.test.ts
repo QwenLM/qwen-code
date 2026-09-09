@@ -48,6 +48,7 @@ import {
   localFilterCommands,
   mountNullKind,
   mountRootFor,
+  redirectedAncestor,
   sanitizedGitEnv,
   unmountableRootSpelling,
   untrustedGitfile,
@@ -3201,6 +3202,30 @@ describe('mountRootFor — the walk bound is geometry-aware', () => {
     for (const dir of made.splice(0))
       rmSync(dir, { recursive: true, force: true });
   });
+
+  itWhereContainmentExists(
+    'mounts nothing — and refuses — when `.qwen` links at a directory with no `tmp` inside',
+    () => {
+      // The walk's old blanket catch read a leaf ENOENT as "nothing above to
+      // redirect through": with `.qwen` a symlink to a directory lacking
+      // `tmp`, lstatSync('<repo>/.qwen/tmp') throws before `.qwen` itself is
+      // ever lstat'd, so the walk answered null — and everything built under
+      // the link's target (mkdirSync through it, the checkout into it) was
+      // the fetch-pr R27-9 gate's exact prey. The walk now keeps climbing on
+      // a nonexistent component.
+      const anchor = tmp();
+      const elsewhere = tmp(); // a real directory WITHOUT `tmp` inside
+      const repo = join(anchor, 'repo');
+      mkdirSync(repo);
+      symlinkSync(elsewhere, join(repo, '.qwen'));
+      expect(redirectedAncestor(join(repo, '.qwen', 'tmp'))).toBe(
+        join(repo, '.qwen'),
+      );
+      expect(
+        mountRootFor(join(repo, '.qwen', 'tmp', 'review-pr-1')),
+      ).toBeNull();
+    },
+  );
 
   itWhereContainmentExists(
     'mounts a checkout whose DIRECT parent is a symlink',

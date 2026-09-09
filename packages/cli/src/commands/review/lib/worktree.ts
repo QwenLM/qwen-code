@@ -908,7 +908,19 @@ export function redirectedAncestor(
       // Unresolvable: the literal comparison below is the whole stop test.
     }
     for (let cur = resolve(dir); ; cur = dirname(cur)) {
-      if (lstatSync(cur).isSymbolicLink()) return cur;
+      let isLink: boolean;
+      try {
+        isLink = lstatSync(cur).isSymbolicLink();
+      } catch {
+        // A component that does not EXIST — an ancestor's link target lacks
+        // the rest of the path — throws here, and swallowing that at the
+        // outer catch used to end the walk with the link itself un-lstat'd:
+        // `.qwen` pointing at a directory with no `tmp` inside read as
+        // "nothing redirects this" while every path built under it lands in
+        // the link's target. Keep walking: the link is what this looks for.
+        isLink = false;
+      }
+      if (isLink) return cur;
       if (cur === stop) return null;
       try {
         if (realpathSync(cur) === stopReal) return null;

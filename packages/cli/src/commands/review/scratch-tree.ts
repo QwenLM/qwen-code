@@ -628,8 +628,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
           `refusing to build a standalone scratch tree: the review worktree's ` +
           `pointer ${worktreeUntrusted}, so the commit this tree would be ` +
           'checked out at is whatever it names — not necessarily the reviewed ' +
-          'head. Settle the pointer (or pass --fetched-sha from the fetch ' +
-          'report, which pins the head above) and re-run.',
+          'head. Settle the pointer and re-run.',
       };
     }
     try {

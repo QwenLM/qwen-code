@@ -23,7 +23,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import {
   baseTreeTrustPath,
   builtTreeRecord,
@@ -66,6 +66,59 @@ describe('base-tree trust store', () => {
       }),
     );
   };
+
+  it('keys the trust file under the OUTERMOST repository in the nested geometry', () => {
+    // A review launched from inside another review's worktree: the inner
+    // review's own `.qwen` sits inside the OUTER review's read-write mount,
+    // and a trust file there is the outer reviewed code's to read and
+    // forge. The root is the outermost enclosing repository's — the same
+    // path the lease module re-roots to — derived lexically, so no planted
+    // pointer or link gets a say.
+    const innerWt = join(
+      repo,
+      '.qwen',
+      'tmp',
+      'review-pr-9',
+      '.qwen',
+      'tmp',
+      'review-pr-1',
+    );
+    mkdirSync(innerWt, { recursive: true });
+    const p = baseTreeTrustPath(innerWt, plan);
+    expect(p.startsWith(join(repo, '.qwen', 'review-leases') + sep)).toBe(true);
+    expect(p).not.toContain(`${sep}tmp${sep}`);
+  });
+
+  it('finds the lease where the lease module re-rooted it in the nested geometry', () => {
+    // The lease identity is the run identity only if the two modules agree
+    // on WHERE the lease lives: `leaseDirectory` re-roots to the outermost
+    // enclosing repository, and `runIdentityMs` must read exactly there.
+    const innerWt = join(
+      repo,
+      '.qwen',
+      'tmp',
+      'review-pr-9',
+      '.qwen',
+      'tmp',
+      'review-pr-1',
+    );
+    mkdirSync(innerWt, { recursive: true });
+    const dir = join(repo, '.qwen', 'review-leases');
+    mkdirSync(dir, { recursive: true });
+    const leasePath = join(dir, 'qwen-review-lease-pr-1.json');
+    writeFileSync(
+      leasePath,
+      JSON.stringify({
+        sessionId: 's',
+        promptId: 'p',
+        target: 'pr-1',
+        repositoryRoot: repo,
+        worktreePath: resolve(innerWt),
+        branch: 'qwen-review/pr-1',
+      }),
+    );
+    expect(runIdentityMs(innerWt, plan)).toBe(statSync(leasePath).mtimeMs);
+  });
 
   it('lives beside the leases — outside the mounted tmp dir — one file per plan', () => {
     const p = baseTreeTrustPath(worktree, plan);
