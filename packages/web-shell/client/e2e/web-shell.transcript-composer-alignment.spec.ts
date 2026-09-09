@@ -8,23 +8,24 @@ import {
   userTextEvent,
 } from './utils/mockDaemon';
 
-async function expectSameAxis(message: Locator, composer: Locator) {
+async function expectSameEdges(message: Locator, composer: Locator) {
   await expect
     .poll(async () => {
       const messageBox = await message.boundingBox();
       const composerBox = await composer.boundingBox();
       if (!messageBox || !composerBox) return Infinity;
-      return Math.abs(
-        messageBox.x +
-          messageBox.width / 2 -
-          (composerBox.x + composerBox.width / 2),
+      return Math.max(
+        Math.abs(messageBox.x - composerBox.x),
+        Math.abs(
+          messageBox.x + messageBox.width - composerBox.x - composerBox.width,
+        ),
       );
     })
     .toBeLessThanOrEqual(1);
 }
 
 for (const navigation of [true, false]) {
-  test(`transcript stays on the composer axis with turn navigation ${navigation ? 'enabled' : 'unsupported'} @smoke`, async ({
+  test(`transcript matches composer edges with turn navigation ${navigation ? 'enabled' : 'unsupported'} @smoke`, async ({
     page,
     baseURL,
   }, testInfo) => {
@@ -63,6 +64,7 @@ for (const navigation of [true, false]) {
               turnId: 'record-0',
               kind: 'prompt',
               label: 'What is the weather?',
+              detail: 'The weather report includes the weekly forecast.',
             },
           ],
         },
@@ -97,30 +99,53 @@ for (const navigation of [true, false]) {
         ),
       )
       .toBeGreaterThan(0);
-    await expectSameAxis(message, composer);
-    const column = page.locator('[data-history-viewport] > div').last();
-    await expect(column).toHaveCSS(
-      'padding-right',
-      navigation ? '64px' : '0px',
-    );
-
-    // The columns have different widths in this band but still share an axis.
-    await page.setViewportSize({ width: 1300, height: 900 });
-    if (navigation) {
-      await expect(rail).toBeVisible();
+    for (const width of [1440, 1300, 1000, 802, 700, 599]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expectSameEdges(message, composer);
+      const viewport = page.locator('[data-history-viewport]');
       await expect
         .poll(async () => {
-          const messageBox = await message.boundingBox();
-          const composerBox = await composer.boundingBox();
-          return (composerBox?.width ?? 0) - (messageBox?.width ?? Infinity);
+          const scrollBox = await messageList.boundingBox();
+          const viewportBox = await viewport.boundingBox();
+          if (!scrollBox || !viewportBox) return Infinity;
+          return Math.abs(
+            scrollBox.x + scrollBox.width - viewportBox.x - viewportBox.width,
+          );
         })
-        .toBeGreaterThan(1);
+        .toBeLessThanOrEqual(1);
+      const viewportBox = await viewport.boundingBox();
+      if (navigation && viewportBox && viewportBox.width >= 600) {
+        await expect(rail).toBeVisible();
+        const railBox = await rail.boundingBox();
+        const messageBox = await message.boundingBox();
+        expect(railBox!.x + railBox!.width).toBeLessThanOrEqual(messageBox!.x);
+      } else {
+        await expect(rail).toBeHidden();
+      }
     }
-    await expectSameAxis(message, composer);
-
-    await page.setViewportSize({ width: 599, height: 900 });
-    await expect(rail).toBeHidden();
-    await expect(column).toHaveCSS('padding-right', '0px');
-    await expectSameAxis(message, composer);
+    for (const width of navigation ? [1440, 700] : []) {
+      await page.setViewportSize({ width, height: 900 });
+      const tick = rail.locator('[data-turn-ordinal] > span');
+      await rail.locator('[data-turn-ordinal]').hover();
+      await expect
+        .poll(async () => (await tick.boundingBox())?.width ?? 0)
+        .toBeGreaterThan(27);
+      const tickBox = await tick.boundingBox();
+      const railScrollBox = await rail.locator(':scope > div').boundingBox();
+      expect(tickBox!.x + tickBox!.width).toBeLessThanOrEqual(
+        railScrollBox!.x + railScrollBox!.width,
+      );
+      const preview = page.locator('[data-slot="tooltip-content"]');
+      await expect(preview).toBeVisible();
+      await expect(preview).toContainText('What is the weather?');
+      await expect(preview).toContainText(
+        'The weather report includes the weekly forecast.',
+      );
+      await expect(preview).toHaveCSS('border-radius', '14px');
+      await expect(preview).toHaveCSS('padding', '12px 14px');
+      await expect(preview.locator('[data-slot="tooltip-arrow"]')).toBeHidden();
+      await page.mouse.move(500, 10);
+      await expect(preview).toHaveCount(0);
+    }
   });
 }
