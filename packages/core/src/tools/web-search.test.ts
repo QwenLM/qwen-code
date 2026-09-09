@@ -222,6 +222,7 @@ describe('evaluateWebSearchGate', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         modelId: 'qwen3.6-plus',
         apiKeyEnvKey: TEST_ENV_KEY,
         baseUrl: DASHSCOPE_BASE_URL,
@@ -453,6 +454,7 @@ describe('evaluateWebSearchGate', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         modelId: 'qwen3.6-plus',
         apiKeyEnvKey: TEST_ENV_KEY,
         baseUrl: DASHSCOPE_BASE_URL,
@@ -649,6 +651,7 @@ describe('evaluateWebSearchGate auto derivation', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         // Not the primary model id: the search runs on the documented
         // search model at the same endpoint.
         modelId: 'qwen3.8-flash',
@@ -1409,11 +1412,218 @@ describe('WebSearchTool execute', () => {
     expect(params.store).toBe(false);
     expect(params.stream).toBe(true);
     expect(params.instructions).toContain('untrusted');
+    // The side model is the only source of page titles, so the instructions
+    // must keep asking for them.
+    expect(params.instructions).toContain('"Sources:"');
     expect(params.input).toBe('Perform a web search for the query: test query');
     expect(params.tools).toEqual([
       { type: 'web_search' },
       { type: 'web_extractor' },
     ]);
+  });
+
+  it('renders sources as titled links when the side model listed them', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          SEARCH_ITEM,
+          EXTRACTOR_ITEM,
+          {
+            type: 'message',
+            status: 'completed',
+            content: [
+              {
+                type: 'output_text',
+                text: [
+                  'The answer is 42.',
+                  '',
+                  'Sources:',
+                  '- Example A page — https://example.com/a',
+                  '- Example B page — https://example.com/b',
+                ].join('\n'),
+              },
+            ],
+          },
+        ]),
+      ),
+    );
+
+    const result = await runSearch(makeConfig());
+    const content = result.llmContent as string;
+    expect(content).toContain('- [Example A page](https://example.com/a)');
+    expect(content).toContain('- [Example B page](https://example.com/b)');
+    // The block itself is gone: each page is quoted once, in the section
+    // that says how strong the evidence is.
+    expect(content).not.toContain('Example A page — https://example.com/a');
+    expect(content).toContain('The answer is 42.');
+  });
+
+  it('drops a listed URL the search never returned', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          SEARCH_ITEM,
+          {
+            type: 'message',
+            status: 'completed',
+            content: [
+              {
+                type: 'output_text',
+                text: [
+                  'Answer.',
+                  'Sources:',
+                  '- Example A page — https://example.com/a',
+                  '- Invented — https://unrelated.example/x',
+                ].join('\n'),
+              },
+            ],
+          },
+        ]),
+      ),
+    );
+
+    const result = await runSearch(makeConfig());
+    const content = result.llmContent as string;
+    expect(content).toContain('- [Example A page](https://example.com/a)');
+    expect(content).not.toContain('unrelated.example');
+  });
+
+  it('keeps bare URLs and the whole answer when the side model ignored the format', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(completedEvents([SEARCH_ITEM, EXTRACTOR_ITEM, MESSAGE_ITEM])),
+    );
+
+    const result = await runSearch(makeConfig());
+    const content = result.llmContent as string;
+    expect(content).toContain('- https://example.com/a');
+    expect(content).toContain('- https://example.com/b');
+    expect(content).toContain('The answer is 42.');
+  });
+
+  it('uses a title the response itself carried', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          {
+            ...SEARCH_ITEM,
+            action: {
+              ...SEARCH_ITEM.action,
+              sources: [
+                {
+                  type: 'url',
+                  url: 'https://example.com/a',
+                  title: 'Declared A',
+                },
+                { type: 'url', url: 'https://example.com/b' },
+              ],
+            },
+          },
+          MESSAGE_ITEM,
+        ]),
+      ),
+    );
+
+    const result = await runSearch(makeConfig());
+    const content = result.llmContent as string;
+    expect(content).toContain('- [Declared A](https://example.com/a)');
+    expect(content).toContain('- https://example.com/b');
+  });
+
+  it('prefers the side model title over the one the response declared', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          {
+            ...SEARCH_ITEM,
+            action: {
+              ...SEARCH_ITEM.action,
+              sources: [
+                {
+                  type: 'url',
+                  url: 'https://example.com/a',
+                  title: 'Declared A',
+                },
+              ],
+            },
+          },
+          {
+            type: 'message',
+            status: 'completed',
+            content: [
+              {
+                type: 'output_text',
+                text: 'Answer.\nSources:\n- Read A — https://example.com/a',
+              },
+            ],
+          },
+        ]),
+      ),
+    );
+
+    const result = await runSearch(makeConfig());
+    expect(result.llmContent as string).toContain(
+      '- [Read A](https://example.com/a)',
+    );
+  });
+
+  it('escapes link syntax in a title and wraps a parenthesized URL', async () => {
+    const url = 'https://example.com/wiki/Foo_(bar)';
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          {
+            ...SEARCH_ITEM,
+            action: {
+              ...SEARCH_ITEM.action,
+              sources: [{ type: 'url', url }],
+            },
+          },
+          {
+            type: 'message',
+            status: 'completed',
+            content: [
+              {
+                type: 'output_text',
+                text: `Answer.\nSources:\n- Foo [bar] (baz) — ${url}`,
+              },
+            ],
+          },
+        ]),
+      ),
+    );
+
+    const result = await runSearch(makeConfig());
+    expect(result.llmContent as string).toContain(
+      '- [Foo \\[bar\\] (baz\\)](<https://example.com/wiki/Foo_(bar)>)',
+    );
+  });
+
+  it('keeps titled sources when an oversized answer is truncated', async () => {
+    const bigText = 'x'.repeat(150_000);
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          SEARCH_ITEM,
+          EXTRACTOR_ITEM,
+          {
+            type: 'message',
+            status: 'completed',
+            content: [
+              {
+                type: 'output_text',
+                text: `${bigText}\nSources:\n- Example A page — https://example.com/a`,
+              },
+            ],
+          },
+        ]),
+      ),
+    );
+
+    const result = await runSearch(makeConfig());
+    const content = result.llmContent as string;
+    expect(content).toContain('answer truncated to fit');
+    expect(content).toContain('- [Example A page](https://example.com/a)');
+    expect(content.length).toBeLessThan(102_000);
   });
 
   it('omits web_extractor when disabled', async () => {
