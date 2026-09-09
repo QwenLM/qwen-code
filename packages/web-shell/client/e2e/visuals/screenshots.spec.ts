@@ -146,13 +146,22 @@ for (const theme of THEMES) {
     });
 
     // Assertions only, no captures. This scenario injects a fake turn_error so
-    // the error row's Copy affordance (#10001) can be exercised, and it is the
-    // only visual test that hovers a message row -- so its screenshots were the
-    // only place a hover-timestamp change could show up, and every web-shell
-    // preview was dominated by four full-height red error images regardless of
-    // what the PR touched. The reveal/hide behaviour is pinned by the opacity
-    // assertions below on every viewport and on touch; the captures added a
-    // misleading preview, not coverage.
+    // the error row's Copy affordance (#10001) can be exercised. It is the only
+    // visual test that hovers a message row DELIBERATELY, and its four captures
+    // meant every web-shell preview led with full-height red error images no
+    // matter what the PR touched -- readers repeatedly took the preview for a
+    // live failure.
+    //
+    // Dropping them does not blind the hover timestamp entirely: the parallel
+    // agents test leaves the cursor resting on the group header after
+    // `summary.click()`, so `parallel-agents-expanded` paints the chip through
+    // residual hover and moves when the chip moves. That is incidental rather
+    // than intended coverage, and `visual-capture-contracts.test.ts` is what
+    // actually pins the chip's anchor and background.
+    //
+    // The reveal/hide behaviour is pinned by the opacity assertions below on
+    // every viewport and on touch; the captures added a misleading preview,
+    // not coverage.
     test(`terminal turn error`, async ({ browser, page }, testInfo) => {
       const baseURL = resolveBaseURL(testInfo);
       const scenario = createTerminalTurnErrorScenario(
