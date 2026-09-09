@@ -29233,13 +29233,15 @@ describe('App session callbacks', () => {
       const report = testState.latestSplitViewProps!.onPendingPanesChange!;
       const ownerIds = outerPending ? [mockConnection.sessionId!] : [];
       await act(async () => report(ownerIds));
+      // Clear setup-time calls so the guard below measures only this rerender.
+      mockUseDaemonSessionActivityBridge.mockClear();
       rerender();
       expect(testState.latestSplitViewProps!.onPendingPanesChange).toBe(report);
-      expect(mockUseDaemonActivePromptBridge).toHaveBeenCalled();
-      mockUseDaemonActivePromptBridge.mockClear();
+      expect(mockUseDaemonSessionActivityBridge).toHaveBeenCalled();
+      mockUseDaemonSessionActivityBridge.mockClear();
       for (const ids of [['foreign-session'], ['another-session'], []]) {
         await act(async () => report([...ownerIds, ...ids]));
-        expect(mockUseDaemonActivePromptBridge).not.toHaveBeenCalled();
+        expect(mockUseDaemonSessionActivityBridge).not.toHaveBeenCalled();
       }
     },
   );
