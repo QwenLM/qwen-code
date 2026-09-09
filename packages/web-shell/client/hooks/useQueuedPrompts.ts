@@ -537,10 +537,18 @@ export function useQueuedPrompts({
   const nextQueuedPromptIdRef = useRef(1);
   const latestSessionIdRef = useRef(sessionId);
   const latestWorkspaceCwdRef = useRef(workspaceCwd);
+  const latestConnectedRef = useRef(connected);
   const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
   const explicitInsertGenerationsRef = useRef<Map<number, number>>(new Map());
   const submitAbortControllersRef = useRef<Set<AbortController>>(new Set());
   const removingServerPromptIdsRef = useRef<Set<string>>(new Set());
+  /**
+   * Ids the cleared-row confirmation arm is DELETE-ing. Kept apart from
+   * `removingServerPromptIdsRef`: that set's started-event skip exists for
+   * user-initiated removals, and must not swallow the echo of a prompt the
+   * daemon started before this DELETE landed.
+   */
+  const clearedPromptRemovalIdsRef = useRef<Set<string>>(new Set());
   const displayedServerPromptIdsRef = useRef<Set<string>>(new Set());
   const settledServerPromptIdsRef = useRef<Set<string>>(new Set());
   const completionCallbacksRef = useRef<Map<string, () => void>>(new Map());
@@ -630,6 +638,7 @@ export function useQueuedPrompts({
 
   latestSessionIdRef.current = sessionId;
   latestWorkspaceCwdRef.current = workspaceCwd;
+  latestConnectedRef.current = connected;
   holdQueuedPromptsLocallyRef.current = holdQueuedPromptsLocally;
   const sessionActive = streamingState !== 'idle' || sessionHasActivePrompt;
   useLayoutEffect(() => {
@@ -685,6 +694,7 @@ export function useQueuedPrompts({
       for (const serverPrompt of serverQueued) {
         if (
           removingServerPromptIdsRef.current.has(serverPrompt.promptId) ||
+          clearedPromptRemovalIdsRef.current.has(serverPrompt.promptId) ||
           settledServerPromptIdsRef.current.has(serverPrompt.promptId)
         ) {
           continue;
@@ -831,9 +841,11 @@ export function useQueuedPrompts({
   const refreshPendingPrompts = useCallback(
     (
       targetSessionId = sessionId,
-      notBefore = 0,
+      // Default fence: a refresh that follows a local state change must not
+      // join (and sync from) a flight dispatched before that change.
+      notBefore = refreshRequestSeqRef.current,
     ): Promise<RefreshPendingPromptsResult> => {
-      if (!connected || !targetSessionId)
+      if (!latestConnectedRef.current || !targetSessionId)
         return Promise.resolve({ status: 'skipped' });
       if (latestSessionIdRef.current !== targetSessionId)
         return Promise.resolve({ status: 'skipped' });
@@ -897,6 +909,14 @@ export function useQueuedPrompts({
         // stale flight out rather than storm the daemon, then take exactly
         // one fresh snapshot — or join one dispatched meanwhile.
         return inflight.promise.then(() => {
+          // The wait can outlive the session or the connection: re-apply
+          // the entry guards before dispatching against them.
+          if (
+            !latestConnectedRef.current ||
+            latestSessionIdRef.current !== targetSessionId
+          ) {
+            return { status: 'skipped' } as const;
+          }
           const latest = inflightRefreshRef.current;
           if (
             latest &&
@@ -911,7 +931,7 @@ export function useQueuedPrompts({
       }
       return dispatchRefresh();
     },
-    [clientId, connected, sessionActions, sessionId, syncServerQueuedPrompts],
+    [clientId, sessionActions, sessionId, syncServerQueuedPrompts],
   );
 
   const applyMidTurnSnapshot = useCallback(
@@ -1353,6 +1373,7 @@ export function useQueuedPrompts({
     unreleasedPromptIdsRef.current = new Set();
     releaseChainRef.current = null;
     removingServerPromptIdsRef.current = new Set();
+    clearedPromptRemovalIdsRef.current = new Set();
     displayedServerPromptIdsRef.current = new Set();
     settledServerPromptIdsRef.current = new Set();
     pendingStartedByPromptIdRef.current = new Map();
@@ -1660,11 +1681,9 @@ export function useQueuedPrompts({
             displayedServerPromptIdsRef.current.delete(result.promptId);
             return;
           }
-          if (
-            prompt.resubmittedAfterIdleRejection &&
-            latestSessionActiveRef.current &&
-            !localMessageAppended
-          ) {
+          // Not gated on the client's activity mirror: it lags the daemon
+          // state this confirmation exists to correct.
+          if (prompt.resubmittedAfterIdleRejection && !localMessageAppended) {
             // Refreshes are single-flight per session, but the snapshot must
             // post-date this body's own admission: joining a GET dispatched
             // before it would read a queue that cannot list the prompt and
@@ -1684,6 +1703,13 @@ export function useQueuedPrompts({
             const localRowExists = queuedPromptsRef.current.some(
               (item) => item.id === localId,
             );
+            // A start or completion that beat the snapshot wins over it:
+            // stamping the id here would mark a running prompt queued, and
+            // its Remove would abort the turn.
+            const startedSinceSnapshot =
+              displayedServerPromptIdsRef.current.has(result.promptId) ||
+              pendingStartedByPromptIdRef.current.has(result.promptId) ||
+              completedPromptIdsRef.current.has(result.promptId);
             if (!localRowExists) {
               if (syncClaimedSubmittingRowIdsRef.current.delete(localId)) {
                 // The confirming sync attributed this row to an
@@ -1702,13 +1728,24 @@ export function useQueuedPrompts({
               const queuedInSnapshot =
                 refresh.status === 'refreshed' &&
                 !settledServerPromptIdsRef.current.has(result.promptId) &&
+                !startedSinceSnapshot &&
                 refresh.pendingPrompts.some(
                   (p) => p.promptId === result.promptId && p.state === 'queued',
                 );
-              if (
-                !queuedInSnapshot ||
-                displayedServerPromptIdsRef.current.has(result.promptId)
-              ) {
+              if (!queuedInSnapshot) {
+                // The DELETE is vetoed, but the confirming sync may already
+                // have materialized a row for the prompt the user cleared —
+                // drop it rather than resurrect the cleared draft.
+                const remaining = queuedPromptsRef.current.filter(
+                  (item) =>
+                    item.isEditing ||
+                    item.isRemoving ||
+                    item.serverPromptId !== result.promptId,
+                );
+                if (remaining.length !== queuedPromptsRef.current.length) {
+                  queuedPromptsRef.current = remaining;
+                  setQueuedPrompts(remaining);
+                }
                 if (prompt.onComplete) {
                   settleCompletionCallback(result.promptId, prompt.onComplete);
                 }
@@ -1722,7 +1759,7 @@ export function useQueuedPrompts({
                 }
                 return;
               }
-              removingServerPromptIdsRef.current.add(result.promptId);
+              clearedPromptRemovalIdsRef.current.add(result.promptId);
               // The confirming sync above may have materialized a row for the
               // prompt the user already cleared; drop it before the DELETE,
               // unless an action is already pending on that row.
@@ -1755,7 +1792,7 @@ export function useQueuedPrompts({
                   },
                 )
                 .finally(() => {
-                  removingServerPromptIdsRef.current.delete(result.promptId);
+                  clearedPromptRemovalIdsRef.current.delete(result.promptId);
                 });
               return;
             }
@@ -1776,12 +1813,18 @@ export function useQueuedPrompts({
               return;
             }
             if (refresh.status !== 'refreshed') {
-              const startedOrCompleted =
-                displayedServerPromptIdsRef.current.has(result.promptId) ||
-                pendingStartedByPromptIdRef.current.has(result.promptId) ||
+              // A settle that beat the snapshot wins over it: the message
+              // already ran (and the settle cleared the echo guard), so the
+              // row drops without a second echo.
+              const settled =
+                settledServerPromptIdsRef.current.has(result.promptId) ||
                 completedPromptIdsRef.current.has(result.promptId);
+              const startedOrCompleted =
+                settled ||
+                displayedServerPromptIdsRef.current.has(result.promptId) ||
+                pendingStartedByPromptIdRef.current.has(result.promptId);
               if (startedOrCompleted) {
-                if (!localMessageAppended) {
+                if (!settled && !localMessageAppended) {
                   appendLocalQueuedPrompt(prompt, result.promptId);
                 }
                 const next = queuedPromptsRef.current.filter(
@@ -1814,13 +1857,6 @@ export function useQueuedPrompts({
               }
               return;
             }
-            // A start or completion that beat the snapshot wins over it:
-            // stamping the id here would mark a running prompt queued, and
-            // its Remove would abort the turn.
-            const startedSinceSnapshot =
-              displayedServerPromptIdsRef.current.has(result.promptId) ||
-              pendingStartedByPromptIdRef.current.has(result.promptId) ||
-              completedPromptIdsRef.current.has(result.promptId);
             // Bind by the id the daemon returned, not by rendered text:
             // identical resubmissions carrying attachments suppress both the
             // text binding and the materialization, and the fall-through
@@ -1918,11 +1954,14 @@ export function useQueuedPrompts({
           }
           // A row the confirming sync claimed for an already-displayed
           // prompt is gone without any user cancellation; the failure path
-          // still owns it, or the draft would vanish with no error.
+          // still owns it when nothing reached the daemon, or the draft
+          // would vanish with no error. Once admission started the daemon
+          // may already hold and echo the prompt, so a transport failure
+          // past that point must not report a false queue failure.
           const syncClaimed =
             syncClaimedSubmittingRowIdsRef.current.delete(localId);
           if (
-            !syncClaimed &&
+            !(syncClaimed && !admissionStarted) &&
             !queuedPromptsRef.current.some((p) => p.id === localId)
           ) {
             return;
