@@ -2183,6 +2183,10 @@ export default {
   out: 'sort.',
   'In/Out': 'Ent/Sort',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'La mise à jour vers une version précise nécessite une installation autonome. Installez manuellement la version {{version}} avec votre méthode d’installation.',
+  'Install an exact version without querying npm':
+    'Installer une version précise sans interroger npm',
   'Check for Qwen Code updates and install if available':
     'Vérifier les mises à jour de Qwen Code et installer si disponible',
   'Qwen Code update available! {{current}} → {{latest}}':
