@@ -71,6 +71,42 @@ export const noteConPtyHostReleased = (ptyProcess: unknown): void => {
 };
 
 /**
+ * Dispose only node-pty's conout worker thread for a finished PTY, without
+ * closing the pseudo-console.
+ *
+ * Used by the web-terminal live-release path when the shell has not yet emitted
+ * its first output byte: node-pty's `WindowsTerminal.kill()` defers its whole
+ * teardown (the native `ClosePseudoConsole` and this worker dispose) into
+ * `_deferreds` until `_isReady` flips, so a release at that moment must dispose
+ * the worker now — the one resource a never-run deferred teardown would strand
+ * — while leaving the native close to the queued `kill()`. Closing it here too
+ * would double-close the same HPCON (see `releaseConPtyHost`). The worker
+ * dispose is idempotent (`ConoutConnection.dispose` guards on `_isDisposed` for
+ * the non-`useConptyDll` path), so doing it here and again in the queued
+ * teardown is safe. No-op off Windows.
+ *
+ * Like `releaseConPtyHost`, this never calls `ptyProcess.kill()`; see that
+ * function for the #6067 recycled-pid argument and the win32-only rationale.
+ */
+export const disposeConoutWorker = (ptyProcess: unknown): void => {
+  if (os.platform() !== 'win32') {
+    return;
+  }
+  const agent = (ptyProcess as { _agent?: WindowsPtyAgentInternals } | null)
+    ?._agent;
+  if (!agent) {
+    return;
+  }
+  try {
+    agent._conoutSocketWorker?.dispose?.();
+  } catch (e) {
+    debugLogger.warn(
+      `disposeConoutWorker: conout worker dispose threw: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+};
+
+/**
  * Releases what node-pty leaves behind when a Windows PTY finishes.
  *
  * **What this actually frees today: the conout worker thread, and not the
@@ -129,38 +165,6 @@ export const noteConPtyHostReleased = (ptyProcess: unknown): void => {
  * win32-only: there is no ConPTY host or conout worker elsewhere, and node-pty's
  * `UnixTerminal.kill()` would signal an already-exited, possibly recycled pid.
  */
-/**
- * Dispose only node-pty's conout worker thread for a finished PTY, without
- * closing the pseudo-console.
- *
- * Used by the web-terminal live-release path when the shell has not yet emitted
- * its first output byte: node-pty's `WindowsTerminal.kill()` defers its whole
- * teardown (the native `ClosePseudoConsole` and this worker dispose) into
- * `_deferreds` until `_isReady` flips, so a release at that moment must dispose
- * the worker now — the one resource a never-run deferred teardown would strand
- * — while leaving the native close to the queued `kill()`. Closing it here too
- * would double-close the same HPCON (see `releaseConPtyHost`). The worker
- * dispose is idempotent (`ConoutConnection.dispose` guards on `_isDisposed` for
- * the non-`useConptyDll` path), so doing it here and again in the queued
- * teardown is safe. No-op off Windows.
- */
-export const disposeConoutWorker = (ptyProcess: unknown): void => {
-  if (os.platform() !== 'win32') {
-    return;
-  }
-  const agent = (ptyProcess as { _agent?: WindowsPtyAgentInternals } | null)
-    ?._agent;
-  if (!agent) {
-    return;
-  }
-  try {
-    agent._conoutSocketWorker?.dispose?.();
-  } catch (e) {
-    debugLogger.warn(
-      `disposeConoutWorker: conout worker dispose threw: ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
-};
 
 export const releaseConPtyHost = (ptyProcess: unknown): void => {
   if (os.platform() !== 'win32') {
