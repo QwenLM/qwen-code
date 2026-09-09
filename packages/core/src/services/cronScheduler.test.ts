@@ -1825,6 +1825,44 @@ describe('CronScheduler', () => {
       expect(await readCronTasks(tmpDir)).toEqual([]);
     });
 
+    it('keeps the removal guard when restoring a consumed one-shot fails', async () => {
+      const original: DurableCronTask = {
+        ...diskTask('once-restore-write-fails'),
+        cron: '7 18 * * *',
+        recurring: false,
+        sessionId: 'session-1',
+        sessionMode: 'per_run',
+      };
+      await writeCronTasks(tmpDir, [original]);
+      await scheduler.enableDurable('session-1');
+      let restoration: Promise<boolean> | undefined;
+      let fires = 0;
+      scheduler.start((job) => {
+        fires += 1;
+        restoration = scheduler.restoreConsumedOneShot(job.id);
+      });
+      updateGate.fail = Object.assign(new Error('ENOSPC: disk full'), {
+        code: 'ENOSPC',
+      });
+
+      const fireAt = nextFireTime(original.cron, new Date(original.createdAt));
+      scheduler.tick(new Date(fireAt.getTime() + 1000));
+
+      await expect(restoration).rejects.toThrow('ENOSPC');
+      const pendingRemoval = (
+        scheduler as unknown as { pendingRemoval: Set<string> }
+      ).pendingRemoval;
+      expect(pendingRemoval.has(original.id)).toBe(true);
+      updateGate.fail = null;
+      await (
+        scheduler as unknown as {
+          loadFileTasks(handleMissed: boolean): Promise<void>;
+        }
+      ).loadFileTasks(true);
+      scheduler.tick(new Date(fireAt.getTime() + 2000));
+      expect(fires).toBe(1);
+    });
+
     // Settle + tear down a second scheduler sharing this tmpDir, so its
     // fire-and-forget writes don't race the afterEach rm.
     async function settle(s: CronScheduler): Promise<void> {

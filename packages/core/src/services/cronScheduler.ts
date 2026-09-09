@@ -1382,7 +1382,6 @@ export class CronScheduler {
       this.restoredPerRunOneShots.delete(taskId);
       return false;
     }
-    this.pendingRemoval.delete(taskId);
     this.armedDurableOneShots.delete(taskId);
     this.restoredPerRunOneShots.add(taskId);
     let restoreGenerations: ReadonlyMap<string, number> = new Map();
@@ -1437,6 +1436,7 @@ export class CronScheduler {
       this.restoredPerRunOneShots.delete(taskId);
       return false;
     }
+    this.pendingRemoval.delete(taskId);
     this.jobs.delete(taskId);
     this.consumedPerRunOneShots.delete(taskId);
     this.consumedPerRunRemovalGenerations.delete(taskId);

@@ -6,7 +6,10 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
-import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+  type AcpSessionBridge,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import { SessionService, Storage } from '@qwen-code/qwen-code-core';
 
 /** Captures the launcher's operator-facing stderr output. */
@@ -74,6 +77,7 @@ function makeFakeBridge(opts?: {
    * throw synchronously (e.g. an unknown session id hits an assertion before
    * the first await), which must not clobber the launch error. */
   closeSessionFails?: 'sync' | 'async';
+  closeSessionHangs?: boolean;
   /** Accepted acknowledgements returned by successive completion deliveries. */
   notificationAcks?: boolean[];
   /** Persisted parent lineage for callers restored after a daemon restart. */
@@ -235,6 +239,7 @@ function makeFakeBridge(opts?: {
     },
     closeSession: (sessionId: string) => {
       closes.push(sessionId);
+      if (opts?.closeSessionHangs) return new Promise<void>(() => {});
       if (opts?.closeSessionFails === 'sync') {
         throw new Error('closeSession exploded');
       }
@@ -612,6 +617,51 @@ describe('sub-session launcher', () => {
     }
   });
 
+  it('bounds rollback when a spawned child does not answer close', async () => {
+    vi.useFakeTimers();
+    const fake = makeFakeBridge({
+      modelApplied: false,
+      closeSessionHangs: true,
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+    let settled = false;
+
+    try {
+      const launch = launcher
+        .launch({
+          prompt: 'run the task',
+          completion: 'sent',
+          model: 'missing-model',
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+          callerSessionId: 'caller-1',
+        })
+        .finally(() => {
+          settled = true;
+        });
+      const rejection = launch.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+      await vi.advanceTimersByTimeAsync(ACTIVE_WORK_CLOSE_TIMEOUT_MS + 1_000);
+      expect(settled).toBe(true);
+      expect(await rejection).toEqual(
+        expect.objectContaining({
+          message: expect.stringMatching(
+            /model selection failed.*missing-model/i,
+          ),
+        }),
+      );
+      expect(fake.closes).toEqual(['sub-1']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('removes an isolated scheduled-task transcript in its runtime', async () => {
     const fake = makeFakeBridge({ modelApplied: false });
     const runtimeBaseDir = '/tmp/scheduled-task-runtime';
@@ -674,6 +724,7 @@ describe('sub-session launcher', () => {
           sourceType: 'standalone',
           sourcePersisted: true,
           parentSessionPersisted: true,
+          modelApplied: false,
         },
         projectlessOutputDirectory: `${WS}/conversation-${request.sessionId}`,
         workingDirectory: { state: 'ready' as const },
@@ -736,6 +787,8 @@ describe('sub-session launcher', () => {
         parentSessionId: string;
         promptId: string;
         modelServiceId?: string;
+        sourceType?: string;
+        sourceId?: string;
       }) => {
         childSessionId = request.sessionId;
         throw Object.assign(
@@ -776,6 +829,13 @@ describe('sub-session launcher', () => {
     });
 
     expect(childSessionId).not.toBe('');
+    expect(createChildWithInitialPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+      }),
+      'standalone child task',
+    );
     expect(fake.prompts).toEqual([]);
   });
 

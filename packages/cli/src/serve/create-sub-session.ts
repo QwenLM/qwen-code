@@ -44,6 +44,7 @@ import {
   stripTerminalControlSequences,
 } from '@qwen-code/qwen-code-core';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import { ACTIVE_WORK_CLOSE_TIMEOUT_MS } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   AcpSessionBridge,
   BridgeBackgroundNotification,
@@ -875,6 +876,8 @@ export function createSubSessionLauncher(
             sessionId: randomUUID(),
             parentSessionId: info.callerSessionId,
             promptId,
+            ...(info.sourceType ? { sourceType: info.sourceType } : {}),
+            ...(info.sourceId ? { sourceId: info.sourceId } : {}),
             ...(info.model ? { modelServiceId: info.model } : {}),
           },
           info.prompt,
@@ -896,7 +899,7 @@ export function createSubSessionLauncher(
       }
       spawnedSession = sub;
       const sessionId = sub.sessionId;
-      if (info.model && sub.modelApplied === false) {
+      if (!standalone && info.model && sub.modelApplied === false) {
         throw new Error(`sub-session model selection failed: ${info.model}`);
       }
       if (isolatedWorkspace && !standalone) {
@@ -1189,11 +1192,31 @@ export function createSubSessionLauncher(
         // Cleanup failures must not replace `err`, the real launch failure.
         const sessionId = spawnedSession.sessionId;
         let sessionClosed = false;
+        let closeTimer: ReturnType<typeof setTimeout> | undefined;
         try {
-          await bridge.closeSession(sessionId);
+          await Promise.race([
+            bridge.closeSession(sessionId, undefined, {
+              reason: 'sub_session_rollback',
+              agentCloseTimeoutMs: ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+            }),
+            new Promise<never>((_, reject) => {
+              closeTimer = setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      `Timed out closing rolled-back sub-session ${sessionId}`,
+                    ),
+                  ),
+                ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+              );
+              if (typeof closeTimer.unref === 'function') closeTimer.unref();
+            }),
+          ]);
           sessionClosed = true;
         } catch (closeErr) {
           log.debug('sub-session: closeSession threw', sessionId, closeErr);
+        } finally {
+          if (closeTimer !== undefined) clearTimeout(closeTimer);
         }
         if (sessionClosed && !promptAdmitted) {
           try {

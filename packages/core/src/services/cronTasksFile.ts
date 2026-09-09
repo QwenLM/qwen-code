@@ -266,9 +266,17 @@ const updateMutexes = new Map<string, Mutex>();
 // Per-task tombstones are durable because scheduled-task routes run in the
 // daemon while the scheduler that may restore a consumed one-shot runs in an
 // ACP child. Both files are read and written under the task-file lock below.
+const MAX_TASK_DELETION_GENERATIONS = 10_000;
+
 interface CronTaskDeletionGenerations {
-  version: 1;
+  version: 2;
+  watermark: number;
   entries: Array<[string, number]>;
+}
+
+interface CronTaskDeletionState {
+  generations: Map<string, number>;
+  watermark: number;
 }
 
 function getUpdateMutex(filePath: string): Mutex {
@@ -282,21 +290,34 @@ function getUpdateMutex(filePath: string): Mutex {
 
 async function readTaskDeletionGenerations(
   filePath: string,
-): Promise<Map<string, number>> {
+): Promise<CronTaskDeletionState> {
   const statePath = `${filePath}.deletions`;
   let raw: string;
   try {
     raw = await fs.readFile(statePath, 'utf-8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new Map();
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { generations: new Map(), watermark: 0 };
+    }
     throw error;
   }
 
-  const parsed = JSON.parse(raw) as Partial<CronTaskDeletionGenerations>;
-  if (parsed.version !== 1 || !Array.isArray(parsed.entries)) {
+  const parsed = JSON.parse(raw) as {
+    version?: unknown;
+    watermark?: unknown;
+    entries?: unknown;
+  };
+  if (
+    (parsed.version !== 1 && parsed.version !== 2) ||
+    !Array.isArray(parsed.entries) ||
+    (parsed.version === 2 &&
+      (!Number.isSafeInteger(parsed.watermark) ||
+        (parsed.watermark as number) < 0))
+  ) {
     throw new Error(`Invalid scheduled-task deletion state: ${statePath}`);
   }
   const generations = new Map<string, number>();
+  let maximumGeneration = 0;
   for (const entry of parsed.entries) {
     if (
       !Array.isArray(entry) ||
@@ -309,18 +330,25 @@ async function readTaskDeletionGenerations(
       throw new Error(`Invalid scheduled-task deletion state: ${statePath}`);
     }
     generations.set(entry[0], entry[1]);
+    maximumGeneration = Math.max(maximumGeneration, entry[1]);
   }
-  return generations;
+  const watermark =
+    parsed.version === 2 ? (parsed.watermark as number) : maximumGeneration;
+  if (watermark < maximumGeneration) {
+    throw new Error(`Invalid scheduled-task deletion state: ${statePath}`);
+  }
+  return { generations, watermark };
 }
 
 async function writeTaskDeletionGenerations(
   filePath: string,
-  generations: ReadonlyMap<string, number>,
+  deletionState: CronTaskDeletionState,
   assertCanCommit?: () => void,
 ): Promise<void> {
   const state: CronTaskDeletionGenerations = {
-    version: 1,
-    entries: [...generations],
+    version: 2,
+    watermark: deletionState.watermark,
+    entries: [...deletionState.generations],
   };
   await atomicWriteJSON(`${filePath}.deletions`, state, {
     noFollow: true,
@@ -501,15 +529,16 @@ export async function updateCronTasks(
           ? options.observeDeletionIds(tasks)
           : (options.observeDeletionIds ?? []),
       );
-      let generations: Map<string, number> | undefined;
+      let deletionState: CronTaskDeletionState | undefined;
       if (observedIds.size > 0) {
-        const observedGenerations = await readTaskDeletionGenerations(filePath);
-        generations = observedGenerations;
+        const observedDeletionState =
+          await readTaskDeletionGenerations(filePath);
+        deletionState = observedDeletionState;
         options.onDeletionGenerations?.(
           new Map(
             [...observedIds].map((id) => [
               id,
-              observedGenerations.get(id) ?? 0,
+              observedDeletionState.generations.get(id) ?? 0,
             ]),
           ),
         );
@@ -520,19 +549,25 @@ export async function updateCronTasks(
           ? options.deletionIds()
           : options.deletionIds;
       if (deletionIds?.length) {
-        generations ??= await readTaskDeletionGenerations(filePath);
+        deletionState ??= await readTaskDeletionGenerations(filePath);
         for (const id of new Set(deletionIds)) {
-          const generation = (generations.get(id) ?? 0) + 1;
-          if (!Number.isSafeInteger(generation)) {
+          if (deletionState.watermark === Number.MAX_SAFE_INTEGER) {
             throw new Error(
               `Scheduled-task deletion generation overflow for ${id}`,
             );
           }
-          generations.set(id, generation);
+          deletionState.watermark += 1;
+          deletionState.generations.delete(id);
+          deletionState.generations.set(id, deletionState.watermark);
+        }
+        while (deletionState.generations.size > MAX_TASK_DELETION_GENERATIONS) {
+          const oldest = deletionState.generations.keys().next().value;
+          if (oldest === undefined) break;
+          deletionState.generations.delete(oldest);
         }
         await writeTaskDeletionGenerations(
           filePath,
-          generations,
+          deletionState,
           options.assertCanCommit,
         );
       }

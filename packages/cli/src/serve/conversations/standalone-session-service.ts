@@ -21,7 +21,10 @@ import type {
   BridgeStandaloneRestoreSessionRequest,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { ServeWorkspaceProvidersStatus } from '@qwen-code/acp-bridge/status';
-import { STANDALONE_SESSION_SOURCE_TYPE } from '@qwen-code/acp-bridge/sessionSource';
+import {
+  isScheduledTaskRunSource,
+  STANDALONE_SESSION_SOURCE_TYPE,
+} from '@qwen-code/acp-bridge/sessionSource';
 import {
   createDebugLogger,
   readSessionPrs,
@@ -116,6 +119,8 @@ export interface CreateStandaloneChildSessionRequest
   extends CreateStandaloneSessionRequest {
   parentSessionId: string;
   promptId: string;
+  sourceType?: string;
+  sourceId?: string;
 }
 
 export interface CreatedStandaloneSession {
@@ -2626,7 +2631,10 @@ export class StandaloneSessionService {
   private async createUnderExclusive(
     runtime: WorkspaceRuntime,
     sessionId: string,
-    request: CreateStandaloneSessionRequest,
+    request: CreateStandaloneSessionRequest & {
+      sourceType?: string;
+      sourceId?: string;
+    },
     prompt: string | undefined,
     promptId: string,
     parentSessionId?: string,
@@ -2697,7 +2705,7 @@ export class StandaloneSessionService {
     }
     this.assertRuntimeCurrentOrQuarantine(runtime);
     if (
-      parentSessionId !== undefined &&
+      isScheduledTaskRunSource(request) &&
       request.modelServiceId !== undefined &&
       session.modelApplied === false
     ) {

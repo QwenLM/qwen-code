@@ -576,6 +576,37 @@ describe('cronTasksFile', () => {
   });
 
   describe('updateCronTasks', () => {
+    it('bounds deletion generations without reusing an evicted generation', async () => {
+      const statePath = `${getCronFilePath(tmpDir)}.deletions`;
+      await writeCronTasks(tmpDir, []);
+      await fs.mkdir(path.dirname(statePath), { recursive: true });
+      await fs.writeFile(
+        statePath,
+        JSON.stringify({
+          version: 1,
+          entries: Array.from({ length: 10_000 }, (_, index) => [
+            `old-${index}`,
+            1,
+          ]),
+        }),
+      );
+
+      expect(await removeCronTasks(tmpDir, ['newest'])).toBe(0);
+      let state = JSON.parse(await fs.readFile(statePath, 'utf8')) as {
+        watermark: number;
+        entries: Array<[string, number]>;
+      };
+      expect(state.entries).toHaveLength(10_000);
+      expect(state.entries.at(-1)).toEqual(['newest', 2]);
+      expect(state.entries.some(([id]) => id === 'old-0')).toBe(false);
+
+      expect(await removeCronTasks(tmpDir, ['old-0'])).toBe(0);
+      state = JSON.parse(await fs.readFile(statePath, 'utf8')) as typeof state;
+      expect(state.entries).toHaveLength(10_000);
+      expect(state.entries.at(-1)).toEqual(['old-0', 3]);
+      expect(state.watermark).toBe(3);
+    });
+
     it('shares deletion generations across module instances', async () => {
       const taskId = 'cross-process-delete';
       await writeCronTasks(tmpDir, [makeTask({ id: taskId })]);
