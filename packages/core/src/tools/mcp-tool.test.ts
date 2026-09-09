@@ -1023,10 +1023,12 @@ describe('DiscoveredMCPTool', () => {
     },
   );
 
-  it.each(['business error', 'abort'])(
+  it.each(['business error', 'unregistered business error', 'abort'])(
     'preserves a shared invocation %s without a connection-loss warning',
     async (kind) => {
-      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      if (kind !== 'unregistered business error') {
+        updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      }
       const error = new Error(
         kind === 'abort' ? 'Connection closed' : 'Invalid input',
       );

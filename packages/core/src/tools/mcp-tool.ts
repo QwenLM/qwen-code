@@ -32,11 +32,7 @@ import type { Config } from '../config/config.js';
 import { truncateToolOutput } from './truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
-import {
-  getAllMCPServerStatuses,
-  getMCPServerStatus,
-  MCPServerStatus,
-} from './mcp-status.js';
+import { getAllMCPServerStatuses, MCPServerStatus } from './mcp-status.js';
 import {
   getInvocationContext,
   INVOCATION_CONTEXT_META_KEY,
@@ -316,6 +312,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   private static readonly MAX_RECONNECT_RETRIES = 3;
   private static readonly UNSAFE_REPLAY_ERROR_MESSAGE =
     'MCP tool execution may have completed before the connection failed. Automatic replay was skipped because the call could not be verified as safe to replay. Do not retry automatically; verify the outcome before trying again.';
+  private static readonly SHARED_CONNECTION_ERROR_MESSAGE =
+    'The shared MCP connection failed. This call was not replayed and its outcome may be unknown. Connection recovery is managed separately from tool execution. Do not retry automatically; verify the outcome before trying again.';
 
   constructor(
     private readonly mcpTool: CallableTool,
@@ -442,9 +440,12 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     if (!this.reconnectOnError && this.isConnectionError(error)) {
       // The session will restore its shared connection. The model must still
       // be told that this call's outcome is unknown, to avoid a fresh retry.
-      throw new Error(DiscoveredMCPToolInvocation.UNSAFE_REPLAY_ERROR_MESSAGE, {
-        cause: error,
-      });
+      throw new Error(
+        DiscoveredMCPToolInvocation.SHARED_CONNECTION_ERROR_MESSAGE,
+        {
+          cause: error,
+        },
+      );
     }
 
     if (!this.shouldAttemptReconnect(error)) {
@@ -557,7 +558,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   }
 
   private isConnectionError(error: unknown): boolean {
-    if (getMCPServerStatus(this.serverName) === MCPServerStatus.DISCONNECTED) {
+    if (
+      getAllMCPServerStatuses().get(this.serverName) ===
+      MCPServerStatus.DISCONNECTED
+    ) {
       return true;
     }
 

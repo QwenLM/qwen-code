@@ -1629,6 +1629,48 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(promptRegistry.registerPrompt).not.toHaveBeenCalled();
     });
 
+    it('rejects a partial discovery snapshot when the transport closes during listing', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: () => ({ prompts: {} }),
+        request: vi
+          .fn()
+          .mockResolvedValue({ prompts: [{ name: 'surviving-prompt' }] }),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+        onclose: undefined as (() => void) | undefined,
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: async () => {
+          mockedClient.onclose?.();
+          throw new Error('Connection closed');
+        },
+      } as unknown as GenAiLib.CallableTool);
+      const client = new McpClient(
+        'partial-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+        undefined,
+        { trackTransportClose: true },
+      );
+      await client.connect();
+      await expect(
+        client.discoverAndReturn(cfgWithResources()),
+      ).rejects.toThrow('connection closed during discovery');
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+    });
+
     it('marks discovered tools alwaysLoad when the MCP server config requests it', async () => {
       const mockedClient = {
         listTools: vi.fn().mockResolvedValue({ tools: [] }),
@@ -3995,9 +4037,16 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
 describe('McpClient transport retirement with the real SDK', () => {
   afterEach(() => vi.restoreAllMocks());
-  it.each(['late', 'normal', 'reject'] as const)(
-    'retires an old transport when close is %s without corrupting its replacement',
-    async (closeMode) => {
+  it.each([
+    ['late', true],
+    ['normal', true],
+    ['reject', true],
+    ['late', false],
+    ['normal', false],
+    ['reject', false],
+  ] as const)(
+    'retires an old transport when close is %s (pool close tracking: %s)',
+    async (closeMode, poolManaged) => {
       const actual = await vi.importActual<
         typeof import('@modelcontextprotocol/client')
       >('@modelcontextprotocol/client');
@@ -4046,6 +4095,8 @@ describe('McpClient transport retirement with the real SDK', () => {
         {} as PromptRegistry,
         { getDirectories: () => [] } as unknown as WorkspaceContext,
         false,
+        undefined,
+        { trackTransportClose: poolManaged },
       );
       try {
         await client.connect();
@@ -4073,9 +4124,15 @@ describe('McpClient transport retirement with the real SDK', () => {
         expect(closed).toHaveBeenCalledTimes(1);
         b.onclose?.();
         expect(sdk.transport).toBeUndefined();
-        expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+        expect(client.getStatus()).toBe(
+          poolManaged
+            ? MCPServerStatus.DISCONNECTED
+            : MCPServerStatus.CONNECTED,
+        );
         expect(getMCPServerStatus('retirement-test')).toBe(
-          MCPServerStatus.DISCONNECTED,
+          poolManaged
+            ? MCPServerStatus.DISCONNECTED
+            : MCPServerStatus.CONNECTED,
         );
       } finally {
         await client.disconnect();

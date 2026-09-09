@@ -39,6 +39,8 @@ import type {
 } from '../agents/runtime/agent-events.js';
 import type { Config, MCPServerConfig } from '../config/config.js';
 import { APPROVAL_MODES, deriveConfig } from '../config/config.js';
+import { PromptRegistry } from '../prompts/prompt-registry.js';
+import { ResourceRegistry } from '../resources/resource-registry.js';
 import type { HookDefinition, HookEventName } from '../hooks/types.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
@@ -1070,6 +1072,14 @@ export class SubagentManager {
         ...(config.mcpServers as Record<string, MCPServerConfig>),
       };
       subagentContext.getMcpServers = () => merged;
+      if (runtimeContext.getMcpTransportPool()) {
+        // This registry acquires its own pool projections. Its discovery and
+        // teardown must not remove the parent's prompts or resources.
+        const prompts = new PromptRegistry();
+        const resources = new ResourceRegistry();
+        subagentContext.getPromptRegistry = () => prompts;
+        subagentContext.getResourceRegistry = () => resources;
+      }
     }
 
     // The skip-rebuild optimization (`hasRebuiltToolRegistry`) is bypassed

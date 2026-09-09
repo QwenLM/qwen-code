@@ -71,6 +71,7 @@ function mkManager(
     overrides.toolRegistry ??
     ({
       removeMcpToolsByServer: vi.fn(),
+      getToolsByServer: vi.fn().mockReturnValue([]),
     } as unknown as ToolRegistry);
   return new McpClientManager(config, toolRegistry, overrides.options ?? {});
 }
@@ -777,6 +778,7 @@ describe('McpClientManager', () => {
       release: vi.fn(),
       on: vi.fn(),
       id: 'srv::abc',
+      transportId: connectionIdOf('srv', {}),
       serverName: 'srv',
       entryIndex: 0,
       // R24 T19: pooled fast-path now health-checks via
@@ -838,6 +840,7 @@ describe('McpClientManager', () => {
       release: vi.fn(),
       on: vi.fn(),
       id: 'srv::abc',
+      transportId: connectionIdOf('srv', {}),
       serverName: 'srv',
       entryIndex: 0,
       client: {
@@ -4350,9 +4353,13 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
   ) {
     const addSpy = opts.runtimeAddSpy ?? vi.fn();
     const removeSpy = opts.runtimeRemoveSpy ?? vi.fn().mockReturnValue(true);
+    const runtimeServers = { ...opts.runtimeServers };
+    addSpy.mockImplementation((name: string, config: MCPServerConfig) => {
+      runtimeServers[name] = config;
+    });
     return {
       isTrustedFolder: () => true,
-      getMcpServers: () => ({}),
+      getMcpServers: () => ({ ...opts.settingsServers, ...runtimeServers }),
       getMcpServerCommand: () => undefined,
       getTargetDir: () => '/session/worktree',
       getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
@@ -4362,7 +4369,7 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
       getSessionId: () => 'test-session-1',
       isMcpServerDisabled: () => false,
       getSettingsMcpServers: () => opts.settingsServers ?? {},
-      getRuntimeMcpServers: () => opts.runtimeServers ?? {},
+      getRuntimeMcpServers: () => runtimeServers,
       addRuntimeMcpServer: addSpy,
       removeRuntimeMcpServer: removeSpy,
     } as unknown as Config;
@@ -4374,6 +4381,8 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
     const acquireSpy = vi.fn().mockResolvedValue({
       release: vi.fn(),
       on: vi.fn(),
+      client: { getStatus: () => MCPServerStatus.CONNECTED },
+      updateConfig: vi.fn(),
       id: 'my-server::abc123',
       serverName: 'my-server',
       entryIndex: 0,
@@ -4387,7 +4396,14 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
     } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
 
     const config = mkRuntimeConfig();
-    const manager = mkManager({ config, options: { pool: fakePool } });
+    const manager = mkManager({
+      config,
+      toolRegistry: {
+        removeMcpToolsByServer: vi.fn(),
+        getToolsByServer: () => [{ name: 'tool1' }, { name: 'tool2' }],
+      } as unknown as ToolRegistry,
+      options: { pool: fakePool },
+    });
 
     const result = await manager.addRuntimeMcpServer(
       'my-server',
@@ -4493,6 +4509,7 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
       release: releaseSpyConn1,
       updateConfig,
       on: vi.fn(),
+      client: { getStatus: () => MCPServerStatus.CONNECTED },
       // Distinct lifecycle id: if the same-fingerprint comparison below
       // regressed from `transportId` back to `id`, the replace would tear
       // down and re-acquire the transport, and this test would catch it.
@@ -4531,6 +4548,7 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
     // First add
     await manager.addRuntimeMcpServer('dup-srv', serverConfig, 'client-4');
     expect(acquireSpy).toHaveBeenCalledTimes(1);
+    updateConfig.mockClear();
 
     // Second add changes only per-session metadata, so the transport
     // fingerprint remains identical while the session view must refresh.
@@ -4572,6 +4590,8 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
     const acquireSpy = vi.fn().mockResolvedValue({
       release: vi.fn(),
       on: vi.fn(),
+      client: { getStatus: () => MCPServerStatus.CONNECTED },
+      updateConfig: vi.fn(),
       id: 'shadow-srv::def',
       serverName: 'shadow-srv',
       entryIndex: 0,
@@ -4673,6 +4693,8 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
     const conn = {
       release: releaseSpyConn,
       on: vi.fn(),
+      client: { getStatus: () => MCPServerStatus.CONNECTED },
+      updateConfig: vi.fn(),
       id: 'rm-srv::aaa',
       serverName: 'rm-srv',
       entryIndex: 0,
@@ -4712,6 +4734,8 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
     const conn = {
       release: vi.fn(),
       on: vi.fn(),
+      client: { getStatus: () => MCPServerStatus.CONNECTED },
+      updateConfig: vi.fn(),
       id: 'shadow-rm::bbb',
       serverName: 'shadow-rm',
       entryIndex: 0,
@@ -4806,7 +4830,7 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
 });
 
 describe('pooled session recovery', () => {
-  function fixture() {
+  function fixture(eventEmitter?: EventEmitter) {
     let trusted = true;
     let disabled = false;
     let pendingApproval = false;
@@ -4826,13 +4850,14 @@ describe('pooled session recovery', () => {
       isMcpServerDisabled: () => disabled,
       isMcpServerPendingApproval: () => pendingApproval,
     } as unknown as Config;
-    const connection = () =>
+    const connection = (name = 'srv') =>
       Object.assign(new EventEmitter(), {
-        id: connectionIdOf('srv', servers['srv']),
-        transportId: connectionIdOf('srv', servers['srv']),
+        id: connectionIdOf(name, servers[name]),
+        transportId: connectionIdOf(name, servers[name]),
         client: {
           getStatus: (): MCPServerStatus => MCPServerStatus.CONNECTED,
           callTool: vi.fn(),
+          readResource: vi.fn().mockResolvedValue({ contents: [] }),
         },
         release: vi.fn(),
         updateConfig: vi.fn(),
@@ -4853,6 +4878,7 @@ describe('pooled session recovery', () => {
       config,
       toolRegistry,
       options: {
+        eventEmitter,
         pool: pool as unknown as import('./mcp-transport-pool.js').McpTransportPool,
       },
     });
@@ -4871,6 +4897,7 @@ describe('pooled session recovery', () => {
       replacement,
       pool,
       fail,
+      connection,
       revokeTrust: () => {
         trusted = false;
       },
@@ -4883,6 +4910,135 @@ describe('pooled session recovery', () => {
     };
   }
 
+  function runtimeFixture() {
+    const f = fixture();
+    Object.assign(f.config, {
+      getSettingsMcpServers: () => ({}),
+      getRuntimeMcpServers: () => f.servers,
+      addRuntimeMcpServer: (name: string, config: MCPServerConfig) => {
+        f.servers[name] = config;
+      },
+      removeRuntimeMcpServer: (name: string) => {
+        const present = name in f.servers;
+        delete f.servers[name];
+        return present;
+      },
+      getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+    });
+    Object.assign(f.initial, { toolsSnapshot: [] });
+    Object.assign(f.replacement, { toolsSnapshot: [] });
+    return f;
+  }
+
+  it('waits for in-flight recovery before a runtime re-add uses its session seat', async () => {
+    const f = runtimeFixture();
+    await f.manager.discoverAllMcpTools(f.config);
+    f.fail();
+    let complete!: (value: typeof f.replacement) => void;
+    f.pool.acquireForRecovery.mockReturnValue(
+      new Promise((resolve) => {
+        complete = resolve;
+      }),
+    );
+    const recovery = f.manager.recoverFailedConnections(
+      new AbortController().signal,
+    );
+    const added = f.manager.addRuntimeMcpServer(
+      'srv',
+      f.servers['srv'],
+      'client',
+    );
+    expect(f.pool.acquire).toHaveBeenCalledOnce();
+    complete(f.replacement);
+    await recovery;
+    await expect(added).resolves.toMatchObject({
+      name: 'srv',
+      replaced: false,
+    });
+    expect(f.pool.acquire).toHaveBeenCalledOnce();
+    expect(f.replacement.release).not.toHaveBeenCalled();
+  });
+
+  it('releases a runtime acquire that finishes after removal', async () => {
+    const f = runtimeFixture();
+    const config = f.servers['srv'];
+    delete f.servers['srv'];
+    let complete!: (value: typeof f.initial) => void;
+    f.pool.acquire.mockReturnValue(
+      new Promise((resolve) => {
+        complete = resolve;
+      }),
+    );
+    const added = f.manager.addRuntimeMcpServer('srv', config, 'client');
+    await f.manager.removeRuntimeMcpServer('srv', 'client');
+    complete(f.initial);
+    await expect(added).rejects.toThrow('superseded');
+    expect(f.initial.release).toHaveBeenCalledOnce();
+    expect(f.servers).toEqual({});
+    expect(
+      await f.manager.recoverFailedConnections(new AbortController().signal),
+    ).toEqual([]);
+  });
+
+  it('runs configuration reconciliation queued behind a runtime add', async () => {
+    const f = runtimeFixture();
+    const config = f.servers['srv'];
+    delete f.servers['srv'];
+    let complete!: (value: typeof f.initial) => void;
+    f.pool.acquire.mockReturnValueOnce(
+      new Promise((resolve) => {
+        complete = resolve;
+      }),
+    );
+    const added = f.manager.addRuntimeMcpServer('srv', config, 'client');
+    f.servers['other'] = new MCPServerConfig('other');
+    const refresh = f.manager.discoverAllMcpToolsIncremental(f.config);
+    complete(f.initial);
+    await added;
+    await refresh;
+    expect(f.pool.acquire.mock.calls.map(([name]) => name)).toEqual([
+      'srv',
+      'other',
+    ]);
+  });
+
+  it('drops retained failure notices when a runtime server is removed', async () => {
+    const f = runtimeFixture();
+    await f.manager.discoverAllMcpTools(f.config);
+    f.fail();
+    f.pool.acquireForRecovery.mockRejectedValue(new Error('unavailable'));
+    await f.manager.recoverFailedConnections(new AbortController().signal, {
+      consumeNotices: false,
+    });
+    await f.manager.removeRuntimeMcpServer('srv', 'client');
+    const budget = {
+      beginBulkPass: vi.fn(),
+      endBulkPass: vi.fn(),
+      clearRefusal: vi.fn(),
+    };
+    Object.assign(f.pool, { getBudget: () => budget });
+    expect(
+      await f.manager.recoverFailedConnections(new AbortController().signal),
+    ).toEqual([]);
+    expect(budget.beginBulkPass).not.toHaveBeenCalled();
+  });
+
+  it('rejects a runtime name reserved by mcp.serverCommand', async () => {
+    const f = runtimeFixture();
+    Object.assign(f.config, {
+      getMcpServerCommand: () => 'node configured-server',
+    });
+    await expect(
+      f.manager.addRuntimeMcpServer(
+        'mcp',
+        { httpUrl: 'https://example.invalid/mcp' },
+        'client',
+      ),
+    ).rejects.toThrow('reserved');
+    expect(f.pool.acquire).not.toHaveBeenCalled();
+  });
+
   it('recovers an evicted handle on next demand without executing any tool', async () => {
     const f = fixture();
     await f.manager.discoverAllMcpTools(f.config);
@@ -4892,10 +5048,136 @@ describe('pooled session recovery', () => {
       new AbortController().signal,
     );
     expect(f.pool.acquireForRecovery).toHaveBeenCalledTimes(1);
-    expect(notices[0]).toContain('reconnected');
+    expect(notices[0].message).toContain('reconnected');
     expect(f.replacement.client.callTool).not.toHaveBeenCalled();
     await f.manager.recoverFailedConnections(new AbortController().signal);
     expect(f.pool.acquireForRecovery).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers another server when one candidate fails in the same pass', async () => {
+    const f = fixture();
+    f.servers['other'] = new MCPServerConfig('other-command');
+    const other = f.connection('other');
+    const recoveredOther = f.connection('other');
+    f.pool.acquire.mockImplementation(async (name) =>
+      name === 'srv' ? f.initial : other,
+    );
+    f.pool.acquireForRecovery.mockImplementation(async (name) => {
+      if (name === 'srv') throw new Error('unavailable');
+      return recoveredOther;
+    });
+    await f.manager.discoverAllMcpTools(f.config);
+    f.fail();
+    other.emit('event', {
+      kind: 'failed',
+      serverName: 'other',
+      generation: 0,
+      lastError: 'closed',
+    });
+    const notices = await f.manager.recoverFailedConnections(
+      new AbortController().signal,
+    );
+    expect(notices).toEqual(
+      expect.arrayContaining([
+        {
+          serverName: 'srv',
+          message: expect.stringContaining('remains disconnected'),
+        },
+        {
+          serverName: 'other',
+          message: expect.stringContaining('reconnected'),
+        },
+      ]),
+    );
+    expect(notices).toHaveLength(2);
+    expect(f.manager.getServerStatus('srv')).toBe(MCPServerStatus.DISCONNECTED);
+    expect(f.manager.getServerStatus('other')).toBe(MCPServerStatus.CONNECTED);
+    expect(recoveredOther.client.callTool).not.toHaveBeenCalled();
+    await f.manager.stop();
+  });
+
+  it('drops an obsolete failed candidate during configuration reconciliation', async () => {
+    const f = fixture();
+    await f.manager.discoverAllMcpTools(f.config);
+    f.fail();
+    delete f.servers['srv'];
+    await f.manager.discoverAllMcpToolsIncremental(f.config);
+    const budget = {
+      beginBulkPass: vi.fn(),
+      endBulkPass: vi.fn(),
+      clearRefusal: vi.fn(),
+    };
+    Object.assign(f.pool, { getBudget: () => budget });
+    await expect(
+      f.manager.recoverFailedConnections(new AbortController().signal),
+    ).resolves.toEqual([]);
+    expect(f.pool.acquireForRecovery).not.toHaveBeenCalled();
+    expect(budget.beginBulkPass).not.toHaveBeenCalled();
+    await f.manager.stop();
+  });
+
+  it('retains child-agent recovery notices for the owning ACP session', async () => {
+    const f = fixture();
+    await f.manager.discoverAllMcpTools(f.config);
+    f.fail();
+    const notices = await f.manager.recoverFailedConnections(
+      new AbortController().signal,
+      { consumeNotices: false },
+    );
+    expect(notices).toEqual([
+      { serverName: 'srv', message: expect.stringContaining('reconnected') },
+    ]);
+    expect(
+      await f.manager.recoverFailedConnections(new AbortController().signal),
+    ).toEqual(notices);
+    expect(
+      await f.manager.recoverFailedConnections(new AbortController().signal),
+    ).toEqual([]);
+    expect(f.pool.acquireForRecovery).toHaveBeenCalledOnce();
+  });
+
+  it('runs a queued configuration refresh even when a recovery listener throws', async () => {
+    const events = new EventEmitter();
+    const f = fixture(events);
+    await f.manager.discoverAllMcpTools(f.config);
+    f.fail();
+    let complete!: (value: typeof f.replacement) => void;
+    f.pool.acquireForRecovery.mockReturnValue(
+      new Promise((resolve) => {
+        complete = resolve;
+      }),
+    );
+    const recovery = f.manager.recoverFailedConnections(
+      new AbortController().signal,
+    );
+    f.servers['added'] = new MCPServerConfig('other');
+    events.once('mcp-client-update', () => {
+      throw new Error('listener failed');
+    });
+    const refresh = f.manager.discoverAllMcpToolsIncremental(f.config);
+    complete(f.replacement);
+    await expect(recovery).resolves.toEqual([
+      { serverName: 'srv', message: expect.stringContaining('reconnected') },
+    ]);
+    await expect(refresh).resolves.toBeUndefined();
+    expect(f.pool.acquire.mock.calls.some(([name]) => name === 'added')).toBe(
+      true,
+    );
+  });
+
+  it('preserves unrelated workspace refusals on successful recovery', async () => {
+    const f = fixture();
+    await f.manager.discoverAllMcpTools(f.config);
+    f.fail();
+    const { WorkspaceMcpBudget } = await import('./mcp-workspace-budget.js');
+    const budget = new WorkspaceMcpBudget({ clientBudget: 1, mode: 'enforce' });
+    budget.beginBulkPass();
+    budget.recordRefusal('unrelated', 'stdio');
+    budget.recordRefusal('srv', 'stdio');
+    budget.endBulkPass();
+    Object.assign(f.pool, { getBudget: () => budget });
+    await f.manager.recoverFailedConnections(new AbortController().signal);
+    expect(budget.getRefusedServerNames()).toEqual(['unrelated']);
   });
 
   it.each([undefined, '/explicit-cwd'])(
@@ -4946,7 +5228,7 @@ describe('pooled session recovery', () => {
           expect.anything(),
           expect.anything(),
         );
-        expect(notices[0]).toContain('reconnected');
+        expect(notices[0].message).toContain('reconnected');
       } finally {
         vi.mocked(populateMcpServerCommand).mockImplementation(
           (servers) => servers,
@@ -4965,9 +5247,130 @@ describe('pooled session recovery', () => {
       f.manager.readResource('srv', 'test://resource'),
     ).rejects.toThrow('pool entry disconnected');
     expect(f.initial.release).toHaveBeenCalledTimes(1);
+    const notices = await f.manager.recoverFailedConnections(
+      new AbortController().signal,
+    );
+    expect(f.pool.acquireForRecovery).toHaveBeenCalledOnce();
+    expect(notices[0].message).toContain('reconnected');
     await f.manager.stop();
     expect(f.initial.release).toHaveBeenCalledTimes(1);
   });
+
+  it('recovers resource reads through the pool and leaves the notice for ACP', async () => {
+    const f = fixture();
+    await f.manager.discoverAllMcpTools(f.config);
+    f.fail();
+    const standaloneCount = vi.mocked(McpClient).mock.calls.length;
+    await expect(
+      f.manager.readResource('srv', 'test://resource'),
+    ).resolves.toEqual({ contents: [] });
+    expect(f.pool.acquireForRecovery).toHaveBeenCalledOnce();
+    expect(f.replacement.client.readResource).toHaveBeenCalledExactlyOnceWith(
+      'test://resource',
+      undefined,
+    );
+    expect(vi.mocked(McpClient).mock.calls.length).toBe(standaloneCount);
+    expect(
+      (
+        await f.manager.recoverFailedConnections(new AbortController().signal)
+      )[0].message,
+    ).toContain('reconnected');
+    await f.manager.stop();
+  });
+
+  it.each(['never acquired', 'explicit disconnect'])(
+    'does not create a standalone resource client in pool mode: %s',
+    async (state) => {
+      const f = fixture();
+      if (state === 'explicit disconnect') {
+        await f.manager.discoverAllMcpTools(f.config);
+        await f.manager.disconnectServer('srv');
+      }
+      const standaloneCount = vi.mocked(McpClient).mock.calls.length;
+      await expect(
+        f.manager.readResource('srv', 'test://resource'),
+      ).rejects.toThrow('pool connection unavailable');
+      expect(f.pool.acquireForRecovery).not.toHaveBeenCalled();
+      expect(vi.mocked(McpClient).mock.calls.length).toBe(standaloneCount);
+    },
+  );
+
+  it.each(['trust', 'approval', 'disabled'])(
+    'rechecks %s before reading a resource after recovery finishes',
+    async (change) => {
+      const f = fixture();
+      await f.manager.discoverAllMcpTools(f.config);
+      f.fail();
+      const recover = f.manager.recoverFailedConnections.bind(f.manager);
+      vi.spyOn(f.manager, 'recoverFailedConnections').mockImplementation(
+        async (...args) => {
+          const result = await recover(...args);
+          // Another server can keep the bulk recovery pending after srv has
+          // reconnected. Revoke policy before the waiting read resumes.
+          if (change === 'trust') f.revokeTrust();
+          if (change === 'approval') f.requireApproval();
+          if (change === 'disabled') f.disable();
+          return result;
+        },
+      );
+      await expect(
+        f.manager.readResource('srv', 'test://resource'),
+      ).rejects.toThrow('pool connection unavailable');
+      expect(f.replacement.client.readResource).not.toHaveBeenCalled();
+      await f.manager.stop();
+    },
+  );
+
+  it.each(['trust', 'approval', 'disabled', 'removed', 'changed'])(
+    'rejects a pooled resource read after %s changes',
+    async (change) => {
+      const f = fixture();
+      await f.manager.discoverAllMcpTools(f.config);
+      if (change === 'trust') f.revokeTrust();
+      if (change === 'approval') f.requireApproval();
+      if (change === 'disabled') f.disable();
+      if (change === 'removed') delete f.servers['srv'];
+      if (change === 'changed')
+        f.servers['srv'] = new MCPServerConfig('different-command');
+      await expect(
+        f.manager.readResource('srv', 'test://resource'),
+      ).rejects.toThrow();
+      expect(f.initial.client.readResource).not.toHaveBeenCalled();
+      expect(f.pool.acquireForRecovery).not.toHaveBeenCalled();
+      await f.manager.stop();
+    },
+  );
+
+  it.each(['disconnected', 'trust', 'approval', 'disabled', 'changed'])(
+    'rejects a runtime pooled acquire when %s changes before it returns',
+    async (change) => {
+      const f = runtimeFixture();
+      f.pool.acquire.mockImplementationOnce(async () => {
+        if (change === 'disconnected')
+          vi.spyOn(f.initial.client, 'getStatus').mockReturnValue(
+            MCPServerStatus.DISCONNECTED,
+          );
+        if (change === 'trust') f.revokeTrust();
+        if (change === 'approval') f.requireApproval();
+        if (change === 'disabled') f.disable();
+        if (change === 'changed')
+          f.servers['srv'] = new MCPServerConfig('different-command');
+        return f.initial;
+      });
+      await expect(
+        f.manager.addRuntimeMcpServer(
+          'srv',
+          new MCPServerConfig('node'),
+          'client',
+        ),
+      ).rejects.toThrow();
+      expect(f.initial.release).toHaveBeenCalledOnce();
+      expect(f.manager.getServerStatus('srv')).toBe(
+        MCPServerStatus.DISCONNECTED,
+      );
+      await f.manager.stop();
+    },
+  );
 
   it.each(['disconnected', 'registration failure'])(
     'records cooldown when a recovered handle fails acceptance: %s',
@@ -4987,7 +5390,7 @@ describe('pooled session recovery', () => {
       const notices = await f.manager.recoverFailedConnections(
         new AbortController().signal,
       );
-      expect(notices[0]).toContain('remains disconnected');
+      expect(notices[0].message).toContain('remains disconnected');
       expect(f.replacement.release).toHaveBeenCalledTimes(1);
       expect(f.pool.recordRecoveryFailure).toHaveBeenCalledExactlyOnceWith(
         f.initial.transportId,
@@ -5239,8 +5642,8 @@ describe('pooled session recovery', () => {
     const notices = await f.manager.recoverFailedConnections(
       new AbortController().signal,
     );
-    expect(notices[0]).toContain('remains disconnected');
-    expect(notices[0]).toContain('authentication');
+    expect(notices[0].message).toContain('remains disconnected');
+    expect(notices[0].message).toContain('authentication');
     await f.manager.recoverFailedConnections(new AbortController().signal);
     expect(f.pool.acquireForRecovery).toHaveBeenCalledTimes(2);
   });
@@ -5250,7 +5653,11 @@ describe('pooled session recovery', () => {
     const f = fixture();
     await f.manager.discoverAllMcpTools(f.config);
     f.fail();
-    const budget = { beginBulkPass: vi.fn(), endBulkPass: vi.fn() };
+    const budget = {
+      beginBulkPass: vi.fn(),
+      endBulkPass: vi.fn(),
+      clearRefusal: vi.fn(),
+    };
     Object.assign(f.pool, { getBudget: () => budget });
     f.pool.acquireForRecovery.mockRejectedValue(
       new BudgetExhaustedError('srv', 1, 1),
@@ -5258,8 +5665,10 @@ describe('pooled session recovery', () => {
     const notices = await f.manager.recoverFailedConnections(
       new AbortController().signal,
     );
-    expect(notices[0]).toContain('workspace MCP client budget is exhausted');
-    expect(notices[0]).not.toContain('authentication');
+    expect(notices[0].message).toContain(
+      'workspace MCP client budget is exhausted',
+    );
+    expect(notices[0].message).not.toContain('authentication');
     expect(budget.beginBulkPass).toHaveBeenCalledOnce();
     expect(budget.endBulkPass).toHaveBeenCalledOnce();
   });
@@ -5315,7 +5724,7 @@ describe('pooled session recovery', () => {
     const notices = await f.manager.recoverFailedConnections(
       new AbortController().signal,
     );
-    expect(notices[0]).toContain('reconnected');
+    expect(notices[0].message).toContain('reconnected');
     expect(f.pool.acquireForRecovery).toHaveBeenCalledTimes(1);
     expect(f.replacement.client.callTool).not.toHaveBeenCalled();
   });

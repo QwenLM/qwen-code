@@ -297,7 +297,7 @@ environment. This is kept as an escape hatch for at least one release.
 
 ### Connection-loss replay
 
-For tools outside the workspace MCP pool (including daemon sessions started with `--no-mcp-pool`), Qwen Code only reconnects and replays the current MCP tool call when the server has `trust: true`, the workspace is trusted, and the tool explicitly declares either `idempotentHint: true` or a consistent read-only annotation. Read-only annotations conflict with `destructiveHint: true` or `idempotentHint: false` and are not replayed.
+For tools outside the workspace MCP pool (including daemon sessions started with `QWEN_SERVE_NO_MCP_POOL=1`), Qwen Code only reconnects and replays the current MCP tool call when the server has `trust: true`, the workspace is trusted, and the tool explicitly declares either `idempotentHint: true` or a consistent read-only annotation. Read-only annotations conflict with `destructiveHint: true` or `idempotentHint: false` and are not replayed.
 
 Calls with missing annotations, conflicting annotations, an untrusted server, or an untrusted workspace are not replayed after a connection failure. Qwen Code reports that the result may be unknown because the server could have completed the operation before the response was lost. Verify the outcome before trying again. This conservative behavior can differ from earlier releases that transparently retried unannotated tools.
 

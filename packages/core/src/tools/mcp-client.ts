@@ -540,6 +540,7 @@ export class McpClient {
     private readonly workspaceContext: WorkspaceContext,
     private readonly debugMode: boolean,
     private readonly sendSdkMcpMessage?: SendSdkMcpMessage,
+    options: { trackTransportClose?: boolean } = {},
   ) {
     this.client = createMcpClient(
       `qwen-cli-mcp-client-${this.serverName}`,
@@ -548,7 +549,7 @@ export class McpClient {
     const onClose = this.client.onclose;
     this.client.onclose = () => {
       onClose?.();
-      if (this.isDisconnecting) return;
+      if (this.isDisconnecting || !options.trackTransportClose) return;
       // EOF/process exit does not invoke the SDK's onerror callback.
       this.lastTransportError ??= new Error('MCP transport closed');
       this.updateStatus(MCPServerStatus.DISCONNECTED);
@@ -767,6 +768,11 @@ export class McpClient {
           { applyConfigFilters: opts?.applyConfigFilters ?? true },
         ),
       ]);
+      // Individual listings swallow transport errors. A partial snapshot must
+      // not mark a connection active after another listing observed its close.
+      if (this.getStatus() !== MCPServerStatus.CONNECTED) {
+        throw new Error('MCP connection closed during discovery.');
+      }
       const tools = applyListingAppResourceUi(toolDiscovery.tools, resources);
 
       if (

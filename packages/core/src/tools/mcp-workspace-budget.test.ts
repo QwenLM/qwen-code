@@ -154,6 +154,61 @@ describe('WorkspaceMcpBudget', () => {
   });
 
   describe('refused batch coalescing', () => {
+    it('preserves unrelated refusals across partial recovery and publishes the merged state', () => {
+      const onEvent = vi.fn();
+      const budget = new WorkspaceMcpBudget({
+        clientBudget: 1,
+        mode: 'enforce',
+        onEvent,
+      });
+      budget.beginBulkPass();
+      budget.recordRefusal('a', 'stdio');
+      budget.recordRefusal('b', 'sse');
+      budget.endBulkPass();
+      onEvent.mockClear();
+      budget.beginBulkPass({ preserveRefusals: true });
+      budget.endBulkPass();
+      expect(budget.getRefusedServerNames()).toEqual(['a', 'b']);
+      expect(onEvent).not.toHaveBeenCalled();
+      budget.beginBulkPass({ preserveRefusals: true });
+      budget.recordRefusal('c', 'http');
+      budget.endBulkPass();
+      expect(budget.getRefusedServerNames()).toEqual(['a', 'b', 'c']);
+      expect(onEvent).toHaveBeenCalledOnce();
+      expect(onEvent.mock.calls[0][0].refusedServers).toEqual([
+        { name: 'a', transport: 'stdio', reason: 'budget_exhausted' },
+        { name: 'b', transport: 'sse', reason: 'budget_exhausted' },
+        { name: 'c', transport: 'http', reason: 'budget_exhausted' },
+      ]);
+      onEvent.mockClear();
+      budget.beginBulkPass({ preserveRefusals: true });
+      budget.clearRefusal('a');
+      budget.endBulkPass();
+      expect(budget.getRefusedServerNames()).toEqual(['b', 'c']);
+      expect(
+        onEvent.mock.calls[0][0].refusedServers.map(
+          (s: { name: string }) => s.name,
+        ),
+      ).toEqual(['b', 'c']);
+      budget.beginBulkPass();
+      budget.endBulkPass();
+      expect(budget.getRefusedServerNames()).toEqual([]);
+    });
+
+    it('lets full discovery reset refusals when overlapping a partial recovery', () => {
+      const budget = new WorkspaceMcpBudget({
+        clientBudget: 1,
+        mode: 'enforce',
+      });
+      budget.recordRefusal('old', 'stdio');
+      budget.beginBulkPass({ preserveRefusals: true });
+      budget.beginBulkPass();
+      budget.recordRefusal('current', 'stdio');
+      budget.endBulkPass();
+      budget.endBulkPass();
+      expect(budget.getRefusedServerNames()).toEqual(['current']);
+    });
+
     it('coalesces per-pass refusals into one refused_batch event', () => {
       const onEvent = vi.fn();
       const budget = new WorkspaceMcpBudget({

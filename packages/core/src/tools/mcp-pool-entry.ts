@@ -587,7 +587,10 @@ export class PoolEntry {
   attach(
     sessionId: string,
     view: SessionMcpView,
-    opts?: { skipReplay?: boolean; release?: () => void },
+    opts?: {
+      skipReplay?: boolean;
+      release?: (handle: PooledConnection) => void;
+    },
   ): PooledConnection {
     if (this.state === 'closed' || this.state === 'failed') {
       throw new Error(
@@ -644,6 +647,7 @@ export class PoolEntry {
 
     const handle = new PooledConnectionImpl(this, sessionId, opts?.release);
     this.subscriberHandles.set(sessionId, handle);
+    previousHandle?.release();
     return handle;
   }
 
@@ -677,7 +681,13 @@ export class PoolEntry {
    * registrations via `view.teardown()` and removes the ref.
    * Caller (pool) starts the drain timer when `refs.size === 0`.
    */
-  detach(sessionId: string): void {
+  detach(sessionId: string, expectedHandle?: PooledConnection): boolean {
+    if (
+      expectedHandle &&
+      this.subscriberHandles.get(sessionId) !== expectedHandle
+    ) {
+      return false;
+    }
     const view = this.subscribers.get(sessionId);
     if (view) {
       try {
@@ -691,6 +701,7 @@ export class PoolEntry {
     this.subscribers.delete(sessionId);
     this.subscriberHandles.delete(sessionId);
     this.refs.delete(sessionId);
+    return true;
   }
 
   /**
@@ -1290,7 +1301,7 @@ class PooledConnectionImpl implements PooledConnection {
     // Pool-supplied release callback. Wired by `pool.acquire` to call
     // `pool.release(id, sessionId)` so subscribers can `handle.release()`
     // without needing a pool reference.
-    private readonly releaseCallback?: () => void,
+    private readonly releaseCallback?: (handle: PooledConnection) => void,
   ) {}
 
   get id(): ConnectionId {
@@ -1367,6 +1378,6 @@ class PooledConnectionImpl implements PooledConnection {
     // review P1 #1 fix: prior to wiring this callback, calling
     // handle.release() was a no-op and leaked refs until the
     // session's `releaseSession` bulk-cleanup fired.
-    this.releaseCallback?.();
+    this.releaseCallback?.(this);
   }
 }

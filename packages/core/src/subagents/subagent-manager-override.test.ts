@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { EventEmitter } from 'node:events';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { Config, ApprovalMode, deriveConfig } from '../config/config.js';
 import { SubagentManager } from './subagent-manager.js';
 import type { SubagentConfig } from './types.js';
@@ -12,6 +13,12 @@ import { ToolNames } from '../tools/tool-names.js';
 import { EditTool } from '../tools/edit.js';
 import { ReadFileTool } from '../tools/read-file.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
+import { PromptRegistry } from '../prompts/prompt-registry.js';
+import { ResourceRegistry } from '../resources/resource-registry.js';
+import { SessionMcpView } from '../tools/session-mcp-view.js';
+import type { McpTransportPool } from '../tools/mcp-transport-pool.js';
+import { MCPServerStatus } from '../tools/mcp-client.js';
+import { connectionIdOf } from '../tools/mcp-pool-key.js';
 
 /**
  * Companion to `tools/agent/agent-override.test.ts`. A derived child must
@@ -19,6 +26,7 @@ import { createApprovalModeOverride } from '../tools/agent/agent.js';
  * than the parent's recorded reads.
  */
 describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', () => {
+  afterEach(() => vi.restoreAllMocks());
   // Bare mode keeps the registry small (ReadFile / Edit / Shell only) and
   // avoids needing extra setup for optional tools.
   const baseParams = {
@@ -183,6 +191,84 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
   });
 
   describe('per-agent mcpServers override', () => {
+    it('preserves parent prompts and resources when a pooled child discovers and stops', async () => {
+      const parent = new Config(baseParams);
+      const parentPrompts = new PromptRegistry();
+      const parentResources = new ResourceRegistry();
+      const prompt = { name: 'prompt', serverName: 'srv', invoke: vi.fn() };
+      const resource = {
+        name: 'parent',
+        uri: 'test://resource',
+        serverName: 'srv',
+      };
+      parentPrompts.registerPrompt(prompt);
+      parentResources.registerResource(resource);
+      vi.spyOn(parent, 'getPromptRegistry').mockReturnValue(parentPrompts);
+      vi.spyOn(parent, 'getResourceRegistry').mockReturnValue(parentResources);
+      const acquire: McpTransportPool['acquire'] = async (
+        name,
+        cfg,
+        sessionId,
+        tools,
+        prompts,
+        resources,
+      ) => {
+        const view = new SessionMcpView(
+          tools,
+          prompts,
+          resources,
+          sessionId,
+          name,
+          cfg,
+        );
+        view.applyPrompts([{ ...prompt, serverName: name }]);
+        view.applyResources([{ ...resource, name: 'child', serverName: name }]);
+        return Object.assign(new EventEmitter(), {
+          id: connectionIdOf(name, cfg),
+          transportId: connectionIdOf(name, cfg),
+          serverName: name,
+          entryIndex: 0,
+          sessionId,
+          toolsSnapshot: [],
+          promptsSnapshot: [],
+          resourcesSnapshot: [],
+          client: { getStatus: () => MCPServerStatus.CONNECTED },
+          release: () => view.teardown(),
+          updateConfig: vi.fn(),
+        }) as unknown as Awaited<ReturnType<McpTransportPool['acquire']>>;
+      };
+      parent.setMcpTransportPool({
+        acquire,
+        getBudget: () => undefined,
+      } as McpTransportPool);
+      const parentRegistry = await parent.createToolRegistry(undefined, {
+        skipDiscovery: true,
+      });
+      vi.spyOn(parent, 'getToolRegistry').mockReturnValue(parentRegistry);
+      const child = await callBuildOverride(
+        new SubagentManager(parent),
+        parent,
+        {
+          mcpServers: { srv: { command: 'child-server' } },
+        },
+      );
+      expect(child.getSessionId()).toBe(parent.getSessionId());
+      expect(child.getPromptRegistry().getPrompt('prompt')).toBeDefined();
+      expect(
+        child.getResourceRegistry().getResource('srv', 'test://resource')?.name,
+      ).toBe('child');
+      expect(parentPrompts.getPrompt('prompt')).toBe(prompt);
+      expect(parentResources.getResource('srv', 'test://resource')).toBe(
+        resource,
+      );
+      await child.getToolRegistry().stop();
+      expect(parentPrompts.getPrompt('prompt')).toBe(prompt);
+      expect(parentResources.getResource('srv', 'test://resource')).toBe(
+        resource,
+      );
+      await parentRegistry.stop();
+    });
+
     it('exposes session + agent servers via getMcpServers, with agent winning on key collision', async () => {
       const parent = new Config(baseParams);
       const parentRegistry = await parent.createToolRegistry(undefined, {

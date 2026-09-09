@@ -19,6 +19,8 @@ import type { SendSdkMcpMessage } from './mcp-client.js';
 import { removeMCPServerStatus } from './mcp-client.js';
 import { McpClientManager } from './mcp-client-manager.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
+import { connectionIdOf } from './mcp-pool-key.js';
+import { mcpSessionMetadataKey } from './mcp-session-config.js';
 import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
@@ -219,6 +221,8 @@ export class ToolRegistry {
   private permissionDeferred: Set<string> = new Set();
   private config: Config;
   private mcpClientManager: McpClientManager;
+  private copiedMcpToolsSource?: ToolRegistry;
+  private readonly copiedMcpTools = new Map<string, DiscoveredMCPTool>();
 
   constructor(
     config: Config,
@@ -461,17 +465,90 @@ export class ToolRegistry {
    * that were built with skipDiscovery.
    */
   copyDiscoveredToolsFrom(source: ToolRegistry): void {
+    this.copiedMcpToolsSource = source;
     for (const tool of source.tools.values()) {
       if (
         (tool instanceof DiscoveredTool || tool instanceof DiscoveredMCPTool) &&
         !this.tools.has(tool.name)
       ) {
         this.tools.set(tool.name, tool);
+        if (tool instanceof DiscoveredMCPTool) {
+          this.copiedMcpTools.set(tool.name, tool);
+        }
         if (source.isPermissionDeferred(tool.name)) {
           this.permissionDeferred.add(tool.name);
         }
       }
     }
+  }
+
+  async refreshMcpTools(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return;
+    const source = this.copiedMcpToolsSource;
+    await source?.refreshMcpTools(signal);
+    if (signal.aborted || source !== this.copiedMcpToolsSource) return;
+    await this.mcpClientManager.recoverFailedConnections(signal, {
+      consumeNotices: false,
+    });
+    if (signal.aborted || !source || source !== this.copiedMcpToolsSource)
+      return;
+
+    const canInherit = (tool: DiscoveredMCPTool): boolean =>
+      this.canInheritMcpServer(tool.serverName, source) &&
+      !this.isToolDisabled(tool.name, tool.permissionAliases);
+
+    for (const [name, copiedTool] of this.copiedMcpTools) {
+      const current = this.tools.get(name);
+      if (current && current !== copiedTool) {
+        this.copiedMcpTools.delete(name);
+        continue;
+      }
+      const next = source.tools.get(name);
+      if (current === next && next === copiedTool && canInherit(copiedTool))
+        continue;
+      this.tools.delete(name);
+      this.revealedDeferred.delete(name);
+      this.permissionDeferred.delete(name);
+      this.copiedMcpTools.delete(name);
+    }
+    for (const tool of source.tools.values()) {
+      if (
+        !(tool instanceof DiscoveredMCPTool) ||
+        this.tools.has(tool.name) ||
+        this.factories.has(tool.name) ||
+        !canInherit(tool)
+      ) {
+        continue;
+      }
+      this.registerTool(tool);
+      this.copiedMcpTools.set(tool.name, tool);
+      if (source.isPermissionDeferred(tool.name)) {
+        this.permissionDeferred.add(tool.name);
+      }
+    }
+  }
+
+  private canInheritMcpServer(
+    serverName: string,
+    source: ToolRegistry,
+  ): boolean {
+    if (
+      !this.config.isTrustedFolder() ||
+      this.config.isMcpServerDisabled(serverName) ||
+      this.config.isMcpServerPendingApproval(serverName)
+    )
+      return false;
+    const local = this.config.getMcpServers()?.[serverName];
+    const inherited = source.config.getMcpServers()?.[serverName];
+    // Overrides own their discovery even when it has not produced tools yet.
+    return (
+      local === inherited ||
+      (!!local &&
+        !!inherited &&
+        connectionIdOf(serverName, local) ===
+          connectionIdOf(serverName, inherited) &&
+        mcpSessionMetadataKey(local) === mcpSessionMetadataKey(inherited))
+    );
   }
 
   private removeDiscoveredTools(): void {
@@ -1082,7 +1159,36 @@ export class ToolRegistry {
       throw new Error('MCP resources are unavailable in untrusted folders.');
     }
 
-    return this.mcpClientManager.readResource(serverName, uri, options);
+    // This cursor starts at the current registry and follows its resource owner.
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    let owner: ToolRegistry = this;
+    const inheritedFrom: Array<[ToolRegistry, ToolRegistry]> = [];
+    while (
+      owner.config.getMcpTransportPool() &&
+      owner.copiedMcpToolsSource &&
+      owner.canInheritMcpServer(serverName, owner.copiedMcpToolsSource)
+    ) {
+      const source = owner.copiedMcpToolsSource;
+      inheritedFrom.push([owner, source]);
+      owner = source;
+    }
+    if (owner !== this) {
+      const signal = options?.signal ?? new AbortController().signal;
+      await owner.refreshMcpTools(signal);
+      signal.throwIfAborted();
+      if (
+        inheritedFrom.some(
+          ([child, source]) =>
+            source !== child.copiedMcpToolsSource ||
+            !child.canInheritMcpServer(serverName, source),
+        )
+      ) {
+        throw new Error(
+          `MCP server '${serverName}' is no longer available to this agent.`,
+        );
+      }
+    }
+    return owner.mcpClientManager.readResource(serverName, uri, options);
   }
 
   /**
@@ -1090,6 +1196,15 @@ export class ToolRegistry {
    * This method is idempotent and safe to call multiple times.
    */
   async stop(): Promise<void> {
+    this.copiedMcpToolsSource = undefined;
+    for (const [name, tool] of this.tools) {
+      if (tool instanceof DiscoveredMCPTool) {
+        this.tools.delete(name);
+        this.revealedDeferred.delete(name);
+        this.permissionDeferred.delete(name);
+      }
+    }
+    this.copiedMcpTools.clear();
     // Wait for any in-flight factory promises to settle before disposing, so
     // that tools which finish loading after stop() is called are still cleaned
     // up rather than leaking their listeners and resources.

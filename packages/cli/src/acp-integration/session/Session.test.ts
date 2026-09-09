@@ -16020,13 +16020,96 @@ describe('Session', () => {
     });
 
     describe('MCP demand recovery', () => {
-      it.each(['reconnected', 'remains disconnected'])(
-        'deduplicates %s notices across tool loops while refreshing each send',
-        async (state) => {
+      it('keeps a Stop-hook continuation in the same recovery notice turn', async () => {
+        const notice = {
+          serverName: 'counter',
+          message: "MCP server 'counter' reconnected.",
+        };
+        const recover =
+          mockToolRegistry.getMcpClientManager().recoverFailedConnections;
+        recover.mockResolvedValue([notice]);
+        const request = vi
+          .fn()
+          .mockResolvedValueOnce({
+            success: true,
+            output: { decision: 'block', reason: 'Continue after Stop hook' },
+          })
+          .mockResolvedValue({ success: true, output: {} });
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({ request });
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockChat.getHistory = vi
+          .fn()
+          .mockReturnValue([
+            { role: 'model', parts: [{ text: 'response text' }] },
+          ]);
+        mockChat.getLastModelMessageText = vi
+          .fn()
+          .mockReturnValue('response text');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(async () => createEmptyStream());
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+        expect(recover).toHaveBeenCalledTimes(2);
+        expect(mockLlmClient.tryCompressChat).toHaveBeenNthCalledWith(
+          2,
+          'test-session-id########1_stop_hook_1',
+          false,
+          expect.any(AbortSignal),
+        );
+        const notices = vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.filter(
+            ([update]) =>
+              update.update.sessionUpdate === 'agent_message_chunk' &&
+              update.update.content.type === 'text' &&
+              update.update.content.text === notice.message,
+          );
+        expect(notices).toHaveLength(1);
+      });
+
+      it('sends the model request after an MCP recovery exception', async () => {
+        const recover =
+          mockToolRegistry.getMcpClientManager().recoverFailedConnections;
+        recover.mockRejectedValue(new Error('MCP bookkeeping failed'));
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        const result = await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+        expect(result.stopReason).toBe('end_turn');
+        expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      });
+
+      it.each([
+        ['reconnected', 'reconnected', 1],
+        ['remains disconnected', 'remains disconnected', 1],
+        ['remains disconnected', 'reconnected', 2],
+        ['reconnected', 'remains disconnected', 2],
+      ] as const)(
+        'reports %s through a %s transition across tool loops (%s notices)',
+        async (state, middle, expectedCount) => {
           const notice = `MCP server 'counter' ${state}.`;
           const recover =
             mockToolRegistry.getMcpClientManager().recoverFailedConnections;
-          recover.mockResolvedValue([notice]);
+          recover.mockResolvedValue([
+            { serverName: 'counter', message: notice },
+          ]);
+          for (const next of [state, middle, state]) {
+            recover.mockResolvedValueOnce([
+              {
+                serverName: 'counter',
+                message: `MCP server 'counter' ${next}.`,
+              },
+            ]);
+          }
           const execute = vi
             .fn()
             .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' });
@@ -16079,14 +16162,14 @@ describe('Session', () => {
           expect(execute).toHaveBeenCalledTimes(2);
           expect(send).toHaveBeenCalledTimes(3);
           expect(recover).toHaveBeenCalledTimes(3);
-          expect(notices()).toHaveLength(1);
+          expect(notices()).toHaveLength(expectedCount);
           // A second connection loss in the turn can change declarations, even
           // when its recovery message is identical to the first one's.
           expect(
             mockLlmClient.setTools.mock.calls.length,
           ).toBeGreaterThanOrEqual(3);
           await session.prompt(prompt);
-          expect(notices()).toHaveLength(2);
+          expect(notices()).toHaveLength(expectedCount + 1);
         },
       );
 
@@ -16097,7 +16180,9 @@ describe('Session', () => {
           const notice = `MCP server 'counter' ${state}.`;
           const recover =
             mockToolRegistry.getMcpClientManager().recoverFailedConnections;
-          recover.mockResolvedValue([notice]);
+          recover.mockResolvedValue([
+            { serverName: 'counter', message: notice },
+          ]);
           mockChat.sendMessageStream = vi
             .fn()
             .mockResolvedValue(createEmptyStream());

@@ -970,6 +970,20 @@ export class AgentCore {
       const roundAbortController = createChildAbortController(abortController);
 
       try {
+        if (this.runtimeContext.getMcpTransportPool()) {
+          await this.runtimeContext
+            .getToolRegistry()
+            .refreshMcpTools(roundAbortController.signal);
+          if (roundAbortController.signal.aborted) {
+            terminateMode = AgentTerminateMode.CANCELLED;
+            break;
+          }
+          toolsList = await this.prepareTools();
+          if (roundAbortController.signal.aborted) {
+            terminateMode = AgentTerminateMode.CANCELLED;
+            break;
+          }
+        }
         const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${this.promptOrdinal++}`;
         turnCounter += 1;
 

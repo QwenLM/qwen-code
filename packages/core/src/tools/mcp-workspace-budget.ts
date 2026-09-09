@@ -79,11 +79,16 @@ export class WorkspaceMcpBudget {
   >();
 
   /**
-   * Snapshot-visible list — refused names from the most recent
-   * completed pass. NOT cleared on `endBulkPass` emit; only on
-   * `beginBulkPass` of the NEXT pass. Backs `getAccounting().refusedServerNames`.
+   * Snapshot-visible refusal set. Full discovery replaces it; partial
+   * recovery updates only the servers it reconsidered.
    */
   private lastRefusedServerNames: readonly string[] = [];
+  private readonly lastRefusedTransports = new Map<
+    string,
+    McpRefusedServer['transport']
+  >();
+  private preserveRefusals = false;
+  private refusalRemoved = false;
 
   /**
    * Hysteresis state for `budget_warning`. Initial `true` = "armed";
@@ -133,9 +138,7 @@ export class WorkspaceMcpBudget {
   }
 
   /**
-   * Snapshot `lastRefusedServerNames` for the snapshot route. Cleared
-   * on the start of the NEXT bulk pass (so a `GET /workspace/mcp`
-   * between passes still sees the last refusal set).
+   * Snapshot the refusal set for the workspace MCP route.
    */
   getRefusedServerNames(): readonly string[] {
     return this.lastRefusedServerNames;
@@ -224,17 +227,32 @@ export class WorkspaceMcpBudget {
    * (currently unused but reserved) don't drop refusals from the
    * outer pass.
    *
-   * Side effect: on the OUTERMOST `beginBulkPass` (depth 0 → 1), this
-   * resets `lastRefusedServerNames` so the new pass starts with a
-   * clean slate. Snapshot consumers between passes see the previous
-   * pass's refusals; the new pass's refusals appear once `endBulkPass`
-   * fires.
+   * Full discovery clears the previous snapshot. A partial recovery preserves
+   * it and calls clearRefusal for successes. If scopes overlap, full discovery
+   * owns the reset; pending results from either scope share the final flush.
    */
-  beginBulkPass(): void {
+  beginBulkPass(options: { preserveRefusals?: boolean } = {}): void {
     if (this.bulkPassDepth === 0) {
+      this.preserveRefusals = options.preserveRefusals === true;
+    }
+    // A full discovery reevaluates every server; recovery touches a subset.
+    if (options.preserveRefusals !== true) {
+      this.preserveRefusals = false;
       this.lastRefusedServerNames = [];
+      this.lastRefusedTransports.clear();
     }
     this.bulkPassDepth += 1;
+  }
+
+  clearRefusal(serverName: string): void {
+    this.pendingRefusalNames.delete(serverName);
+    this.pendingRefusalTransports.delete(serverName);
+    if (this.lastRefusedTransports.delete(serverName)) {
+      this.lastRefusedServerNames = Object.freeze([
+        ...this.lastRefusedTransports.keys(),
+      ]);
+      this.refusalRemoved = true;
+    }
   }
 
   /**
@@ -255,6 +273,7 @@ export class WorkspaceMcpBudget {
     this.bulkPassDepth -= 1;
     if (this.bulkPassDepth > 0) return;
     this.flushRefusedBatch();
+    this.preserveRefusals = false;
   }
 
   /**
@@ -264,7 +283,7 @@ export class WorkspaceMcpBudget {
    * (the out-of-bulk-pass length-1 inline flush).
    */
   private flushRefusedBatch(): void {
-    if (this.pendingRefusalNames.size === 0) return;
+    if (this.pendingRefusalNames.size === 0 && !this.refusalRemoved) return;
     if (this.clientBudget === undefined || this.mode !== 'enforce') {
       // Should be unreachable per recordRefusal's mode gate; defensive
       // drain to avoid leaking refusals into the next pass.
@@ -272,18 +291,22 @@ export class WorkspaceMcpBudget {
       this.pendingRefusalTransports.clear();
       return;
     }
-    const refusedServers: McpRefusedServer[] = [];
-    const names: string[] = [];
+    if (!this.preserveRefusals) this.lastRefusedTransports.clear();
     for (const name of this.pendingRefusalNames) {
       const transport = this.pendingRefusalTransports.get(name) ?? 'unknown';
-      refusedServers.push({
-        name,
-        transport,
-        reason: 'budget_exhausted',
-      });
-      names.push(name);
+      this.lastRefusedTransports.set(name, transport);
     }
-    this.lastRefusedServerNames = Object.freeze(names);
+    const refusedServers: McpRefusedServer[] = [
+      ...this.lastRefusedTransports,
+    ].map(([name, transport]) => ({
+      name,
+      transport,
+      reason: 'budget_exhausted',
+    }));
+    this.lastRefusedServerNames = Object.freeze([
+      ...this.lastRefusedTransports.keys(),
+    ]);
+    this.refusalRemoved = false;
     this.pendingRefusalNames.clear();
     this.pendingRefusalTransports.clear();
     if (this.onEvent) {

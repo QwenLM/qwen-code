@@ -1983,7 +1983,7 @@ export class Session implements SessionContext {
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
   private mcpRecoveryNoticeTurn?: string;
-  private readonly mcpRecoveryNotices = new Set<string>();
+  private readonly mcpRecoveryNotices = new Map<string, string>();
   private refreshContextFilesOnWrite = false;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly createdAt: number = Date.now();
@@ -7729,31 +7729,39 @@ export class Session implements SessionContext {
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
-    const mcpRecoveryNotices = await this.config
-      .getToolRegistry()
-      .getMcpClientManager()
-      .recoverFailedConnections(abortSignal);
+    try {
+      const mcpRecoveryNotices = await this.config
+        .getToolRegistry()
+        .getMcpClientManager()
+        .recoverFailedConnections(abortSignal);
+      if (abortSignal.aborted) {
+        return { responseStream: null, stopReason: 'cancelled' };
+      }
+      if (mcpRecoveryNotices.length > 0) {
+        // A later tool loop may need another connection or fresh declarations,
+        // but identical status messages should appear only once per user turn.
+        await llmClient.setTools();
+        await this.sendAvailableCommandsUpdate();
+        const recoveryTurnId = options.recoveryTurnId ?? promptId;
+        if (this.mcpRecoveryNoticeTurn !== recoveryTurnId) {
+          this.mcpRecoveryNoticeTurn = recoveryTurnId;
+          this.mcpRecoveryNotices.clear();
+        }
+        for (const notice of mcpRecoveryNotices) {
+          if (this.mcpRecoveryNotices.get(notice.serverName) === notice.message)
+            continue;
+          this.mcpRecoveryNotices.set(notice.serverName, notice.message);
+          await this.#emitAgentDiagnosticMessageSafely(
+            notice.message,
+            'Failed to emit MCP recovery status',
+          );
+        }
+      }
+    } catch (error) {
+      debugLogger.error('MCP recovery before model send failed', error);
+    }
     if (abortSignal.aborted) {
       return { responseStream: null, stopReason: 'cancelled' };
-    }
-    if (mcpRecoveryNotices.length > 0) {
-      // A later tool loop may need another connection or fresh declarations,
-      // but identical status messages should appear only once per user turn.
-      await llmClient.setTools();
-      await this.sendAvailableCommandsUpdate();
-      const recoveryTurnId = options.recoveryTurnId ?? promptId;
-      if (this.mcpRecoveryNoticeTurn !== recoveryTurnId) {
-        this.mcpRecoveryNoticeTurn = recoveryTurnId;
-        this.mcpRecoveryNotices.clear();
-      }
-      for (const notice of mcpRecoveryNotices) {
-        if (this.mcpRecoveryNotices.has(notice)) continue;
-        this.mcpRecoveryNotices.add(notice);
-        await this.#emitAgentDiagnosticMessageSafely(
-          notice,
-          'Failed to emit MCP recovery status',
-        );
-      }
     }
 
     let compressionDiagnostic: string | null = null;
