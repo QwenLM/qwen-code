@@ -732,8 +732,20 @@ describe('AcpConnection child exit cleanup', () => {
 
     resolveNewSession({ sessionId: 'stale-from-retired-cli' });
     resolveLoadSession({});
-    await newPromise;
-    await loadPromise;
+    // The guard must fail the call, not resolve it. Returning the retired
+    // CLI's payload lets qwenAgentManager.applySessionStateFromResult write
+    // the dead model/mode state into the live webview's baselines, and
+    // createNewSession hands that same promise to every concurrent caller via
+    // sessionCreateInFlight. Reverting either guard to `return response` reds
+    // both assertions below.
+    await expect(newPromise).rejects.toMatchObject({
+      code: ACP_ERROR_CODES.INTERNAL_ERROR,
+      data: { details: 'connection superseded' },
+    });
+    await expect(loadPromise).rejects.toMatchObject({
+      code: ACP_ERROR_CODES.INTERNAL_ERROR,
+      data: { details: 'connection superseded' },
+    });
 
     expect(acp.currentSessionId).toBeNull();
   });
@@ -781,8 +793,17 @@ describe('AcpConnection child exit cleanup', () => {
 
     resolveNewSession({ sessionId: 'stale-from-retired-cli' });
     resolveLoadSession({});
-    await newPromise;
-    await loadPromise;
+    // Same return-value pin as the disconnect() case, on the re-connect path:
+    // the retired CLI's payload must not reach the caller, or it is applied to
+    // the replacement connection's live webview state.
+    await expect(newPromise).rejects.toMatchObject({
+      code: ACP_ERROR_CODES.INTERNAL_ERROR,
+      data: { details: 'connection superseded' },
+    });
+    await expect(loadPromise).rejects.toMatchObject({
+      code: ACP_ERROR_CODES.INTERNAL_ERROR,
+      data: { details: 'connection superseded' },
+    });
 
     expect(acp.currentSessionId).toBe('live-session-2');
   });

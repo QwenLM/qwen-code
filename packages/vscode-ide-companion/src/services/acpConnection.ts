@@ -546,10 +546,15 @@ export class AcpConnection {
       mcpServers: [],
     });
     // A stale session/new can resolve after disconnect() (or a re-connect)
-    // retired this connection. Writing then would stamp the dead session's id
-    // onto the replacement connection's field, so bail out before the write.
+    // retired this connection. Handing the payload back would let the caller
+    // apply the retired CLI's model and mode state to the live webview
+    // (`applySessionStateFromResult` in qwenAgentManager.ts), and writing would
+    // stamp the dead session's id onto the replacement connection's field, so
+    // fail instead — the same shape the inbound callback guards use above.
     if (this.sdkConnection !== conn) {
-      return response;
+      throw RequestError.internalError({
+        details: 'connection superseded',
+      });
     }
     this.sessionId = response.sessionId || null;
     logger.log('[ACP] Session created with ID:', this.sessionId);
@@ -619,21 +624,13 @@ export class AcpConnection {
     const conn = this.ensureConnection();
     logger.log('[ACP] Sending session/load request for session:', sessionId);
     const cwd = cwdOverride || this.workingDir;
+    let response: LoadSessionResponse;
     try {
-      const response = await conn.loadSession({
+      response = await conn.loadSession({
         sessionId,
         cwd,
         mcpServers: [],
       });
-      logger.log('[ACP] Session load succeeded for session:', sessionId);
-      // A stale session/load can resolve after disconnect() (or a re-connect)
-      // retired this connection. Writing then would stamp the dead session's
-      // id onto the replacement connection's field; the normal path keeps the
-      // write, since the caller reports currentSessionId right after connect().
-      if (this.sdkConnection === conn) {
-        this.sessionId = sessionId;
-      }
-      return response;
     } catch (error) {
       logger.error(
         '[ACP] Session load request failed:',
@@ -641,6 +638,22 @@ export class AcpConnection {
       );
       throw error;
     }
+    // A stale session/load can resolve after disconnect() (or a re-connect)
+    // retired this connection. Handing the payload back would let the caller
+    // apply the retired CLI's model and mode state to the live webview
+    // (`applySessionStateFromResult` and `restoreBaselineSessionStateAfterLoad`
+    // in qwenAgentManager.ts), and writing would stamp the dead session's id
+    // onto the replacement connection's field, so fail instead. Checked outside
+    // the catch above so a supersede is not logged as a request failure, and
+    // before the success log so a discarded load prints no success line.
+    if (this.sdkConnection !== conn) {
+      throw RequestError.internalError({
+        details: 'connection superseded',
+      });
+    }
+    logger.log('[ACP] Session load succeeded for session:', sessionId);
+    this.sessionId = sessionId;
+    return response;
   }
 
   async listSessions(options?: {
