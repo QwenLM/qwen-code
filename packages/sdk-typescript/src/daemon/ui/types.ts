@@ -902,6 +902,11 @@ export type DaemonToolPreview =
 export type DaemonToolResultPreview =
   | DaemonTodoListPreview
   | {
+      kind: 'question_answers';
+      text: string;
+      answers: Array<{ question: string; answer: string }>;
+    }
+  | {
       kind: 'text';
       text: string;
     }

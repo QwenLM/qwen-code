@@ -53,6 +53,63 @@ function createTerminalTurnErrorScenario(sessionId: string) {
 
 for (const theme of THEMES) {
   test.describe(`web-shell screenshots (${theme})`, () => {
+    test('session overview', async ({ page }, testInfo) => {
+      const workspaceCwd = '/workspace/session-overview';
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd,
+        sessions: [
+          {
+            displayName: 'Review release approval',
+            isWaitingForPermission: true,
+          },
+          {
+            displayName: 'Choose the export format',
+            isWaitingForUserQuestion: true,
+          },
+          { displayName: 'Run the browser tests', hasActivePrompt: true },
+          { displayName: 'Update session documentation' },
+        ].map((session, index) => ({
+          ...session,
+          sessionId: `overview-${index}`,
+          workspaceCwd,
+          updatedAt: '2026-07-01T12:00:00.000Z',
+          branch: {
+            name:
+              index === 0
+                ? 'feature/session-overview-with-complete-metadata-in-constrained-viewports'
+                : 'feature/session-overview',
+            baseBranch: 'main',
+          },
+        })),
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await page
+        .getByRole('button', { name: 'Session Overview', exact: true })
+        .click();
+      await expect(
+        page.locator('[data-web-shell-session-panel]'),
+      ).toContainText('Review release approval');
+      await captureScreenshot(page, `session-overview-${theme}`);
+      await page
+        .getByRole('button', {
+          name: 'Details for Review release approval',
+          exact: true,
+        })
+        .click();
+      await expect(
+        page.getByRole('dialog', {
+          name: 'Review release approval',
+          exact: true,
+        }),
+      ).toBeVisible();
+      await captureScreenshot(page, `session-overview-details-${theme}`);
+    });
+
     test(`session transcript`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         events: [
