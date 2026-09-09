@@ -97,9 +97,13 @@ import {
 } from './local-bind-addresses.js';
 import { isLoopbackAddress, isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
-import { installSelfOriginStripMiddleware } from './server/self-origin.js';
+import {
+  installSelfOriginStripMiddleware,
+  installRemoteSelfOriginMiddleware,
+} from './server/self-origin.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
-import { resolveServeToken } from './serve-token.js';
+import { resolveRemoteServeToken } from './serve-token.js';
+import { printRemoteQuickstart } from './remote-quickstart.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   allowOriginCors,
@@ -722,7 +726,6 @@ export function formatChannelWorkerDaemonUrl(
   host: string,
   port: number,
   tls = false,
-  boundFamily?: 'IPv4' | 'IPv6',
   ipv6LoopbackAssigned: boolean = hostAssignsIpv6Loopback(),
 ): string {
   const scheme = tls ? 'https' : 'http';
@@ -736,26 +739,15 @@ export function formatChannelWorkerDaemonUrl(
   // binds `::` while its loopback carries no `::1` (e.g.
   // `net.ipv6.conf.lo.disable_ipv6=1`) has only `127.0.0.1`. The old
   // spelling-based rule handed the latter `[::1]`, and the first worker's
-  // `fetch failed` exited the daemon. The v4 wildcard keeps v4 loopback:
-  // measured against `0.0.0.0`, `dial ::1` is ECONNREFUSED.
-  //
-  // An EMPTY --hostname decides by the socket that actually bound, not by
-  // spelling (R10-1): Node's `_listen2` tries the IPv6 unspecified address
-  // for it and falls back to `0.0.0.0` when IPv6 is unavailable, so on the
-  // fallback host the socket is IPv4 while the spelling said IPv6 — handing
-  // workers `[::1]` there dialled an address nothing listens on, and the
-  // first worker's failure exited the daemon. Explicit `::`/`[::]` and
+  // `fetch failed` exited the daemon. Explicit `::`/`[::]` and
   // `0.0.0.0` keep their spelling-based family mapping: those binds fail
   // loud when their family is unavailable, so the spelling cannot lie about
-  // them.
+  // them. An EMPTY --hostname never reaches here: runQwenServe refuses it as
+  // operator error before any listener exists, so there is no empty-host
+  // branch to keep in sync with the socket family.
   const v6Loopback = ipv6LoopbackAssigned
     ? `${scheme}://[::1]:${port}`
     : `${scheme}://127.0.0.1:${port}`;
-  if (normalized === '') {
-    return boundFamily === 'IPv4'
-      ? `${scheme}://127.0.0.1:${port}`
-      : v6Loopback;
-  }
   if (canonicalIp === '::') {
     return v6Loopback;
   }
@@ -2597,12 +2589,16 @@ function createBootstrapServeApp(input: {
   const localTerminalOpenAvailable = isLocalTerminalAvailable();
 
   installSelfOriginStripMiddleware(app, getPort, opts.hostname);
+  // Same admission order as the runtime app (createServeApp): Host gate, then
+  // the remote same-origin check, then the CORS wall — so a request gets the
+  // same reject body in every boot phase.
+  app.use(hostAllowlist(opts.hostname, getPort));
+  installRemoteSelfOriginMiddleware(app, opts.hostname, opts.token);
   if (opts.allowOrigins && opts.allowOrigins.length > 0) {
     app.use(allowOriginCors(parseAllowOriginPatterns(opts.allowOrigins)));
   } else {
     app.use(denyBrowserOriginCors);
   }
-  app.use(hostAllowlist(opts.hostname, getPort));
 
   const healthHandler = (req: Request, res: Response): void => {
     const runtimeError = getRuntimeError();
@@ -3107,9 +3103,14 @@ function runSynchronousRequestGate(
  * Token resolution order:
  *   1. explicit `opts.token`
  *   2. `QWEN_SERVER_TOKEN` env var
+ *   3. a generated ephemeral bearer when neither source is present and the
+ *      bind is non-loopback (printed once at startup; loopback binds never
+ *      generate and keep the trusted tokenless mode)
  *
- * Boot refuses to start when bound beyond loopback without a token; this is a
- * hard rule, not a warning, per the threat model in the design issue.
+ * Boot refuses to start when a supplied token source is explicitly empty;
+ * that is a hard rule, not a warning, per the threat model in the design
+ * issue. A non-loopback bind with no source at all generates instead of
+ * refusing.
  */
 interface DaemonLoggerLifecycleCallbacks {
   initialized(logger: DaemonLogger): void;
@@ -3230,11 +3231,33 @@ export async function runQwenServe(
   }
 }
 
+let brokenPipeGuardInstalled = false;
+
+/**
+ * stdout/stderr may be pipes whose reader leaves (`qwen serve | head -n 1`,
+ * a log shipper closing its end). Node reports EPIPE as an asynchronous
+ * 'error' event that no try/catch around write() can see; without a listener
+ * it becomes an uncaught exception and kills the already-listening daemon
+ * together with its sessions and channel workers. The daemon's job is
+ * serving; a vanished log reader is not a reason to stop it. Non-EPIPE
+ * stream errors are re-thrown so real faults still surface.
+ */
+function installServeBrokenPipeGuard(): void {
+  if (brokenPipeGuardInstalled) return;
+  brokenPipeGuardInstalled = true;
+  const ignoreEpipe = (err: NodeJS.ErrnoException): void => {
+    if (err.code !== 'EPIPE') throw err;
+  };
+  process.stdout.on('error', ignoreEpipe);
+  process.stderr.on('error', ignoreEpipe);
+}
+
 async function runQwenServeImpl(
   optsIn: RunQwenServeOptions,
   deps: RunQwenServeDeps,
   loggerLifecycle: DaemonLoggerLifecycleCallbacks,
 ): Promise<RunHandle> {
+  installServeBrokenPipeGuard();
   const runStartedAt = performance.now();
   // Embedded callers pass the credential through `optsIn`. Remove any ambient
   // copy before freezing runtime environments or starting auxiliary workers.
@@ -3319,11 +3342,29 @@ async function runQwenServeImpl(
   };
   loggerLifecycle.scrubApplied(restoreScrubbedLoaderEnv);
 
-  const token = resolveServeToken(optsIn.token);
+  // An empty --hostname (an unset variable in an alias or compose file) makes
+  // Node bind every interface; treat it as operator error rather than an
+  // intentional wildcard, so a config mistake can never silently produce a
+  // remote-listening daemon.
+  if (!optsIn.hostname.trim()) {
+    throw new Error(
+      'Invalid --hostname: empty value binds every interface. Pass an ' +
+        'explicit address (e.g. --hostname 0.0.0.0) or omit the flag.',
+    );
+  }
+
   const bindHostname =
     optsIn.hostname.toLowerCase() === 'localhost'
       ? (await (deps.bindHostnameLookup ?? lookup)(optsIn.hostname)).address
       : optsIn.hostname;
+  // Generation keys on the operator's spelling (with the literal `localhost`
+  // resolved once). The fail-closed backstop for a spelling that resolves
+  // off-loopback is the resolved-address refusal further below — it must not
+  // be folded into this operand, which by construction never sees it.
+  const { token, generated: generatedToken } = resolveRemoteServeToken(
+    optsIn.token,
+    isLoopbackBind(optsIn.hostname),
+  );
   const trustedLoopbackMode = isTrustedLoopbackMode({
     loopbackBind: isLoopbackAddress(bindHostname),
     tokenConfigured: token !== undefined,
@@ -3570,8 +3611,10 @@ async function runQwenServeImpl(
 
   if (!isLoopbackBind(opts.hostname) && !token) {
     throw new Error(
-      `Refusing to bind ${opts.hostname}:${opts.port} without a bearer token. ` +
-        `Set ${QWEN_SERVER_TOKEN_ENV} or pass --token, or rebind to loopback ` +
+      `Refusing to bind ${opts.hostname}:${opts.port} without a bearer ` +
+        `token (an explicitly empty --token or ${QWEN_SERVER_TOKEN_ENV} ` +
+        `counts as none, since a blank source never generates one). Set ` +
+        `${QWEN_SERVER_TOKEN_ENV} or pass --token, or rebind to loopback ` +
         `(127.0.0.0/8, localhost, ::1, or [::1]).`,
     );
   }
@@ -4254,17 +4297,25 @@ async function runQwenServeImpl(
             'bind (the static shell has no secrets; the API stays token-gated). ' +
             'Pass --no-web to disable the UI.',
         );
-        // The shell HTML/JS loads (GET carries no Origin), but its same-origin
-        // POSTs (create session, prompt, permission vote) send an Origin the
-        // daemon's CORS wall rejects with 403 unless allow-listed — so without
-        // --allow-origin the UI is effectively read-only on a non-loopback
-        // bind. Front the daemon with a same-origin reverse proxy, or pass
-        // --allow-origin <origin>, to make mutations work.
+        // The remote same-origin exception matches the browser's Origin
+        // against the scheme and Host the daemon's own socket sees, so it
+        // covers direct listeners only. WebSocket upgrades (terminal, voice)
+        // admit loopback/allowlisted origins alone, and ANY intermediary
+        // that terminates TLS or rewrites the Host header (nginx's default
+        // proxy_set_header, k8s Ingress) presents an Origin this daemon
+        // cannot match — name them so the operator is not left with a
+        // silently read-only shell. Port translation alone forwards Host
+        // verbatim and needs nothing.
         if (!opts.allowOrigins || opts.allowOrigins.length === 0) {
           writeStderrLine(
-            'qwen serve: without --allow-origin the Web Shell is read-only on a ' +
-              'non-loopback bind — same-origin POSTs are blocked by CORS (403). ' +
-              'Pass --allow-origin <origin> or front it with a same-origin proxy.',
+            'qwen serve: same-origin Web Shell HTTP requests work without ' +
+              '--allow-origin, but WebSocket-backed features (terminal, voice) ' +
+              'and browsers reaching the daemon through a TLS-terminating ' +
+              'proxy still need --allow-origin <origin>. A plain-HTTP ' +
+              'intermediary that rewrites the Host header (nginx default ' +
+              'proxy_set_header, k8s Ingress) needs --allow-origin <origin> ' +
+              'for the origin the browser sees, unless it forwards Host ' +
+              'verbatim; port translation alone (ssh -L, docker -p) is fine.',
           );
         }
       }
@@ -6457,9 +6508,7 @@ async function runQwenServeImpl(
           // this warms are what `runtime.memory.children` sums, and a child
           // nobody refreshed reads as unmeasured there. No `isChannelLive`
           // filter is needed — `refreshChildResource` already no-ops without a
-          // live channel — and no concurrency limit is added, because the call
-          // is single-flight per bridge and the number of bridges is capped by
-          // MAX_DAEMON_WORKSPACES.
+          // live channel and is single-flight per bridge.
           for (const managed of workspaceRegistry.listManaged()) {
             // The shipped bridge's `refreshChildResource` never rejects: it
             // catches the RPC failure itself, keeps the last good cache, and
@@ -8714,11 +8763,6 @@ async function runQwenServeImpl(
             workerHostname,
             actualPort,
             tlsOptions !== undefined,
-            typeof addr === 'object' &&
-              addr &&
-              (addr.family === 'IPv4' || addr.family === 'IPv6')
-              ? addr.family
-              : undefined,
           );
 
           (
@@ -9449,6 +9493,24 @@ async function runQwenServeImpl(
         `qwen serve listening on ${url} (mode=${opts.mode}, ` +
           `workspace=${boundWorkspace})`,
       );
+      // The quickstart block keys off the address the socket actually bound:
+      // a DNS name that resolves to loopback binds loopback only, so its
+      // addresses and QR would be undialable from anywhere else, while a
+      // generated bearer is still printed because it is the operator's only
+      // way in.
+      const boundAddress =
+        typeof addr === 'object' && addr ? addr.address : opts.hostname;
+      if (token) {
+        void printRemoteQuickstart({
+          bind: opts.hostname,
+          boundAddress,
+          port: actualPort,
+          tls: Boolean(tlsOptions),
+          token,
+          generated: generatedToken,
+          web: webShellMounted,
+        });
+      }
       // Operator log on stderr too (systemd/docker/k8s default
       // captures only stderr for service diagnostics, and the
       // workspace= breadcrumb is the single piece of information

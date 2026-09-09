@@ -4332,6 +4332,74 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection().models?.[0]?.reasoningPreview?.effort).toBe('low');
   });
 
+  it('preserves both Plan fields when context omits modes and clears policy on a confirmed exit', async () => {
+    const session = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        currentMode: 'plan',
+        planExecutionMode: 'yolo',
+      },
+    });
+    session.context.mockResolvedValueOnce({
+      ...contextStatus('session-a'),
+      state: {},
+    });
+    await actions.getContext();
+    expect(getConnection()).toMatchObject({
+      currentMode: 'plan',
+      planExecutionMode: 'yolo',
+    });
+    session.context.mockResolvedValueOnce({
+      ...contextStatus('session-a'),
+      state: { modes: { currentModeId: 'default' } },
+    });
+    await actions.getContext();
+    expect(getConnection().currentMode).toBe('default');
+    expect(getConnection().planExecutionMode).toBeUndefined();
+  });
+
+  it('keeps the selected Plan permission when an older context read finishes later', async () => {
+    const session = createMockSession('session-a');
+    const staleContext = createDeferred<ReturnType<typeof contextStatus>>();
+    session.context.mockReturnValueOnce(staleContext.promise);
+    session.client.setSessionApprovalMode.mockResolvedValueOnce({
+      sessionId: 'session-a',
+      mode: 'plan',
+      planExecutionMode: 'yolo',
+      previous: 'default',
+      persisted: false,
+    });
+    const { actions, getConnection } = createActionsHarness({ session });
+    const pendingContext = actions.getContext();
+    await actions.setApprovalMode('yolo', { planMode: true });
+    expect(session.client.setSessionApprovalMode).toHaveBeenCalledWith(
+      'session-a',
+      'yolo',
+      expect.objectContaining({ planMode: true }),
+    );
+    staleContext.resolve({
+      ...contextStatus('session-a'),
+      state: { modes: { currentModeId: 'default' } },
+    });
+    await pendingContext;
+    expect(getConnection()).toMatchObject({
+      currentMode: 'plan',
+      planExecutionMode: 'yolo',
+    });
+    session.client.setSessionApprovalMode.mockResolvedValueOnce({
+      sessionId: 'session-a',
+      mode: 'yolo',
+      previous: 'plan',
+      persisted: false,
+    });
+    await actions.setApprovalMode('yolo', { planMode: false });
+    expect(getConnection().currentMode).toBe('yolo');
+    expect(getConnection().planExecutionMode).toBeUndefined();
+  });
+
   it('does not apply a late approval mode to a replacement attachment', async () => {
     const source = createMockSession('session-a', 'client-a');
     const target = createMockSession('session-a', 'client-b');

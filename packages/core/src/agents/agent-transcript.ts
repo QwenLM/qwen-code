@@ -27,6 +27,7 @@ import {
   AgentEventType,
   type AgentEventEmitter,
   type AgentToolCallEvent,
+  type AgentToolOutputUpdateEvent,
   type AgentToolResponsesFinalizedEvent,
   type AgentRoundTextEvent,
   type AgentStreamTextEvent,
@@ -36,6 +37,7 @@ import type {
   AgentBootstrapRecordPayload,
   ChatRecord,
 } from '../services/chatRecordingService.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { MAX_SUBAGENT_DEPTH_LIMIT } from '../config/config.js';
 import type { Config, SandboxConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -777,6 +779,28 @@ export function attachJsonlTranscriptWriter(
     });
   };
 
+  const sessionReadiness = new Map<string, boolean>();
+  const recordSessionReadiness = (callId: string, ready: boolean) => {
+    if (sessionReadiness.get(callId) === ready) return;
+    sessionReadiness.set(callId, ready);
+    recordSystem('agent_session_ready', {
+      callId,
+      subagentSessionReady: ready,
+    });
+  };
+
+  const onToolOutputUpdate = (event: AgentToolOutputUpdateEvent) => {
+    const output = event.outputChunk;
+    if (
+      typeof output === 'object' &&
+      output !== null &&
+      'subagentSessionReady' in output &&
+      typeof output.subagentSessionReady === 'boolean'
+    ) {
+      recordSessionReadiness(event.callId, output.subagentSessionReady);
+    }
+  };
+
   const onToolCall = (event: AgentToolCallEvent) => {
     append({
       ...baseFields('assistant'),
@@ -793,6 +817,9 @@ export function attachJsonlTranscriptWriter(
         ],
       },
     });
+    if (event.name === ToolNames.AGENT) {
+      recordSessionReadiness(event.callId, false);
+    }
   };
 
   const onToolResponsesFinalized = (
@@ -804,6 +831,12 @@ export function attachJsonlTranscriptWriter(
         message: { role: 'user', parts: response.responseParts },
         toolCallResult: {
           callId: response.callId,
+          ...(sessionReadiness.has(response.callId) &&
+          response.responseParts.some(
+            (part) => part.functionResponse?.response?.['error'],
+          )
+            ? { status: 'error' as const }
+            : {}),
           ...(response.durationMs !== undefined
             ? { durationMs: response.durationMs }
             : {}),
@@ -864,6 +897,7 @@ export function attachJsonlTranscriptWriter(
   emitter.on(AgentEventType.ROUND_TEXT, onRoundText);
   emitter.on(AgentEventType.STREAM_TEXT, appendStreamText);
   emitter.on(AgentEventType.TOOL_CALL, onToolCall);
+  emitter.on(AgentEventType.TOOL_OUTPUT_UPDATE, onToolOutputUpdate);
   emitter.on(AgentEventType.TOOL_RESPONSES_FINALIZED, onToolResponsesFinalized);
   emitter.on(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
 
@@ -871,6 +905,7 @@ export function attachJsonlTranscriptWriter(
     emitter.off(AgentEventType.ROUND_TEXT, onRoundText);
     emitter.off(AgentEventType.STREAM_TEXT, appendStreamText);
     emitter.off(AgentEventType.TOOL_CALL, onToolCall);
+    emitter.off(AgentEventType.TOOL_OUTPUT_UPDATE, onToolOutputUpdate);
     emitter.off(
       AgentEventType.TOOL_RESPONSES_FINALIZED,
       onToolResponsesFinalized,
