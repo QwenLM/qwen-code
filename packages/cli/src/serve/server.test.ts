@@ -35984,7 +35984,10 @@ describe('GET /session/:id/events (SSE)', () => {
       .get('/session/sess-%E2%80%A8A/events?connectReason=resume')
       .set('Host', `127.0.0.1:${baseOpts.port}`)
       .set('X-Qwen-Client-Id', 'client-1')
-      .then((response) => response);
+      .then(
+        (response) => response,
+        (error: Error) => error,
+      );
 
     await vi.waitFor(() => {
       expect(subscribeOptions?.onSubscriberDiagnostic).toBeTypeOf('function');
@@ -36049,8 +36052,13 @@ describe('GET /session/:id/events (SSE)', () => {
 
     release.resolve();
     const res = await responsePromise;
-    expect(res.headers['x-qwen-sse-stream-id']).toBe(streamId);
-    expect(getActiveSseCount()).toBe(beforeActive);
+    expect(res).toBeInstanceOf(Error);
+    // `res.destroy()` tears the client socket down before the server-side
+    // 'close' listener runs, so the active-stream counter settles a tick
+    // after the request promise rejects.
+    await vi.waitFor(() => {
+      expect(getActiveSseCount()).toBe(beforeActive);
+    });
   });
 
   it('starts live lag measurement only after replay_complete settles', async () => {

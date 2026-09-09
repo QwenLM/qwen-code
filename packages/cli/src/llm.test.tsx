@@ -35,7 +35,7 @@ import { clearCiEnv } from './test-utils/ci-env.js';
 import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
@@ -1751,6 +1751,219 @@ describe('llm.tsx main function', () => {
   it('creates non-interactive prompt ids that preserve session correlation', () => {
     expect(createNonInteractivePromptId('test-session-id')).toBe(
       'test-session-id########0',
+    );
+  });
+
+  it('continues the prompt id chain when the -p run resumes a session', () => {
+    // Every headless `-p` process would otherwise mint `########0` again, and
+    // loadSession keeps only the last file-history snapshot per promptId, so
+    // the earlier run's /rewind target for turn 0 would be dropped.
+    const records = [
+      {
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId: 'test-session-id',
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: '/tmp',
+        version: 'test',
+        message: { role: 'user', parts: [{ text: 'first turn' }] },
+      },
+      {
+        uuid: 'u2',
+        parentUuid: 'u1',
+        sessionId: 'test-session-id',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'ui_telemetry',
+        cwd: '/tmp',
+        version: 'test',
+        systemPayload: { uiEvent: { prompt_id: 'test-session-id########3' } },
+      },
+    ] as unknown as ChatRecord[];
+
+    expect(createNonInteractivePromptId('test-session-id', records)).toBe(
+      'test-session-id########4',
+    );
+  });
+
+  it('continues past a claimed turn 0 that the user-turn fallback cannot see', () => {
+    // computeInitialTurnFromHistory returns 0 here — highest claimed turn is
+    // 0, and the only user record has blank text so its fallback count stays
+    // 0 (`-p '   '` reaches the model, `llm.tsx` only rejects a falsy input).
+    // Seeding from that 0 would re-mint `########0`, the very collision this
+    // function exists to prevent.
+    const records = [
+      {
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId: 'test-session-id',
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: '/tmp',
+        version: 'test',
+        message: { role: 'user', parts: [{ text: '   ' }] },
+      },
+      {
+        uuid: 'u2',
+        parentUuid: 'u1',
+        sessionId: 'test-session-id',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'ui_telemetry',
+        cwd: '/tmp',
+        version: 'test',
+        systemPayload: { uiEvent: { prompt_id: 'test-session-id########0' } },
+      },
+    ] as unknown as ChatRecord[];
+
+    expect(createNonInteractivePromptId('test-session-id', records)).toBe(
+      'test-session-id########1',
+    );
+  });
+
+  it('passes the resumed transcript through to the -p prompt id', async () => {
+    // Pins the call site, not just the function: without the
+    // `getResumedSessionData()` argument in main(), the shipped `-p` path
+    // reverts to `########0` on every resume while the unit tests above stay
+    // green.
+    const originalNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
+    const originalIsTTY = Object.getOwnPropertyDescriptor(
+      process.stdin,
+      'isTTY',
+    );
+    process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const validatorModule = await import('./validateNonInterActiveAuth.js');
+    const nonInteractiveModule = await import('./nonInteractiveCli.js');
+    const initializerModule = await import('./core/initializer.js');
+    const startupWarningsModule = await import('./utils/startupWarnings.js');
+    const userStartupWarningsModule = await import(
+      './utils/userStartupWarnings.js'
+    );
+
+    vi.mocked(cleanupModule.runExitCleanup).mockResolvedValue(undefined);
+    vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      memoryFileCount: 0,
+    });
+    vi.spyOn(startupWarningsModule, 'getStartupWarnings').mockResolvedValue([]);
+    vi.spyOn(
+      userStartupWarningsModule,
+      'getUserStartupWarnings',
+    ).mockResolvedValue([]);
+    const runNonInteractiveSpy = vi
+      .spyOn(nonInteractiveModule, 'runNonInteractive')
+      .mockResolvedValue(0);
+
+    const configStub = {
+      isInteractive: () => false,
+      getQuestion: () => 'hello',
+      getSandbox: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      getModelProvidersConfig: () => undefined,
+      initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getFailedMcpServerNames: () => [],
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getMemoryFileCount: () => 0,
+      getProjectRoot: () => '/',
+      getOutputFormat: () => OutputFormat.TEXT,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getContentGeneratorConfig: () => undefined,
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      getProxy: () => undefined,
+      getResumedSessionData: () => ({
+        conversation: {
+          sessionId: 'test-session-id',
+          messages: [
+            {
+              uuid: 'u1',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: new Date().toISOString(),
+              type: 'system',
+              subtype: 'ui_telemetry',
+              cwd: '/tmp',
+              version: 'test',
+              systemPayload: {
+                uiEvent: { prompt_id: 'test-session-id########3' },
+              },
+            },
+          ],
+        },
+      }),
+    } as unknown as Config;
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: [],
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadCliConfig).mockResolvedValue(configStub);
+    vi.spyOn(validatorModule, 'validateNonInteractiveAuth').mockResolvedValue(
+      configStub,
+    );
+
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof MockProcessExitError)) {
+        throw error;
+      }
+    } finally {
+      processExitSpy.mockRestore();
+      if (originalIsTTY) {
+        Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+      } else {
+        delete (process.stdin as { isTTY?: unknown }).isTTY;
+      }
+      if (originalNoRelaunch !== undefined) {
+        process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
+      } else {
+        delete process.env['QWEN_CODE_NO_RELAUNCH'];
+      }
+    }
+
+    expect(runNonInteractiveSpy).toHaveBeenCalledTimes(1);
+    expect(runNonInteractiveSpy.mock.calls[0]?.[3]).toBe(
+      'test-session-id########4',
     );
   });
 
