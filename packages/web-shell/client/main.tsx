@@ -5,6 +5,7 @@ import {
   DaemonWorkspaceProvider,
   type DaemonProductSessionContext,
 } from '@qwen-code/web-shell/daemon-react-sdk';
+import { BrowserTurnNotifications } from './browser-turn-notifications';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
@@ -23,7 +24,7 @@ import './styles/standalone.css';
 
 const DAEMON_BASE_URL = getDaemonBaseUrl();
 
-const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu'] as const;
+const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu', 'plan'] as const;
 
 const LANGUAGE_STORAGE_KEY = 'qwen-code-web-shell-language';
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';
@@ -253,47 +254,49 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
         <RootErrorFallback error={error} onRetry={reset} language={language} />
       )}
     >
-      <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
-        <WorkspaceSessionProvider
-          sessionId={sessionId}
-          workspaceId={workspaceId}
-          sessionContext={sessionContext}
-          webShellProps={{
-            theme,
-            onThemeChange: handleThemeChange,
-            language,
-            onLanguageChange: handleLanguageChange,
-            onBrandResolved: handleBrandResolved,
-            onSessionIdChange: handleSessionIdChange,
-            sidebar: { enabled: true, showLive: true },
-            header: {
-              items: [
-                'title',
-                'environment',
-                'rightPanel',
-                'tokenUsage',
-                'contextUsage',
-              ],
-            },
-            rightPanel: {
-              items: ['review', 'sideTask', 'terminal'],
-            },
-            environmentPanel: {
-              items: [
-                'environment',
-                'subagents',
-                'backgroundTasks',
-                'attachments',
-                'artifacts',
-              ],
-            },
-            compactThinking: true,
-            markdownTableMode: 'advanced',
-            composerToolbarAdditionalActions:
-              STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
-          }}
-        />
-      </DaemonWorkspaceProvider>
+      <BrowserTurnNotifications language={language}>
+        <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
+          <WorkspaceSessionProvider
+            sessionId={sessionId}
+            workspaceId={workspaceId}
+            sessionContext={sessionContext}
+            webShellProps={{
+              theme,
+              onThemeChange: handleThemeChange,
+              language,
+              onLanguageChange: handleLanguageChange,
+              onBrandResolved: handleBrandResolved,
+              onSessionIdChange: handleSessionIdChange,
+              sidebar: { enabled: true, showLive: true },
+              header: {
+                items: [
+                  'title',
+                  'environment',
+                  'rightPanel',
+                  'tokenUsage',
+                  'contextUsage',
+                ],
+              },
+              rightPanel: {
+                items: ['review', 'sideTask', 'terminal'],
+              },
+              environmentPanel: {
+                items: [
+                  'environment',
+                  'subagents',
+                  'backgroundTasks',
+                  'attachments',
+                  'artifacts',
+                ],
+              },
+              compactThinking: true,
+              markdownTableMode: 'advanced',
+              composerToolbarAdditionalActions:
+                STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
+            }}
+          />
+        </DaemonWorkspaceProvider>
+      </BrowserTurnNotifications>
     </ErrorBoundary>
   );
 }

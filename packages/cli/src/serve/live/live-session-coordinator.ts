@@ -1759,9 +1759,13 @@ export class LiveSessionCoordinator {
           if (update?.['sessionUpdate'] === 'agent_message_chunk') {
             const source = updateSource(update);
             if (source === 'background_notification') {
-              announcement = updateText(update);
+              const text = updateText(update);
+              announcement = announcement
+                ? appendBounded(announcement, `\n${text}`)
+                : text;
               response = '';
-              backgroundTaskId = updateBackgroundTaskId(update);
+              const taskId = updateBackgroundTaskId(update);
+              if (taskId !== undefined) backgroundTaskId = taskId;
             } else if (source === 'background_notification_response') {
               response = appendBounded(response, updateText(update));
             }

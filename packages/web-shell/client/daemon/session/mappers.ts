@@ -412,11 +412,28 @@ export function updateConnectionFromDaemonEvent(
       }
       break;
     }
+    case 'session_snapshot': {
+      const data = getRecord(event.data);
+      const mode = getString(data, 'currentApprovalMode');
+      if (mode)
+        setConnection((current) => ({
+          ...current,
+          currentMode: mode,
+          planExecutionMode:
+            mode === 'plan' ? getString(data, 'planExecutionMode') : undefined,
+        }));
+      break;
+    }
     case 'approval_mode_changed': {
       const data = getRecord(event.data);
       const mode = getString(data, 'next') ?? getString(data, 'mode');
       if (mode) {
-        setConnection((current) => ({ ...current, currentMode: mode }));
+        setConnection((current) => ({
+          ...current,
+          currentMode: mode,
+          planExecutionMode:
+            mode === 'plan' ? getString(data, 'planExecutionMode') : undefined,
+        }));
       }
       break;
     }
@@ -707,6 +724,14 @@ export function getCurrentMode(
 ): string | undefined {
   const modes = getRecord(status?.state?.modes);
   return getString(modes, 'currentModeId') ?? getString(modes, 'currentMode');
+}
+
+export function getPlanExecutionMode(
+  status: DaemonSessionContextStatus | undefined,
+): string | undefined {
+  if (getCurrentMode(status) !== 'plan') return undefined;
+  const modes = getRecord(status?.state?.modes);
+  return getString(getRecord(modes?.['_meta']), 'planExecutionMode');
 }
 
 export function getCurrentModel(

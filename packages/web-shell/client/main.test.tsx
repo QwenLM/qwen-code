@@ -78,7 +78,7 @@ describe('StandaloneApp', () => {
     );
     expect(
       testState.props?.webShellProps.composerToolbarAdditionalActions,
-    ).toEqual(['addMenu']);
+    ).toEqual(['addMenu', 'plan']);
     expect(testState.props?.webShellProps.environmentPanel?.items).toContain(
       'artifacts',
     );
