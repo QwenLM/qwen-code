@@ -233,14 +233,14 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
    */
   const connectSavedRef = useRef(false);
   /**
-   * The name the in-flight connect loaded or picked, stamped at the save
-   * sites and reset at every connect's start. A soft-failed save writes
-   * nothing, but the stored-handle arm still binds a bridge to the record's
-   * own handle: revoke() reads this to veto a deferred clear of the very
-   * record that live bridge serves, while a picker connect that bound a
-   * DIFFERENT directory leaves the record to the revoke.
+   * The handle object the in-flight connect saved, stamped at both save
+   * sites and reset at every connect's start. Basenames collide across
+   * directories, so revoke() certifies a record as this connect's own write
+   * by entry identity against this object, never by name.
    */
-  const connectBoundNameRef = useRef<string | undefined>(undefined);
+  const connectBoundHandleRef = useRef<FileSystemDirectoryHandle | undefined>(
+    undefined,
+  );
   /**
    * True once the in-flight connect committed a panel status of its own,
    * so a revoke reconcile handed to its finally restores the pre-click
@@ -265,6 +265,15 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
    */
   const generationRef = useRef(0);
   /**
+   * Bumped by every bridge build in startBridge(): the epoch a rebind
+   * continuation captures so a connect that binds a NEW grant while the
+   * continuation is parked on its store/permission awaits invalidates it.
+   * disconnect()/unmount already invalidate it via generationRef; a fresh
+   * bind must too, or the continuation rebuilds the bridge over the handle
+   * the user just replaced.
+   */
+  const handleEpochRef = useRef(0);
+  /**
    * Bumped only by `disconnect()`: the revoke arbitration's cancellation
    * epoch. Unlike `generationRef` an unmount does not bump it, so a view
    * disappearing mid-arbitration cannot silently cancel a revoke the user
@@ -284,8 +293,10 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
    * instead of the one this mount named. While it stands, the revoke guard
    * refuses even a name-less click and no status write names a store-loaded
    * record — the Disconnect a name renders could never clear it. Cleared
-   * when this mount binds the record's own handle (restore() or connect()'s
-   * stored-handle arm) or saves its own fresh pick over the record.
+   * when this mount provably re-owns the record: connect()'s stored-handle
+   * arm over a committed re-save or an adopted record handle, its picker
+   * arm over a committed pick, restore() binding the record's own handle
+   * with no live bridge, or the rebind effect over an entry-identity match.
    */
   const foreignRecordRef = useRef(false);
 
@@ -313,6 +324,22 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     [],
   );
 
+  // Entry identity that fails closed: an isSameEntry that rejects (a handle
+  // whose entry cannot be compared) must read as "not the same entry", so
+  // every guard keyed on it refuses instead of deleting a peer's grant.
+  const sameEntryOrFalse = useCallback(
+    async (
+      a: FileSystemDirectoryHandle,
+      b: FileSystemDirectoryHandle,
+    ): Promise<boolean> => {
+      try {
+        return await a.isSameEntry(b);
+      } catch {
+        return false;
+      }
+    },
+    [],
+  );
   // A live bridge bound to this session and selector: the teardown exemption
   // below and the identity check in the async callers both key on it.
   const boundLiveMatch = useCallback(
@@ -334,9 +361,9 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       if (boundHandle === undefined || boundHandle.name !== handle.name) {
         return false;
       }
-      return await boundHandle.isSameEntry(handle);
+      return await sameEntryOrFalse(boundHandle, handle);
     },
-    [boundLiveMatch],
+    [boundLiveMatch, sameEntryOrFalse],
   );
 
   const startBridge = useCallback(
@@ -364,7 +391,11 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         handleRef.current = handle;
         return;
       }
-      // Rebinding makes the record this mount's grant again.
+      // Rebinding makes the record this mount's grant again: every caller
+      // reaches here with the record's own handle, a committed write over
+      // the record, or a rebind that re-asserts the latch afterwards when
+      // the record is provably a peer's; revoke()'s identity check is the
+      // backstop that re-latches a record this bind did not make ours.
       foreignRecordRef.current = false;
       stopBridge();
       // stopBridge() first: stopping afterwards would let the 'stopped' ->
@@ -425,6 +456,8 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       bridgeSelectorKeyRef.current = selectorKeyOf(current.workspaceSelector);
       bridgeHandleNameRef.current = handle.name;
       bridgeHandleRef.current = handle;
+      // A newly bound grant invalidates any parked rebind continuation.
+      handleEpochRef.current += 1;
       void bridge.start();
     },
     [stopBridge],
@@ -443,7 +476,12 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       const persisted = store ? await store.load() : undefined;
       if (generationRef.current !== generation || !persisted) return;
       setStatus((prev) => {
-        if (prev.phase !== 'unavailable') return prev;
+        // Only name the record when the panel has no name of its own: a
+        // mount whose bound handle already earned one would otherwise have
+        // it replaced by whatever a peer wrote into the record slot.
+        if (prev.phase !== 'unavailable' || prev.rootName !== undefined) {
+          return prev;
+        }
         const rootName = recordRootName(persisted.name);
         return rootName === undefined
           ? { phase: 'unavailable', blocker: prev.blocker }
@@ -495,6 +533,13 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     // a foreign record even while this mount's bridge is live, and binding
     // it would let a later revoke delete a peer's grant.
     if (await sameBoundEntry(stored)) {
+      // A disconnect or unmount that landed inside the identity await must
+      // win: re-binding here would resurrect the grant behind it.
+      if (generationRef.current !== generation || detachedRef.current) {
+        return;
+      }
+      // The record holds the very entry the live bridge serves; the rebind
+      // effect re-running alongside this restore owns the latch reset.
       handleRef.current = stored;
       return;
     }
@@ -574,11 +619,16 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     // An effect cannot supply activation, so never request.
     let cancelled = false;
     const generation = generationRef.current;
+    const epoch = handleEpochRef.current;
+    const staleRebind = () =>
+      cancelled ||
+      generationRef.current !== generation ||
+      handleEpochRef.current !== epoch;
     const rebind = async () => {
       let recordIsForeign = false;
       if (store) {
         const persisted = await store.load();
-        if (cancelled || generationRef.current !== generation) return;
+        if (staleRebind()) return;
         if (!persisted) {
           handleRef.current = undefined;
           stopBridge();
@@ -587,7 +637,10 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         }
         // A record the bound handle is not the same entry as is foreign:
         // latch it so a later revoke cannot blind-clear the peer's grant.
-        recordIsForeign = !(await handle.isSameEntry(persisted));
+        // The write waits for the re-check below: a disconnect that landed
+        // inside the identity await must not leave a latch behind.
+        recordIsForeign = !(await sameEntryOrFalse(handle, persisted));
+        if (staleRebind()) return;
         if (recordIsForeign) {
           foreignRecordRef.current = true;
         }
@@ -595,7 +648,9 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       const permission = await ensureReadwritePermission(handle);
       // A disconnect that landed while these awaits were in flight must win:
       // without this the continuation would resurrect the bridge behind it.
-      if (cancelled || generationRef.current !== generation) return;
+      // A connect that bound a NEW grant must win too: its bridge is the
+      // truth, and rebuilding over the captured handle would roll it back.
+      if (staleRebind()) return;
       if (permission.state !== 'granted') {
         // Stop the previous session's bridge first: stop() emits 'stopped'
         // (mapped to idle), so the needs-gesture status must come after it.
@@ -608,13 +663,11 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         return;
       }
       startBridge(handle);
-      // startBridge clears the latch on the premise that the handle it binds
-      // is the record's own; a rebind keeps serving the in-memory grant, so
-      // over a foreign record the latch must be re-asserted or the next
-      // disconnect blind-clears the peer's directory.
-      if (recordIsForeign) {
-        foreignRecordRef.current = true;
-      }
+      // A rebind keeps serving the in-memory grant, so this effect owns the
+      // latch over it: set when the record is a peer's entry, cleared when
+      // the record is provably this mount's own again (the exemption exit
+      // in startBridge verifies only basenames and cannot decide that).
+      foreignRecordRef.current = recordIsForeign;
     };
     void rebind();
     return () => {
@@ -623,6 +676,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
   }, [
     sessionId,
     selectorKey,
+    sameEntryOrFalse,
     startBridge,
     stopBridge,
     store,
@@ -660,7 +714,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     const generation = generationRef.current;
     connectGenerationRef.current = generation;
     connectSavedRef.current = false;
-    connectBoundNameRef.current = undefined;
+    connectBoundHandleRef.current = undefined;
     connectWroteStatusRef.current = false;
     const stale = () => generationRef.current !== generation;
     try {
@@ -680,17 +734,21 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         });
         if (stale()) return;
         if (permission.state === 'granted') {
-          connectBoundNameRef.current = stored.name;
+          connectBoundHandleRef.current = stored;
           connectSavedRef.current = (await store?.save(stored)) ?? true;
           // Both latches clear only on the exits that bind a grant: a stale
           // or otherwise non-binding connect (dismissed picker, failed pick,
           // re-armed gesture) must not disarm either guard.
           if (stale()) return;
+          const sameEntry = await sameBoundEntry(stored);
+          // A disconnect that landed inside the identity await must win over
+          // the binding side effects below.
+          if (stale()) return;
           // Already bound to this very entry: nothing to rebuild. A committed
           // re-save just wrote this mount's handle over the record, so the
           // record is its grant again even though nothing rebuilds; a soft-
           // failed save wrote nothing and the peer's record stays guarded.
-          if (await sameBoundEntry(stored)) {
+          if (sameEntry) {
             if (connectSavedRef.current) foreignRecordRef.current = false;
             handleRef.current = stored;
             return;
@@ -747,7 +805,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         });
         return;
       }
-      connectBoundNameRef.current = result.handle.name;
+      connectBoundHandleRef.current = result.handle;
       connectSavedRef.current = (await store?.save(result.handle)) ?? true;
       if (connectSavedRef.current) foreignRecordRef.current = false;
       if (stale()) return;
@@ -793,6 +851,10 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     // second declined click finds bridgeRef empty and would otherwise
     // downgrade a truthful held-elsewhere panel to idle.
     const name = handleRef.current?.name ?? statusRef.current.rootName;
+    // The handle object this mount bound, captured before the clear below:
+    // revoke() decides whether the record is a peer's grant by entry
+    // identity against it, because basenames collide across directories.
+    const boundHandle = handleRef.current ?? bridgeHandleRef.current;
     const parkedBeforeStop =
       bridgeRef.current?.getState().phase === 'held-elsewhere' ||
       statusRef.current.phase === 'held-elsewhere';
@@ -898,30 +960,40 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       // serving the record is this mount's own, so a deferred revoke must
       // not delete the record from under that live bridge. A picker connect
       // that bound a DIFFERENT directory vetoes nothing: the record is not
-      // its grant.
+      // its grant. Entry identity, not basename: same-named directories are
+      // different grants.
       if (
         current !== undefined &&
         connectGenerationRef.current >= generation &&
-        current.name === connectBoundNameRef.current
+        connectBoundHandleRef.current !== undefined &&
+        (await sameEntryOrFalse(connectBoundHandleRef.current, current))
       ) {
         return false;
       }
-      // A record this mount's own picker arm provably wrote is not foreign:
-      // that arm stamps connectBoundNameRef and commits the save before a
-      // disconnect can land, so treat the matching record as this mount's
-      // grant even though a pre-disconnect connect stamps an older
-      // generation. The granted arm clears the latch only after its stale
-      // check, so a stale re-save of a peer's record still refuses here.
+      // A record this mount's own connect provably wrote is not foreign:
+      // the save sites stamp the saved handle object and commit before a
+      // later disconnect can read the record, so entry identity against
+      // that stamp certifies the record as this mount's grant even though
+      // a pre-disconnect connect stamps an older generation. A peer's
+      // same-basename overwrite fails the identity check and stays guarded.
       const ownWrite =
         current !== undefined &&
         connectSavedRef.current &&
         !foreignRecordRef.current &&
-        current.name === connectBoundNameRef.current;
+        connectBoundHandleRef.current !== undefined &&
+        (await sameEntryOrFalse(connectBoundHandleRef.current, current));
+      // Decide "the record is a peer's grant" by entry identity against the
+      // handle this mount bound; only a mount holding no handle object at
+      // all (withheld, needs-gesture) falls back to the name it was shown.
+      const foreignRecord =
+        current !== undefined &&
+        (boundHandle !== undefined
+          ? !(await sameEntryOrFalse(current, boundHandle))
+          : name !== undefined && current.name !== name);
       if (
         current !== undefined &&
         !ownWrite &&
-        (foreignRecordRef.current ||
-          (name !== undefined && current.name !== name))
+        (foreignRecordRef.current || foreignRecord)
       ) {
         // Not the grant this mount named: remember that the record is
         // foreign, so a later click with no name of its own cannot
@@ -1008,7 +1080,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       if (connectWroteStatusRef.current) return;
     }
     setStatus(unclearedStatus(declined));
-  }, [capability.blocker, recordRootName, stopBridge, store]);
+  }, [capability.blocker, recordRootName, sameEntryOrFalse, stopBridge, store]);
 
   return { status, capability, connect, disconnect, restore };
 }
