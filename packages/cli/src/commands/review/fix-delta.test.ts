@@ -63,8 +63,33 @@ const readdirHook = vi.hoisted(() => ({
 const statHook = vi.hoisted(() => ({
   zeroInodes: false,
 }));
+// …and the canonicalisation witness: a link chain whose resolved form
+// cannot materialise (past the platform limit) — realpathSync.native
+// throws ENAMETOOLONG while statSync resolves fine. No CI host mounts
+// such a filesystem, so the resolution is wrapped behind the same kind
+// of switch, keyed on a path pattern the test plants.
+const realpathHook = vi.hoisted(() => ({
+  failOn: null as RegExp | null,
+}));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
+  const hooked = (path: unknown, opts?: unknown): unknown => {
+    const s = Buffer.isBuffer(path) ? path.toString('latin1') : String(path);
+    if (realpathHook.failOn !== null && realpathHook.failOn.test(s)) {
+      const err = new Error('ENAMETOOLONG: name too long');
+      (err as NodeJS.ErrnoException).code = 'ENAMETOOLONG';
+      throw err;
+    }
+    return (actual.realpathSync.native as (...a: unknown[]) => unknown)(
+      path,
+      opts,
+    );
+  };
+  const realpathSync = Object.assign(
+    (...args: Parameters<typeof actual.realpathSync>) =>
+      actual.realpathSync(...args),
+    { native: hooked },
+  ) as typeof actual.realpathSync;
   const readdirSync = ((...args: Parameters<typeof actual.readdirSync>) => {
     const entries = actual.readdirSync(...args);
     const opts = args[1];
@@ -97,9 +122,10 @@ vi.mock('node:fs', async (importOriginal) => {
   }) as typeof actual.statSync;
   return {
     ...actual,
-    default: { ...actual, readdirSync, statSync },
+    default: { ...actual, readdirSync, statSync, realpathSync },
     readdirSync,
     statSync,
+    realpathSync,
   };
 });
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -283,6 +309,7 @@ describe('fix-delta', () => {
     tmpdirOverride.value = undefined;
     readdirHook.unknownDirents = false;
     statHook.zeroInodes = false;
+    realpathHook.failOn = null;
     setWalkBudgetsForTest({
       perWalk: IGNORED_WALK_BUDGET,
       perRun: IGNORED_WALK_RUN_CAP,
@@ -2601,11 +2628,13 @@ describe('fix-delta', () => {
     expect(lines.at(-1)).toContain('the tree is unchanged since the snapshot');
   });
 
-  it('names a repository a symlink target merely CONTAINS', () => {
-    // `add -A` records the link, never what is behind it, so a repository
-    // one level down the target is exactly as invisible as one the link
-    // points straight at. The branch returned silently when the target
-    // carried no `.git` of its own — neither probed nor disclosed.
+  it('scopes a repository an out-of-tree symlink target merely CONTAINS', () => {
+    // `add -A` records the link, never what is behind it. The target is
+    // OUTSIDE the audited tree, and the walk does not start there:
+    // enumerating and baselining a foreign directory read an unrelated
+    // commit in it as this tree's transition and withheld the all-clear.
+    // The link is scope — named, with the rule that an edit through it
+    // leaves no record here — not blind-spot dirt.
     const outside = join(out, 'linked');
     const inner = join(outside, 'deep', 'repo');
     mkdirSync(inner, { recursive: true });
@@ -2625,10 +2654,13 @@ describe('fix-delta', () => {
     const lines = stderr();
     expect(
       lines.some(
-        (l) => l.includes('cannot see') && l.includes('link/deep/repo'),
+        (l) =>
+          l.includes('link') &&
+          l.includes('link reaching outside this repository'),
       ),
     ).toBe(true);
-    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+    expect(lines.some((l) => l.includes('link/deep/repo'))).toBe(false);
+    expect(lines.at(-1)).toContain('the tree is unchanged since the snapshot');
   });
 
   it('re-reports a submodule whose interior state changed since the snapshot', () => {
@@ -3434,6 +3466,40 @@ describe('fix-delta', () => {
     ).toThrow(/a clean\/process filter is configured/);
   });
 
+  it('splits a merged note at its opener, not only at the newline', () => {
+    // A filter child shares git's stderr fd; one that omits its trailing
+    // newline merges its bytes with git's next note, and the merged line
+    // matched the prefix-anchored `/^hint:/` tolerance wholesale —
+    // absorbing the note that proves a path was skipped, and certifying
+    // a partial capture. The split happens at the note boundary too:
+    // `hint: chatter` is tolerated and `error: unable to index …` stands
+    // on its own line, unexplained.
+    expect(() =>
+      assertCompleteCapture(
+        {
+          stderr:
+            "hint: filter chattererror: unable to index file 'sub/secret.txt'\n",
+          status: 1,
+          completed: true,
+        },
+        true,
+      ),
+    ).toThrow(/could not capture the whole tree/);
+    // …and the boundary split is not the forbidden reassembly: a
+    // tolerated zero-commit note MERGED behind chatter still reads as
+    // itself (git never skips a path on that note alone).
+    expect(() =>
+      assertCompleteCapture(
+        {
+          stderr: "hint: xerror: 'zzz/' does not have a commit checked out\n",
+          status: 1,
+          completed: true,
+        },
+        true,
+      ),
+    ).not.toThrow();
+  });
+
   it('never classifies the audited repository as its own nested repository', () => {
     // A committed link `self -> .` resolves to the audited root: every
     // discovery route (`? self`, `! self`, a tracked mode-120000 link)
@@ -4216,6 +4282,44 @@ describe('fix-delta', () => {
     expect(existsSync(snapshotFile())).toBe(false);
   });
 
+  it('refuses a subtree plant even when the enclosing HEAD is spelled without the space', () => {
+    // git's `validate_headref` skips ZERO or more whitespace after `ref:`,
+    // so `ref:refs/heads/main` is a HEAD git answers for. The hand-rolled
+    // predicate required `\s+`, answered false for the enclosing
+    // repository, and the subtree-narrowing gate stood down over a
+    // planted `sub/.git` — the snapshot recorded the subtree and
+    // `--since` all-cleared over a fix applied at the root. The
+    // classification now asks git itself.
+    mkdirSync(join(repo, 'sub'), { recursive: true });
+    writeFileSync(join(repo, 'sub', 'b.txt'), 'v1\n');
+    git('add', '-A');
+    git('commit', '-qm', 'sub');
+    writeFileSync(join(repo, '.git', 'HEAD'), 'ref:refs/heads/main');
+    writeFileSync(join(repo, 'sub', '.git'), `gitdir: ${join(repo, '.git')}\n`);
+    const cwdHere = process.cwd();
+    try {
+      process.chdir(join(repo, 'sub'));
+      expect(() => runSnapshot()).toThrow(/CONTAINS it/);
+    } finally {
+      process.chdir(cwdHere);
+    }
+    expect(existsSync(snapshotFile())).toBe(false);
+  });
+
+  it('accepts an uppercase detached HEAD, as git does', () => {
+    // `get_oid_hex` takes A-F too: a repository recovered by hand with an
+    // uppercase SHA in `.git/HEAD` is a working detached HEAD to git. The
+    // lowercase-only predicate said otherwise, the honest walk climbed
+    // past an honest `.git`, and the refusal diagnosed a `core.worktree`
+    // that was never set.
+    const head = git('rev-parse', 'HEAD').toUpperCase();
+    writeFileSync(join(repo, '.git', 'HEAD'), `${head}\n`);
+    // git itself answers this HEAD: the precondition the pin is about.
+    expect(git('rev-parse', '--show-toplevel')).toBe(repo);
+    expect(() => runSnapshot()).not.toThrow();
+    expect(existsSync(snapshotFile())).toBe(true);
+  });
+
   it('captures a family-named path the user staged without committing', () => {
     // `-u` updates entries the throwaway index HOLDS, and that index is
     // HEAD's tree: a family-named path staged but not committed is tracked
@@ -4239,6 +4343,37 @@ describe('fix-delta', () => {
     const hunks = readFileSync(hunksFile(), 'utf8');
     expect(hunks).toContain('qwen-review-notes.md');
     expect(hunks).toContain('EDITED-BY-THE-FIX');
+    // …and the baseline's content as the REMOVED line: a whole-file
+    // addition would mean the baseline never recorded the staged path.
+    expect(hunks).toContain('-staged content v1');
+    expect(stderr().at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('records the deletion of a staged family-named dangling symlink', () => {
+    // The staged re-inclusion filtered on `existsSync`, which FOLLOWS the
+    // link: a staged DANGLING symlink was dropped from both trees, and
+    // the fix's deletion of it produced no hunk over the bare all-clear.
+    // git records a symlink (mode 120000) whether or not the target
+    // exists; `lstat` answers for the entry git stored.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n.qwen/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore .qwen');
+    mkdirSync(join(repo, '.qwen', 'tmp'), { recursive: true });
+    const link = join(repo, '.qwen', 'tmp', 'qwen-review-link');
+    symlinkSync('gone-target', link);
+    git('add', '-f', '--', '.qwen/tmp/qwen-review-link');
+
+    runSnapshot();
+    rmSync(link);
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('qwen-review-link');
+    expect(hunks).toContain('deleted file mode 120000');
+    // The link's target text rides the blob: it must render as a REMOVED
+    // line — a whole-file addition would mean the baseline never recorded
+    // the link at all.
+    expect(hunks).toContain('-gone-target');
     expect(stderr().at(-1)).not.toContain('the tree is unchanged since');
   });
 
@@ -4413,6 +4548,62 @@ describe('fix-delta', () => {
     ).toBe(true);
     expect(
       lines.some((l) => /2 file\(s\) changed since the snapshot/.test(l)),
+    ).toBe(true);
+  });
+
+  it('classifies a ghost for a file staged in the user index, never committed', () => {
+    // `check-ignore` without `--no-index` lets the USER's index outrank
+    // the rules: a staged-but-uncommitted file is never reported ignored,
+    // so it was never recognised as a ghost and the invented deletion
+    // rode into the hunks as an edit the fix never made. The classifier
+    // asks the rules-only question, which is the one the capture answers.
+    writeFileSync(join(repo, 'foo.log'), 'a\n');
+    git('add', '--', 'foo.log'); // staged, never committed
+
+    runSnapshot();
+    writeFileSync(join(repo, '.gitignore'), '*.log\n');
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).not.toContain('deleted file mode');
+    expect(hunks).not.toContain('foo.log');
+    expect(hunks).toContain('.gitignore');
+    expect(hunks).toContain('a.ts');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) =>
+          /\bfoo\.log\b/.test(l) &&
+          l.includes('still on') &&
+          l.includes('disk'),
+      ),
+    ).toBe(true);
+    // The count names only the real changes: `.gitignore` and `a.ts`.
+    expect(
+      lines.some((l) => /2 file\(s\) changed since the snapshot/.test(l)),
+    ).toBe(true);
+  });
+
+  it('classifies a capture-invented deletion of a dangling symlink as a ghost', () => {
+    // The on-disk test used `existsSync`, which FOLLOWS the link: a
+    // dangling symlink — on disk by every lstat meaning, recorded by git
+    // as mode 120000 — failed the test and skipped the classifier, so the
+    // invented deletion rode into the hunks as an edit the fix never made.
+    symlinkSync('gone-target', join(repo, 'v'));
+
+    runSnapshot();
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nv\n');
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).not.toContain('deleted file mode 120000');
+    expect(hunks).not.toContain('gone-target');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) => /\bv\b/.test(l) && l.includes('still on') && l.includes('disk'),
+      ),
     ).toBe(true);
   });
 
@@ -4652,6 +4843,174 @@ describe('fix-delta', () => {
     // One identity in the record is one probe: a second spelling would
     // have carried its own key.
     expect(Object.keys(snap.digests)).toHaveLength(1);
+  });
+
+  it('names a link a nested repository TRACKS that reaches a second repository', () => {
+    // The interior enumeration read only the nested status's `?`/`!`
+    // lines: a symlink the nested repository COMMITTED emits none, and an
+    // edit through it left both trees byte-identical with the digest
+    // unmoved. The interior now sweeps the index's mode-120000 entries
+    // the way the root's own sweep does.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore ig');
+    const target = join(repo, 'ig', 'target');
+    mkdirSync(target, { recursive: true });
+    gitAt(target, 'init', '-q', '-b', 'main');
+    gitAt(target, 'config', 'user.email', 't@t.t');
+    gitAt(target, 'config', 'user.name', 't');
+    writeFileSync(join(target, 'f.txt'), 'v1\n');
+    gitAt(target, 'add', '-A');
+    gitAt(target, 'commit', '-qm', 'init');
+    const inner = join(repo, 'ig', 'inner');
+    mkdirSync(inner, { recursive: true });
+    gitAt(inner, 'init', '-q', '-b', 'main');
+    gitAt(inner, 'config', 'user.email', 't@t.t');
+    gitAt(inner, 'config', 'user.name', 't');
+    writeFileSync(join(inner, 'f.txt'), 'v1\n');
+    // The nested repository COMMITS the link — no status line, ever.
+    symlinkSync(join('..', 'target'), join(inner, 'lnk'));
+    gitAt(inner, 'add', '-A');
+    gitAt(inner, 'commit', '-qm', 'init');
+
+    runSnapshot();
+    writeFileSync(
+      join(target, 'f.txt'),
+      'the fix — through a tracked interior link\n',
+    );
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some((l) => l.includes('ig/inner/lnk') && l.includes('cannot see')),
+    ).toBe(true);
+    expect(
+      lines.some((l) => l.includes('the tree is unchanged since the snapshot')),
+    ).toBe(false);
+  });
+
+  // POSIX-only: a name that is not valid UTF-8 cannot be planted on NTFS,
+  // and APFS refuses it at creation (the sibling non-UTF-8 cases fail
+  // there the same way).
+  it.skipIf(process.platform === 'win32')(
+    'probes a repository whose name decodes to the in-tree git dir name',
+    () => {
+      // The in-tree git dir is named gd-<0xE9> (not valid UTF-8): the
+      // string decode read it as gd-<U+FFFD>, and a planted repository
+      // named with exactly those bytes (gd-<EF BF BD>, valid UTF-8)
+      // matched the exclusion and dropped out of every probe route. The
+      // comparison is on raw bytes now.
+      const wt = realpathSync(
+        mkdtempSync(join(tmpdir(), 'qwen-fix-delta-gdraw-')),
+      );
+      const cwdHere = process.cwd();
+      try {
+        const gdName = Buffer.concat([Buffer.from('gd-'), Buffer.from([0xe9])]);
+        execFileSync('/bin/sh', [], {
+          input: Buffer.concat([
+            Buffer.from("set -e\ncd -- '"),
+            Buffer.from(wt),
+            Buffer.from("'\ngit init -q -b main --separate-git-dir '"),
+            gdName,
+            Buffer.from(
+              "' .\ngit config user.email t@t.t\ngit config user.name t\nprintf x > a.ts\ngit add -A\ngit commit -qm init\n",
+            ),
+          ]),
+        });
+        // The planted name is the U+FFFD text — valid UTF-8 whose bytes
+        // are EF BF BD, exactly what the lossy decode produced.
+        const plant = join(wt, `gd-${String.fromCodePoint(0xfffd)}`);
+        mkdirSync(plant);
+        initNestedRepoSh(Buffer.from(plant));
+        process.chdir(wt);
+        const snap = join(out, 'gdraw-snapshot.json');
+        const hunks = join(out, 'gdraw-hunks.diff');
+        runFixDelta({ snapshot: true, since: undefined, out: snap });
+        writeFileSync(join(plant, 'f.txt'), 'the hidden fix\n');
+        runSince(snap, hunks);
+
+        expect(readFileSync(hunks, 'utf8')).toBe('');
+        const lines = stderr();
+        expect(
+          lines.some(
+            (l) =>
+              l.includes(`gd-${String.fromCodePoint(0xfffd)}`) &&
+              l.includes('cannot see'),
+          ),
+        ).toBe(true);
+        expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+      } finally {
+        process.chdir(cwdHere);
+        rmSync(wt, {
+          recursive: true,
+          force: true,
+          maxRetries: 3,
+          retryDelay: 100,
+        });
+      }
+    },
+  );
+
+  it('routes a link whose canonical form cannot materialise to unresolved, never out-of-root', () => {
+    // A link chain whose resolved form runs past the platform limit:
+    // statSync resolves it but the canonicalisation throws ENAMETOOLONG
+    // (measured end to end), and the classifier's catch answered
+    // "outside" — an in-tree link disclosed as an escape while the
+    // all-clear printed. Unresolvable rides `unresolved`, and spends the
+    // all-clear. No CI host mounts such a filesystem, so the resolution
+    // is forced through the suite's hook.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore ig');
+    mkdirSync(join(repo, 'ig', 'target'), { recursive: true });
+    symlinkSync('target', join(repo, 'ig', 'c0'));
+    realpathHook.failOn = /c0/;
+
+    runSnapshot();
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(snap.unresolved).toContain('ig/c0');
+    expect(snap.outOfRoot).not.toContain('ig/c0');
+    runSince();
+
+    const lines = stderr();
+    expect(
+      lines.some((l) => l.includes('ig/c0') && l.includes('cannot see')),
+    ).toBe(true);
+    expect(
+      lines.some(
+        (l) => l.includes('c0') && l.includes('outside this repository'),
+      ),
+    ).toBe(false);
+    expect(
+      lines.some((l) => l.includes('the tree is unchanged since the snapshot')),
+    ).toBe(false);
+  });
+
+  it('names a dirty submodule once when a tracked link points at it', () => {
+    // The status route recorded the dirt but never registered the
+    // physical repository as probed, so the index's tracked link reached
+    // the same repository again and the baseline carried it under two
+    // names — one disclosure line naming both spellings of one dir.
+    const subSrc = plantCommittedSubmodule('sub');
+    try {
+      symlinkSync('sub', join(repo, 'link'));
+      git('add', '-A');
+      git('commit', '-qm', 'commit a link to the submodule');
+      writeFileSync(join(repo, 'sub', 'dirty.txt'), 'pre-existing\n');
+
+      runSnapshot();
+      runSince();
+
+      const naming = stderr().filter((l) => l.includes('pre-existing'));
+      expect(naming).toHaveLength(1);
+      expect(naming[0]).toContain('sub');
+      expect(naming[0]).not.toContain('link');
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
   });
 
   it("captures under the skill's own side paths when the repository ignores .qwen", () => {

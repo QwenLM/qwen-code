@@ -1180,6 +1180,18 @@ describe('bundled review skill', () => {
       'Fix audit: not run — hunks carry edits no outcome owns',
     );
     expect(step).toContain('Do not invent a `fixed` outcome');
+    // Ownership, not path overlap: a foreign write can land in a path a
+    // finding NAMES (a watcher's reformat of the file the finding sits
+    // in), and the overlap-keyed exception sent the orchestrator to
+    // falsify the ledger there.
+    expect(step).toContain('whether or not its path is one a finding names');
+    expect(step).not.toContain('name only paths NO finding names');
+    // The blind-capture third cause: an edit inside a nested repository
+    // lands no hunk and no outcome is wrong for it — disclosed, and the
+    // outcomes untouched.
+    expect(step).toContain(
+      'Fix audit: not run — the edit landed where the capture cannot see it',
+    );
     expect(step).toContain('Fix audit: not run — <what the command said>');
     expect(step).toContain(
       'never into `findings-in.json`, the census, or the verdict',

@@ -2806,10 +2806,13 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
           `${hunkPaths.length > 0 ? `: ${hunkPaths.slice(0, 5).join(', ')}${hunkPaths.length > 5 ? ', …' : ''}` : ''}). ` +
           'That is a ledger/tree mismatch, not an empty fix round: edits ' +
           'landed that no outcome owns, so "nothing was applied" would be ' +
-          'false. Correct the ledger — record the outcomes the edits ' +
-          'actually earned (`review findings --outcomes …`) and rebuild the ' +
-          'artifact — then re-run this command; it is the ledger, not the ' +
-          'audit, that is wrong here.',
+          'false. A write from outside this flow (a watcher, a formatter, a ' +
+          'background build) is the ordinary such case — revert or set it ' +
+          'aside and re-run the `--since`, and leave the ledger alone: a ' +
+          "foreign edit is not a finding's fix. Correct the ledger only " +
+          'when a finding WAS fixed without record — record the outcomes ' +
+          'the edits actually earned (`review findings --outcomes …`) and ' +
+          'rebuild the artifact — then re-run this command.',
       );
     }
     throw new Error(
@@ -2826,7 +2829,10 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
         'AFTER the edits — the pre-edit state is gone and the audit cannot ' +
         'run, so the outcomes stay untouched — or the edits never landed, in ' +
         'which case those outcomes are wrong and the ledger, not the audit, ' +
-        'is what to correct.',
+        'is what to correct — or the edit landed where the capture cannot ' +
+        'see it: when `fix-delta --since` printed a blind-spot line beside ' +
+        'this empty file (`… cannot see … The hunks file stays empty`), ' +
+        'that is the cause, and the outcomes stand.',
     );
   }
   const where = (f: Finding): string => {

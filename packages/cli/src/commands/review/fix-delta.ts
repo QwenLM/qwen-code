@@ -199,6 +199,51 @@ function inTreeGitDir(root: string): string | null {
 }
 
 /**
+ * `inTreeGitDir` as RAW BYTES, for the probe's exclusion comparison. The
+ * string form decodes git's output as UTF-8, and a git dir whose name is
+ * not valid UTF-8 comes back with U+FFFD — which an entirely valid UTF-8
+ * directory named with exactly those bytes (`gd-<EF BF BD>` beside
+ * `gd-<0xE9>`) then MATCHES, dropping it from every probe route with no
+ * disclosure. Carried as bytes, the comparison is exact. Comparison
+ * keys on git's `/`, as both discovery routes do.
+ */
+function inTreeGitDirBytes(root: string): Buffer | null {
+  const raw = gitRaw('-C', root, 'rev-parse', '--absolute-git-dir');
+  const nl = raw.indexOf(0x0a);
+  const gitDir = nl === -1 ? raw : raw.subarray(0, nl);
+  const rootBuf = Buffer.from(root, 'utf8');
+  const boundary = gitDir[rootBuf.length];
+  if (
+    gitDir.length <= rootBuf.length + 1 ||
+    !gitDir.subarray(0, rootBuf.length).equals(rootBuf) ||
+    (boundary !== 0x2f && boundary !== 0x5c) /* / or \ */
+  ) {
+    return null;
+  }
+  let relBytes = gitDir.subarray(rootBuf.length + 1);
+  if (sep === '\\') {
+    // win32: a POSIX filename can carry '\', but there none can — so the
+    // native separator is normalised to git's '/'. latin1 is the
+    // byte<->char bijection, so the rewrite loses nothing.
+    relBytes = Buffer.from(
+      relBytes.toString('latin1').split(sep).join('/'),
+      'latin1',
+    );
+  }
+  if (
+    relBytes.length === 0 ||
+    relBytes.equals(Buffer.from('..')) ||
+    (relBytes.length > 2 &&
+      relBytes[0] === 0x2e &&
+      relBytes[1] === 0x2e &&
+      relBytes[2] === 0x2f)
+  ) {
+    return null;
+  }
+  return relBytes;
+}
+
+/**
  * The exclusion is lexical — a symlink planted at an excluded directory
  * redirects every side-file write through it into a physical path no
  * pathspec matches, so the capture would report the review's own
@@ -341,8 +386,12 @@ export function snapshotWorkingTree(
     // files sit under `.qwen/tmp`, which repositories such as this one
     // ignore wholesale, so the skill's own invocation refused in exactly
     // those checkouts. The probe and the comparison keep every side path:
-    // neither complains, and a tracked side path is never reported
-    // ignored, so it stays excluded from the capture too.
+    // neither complains, and a tracked or staged side path is never
+    // reported ignored BY THE INDEX-CONSULTING question below — the one
+    // that predicts what `add -A` accepts. (The ghost classifier in
+    // `ghostDeletions` asks the other question — whether the RULES alone
+    // hide a path, `--no-index` — because a rule that appeared between
+    // the moments is exactly what it tests for.)
     const add = gitWithEnvReport(env, [
       '-C',
       root,
@@ -378,7 +427,20 @@ export function snapshotWorkingTree(
     // paths repositories commonly ignore, and these paths are user content
     // by the same contract that admits the committed half).
     const stagedOnly = stagedFamilyPaths(root, sidePaths, tracked).filter(
-      (path) => existsSync(joinBytes(Buffer.from(root), path)),
+      (path) => {
+        // The ENTRY, never its target: git records a symlink (mode 120000)
+        // whether or not the target exists, and `existsSync` follows the
+        // link — a staged DANGLING link was filtered out of both trees,
+        // and its later deletion produced no hunk over the bare
+        // all-clear. Only ENOENT means absent; any other error keeps the
+        // path and lets `add -f` rule on it.
+        try {
+          lstatSync(joinBytes(Buffer.from(root), path));
+          return true;
+        } catch (err) {
+          return errnoOf(err) !== 'ENOENT';
+        }
+      },
     );
     if (stagedOnly.length > 0) {
       const staged = gitWithEnvReport(
@@ -431,10 +493,13 @@ export function snapshotWorkingTree(
 /**
  * The side paths git would ACCEPT in an `add` pathspec: the ones not
  * ignored. `check-ignore -q` answers 0 for an ignored path, 1 for one that
- * is not; a tracked path is never reported ignored (the index outranks the
- * rules), and an answer git cannot give keeps the path excluded — if it
- * was ignored after all, the capture refuses as before rather than
- * recording the side file.
+ * is not; a tracked or staged path is never reported ignored, because this
+ * probe deliberately CONSULTS the index the way `add -A` itself does — it
+ * predicts the capture's acceptance, and an answer git cannot give keeps
+ * the path excluded: if it was ignored after all, the capture refuses as
+ * before rather than recording the side file. (The ghost classifier asks
+ * the rules-only question — `--no-index` — for the opposite reason: it
+ * tests whether a rule, not the index, hides a path.)
  */
 function capturableSidePaths(
   root: string,
@@ -658,7 +723,15 @@ export function assertCompleteCapture(
     );
   }
   const lines = add.stderr
-    .split('\n')
+    // Split on the note boundary as well as the newline: a filter child
+    // shares git's stderr fd, and one that omits its trailing newline
+    // merges its bytes with git's next note — `hint: chattererror:
+    // unable to index file '…'` is ONE line, and the /^hint:/ tolerance
+    // would absorb the very note that proves a path was skipped. The
+    // lookahead never JOINS lines, so this is a split, not the
+    // reassembly the strict ruling forbids — a note opener always starts
+    // a line, whoever failed to terminate the previous one.
+    .split(/\n|(?=(?:error|fatal|warning|hint): )/)
     .map((line) => line.trim())
     .filter((line) => line !== '');
   const notes = filtersConfigured ? lines : reassembleZeroCommitNotes(lines);
@@ -987,7 +1060,18 @@ function ghostDeletions(
   for (let i = 0; i + 1 < fields.length; i += 2) {
     if (fields[i][0] !== 0x44 /* D */) continue;
     const rel = fields[i + 1];
-    if (!existsSync(joinBytes(rootBuf, rel))) continue;
+    try {
+      // `lstatSync`, not `existsSync`: git records a symlink (mode 120000)
+      // whether or not its target exists, and `existsSync` follows the
+      // link — a dangling one read as absent and skipped the classifier
+      // below, so the capture-invented deletion of it rode into the
+      // hunks as an edit the fix never made.
+      lstatSync(joinBytes(rootBuf, rel));
+    } catch (err) {
+      if (errnoOf(err) === 'ENOENT') continue;
+      // Any other error: not proven absent, so the path still reaches
+      // the classifier.
+    }
     // Still on disk is not enough: a fix that replaces a tracked FILE with
     // a DIRECTORY of the same name also records `D <name>` beside the new
     // entries, and calling that a ghost dropped the whole subtree from the
@@ -1007,6 +1091,12 @@ function ghostDeletions(
       ...probePins(root),
       'check-ignore',
       '-q',
+      // `--no-index`: the question is whether the RULES hide this path,
+      // not what `add` would do with it — without it the USER's index
+      // outranks the rules, and a staged-but-uncommitted file was never
+      // recognised as a ghost, so the capture-invented deletion of it
+      // rode into the hunks as an edit the fix never made.
+      '--no-index',
       '--',
       name.split(sep).join('/'),
     );
@@ -1533,6 +1623,38 @@ function probeNestedRepoState(absPath: Buffer): {
       interiorLinks.push(name);
     }
   }
+  // The status lines enumerate only the UNTRACKED and the ignored: a
+  // symlink this repository TRACKS emits no `?`/`!` line, so the index's
+  // own mode-120000 entries are swept too — an edit through one leaves
+  // both trees byte-identical and this repository's digest unmoved,
+  // exactly the blind spot the root's own index sweep exists for, one
+  // level down. The probe's own pins ride; a sweep that cannot run makes
+  // the interior unanswerable — failed, never clean.
+  let trackedLinks: Buffer;
+  try {
+    trackedLinks = gitRaw(
+      '-C',
+      path,
+      ...probePins(path),
+      'ls-files',
+      '-s',
+      '-z',
+    );
+  } catch {
+    return { state: 'failed' };
+  }
+  const seenLink = new Set(interiorLinks.map((l) => l.toString('latin1')));
+  for (const entry of splitNul(trackedLinks)) {
+    if (!entry.subarray(0, 7).equals(SYMLINK_MODE_PREFIX)) continue;
+    const tab = entry.indexOf(0x09);
+    if (tab === -1) continue;
+    const name = entry.subarray(tab + 1);
+    const key = name.toString('latin1');
+    if (!seenLink.has(key)) {
+      seenLink.add(key);
+      interiorLinks.push(name);
+    }
+  }
   // Dirt is what is NOT a header and NOT an ignored entry: with
   // `--branch` the output is never empty, so emptiness is no longer the
   // clean test, and `! ` lines ride the digest without counting.
@@ -1780,8 +1902,8 @@ interface ExclusionContext {
    * different path entirely.
    */
   rootIdentity: { dev: number; ino: number } | null;
-  /** The in-tree git dir relative to `root`, when the git dir sits inside. */
-  gitDirRel: string | null;
+  /** The in-tree git dir relative to `root`, as raw bytes (see `inTreeGitDirBytes`). */
+  gitDirRel: Buffer | null;
   /**
    * The review worktrees the ORCHESTRATOR named (`--review-worktree`),
    * resolved. These are the flow's own checkouts — walked for planted
@@ -1822,27 +1944,26 @@ function exclusionContext(
   return {
     root,
     rootIdentity,
-    gitDirRel: inTreeGitDir(root),
+    gitDirRel: inTreeGitDirBytes(root),
     reviewWorktrees: named,
   };
 }
 
 /** True when `rel` is the in-tree git dir or anything under it. */
-function underInTreeGitDir(rel: Buffer, gitDirRel: string | null): boolean {
-  // The comparison is on BYTES, never on the display decode: `decodePath`
-  // is not injective (UTF-8 `C3 A9` and the single invalid byte `E9` both
-  // render 'é'), so a decoded comparison lets a planted `.git-<0xE9>`
-  // directory answer for an in-tree git dir named `.git-é` and drop out of
-  // capture, comparison and probe alike. `sep` -> `/` first: `inTreeGitDir`
-  // builds its name with `path.relative`, while both discovery routes
-  // (git's `-z` listings and the walk's `joinRel`) key on git's separator.
+function underInTreeGitDir(rel: Buffer, gitDirRel: Buffer | null): boolean {
+  // The comparison is on BYTES, never on any decode: `decodePath` is not
+  // injective (UTF-8 `C3 A9` and the single invalid byte `E9` both render
+  // 'é'), so a decoded comparison lets a planted `.git-<0xE9>` directory
+  // answer for an in-tree git dir named `.git-é` and drop out of capture,
+  // comparison and probe alike — and a planted `gd-<EF BF BD>` answers a
+  // `gd-<0xE9>` dir the same way. Both discovery routes (git's `-z`
+  // listings and the walk's `joinRel`) key on git's `/`.
   if (gitDirRel === null) return false;
-  const gitDir = Buffer.from(gitDirRel.split(sep).join('/'));
   return (
-    rel.equals(gitDir) ||
-    (rel.length > gitDir.length &&
-      rel.subarray(0, gitDir.length).equals(gitDir) &&
-      rel[gitDir.length] === 0x2f) /* / */
+    rel.equals(gitDirRel) ||
+    (rel.length > gitDirRel.length &&
+      rel.subarray(0, gitDirRel.length).equals(gitDirRel) &&
+      rel[gitDirRel.length] === 0x2f) /* / */
   );
 }
 
@@ -1901,15 +2022,22 @@ function probeExcluded(
   }
 }
 
+/** The reach of a directory a link or a discovery route points at. */
+type RootReach = 'inside' | 'outside' | 'unresolvable';
+
 /**
- * True when a path resolves outside the audited repository — the bound the
- * discovery walk keeps. The audited root itself resolves INSIDE (a link
- * back to root is not an escape; `isAuditedRoot` rules that case), and a
- * target that cannot be resolved counts as an escape: the walk cannot say
- * it is in-tree, and disclosing is the direction this command fails in.
+ * Whether a path resolves outside the audited repository — the bound
+ * every discovery route keeps. The audited root itself resolves INSIDE
+ * (a link back to root is not an escape; `isAuditedRoot` rules that
+ * case). A target that cannot be RESOLVED is its own answer: stamping it
+ * 'outside' disclosed an in-tree directory link as an escape whenever
+ * the canonical form could not materialise (a link chain whose resolved
+ * path runs past the platform limit) — unresolvable rides `unresolved`,
+ * never `outOfRoot`. Where the inode cannot carry the comparison, the
+ * resolved SPELLING still can: the lexical prefix answer is the same
+ * containment the identity walk computes.
  */
-function escapesRoot(abs: Buffer, ctx: ExclusionContext): boolean {
-  if (ctx.rootIdentity === null) return false;
+function escapesRoot(abs: Buffer, ctx: ExclusionContext): RootReach {
   let cur: Buffer;
   try {
     // BYTES, never a decoded spelling: a name that is not valid UTF-8
@@ -1920,25 +2048,45 @@ function escapesRoot(abs: Buffer, ctx: ExclusionContext): boolean {
     // different string for the same directory).
     cur = realpathSync.native(abs, { encoding: 'buffer' });
   } catch {
-    return true;
+    return 'unresolvable';
   }
+  if (ctx.rootIdentity === null) {
+    // Lexical fallback: no identity to compare against, so compare the
+    // resolved spelling the way the report names paths.
+    let rootReal: Buffer;
+    try {
+      rootReal = realpathSync.native(Buffer.from(ctx.root), {
+        encoding: 'buffer',
+      });
+    } catch {
+      return 'unresolvable';
+    }
+    if (cur.equals(rootReal)) return 'inside';
+    const sepByte = sep === '\\' ? 0x5c : 0x2f;
+    return cur.length > rootReal.length &&
+      cur.subarray(0, rootReal.length).equals(rootReal) &&
+      cur[rootReal.length] === sepByte
+      ? 'inside'
+      : 'outside';
+  }
+  const rootIdentity = ctx.rootIdentity;
   for (;;) {
     let st;
     try {
       st = statSync(cur);
     } catch {
-      return true;
+      return 'unresolvable';
     }
     if (
       hasVerifiableInode(st.ino) &&
-      st.dev === ctx.rootIdentity.dev &&
-      st.ino === ctx.rootIdentity.ino
+      st.dev === rootIdentity.dev &&
+      st.ino === rootIdentity.ino
     ) {
-      return false;
+      return 'inside';
     }
     const parent = dirname(cur.toString('latin1'));
     const parentBuf = Buffer.from(parent, 'latin1');
-    if (parentBuf.equals(cur)) return true;
+    if (parentBuf.equals(cur)) return 'outside';
     cur = parentBuf;
   }
 }
@@ -2075,7 +2223,15 @@ function reposUnder(
           // does not cover. Out of root is disclosed, never walked; the
           // link itself is what `add -A` records, and the disclosure is
           // what says an edit through it would leave no record here.
-          if (escapesRoot(childAbs, ctx)) {
+          const reach = escapesRoot(childAbs, ctx);
+          if (reach === 'unresolvable') {
+            // A link the platform cannot resolve (a chain past the
+            // limit) is not an escape — it is a path nobody answered
+            // for, and it rides `unresolved`, never `outOfRoot`.
+            unreadable.push(childRel);
+            continue;
+          }
+          if (reach === 'outside') {
             outOfRoot.push(childRel);
             continue;
           }
@@ -2132,10 +2288,17 @@ function unmarkVisited(abs: Buffer, state: ProbeState): void {
 
 /** True when `abs` IS the audited repository's own root (by identity). */
 function isAuditedRoot(abs: Buffer, ctx: ExclusionContext): boolean {
-  if (ctx.rootIdentity === null) return false;
+  if (ctx.rootIdentity === null) {
+    // No verifiable inode — fall back to the resolved spelling rather
+    // than fail open: a link back to the audited root must still be
+    // recognised, or the audited tree is probed as its own nested
+    // repository.
+    return samePath(abs.toString('latin1'), ctx.root);
+  }
   try {
     const st = statSync(abs);
-    if (!hasVerifiableInode(st.ino)) return false;
+    if (!hasVerifiableInode(st.ino))
+      return samePath(abs.toString('latin1'), ctx.root);
     return st.dev === ctx.rootIdentity.dev && st.ino === ctx.rootIdentity.ino;
   } catch {
     return false;
@@ -2171,13 +2334,19 @@ function identityOf(abs: Buffer): string | null {
   // The house predicate, not a bare `!== 0`: FAT/exFAT and some SMB
   // mounts answer 0, and a Windows file index past the safe-integer
   // range rounds, so two distinct directories can carry one `ino`.
-  // Either way there is no identity to key on — every directory would
-  // read as the first one and the walk would drop everything after its
-  // root. No identity means walk and probe, never "seen".
+  // Either way the INODE is no identity to key on — but the resolved
+  // spelling is: a link cycle is as boundless on FAT as anywhere, and
+  // the lexical key recognises the re-entry the inode cannot. Only when
+  // neither answers is there no identity — and no identity means walk
+  // and probe, never "seen".
   try {
     const st = statSync(abs);
-    if (!hasVerifiableInode(st.ino)) return null;
-    return `${st.dev}:${st.ino}`;
+    if (hasVerifiableInode(st.ino)) return `${st.dev}:${st.ino}`;
+  } catch {
+    // fall through to the lexical key
+  }
+  try {
+    return `p:${realpathSync.native(abs, { encoding: 'buffer' }).toString('latin1')}`;
   } catch {
     return null;
   }
@@ -2279,6 +2448,18 @@ function walkAndProbe(
   ctx: ExclusionContext,
   state: ProbeState,
 ): void {
+  // …and the walk itself starts inside the audited tree, or not at
+  // all: a walk that begins outside it enumerates and baselines content
+  // no tree records.
+  const reach = escapesRoot(dirAbs, ctx);
+  if (reach === 'unresolvable') {
+    state.unresolved.add(dirRel.toString('latin1'));
+    return;
+  }
+  if (reach === 'outside') {
+    state.outOfRoot.add(dirRel.toString('latin1'));
+    return;
+  }
   const found = reposUnder(dirAbs, dirRel, ctx, state);
   for (const r of found.repos) probeNestedRepo(r.abs, r.rel, ctx, state);
   for (const u of found.unreadable) state.unresolved.add(u.toString('latin1'));
@@ -2327,6 +2508,27 @@ function probeLinkedRepo(
     return;
   }
   if (isAuditedRoot(abs, ctx)) return;
+  // One classifier for every route that starts a walk or a probe, not
+  // only the walk's: the status-slashless route, the index mode-120000
+  // route and a nested repository's interior links all funnel through
+  // here. A link out of the tree is scope, never walked; an
+  // unresolvable one rides `unresolved`, never `outOfRoot`. A link
+  // pointing straight at an out-of-root REPOSITORY is still probed —
+  // its uncommitted dirt is a blind spot either way — but it rides the
+  // outOfRoot bucket, so a commit inside it (nothing a fix could have
+  // made) reads as scope, not as a move inside the audited tree.
+  const reach = escapesRoot(abs, ctx);
+  if (reach === 'unresolvable') {
+    state.unresolved.add(key);
+    return;
+  }
+  if (reach === 'outside') {
+    state.outOfRoot.add(key);
+    if (existsSync(joinBytes(abs, DOT_GIT))) {
+      probeNestedRepo(abs, rel, ctx, state);
+    }
+    return;
+  }
   const target = own ?? linkTargetExcluded(abs, ctx);
   if (target === 'git-dir') return;
   if (target === 'review-worktree') {
@@ -2475,9 +2677,12 @@ function probeBlindSpotState(
     budget: walkBudgets.perRun,
   };
   // The audited root is the first directory every walk must never
-  // re-enter — through a link to itself, or to an ancestor.
-  if (ctx.rootIdentity !== null) {
-    state.visited.add(`${ctx.rootIdentity.dev}:${ctx.rootIdentity.ino}`);
+  // re-enter — through a link to itself, or to an ancestor. Seeded by
+  // `identityOf`, so the lexical key stands in where the inode cannot
+  // answer rather than leaving the seed out entirely.
+  const rootKey = identityOf(Buffer.from(ctx.root));
+  if (rootKey !== null) {
+    state.visited.add(rootKey);
   }
   const entries = splitNul(raw);
   for (let i = 0; i < entries.length; i++) {
@@ -2548,7 +2753,15 @@ function probeBlindSpotState(
     // on every run, whatever the interior did — and an interior whose own
     // config steers its status was named dirty rather than named as a
     // state this command could not answer for).
-    const inner = probeNestedRepoState(joinBytes(rootBuf, relBytes));
+    const innerAbs = joinBytes(rootBuf, relBytes);
+    const inner = probeNestedRepoState(innerAbs);
+    // Register the physical repository the way `probeNestedRepo` does:
+    // the status route records `dirty`/`digests` directly, and without
+    // the registration a second route to the SAME repository (a tracked
+    // link pointing at it) probed again and the baseline carried it
+    // under two names.
+    const innerIdentity = identityOf(innerAbs);
+    if (innerIdentity !== null) state.probed.add(innerIdentity);
     if (inner.state === 'failed') {
       unresolved.add(key);
       continue;
@@ -2876,30 +3089,35 @@ function assertRootHoldsCwd(root: string): void {
   // is the same shape without an adversary, and is refused the same way;
   // a copied linked worktree is NOT (its `.git` still reads
   // `<common>/worktrees/<name>`, so it passes, as it should).
-  const enclosing = enclosingToplevel(top);
-  if (enclosing !== null) {
-    const outerGitDir = gitOpt(
-      '-C',
-      enclosing,
-      'rev-parse',
-      '--absolute-git-dir',
-    );
-    const hereGitDir = gitOpt('-C', root, 'rev-parse', '--absolute-git-dir');
-    if (
-      outerGitDir !== null &&
-      hereGitDir !== null &&
-      samePath(outerGitDir, hereGitDir)
-    ) {
-      throw new Error(
-        `fix-delta: ${root} answers for the repository at ${hereGitDir}, ` +
-          `but so does ${enclosing}, which CONTAINS it — a \`.git\` entry ` +
-          'inside the working tree (a planted gitfile, or one a moved ' +
-          'submodule or copied worktree left behind) narrows every ' +
-          'reading to this subtree, so the capture would record part of ' +
-          'the tree, name paths that do not exist at the repository root, ' +
-          'and miss every edit outside it. Remove the stale `.git` entry, ' +
-          'or run from the repository root, and re-run.',
+  //
+  // The walk is UNVALIDATED: every strict ancestor of the derived root
+  // holding a `.git` path at all is asked for its git dir. A validating
+  // predicate here is an approximation of git's own, and its misses skip
+  // the gate (a HEAD spelled `ref:refs/heads/main` failed one, and the
+  // gate stood down over it); over-acceptance can only ever produce a
+  // refusal, because a genuine enclosing repository's git dir never
+  // equals this repository's own.
+  const hereGitDir = gitOpt('-C', root, 'rev-parse', '--absolute-git-dir');
+  if (hereGitDir !== null) {
+    for (const enclosing of enclosingGitDirs(top)) {
+      const outerGitDir = gitOpt(
+        '-C',
+        enclosing,
+        'rev-parse',
+        '--absolute-git-dir',
       );
+      if (outerGitDir !== null && samePath(outerGitDir, hereGitDir)) {
+        throw new Error(
+          `fix-delta: ${root} answers for the repository at ${hereGitDir}, ` +
+            `but so does ${enclosing}, which CONTAINS it — a \`.git\` entry ` +
+            'inside the working tree (a planted gitfile, or one a moved ' +
+            'submodule or copied worktree left behind) narrows every ' +
+            'reading to this subtree, so the capture would record part of ' +
+            'the tree, name paths that do not exist at the repository root, ' +
+            'and miss every edit outside it. Remove the stale `.git` entry, ' +
+            'or run from the repository root, and re-run.',
+        );
+      }
     }
   }
   const fromCwd = git('rev-parse', '--absolute-git-dir');
@@ -2917,15 +3135,20 @@ function assertRootHoldsCwd(root: string): void {
 }
 
 /**
- * The first directory ABOVE `dir` that git's own discovery would accept as
- * a working tree, or null when there is none. The bound of the
- * subtree-narrowing check: an enclosing checkout answering for the same
- * git dir is the signature a `.git` entry planted inside a working tree
+ * Every strict ancestor of `dir` holding a `.git` path at all —
+ * unvalidated, on purpose: the subtree-narrowing gate compares git dirs,
+ * and over-acceptance there can only ever produce a refusal, while a
+ * validating predicate's miss (an approximation of git's own) would
+ * stand the gate down. An enclosing checkout answering for the same git
+ * dir is the signature a `.git` entry planted inside a working tree
  * leaves.
  */
-function enclosingToplevel(dir: string): string | null {
-  const parent = dirname(dir);
-  return parent === dir ? null : honestToplevel(parent);
+function enclosingGitDirs(dir: string): string[] {
+  const dirs: string[] = [];
+  for (let cur = dirname(dir); cur !== dirname(cur); cur = dirname(cur)) {
+    if (existsSync(join(cur, '.git'))) dirs.push(cur);
+  }
+  return dirs;
 }
 
 /**
@@ -2943,24 +3166,20 @@ function honestToplevel(dir: string): string | null {
 /**
  * What git's own discovery accepts as a `.git` entry: a gitfile (any
  * regular file — git reads it or dies on it, it never climbs past one),
- * or a directory holding `HEAD`, `objects/` and `refs/`. An empty `.git`
- * directory or a dangling `.git` link is climbed past, as git climbs past
- * it — refusing there named a `core.worktree` that was never set.
+ * or a directory git itself answers for. The directory case ASKS git
+ * rather than approximating `validate_headref`: the accepted spellings
+ * of HEAD are arbitrary bytes in a file the tree owns (a `ref:` with
+ * zero whitespace, an uppercase SHA), and the corner set has no last
+ * element. `rev-parse --git-dir` answers for exactly the directories git
+ * accepts — an empty or garbage HEAD is rejected and climbed past, as it
+ * must be, and an unborn-but-valid HEAD answers fine.
  */
 function isGitEntry(dotGit: string): boolean {
   try {
     const st = statSync(dotGit);
     if (st.isFile()) return true;
     if (!st.isDirectory()) return false;
-    // git validates the HEAD it finds (`validate_headref`) — a `.git`
-    // directory carrying an empty or garbage HEAD is climbed past, and
-    // stopping there named a `core.worktree` that was never set.
-    const head = readFileSync(join(dotGit, 'HEAD'), 'utf8');
-    return (
-      /^(ref:\s+refs\/|[0-9a-f]{40}|[0-9a-f]{64})/.test(head) &&
-      statSync(join(dotGit, 'objects')).isDirectory() &&
-      statSync(join(dotGit, 'refs')).isDirectory()
-    );
+    return gitOpt('--git-dir', dotGit, 'rev-parse', '--git-dir') !== null;
   } catch {
     return false;
   }
@@ -3220,11 +3439,23 @@ export function runFixDelta(args: FixDeltaArgs): void {
     const now = probe.digests[p];
     return before !== undefined && now !== undefined && before === now;
   };
+  // Scope is not a transition: a path the probe reached OUTSIDE the
+  // audited tree (a link's target) carries its digest like any other,
+  // but a move inside it is not content of this tree — reporting it as
+  // "committed or stashed inside" was a false fact about the audited
+  // repository, and it withheld the all-clear over it. Those ride the
+  // scope note, at either moment.
+  const outOfRootNow = probe.outOfRoot;
+  const isOutOfRoot = (p: string): boolean =>
+    snapshot.outOfRoot.includes(p) || outOfRootNow.includes(p);
   const freshDirt = dirtyNow.filter(
     (p) => !snapshot.dirtySubmodules.includes(p) || !sameDirtAsBaseline(p),
   );
   const preExisting = dirtyNow.filter(
-    (p) => snapshot.dirtySubmodules.includes(p) && sameDirtAsBaseline(p),
+    (p) =>
+      snapshot.dirtySubmodules.includes(p) &&
+      sameDirtAsBaseline(p) &&
+      !isOutOfRoot(p),
   );
   // The third transition the baseline can see: dirt at snapshot time that is
   // GONE now necessarily changed on disk between the two states — a clean
@@ -3232,7 +3463,8 @@ export function runFixDelta(args: FixDeltaArgs): void {
   // this the all-clear claim would be provably false. A path the probe can
   // no longer ANSWER is not gone — it rides the unresolved disclosure.
   const cleaned = snapshot.dirtySubmodules.filter(
-    (p) => !dirtyNow.includes(p) && !unresolvedNow.includes(p),
+    (p) =>
+      !dirtyNow.includes(p) && !unresolvedNow.includes(p) && !isOutOfRoot(p),
   );
   const files =
     diff.length === 0
@@ -3258,6 +3490,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
       !dirtyNow.includes(p) &&
       !unresolvedNow.includes(p) &&
       !recorded.has(p) &&
+      !isOutOfRoot(p) &&
       probe.digests[p] !== undefined &&
       probe.digests[p] !== snapshot.digests[p],
   );
@@ -3274,6 +3507,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
       snapshot.digests[p] === undefined &&
       !dirtyNow.includes(p) &&
       !unresolvedNow.includes(p) &&
+      !isOutOfRoot(p) &&
       !recorded.has(p),
   );
   // The comparison is a closed matrix over the baseline state × the state
@@ -3297,10 +3531,14 @@ export function runFixDelta(args: FixDeltaArgs): void {
   // so it rides the blind-spot gate; the rest state the scope and leave
   // the all-clear alone, or every repository using `npm link` would hear
   // the qualification on every run and stop reading it.
-  const outOfRootNow = probe.outOfRoot;
   const freshOutOfRoot = outOfRootNow.filter(
     (p) => !snapshot.outOfRoot.includes(p),
   );
+  // A probed out-of-root repository that is dirty or unresolved rides
+  // its own gating line; the scope note names only the rest.
+  const outOfRootScope = (
+    freshOutOfRoot.length > 0 ? freshOutOfRoot : outOfRootNow
+  ).filter((p) => !dirtyNow.includes(p) && !unresolvedNow.includes(p));
   const vanished = [
     ...Object.keys(snapshot.digests).filter(
       (p) =>
@@ -3308,6 +3546,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
         probe.digests[p] === undefined &&
         !dirtyNow.includes(p) &&
         !unresolvedNow.includes(p) &&
+        !isOutOfRoot(p) &&
         !recorded.has(p),
     ),
     ...snapshot.unresolved.filter(
@@ -3315,6 +3554,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
         probe.digests[p] === undefined &&
         !dirtyNow.includes(p) &&
         !unresolvedNow.includes(p) &&
+        !isOutOfRoot(p) &&
         !recorded.has(p),
     ),
   ];
@@ -3338,14 +3578,9 @@ export function runFixDelta(args: FixDeltaArgs): void {
     if (unresolvedNow.length > 0) {
       writeStderrLine(unresolvedBlindSpot(displayNames(unresolvedNow), true));
     }
-    if (outOfRootNow.length > 0) {
+    if (outOfRootScope.length > 0) {
       writeStderrLine(
-        outOfRootNote(
-          displayNames(
-            freshOutOfRoot.length > 0 ? freshOutOfRoot : outOfRootNow,
-          ),
-          freshOutOfRoot.length > 0,
-        ),
+        outOfRootNote(displayNames(outOfRootScope), freshOutOfRoot.length > 0),
       );
     }
     if (cleaned.length > 0) {
@@ -3410,12 +3645,9 @@ export function runFixDelta(args: FixDeltaArgs): void {
   if (freshDirt.length > 0) {
     writeStderrLine(submoduleBlindSpot(displayNames(freshDirt), false));
   }
-  if (outOfRootNow.length > 0) {
+  if (outOfRootScope.length > 0) {
     writeStderrLine(
-      outOfRootNote(
-        displayNames(freshOutOfRoot.length > 0 ? freshOutOfRoot : outOfRootNow),
-        freshOutOfRoot.length > 0,
-      ),
+      outOfRootNote(displayNames(outOfRootScope), freshOutOfRoot.length > 0),
     );
   }
   if (unresolvedNow.length > 0) {
