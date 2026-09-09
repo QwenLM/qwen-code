@@ -58,7 +58,7 @@ Pick the path that matches your goal:
 - [`17-configuration.md`](./17-configuration.md) - env vars, CLI flags, `settings.json` keys that affect the daemon.
 - [`18-error-taxonomy.md`](./18-error-taxonomy.md) - typed errors per layer with remediation.
 - [`19-observability.md`](./19-observability.md) - `QWEN_SERVE_DEBUG`, debugging recipes, telemetry gaps.
-- [`20-quickstart-operations.md`](./20-quickstart-operations.md) - shortest startup path, curl checks, route map, and embedded invocation recipes.
+- [`20-quickstart-operations.md`](./20-quickstart-operations.md) - shortest startup path, curl checks, route map, and the embedding boundary (in-process hosting is internal; external integrations use `qwen serve --no-web` plus the HTTP/SSE protocol). The internal `createServeApp` lifecycle recipe lives in [`02-serve-runtime.md`](./02-serve-runtime.md).
 
 ## Glossary
 
@@ -141,12 +141,12 @@ Use these anchors when moving from the docs into the latest `main` code:
 
 ### Reference and operations
 
-| Area                    | Current state                                                                                                                                             | Primary docs                          |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
-| Configuration           | Full `qwen serve` flags, env vars, `settings.json`, `ServeOptions`, `BridgeOptions`, and important constants are collected in one page.                   | [`17`](./17-configuration.md)         |
-| Quickstart / operations | Shortest startup path, launch recipes, curl checks, Web Shell auth behavior, route split, shutdown behavior, and embedded invocation recipes are covered. | [`20`](./20-quickstart-operations.md) |
-| Errors                  | Boot-time explicit failures, route errors, bridge errors, EventBus errors, filesystem errors, and mediator errors are summarized with remediation.        | [`18`](./18-error-taxonomy.md)        |
-| Observability           | `QWEN_SERVE_DEBUG`, curl recipes, useful events, telemetry gaps, and investigation checklists are documented.                                             | [`19`](./19-observability.md)         |
+| Area                    | Current state                                                                                                                                                                                                                               | Primary docs                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| Configuration           | Full `qwen serve` flags, env vars, `settings.json`, `ServeOptions`, `BridgeOptions`, and important constants are collected in one page.                                                                                                     | [`17`](./17-configuration.md)         |
+| Quickstart / operations | Shortest startup path, launch recipes, curl checks, Web Shell auth behavior, route split, shutdown behavior, and the embedding boundary are covered. The internal `createServeApp` lifecycle recipe lives in [`02`](./02-serve-runtime.md). | [`20`](./20-quickstart-operations.md) |
+| Errors                  | Boot-time explicit failures, route errors, bridge errors, EventBus errors, filesystem errors, and mediator errors are summarized with remediation.                                                                                          | [`18`](./18-error-taxonomy.md)        |
+| Observability           | `QWEN_SERVE_DEBUG`, curl recipes, useful events, telemetry gaps, and investigation checklists are documented.                                                                                                                               | [`19`](./19-observability.md)         |
 
 ### Historical or deprecated surfaces
 

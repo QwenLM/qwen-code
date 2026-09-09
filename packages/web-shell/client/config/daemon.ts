@@ -44,7 +44,8 @@ function readStoredDaemonToken(): string | undefined {
   }
 }
 
-function persistDaemonToken(token: string): void {
+export function persistDaemonToken(token: string): void {
+  cachedDaemonToken = token;
   try {
     window.sessionStorage.setItem(DAEMON_TOKEN_STORAGE_KEY, token);
   } catch {
@@ -72,8 +73,7 @@ export function getDaemonToken(): string | undefined {
     // sessionStorage (not localStorage) keeps the token scoped to this tab and
     // cleared when the tab closes.
     persistDaemonToken(fromUrl);
-    cachedDaemonToken = fromUrl;
-    return cachedDaemonToken;
+    return fromUrl;
   }
   // Refresh path: the URL was already cleaned on the first load — fall
   // back to the per-tab persisted copy.
@@ -117,7 +117,6 @@ export function waitForDaemonTokenMessage(
 
 export function removeDaemonTokenFromUrl(): void {
   if (typeof window === 'undefined') return;
-  if (import.meta.env.DEV) return;
   const url = new URL(window.location.href);
   let changed = false;
   if (url.searchParams.has('token')) {
