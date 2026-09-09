@@ -1566,9 +1566,17 @@
   min-width: 0;
 }
 
-.toolBtn:hover {
+.toolBtn:not(:disabled):not([data-disabled]):hover {
   background: var(--chat-editor-bg-tertiary);
   color: var(--chat-editor-text-primary);
+}
+
+.planControl {
+  flex: 0 0 auto;
+}
+
+.planControl[data-disabled] {
+  cursor: default;
 }
 
 .workspaceSelectTrigger {

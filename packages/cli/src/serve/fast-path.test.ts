@@ -454,7 +454,6 @@ describe('CLI entry import boundary', () => {
     const runServeSource = readFileSync('src/serve/run-qwen-serve.ts', 'utf8');
 
     expect(runServeSource).not.toMatch(/from ['"]\.\/server\.js['"]/);
-    expect(runServeSource).not.toMatch(/from ['"]\.\/web-shell-static\.js['"]/);
     expect(runServeSource).not.toMatch(
       /from ['"]\.\/acp-session-bridge\.js['"]/,
     );
@@ -466,6 +465,10 @@ describe('CLI entry import boundary', () => {
     );
     expect(runServeSource).toContain("import('./server.js')");
     expect(runServeSource).toContain("import('@qwen-code/acp-bridge/bridge')");
+    // web-shell-static (express-static/CSP machinery) must stay out of the
+    // fast-path static closure at every depth, including transitive edges
+    // through server/self-origin.js and web-shell-preauth.js; the static
+    // source-graph walk below pins that instead of per-hop regexes.
   });
 
   it('keeps request helpers from value-importing the ACP compatibility shim', () => {
@@ -496,7 +499,9 @@ describe('CLI entry import boundary', () => {
 
     expect(graph.unresolvedLocalImports).toEqual([]);
     const forbiddenLocalFiles = [...graph.localFiles].filter(
-      (filePath) => filePath === 'src/serve/acp-session-bridge.ts',
+      (filePath) =>
+        filePath === 'src/serve/acp-session-bridge.ts' ||
+        filePath === 'src/serve/web-shell-static.ts',
     );
     expect(
       forbiddenLocalFiles,
