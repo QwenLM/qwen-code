@@ -40,11 +40,12 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 //   cd packages/web-templates && node src/export-html/build.mjs
 // (the build prints `Document export runtime is N bytes`.)
 //
-// Last measured at 4,205,360 bytes on main after #11340. Keep the warning close
-// to that measurement, while the structural guards above catch the known large
-// dependency graphs before the coarse hard ceiling does.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 4_100_000;
-const MAX_DOCUMENT_RUNTIME_BYTES = 5_000_000;
+// Last measured at 4,133,282 bytes by the Lint & Static lane on main. Keep the
+// warning close to that measurement and the hard ceiling close above it — a cap
+// left far above the measurement is a ratchet with enough slack for a whole
+// dependency family to come back unnoticed.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 4_200_000;
+const MAX_DOCUMENT_RUNTIME_BYTES = 4_300_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
