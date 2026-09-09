@@ -165,6 +165,35 @@ function run(
 }
 
 describe('repo-context providers and trust boundary', () => {
+  it.each([false, true])(
+    'restores the full roster only when repository reviewers are required (%s)',
+    (required) => {
+      const root = temp();
+      const worktree = join(root, 'worktree');
+      mkdirSync(worktree);
+      const { planPath } = run(
+        root,
+        worktree,
+        { files: [{ path: 'docs/_meta.ts' }], reviewProfile: 'docs-nav' },
+        [
+          {
+            provide: () => ({
+              ...context(),
+              requiredAgents: required ? ['test-matrix'] : [],
+            }),
+          },
+        ],
+      );
+      expect(readJson(planPath)).toMatchObject({
+        repositoryContext: { provider: 'fake-provider' },
+      });
+      if (required)
+        expect(readJson(planPath)).not.toHaveProperty('reviewProfile');
+      else
+        expect(readJson(planPath)).toHaveProperty('reviewProfile', 'docs-nav');
+    },
+  );
+
   it('writes null and clears stale context when no provider matches', () => {
     const root = temp();
     const worktree = join(root, 'worktree');

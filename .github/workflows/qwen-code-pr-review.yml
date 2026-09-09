@@ -996,6 +996,7 @@ jobs:
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
           AUTO_REVIEW: '${{ steps.context.outputs.auto_review }}'
+          QWEN_REVIEW_AUTOMATIC: '${{ steps.context.outputs.auto_review }}'
           TIMEOUT_MINUTES: '${{ steps.context.outputs.timeout_minutes }}'
           TIMEOUT_EXPLICIT: '${{ steps.context.outputs.timeout_explicit }}'
           # Timeout headroom for CI reviews, measured against the PR 8507

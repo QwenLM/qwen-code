@@ -429,6 +429,16 @@ export function runRepoContext(
         );
   if (context === null) delete plan.repositoryContext;
   else plan.repositoryContext = context;
+  if (
+    plan['reviewProfile'] === 'docs-nav' &&
+    context &&
+    context.requiredAgents.length > 0
+  ) {
+    delete plan['reviewProfile'];
+    writeStderrLine(
+      'Repository-required reviewers keep this navigation change on the full review path.',
+    );
+  }
 
   mkdirSync(dirname(outPath), { recursive: true });
   atomicWriteFileSync(outPath, `${JSON.stringify(context, null, 2)}\n`);

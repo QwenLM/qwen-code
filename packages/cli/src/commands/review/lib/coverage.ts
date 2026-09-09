@@ -53,6 +53,7 @@
 // rest, and it is now in the prompt, in code.
 
 import { readFileSync, statSync } from 'node:fs';
+import { DOCS_NAV_PROFILE } from './docs-nav-profile.js';
 import {
   readRunTranscripts,
   wasGivenTheDiff,
@@ -245,6 +246,7 @@ export interface CoverageFromTranscripts {
 
 /** The plan, as far as coverage needs it. The roster reads more of it — see RosterPlan. */
 interface Plan {
+  reviewProfile?: unknown;
   diffPathAbsolute: string;
   chunks: Array<{
     id: number;
@@ -1549,6 +1551,7 @@ export function verificationGaps(
   // full high pipeline and escalate every medium review back to high. Verify
   // (Step 4) still runs at medium, so its floor below is untouched.
   const balancedMedium = (plan as { effort?: unknown }).effort === 'medium';
+  const focusedNavigation = plan.reviewProfile === DOCS_NAV_PROFILE;
 
   // How a step's agents actually got their prompt. The floor needs the shapes
   // apart, not one boolean, because the fix for each is different — and a refusal
@@ -1714,7 +1717,11 @@ export function verificationGaps(
   const budgetStopped = stop !== null && stop.cause !== 'round-cap';
   const reverseByDesign = budgetStopped && reverse === 'not-built';
   // A repairable reverse-audit gap only at high: medium is complete without it.
-  const reverseGap = !balancedMedium && !reverseByDesign && reverse !== 'ok';
+  const reverseGap =
+    !balancedMedium &&
+    !focusedNavigation &&
+    !reverseByDesign &&
+    reverse !== 'ok';
   if (reverseGap) {
     // The fix template carries `--plan <plan>`; a literal `<plan>` pasted into a
     // POSIX shell parses as input redirection, so the one repair round Step 6
@@ -1805,6 +1812,16 @@ export function verificationGaps(
     });
   }
 
+  if (focusedNavigation) {
+    gaps.push({
+      subject: 'focused navigation review',
+      reason:
+        'limited to the static navigation change; findings require independent verification. The full review and reverse audit are outside this profile, so it cannot certify Approve',
+      subjectZh: '导航专项审查',
+      reasonZh:
+        '范围限于静态导航改动，发现的问题须独立验证；此模式不包含完整审查和反向审计，因此不会 Approve',
+    });
+  }
   return { ok: gaps.length === 0, gaps, remediation, unverifiedFindings };
 }
 

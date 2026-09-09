@@ -27,6 +27,7 @@ import { RESUME_MAX } from './run-ledger.js';
 
 /** Why a resume was refused. Stable identifiers: the report carries one. */
 export type ResumeRefusal =
+  | 'profile-not-resumable'
   | 'no-report' // no previous fetch report at the plan path
   | 'pr-mismatch' // the report on disk is another PR's
   | 'effort-mismatch' // an explicit --effort differs from the recorded run's
@@ -45,6 +46,7 @@ export type ResumeAssessment =
 
 /** What the previous fetch report claims. All fields as parsed, unvalidated. */
 export interface PreviousReport {
+  reviewProfile?: unknown;
   prNumber?: unknown;
   fetchedSha?: unknown;
   diffSha256?: unknown;
@@ -98,6 +100,9 @@ export function assessResume(
   }
   if (prev.prNumber !== probes.prNumber) {
     return { ok: false, reason: 'pr-mismatch' };
+  }
+  if (prev.reviewProfile === 'docs-nav') {
+    return { ok: false, reason: 'profile-not-resumable' };
   }
   // A plan with no recorded effort ran the default (high) roster; an
   // explicit effort that differs is a request for different work, not a

@@ -69,6 +69,14 @@ describe('assessResume — the empty-string shapes, named by the FIRST break', (
 });
 
 describe('assessResume', () => {
+  it('starts fresh rather than resuming a focused automatic review as high', () => {
+    expect(
+      assessResume({ ...prev(), reviewProfile: 'docs-nav' }, probes()),
+    ).toEqual({
+      ok: false,
+      reason: 'profile-not-resumable',
+    });
+  });
   it('resumes when every probe matches the previous report', () => {
     expect(assessResume(prev(), probes())).toEqual({ ok: true });
   });

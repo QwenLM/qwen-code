@@ -426,6 +426,33 @@ describe('agent-prompt (command boundary)', () => {
       }),
     ).toThrow(/cannot read the plan/);
   });
+
+  it('stops reverse audit for focused navigation without recording a prompt', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-nav-'));
+    const savedExit = process.exitCode;
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(
+        plan,
+        JSON.stringify({ ...PLAN, reviewProfile: 'docs-nav' }),
+      );
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        findings: join(dir, 'findings.md'),
+        round: 1,
+      });
+      expect(process.exitCode).toBe(4);
+      expect(writeStdoutLine).not.toHaveBeenCalled();
+      expect(readRecordedPrompts(plan).size).toBe(0);
+      expect(writeStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('skips reverse audit'),
+      );
+    } finally {
+      process.exitCode = savedExit;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it('injects the project rules the review loaded', () => {
     // They were loaded, written to a file, and dropped: `buildChunkAgentPrompt`
     // took a `rules` argument that the CLI had no flag to supply. The review
@@ -2792,6 +2819,22 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
   };
   const absTmp = resolve('/abs/tmp');
 
+  it.each(['docs-nav', 'verify'] as const)(
+    'keeps %s inside the causal navigation scope',
+    (role) => {
+      const brief = buildRoleBrief(
+        { ...PR_PLAN, reviewProfile: 'docs-nav' },
+        role,
+        { planPath: join(absTmp, 'plan.json') },
+      );
+      expect(brief).toContain('causal base/head difference');
+      expect(brief).toContain('discoverability alone does not establish that');
+      if (role === 'docs-nav') {
+        expect(brief).toContain(join(absTmp, 'qwen-review-pr-6766-context.md'));
+      }
+    },
+  );
+
   it.each([
     '1a',
     '1b',
@@ -2808,6 +2851,7 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     '6b',
     '6c',
     'test-matrix',
+    'docs-nav',
     // The conditionally-owed role welds the diff like every other reader; a
     // role-keyed branch in buildRoleBrief that breaks welding for it alone
     // must not ship green (6d needs a PR-bearing plan, so its diff weld is

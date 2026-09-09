@@ -574,6 +574,116 @@ function base(overrides: Partial<ComposeReviewInput>): ComposeReviewInput {
   };
 }
 
+describe('focused navigation publishing', () => {
+  function focusedPlan(verified = false, reviewed = true): string {
+    const p = plan({
+      step45: false,
+      effort: 'high',
+      ownerRepo: 'QwenLM/qwen-code',
+      prNumber: 11426,
+      fetchedSha: 'a'.repeat(40),
+      reviewModelId: 'fixture-model@1a2b3c4d',
+    });
+    const captured = JSON.parse(readFileSync(p, 'utf8'));
+    Object.assign(captured, {
+      reviewProfile: 'docs-nav',
+      srcDiffLines: 13,
+      fullSrcDiffLines: 13,
+      diffLines: 13,
+      files: [
+        {
+          path: 'docs/developers/_meta.ts',
+          kind: 'source',
+          removedLines: 3,
+          heavy: false,
+        },
+      ],
+      chunks: [
+        {
+          id: 1,
+          startLine: 1,
+          endLine: 13,
+          files: [{ path: 'docs/developers/_meta.ts', newStart: 1, newEnd: 9 }],
+        },
+      ],
+    });
+    writeFileSync(p, JSON.stringify(captured));
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    if (reviewed) {
+      const brief = briefPath(p, 'docs-nav');
+      const launch = `read_file(file_path="${brief}")\nread_file(file_path="${DIFF}", offset=0, limit=13)`;
+      mkdirSync(promptRecordDir(p), { recursive: true });
+      writeFileSync(brief, 'Review the navigation diff.');
+      writeFileSync(join(promptRecordDir(p), 'docs-nav.txt'), launch);
+      transcript('docs-nav', launch, { toolCalls: 2, range: [0, 13] });
+    }
+    if (verified) recordStep45(p, ['verify']);
+    return p;
+  }
+
+  it.each([
+    {
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      verified: false,
+      event: 'COMMENT',
+    },
+    {
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      verified: true,
+      event: 'COMMENT',
+    },
+    {
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      verified: true,
+      event: 'REQUEST_CHANGES',
+    },
+    {
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      verified: false,
+      event: 'COMMENT',
+    },
+  ])(
+    'publishes $event for C=$criticalsInline S=$suggestionsInline verified=$verified without a full-review anchor',
+    ({ verified, event, ...counts }) => {
+      const r = composeReview({
+        ...counts,
+        planPath: focusedPlan(verified),
+        env: ENV,
+        modelId: MODEL,
+      });
+      expect(r.event).toBe(event);
+      expect(r.body).toContain('focused navigation review');
+      expect(r.body).toContain('cannot certify Approve');
+      expect(r.remediation.join('\n')).not.toContain('--role reverse-audit');
+      expect(r.cappedBy).not.toContain('chunk-nobody-read');
+      expect(r.remediation.join('\n')).not.toContain('--roster');
+      const ledger = parseLedger(r.body);
+      expect(ledger).not.toBeNull();
+      for (const field of ['sha', 'model', 'closed'])
+        expect(ledger).not.toHaveProperty(field);
+      if (counts.criticalsInline > 0) {
+        expect(r.cappedBy.includes('criticals-unverified')).toBe(!verified);
+      }
+    },
+  );
+
+  it('still requires the focused reviewer to read the diff', () => {
+    const r = composeReview({
+      planPath: focusedPlan(false, false),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.remediation.join('\n')).toContain('--roster');
+  });
+});
+
 describe('composeReview — the C/S table', () => {
   it('C=0, S=0 → APPROVE with the LGTM body', () => {
     const r = composeReview(base({}));
