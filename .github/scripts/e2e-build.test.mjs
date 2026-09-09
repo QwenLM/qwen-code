@@ -452,9 +452,7 @@ describe('e2e build artifact upload retry (e2e.yml build job)', () => {
     // Scope to the archive, not the action: an unrelated second artifact
     // in the build job must not redden the retry contract, and the two
     // attempts are bound by step name, never by position.
-    const archiveUploads = uploads.filter(
-      (s) => s.with?.name === uploads[0]?.with?.name,
-    );
+    const archiveUploads = uploads.filter((s) => s.with?.name === 'e2e-build');
     assert.equal(
       archiveUploads.length,
       2,
@@ -488,9 +486,10 @@ describe('e2e build artifact upload retry (e2e.yml build job)', () => {
     // (its conclusion is success; only its outcome is failure), so the retry
     // would never run while a substring pin still reads green.
     assert.equal(retry.if, "${{ steps.upload-build.outcome == 'failure' }}");
-    // The stalled first attempt reserves the artifact name for the run,
-    // and v4+ 409s a same-name upload — without overwrite the retry (and
-    // a manual re-run of the job) fails on Conflict, not on the network.
+    // v4+ 409s a same-name upload only against an artifact finalized in
+    // this run attempt — a stall aborts before finalize and reserves
+    // nothing, so overwrite guards the finalize-then-fail window: an
+    // attempt that finalized e2e-build and only then reported failure.
     assert.equal(retry.with.overwrite, true);
     // Both attempts publish the same payload under the same name; the
     // missing-archive guard rides on both so a pack regression fails
@@ -547,7 +546,7 @@ describe('e2e build artifact upload retry (e2e.yml build job)', () => {
       );
     }
     assert.ok(
-      consumed.has(uploads[0].with.name),
+      consumed.has('e2e-build'),
       'no leg downloads the artifact the build job publishes',
     );
   });
