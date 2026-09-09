@@ -16,6 +16,7 @@ import type {
   TaskListResultDisplay,
   TeamResultDisplay,
   TodoResultDisplay,
+  ToolResultDisplay,
 } from '../tools/tools.js';
 import {
   compactStringForHistory,
@@ -46,6 +47,82 @@ function hasUnpairedSurrogate(value: string): boolean {
 }
 
 describe('toolResultDisplayCompaction', () => {
+  it.each([
+    { answers: [] },
+    { text: 42, answers: [] },
+    { text: null, answers: [] },
+    { text: 'fallback' },
+    { text: 'fallback', answers: null },
+    { text: 'fallback', answers: {} },
+    { text: 'fallback', answers: [null] },
+    { text: 'fallback', answers: ['answer'] },
+    { text: 'fallback', answers: [{ answer: 'Yes' }] },
+    { text: 'fallback', answers: [{ question: 'Question?' }] },
+    { text: 'fallback', answers: [{ question: 42, answer: 'Yes' }] },
+    { text: 'fallback', answers: [{ question: 'Question?', answer: 42 }] },
+  ])('preserves malformed question display unchanged: %j', (fields) => {
+    const display = {
+      type: 'ask_user_question_answers',
+      ...fields,
+    } as unknown as ToolResultDisplay;
+
+    expect(compactToolResultDisplayForHistory(display)).toBe(display);
+    expect(compactToolResultDisplayForRecording(display)).toBe(display);
+  });
+
+  it('preserves valid question displays with no answers', () => {
+    const display = {
+      type: 'ask_user_question_answers' as const,
+      text: 'No valid answers were provided.',
+      answers: [],
+    };
+
+    expect(compactToolResultDisplayForHistory(display)).toEqual(display);
+    expect(compactToolResultDisplayForRecording(display)).toEqual(display);
+  });
+
+  it.each([
+    ['history', compactToolResultDisplayForHistory],
+    ['recording', compactToolResultDisplayForRecording],
+  ] as const)(
+    'bounds question display fields for %s without changing answers at source',
+    (purpose, compact) => {
+      const long = `start-${'😀'.repeat(20_000)}-end`;
+      const display = {
+        type: 'ask_user_question_answers' as const,
+        text: long,
+        answers: [
+          { question: long, answer: long },
+          { question: 'Short question?', answer: 'Yes\n**Header**: literal' },
+        ],
+      };
+      const original = structuredClone(display);
+      const result = compact(display);
+
+      expect(result.type).toBe(display.type);
+      expect(result.answers).toHaveLength(2);
+      expect(result.answers[1]).toEqual(display.answers[1]);
+      for (const value of [
+        result.text,
+        result.answers[0].question,
+        result.answers[0].answer,
+      ]) {
+        expect(value.length).toBeLessThanOrEqual(
+          MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+        );
+        expect(value).toContain('start-');
+        expect(value).toContain('-end');
+        expect(value).toContain(
+          purpose === 'history'
+            ? 'CLI history display'
+            : 'saved session preview',
+        );
+        expect(hasUnpairedSurrogate(value)).toBe(false);
+      }
+      expect(display).toEqual(original);
+    },
+  );
+
   it('keeps short strings unchanged', () => {
     const value = 'short output';
 
