@@ -1175,6 +1175,23 @@ function dropDanglingUnsignedTrailingThought(
   }
 }
 
+function isCompleteResponsesReasoningSignature(signature: string): boolean {
+  if (!signature.startsWith('{')) return false;
+  try {
+    const payload: unknown = JSON.parse(signature);
+    return (
+      payload !== null &&
+      typeof payload === 'object' &&
+      'id' in payload &&
+      typeof payload.id === 'string' &&
+      'encrypted_content' in payload &&
+      typeof payload.encrypted_content === 'string'
+    );
+  } catch {
+    return false;
+  }
+}
+
 function findLastPlainTextPartIndex(parts: Part[]): number {
   for (let i = parts.length - 1; i >= 0; i -= 1) {
     if (isPlainTextPart(parts[i])) {
@@ -5624,24 +5641,10 @@ export class LlmChat {
     // implemented, but would misattribute text across episodes if a
     // non-compliant proxy ever dropped a signature entirely.
     //
-    // Known limitation (mirror image of the above): two back-to-back
-    // TEXT-LESS thought parts that each carry their own signature also
-    // merge, and their signatures are concatenated into one
-    // `{text:'', thought:true, thoughtSignature:'AB'}` part that is valid
-    // for neither block. The split condition requires `partText !== ''`,
-    // so a text-less part can never open a new episode, while the
-    // signature accumulation below is unconditional. This is not
-    // disambiguable here: `frag1`+`frag2` within one episode is precisely
-    // the fragmentation case the concatenation exists to serve, and it
-    // is indistinguishable from two complete text-less episodes. Prior
-    // behavior dropped the signature entirely in this shape (no text
-    // meant no emitted part), so this trades a lossy result for a
-    // corrupt-on-replay one -- a bad signature 400s where a missing one
-    // merely degrades. Not reachable on the Anthropic wire, where a
-    // thinking block always carries text; it IS reachable on the OpenAI
-    // Responses wire when reasoning summaries are disabled and only
-    // `encrypted_content` is returned, since every reasoning item is then
-    // text-less (see #8169).
+    // Responses emits one complete JSON {id, encrypted_content} payload at
+    // output_item.done. Close that episode immediately, even without summary
+    // text; unlike Anthropic signature_delta fragments, it must never be
+    // concatenated with the next reasoning item's payload.
     const consolidatedHistoryParts: Part[] = [];
     let openEpisodeText = '';
     let openEpisodeSignature = '';
@@ -5684,6 +5687,9 @@ export class LlmChat {
         openEpisodeText += partText;
         if (part.thoughtSignature) {
           openEpisodeSignature += part.thoughtSignature;
+          if (isCompleteResponsesReasoningSignature(part.thoughtSignature)) {
+            flushThoughtEpisode();
+          }
         }
         continue;
       }

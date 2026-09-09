@@ -4792,13 +4792,8 @@ describe('LlmChat', async () => {
     });
 
     it('should preserve two OpenAI-Responses-shaped reasoning episodes (JSON-encoded signature payloads), each next to the function_call it preceded', async () => {
-      // The grouping algorithm only ever touches part.thought/text/
-      // thoughtSignature as opaque fields, so it must behave identically
-      // regardless of whether thoughtSignature is Anthropic's plain string
-      // or the OpenAI Responses PR's JSON-encoded {id, encrypted_content}
-      // payload (encodeReasoningSignature). This pins that claim with a
-      // concrete fixture shaped like the Responses generator's actual
-      // emission (a signature-only closing chunk carrying the JSON string).
+      // Match the Responses converter's completed-item envelope, preserving
+      // each summary and payload next to the tool call it preceded.
       const sigA = JSON.stringify({ id: 'rs_1', encrypted_content: 'encA' });
       const sigB = JSON.stringify({ id: 'rs_2', encrypted_content: 'encB' });
       const stream = (async function* () {
@@ -4848,6 +4843,68 @@ describe('LlmChat', async () => {
         { functionCall: { id: 'call2', name: 'tool', args: {} } },
       ]);
     });
+
+    it.each([
+      ['', ''],
+      ['', 'second summary'],
+      ['first summary', ''],
+      ['first summary', 'second summary'],
+      ['   ', '\n'],
+    ])(
+      'preserves consecutive complete Responses payloads with summaries %j and %j',
+      async (firstSummary, secondSummary) => {
+        const recordAssistantTurn = vi.fn();
+        const recordingChat = chatWithRecorder(recordAssistantTurn);
+        const summaries = [firstSummary, secondSummary];
+        const signatures = summaries.map((_, index) =>
+          JSON.stringify({
+            id: `rs_${index}`,
+            encrypted_content: `opaque_${index}`,
+          }),
+        );
+        const toolPart = {
+          functionCall: { id: 'call1', name: 'tool', args: {} },
+        };
+        const parts = summaries.flatMap((text, index) => [
+          { thought: true, text: text.slice(0, 2) },
+          { thought: true, text: text.slice(2) },
+          { thought: true, thoughtSignature: signatures[index] },
+        ]);
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          (async function* () {
+            for (const part of [...parts, toolPart]) {
+              yield {
+                candidates: [{ content: { role: 'model', parts: [part] } }],
+              } as GenerateContentResponse;
+            }
+            yield {
+              candidates: [{ finishReason: 'STOP' }],
+            } as GenerateContentResponse;
+          })(),
+        );
+
+        const stream = await recordingChat.sendMessageStream(
+          'm1',
+          { message: 'preserve all reasoning items' },
+          'p-complete-responses-payloads',
+        );
+        for await (const _ of stream);
+
+        const expectedParts = [
+          ...summaries.map((text, index) => ({
+            thought: true,
+            text: text.trim(),
+            thoughtSignature: signatures[index],
+          })),
+          toolPart,
+        ];
+        expect(recordingChat.getHistory()[1].parts).toEqual(expectedParts);
+        expect(recordAssistantTurn).toHaveBeenCalledOnce();
+        expect(recordAssistantTurn.mock.calls[0][0].message).toEqual(
+          expectedParts,
+        );
+      },
+    );
 
     it('should still record a mid-turn signature-only reasoning episode with no accompanying text, rather than dropping it', async () => {
       // A signature-only chunk with empty text is still potentially
@@ -4966,18 +5023,13 @@ describe('LlmChat', async () => {
       );
     });
 
-    it('documents the accepted limitation: two adjacent text-less signed thought parts concatenate their signatures', async () => {
-      // Pins a KNOWN corruption, not desired behavior. The episode split
-      // condition requires `partText !== ''`, so a text-less thought part
-      // can never open a new episode, while signature accumulation is
-      // unconditional -- two text-less signed parts therefore emit one
-      // part whose signature is 'sigAsigB', valid for neither block. This
-      // is indistinguishable at this layer from legitimate signature
-      // fragmentation within a single episode, which is exactly what the
-      // concatenation exists to serve. Unreachable on the Anthropic wire
-      // (thinking blocks always carry text); reachable on the OpenAI
-      // Responses wire when summaries are off and only encrypted_content
-      // is returned (#8169).
+    it.each([
+      'sigA',
+      '{broken',
+      '{"id":"rs_1"}',
+      '{"id":1,"encrypted_content":"enc"}',
+      '{"id":"rs_1","encrypted_content":1}',
+    ])('keeps unrecognized signature fragments together: %s', async (first) => {
       const stream = (async function* () {
         yield {
           candidates: [
@@ -4985,7 +5037,7 @@ describe('LlmChat', async () => {
               content: {
                 role: 'model',
                 parts: [
-                  { thought: true, thoughtSignature: 'sigA' },
+                  { thought: true, thoughtSignature: first },
                   { thought: true, thoughtSignature: 'sigB' },
                   { functionCall: { id: 'call1', name: 'tool', args: {} } },
                 ],
@@ -5007,7 +5059,7 @@ describe('LlmChat', async () => {
       for await (const _ of res);
 
       expect(chat.getHistory()[1].parts).toEqual([
-        { text: '', thought: true, thoughtSignature: 'sigAsigB' },
+        { text: '', thought: true, thoughtSignature: first + 'sigB' },
         { functionCall: { id: 'call1', name: 'tool', args: {} } },
       ]);
     });
