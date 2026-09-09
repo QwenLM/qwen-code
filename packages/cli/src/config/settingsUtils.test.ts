@@ -726,6 +726,52 @@ describe('SettingsUtils', () => {
         ).toBe('(not set)');
       });
 
+      it('renders a pending reset to an unset tri-state value', () => {
+        vi.mocked(getSettingsSchema).mockReturnValue({
+          tools: {
+            type: 'object',
+            label: 'Tools',
+            category: 'Tools',
+            requiresRestart: true,
+            default: {},
+            description: 'Tools',
+            showInDialog: false,
+            properties: {
+              webSearch: {
+                type: 'object',
+                label: 'Web Search',
+                category: 'Tools',
+                requiresRestart: true,
+                default: {},
+                description: 'Web Search',
+                showInDialog: false,
+                properties: {
+                  enabled: {
+                    type: 'boolean',
+                    label: 'Enable WebSearch',
+                    category: 'Tools',
+                    requiresRestart: true,
+                    default: undefined,
+                    description: 'Enable WebSearch',
+                    showInDialog: true,
+                  },
+                },
+              },
+            },
+          },
+        } as unknown as SettingsSchemaType);
+
+        expect(
+          getDisplayValue(
+            'tools.webSearch.enabled',
+            makeMockSettings({ tools: { webSearch: { enabled: true } } }),
+            makeMockSettings({ tools: { webSearch: { enabled: true } } }),
+            new Set(['tools.webSearch.enabled']),
+            makeMockSettings({ tools: { webSearch: { enabled: undefined } } }),
+          ),
+        ).toBe('(not set)*');
+      });
+
       describe('enum behavior', () => {
         enum StringEnum {
           FOO = 'foo',
@@ -899,6 +945,25 @@ describe('SettingsUtils', () => {
             modifiedSettings,
           );
           expect(result).toBe('Bar');
+        });
+
+        it('renders an unset enum default without exposing undefined', () => {
+          vi.mocked(getSettingsSchema).mockReturnValue({
+            ui: {
+              properties: {
+                theme: { ...SETTING, default: undefined },
+              },
+            },
+          } as unknown as SettingsSchemaType);
+
+          expect(
+            getDisplayValue(
+              'ui.theme',
+              makeMockSettings({}),
+              makeMockSettings({}),
+              new Set(),
+            ),
+          ).toBe('(not set)');
         });
       });
 

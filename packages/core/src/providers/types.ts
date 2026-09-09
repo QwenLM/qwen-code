@@ -124,9 +124,10 @@ export interface ProviderConfig {
    * credentials as the main model, letting the tool register without any
    * `tools.webSearch` configuration.
    *
-   * Absent means the provider has no documented server-side search reachable
-   * through its endpoint, so the tool stays off unless the user configures a
-   * search model (or an env-declared backend) explicitly.
+   * For a preset that pins its base URL, absence vetoes automatic activation.
+   * Custom and unmatched endpoints carry no preset-level knowledge and still
+   * pass through the automatic DashScope host check. Explicit configuration
+   * requires a search model; an env-declared backend also requires that model.
    */
   webSearch?: { backend: 'dashscope' };
 

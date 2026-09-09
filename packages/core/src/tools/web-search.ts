@@ -15,7 +15,10 @@ import {
 import { DASHSCOPE_REGIONAL_HOSTS } from '../core/openaiContentGenerator/provider/dashscope.js';
 import { buildSessionAwareFetch } from '../core/outbound-session-id.js';
 import { getDefaultApiKeyEnvVar } from '../models/modelConfigErrors.js';
-import { findProviderByCredentials } from '../providers/all-providers.js';
+import {
+  ALL_PROVIDERS,
+  findProviderByCredentials,
+} from '../providers/all-providers.js';
 import {
   buildRuntimeFetchOptions,
   preloadRuntimeFetchModule,
@@ -139,9 +142,10 @@ export type WebSearchGateResult =
  * DashScope-compatible endpoint check for the search side channel. Accepts
  * the official DashScope regional hosts (the Standard preset regions,
  * including `dashscope-us`), Bailian Token Plan / workspace MaaS endpoints,
- * and internal Alibaba gateways. This is intentionally narrower than the
- * content provider's DashScope detection: generic Alibaba Cloud API Gateway
- * and proxy endpoints are not known to forward the Responses search tools.
+ * and internal Alibaba gateways. This overlaps, but is neither a subset nor a
+ * superset of, the content provider's DashScope detection: it rejects generic
+ * Alibaba Cloud API Gateway and proxy endpoints, but accepts all concrete
+ * `*.maas.aliyuncs.com` endpoints for the Responses search side channel.
  * This only catches obvious misconfiguration; a host that does not serve the
  * Responses API fails loudly on first use.
  */
@@ -188,6 +192,23 @@ function safeUrlHost(baseUrl: string): string {
   } catch {
     return '[invalid]';
   }
+}
+
+function normalizedBaseUrl(baseUrl: string): string {
+  return baseUrl.replace(/\/+$/, '');
+}
+
+function findProviderByEndpoint(baseUrl: string) {
+  const normalized = normalizedBaseUrl(baseUrl);
+  return ALL_PROVIDERS.find((provider) => {
+    const configured = provider.baseUrl;
+    if (typeof configured === 'string') {
+      return normalizedBaseUrl(configured) === normalized;
+    }
+    return configured?.some(
+      (option) => normalizedBaseUrl(option.url) === normalized,
+    );
+  });
 }
 
 const gateDebugLogger: DebugLogger = createDebugLogger('WEB_SEARCH');
@@ -245,6 +266,7 @@ interface AutoSearchCandidate {
   baseUrl: string;
   envKey?: string;
   apiKey?: string;
+  customHeaders?: Record<string, string>;
   /** Exact registry key component, for the customHeaders lookup. */
   registryBaseUrl?: string;
 }
@@ -263,9 +285,9 @@ function findPrimaryModelEntry(
   const modelId = config.getModel();
   const authType = config.getCurrentAuthType();
   const registryBaseUrl = config.getCurrentModelRegistryBaseUrl();
-  const matches = config
-    .getAllConfiguredModels(authType ? [authType] : undefined)
-    .filter((m) => m.id === modelId);
+  const matches = authType
+    ? config.getAllConfiguredModels([authType]).filter((m) => m.id === modelId)
+    : [];
   // One model id can appear on several entries (different regions, or the
   // synthesized runtime option sorted first); prefer the one the registry
   // actually selected, then any entry that carries usable credentials.
@@ -276,7 +298,11 @@ function findPrimaryModelEntry(
           m.baseUrl === registryBaseUrl,
       )
     : undefined;
-  const entry = [selected, ...matches].find((m) => m?.baseUrl && m.envKey);
+  const entry = selected
+    ? isUsableSearchEntry(selected)
+      ? selected
+      : undefined
+    : matches.find(isUsableSearchEntry);
   if (entry?.baseUrl && entry.envKey) {
     return {
       authType: entry.authType,
@@ -296,9 +322,14 @@ function findPrimaryModelEntry(
   const generation = modelsConfig.getGenerationConfig();
   if (generation.baseUrl && generation.authType) {
     const apiKeySource = modelsConfig.getGenerationConfigSources()['apiKey'];
+    const sourceEnvKey =
+      apiKeySource?.kind === 'env' ? apiKeySource.envKey : undefined;
+    const declaredEnvKey = generation.apiKeyEnvKey;
     const envKey =
-      generation.apiKeyEnvKey ??
-      (apiKeySource?.kind === 'env' ? apiKeySource.envKey : undefined);
+      sourceEnvKey ??
+      (!apiKeySource && declaredEnvKey && process.env[declaredEnvKey]?.trim()
+        ? declaredEnvKey
+        : undefined);
     const apiKey = envKey ? undefined : generation.apiKey;
     const fallbackEnvKey = getDefaultApiKeyEnvVar(generation.authType);
     if (
@@ -312,6 +343,7 @@ function findPrimaryModelEntry(
         baseUrl: generation.baseUrl,
         envKey: envKey ?? (apiKey ? undefined : fallbackEnvKey),
         apiKey,
+        customHeaders: generation.customHeaders,
       };
     }
   }
@@ -357,7 +389,14 @@ function resolveAutoBackend(
   // endpoint the user typed in (`baseUrl: undefined`) and carries no
   // knowledge of it, so a custom entry pointing at DashScope must still reach
   // the host check below, as must an entry matching no preset at all.
-  const preset = findProviderByCredentials(entry.baseUrl, entry.envKey);
+  const credentialMatchedPreset = findProviderByCredentials(
+    entry.baseUrl,
+    entry.envKey,
+  );
+  const preset =
+    credentialMatchedPreset?.baseUrl !== undefined
+      ? credentialMatchedPreset
+      : findProviderByEndpoint(entry.baseUrl);
   const presetKnowsEndpoint = preset?.baseUrl !== undefined;
   if (presetKnowsEndpoint) {
     if (preset?.webSearch?.backend !== 'dashscope') {
@@ -393,7 +432,8 @@ function resolveAutoBackend(
       apiKey: entry.apiKey,
       baseUrl: entry.baseUrl,
       webExtractor: settings?.webExtractor !== false,
-      customHeaders: resolvedEntry?.generationConfig?.customHeaders,
+      customHeaders:
+        entry.customHeaders ?? resolvedEntry?.generationConfig?.customHeaders,
     },
   };
 }
@@ -408,11 +448,11 @@ function resolveAutoBackend(
  * endpoint does not serve fails the first invocation loudly
  * (`InvalidParameter: Unsupported model`).
  *
- * Three paths, in order: an env-declared backend (`WEB_SEARCH_BASE_URL`), a
- * configured search model resolved against `modelProviders`, and — when
- * neither is configured — derivation from the provider the main model runs
- * on ({@link resolveAutoBackend}). Only the first two report failures as
- * startup notices; see {@link WebSearchGateResult}.
+ * Without a model selector, an undeclared backend may be derived from the
+ * primary provider. With a selector, `WEB_SEARCH_BASE_URL` supplies the
+ * endpoint directly; otherwise the selector resolves against
+ * `modelProviders`. Explicit-path failures report startup notices, while an
+ * unavailable automatic backend is silent; see {@link WebSearchGateResult}.
  */
 export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
   const settings = config.getWebSearchSettings();

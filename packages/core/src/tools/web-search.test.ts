@@ -70,6 +70,7 @@ interface ConfigOverrides {
     baseUrl?: string;
     apiKeyEnvKey?: string;
     apiKey?: string;
+    customHeaders?: Record<string, string>;
   };
   generationConfigSources?: Record<string, { kind: string; envKey?: string }>;
 }
@@ -121,7 +122,8 @@ function makeConfig(overrides: ConfigOverrides = {}): Config {
     getContentGeneratorConfig: () => ({ authType: 'openai' }),
     // The auto path reads the ModelsConfig view, which is populated before
     // `refreshAuth` fills in the content generator config.
-    getCurrentAuthType: () => overrides.primaryAuthType ?? 'openai',
+    getCurrentAuthType: () =>
+      'primaryAuthType' in overrides ? overrides.primaryAuthType : 'openai',
     getCurrentModelRegistryBaseUrl: () => overrides.primaryRegistryBaseUrl,
     getModelsConfig: () => ({
       getGenerationConfig: () => overrides.generationConfig ?? {},
@@ -721,9 +723,8 @@ describe('evaluateWebSearchGate auto derivation', () => {
   });
 
   it('derives the backend from an env-only generation config', () => {
-    // OPENAI_BASE_URL + OPENAI_API_KEY declare no modelProviders entry, and
-    // carry the key's value rather than its variable name — the auth type's
-    // default variable is the only way to name it.
+    // The resolver carries the env value plus its source metadata, but no
+    // apiKeyEnvKey. The source keeps searches following key rotation.
     vi.stubEnv('OPENAI_API_KEY', 'sk-env-only');
     const gate = evaluateWebSearchGate(
       autoConfig([], 'env-model', {
@@ -731,6 +732,10 @@ describe('evaluateWebSearchGate auto derivation', () => {
           model: 'env-model',
           authType: 'openai',
           baseUrl: DASHSCOPE_BASE_URL,
+          apiKey: 'sk-env-only',
+        },
+        generationConfigSources: {
+          apiKey: { kind: 'env', envKey: 'OPENAI_API_KEY' },
         },
       }),
     );
@@ -738,6 +743,7 @@ describe('evaluateWebSearchGate auto derivation', () => {
     if (gate.ok) {
       expect(gate.backend.baseUrl).toBe(DASHSCOPE_BASE_URL);
       expect(gate.backend.apiKeyEnvKey).toBe('OPENAI_API_KEY');
+      expect(gate.backend.apiKey).toBeUndefined();
     }
   });
 
@@ -775,6 +781,47 @@ describe('evaluateWebSearchGate auto derivation', () => {
     );
     expect(gate.ok).toBe(true);
     if (gate.ok) expect(gate.backend.apiKeyEnvKey).toBe('PLAN_KEY');
+  });
+
+  it('uses a literal credential when a declared env key is unset', () => {
+    vi.stubEnv(STANDARD.envKey, '');
+    const gate = evaluateWebSearchGate(
+      autoConfig([STANDARD], STANDARD.id, {
+        primaryRegistryBaseUrl: STANDARD.baseUrl,
+        generationConfig: {
+          model: STANDARD.id,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: STANDARD.baseUrl,
+          apiKeyEnvKey: STANDARD.envKey,
+          apiKey: 'sk-settings-literal',
+        },
+        generationConfigSources: { apiKey: { kind: 'settings' } },
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.apiKey).toBe('sk-settings-literal');
+      expect(gate.backend.apiKeyEnvKey).toBeUndefined();
+    }
+  });
+
+  it('forwards custom headers from an env-only generation config', () => {
+    const customHeaders = { 'X-DashScope-WorkSpace': 'llm-xyz' };
+    const gate = evaluateWebSearchGate(
+      autoConfig([], 'env-model', {
+        generationConfig: {
+          model: 'env-model',
+          authType: AuthType.USE_OPENAI,
+          baseUrl:
+            'https://llm-xyz.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          apiKey: 'sk-workspace',
+          customHeaders,
+        },
+        generationConfigSources: { apiKey: { kind: 'settings' } },
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) expect(gate.backend.customHeaders).toEqual(customHeaders);
   });
 
   it('keeps auto-derived web extraction disabled when requested', () => {
@@ -818,6 +865,77 @@ describe('evaluateWebSearchGate auto derivation', () => {
     );
     expect(gate.ok).toBe(true);
     if (gate.ok) expect(gate.backend.baseUrl).toBe(intl.baseUrl);
+  });
+
+  it('falls back to the selected generation config instead of a keyed sibling', () => {
+    const selected = { ...STANDARD, envKey: undefined };
+    const sibling = {
+      ...STANDARD,
+      envKey: 'DASHSCOPE_INTL_KEY',
+      baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    };
+    vi.stubEnv(sibling.envKey, 'sk-intl');
+    const gate = evaluateWebSearchGate(
+      autoConfig([selected, sibling], selected.id, {
+        primaryRegistryBaseUrl: selected.baseUrl,
+        generationConfig: {
+          model: selected.id,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: selected.baseUrl,
+          apiKey: 'sk-selected',
+        },
+        generationConfigSources: { apiKey: { kind: 'settings' } },
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.baseUrl).toBe(selected.baseUrl);
+      expect(gate.backend.apiKey).toBe('sk-selected');
+    }
+  });
+
+  it('does not scan other auth types before authentication is selected', () => {
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(
+      autoConfig([STANDARD], STANDARD.id, {
+        primaryAuthType: undefined,
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.silent).toBe(true);
+  });
+
+  it('still uses the selected generation config before authentication is resolved', () => {
+    const gate = evaluateWebSearchGate(
+      autoConfig([STANDARD], STANDARD.id, {
+        primaryAuthType: undefined,
+        generationConfig: {
+          model: STANDARD.id,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: STANDARD.baseUrl,
+          apiKey: 'sk-selected',
+        },
+        generationConfigSources: { apiKey: { kind: 'settings' } },
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.baseUrl).toBe(STANDARD.baseUrl);
+      expect(gate.backend.apiKey).toBe('sk-selected');
+    }
+  });
+
+  it('accepts a non-preset internal Alibaba host on the automatic path', () => {
+    const internal = {
+      id: 'internal-model',
+      authType: AuthType.USE_OPENAI,
+      envKey: 'INTERNAL_MODEL_KEY',
+      baseUrl: 'https://gw.some-team.alibaba-inc.com/v1',
+    };
+    vi.stubEnv(internal.envKey, 'sk-internal');
+    const gate = evaluateWebSearchGate(autoConfig([internal], internal.id));
+    expect(gate.ok).toBe(true);
+    if (gate.ok) expect(gate.backend.baseUrl).toBe(internal.baseUrl);
   });
 
   it('rejects a non-OpenAI primary provider on an accepted host', () => {
@@ -880,6 +998,10 @@ describe('evaluateWebSearchGate auto derivation', () => {
           model: 'env-model',
           authType: 'openai',
           baseUrl: DASHSCOPE_BASE_URL,
+          apiKey: 'stale-env-value',
+        },
+        generationConfigSources: {
+          apiKey: { kind: 'env', envKey: 'OPENAI_API_KEY' },
         },
       }),
     );
@@ -969,6 +1091,41 @@ describe('evaluateWebSearchGate auto derivation', () => {
         'provider "idealab" declares no built-in web search backend',
       );
     }
+  });
+
+  it.each([
+    [CODING_PLAN.baseUrl + '/', 'ALT_CODING_KEY'],
+    ['https://idealab.alibaba-inc.com/api/openai/v1/', 'ALT_IDEALAB_KEY'],
+  ])(
+    'honors an endpoint preset veto despite credential formatting: %s',
+    (baseUrl, envKey) => {
+      const entry = {
+        id: 'qwen3.6-plus',
+        authType: AuthType.USE_OPENAI,
+        envKey,
+        baseUrl,
+      };
+      vi.stubEnv(envKey, 'sk-test');
+      const gate = evaluateWebSearchGate(autoConfig([entry], entry.id));
+      expect(gate.ok).toBe(false);
+      if (!gate.ok) expect(gate.silent).toBe(true);
+    },
+  );
+
+  it('honors an endpoint preset veto for a literal credential', () => {
+    const gate = evaluateWebSearchGate(
+      autoConfig([], 'qwen3.6-plus', {
+        generationConfig: {
+          model: 'qwen3.6-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
+          apiKey: 'sk-literal',
+        },
+        generationConfigSources: { apiKey: { kind: 'settings' } },
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.silent).toBe(true);
   });
 
   it.each([
@@ -1102,6 +1259,42 @@ describe('evaluateWebSearchGate auto derivation', () => {
     expect(gate.ok).toBe(false);
     if (!gate.ok) {
       expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('reports explicit opt-in when automatic derivation throws', () => {
+    const broken = {
+      getWebSearchSettings: () => ({ enabled: true }),
+      getModel: () => 'some-model',
+      getCurrentAuthType: () => 'openai',
+      getCurrentModelRegistryBaseUrl: () => undefined,
+      getAllConfiguredModels: () => [],
+      getModelsConfig: () => ({}),
+    } as unknown as Config;
+    const gate = evaluateWebSearchGate(broken);
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBeFalsy();
+      expect(gate.notice).toContain('no search model');
+    }
+  });
+
+  it('does not override a declared env backend when its model is missing', () => {
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(
+      makeConfig({
+        settings: {
+          baseUrl: DASHSCOPE_BASE_URL,
+          apiKeyEnv: TEST_ENV_KEY,
+        },
+        models: [STANDARD],
+        primaryModel: STANDARD.id,
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBeFalsy();
+      expect(gate.notice).toContain('no search model');
     }
   });
 

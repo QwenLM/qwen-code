@@ -9764,10 +9764,14 @@ export class Config {
     // only when the tool was actually asked for; a provider with no search
     // backend fails silently (`gate.silent`), since warning about a feature
     // the user never configured is noise.
+    const hasExplicitWebSearchBackend =
+      !!this.webSearchSettings?.model?.trim() ||
+      !!this.webSearchSettings?.baseUrl;
     if (
       !this.getBareMode() &&
       !this.isSafeMode() &&
-      this.webSearchSettings?.enabled !== false
+      this.webSearchSettings?.enabled !== false &&
+      (this.webSearchSettings?.enabled === true || !hasExplicitWebSearchBackend)
     ) {
       const { evaluateWebSearchGate } = await import('../tools/web-search.js');
       const gate = evaluateWebSearchGate(this);

@@ -10136,6 +10136,10 @@ describe('Server Config (config.ts)', () => {
             authType: AuthType.USE_OPENAI,
             model: 'qwen3.6-plus',
             baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            apiKey: 'sk-env-only',
+          },
+          generationConfigSources: {
+            apiKey: { kind: 'env', envKey: 'OPENAI_API_KEY' },
           },
         });
         await config.initialize();
@@ -10186,6 +10190,39 @@ describe('Server Config (config.ts)', () => {
         ).toEqual([]);
       } finally {
         vi.unstubAllEnvs();
+      }
+    });
+
+    it('does not activate a legacy model-only web search configuration', async () => {
+      process.env['DASHSCOPE_API_KEY'] = 'sk-test';
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.6-plus',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: 'qwen3.6-plus',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
+          webSearch: { model: 'qwen3.6-plus' },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).not.toContain(ToolNames.WEB_SEARCH);
+      } finally {
+        delete process.env['DASHSCOPE_API_KEY'];
       }
     });
 
