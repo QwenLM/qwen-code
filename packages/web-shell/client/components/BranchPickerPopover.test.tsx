@@ -2785,6 +2785,29 @@ describe('BranchPickerPopover remotes view', () => {
     expect(workspaceGitRemotes.mock.calls.length).toBeGreaterThan(calls);
   });
 
+  it('keeps the sentence boundary of a multi-line git error in the footer', async () => {
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'git_config_write_failed',
+          message:
+            "error: could not lock config file .git/config: File exists\nfatal: could not remove config section 'remote.origin'",
+        },
+        'POST /workspaces/:workspace/git/remote/remove: git_config_write_failed',
+      ),
+    );
+    await openRemotesView();
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    const footer = document.body.querySelector('[class*="statusBar"]');
+    // The two git sentences stay separated — a stripped \n would fuse
+    // them into 'File existsfatal:'.
+    expect(footer?.textContent).toContain('File exists fatal:');
+    expect(footer?.textContent).not.toContain('File existsfatal');
+  });
+
   it('marks canonical-equivalence and script-mixing lookalikes', async () => {
     const remote = (name: string) => ({
       name,

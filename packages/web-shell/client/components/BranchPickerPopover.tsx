@@ -99,6 +99,14 @@ function sanitizeRemoteDisplay(value: string): string {
   return value.replace(DISPLAY_INVISIBLE_CHARS, '');
 }
 
+// Git's error text in the single-line footer: the invisible class strips
+// — but a stripped \n FUSES two of git's sentences (a lock line runs
+// straight into the write failure). Collapse whitespace to one space
+// FIRST so the sentence boundary survives, then strip.
+function sanitizeStatusText(value: string): string {
+  return sanitizeRemoteDisplay(value.replace(/\s+/g, ' ')).trim();
+}
+
 // The popover content may live in a shadow-portal root (Web Shell portal
 // mode): document.activeElement retargets to the host and
 // document.body.querySelector cannot cross the boundary, so every focus
@@ -838,7 +846,7 @@ export function BranchPickerPopover({
       } catch (err) {
         if (requestId !== remotesRequestIdRef.current) return;
         if (silent) return;
-        setRemotesError(sanitizeRemoteDisplay(pullErrorMessage(err)));
+        setRemotesError(sanitizeStatusText(pullErrorMessage(err)));
       } finally {
         if (requestId === remotesRequestIdRef.current && !silent) {
           setRemotesLoading(false);
@@ -1023,7 +1031,7 @@ export function BranchPickerPopover({
       if (requestId !== remotesRequestIdRef.current) return;
       // git echoes config-sourced names in its errors; the footer renders
       // verbatim, so sanitize at this display boundary too.
-      showStatus(sanitizeRemoteDisplay(pullErrorMessage(err)), 'error');
+      showStatus(sanitizeStatusText(pullErrorMessage(err)), 'error');
       // A refused add can mean the list is stale (409 already-exists for a
       // remote the panel does not show); re-read silently so the panel
       // converges without tearing down the rows and the typed draft.
@@ -1088,7 +1096,7 @@ export function BranchPickerPopover({
         onBranchChanged?.();
       } catch (err) {
         if (requestId !== remotesRequestIdRef.current) return;
-        showStatus(sanitizeRemoteDisplay(pullErrorMessage(err)), 'error');
+        showStatus(sanitizeStatusText(pullErrorMessage(err)), 'error');
         // A refused remove usually means the list is stale (git answered
         // "No such remote" for a row still on screen — a terminal removed
         // it first); re-read silently so the panel converges instead of

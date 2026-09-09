@@ -490,6 +490,20 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
       expect(out.body['error']).toBe(code);
     });
 
+    it('bounds the loose keyword branches to the capped slice', () => {
+      // A keyword past the 512 cap (a `dirty-cache.git` URL deep in a
+      // long push rejection) is not a dirty tree — the loose branches
+      // match the bounded slice, while the anchored remote branches
+      // still read the full detail.
+      const deep = `${'x'.repeat(600)} dirty`;
+      const out = classify(deep);
+      expect(out.body['error']).not.toBe('dirty_working_tree');
+      // The positive arm still fires when the keyword is inside the cap.
+      const early = classify('error: the working tree is dirty');
+      expect(early.status).toBe(409);
+      expect(early.body['error']).toBe('dirty_working_tree');
+    });
+
     it('classifies the stdout half of the detail too', () => {
       // Empty stdout/stderr parts are dropped before the join, so a shape
       // arriving on stdout alone sits at line 1 — the anchored branches

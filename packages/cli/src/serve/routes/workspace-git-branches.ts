@@ -341,30 +341,34 @@ export function sendGitError(
     res.status(409).json({ error: 'remote_shadows_inherited', message });
     return;
   }
+  // The loose keyword branches match the BOUNDED slice, not the full
+  // detail: an unbounded keyword scan reclassifies a long push/pull
+  // output by any path or URL past the cap (a `dirty-cache.git` URL at
+  // char 600 is not a dirty tree).
   if (
-    /not a git repository/i.test(fullMessage) ||
-    /invalid reference/i.test(fullMessage)
+    /not a git repository/i.test(message) ||
+    /invalid reference/i.test(message)
   ) {
     res.status(404).json({ error: 'not_a_git_repository', message });
     return;
   }
-  if (/dirty|uncommitted|would be overwritten/i.test(fullMessage)) {
+  if (/dirty|uncommitted|would be overwritten/i.test(message)) {
     res.status(409).json({ error: 'dirty_working_tree', message });
     return;
   }
-  if (/already exists/i.test(fullMessage)) {
+  if (/already exists/i.test(message)) {
     res.status(409).json({ error: 'branch_already_exists', message });
     return;
   }
-  if (/nothing to commit/i.test(fullMessage)) {
+  if (/nothing to commit/i.test(message)) {
     res.status(400).json({ error: 'nothing_to_commit', message });
     return;
   }
-  if (/detached HEAD/i.test(fullMessage)) {
+  if (/detached HEAD/i.test(message)) {
     res.status(409).json({ error: 'detached_head', message });
     return;
   }
-  if (/no upstream|no tracking information/i.test(fullMessage)) {
+  if (/no upstream|no tracking information/i.test(message)) {
     res.status(400).json({ error: 'no_upstream', message });
     return;
   }
