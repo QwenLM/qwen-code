@@ -253,7 +253,9 @@ function WorkspaceSessionProviderWorkspace({
       <WorkspaceUnavailableState
         title={t('workspace.loadFailed')}
         description={
-          workspace.error?.message ?? t('workspace.loadFailedDescription')
+          workspace.error?.message
+            ? `${t('workspace.loadFailedDescription')} (${workspace.error.message})`
+            : t('workspace.loadFailedDescription')
         }
         actionLabel={t('common.retry')}
         theme={webShellProps.theme}

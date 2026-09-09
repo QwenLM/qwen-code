@@ -208,6 +208,9 @@ it.each(
         expect(container.textContent).toContain(
           initialFailure === 'http' ? 'HTTP 502' : 'Failed to fetch',
         );
+        expect(container.textContent).toContain(
+          'The workspace service could not be reached. Check the daemon and try again.',
+        );
         const retry = Array.from(container.querySelectorAll('button')).find(
           (button) => button.textContent === 'Try again',
         );
@@ -217,6 +220,9 @@ it.each(
           await new Promise((resolve) => setTimeout(resolve, 100));
         });
         expect(container.textContent).toContain('Retry discovery failed');
+        expect(container.textContent).toContain(
+          'The workspace service could not be reached. Check the daemon and try again.',
+        );
         expect(loadBodies).toHaveLength(0);
         await act(async () => {
           retry!.click();

@@ -195,21 +195,38 @@ describe('WorkspaceSessionProvider targets', () => {
     expect(mocks.workspace.refreshCapabilities).toHaveBeenCalledOnce();
   });
 
-  it('shows the reason initial session workspace discovery failed', async () => {
-    mocks.workspace = {
-      ...mocks.workspace,
-      status: 'error',
-      capabilities: undefined,
-      error: new Error('502 Daemon restarting'),
-    };
-    await act(async () => {
-      root.render(
-        <WorkspaceSessionProvider sessionId="session-a" webShellProps={{}} />,
-      );
-    });
-    expect(mocks.providerMounts).toBe(0);
-    expect(container.textContent).toContain('502 Daemon restarting');
-  });
+  it.each([
+    {
+      language: 'en',
+      guidance:
+        'The workspace service could not be reached. Check the daemon and try again.',
+    },
+    {
+      language: 'zh-CN',
+      guidance: '无法连接工作区服务，请检查守护进程后重试。',
+    },
+  ] as const)(
+    'shows guidance and the discovery error in $language',
+    async ({ language, guidance }) => {
+      mocks.workspace = {
+        ...mocks.workspace,
+        status: 'error',
+        capabilities: undefined,
+        error: new Error('502 Daemon restarting'),
+      };
+      await act(async () => {
+        root.render(
+          <WorkspaceSessionProvider
+            sessionId="session-a"
+            webShellProps={{ language }}
+          />,
+        );
+      });
+      expect(mocks.providerMounts).toBe(0);
+      expect(container.textContent).toContain('502 Daemon restarting');
+      expect(container.textContent).toContain(guidance);
+    },
+  );
 
   it('keeps the app mounted when opening a standalone session from a workspace', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');

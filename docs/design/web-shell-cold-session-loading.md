@@ -19,8 +19,9 @@ late failure cannot replace a newer refresh or a different client's state.
 Cached reads do not publish workspace state and must not suppress the initial
 error when another reader immediately retries a failed request.
 The error screen's retry action performs a fresh discovery request; restoration
-starts only after that request succeeds. Display the current error message so
-both initial and retry failures retain their diagnostic reason.
+starts only after that request succeeds. Display localized recovery guidance
+together with the current error message so both initial and retry failures
+retain their diagnostic reason and the instructions to check the daemon and retry.
 
 Seed the session connection with those known capabilities on its first render.
 Otherwise activity consumers briefly select catalog fallback before discovering
