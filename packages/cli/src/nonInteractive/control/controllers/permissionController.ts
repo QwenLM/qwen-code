@@ -43,6 +43,8 @@ import { BaseController } from './baseController.js';
 import { buildPermissionSuggestions } from '../../permission-suggestions.js';
 
 const DEFAULT_CAN_USE_TOOL_TIMEOUT_MS = 60_000;
+const ABORTED_TURN_CANCEL_MESSAGE =
+  'The turn was cancelled before the approval could be answered.';
 
 export class PermissionController extends BaseController {
   private pendingOutgoingRequests = new Set<string>();
@@ -529,8 +531,7 @@ export class PermissionController extends BaseController {
           ToolConfirmationOutcome.Cancel,
           requiresUserInteraction
             ? {
-                cancelMessage:
-                  'The turn was cancelled before the approval could be answered.',
+                cancelMessage: ABORTED_TURN_CANCEL_MESSAGE,
               }
             : undefined,
         );
@@ -659,7 +660,14 @@ export class PermissionController extends BaseController {
       // On error, pass error message as cancel message
       // Only pass payload for exec and mcp types that support it
       const confirmationType = toolCall.confirmationDetails.type;
-      if (requiresUserInteraction) {
+      if (signal.aborted && requiresUserInteraction) {
+        await toolCall.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.Cancel,
+          {
+            cancelMessage: ABORTED_TURN_CANCEL_MESSAGE,
+          },
+        );
+      } else if (requiresUserInteraction) {
         await toolCall.confirmationDetails.onConfirm(
           ToolConfirmationOutcome.Cancel,
           {
