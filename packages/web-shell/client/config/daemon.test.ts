@@ -234,9 +234,6 @@ describe('waitForDaemonTokenMessage', () => {
 describe('removeDaemonTokenFromUrl', () => {
   beforeEach(() => {
     vi.resetModules();
-    // The function is a no-op under import.meta.env.DEV; exercise the
-    // production-build path where it actually strips the token.
-    vi.stubEnv('DEV', false);
   });
 
   afterEach(() => {
@@ -292,5 +289,34 @@ describe('removeDaemonTokenFromUrl', () => {
     const mod = await import('./daemon');
     mod.removeDaemonTokenFromUrl();
     expect(replaceState).not.toHaveBeenCalled();
+  });
+
+  it('still scrubs the token in a dev build', async () => {
+    vi.stubEnv('DEV', true);
+    const replaceState = setupHref('http://localhost:4170/?token=secret');
+    const mod = await import('./daemon');
+    mod.removeDaemonTokenFromUrl();
+    const next = new URL(String(replaceState.mock.calls[0][2]));
+    expect(next.searchParams.has('token')).toBe(false);
+  });
+});
+
+describe('persistDaemonToken', () => {
+  it('keeps the token in memory when session storage throws', async () => {
+    vi.resetModules();
+    vi.stubGlobal('sessionStorage', {
+      getItem: () => {
+        throw new Error('storage blocked');
+      },
+      setItem: () => {
+        throw new Error('storage blocked');
+      },
+      removeItem: () => {
+        throw new Error('storage blocked');
+      },
+    });
+    const mod = await import('./daemon');
+    mod.persistDaemonToken('mem-only');
+    expect(mod.getDaemonToken()).toBe('mem-only');
   });
 });

@@ -171,6 +171,7 @@ function liveSessionSnapshotsEqual(
       !prior ||
       prior.clientCount !== session.clientCount ||
       prior.hasActivePrompt !== session.hasActivePrompt ||
+      prior.activeWorkState !== session.activeWorkState ||
       prior.isWaitingForPermission !== session.isWaitingForPermission ||
       prior.isWaitingForUserQuestion !== session.isWaitingForUserQuestion ||
       prior.updatedAt !== session.updatedAt
@@ -728,6 +729,7 @@ export class SessionCatalogStore {
         const live = liveById.get(session.sessionId);
         const clientCount = live?.clientCount ?? 0;
         const hasActivePrompt = live?.hasActivePrompt ?? false;
+        const activeWorkState = live?.activeWorkState;
         const isWaitingForPermission = live?.isWaitingForPermission ?? false;
         const isWaitingForUserQuestion =
           live?.isWaitingForUserQuestion ?? false;
@@ -750,6 +752,7 @@ export class SessionCatalogStore {
         if (
           session.clientCount === clientCount &&
           session.hasActivePrompt === hasActivePrompt &&
+          session.activeWorkState === activeWorkState &&
           session.isWaitingForPermission === isWaitingForPermission &&
           session.isWaitingForUserQuestion === isWaitingForUserQuestion &&
           session.updatedAt === updatedAt
@@ -762,6 +765,7 @@ export class SessionCatalogStore {
           ...session,
           clientCount,
           hasActivePrompt,
+          activeWorkState,
           isWaitingForPermission,
           isWaitingForUserQuestion,
           ...(updatedAt !== undefined ? { updatedAt } : {}),

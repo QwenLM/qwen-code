@@ -150,4 +150,12 @@ describe('alibabaStandardProvider', () => {
       ),
     ).toBe(false);
   });
+
+  it('declares the built-in web search backend', () => {
+    // The Responses API on these endpoints serves the search tools with the
+    // same key, so `web_search` registers without extra configuration.
+    expect(alibabaStandardProvider.webSearch).toEqual({
+      backend: 'dashscope',
+    });
+  });
 });
