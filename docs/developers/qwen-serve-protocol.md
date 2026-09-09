@@ -2783,8 +2783,16 @@ Response:
 
 The `202` response acknowledges admission, not Agent completion. Observe the
 session SSE stream after `lastEventId` and correlate `turn_complete` or
-`turn_error` by `promptId`. `turn_complete.data.stopReason` may be `end_turn`,
-`cancelled`, `max_tokens`, `error`, or `length`.
+`turn_error` by `promptId`.
+
+`turn_complete.data.stopReason` carries the ACP `StopReason` the agent
+returned — `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` or
+`cancelled` — plus two values the daemon originates itself: `error` when a turn
+fails inside the daemon rather than the agent, and
+`reconstructed_from_transcript` for a turn recovered from persisted history
+rather than observed live. **Treat the field as an open string**: it is typed
+`string` on the wire, the ACP set can grow, and a client that exhaustively
+switches on it will break on the next addition.
 
 If the HTTP client disconnects mid-prompt, the daemon sends an ACP `cancel` notification to the agent, which winds the prompt down with `stopReason: "cancelled"`.
 
