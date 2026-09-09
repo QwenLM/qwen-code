@@ -772,35 +772,10 @@ export function assertCompleteCapture(
   }
 }
 
-/**
- * The pathspec the CAPTURE runs under: the review's own name families
- * excluded — once as a file match and once as a deep-content match, because
- * a glob `*` does not cross `/` — and, in the rare repository whose git dir
- * sits inside its worktree, the git dir with them. `literal` there: the dir
- * name is raw path text, and the default wildcard matching reads
- * `[]`/`*`/`?` in it as a glob that drops merely matching tracked files
- * from the capture.
- *
- * At ANY depth: a review run from a subdirectory writes its side files under
- * THAT directory's `.qwen/tmp`, so the families are not root-anchored. What
- * the depth costs is paid back elsewhere rather than here: the tracked half
- * of a family match is recorded after this exclusion has run
- * (`snapshotWorkingTree`), and the probe side never lets a REPOSITORY hide
- * behind a family name — only a worktree the orchestrator names is walked
- * instead of probed (`probeExcluded`).
- */
-export function excludePathspec(
-  root: string,
-  extraLiteral: readonly string[] = [],
-): string[] {
-  const specs = ['.'];
-  for (const family of FIX_DELTA_EXCLUDES) {
-    specs.push(`:(glob,exclude)**/${family}`, `:(glob,exclude)**/${family}/**`);
-  }
-  return [...specs, ...literalExcludes(root, extraLiteral)];
-}
-
-/** The literal half of both pathspecs: the in-tree git dir and the side files. */
+/** The literal half of the index-side pathspecs: the in-tree git dir and
+ * the side files. Used only for `ls-files`-style argv listings of the
+ * throwaway index — the git dir is never in an index, and the capture's
+ * own pathspec is the byte form in `capturePathspecBytes`. */
 function literalExcludes(
   root: string,
   extraLiteral: readonly string[],
@@ -820,17 +795,19 @@ function literalExcludes(
 }
 
 /**
- * `excludePathspec` as NUL-separated raw BYTES for
- * `--pathspec-from-file - --pathspec-file-nul`: argv coerces a name that
+ * The capture's pathspec as NUL-separated raw BYTES for
+ * `--pathspec-from-file - --pathspec-file-nul` — argv coerces a name that
  * is not valid UTF-8 to U+FFFD, and an in-tree git dir named with such
  * bytes (a `--separate-git-dir` the user chose) would otherwise fall out
- * of the exclusion — the capture then records the audited repository's
+ * of the exclusion: the capture then records the audited repository's
  * own objects as edits. The git-dir entry rides `inTreeGitDirBytes`' raw
- * form; every other entry is ASCII or the caller's own string.
+ * form; every other entry is ASCII or the caller's own string. The
+ * review's name families are excluded once as a file match and once as a
+ * deep-content match, because a glob `*` does not cross `/`.
  */
-function capturePathspecBytes(
+export function capturePathspecBytes(
   root: string,
-  extraLiteral: readonly string[],
+  extraLiteral: readonly string[] = [],
 ): Buffer {
   const specs: Buffer[] = [Buffer.from('.')];
   for (const family of FIX_DELTA_EXCLUDES) {
@@ -872,14 +849,22 @@ function capturePathspecBytes(
  * capture records on purpose, which an exclusion here dropped from the
  * hunks again.
  *
- * The literal excludes stay: the in-tree git dir is not blind-spot content,
- * and this command's own `--out`/`--since` files are its own writes.
+ * The literal excludes stay ONLY for this command's own side files. The
+ * in-tree git dir is deliberately NOT in this list: the probe prunes it
+ * byte-exactly in `probeExcluded`, and the trees never contain it (the
+ * capture's exclusion rides the raw-bytes stdin pathspec). Carrying its
+ * decoded name in argv was worse than dropping it: a name that is not
+ * valid UTF-8 coerces to U+FFFD on spawn, so the exclusion matched a
+ * lookalike directory and hid exactly the content the probe exists to
+ * see.
  */
-function literalPathspec(
-  root: string,
-  extraLiteral: readonly string[],
-): string[] {
-  return ['.', ...literalExcludes(root, extraLiteral)];
+function literalPathspec(extraLiteral: readonly string[]): string[] {
+  return [
+    '.',
+    ...extraLiteral.map(
+      (rel) => `:(exclude,literal)${rel.split(sep).join('/')}`,
+    ),
+  ];
 }
 
 /**
@@ -1091,7 +1076,7 @@ function ghostDeletions(
     fromTree,
     toTree,
     '--',
-    ...literalPathspec(root, sidePaths),
+    ...literalPathspec(sidePaths),
   );
   const fields = splitNul(raw);
   const ghosts: Buffer[] = [];
@@ -1205,7 +1190,7 @@ function deletedFamilyPaths(
     fromTree,
     toTree,
     '--',
-    ...literalPathspec(root, sidePaths),
+    ...literalPathspec(sidePaths),
   );
   // Records are `D NUL <path> NUL`.
   const fields = splitNul(raw);
@@ -1265,7 +1250,7 @@ function renameSourcesBetweenTrees(
     fromTree,
     toTree,
     '--',
-    ...literalPathspec(root, sidePaths),
+    ...literalPathspec(sidePaths),
   );
   // Records are `R<score> NUL <old> NUL <new> NUL`.
   const fields = splitNul(raw);
@@ -1320,7 +1305,7 @@ function patchBetweenTrees(
     fromTree,
     toTree,
     '--',
-    ...literalPathspec(root, sidePaths),
+    ...literalPathspec(sidePaths),
   );
 }
 
@@ -1350,7 +1335,7 @@ function filesBetweenTrees(
     fromTree,
     toTree,
     '--',
-    ...literalPathspec(root, sidePaths),
+    ...literalPathspec(sidePaths),
   );
   // RAW, one Buffer per name: the display decode happens at the reporting
   // edge (`decodePath`), because a non-UTF-8 name must reach the summary
@@ -2687,7 +2672,7 @@ function probeBlindSpotState(
     '--ignored=matching',
     '-z',
     '--',
-    ...literalPathspec(root, sidePaths),
+    ...literalPathspec(sidePaths),
   );
   const rootBuf = Buffer.from(root);
   const ctx = exclusionContext(root, reviewWorktrees);

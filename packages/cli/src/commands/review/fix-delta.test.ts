@@ -155,7 +155,7 @@ import {
   IGNORED_WALK_RUN_CAP,
   setWalkBudgetsForTest,
   assertCompleteCapture,
-  excludePathspec,
+  capturePathspecBytes,
   fixDeltaCommand,
   runFixDelta,
   snapshotWorkingTree,
@@ -1181,9 +1181,11 @@ describe('fix-delta', () => {
       gitAt(wt, 'add', 'a.ts');
       gitAt(wt, 'commit', '-qm', 'head');
       process.chdir(wt);
-      // The pathspec itself: git's separator is the only one it may carry.
-      expect(excludePathspec(wt)).toContain(':(exclude,literal)sub/gd');
-      for (const spec of excludePathspec(wt)) {
+      // The pathspec itself — the byte form the capture carries: git's
+      // separator is the only one it may carry.
+      const specs = capturePathspecBytes(wt).toString('latin1').split('\0');
+      expect(specs).toContain(':(exclude,literal)sub/gd');
+      for (const spec of specs) {
         expect(spec.includes('\\')).toBe(false);
       }
       const snap = join(out, 'nestgd-snapshot.json');
