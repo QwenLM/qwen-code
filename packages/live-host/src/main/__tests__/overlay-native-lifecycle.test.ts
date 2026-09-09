@@ -262,7 +262,7 @@ let overlayLayout = 'setup';
 let overlayOffset = { x: 0, y: 0 };
 let nativeServicesActive = false, nativeServiceGeneration = 0, liveStartPending = false, quitting = false;
 let audioTransportFailed = false, captureReadyEpoch, pendingVisualSourceChange;
-let visualSourceChangeGeneration = 0, readinessReconnectTimer, mediaPermissionTimer;
+let visualSourceChangeGeneration = 0, readinessReconnectTimer, readinessReconnectReason, mediaPermissionTimer;
 let quitApproved = false, quitOperation, quitState;
 let visualInput, visualError, visualReady = false;
 const permissions = {}, selfChecks = {};

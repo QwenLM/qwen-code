@@ -41807,6 +41807,7 @@ class FakeLiveHostSocket extends EventEmitter {
           instanceNonce,
           permissions: {
             microphone: 'granted',
+            camera: 'granted',
             accessibility: 'granted',
             screenRecording: 'granted',
           },
@@ -41962,7 +41963,7 @@ describe('Live Appshot server integration', () => {
         );
         const captureHandler = setup.captureHandler;
         expect(captureHandler).toEqual(expect.any(Function));
-        const capture = vi.spyOn(setup.coordinator, 'captureScreenContext');
+        const capture = vi.spyOn(setup.coordinator, 'captureVisualContext');
         const discovery = await import('./live/discovery.js');
         const assertPublisher = vi.spyOn(
           discovery,

@@ -131,6 +131,10 @@ terminate an independently running `qwen serve`. A legacy WebShell connection
 only ends its Live call and closes Host. If shutdown is not confirmed, the
 orb remains with an error and Quit can retry the same authenticated instance.
 It never redirects a retry to a different discovered daemon.
+Same-instance reconnects retain the authenticated shutdown target, independently
+of the WebSocket. Quit completes only with a matching receipt or an OS process
+probe that proves the original daemon PID no longer exists; 404s, resets and
+connection refusals alone do not prove shutdown. Failed Quit keeps media stopped.
 On cleanup failure the daemon retains only its authenticated shutdown control
 endpoint and discovery, rejecting new work. A retry closes only the resources
 that previously failed; successful cleanup steps are not repeated.

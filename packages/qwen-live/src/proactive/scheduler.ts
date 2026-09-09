@@ -8,7 +8,10 @@
 
 import { randomUUID } from 'node:crypto';
 import type { ProactiveConfig } from '../config.js';
-import { QWEN_REALTIME_LIMITS } from '../realtime/realtime-session.js';
+import {
+  QWEN_REALTIME_INPUT_SAMPLE_RATE,
+  QWEN_REALTIME_LIMITS,
+} from '../realtime/realtime-session.js';
 import {
   DashScopeRealtimeMonitor,
   type DashScopeRealtimeMonitorCallbacks,
@@ -35,6 +38,7 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
 
 interface MediaEvidence {
   vision: number[];
+  visionStartedAt?: number;
   audio: Array<{ capturedAt: number; bytes: number }>;
 }
 
@@ -288,8 +292,9 @@ export class ProactiveScheduler implements ProactiveSchedulerControl {
       const monitor = this.monitors.get(task.taskId);
       if (!monitor?.feedImage(jpegBase64)) continue;
       const state = this.evidenceFor(task.taskId);
-      state.vision.push(capturedAt);
       this.pruneEvidence(state, capturedAt);
+      state.visionStartedAt ??= capturedAt;
+      state.vision.push(capturedAt);
     }
   }
 
@@ -599,9 +604,7 @@ export class ProactiveScheduler implements ProactiveSchedulerControl {
       }
       const state = this.evidenceFor(task.taskId);
       this.pruneEvidence(state, now);
-      const audioSeconds =
-        state.audio.reduce((total, input) => total + input.bytes, 0) /
-        (16_000 * 2);
+      const audioSeconds = this.audioSeconds(state);
       const media = {
         visionFrames: state.vision.length,
         audioSeconds: Math.round(audioSeconds * 100) / 100,
@@ -628,17 +631,29 @@ export class ProactiveScheduler implements ProactiveSchedulerControl {
         this.options.config.vision.minEvalDurationSec *
           this.options.config.vision.fps,
       );
-      if (minimumFrames > 0 && state.vision.length < minimumFrames)
+      // Retain the nominal-rate contract, but let slower successful captures
+      // warm by elapsed observation time across a continuously fresh window.
+      if (
+        state.vision.length < minimumFrames &&
+        state.vision.at(-1)! - state.visionStartedAt! <
+          this.options.config.vision.minEvalDurationSec * 1_000
+      ) {
         return false;
+      }
     }
     if (task.modalities.includes('audio')) {
       if (state.audio.length === 0) return false;
-      const seconds =
-        state.audio.reduce((total, input) => total + input.bytes, 0) /
-        (16_000 * 2);
+      const seconds = this.audioSeconds(state);
       if (seconds < this.options.config.audio.minEvalDurationSec) return false;
     }
     return true;
+  }
+
+  private audioSeconds(state: MediaEvidence): number {
+    return (
+      state.audio.reduce((total, input) => total + input.bytes, 0) /
+      (QWEN_REALTIME_INPUT_SAMPLE_RATE * 2)
+    );
   }
 
   private onMonitorResult(
@@ -661,6 +676,7 @@ export class ProactiveScheduler implements ProactiveSchedulerControl {
       triggered: result.triggered,
       failed: Boolean(result.error),
       summaryChars: result.summary.length,
+      ...(result.ignoredAction ? { ignoredAction: result.ignoredAction } : {}),
     });
     const repeat = this.repeats.get(taskId);
     if (repeat && repeat.cooldownUntil > 0) {
@@ -822,6 +838,7 @@ export class ProactiveScheduler implements ProactiveSchedulerControl {
     state.vision = state.vision.filter(
       (capturedAt) => capturedAt >= visionCutoff,
     );
+    if (state.vision.length === 0) state.visionStartedAt = undefined;
     state.audio = state.audio.filter(
       (input) => input.capturedAt >= audioCutoff,
     );

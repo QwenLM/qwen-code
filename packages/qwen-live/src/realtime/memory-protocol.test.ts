@@ -9,6 +9,8 @@ import { MemoryDialogueCollector } from '../memory/dialogue.js';
 import { MEMORY_TOOLS } from '../memory/tools.js';
 import {
   openQwenRealtimeSession,
+  MAX_REALTIME_INSTRUCTIONS_CHARS,
+  QwenRealtimeError,
   type QwenRealtimeCallbacks,
 } from './realtime-session.js';
 
@@ -355,13 +357,18 @@ describe('Memory Realtime publication and dialogue boundaries', () => {
           endpoint: 'https://example.test',
           model: 'test',
           callEpoch: 1,
-          instructions: 'x'.repeat(100001),
+          instructions: 'x'.repeat(MAX_REALTIME_INSTRUCTIONS_CHARS + 1),
           tools: MEMORY_TOOLS,
         },
         {},
         { createWebSocket },
       ),
-    ).rejects.toThrow(RangeError);
+    ).rejects.toMatchObject({
+      constructor: QwenRealtimeError,
+      code: 'instructions_too_large',
+      kind: 'configuration',
+      fatal: true,
+    });
     expect(createWebSocket).not.toHaveBeenCalled();
   });
 

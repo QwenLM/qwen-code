@@ -10,6 +10,8 @@ import { PROACTIVE_SESSION_TOOLS } from '../tools/definitions.js';
 import {
   deriveQwenOmniRealtimeUrl,
   openQwenRealtimeSession,
+  QWEN_REALTIME_INPUT_SAMPLE_RATE,
+  QWEN_REALTIME_OUTPUT_SAMPLE_RATE,
   QWEN_REALTIME_LIMITS,
   REMAIN_SILENT_TOOL_NAME,
   type QwenRealtimeCallbacks,
@@ -228,6 +230,53 @@ async function connect(
 }
 
 describe('realtime-session', () => {
+  it('R1-9 rejects a dispatched result after nonfatal response failure while keeping transport usable', async () => {
+    const socket = new FakeSocket();
+    const callbacks = {
+      onFunctionCall: vi.fn(),
+      onError: vi.fn(),
+      onIgnoredEvent: vi.fn(),
+    } satisfies QwenRealtimeCallbacks;
+    const session = await connect(socket, callbacks);
+    let closed = false;
+    void session.closed.then(() => {
+      closed = true;
+    });
+    try {
+      commitFinalInput(socket, 'input-slow-tool', 'Run the delegated task');
+      responseCreated(socket, 'response-slow-tool');
+      functionCall(
+        socket,
+        'response-slow-tool',
+        'call-slow-tool',
+        'handoff',
+        JSON.stringify({ task: 'Run the delegated task' }),
+      );
+      expect(callbacks.onFunctionCall).toHaveBeenCalledOnce();
+      responseDone(socket, 'response-slow-tool', 'failed');
+      expect(callbacks.onError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'response_failed', fatal: false }),
+      );
+      expect(
+        session.submitFunctionOutput(
+          { callEpoch: 7, callId: 'call-slow-tool' },
+          JSON.stringify({ status: 'accepted', job: 'job_1' }),
+        ),
+      ).toBe(false);
+      expect(callbacks.onIgnoredEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'stale_call' }),
+      );
+      await Promise.resolve();
+      expect(closed).toBe(false);
+      expect(socket.readyState).toBe(socket.OPEN);
+      expect(session.sendBackendContext('The backend is still running')).toBe(
+        true,
+      );
+    } finally {
+      session.close({ discardPendingInput: true });
+    }
+  });
+
   it.each([
     'qwen3.5-omni-plus-realtime',
     'qwen3.5-omni-flash-realtime',
@@ -262,8 +311,18 @@ describe('realtime-session', () => {
           model === 'qwen3.5-omni-flash-realtime'
         ) {
           expect(settings['audio']).toEqual({
-            input: { format: { type: 'pcm', sample_rate: 16000 } },
-            output: { format: { type: 'pcm', sample_rate: 24000 } },
+            input: {
+              format: {
+                type: 'pcm',
+                sample_rate: QWEN_REALTIME_INPUT_SAMPLE_RATE,
+              },
+            },
+            output: {
+              format: {
+                type: 'pcm',
+                sample_rate: QWEN_REALTIME_OUTPUT_SAMPLE_RATE,
+              },
+            },
           });
           expect(settings).not.toHaveProperty('output_audio_format');
         } else {

@@ -248,33 +248,49 @@ export class LiveDaemonConnection {
     this.discovery.stop();
     this.cancelReconnect();
     this.closeSocket(1000, 'host stopping');
-    if (!this.quitPromise && !this.quitTarget)
+    if (!this.quitPromise && !this.quitTarget) {
+      this.shutdownTarget = undefined;
       this.publish({ phase: 'disconnected' });
+    }
   }
 
   requestQuit(): Promise<void> {
     if (this.quitPromise) return this.quitPromise;
     const socket =
-      this.welcomed &&
-      this.snapshot.phase === 'ready' &&
-      this.socket?.readyState === WebSocket.OPEN
+      this.welcomed && this.socket?.readyState === WebSocket.OPEN
         ? this.socket
         : undefined;
-    const target =
-      this.quitTarget ?? (socket ? this.shutdownTarget : undefined);
+    const target = this.quitTarget ?? this.shutdownTarget;
     if (target) this.quitTarget = { ...target };
     this.discovery.stop();
     this.cancelReconnect();
     this.clearHeartbeatTimer();
     this.intentionalClose = true;
     this.quitPromise = this.quitConnection(socket, target).then(
-      () => this.closeSocket(1000, 'host quitting'),
       () => {
+        this.closeSocket(1000, 'host quitting');
+        this.shutdownTarget = undefined;
+        this.quitTarget = undefined;
+      },
+      (cause: unknown) => {
         this.quitPromise = undefined;
-        throw new Error(liveMessage('host.error.quitUnconfirmed'));
+        const error = new Error(liveMessage('host.error.quitUnconfirmed'), {
+          cause,
+        });
+        this.publish({ phase: 'error', error: error.message });
+        throw error;
       },
     );
     return this.quitPromise;
+  }
+
+  private isShutdownProcessGone(target: LiveDiscoveryRecord): boolean {
+    try {
+      process.kill(target.pid, 0);
+      return false;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException | undefined)?.code === 'ESRCH';
+    }
   }
 
   private async quitConnection(
@@ -284,18 +300,25 @@ export class LiveDaemonConnection {
     if (target) {
       if (!target.token)
         throw new Error(liveMessage('host.error.quitCredentials'));
+      if (this.isShutdownProcessGone(target)) return;
       const url = new URL(buildHostWebSocketUrl(target.url));
       url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
       url.pathname = '/live/quit';
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${target.token}`,
-          'x-qwen-live-nonce': target.instanceNonce,
-        },
-        redirect: 'error',
-        signal: AbortSignal.timeout(QUIT_TIMEOUT_MS),
-      });
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${target.token}`,
+            'x-qwen-live-nonce': target.instanceNonce,
+          },
+          redirect: 'error',
+          signal: AbortSignal.timeout(QUIT_TIMEOUT_MS),
+        });
+      } catch (error) {
+        if (this.isShutdownProcessGone(target)) return;
+        throw error;
+      }
       if (!response.ok) {
         await response.body?.cancel();
         throw new Error(liveMessage('host.error.quitRejected'));
@@ -587,6 +610,14 @@ export class LiveDaemonConnection {
     }
 
     if (result.signature === this.currentSignature && this.socket) return;
+    if (
+      this.shutdownTarget &&
+      (this.shutdownTarget.instanceNonce !== result.record.instanceNonce ||
+        this.shutdownTarget.pid !== result.record.pid ||
+        this.shutdownTarget.url !== result.record.url ||
+        this.shutdownTarget.token !== result.record.token)
+    )
+      this.shutdownTarget = undefined;
     this.currentRecord = result.record;
     this.currentSignature = result.signature;
     this.reconnectPolicy.reset();
@@ -597,7 +628,6 @@ export class LiveDaemonConnection {
 
   private connect(record: LiveDiscoveryRecord): void {
     if (this.socket || this.quitPromise || this.quitTarget) return;
-    this.shutdownTarget = undefined;
     this.capabilities = undefined;
     this.visualInput = undefined;
     this.pendingVisualSelection = undefined;
@@ -890,11 +920,14 @@ export class LiveDaemonConnection {
       if (socket !== this.socket) return;
       this.socket = undefined;
       this.welcomed = false;
-      this.shutdownTarget = undefined;
       this.capabilities = undefined;
       this.clearHandshakeTimer();
       this.clearHeartbeatTimer();
-      if (this.intentionalClose) return;
+      if (this.intentionalClose) {
+        if (!this.quitPromise && this.snapshot.phase === 'ready')
+          this.publish({ phase: 'disconnected', error: 'daemon_disconnected' });
+        return;
+      }
       if (code === 4006) {
         this.publish({ phase: 'incompatible', error: 'host_version' });
         return;
@@ -1027,7 +1060,6 @@ export class LiveDaemonConnection {
       new Error(liveMessage('host.language.disconnected')),
     );
     this.uiLanguageV1 = undefined;
-    this.shutdownTarget = undefined;
     this.rejectMemoryRequest(
       new Error(liveMessage('host.error.memoryDisconnected')),
     );
@@ -1050,7 +1082,6 @@ export class LiveDaemonConnection {
       new Error(liveMessage('host.language.disconnected')),
     );
     this.uiLanguageV1 = undefined;
-    this.shutdownTarget = undefined;
     this.rejectMemoryRequest(
       new Error(liveMessage('host.error.memoryDisconnected')),
     );

@@ -13,6 +13,7 @@ export interface MonitorEvaluationResult {
   summary: string;
   currentState: string;
   error?: string;
+  ignoredAction?: 'function_call';
 }
 
 export interface MonitorInstructionSource {
@@ -40,7 +41,10 @@ const NARRATION_FILLER_PREFIX =
 const NARRATION_PERCEPTION_PREFIX =
   /^(?:我(?:刚刚|刚才|现在)?(?:看到|看见|注意到|发现|听到|听见)(?:了)?|i\s+(?:can\s+)?(?:see|saw|hear|heard|noticed|notice|observed|observe))[\s，,。.!！?？、:：;；~～-]*/iu;
 
-/** The action protocol prompt used by the source DashScope monitor. */
+/**
+ * The source DashScope SFT prompt, including its original tool catalogue.
+ * Proposed calls remain non-executable compatibility actions.
+ */
 export const PROACTIVE_MONITOR_SYSTEM_PROMPT = `You are a proactive real-time assistant monitoring a live stream delivered as sequential short clips. Each clip may contain audio, video, or both. The user may provide an instruction at the start and further task-related instructions or questions during the session.
 
 After each clip, use only the evidence available up to the end of that clip and output EXACTLY one of the following:
@@ -124,7 +128,12 @@ export function parseMonitorAction(
     if (!action.slice('Func_call:'.length).trim()) {
       throw new Error('Func_call action requires a non-empty body.');
     }
-    return { triggered: false, summary: '', currentState: '' };
+    return {
+      triggered: false,
+      summary: '',
+      currentState: '',
+      ignoredAction: 'function_call',
+    };
   }
   if (!action.startsWith('Reply:')) {
     throw new Error(

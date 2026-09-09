@@ -26,6 +26,7 @@ export type RealtimeCallEpoch = string | number;
 
 export const QWEN_REALTIME_INPUT_SAMPLE_RATE = 16_000;
 export const QWEN_REALTIME_OUTPUT_SAMPLE_RATE = 24_000;
+export const MAX_REALTIME_INSTRUCTIONS_CHARS = 100_000;
 
 export const QWEN_REALTIME_LIMITS = {
   maxInputAudioFrameBytes: 64 * 1024,
@@ -201,8 +202,7 @@ export interface RealtimeImageDroppedEvent extends RealtimeEventContext {
   reason:
     | 'audio_not_started'
     | 'connection_unavailable'
-    | 'socket_backpressure'
-    | 'speech_superseded';
+    | 'socket_backpressure';
   bufferedBytes: number;
 }
 
@@ -624,10 +624,15 @@ export function openQwenRealtimeSession(
   return new Promise<QwenRealtimeSession>((resolve, reject) => {
     if (
       typeof config.instructions !== 'string' ||
-      config.instructions.length > 100_000
+      config.instructions.length > MAX_REALTIME_INSTRUCTIONS_CHARS
     ) {
       reject(
-        new RangeError('Realtime instructions exceed the supported size.'),
+        new QwenRealtimeError(
+          'Realtime instructions exceed the supported size.',
+          'instructions_too_large',
+          true,
+          { kind: 'configuration' },
+        ),
       );
       return;
     }
@@ -1960,7 +1965,7 @@ export function openQwenRealtimeSession(
         if (terminal || closedByClient) return false;
         if (
           typeof update.instructions !== 'string' ||
-          update.instructions.length > 100_000
+          update.instructions.length > MAX_REALTIME_INSTRUCTIONS_CHARS
         )
           throw new RangeError(
             'Realtime instructions exceed the supported size.',
@@ -2213,8 +2218,18 @@ export function openQwenRealtimeSession(
           config.model === 'qwen3.5-omni-flash-realtime'
             ? {
                 audio: {
-                  input: { format: { type: 'pcm', sample_rate: 16_000 } },
-                  output: { format: { type: 'pcm', sample_rate: 24_000 } },
+                  input: {
+                    format: {
+                      type: 'pcm',
+                      sample_rate: QWEN_REALTIME_INPUT_SAMPLE_RATE,
+                    },
+                  },
+                  output: {
+                    format: {
+                      type: 'pcm',
+                      sample_rate: QWEN_REALTIME_OUTPUT_SAMPLE_RATE,
+                    },
+                  },
                 },
               }
             : { input_audio_format: 'pcm', output_audio_format: 'pcm' }),

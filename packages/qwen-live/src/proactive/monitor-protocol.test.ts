@@ -40,9 +40,12 @@ describe('Proactive monitor protocol', () => {
       triggered: true,
       summary: '水开了',
     });
-    expect(parseMonitorAction('Func_call:好的\n{}', 'event').triggered).toBe(
-      false,
-    );
+    expect(parseMonitorAction('Func_call:好的\n{}', 'event')).toEqual({
+      triggered: false,
+      summary: '',
+      currentState: '',
+      ignoredAction: 'function_call',
+    });
     expect(() => parseMonitorAction('水开了', 'event')).toThrow(
       'Monitor action',
     );

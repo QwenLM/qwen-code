@@ -2052,6 +2052,7 @@ export class LiveHostCoordinator {
       return;
     }
     this.call = undefined;
+    this.resetOutputAudio();
     this.notifyInactive();
     this.rejectPendingVisualCaptures(
       new Error('The Live call ended before visual capture completed.'),
@@ -2074,6 +2075,7 @@ export class LiveHostCoordinator {
     if (this.call !== call || call.state !== 'stopping') return;
     this.pendingStartMode = undefined;
     this.call = undefined;
+    this.resetOutputAudio();
     this.notifyInactive();
     this.rejectPendingVisualCaptures(new Error(message), call.epoch);
     this.lastCallError = message;

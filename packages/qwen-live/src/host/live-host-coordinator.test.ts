@@ -137,6 +137,64 @@ afterEach(() => {
 });
 
 describe('LiveHostCoordinator', () => {
+  it.each(['success', 'failure'] as const)(
+    'R1-7 resets drained-call playback ownership after stop %s',
+    async (outcome) => {
+      let finishStop!: (result: void | { error: string }) => void;
+      const onPlaybackStarted = vi.fn();
+      const onPlaybackCompleted = vi.fn();
+      const value = coordinator({
+        handlers: {
+          onPlaybackStarted,
+          onPlaybackCompleted,
+          onStop: () =>
+            new Promise<void | { error: string }>((resolve) => {
+              finishStop = resolve;
+            }),
+        },
+      });
+      const socket = connectReady(
+        value,
+        readyHello({ capabilities: { outputAudioEndMarkerV1: true } }),
+      );
+      const first = value.start('resume');
+      value.sendOutputAudio(first.epoch, Buffer.from([1, 0]));
+      value.stop();
+      expect(value.sendOutputAudio(first.epoch, Buffer.from([2, 0]))).toBe(
+        true,
+      );
+      const drainedOutput = socket.outputFrames().at(-1)!.outputId;
+      value.finishOutputAudio(first.epoch);
+      finishStop(outcome === 'failure' ? { error: 'drain failed' } : undefined);
+      await vi.waitFor(() => expect(value.getStatus().callId).toBeUndefined());
+      socket.receive({
+        type: 'host.playback_completed',
+        epoch: first.epoch,
+        outputId: drainedOutput,
+      });
+
+      const second = value.start('resume');
+      for (let burst = 0; burst < 2; burst += 1) {
+        value.sendOutputAudio(second.epoch, Buffer.from([3, 0]));
+        const outputId = socket.outputFrames().at(-1)!.outputId;
+        expect(outputId).toBeGreaterThan(drainedOutput);
+        value.finishOutputAudio(second.epoch);
+        socket.receive({
+          type: 'host.playback_started',
+          epoch: second.epoch,
+          outputId,
+        });
+        socket.receive({
+          type: 'host.playback_completed',
+          epoch: second.epoch,
+          outputId,
+        });
+      }
+      expect.soft(onPlaybackStarted).toHaveBeenCalledTimes(2);
+      expect(onPlaybackCompleted).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it('publishes optional task snapshots on handshake and separate updates without changing call state', () => {
     const ledger = new SubagentsLedger();
     const value = coordinator({ getSubagents: () => ledger.snapshot() });

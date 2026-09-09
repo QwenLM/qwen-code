@@ -1008,6 +1008,10 @@ export const LIVE_MESSAGES = {
     en: 'Settings are unavailable. Please reconnect.',
     'zh-CN': '设置暂不可用，请重新连接。',
   },
+  'host.error.visualSettingsFailed': {
+    en: 'Could not change capture mode. Please try again.',
+    'zh-CN': '未能切换获取模式，请重试。',
+  },
   'host.config.unavailable': {
     en: 'Opening config is unavailable. Connect to an updated standalone Qwen Live daemon.',
     'zh-CN': '暂时无法打开配置，请连接更新后的独立 Qwen Live daemon。',

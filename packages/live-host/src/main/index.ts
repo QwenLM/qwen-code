@@ -127,6 +127,7 @@ let nativeServicesActive = false;
 let nativeServiceGeneration = 0;
 let audioTransportFailed = false;
 let readinessReconnectTimer: NodeJS.Timeout | undefined;
+let readinessReconnectReason: 'readiness' | 'visual' | undefined;
 let mediaPermissionTimer: NodeJS.Timeout | undefined;
 let settingsOpen = false;
 let language: LiveLanguage = 'en';
@@ -679,8 +680,22 @@ function quitHost(): Promise<void> {
       quitting = false;
       quitOperation = undefined;
       quitState = 'failed';
+      const cause = error instanceof Error ? error.cause : undefined;
       writeLiveDiagnostic('host_quit_failed', {
         kind: error instanceof Error ? error.name : 'unknown',
+        reason:
+          (
+            [
+              'host.error.quitCredentials',
+              'host.error.quitRejected',
+              'host.error.quitAck',
+              'host.error.stopFailed',
+              'host.error.stopTimeout',
+            ] as const
+          ).find(
+            (key) =>
+              cause instanceof Error && cause.message === liveMessage(key),
+          ) ?? (cause instanceof Error ? cause.name : 'unknown'),
       });
       publishState();
       showOverlay();
@@ -693,19 +708,26 @@ function quitHost(): Promise<void> {
   return quitOperation;
 }
 
-function scheduleReadinessReconnect(): void {
+function scheduleReadinessReconnect(
+  reason: 'readiness' | 'visual' = 'readiness',
+): void {
   if (!nativeServicesActive) return;
+  if (readinessReconnectReason !== 'readiness')
+    readinessReconnectReason = reason;
   if (readinessReconnectTimer) clearTimeout(readinessReconnectTimer);
   readinessReconnectTimer = setTimeout(() => {
     readinessReconnectTimer = undefined;
+    readinessReconnectReason = undefined;
     daemon.reconnectNow();
   }, READINESS_RECONNECT_DEBOUNCE_MS);
   readinessReconnectTimer.unref();
 }
 
 function cancelReadinessReconnect(): void {
+  if (readinessReconnectReason !== 'visual') return;
   if (readinessReconnectTimer) clearTimeout(readinessReconnectTimer);
   readinessReconnectTimer = undefined;
+  readinessReconnectReason = undefined;
 }
 
 function sendRendererCommand(channel: string, value?: unknown): void {
@@ -1184,7 +1206,7 @@ function beginMediaPermissionMonitor(): void {
         } else {
           syncVisualCapture();
         }
-        scheduleReadinessReconnect();
+        scheduleReadinessReconnect('visual');
       }
     }
     if (pendingVisualSourceChange?.source === 'camera') {
@@ -1232,6 +1254,7 @@ function deactivateNativeServices(): void {
   closeHostInputCapture('native_services_stopped');
   if (readinessReconnectTimer) clearTimeout(readinessReconnectTimer);
   readinessReconnectTimer = undefined;
+  readinessReconnectReason = undefined;
   if (mediaPermissionTimer) clearInterval(mediaPermissionTimer);
   mediaPermissionTimer = undefined;
   shortcut?.stop();
@@ -1286,7 +1309,7 @@ async function requestCameraPermission(
     );
   }
   publishState();
-  if (reconnectAfterChange) scheduleReadinessReconnect();
+  if (reconnectAfterChange) scheduleReadinessReconnect('visual');
   return granted;
 }
 
@@ -1702,7 +1725,13 @@ function registerIpc(): void {
     }
     const mode = value as VisualMode;
     const epoch = daemon.getEpoch();
-    if (!daemon.sendVisualSettings({ mode }, epoch)) return;
+    try {
+      if (!daemon.sendVisualSettings({ mode }, epoch)) throw new Error();
+    } catch {
+      writeLiveDiagnostic('visual_mode_rejected', { epoch, mode });
+      throw new Error(liveMessage('host.error.visualSettingsFailed'));
+    }
+    writeLiveDiagnostic('visual_mode_requested', { epoch, mode });
   });
   ipcMain.handle(
     'live:request-permission',
@@ -2318,7 +2347,7 @@ void app.whenReady().then(() => {
     }
     publishState();
     if (changed && visualInput?.source !== 'camera') {
-      scheduleReadinessReconnect();
+      scheduleReadinessReconnect('visual');
     }
   });
   appshotCapture = new AppshotCaptureService();

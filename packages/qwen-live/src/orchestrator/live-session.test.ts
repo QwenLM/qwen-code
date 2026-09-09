@@ -68,6 +68,7 @@ import {
   UPDATE_PROACTIVE_TASK_TOOL_NAME,
 } from '../tools/definitions.js';
 import { LiveSession } from './live-session.js';
+import { buildLiveInstructions } from '../realtime/instructions.js';
 
 const PERMISSION_OPTIONS: readonly PermissionOption[] = [
   { optionId: 'allow', kind: 'proceed' },
@@ -602,6 +603,479 @@ async function awaitReceipts(
 }
 
 // -- tests --------------------------------------------------------------------
+
+describe('runtime review reproductions', () => {
+  it.each(['matching', 'missing', 'different', 'rejected', 'throws'] as const)(
+    'R1-8 retains buffered external permission and completion for a %s receipt',
+    async (outcome) => {
+      const { session, adaptor, callbacks, realtime, log } =
+        await startSession();
+      try {
+        callTool(callbacks, 'session_create', {});
+        await awaitReceipts(realtime, 1);
+        let finish!: (value: PromptReceipt) => void;
+        let reject!: (error: Error) => void;
+        adaptor.prompt.mockImplementationOnce(
+          () =>
+            new Promise<PromptReceipt>((resolve, fail) => {
+              finish = resolve;
+              reject = fail;
+            }),
+        );
+        callTool(callbacks, 'handoff', {
+          session: 'session_1',
+          task: 'New requested task',
+        });
+        await vi.waitFor(() => expect(adaptor.prompt).toHaveBeenCalledOnce());
+        adaptor.queue('s1').push({
+          type: 'permission_request',
+          jobRef: 'external-turn',
+          requestId: 'external-permission',
+          title: 'External task needs approval',
+          options: PERMISSION_OPTIONS,
+        });
+        adaptor.queue('s1').push({
+          type: 'turn_complete',
+          jobRef: 'external-turn',
+          summary: 'External result',
+        });
+        await vi.waitFor(() =>
+          expect(log.write).toHaveBeenCalledWith(
+            'backend.event',
+            expect.objectContaining({ type: 'turn_complete' }),
+          ),
+        );
+        expect(realtime.sendBackendContext).not.toHaveBeenCalled();
+        if (outcome === 'throws') reject(new Error('prompt rejected'));
+        else
+          finish({
+            status: outcome === 'rejected' ? 'rejected' : 'accepted',
+            ...(outcome === 'matching' ? { jobRef: 'external-turn' } : {}),
+            ...(outcome === 'different' ? { jobRef: 'new-turn' } : {}),
+          });
+        await awaitReceipts(realtime, 2);
+        await delay(30);
+        callTool(callbacks, 'respond_permission', {
+          request_id: 'req_1',
+          decision: 'allow',
+        });
+        const results = await awaitReceipts(realtime, 3);
+        expect.soft(results[2]).toEqual({ status: 'delivered' });
+        expect
+          .soft(adaptor.respondPermission)
+          .toHaveBeenCalledWith(
+            { id: 's1', adaptor: 'fake' },
+            'external-permission',
+            'allow',
+          );
+        expect
+          .soft(realtime.sendBackendContext)
+          .toHaveBeenCalledWith(
+            expect.stringMatching(
+              /^\[COMPLETE (job_1|session_1)\] External result$/,
+            ),
+          );
+        if (outcome === 'different' || outcome === 'missing') {
+          expect(session.getSubagentsSnapshot().counts.completed).toBe(0);
+          expect(session.getSubagentsSnapshot().tasks[0]).toMatchObject({
+            request: 'New requested task',
+            status: 'starting',
+            output: '',
+          });
+        }
+      } finally {
+        session.dispose();
+      }
+    },
+  );
+
+  it.each(['external-turn', 'new-turn'])(
+    'R1-8 does not resurrect a buffered permission resolved before receipt %s',
+    async (jobRef) => {
+      const { session, adaptor, callbacks, realtime, log } =
+        await startSession();
+      try {
+        let finish!: (value: PromptReceipt) => void;
+        adaptor.prompt.mockImplementationOnce(
+          () => new Promise<PromptReceipt>((resolve) => (finish = resolve)),
+        );
+        callTool(callbacks, 'handoff', { task: 'New requested task' });
+        await vi.waitFor(() => expect(adaptor.prompt).toHaveBeenCalledOnce());
+        adaptor.queue('s1').push({
+          type: 'permission_request',
+          jobRef: 'external-turn',
+          requestId: 'already-resolved',
+          title: 'Resolved on screen',
+          options: PERMISSION_OPTIONS,
+        });
+        adaptor.queue('s1').push({
+          type: 'permission_resolved',
+          requestId: 'already-resolved',
+          byUs: false,
+        });
+        await vi.waitFor(() =>
+          expect(log.write).toHaveBeenCalledWith(
+            'backend.event',
+            expect.objectContaining({ type: 'permission_resolved' }),
+          ),
+        );
+        finish({ status: 'accepted', jobRef });
+        await awaitReceipts(realtime, 1);
+        callTool(callbacks, 'respond_permission', {
+          request_id: 'req_1',
+          decision: 'allow',
+        });
+        const results = await awaitReceipts(realtime, 2);
+        expect(results[1]).toMatchObject({ status: 'error' });
+        expect(adaptor.respondPermission).not.toHaveBeenCalled();
+        expect(realtime.sendBackendContext).not.toHaveBeenCalledWith(
+          expect.stringContaining('[PERMISSION'),
+        );
+        expect(session.getSubagentsSnapshot().counts.needsAttention).toBe(0);
+      } finally {
+        session.dispose();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'R1-9 distinguishes provider response failure from terminal failure (fatal=%s)',
+    async (fatal) => {
+      const { session, adaptor, callbacks, realtime, host } =
+        await startSession();
+      try {
+        let finish!: (value: PromptReceipt) => void;
+        adaptor.prompt.mockImplementationOnce(
+          () => new Promise<PromptReceipt>((resolve) => (finish = resolve)),
+        );
+        callbacks.onResponseCreated?.({
+          callEpoch: 1,
+          responseId: 'slow-response',
+          authority: 'direct',
+        });
+        callToolForResponse(callbacks, 'slow-response', 'handoff', {
+          task: 'Slow backend submission',
+        });
+        await vi.waitFor(() => expect(adaptor.prompt).toHaveBeenCalledOnce());
+        callbacks.onError?.(
+          new QwenRealtimeError(
+            'provider response failed',
+            'response_failed',
+            fatal,
+          ),
+        );
+        if (!fatal) {
+          expect(host.failCall).not.toHaveBeenCalled();
+          callbacks.onResponseDone?.({
+            callEpoch: 1,
+            responseId: 'slow-response',
+            status: 'failed',
+            authority: 'direct',
+          });
+        }
+        realtime.submitFunctionOutput.mockReturnValue(false);
+        finish({ status: 'accepted', jobRef: 'slow-job' });
+        await delay(30);
+        expect(host.failCall).toHaveBeenCalledTimes(fatal ? 1 : 0);
+        if (fatal) {
+          expect(realtime.submitFunctionOutput).not.toHaveBeenCalled();
+          expect(realtime.close).toHaveBeenCalled();
+        } else {
+          expect(realtime.submitFunctionOutput).toHaveBeenCalledOnce();
+          expect(realtime.close).not.toHaveBeenCalled();
+        }
+      } finally {
+        session.dispose();
+      }
+    },
+  );
+
+  it.each(['different-response', 'cancelled', 'client-close'] as const)(
+    'R1-9 does not suppress rejected tool output for %s',
+    async (failure) => {
+      const { session, adaptor, callbacks, realtime, host } =
+        await startSession();
+      try {
+        let finish!: (value: PromptReceipt) => void;
+        adaptor.prompt.mockImplementationOnce(
+          () => new Promise<PromptReceipt>((resolve) => (finish = resolve)),
+        );
+        callToolForResponse(callbacks, 'slow-response', 'handoff', {
+          task: 'Slow backend submission',
+        });
+        await vi.waitFor(() => expect(adaptor.prompt).toHaveBeenCalledOnce());
+        callbacks.onResponseDone?.({
+          callEpoch: 1,
+          responseId:
+            failure === 'different-response'
+              ? 'other-response'
+              : 'slow-response',
+          status: failure === 'cancelled' ? 'cancelled' : 'failed',
+          authority: 'direct',
+        });
+        if (failure === 'client-close') {
+          callbacks.onClose?.({ reason: 'client' });
+        }
+        realtime.submitFunctionOutput.mockReturnValue(false);
+        finish({ status: 'accepted', jobRef: 'slow-job' });
+        await vi.waitFor(() => expect(host.failCall).toHaveBeenCalledOnce());
+        expect(realtime.close).toHaveBeenCalledWith({
+          discardPendingInput: true,
+        });
+      } finally {
+        session.dispose();
+      }
+    },
+  );
+
+  it('R1-14 reopens backend injection after invalidated pending Proactive clears old playback', async () => {
+    const harness = createProactiveHarness();
+    const { session, adaptor, callbacks, realtime, host } = await startSession(
+      undefined,
+      {
+        proactive: DEFAULT_PROACTIVE_CONFIG,
+        createProactiveScheduler: harness.createScheduler,
+      },
+    );
+    try {
+      callTool(callbacks, 'handoff', { task: 'Watch for changes' });
+      await awaitReceipts(realtime, 1);
+      const delivery: ProactiveDelivery = {
+        taskId: 'task-monitor',
+        taskGeneration: 1,
+        deliveryId: 'pending-invalidated',
+        event: 'Pending notification',
+      };
+      harness.options().onEvent(delivery);
+      expect(realtime.respondToProactiveEvent).toHaveBeenCalledOnce();
+      session.playbackStarted({ epoch: 1 });
+      harness.options().onDeliveryInvalidated?.(delivery);
+      callbacks.onResponseCreated?.({
+        callEpoch: 1,
+        responseId: 'late-proactive',
+        authority: 'proactive',
+      });
+      expect(host.clearOutput).toHaveBeenCalledWith(1);
+      callbacks.onResponseDone?.({
+        callEpoch: 1,
+        responseId: 'late-proactive',
+        authority: 'proactive',
+        status: 'cancelled',
+        cancellationReason: 'client_cancelled',
+      });
+      session.playbackCompleted({ epoch: 1 });
+      adaptor.queue('s1').push({
+        type: 'turn_complete',
+        jobRef: 'p1',
+        summary: 'Finished after invalidation',
+      });
+      await vi.waitFor(() =>
+        expect(session.getSubagentsSnapshot().counts.completed).toBe(1),
+      );
+      await delay(1_000);
+      expect(realtime.sendBackendContext).toHaveBeenCalledWith(
+        '[COMPLETE job_1] Finished after invalidation',
+      );
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it.each([
+    'tool_continuation',
+    'backend_speech',
+    'direct',
+    'proactive',
+    'proactive_repair',
+  ] as const)(
+    'R1-15 retries a deferred cancel repair after %s becomes idle',
+    async (authority) => {
+      const harness = createProactiveHarness();
+      const { session, callbacks, realtime } = await startSession(undefined, {
+        proactive: DEFAULT_PROACTIVE_CONFIG,
+        createProactiveScheduler: harness.createScheduler,
+      });
+      try {
+        realtime.requestProactiveRepair.mockReturnValueOnce(false);
+        callbacks.onResponseCreated?.({
+          callEpoch: 1,
+          responseId: 'cancel-claim',
+          inputItemId: 'cancel-input',
+          authority: 'direct',
+        });
+        callbacks.onDirectTranscript?.({
+          callEpoch: 1,
+          responseId: 'cancel-claim',
+          inputItemId: 'cancel-input',
+          entries: [
+            { role: 'assistant', text: '好的，已经停止这个提醒任务了。' },
+          ],
+        });
+        callbacks.onResponseDone?.({
+          callEpoch: 1,
+          responseId: 'cancel-claim',
+          inputItemId: 'cancel-input',
+          authority: 'direct',
+          status: 'completed',
+        });
+        expect(realtime.requestProactiveRepair).toHaveBeenCalledOnce();
+        callbacks.onResponseCreated?.({
+          callEpoch: 1,
+          responseId: 'blocking-response',
+          authority,
+        });
+        callbacks.onResponseDone?.({
+          callEpoch: 1,
+          responseId: 'blocking-response',
+          authority,
+          status: 'completed',
+        });
+        expect(realtime.requestProactiveRepair).toHaveBeenCalledTimes(2);
+      } finally {
+        session.dispose();
+      }
+    },
+  );
+
+  it('R1-19 characterizes permanent stream errors surviving hangup but stopping on dispose', async () => {
+    const adaptor = new FakeAdaptor();
+    const { session, callbacks, realtime, log } = await startSession(adaptor);
+    const events = vi.spyOn(adaptor, 'events').mockImplementation(() => {
+      throw new Error('session not found');
+    });
+    vi.useFakeTimers();
+    try {
+      callTool(callbacks, 'handoff', { task: 'Lost backend session' });
+      await awaitReceipts(realtime, 1);
+      await vi.advanceTimersByTimeAsync(3_000);
+      const beforeStop = events.mock.calls.length;
+      await session.stop({ epoch: 1, callId: 'call-1' });
+      await vi.advanceTimersByTimeAsync(100_000);
+      expect(events.mock.calls.length).toBeGreaterThan(beforeStop + 5);
+      expect(log.write).toHaveBeenCalledWith(
+        'error',
+        expect.objectContaining({
+          source: 'pump',
+          message: 'session not found',
+        }),
+      );
+      expect(session.getSubagentsSnapshot().tasks[0]?.activity).toBe(
+        liveMessage('subagents.reconnecting'),
+      );
+      session.dispose();
+      const afterDispose = events.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(events).toHaveBeenCalledTimes(afterDispose);
+    } finally {
+      session.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it('R1-15 preserves adjacent cancel authority while waiting for the last foreground response', async () => {
+    const harness = createProactiveHarness();
+    const { session, callbacks, realtime } = await startSession(undefined, {
+      proactive: DEFAULT_PROACTIVE_CONFIG,
+      createProactiveScheduler: harness.createScheduler,
+    });
+    try {
+      callTool(callbacks, CREATE_PROACTIVE_MONITOR_TOOL_NAME, {
+        title: MONITOR_TASK.title,
+        modalities: ['vision'],
+        condition: 'The user starts slouching',
+        trigger_response: 'Sit upright',
+      });
+      await vi.waitFor(() =>
+        expect(realtime.submitFunctionOutput).toHaveBeenCalledOnce(),
+      );
+      realtime.requestProactiveRepair.mockReturnValueOnce(false);
+      callbacks.onResponseCreated?.({
+        callEpoch: 1,
+        responseId: 'user-cancel',
+        inputItemId: 'cancel-input',
+        authority: 'direct',
+      });
+      callbacks.onDirectTranscript?.({
+        callEpoch: 1,
+        responseId: 'user-cancel',
+        entries: [
+          { role: 'assistant', text: '好的，已经停止这个提醒任务了。' },
+        ],
+      });
+      callbacks.onResponseDone?.({
+        callEpoch: 1,
+        responseId: 'user-cancel',
+        inputItemId: 'cancel-input',
+        authority: 'direct',
+        status: 'completed',
+      });
+      for (const authority of ['backend_speech', 'proactive'] as const) {
+        callbacks.onResponseCreated?.({
+          callEpoch: 1,
+          responseId: authority,
+          authority,
+        });
+      }
+      callbacks.onResponseDone?.({
+        callEpoch: 1,
+        responseId: 'backend_speech',
+        authority: 'backend_speech',
+        status: 'completed',
+      });
+      expect(realtime.requestProactiveRepair).toHaveBeenCalledOnce();
+      callbacks.onResponseDone?.({
+        callEpoch: 1,
+        responseId: 'proactive',
+        authority: 'proactive',
+        status: 'completed',
+      });
+      expect(realtime.requestProactiveRepair).toHaveBeenCalledTimes(2);
+      callbacks.onResponseCreated?.({
+        callEpoch: 1,
+        responseId: 'cancel-repair',
+        authority: 'proactive_repair',
+      });
+      callToolForResponse(
+        callbacks,
+        'cancel-repair',
+        CANCEL_PROACTIVE_TASK_TOOL_NAME,
+        {},
+      );
+      await vi.waitFor(() =>
+        expect(realtime.submitFunctionOutput).toHaveBeenCalledTimes(2),
+      );
+      expect(harness.scheduler.cancelTasks).toHaveBeenCalledWith({
+        targetTitle: MONITOR_TASK.title,
+      });
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it.each(['screen', 'camera'] as const)(
+    'R1-25 keeps the full runtime visual announcement identical to prompt for %s',
+    async (source) => {
+      const { session, realtime } = await startSession();
+      try {
+        for (const mode of ['on-demand', 'live-feed'] as const) {
+          const visualInput = { ...DEFAULT_VISUAL_INPUT, source, mode };
+          session.setVisualSettings({
+            epoch: 1,
+            callId: 'call-1',
+            visualInput,
+          });
+          const marker = buildLiveInstructions(visualInput)
+            .split('\n')
+            .find((line) => line.startsWith('[VISUAL_INPUT]'));
+          expect(marker).toBeDefined();
+          expect(realtime.sendBackendContext).toHaveBeenLastCalledWith(marker);
+        }
+      } finally {
+        session.dispose();
+      }
+    },
+  );
+});
 
 describe('LiveSession', () => {
   it('correlates concurrent fast backend events only after each prompt receipt supplies its stable jobRef', async () => {
@@ -1633,7 +2107,7 @@ describe('LiveSession', () => {
       expect(realtime.submitFunctionOutput).toHaveBeenCalledTimes(2);
     });
     expect(realtime.submitFunctionOutput.mock.calls[1]?.[1]).toBe(
-      '提醒任务未创建或修改，提交的信息未通过校验。',
+      '提醒任务未修改。仅对紧邻刚创建的任务设置 repeat=true 时可省略目标；其他修改必须提供 target_title 或 target_title_contains。',
     );
     callbacks.onResponseDone?.({
       callEpoch: 1,
@@ -4104,11 +4578,15 @@ describe('LiveSession', () => {
     expect(receipt).not.toHaveProperty('image_delivery');
   });
 
-  it('fails the call when Realtime rejects a tool result', async () => {
+  it('fails the call when an active Realtime response rejects a tool result', async () => {
     const { callbacks, host, log, realtime } = await startSession();
     realtime.submitFunctionOutput.mockReturnValue(false);
-
-    callTool(callbacks, 'session_list', {});
+    callbacks.onResponseCreated?.({
+      callEpoch: 1,
+      responseId: 'active-tool-response',
+      authority: 'direct',
+    });
+    callToolForResponse(callbacks, 'active-tool-response', 'session_list', {});
     await vi.waitFor(() => {
       expect(host.failCall).toHaveBeenCalledWith(
         1,

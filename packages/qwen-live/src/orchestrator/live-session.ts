@@ -43,6 +43,7 @@ import type {
 import { buildLiveInstructions } from '../realtime/instructions.js';
 import {
   openQwenRealtimeSession,
+  MAX_REALTIME_INSTRUCTIONS_CHARS,
   QwenRealtimeError,
   QWEN_REALTIME_LIMITS,
   type QwenRealtimeSession,
@@ -309,6 +310,8 @@ interface CallContext {
   loggedInputTranscripts: Map<string, string>;
   loggedResponseTranscripts: Map<string, string>;
   responseAuthorities: Map<string, RealtimeResponseAuthority>;
+  pendingToolCalls: Set<{ responseId: string; responseFailed: boolean }>;
+  realtimeUnavailable: boolean;
   proactive?: ProactiveSchedulerControl;
   proactiveDeliveries: Map<string, ProactiveDelivery>;
   invalidatedProactiveDeliveries: Set<string>;
@@ -486,6 +489,8 @@ export class LiveSession {
       loggedInputTranscripts: new Map(),
       loggedResponseTranscripts: new Map(),
       responseAuthorities: new Map(),
+      pendingToolCalls: new Set(),
+      realtimeUnavailable: false,
       proactiveDeliveries: new Map(),
       invalidatedProactiveDeliveries: new Set(),
       userInterruptedProactiveDeliveries: new Set(),
@@ -1016,7 +1021,7 @@ export class LiveSession {
     const memory = this.options.memory.attach({
       sessionId: context.callId,
       maxPromptChars:
-        100_000 -
+        MAX_REALTIME_INSTRUCTIONS_CHARS -
         buildLiveInstructions(
           context.visualInput,
           undefined,
@@ -1239,6 +1244,7 @@ export class LiveSession {
             context.realtime?.cancelResponse();
             context.playbackSuppressed = true;
             this.host.clearOutput(context.epoch);
+            context.injector.noteOutputCleared();
           } else if (delivery) {
             context.activeProactiveDelivery = {
               delivery,
@@ -1276,6 +1282,13 @@ export class LiveSession {
       },
       onResponseDone: (event: RealtimeResponseDoneEvent) => {
         if (!current()) return;
+        if (event.status === 'failed') {
+          for (const call of context.pendingToolCalls.values()) {
+            if (call.responseId === event.responseId) {
+              call.responseFailed = true;
+            }
+          }
+        }
         // Some provider terminal paths omit response.audio.done. Closing the
         // stream here is an idempotent fallback; Host playback may still drain
         // afterwards before the completion barrier opens.
@@ -1294,12 +1307,11 @@ export class LiveSession {
         );
         if (repair) {
           this.requestProactiveRepair(context, repair);
-        } else if (authority === 'tool_continuation') {
-          if (context.proactiveMutationResponses.has(event.responseId)) {
-            context.pendingProactiveRepair = undefined;
-          } else {
-            this.retryPendingProactiveRepair(context);
-          }
+        } else if (
+          authority === 'tool_continuation' &&
+          context.proactiveMutationResponses.has(event.responseId)
+        ) {
+          context.pendingProactiveRepair = undefined;
         }
         let completeProactiveCycle = true;
         if (authority === 'proactive') {
@@ -1316,6 +1328,7 @@ export class LiveSession {
         context.proactiveMutationResponses.delete(event.responseId);
         context.proactiveCommittedMutationResponses.delete(event.responseId);
         context.directAssistantTranscripts.delete(event.responseId);
+        if (!repair) this.retryPendingProactiveRepair(context);
         if (!context.stopping && !awaitingRepairReceipt) {
           this.host.setCallState(context.epoch, 'listening');
         }
@@ -1454,6 +1467,7 @@ export class LiveSession {
           closeCode: error.closeCode,
         });
         if (error.fatal) {
+          context.realtimeUnavailable = true;
           // The socket is done for. Clear the drain flags before failCall()
           // asks this session to stop, or a live utterance would replace the
           // provider failure with a misleading final-input commit error.
@@ -1478,6 +1492,7 @@ export class LiveSession {
       },
       onClose: (info: RealtimeCloseInfo) => {
         if (this.active !== context) return;
+        context.realtimeUnavailable = true;
         this.debug('realtime.closed', {
           epoch: context.epoch,
           reason: info.reason,
@@ -1513,6 +1528,8 @@ export class LiveSession {
     context: CallContext,
     event: RealtimeFunctionCall,
   ): Promise<void> {
+    const call = { responseId: event.responseId, responseFailed: false };
+    context.pendingToolCalls.add(call);
     if (!context.stopping) {
       this.host.setCallState(context.epoch, 'thinking');
     }
@@ -1552,6 +1569,7 @@ export class LiveSession {
       ok: result.ok,
       receipt: receipt.slice(0, 2_000),
     });
+    context.pendingToolCalls.delete(call);
     if (this.active !== context || !context.realtime) return;
     try {
       const submitted = context.realtime.submitFunctionOutput(
@@ -1559,6 +1577,16 @@ export class LiveSession {
         receipt,
       );
       if (!submitted) {
+        // A failed response has already retired its pending tool calls; the
+        // backend side effect can finish after that nonfatal provider error.
+        if (call.responseFailed && !context.realtimeUnavailable) {
+          this.debug('tool.output_ignored', {
+            callId: event.callId,
+            responseId: event.responseId,
+            reason: 'response_failed',
+          });
+          return;
+        }
         throw new Error('Realtime rejected the tool result.');
       }
     } catch (error) {
@@ -1977,9 +2005,22 @@ export class LiveSession {
       pending.count += 1;
       this.pendingSubmissions.set(handle, pending);
       this.ensurePump(handle, backend);
-      const finishSubmission = () => {
+      const finishSubmission = (jobRef?: string) => {
         pending.count -= 1;
         if (pending.count === 0) this.pendingSubmissions.delete(handle);
+        const buffered = pending.events.filter(
+          (event) =>
+            pending.count === 0 ||
+            (jobRef !== undefined &&
+              'jobRef' in event &&
+              event.jobRef === jobRef),
+        );
+        pending.events = pending.events.filter(
+          (event) => !buffered.includes(event),
+        );
+        for (const event of buffered) {
+          this.onBackendEvent(handle, backend, event);
+        }
       };
       let receipt;
       try {
@@ -2022,14 +2063,7 @@ export class LiveSession {
             ? 'running'
             : 'starting',
       );
-      const buffered = pending.events.filter(
-        (event) => 'jobRef' in event && event.jobRef === receipt.jobRef,
-      );
-      pending.events = pending.events.filter(
-        (event) => !buffered.includes(event),
-      );
-      finishSubmission();
-      for (const event of buffered) this.onBackendEvent(handle, backend, event);
+      finishSubmission(receipt.jobRef);
       this.ensurePump(handle, backend);
       const notes = [receipt.note, imageNote].filter(Boolean).join('. ');
       return {
@@ -2391,6 +2425,19 @@ export class LiveSession {
         ? { permissionPending: false, resolvedByUs: event.byUs }
         : {}),
     });
+    if (pending && event.type === 'permission_resolved') {
+      const unresolved = pending.events.filter(
+        (entry) =>
+          entry.type !== 'permission_request' ||
+          entry.requestId !== event.requestId,
+      );
+      if (unresolved.length !== pending.events.length) {
+        // The request never reached the broker. Retire the buffered ask so
+        // a later receipt cannot reopen a vote already handled elsewhere.
+        pending.events = unresolved;
+        return;
+      }
+    }
     if (!observedJob && 'jobRef' in event && event.jobRef && pending) {
       pending.events.push(event);
       if (pending.events.length > 128) {
@@ -2733,7 +2780,13 @@ export class LiveSession {
 
   private retryPendingProactiveRepair(context: CallContext): void {
     const repair = context.pendingProactiveRepair;
-    if (!repair || context.speechInProgress) return;
+    if (
+      !repair ||
+      context.speechInProgress ||
+      context.responseInFlight ||
+      context.responseAuthorities.size > 0
+    )
+      return;
     this.requestProactiveRepair(context, repair);
   }
 
@@ -3211,6 +3264,7 @@ export class LiveSession {
     context.proactiveMutationResponses.clear();
     context.proactiveCommittedMutationResponses.clear();
     context.directAssistantTranscripts.clear();
+    context.pendingToolCalls.clear();
     context.pendingProactiveRepair = undefined;
     context.proactiveRepairAwaitingResponse = undefined;
     context.proactiveRepairReceiptPending = false;

@@ -551,6 +551,7 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
           }
           this.ready = true;
           this.needsRecycle = false;
+          this.evaluationCount = 0;
           this.rebuildWriterQueue();
           if (!this.drainWriterQueue(false)) {
             failConnection(
@@ -922,6 +923,9 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
     if (safeResult.error) this.needsRecycle = true;
     this.debug('proactive.monitor_result', {
       triggered: safeResult.triggered,
+      ...(safeResult.ignoredAction
+        ? { ignoredAction: safeResult.ignoredAction }
+        : {}),
       ...(safeFailure ? failureDebugDetails(safeFailure) : {}),
     });
     this.callbacks.onResult(safeResult, this.options.taskGeneration);
@@ -963,10 +967,6 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
     const connecting = this.connect();
     const generation = this.transportGeneration;
     void connecting
-      .then(() => {
-        this.evaluationCount = 0;
-        this.needsRecycle = false;
-      })
       .catch((error: unknown) => {
         this.needsRecycle = true;
         if (!this.closed && generation === this.transportGeneration) {

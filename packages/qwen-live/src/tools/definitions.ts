@@ -352,8 +352,9 @@ const UPDATE_PROACTIVE_TASK_TOOL: RealtimeToolDefinition = {
       'Modify an existing task selected by a unique title. Event ' +
       'condition/response fields and live-narration focus/style fields are ' +
       'distinct; the task kind cannot be converted by update. Omit the ' +
-      'selector only for an immediately adjacent reference to the ' +
-      'just-created task. Never use update for a new request.',
+      'selector only to set repeat=true, with no other arguments, on the ' +
+      'immediately adjacent just-created task; every other change needs ' +
+      'target_title or target_title_contains. Never use update for a new request.',
     parameters: {
       type: 'object',
       properties: {
@@ -417,8 +418,9 @@ const CANCEL_PROACTIVE_TASK_TOOL: RealtimeToolDefinition = {
     name: CANCEL_PROACTIVE_TASK_TOOL_NAME,
     description:
       'Stop an active Proactive task by a unique exact/partial title, stop ' +
-      'all with all=true, or omit the selector only for an immediately ' +
-      'adjacent reference to the just-created task.',
+      'all with all=true, or use an empty argument object only for an ' +
+      'immediately adjacent reference to the just-created task. Selector-less ' +
+      'adjacent cancellation must have no arguments.',
     parameters: {
       type: 'object',
       properties: {

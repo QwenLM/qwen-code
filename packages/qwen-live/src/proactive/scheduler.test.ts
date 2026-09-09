@@ -8,7 +8,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_PROACTIVE_CONFIG, type ProactiveConfig } from '../config.js';
 import { Injector } from '../orchestrator/injector.js';
 import { QWEN_REALTIME_LIMITS } from '../realtime/realtime-session.js';
-import { formatProactiveEvent } from './monitor-protocol.js';
+import {
+  formatProactiveEvent,
+  parseMonitorAction,
+} from './monitor-protocol.js';
 import type {
   DashScopeRealtimeMonitorCallbacks,
   DashScopeRealtimeMonitorOptions,
@@ -90,6 +93,13 @@ class FakeMonitor implements ProactiveRealtimeMonitor {
         currentState: '',
         error: message,
       },
+      this.options.taskGeneration,
+    );
+  }
+
+  action(raw: string): void {
+    this.callbacks.onResult(
+      parseMonitorAction(raw, this.options.monitorMode),
       this.options.taskGeneration,
     );
   }
@@ -315,6 +325,42 @@ afterEach(() => {
 });
 
 describe('ProactiveScheduler', () => {
+  it('diagnoses ignored function calls without triggering or failing a task', () => {
+    const debug = vi.fn();
+    const { scheduler, monitors, deliveries, failures } = createHarness(
+      config(),
+      { debug },
+    );
+    const task = scheduler.createPerceptionMonitor({
+      title: 'Watch',
+      modalities: ['vision'],
+      condition: 'A change occurs',
+      triggerResponse: 'Tell me',
+      repeat: false,
+    });
+    for (let index = 0; index < 4; index += 1) {
+      monitors[0]!.action(
+        'Func_call:private acknowledgment\n{"name":"private-tool","intent":"private-intent"}',
+      );
+    }
+    expect(debug).toHaveBeenCalledWith('proactive.evaluation_result', {
+      taskId: task.taskId,
+      generation: 1,
+      triggered: false,
+      failed: false,
+      summaryChars: 0,
+      ignoredAction: 'function_call',
+    });
+    expect(JSON.stringify(debug.mock.calls)).not.toContain('private');
+    expect(deliveries).toEqual([]);
+    expect(failures).toEqual([]);
+    expect(scheduler.listTasks()[0]).toMatchObject({
+      status: 'running',
+      failureCount: 0,
+      triggerCount: 0,
+    });
+  });
+
   it('logs actual media and busy gates without repeating an unchanged poll state or exposing content', () => {
     const debug = vi.fn();
     const { scheduler, monitors } = createHarness(config(), { debug });
@@ -772,6 +818,59 @@ describe('ProactiveScheduler', () => {
       audio: 60,
       vision: 10,
     });
+  });
+
+  it('does not warm a single frame by waiting or carry warm-up across a capture gap', () => {
+    const proactive = config();
+    proactive.vision = { fps: 5, windowSizeSec: 2, minEvalDurationSec: 2 };
+    const { scheduler, monitors } = createHarness(proactive);
+    scheduler.createPerceptionMonitor({
+      title: 'Watch',
+      modalities: ['vision'],
+      condition: 'A change occurs',
+      triggerResponse: 'Tell me',
+      repeat: false,
+    });
+    scheduler.feedImage('first');
+    vi.advanceTimersByTime(2_001);
+    expect(monitors[0]!.evaluations).toBe(0);
+
+    for (let index = 0; index < 6; index += 1) {
+      scheduler.feedImage(`slow-${index}`);
+      if (index < 5) vi.advanceTimersByTime(450);
+    }
+    vi.advanceTimersByTime(1_749);
+    expect(monitors[0]!.evaluations).toBe(1);
+
+    // The previous capture is still retained at the last poll; this gap
+    // expires it before the next frame, without an intervening empty poll.
+    vi.advanceTimersByTime(252);
+    scheduler.feedImage('after-gap');
+    vi.advanceTimersByTime(1_748);
+    expect(monitors[0]!.evaluations).toBe(1);
+  });
+
+  it('requires fresh warm-up after resetting the visual source', () => {
+    const proactive = config();
+    proactive.vision = { fps: 5, windowSizeSec: 2, minEvalDurationSec: 2 };
+    const { scheduler, monitors } = createHarness(proactive);
+    scheduler.createPerceptionMonitor({
+      title: 'Watch',
+      modalities: ['vision'],
+      condition: 'A change occurs',
+      triggerResponse: 'Tell me',
+      repeat: false,
+    });
+    for (let index = 0; index < 6; index += 1) {
+      scheduler.feedImage(`slow-${index}`);
+      if (index < 5) vi.advanceTimersByTime(450);
+    }
+    vi.advanceTimersByTime(1_750);
+    expect(monitors[0]!.evaluations).toBe(1);
+    scheduler.resetVisualSource();
+    scheduler.feedImage('new-source');
+    vi.advanceTimersByTime(2_000);
+    expect(monitors[1]!.evaluations).toBe(0);
   });
 
   it('expires audio independently when vision has the longer window', () => {

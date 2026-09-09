@@ -85,6 +85,33 @@ const FAILURE_CODES = new Set<ProactiveFailureCode>([
 ]);
 
 const FAILURE_FALLBACK = '提醒任务未创建或修改，原因暂时无法确认。';
+const VALIDATION_FAILURE = '提醒任务未创建或修改，提交的信息未通过校验。';
+const INVALID_ARGUMENT_FACTS = new Map<string, string>([
+  [
+    'Tool arguments must be valid JSON.',
+    '提醒任务未创建或修改，工具参数必须是有效的 JSON。',
+  ],
+  [
+    'Tool arguments must be an object.',
+    '提醒任务未创建或修改，工具参数必须是 JSON 对象。',
+  ],
+  [
+    'An adjacent selector-less update may only set repeat=true.',
+    '提醒任务未修改。仅对紧邻刚创建的任务设置 repeat=true 时可省略目标；其他修改必须提供 target_title 或 target_title_contains。',
+  ],
+  [
+    'Selector-less update has no adjacent active task.',
+    '提醒任务未修改，没有紧邻刚创建的活动任务；请提供 target_title 或 target_title_contains。',
+  ],
+  [
+    'An adjacent selector-less cancel must have no arguments.',
+    '提醒任务未停止。紧邻刚创建任务的无目标取消必须使用空参数对象；其他取消请提供 target_title、target_title_contains 或 all=true。',
+  ],
+  [
+    'Selector-less cancel has no adjacent active task.',
+    '提醒任务未停止，没有紧邻刚创建的活动任务；请提供 target_title 或 target_title_contains，停止全部任务请使用 all=true。',
+  ],
+]);
 
 export function snapshotProactiveTask(
   task: ProactiveTask,
@@ -434,8 +461,13 @@ function renderFailureFact(receipt: unknown): string {
     case 'task_busy':
       return '提醒任务未修改，没有找到唯一可操作的活动任务。';
     case 'invalid_arguments':
+      return (
+        INVALID_ARGUMENT_FACTS.get(
+          typeof receipt['error'] === 'string' ? receipt['error'] : '',
+        ) ?? VALIDATION_FAILURE
+      );
     case 'validation_error':
-      return '提醒任务未创建或修改，提交的信息未通过校验。';
+      return VALIDATION_FAILURE;
     default:
       return FAILURE_FALLBACK;
   }
