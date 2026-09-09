@@ -406,6 +406,20 @@ describe('SystemMessage — background notification label', () => {
 });
 
 describe('SystemMessage — background notification i18n body', () => {
+  it('renders an overflow summary record without task metadata verbatim', () => {
+    const content =
+      'Dropped 1 background notification (queue full): 1 shell result (shell-0).';
+    const container = render(
+      <SystemMessage
+        content={content}
+        variant="info"
+        source="background_notification"
+      />,
+    );
+
+    expect(container.textContent).toContain(content);
+  });
+
   it('renders shell notifications with structured command via i18n', () => {
     const container = render(
       <SystemMessage
