@@ -47,6 +47,7 @@ export type ServeFastPathSettings = Pick<
 > & {
   general?: Pick<NonNullable<Settings['general']>, 'chatRecording'>;
   policy?: ServeFastPathPolicyInput;
+  serve?: Pick<NonNullable<Settings['serve']>, 'channels'>;
 };
 const V2_SETTINGS_VERSION = 2;
 type CachedTrustRule = TrustPrecedenceRule<string>;
@@ -638,6 +639,19 @@ function pickFastPathSettings(
     out.policy = pickedPolicy;
   }
 
+  const serve = value['serve'];
+  if (isPlainObject(serve)) {
+    const channels = serve['channels'];
+    if (channels !== undefined && !isStringArray(channels)) {
+      throw new Error(
+        'Serve fast path settings serve.channels must be a string array.',
+      );
+    }
+    if (channels !== undefined) {
+      out.serve = { channels };
+    }
+  }
+
   return out;
 }
 
@@ -741,6 +755,11 @@ export function loadServeFastPathSettings(
   const workspace = isTrusted ? workspaceFromDisk : {};
 
   const merged = mergeFastPathSettings(systemDefaults, user, workspace, system);
+  if (workspace.serve) {
+    merged.serve = { channels: [...(workspace.serve.channels ?? [])] };
+  } else {
+    delete merged.serve;
+  }
   return resolveEnvVarsInObject(
     merged as Settings,
     getHomeEnvFallbackVarsFastPath(),

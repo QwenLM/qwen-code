@@ -224,7 +224,10 @@ import {
   sanitizeWorkerDiagnostic,
   type WorkerDiagnosticRedactionOptions,
 } from './channel-worker-diagnostics.js';
-import { channelSelectionNames } from './channel-selection.js';
+import {
+  channelSelectionNames,
+  normalizeServeChannelSelection,
+} from './channel-selection.js';
 import {
   resolveChannelWorkspaceGroups,
   type ChannelWorkspaceGroup,
@@ -3975,10 +3978,19 @@ async function runQwenServeImpl(
     // disk IO) fall back to defaults so the daemon stays bootable.
     writeStderrLine(
       `qwen serve: could not read settings for context.fileName / ` +
-        `policy.* (${err instanceof Error ? err.message : String(err)}); ` +
+        `policy.* / serve.channels ` +
+        `(${err instanceof Error ? err.message : String(err)}); ` +
         `falling back to defaults. Restart with a valid settings.json ` +
-        `to apply context.fileName / policy.* overrides.`,
+        `to apply context.fileName / policy.* / serve.channels overrides.`,
     );
+  }
+  if (!opts.channelSelection) {
+    opts.channelSelection = normalizeServeChannelSelection(
+      bootSettings?.serve?.channels,
+    );
+    if (opts.channelSelection) {
+      channelRuntime = await ensureChannelRuntime();
+    }
   }
 
   // Init daemon logger early so all subsequent lifecycle events

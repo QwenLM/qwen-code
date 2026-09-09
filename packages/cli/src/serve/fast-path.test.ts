@@ -1643,6 +1643,29 @@ describe('serve fast path environment bootstrap', () => {
     expect(settings.advanced?.runtimeOutputDir).toBe('.qwen-runtime');
   });
 
+  it('loads startup channels from workspace settings only', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-startup-channels-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ serve: { channels: ['discord'] } }),
+    );
+
+    expect(loadServeFastPathSettings(tempWorkspace).serve).toBeUndefined();
+
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+
+    expect(loadServeFastPathSettings(tempWorkspace).serve).toEqual({
+      channels: ['telegram'],
+    });
+  });
+
   it('ignores stale legacy keys in current-version settings files', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(

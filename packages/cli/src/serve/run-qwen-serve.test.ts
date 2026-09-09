@@ -13651,6 +13651,108 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('starts workspace startup channels on a bare daemon boot', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-autostart-')),
+    );
+    fs.mkdirSync(path.join(tmpDir, '.qwen'));
+    fs.writeFileSync(
+      path.join(tmpDir, '.qwen', 'settings.json'),
+      JSON.stringify({
+        channels: { telegram: { type: 'telegram' } },
+        serve: { channels: ['telegram'] },
+      }),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    const workerFactory = makeReadyWorkerFactory(worker);
+    const pidfile = makePidfileDeps();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: workerFactory,
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(workerFactory).toHaveBeenCalledOnce();
+      expect(worker.start).toHaveBeenCalledOnce();
+      expect(pidfile.reserveServeServiceInfo).toHaveBeenCalledWith({
+        channels: ['telegram'],
+        servePid: process.pid,
+      });
+
+      const response = await fetch(`${handle.url}/workspace/channels`, {
+        headers: { Authorization: 'Bearer secret' },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        instances: {
+          telegram: {
+            startsWithServe: true,
+          },
+        },
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps explicit channel selection ahead of workspace startup channels', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-explicit-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      channels: ['feishu'],
+      requestedChannels: ['feishu'],
+    });
+    const workerFactory = makeReadyWorkerFactory(worker);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['feishu'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['telegram'] } },
+        channelWorkerSupervisorFactory: workerFactory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(workerFactory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          selection: { mode: 'names', names: ['feishu'] },
+        }),
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('enables, queries, idempotently reapplies, and stops channels after boot', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-runtime-control-')),
