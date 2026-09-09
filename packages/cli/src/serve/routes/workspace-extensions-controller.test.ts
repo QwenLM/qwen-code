@@ -418,9 +418,30 @@ describe('createExtensionsController', () => {
     );
   });
 
-  it.each([undefined, 'latched refresh failure'])(
-    'warns when runtime reconciliation is deferred: %s',
-    async (error) => {
+  it.each([
+    {
+      operation: 'install',
+      runtimeLive: false,
+      error: undefined,
+      warns: false,
+    },
+    { operation: 'install', runtimeLive: true, error: undefined, warns: true },
+    { operation: 'refresh', runtimeLive: false, error: undefined, warns: true },
+    {
+      operation: 'refresh',
+      runtimeLive: true,
+      error: 'latched refresh failure',
+      warns: true,
+    },
+    {
+      operation: 'install',
+      runtimeLive: false,
+      error: 'refresh failed',
+      warns: true,
+    },
+  ])(
+    'reports deferred $operation with runtimeLive=$runtimeLive and error=$error',
+    async ({ operation, runtimeLive, error, warns }) => {
       const reconcileExtensionGeneration = vi.fn(async () => ({
         state: 'deferred',
         refreshed: 0,
@@ -432,6 +453,7 @@ describe('createExtensionsController', () => {
         'getWorkspaceRuntimeCoordinatorIfSupported',
       ).mockReturnValue({
         reconcileExtensionGeneration,
+        status: () => ({ runtimeLive }),
       } as unknown as runtimeCoordinator.WorkspaceRuntimeCoordinator);
       const runtime = {
         workspaceId: 'secondary',
@@ -456,7 +478,7 @@ describe('createExtensionsController', () => {
         json,
       } as unknown as Response;
       controller.runQueuedExtensionMutation(
-        'refresh',
+        operation,
         {},
         response,
         async () => ({ status: 'refreshed', refreshed: 0, failed: 0 }),
@@ -465,18 +487,24 @@ describe('createExtensionsController', () => {
       const operationId = json.mock.calls[0]![0].operationId as string;
       await vi.waitFor(() =>
         expect(controller.getOperation(operationId)).toMatchObject({
-          status: 'succeeded_with_warnings',
-          warnings: [
-            {
-              workspaceId: 'secondary',
-              error:
-                error ??
-                'Extension runtime has not applied the committed generation. Retry the runtime refresh.',
-            },
-          ],
+          status: warns ? 'succeeded_with_warnings' : 'succeeded',
+          ...(warns
+            ? {
+                warnings: [
+                  {
+                    workspaceId: 'secondary',
+                    error:
+                      error ??
+                      'Extension runtime has not applied the committed generation. Retry the runtime refresh.',
+                  },
+                ],
+              }
+            : {}),
         }),
       );
       expect(reconcileExtensionGeneration).toHaveBeenCalled();
+      if (!warns)
+        expect(controller.getOperation(operationId)?.warnings).toBeUndefined();
     },
   );
 

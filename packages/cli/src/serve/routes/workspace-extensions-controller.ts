@@ -722,6 +722,7 @@ export function createExtensionsController(
                       const coordinator =
                         getWorkspaceRuntimeCoordinatorIfSupported(runtime);
                       if (coordinator) {
+                        const runtimeWasLive = coordinator.status().runtimeLive;
                         const reconciliation =
                           await coordinator.reconcileExtensionGeneration(
                             committedGeneration!,
@@ -735,7 +736,8 @@ export function createExtensionsController(
                         };
                         const reconciliationError =
                           reconciliation.error ??
-                          (reconciliation.state !== 'reconciled'
+                          (reconciliation.state !== 'reconciled' &&
+                          (runtimeWasLive || operation === 'refresh')
                             ? 'Extension runtime has not applied the committed generation. Retry the runtime refresh.'
                             : undefined);
                         runtime.bridge.broadcastExtensionsChanged({
