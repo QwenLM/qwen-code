@@ -285,7 +285,8 @@ function isPermissionRequestData(
 }
 
 type DaemonPermissionOutcome =
-  { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string };
+  | { outcome: 'cancelled' }
+  | { outcome: 'selected'; optionId: string };
 
 function parsePermissionOutcome(
   value: unknown,

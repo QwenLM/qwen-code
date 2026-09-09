@@ -452,7 +452,8 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private handleSessionUpdate(params: SessionNotification): void {
     const { sessionId } = params;
     const update = (params as unknown as Record<string, unknown>)['update'] as
-      Record<string, unknown> | undefined;
+      | Record<string, unknown>
+      | undefined;
     if (!update) return;
 
     const type = update['sessionUpdate'] as string;
@@ -481,7 +482,8 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           break;
         }
         const content = update['content'] as
-          { type?: string; text?: string } | undefined;
+          | { type?: string; text?: string }
+          | undefined;
         if (meta?.['qwenDiscreteMessage'] === true) {
           if (
             meta['source'] === 'background_notification_response' &&
