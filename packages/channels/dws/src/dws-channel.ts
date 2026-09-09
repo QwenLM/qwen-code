@@ -117,6 +117,8 @@ interface DwsCursor {
   mentionWatermark?: number;
   notificationHistoryFloor?: number;
   mentionHistoryFloor?: number;
+  notificationHistoryFloorProfile?: string;
+  mentionHistoryFloorProfile?: string;
   groupMessagesEnabled?: boolean;
   directMessagesEnabled?: boolean;
   notificationCheckpoint?: PersistedNotificationCheckpoint;
@@ -556,6 +558,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly documentSet = new Set<string>();
   private readonly todoTargets = new Map<string, string>();
   private readonly userInstructions?: string;
+  private readonly configuredProfile?: string;
   private readonly client: DwsClientLike;
   private readonly imStates: ImSubscriptionState[];
   private readonly dwsMessagePrefix?: string;
@@ -660,6 +663,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     this.router.setChannelApprovalMode(name, config.approvalMode);
 
     this.userInstructions = userInstructions;
+    this.configuredProfile = profile;
     this.client = client ?? new DwsClient({ executable: 'dws', profile });
     this.imStates = imSources.map((source) => ({
       source,
@@ -730,6 +734,12 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         (typeof cursor.mentionHistoryFloor !== 'number' ||
           !Number.isSafeInteger(cursor.mentionHistoryFloor) ||
           cursor.mentionHistoryFloor < 0)) ||
+      (cursor.notificationHistoryFloorProfile !== undefined &&
+        (typeof cursor.notificationHistoryFloorProfile !== 'string' ||
+          !cursor.notificationHistoryFloorProfile.trim())) ||
+      (cursor.mentionHistoryFloorProfile !== undefined &&
+        (typeof cursor.mentionHistoryFloorProfile !== 'string' ||
+          !cursor.mentionHistoryFloorProfile.trim())) ||
       (cursor.groupMessagesEnabled !== undefined &&
         typeof cursor.groupMessagesEnabled !== 'boolean') ||
       (cursor.directMessagesEnabled !== undefined &&
@@ -779,6 +789,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       mentionWatermark: cursor.mentionWatermark,
       notificationHistoryFloor: cursor.notificationHistoryFloor,
       mentionHistoryFloor: cursor.mentionHistoryFloor,
+      notificationHistoryFloorProfile: cursor.notificationHistoryFloorProfile,
+      mentionHistoryFloorProfile: cursor.mentionHistoryFloorProfile,
       groupMessagesEnabled: cursor.groupMessagesEnabled,
       directMessagesEnabled: cursor.directMessagesEnabled,
       notificationCheckpoint: cursor.notificationCheckpoint,
@@ -817,20 +829,24 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.selfProfile === undefined &&
       this.cursor.groupMessagesEnabled === true &&
       this.cursor.mentionHistoryFloor !== undefined &&
-      this.cursor.mentionWatermark !== undefined
+      this.cursor.mentionWatermark !== undefined &&
+      this.cursor.mentionHistoryFloorProfile !== undefined
         ? {
             floor: this.cursor.mentionHistoryFloor,
             watermark: this.cursor.mentionWatermark,
+            profile: this.cursor.mentionHistoryFloorProfile,
           }
         : undefined;
     const initialProfileNotificationBoundary =
       this.cursor.selfProfile === undefined &&
       this.cursor.directMessagesEnabled === true &&
       this.cursor.notificationHistoryFloor !== undefined &&
-      this.cursor.notificationWatermark !== undefined
+      this.cursor.notificationWatermark !== undefined &&
+      this.cursor.notificationHistoryFloorProfile !== undefined
         ? {
             floor: this.cursor.notificationHistoryFloor,
             watermark: this.cursor.notificationWatermark,
+            profile: this.cursor.notificationHistoryFloorProfile,
           }
         : undefined;
     await this.client.assertCompatible?.(this.pollAbortController.signal);
@@ -868,20 +884,26 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.mentionWatermark = undefined;
       this.cursor.notificationHistoryFloor = undefined;
       this.cursor.mentionHistoryFloor = undefined;
+      this.cursor.notificationHistoryFloorProfile = undefined;
+      this.cursor.mentionHistoryFloorProfile = undefined;
       this.cursor.groupMessagesEnabled = undefined;
       this.cursor.directMessagesEnabled = undefined;
       this.cursor.notificationCheckpoint = undefined;
       this.cursor.mentionCheckpoint = undefined;
-      if (initialProfileMentionBoundary) {
+      if (initialProfileMentionBoundary?.profile === identity.profile) {
         this.cursor.mentionHistoryFloor = initialProfileMentionBoundary.floor;
         this.cursor.mentionWatermark = initialProfileMentionBoundary.watermark;
+        this.cursor.mentionHistoryFloorProfile =
+          initialProfileMentionBoundary.profile;
         this.cursor.groupMessagesEnabled = true;
       }
-      if (initialProfileNotificationBoundary) {
+      if (initialProfileNotificationBoundary?.profile === identity.profile) {
         this.cursor.notificationHistoryFloor =
           initialProfileNotificationBoundary.floor;
         this.cursor.notificationWatermark =
           initialProfileNotificationBoundary.watermark;
+        this.cursor.notificationHistoryFloorProfile =
+          initialProfileNotificationBoundary.profile;
         this.cursor.directMessagesEnabled = true;
       }
     }
@@ -1285,11 +1307,16 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     let cursorChanged = this.alignSourcePolicyState(endTime);
     cursorChanged = this.discardDisabledPendingMessages() || cursorChanged;
     if (!directMessagesEnabled) {
-      for (const pending of this.cursor.pendingDocumentNotifications ?? []) {
+      const pendingDocumentNotifications =
+        this.cursor.pendingDocumentNotifications ?? [];
+      for (const pending of pendingDocumentNotifications) {
         this.markProcessedMessage(messageKey(pending));
         cursorChanged = true;
       }
-      if ((this.cursor.pendingDocumentNotifications?.length ?? 0) > 0) {
+      if (pendingDocumentNotifications.length > 0) {
+        process.stderr.write(
+          `[Channel:${this.name}] discarded ${pendingDocumentNotifications.length} pending DWS document notification(s) because direct-message access is disabled.\n`,
+        );
         this.cursor.pendingDocumentNotifications = [];
       }
       if (this.cursor.notificationCheckpoint !== undefined) {
@@ -1753,6 +1780,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.mentionWatermark =
         referenceTime + NOTIFICATION_HISTORY_OVERLAP_MS;
       this.cursor.mentionHistoryFloor = referenceTime;
+      this.cursor.mentionHistoryFloorProfile =
+        this.cursor.selfProfile ?? this.configuredProfile;
       changed = true;
     }
     if (this.cursor.directMessagesEnabled === false && directMessagesEnabled) {
@@ -1765,6 +1794,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.notificationWatermark =
         referenceTime + NOTIFICATION_HISTORY_OVERLAP_MS;
       this.cursor.notificationHistoryFloor = referenceTime;
+      this.cursor.notificationHistoryFloorProfile =
+        this.cursor.selfProfile ?? this.configuredProfile;
       this.notificationWatermarkPulledBack = false;
       changed = true;
     }
@@ -1841,6 +1872,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         this.parkStaleDirectMessage(message);
       } else {
         this.markProcessedMessage(key);
+        this.clearInboundFailure(key);
+        this.removePendingMessage(key);
+        process.stderr.write(
+          `[Channel:${this.name}] discarded a stale ${source.kind} message from before group-message access was re-enabled at ${historyFloor}: ${sanitizeLogText(message.messageId, 120)}\n`,
+        );
         this.saveCursor();
       }
       return { completion: Promise.resolve(), remembered: true };
@@ -2710,6 +2746,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
     this.cursor.pendingMessages = pending.filter((item) =>
       this.isImSourceEnabled(item.source),
+    );
+    process.stderr.write(
+      `[Channel:${this.name}] discarded ${disabled.length} pending DWS message(s) because their chat sources are disabled.\n`,
     );
     for (const resolve of this.pendingMessageCapacityWaiters) resolve();
     this.pendingMessageCapacityWaiters.clear();

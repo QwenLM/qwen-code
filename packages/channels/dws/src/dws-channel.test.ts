@@ -478,6 +478,8 @@ class TestableDwsChannel extends DwsChannel {
   seedSourcePolicyState(state: {
     notificationHistoryFloor?: number;
     mentionHistoryFloor?: number;
+    notificationHistoryFloorProfile?: string;
+    mentionHistoryFloorProfile?: string;
   }): void {
     Object.assign(this.cursor, state);
     this.saveCursor();
@@ -844,6 +846,36 @@ describe('DwsChannel', () => {
     );
   });
 
+  it('logs permanent policy discards', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const channel = await readyChannel(
+        new FakeDwsClient(),
+        makeConfig({ groupPolicy: 'disabled', dmPolicy: 'disabled' }),
+      );
+      channel.seedPendingMessages(1, false, { kind: 'at' });
+      const { channel: documentChannel } = await readyPolicyChannel(
+        new FakeDwsClient(),
+        makeConfig({ groupPolicy: 'disabled', dmPolicy: 'disabled' }),
+        'disabled-document-log-dws',
+      );
+      documentChannel.seedPendingDocumentNotifications(1);
+
+      await channel.poll();
+      await documentChannel.poll();
+
+      const output = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(output).toContain(
+        'discarded 1 pending DWS message(s) because their chat sources are disabled',
+      );
+      expect(output).toContain(
+        'discarded 1 pending DWS document notification(s) because direct-message access is disabled',
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('retains pending work from an enabled chat source', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(
@@ -1141,6 +1173,12 @@ describe('DwsChannel', () => {
     expect(channel.acceptsCursor({ directMessagesEnabled: 1 })).toBe(false);
     expect(channel.acceptsCursor({ notificationHistoryFloor: -1 })).toBe(false);
     expect(channel.acceptsCursor({ mentionHistoryFloor: '1000' })).toBe(false);
+    expect(channel.acceptsCursor({ notificationHistoryFloorProfile: '' })).toBe(
+      false,
+    );
+    expect(channel.acceptsCursor({ mentionHistoryFloorProfile: 1 })).toBe(
+      false,
+    );
   });
 
   it('does not carry source-policy boundaries across a profile switch', async () => {
@@ -7405,7 +7443,77 @@ describe('DwsChannel', () => {
     }
   });
 
-  it('records disabled direct-message state when connection fails', async () => {
+  it('cleans a parked group mention discarded below the re-enable boundary', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const channel = await readyChannel(
+        new FakeDwsClient(),
+        makeConfig({ dmPolicy: 'disabled' }),
+      );
+      const stale = message(
+        'user_im_message_receive_at',
+        'parked-stale-group',
+        'do not replay this message',
+        { eventTime: 9_000 },
+      );
+      channel.seedSourcePolicyState({ mentionHistoryFloor: 20_000 });
+      channel.appendPendingMessage({ kind: 'at' }, stale);
+      channel.seedInboundFailure('cid-1\0parked-stale-group', 4);
+
+      await channel.poll();
+      await channel.poll();
+
+      expect(channel.pendingMessageIds()).toEqual([]);
+      expect(channel.inboundFailures()).toEqual([]);
+      expect(channel.processedMessageIds()).toContain(
+        'cid-1\0parked-stale-group',
+      );
+      expect(
+        stderr.mock.calls.filter((call) =>
+          String(call[0]).includes('parked-stale-group'),
+        ),
+      ).toHaveLength(1);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('cleans a parked direct message discarded below the re-enable boundary', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const channel = await readyChannel(
+        new FakeDwsClient(),
+        makeConfig({ groupPolicy: 'disabled' }),
+      );
+      const stale = message(
+        'user_im_message_receive_o2o_all',
+        'parked-stale-direct',
+        'do not replay this message',
+        { eventTime: 9_000 },
+      );
+      channel.seedSourcePolicyState({ notificationHistoryFloor: 20_000 });
+      channel.appendPendingMessage({ kind: 'direct' }, stale);
+      channel.seedInboundFailure('cid-1\0parked-stale-direct', 4);
+
+      await channel.poll();
+      await channel.poll();
+
+      expect(channel.pendingMessageIds()).toEqual([]);
+      expect(channel.inboundFailures()).toEqual([]);
+      expect(channel.processedMessageIds()).toContain(
+        'cid-1\0parked-stale-direct',
+      );
+      expect(
+        stderr.mock.calls.filter((call) =>
+          String(call[0]).includes('parked-stale-direct'),
+        ),
+      ).toHaveLength(1);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('uses a fail-closed direct-history boundary after a disabled connection fails', async () => {
     const name = 'disabled-failed-connect-dws';
     const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
     try {
@@ -7438,6 +7546,12 @@ describe('DwsChannel', () => {
       now.mockReturnValue(30_000);
       const restartedClient = new FakeDwsClient();
       restartedClient.directMessages = [
+        message(
+          'user_im_message_receive_o2o_all',
+          'enabled-gap-before-disable',
+          'do not cross the fail-closed re-enable boundary',
+          { eventTime: 15_000 },
+        ),
         message(
           'user_im_message_receive_o2o_all',
           'disabled-window-after-failure',
@@ -7475,7 +7589,11 @@ describe('DwsChannel', () => {
       );
       const disabled = new PolicyDwsChannel(
         name,
-        makeConfig({ groupPolicy: 'disabled', dmPolicy: 'disabled' }),
+        makeConfig({
+          profile: 'corp:user-self',
+          groupPolicy: 'disabled',
+          dmPolicy: 'disabled',
+        }),
         makeBridge(),
         undefined,
         disabledClient,
@@ -7492,7 +7610,7 @@ describe('DwsChannel', () => {
       );
       const reEnabling = new PolicyDwsChannel(
         name,
-        makeConfig({ groupPolicy: 'disabled' }),
+        makeConfig({ profile: 'corp:user-self', groupPolicy: 'disabled' }),
         makeBridge(),
         undefined,
         reEnablingClient,
@@ -7520,7 +7638,7 @@ describe('DwsChannel', () => {
       ];
       const { channel: restarted, bridge } = await readyPolicyChannel(
         restartedClient,
-        makeConfig({ groupPolicy: 'disabled' }),
+        makeConfig({ profile: 'corp:user-self', groupPolicy: 'disabled' }),
         name,
       );
 
@@ -7538,6 +7656,69 @@ describe('DwsChannel', () => {
     }
   });
 
+  it('does not carry an unauthenticated re-enable boundary across profiles', async () => {
+    const name = 'fresh-disabled-cross-profile-dws';
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      const disabledClient = new FakeDwsClient();
+      disabledClient.assertAuthenticated.mockRejectedValueOnce(
+        new Error('DWS credential expired'),
+      );
+      const disabled = new PolicyDwsChannel(
+        name,
+        makeConfig({
+          profile: 'corp-one',
+          groupPolicy: 'disabled',
+          dmPolicy: 'disabled',
+        }),
+        makeBridge(),
+        undefined,
+        disabledClient,
+      );
+      channels.push(disabled);
+      await expect(disabled.connect()).rejects.toThrow(
+        'DWS credential expired',
+      );
+
+      now.mockReturnValue(20_000);
+      const reEnablingClient = new FakeDwsClient();
+      reEnablingClient.assertAuthenticated.mockRejectedValueOnce(
+        new Error('DWS credential still expired'),
+      );
+      const reEnabling = new PolicyDwsChannel(
+        name,
+        makeConfig({ profile: 'corp-one', groupPolicy: 'disabled' }),
+        makeBridge(),
+        undefined,
+        reEnablingClient,
+      );
+      channels.push(reEnabling);
+      await expect(reEnabling.connect()).rejects.toThrow(
+        'DWS credential still expired',
+      );
+
+      now.mockReturnValue(30_000);
+      const restartedClient = new FakeDwsClient();
+      restartedClient.identity.profile = 'corp-two';
+      const { channel: restarted } = await readyPolicyChannel(
+        restartedClient,
+        makeConfig({ profile: 'corp-two', groupPolicy: 'disabled' }),
+        name,
+      );
+
+      await restarted.poll();
+
+      expect(restartedClient.listDirectMessages).toHaveBeenCalledWith(
+        25_000,
+        30_000,
+        expect.any(AbortSignal),
+        '0',
+      );
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('does not replay disabled group history after initial authentication fails', async () => {
     const name = 'fresh-disabled-group-failed-connect-dws';
     const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
@@ -7548,7 +7729,11 @@ describe('DwsChannel', () => {
       );
       const disabled = new PolicyDwsChannel(
         name,
-        makeConfig({ groupPolicy: 'disabled', dmPolicy: 'disabled' }),
+        makeConfig({
+          profile: 'corp:user-self',
+          groupPolicy: 'disabled',
+          dmPolicy: 'disabled',
+        }),
         makeBridge(),
         undefined,
         disabledClient,
@@ -7570,7 +7755,7 @@ describe('DwsChannel', () => {
       ];
       const { channel: restarted, bridge } = await readyPolicyChannel(
         restartedClient,
-        makeConfig({ dmPolicy: 'disabled' }),
+        makeConfig({ profile: 'corp:user-self', dmPolicy: 'disabled' }),
         name,
       );
 
@@ -7598,7 +7783,11 @@ describe('DwsChannel', () => {
       );
       const disabled = new PolicyDwsChannel(
         name,
-        makeConfig({ groupPolicy: 'disabled', dmPolicy: 'disabled' }),
+        makeConfig({
+          profile: 'corp:user-self',
+          groupPolicy: 'disabled',
+          dmPolicy: 'disabled',
+        }),
         makeBridge(),
         undefined,
         disabledClient,
@@ -7632,7 +7821,7 @@ describe('DwsChannel', () => {
 
       const { channel: restarted, bridge } = await readyPolicyChannel(
         restartedClient,
-        makeConfig({ groupPolicy: 'disabled' }),
+        makeConfig({ profile: 'corp:user-self', groupPolicy: 'disabled' }),
         name,
       );
 

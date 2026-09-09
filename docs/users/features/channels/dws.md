@@ -79,6 +79,8 @@ qwen channel pairing approve dws-work CODE
 
 For a group-only channel, set `dmPolicy` to `disabled` and choose an enabled `groupPolicy`. For a direct-message-only channel, set `groupPolicy` to `disabled` and keep `dmPolicy` as `open`.
 
+Re-enabling either chat source starts its history recovery at the re-enable time. This fail-closed boundary prevents messages from the disabled interval from being replayed, but it also discards any older messages that arrived while the source was enabled and the channel was not polling.
+
 `groups` controls mention behavior. A concrete group ID overrides `"*"`. With `requireMention: true`, only an @ message wakes the channel. With `requireMention: false`, ordinary messages are also received after the group and sender policies pass.
 
 Group mentions use the real-time personal event stream first. The channel also checks recent `@` message history every five seconds, so mentions from external groups are recovered when DingTalk omits them from the personal event stream. Messages are deduplicated by conversation and message ID across both paths.
