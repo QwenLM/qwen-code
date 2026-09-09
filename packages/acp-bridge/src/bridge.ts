@@ -4602,9 +4602,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     const workOwningGenerations = [...aliveChannels].filter(
       (info) => info.state !== 'dying',
     );
-    if (admission === 'fresh' && workOwningGenerations.length >= 2) {
+    if (workOwningGenerations.length >= 2) {
       writeStderrLine(
-        `qwen serve: runtime recycling blocked fresh work; generations=${workOwningGenerations
+        `qwen serve: runtime recycling blocked ${admission} work; generations=${workOwningGenerations
           .map(
             (info) =>
               `${info.id}:${info.state}:transportFailed=${info.transportFailed}`,
@@ -14432,7 +14432,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
 
     async generateWorkspaceAgent(description, _originatorClientId) {
-      const info = liveChannelInfo();
+      const info = admissibleChannelInfo();
       if (!info) {
         throw new SessionNotFoundError('agents:generate');
       }
@@ -14554,7 +14554,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // success. Soft-refuse (`budget_warning_only`) returns the skip
       // shape without emitting — the caller (HTTP route) decides how to
       // surface the skip to the SDK consumer.
-      const info = liveChannelInfo();
+      const info = admissibleChannelInfo();
       if (!info) {
         throw Object.assign(
           new Error(`No live ACP channel for runtime MCP add: ${name}`),
@@ -14610,7 +14610,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Round-trip the runtime-remove ext-method through
       // the live ACP child and broadcast `mcp_server_removed` on success.
       // Idempotent skip (`not_present`) returns without emitting.
-      const info = liveChannelInfo();
+      const info = admissibleChannelInfo();
       if (!info) {
         throw Object.assign(
           new Error(`No live ACP channel for runtime MCP remove: ${name}`),
