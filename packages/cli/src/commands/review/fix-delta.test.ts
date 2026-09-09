@@ -4205,47 +4205,51 @@ describe('fix-delta', () => {
     }
   });
 
-  it('never certifies a nested repository whose interior status warns past exit 0', () => {
-    // `git status` EXITS 0 over `warning: could not open directory '…'`
-    // while the subtree nobody could read is silently absent from the
-    // entries — so stdout plus the exit code certified clean over content
-    // nobody saw. The interior status is ruled on its stderr like the
-    // capture's own `add` is: any note is unexplained, and unexplained is
-    // failed, never clean.
-    const nested = join(repo, 'nested');
-    mkdirSync(nested);
-    gitAt(nested, 'init', '-q', '-b', 'main');
-    gitAt(nested, 'config', 'user.email', 't@t.t');
-    gitAt(nested, 'config', 'user.name', 't');
-    writeFileSync(join(nested, 'f.txt'), 'v1\n');
-    gitAt(nested, 'add', '-A');
-    gitAt(nested, 'commit', '-qm', 'init');
-    mkdirSync(join(nested, 'scratch'));
-    writeFileSync(join(nested, 'scratch', 's.txt'), 'x\n');
-    chmodSync(join(nested, 'scratch'), 0o000);
-    try {
-      runSnapshot();
-      const snap = JSON.parse(
-        readFileSync(snapshotFile(), 'utf8'),
-      ) as FixSnapshot;
-      expect(snap.unresolved).toContain('nested');
-      // NO edit between the moments: the unreadable subtree alone is the
-      // witness — a clean answer over it is the false certification.
-      runSince();
+  it.skipIf(process.platform === 'win32' || process.geteuid?.() === 0)(
+    'never certifies a nested repository whose interior status warns past exit 0',
+    () => {
+      // `git status` EXITS 0 over `warning: could not open directory '…'`
+      // while the subtree nobody could read is silently absent from the
+      // entries — so stdout plus the exit code certified clean over content
+      // nobody saw. The interior status is ruled on its stderr like the
+      // capture's own `add` is: any note is unexplained, and unexplained is
+      // failed, never clean. (win32 has no POSIX permission bits to make
+      // the directory unreadable, and root bypasses them everywhere else.)
+      const nested = join(repo, 'nested');
+      mkdirSync(nested);
+      gitAt(nested, 'init', '-q', '-b', 'main');
+      gitAt(nested, 'config', 'user.email', 't@t.t');
+      gitAt(nested, 'config', 'user.name', 't');
+      writeFileSync(join(nested, 'f.txt'), 'v1\n');
+      gitAt(nested, 'add', '-A');
+      gitAt(nested, 'commit', '-qm', 'init');
+      mkdirSync(join(nested, 'scratch'));
+      writeFileSync(join(nested, 'scratch', 's.txt'), 'x\n');
+      chmodSync(join(nested, 'scratch'), 0o000);
+      try {
+        runSnapshot();
+        const snap = JSON.parse(
+          readFileSync(snapshotFile(), 'utf8'),
+        ) as FixSnapshot;
+        expect(snap.unresolved).toContain('nested');
+        // NO edit between the moments: the unreadable subtree alone is the
+        // witness — a clean answer over it is the false certification.
+        runSince();
 
-      const lines = stderr();
-      expect(
-        lines.some((l) => l.includes('nested') && l.includes('cannot see')),
-      ).toBe(true);
-      expect(
-        lines.some((l) =>
-          l.includes('the tree is unchanged since the snapshot'),
-        ),
-      ).toBe(false);
-    } finally {
-      chmodSync(join(nested, 'scratch'), 0o755);
-    }
-  });
+        const lines = stderr();
+        expect(
+          lines.some((l) => l.includes('nested') && l.includes('cannot see')),
+        ).toBe(true);
+        expect(
+          lines.some((l) =>
+            l.includes('the tree is unchanged since the snapshot'),
+          ),
+        ).toBe(false);
+      } finally {
+        chmodSync(join(nested, 'scratch'), 0o755);
+      }
+    },
+  );
 
   it('never certifies a nested repository whose filter arrives by include or worktree config', () => {
     // `git config --local` does not follow `include.path`/`includeIf`
