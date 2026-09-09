@@ -5838,6 +5838,82 @@ describe('goal runtime', () => {
     });
   });
 
+  describe('continuation usage figures', () => {
+    it('hands the host the spend the record held when the turn was scheduled', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const spend = new Map<string, number>();
+      const runtime = createGoalRuntime({
+        journal,
+        ledger: {
+          takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
+        },
+        tokenBudgetGrant: 30_000,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      // The first continuation is scheduled before anything has been billed.
+      expect(host.inputs[0]?.usage).toEqual({
+        tokensUsed: 0,
+        tokenBudget: 30_000,
+        turnCount: 0,
+      });
+
+      spend.set(host.started[0]!.turnId, 2_500);
+      await runtime.finishTurn(host.started[0]!);
+
+      expect(host.inputs[1]?.usage).toEqual({
+        tokensUsed: 2_500,
+        tokenBudget: 30_000,
+        turnCount: 1,
+      });
+    });
+
+    it('omits the ceiling for a Goal that has none', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      expect(host.inputs[0]?.usage).toEqual({
+        tokensUsed: 0,
+        turnCount: 0,
+      });
+    });
+
+    it('carries the figures into the wind-down hand-off', async () => {
+      // The hand-off reports where the Goal stopped, so it needs the numbers
+      // even though it is told not to start new work.
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const spend = new Map<string, number>();
+      const runtime = createGoalRuntime({
+        journal,
+        ledger: {
+          takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
+        },
+        tokenBudgetGrant: 1_000,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      spend.set(host.started[0]!.turnId, 1_500);
+      await runtime.finishTurn(host.started[0]!);
+
+      expect(host.inputs[1]).toMatchObject({ windDown: true });
+      expect(host.inputs[1]?.usage).toEqual({
+        tokensUsed: 1_500,
+        tokenBudget: 1_000,
+        turnCount: 1,
+      });
+    });
+  });
+
   describe('no-progress bound', () => {
     function noProgressHarness(
       options: {

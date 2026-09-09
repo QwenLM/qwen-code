@@ -11,6 +11,7 @@ import type {
   DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
 import {
+  getPlanExecutionMode,
   getReplayTokenCount,
   getReplayTokenUsage,
   mapProviderStatus,
@@ -1310,5 +1311,55 @@ describe('updateConnectionFromDaemonEvent', () => {
 
     expect(next.commands).toEqual([]);
     expect(next.skills).toEqual([]);
+  });
+});
+
+describe('Plan connection state', () => {
+  it.each(['approval_mode_changed', 'session_snapshot'])(
+    'maps workflow and execution permission together from %s',
+    (type) => {
+      const planning = applyEvent(
+        { status: 'connected' },
+        {
+          id: 1,
+          v: 1,
+          type,
+          data: {
+            next: 'plan',
+            currentApprovalMode: 'plan',
+            planExecutionMode: 'yolo',
+          },
+        },
+      );
+      expect(planning).toMatchObject({
+        currentMode: 'plan',
+        planExecutionMode: 'yolo',
+      });
+      const done = applyEvent(planning, {
+        id: 2,
+        v: 1,
+        type,
+        data: { next: 'yolo', currentApprovalMode: 'yolo' },
+      });
+      expect(done.currentMode).toBe('yolo');
+      expect(done.planExecutionMode).toBeUndefined();
+    },
+  );
+
+  it('reads execution permission only while the context is in Plan', () => {
+    const context = {
+      v: 1 as const,
+      sessionId: 's',
+      workspaceCwd: '/workspace',
+      state: {
+        modes: {
+          currentModeId: 'plan',
+          _meta: { planExecutionMode: 'auto-edit' },
+        },
+      },
+    };
+    expect(getPlanExecutionMode(context)).toBe('auto-edit');
+    context.state.modes.currentModeId = 'default';
+    expect(getPlanExecutionMode(context)).toBeUndefined();
   });
 });

@@ -22,6 +22,8 @@ import {
   setPendingSettingValue,
   getRestartRequiredFromModified,
   getDisplayValue,
+  nextBooleanSettingValue,
+  saveModifiedSettings,
   isDefaultValue,
   setNestedPropertySafe,
   setNestedPropertyForce,
@@ -35,6 +37,7 @@ import {
   type SettingsSchema,
   type SettingsSchemaType,
 } from './settingsSchema.js';
+import { SettingScope, type LoadedSettings } from './settings.js';
 
 vi.mock('./settingsSchema.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('./settingsSchema.js')>();
@@ -678,6 +681,97 @@ describe('SettingsUtils', () => {
     });
 
     describe('getDisplayValue', () => {
+      it('renders an unset tri-state boolean without exposing undefined', () => {
+        vi.mocked(getSettingsSchema).mockReturnValue({
+          tools: {
+            type: 'object',
+            label: 'Tools',
+            category: 'Tools',
+            requiresRestart: true,
+            default: {},
+            description: 'Tools',
+            showInDialog: false,
+            properties: {
+              webSearch: {
+                type: 'object',
+                label: 'Web Search',
+                category: 'Tools',
+                requiresRestart: true,
+                default: {},
+                description: 'Web Search',
+                showInDialog: false,
+                properties: {
+                  enabled: {
+                    type: 'boolean',
+                    label: 'Enable WebSearch',
+                    category: 'Tools',
+                    requiresRestart: true,
+                    default: undefined,
+                    description: 'Enable WebSearch',
+                    showInDialog: true,
+                  },
+                },
+              },
+            },
+          },
+        } as unknown as SettingsSchemaType);
+
+        expect(
+          getDisplayValue(
+            'tools.webSearch.enabled',
+            makeMockSettings({}),
+            makeMockSettings({}),
+            new Set(),
+          ),
+        ).toBe('(not set)');
+      });
+
+      it('renders a pending reset to an unset tri-state value', () => {
+        vi.mocked(getSettingsSchema).mockReturnValue({
+          tools: {
+            type: 'object',
+            label: 'Tools',
+            category: 'Tools',
+            requiresRestart: true,
+            default: {},
+            description: 'Tools',
+            showInDialog: false,
+            properties: {
+              webSearch: {
+                type: 'object',
+                label: 'Web Search',
+                category: 'Tools',
+                requiresRestart: true,
+                default: {},
+                description: 'Web Search',
+                showInDialog: false,
+                properties: {
+                  enabled: {
+                    type: 'boolean',
+                    label: 'Enable WebSearch',
+                    category: 'Tools',
+                    requiresRestart: true,
+                    default: undefined,
+                    description: 'Enable WebSearch',
+                    showInDialog: true,
+                  },
+                },
+              },
+            },
+          },
+        } as unknown as SettingsSchemaType);
+
+        expect(
+          getDisplayValue(
+            'tools.webSearch.enabled',
+            makeMockSettings({ tools: { webSearch: { enabled: true } } }),
+            makeMockSettings({ tools: { webSearch: { enabled: true } } }),
+            new Set(['tools.webSearch.enabled']),
+            makeMockSettings({ tools: { webSearch: { enabled: undefined } } }),
+          ),
+        ).toBe('(not set)*');
+      });
+
       describe('enum behavior', () => {
         enum StringEnum {
           FOO = 'foo',
@@ -852,6 +946,25 @@ describe('SettingsUtils', () => {
           );
           expect(result).toBe('Bar');
         });
+
+        it('renders an unset enum default without exposing undefined', () => {
+          vi.mocked(getSettingsSchema).mockReturnValue({
+            ui: {
+              properties: {
+                theme: { ...SETTING, default: undefined },
+              },
+            },
+          } as unknown as SettingsSchemaType);
+
+          expect(
+            getDisplayValue(
+              'ui.theme',
+              makeMockSettings({}),
+              makeMockSettings({}),
+              new Set(),
+            ),
+          ).toBe('(not set)');
+        });
       });
 
       it('should show value without * when setting matches default', () => {
@@ -972,6 +1085,40 @@ describe('SettingsUtils', () => {
         );
 
         expect(result).toBe('Auto (follow user input)*');
+      });
+    });
+
+    describe('nextBooleanSettingValue', () => {
+      it('moves an unset tri-state boolean directly to false', () => {
+        expect(nextBooleanSettingValue(undefined)).toBe(false);
+        expect(nextBooleanSettingValue(undefined, false)).toBe(true);
+        expect(nextBooleanSettingValue(false)).toBe(true);
+        expect(nextBooleanSettingValue(true)).toBe(false);
+      });
+    });
+
+    describe('saveModifiedSettings', () => {
+      it('unsets an existing tri-state boolean when reset to default', () => {
+        const setValue = vi.fn();
+        const loadedSettings = {
+          forScope: () => ({
+            settings: { tools: { webSearch: { enabled: true } } },
+          }),
+          setValue,
+        } as unknown as LoadedSettings;
+
+        saveModifiedSettings(
+          new Set(['tools.webSearch.enabled']),
+          { tools: { webSearch: { enabled: undefined } } },
+          loadedSettings,
+          SettingScope.User,
+        );
+
+        expect(setValue).toHaveBeenCalledWith(
+          SettingScope.User,
+          'tools.webSearch.enabled',
+          undefined,
+        );
       });
     });
 
