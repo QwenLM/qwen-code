@@ -184,6 +184,12 @@ export interface AgentToolProgressEvent {
   callId: string;
   /** Clears the call's watchdog deadline before batch finalization finishes. */
   settled?: true;
+  /** Suspends the call's watchdog deadline while nested work is parked on
+      Monitor-owned external input. */
+  waitingForExternalInput?: true;
+  /** Replaces the call's watchdog deadline with the bounded model deadline
+      while nested work is parked on a user approval. */
+  awaitingApproval?: true;
   timestamp: number;
 }
 

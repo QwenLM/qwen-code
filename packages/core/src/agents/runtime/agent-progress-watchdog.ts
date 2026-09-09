@@ -45,6 +45,9 @@ export function getAgentProgressTimeout(
 interface ToolDeadline {
   name: string;
   state: 'queued' | 'approval' | 'executing';
+  /** Nested run parked on Monitor-owned external input: suppresses the
+      model deadline like a top-level external-input wait does. */
+  parkedOnInput?: true;
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -98,7 +101,9 @@ export function attachAgentProgressWatchdog(
     if (
       disposed ||
       waitingForExternalInput ||
-      [...tools.values()].some((tool) => tool.state === 'executing')
+      [...tools.values()].some(
+        (tool) => tool.state === 'executing' || tool.parkedOnInput === true,
+      )
     )
       return;
     modelTimer = schedule(
@@ -167,7 +172,28 @@ export function attachAgentProgressWatchdog(
       armModel();
       return;
     }
+    if (event.awaitingApproval) {
+      // Nested run parked on a user approval: the tool deadline is replaced
+      // by the bounded model deadline, matching direct approvals.
+      tool.state = 'approval';
+      delete tool.parkedOnInput;
+      clearTimeout(tool.timer);
+      tool.timer = undefined;
+      armModel();
+      return;
+    }
+    if (event.waitingForExternalInput) {
+      // Nested run parked on Monitor-owned external input: no deadline, same
+      // as a top-level external-input wait.
+      tool.state = 'approval';
+      tool.parkedOnInput = true;
+      clearTimeout(tool.timer);
+      tool.timer = undefined;
+      clearModel();
+      return;
+    }
     tool.state = 'executing';
+    delete tool.parkedOnInput;
     armTool(event.callId);
     clearModel();
   };
@@ -175,7 +201,8 @@ export function attachAgentProgressWatchdog(
     const tool = tools.get(event.callId);
     if (!tool) return;
     tool.state = 'approval';
-    if (tool.timer) clearTimeout(tool.timer);
+    delete tool.parkedOnInput;
+    clearTimeout(tool.timer);
     tool.timer = undefined;
     armModel();
   };

@@ -1974,10 +1974,21 @@ export class AgentCore {
       // for why the registry cannot answer this and what the predicate owes.
       hasSkillTool: () => this.canInvokeSkill(declaredToolNames),
       outputUpdateHandler: (callId, outputChunk) => {
+        const isTaskExecutionChunk =
+          typeof outputChunk === 'object' &&
+          outputChunk !== null &&
+          'type' in outputChunk &&
+          outputChunk.type === 'task_execution';
+        const waitingForExternalInput =
+          isTaskExecutionChunk && outputChunk.waitingForExternalInput === true;
+        const awaitingApproval =
+          isTaskExecutionChunk && outputChunk.awaitingApproval === true;
         this.eventEmitter?.emit(AgentEventType.TOOL_PROGRESS, {
           subagentId: this.subagentId,
           round: currentRound,
           callId,
+          ...(waitingForExternalInput ? { waitingForExternalInput: true } : {}),
+          ...(awaitingApproval ? { awaitingApproval: true } : {}),
           timestamp: Date.now(),
         } as AgentToolProgressEvent);
         // Keep Shell liveness heartbeats out of the live output view.

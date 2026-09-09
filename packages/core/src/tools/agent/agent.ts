@@ -95,6 +95,7 @@ import type {
   AgentFinishEvent,
   AgentErrorEvent,
   AgentApprovalRequestEvent,
+  AgentRoundEvent,
   AgentUsageEvent,
 } from '../../agents/runtime/agent-events.js';
 import {
@@ -1462,6 +1463,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   ): void {
     let pendingConfirmationCallId: string | undefined;
     const preserveProtocolPayloads = !this.config.isInteractive();
+    const waitingForApproval = () =>
+      this.currentToolCalls!.some(
+        (call) => call.status === 'awaiting_approval',
+      ) && !this.currentToolCalls!.some((call) => call.status === 'executing');
 
     eventEmitter.on(AgentEventType.START, () => {
       this.updateDisplay({ status: 'running' }, updateOutput);
@@ -1477,6 +1482,24 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     eventEmitter.on(AgentEventType.STREAM_TEXT, forwardProgress);
     eventEmitter.on(AgentEventType.MODEL_RETRY, forwardProgress);
     eventEmitter.on(AgentEventType.TOOL_PROGRESS, forwardProgress);
+
+    eventEmitter.on(AgentEventType.ROUND_END, (...args: unknown[]) => {
+      const event = args[0] as AgentRoundEvent;
+      if (event.waitingForExternalInput) {
+        this.updateDisplay({ waitingForExternalInput: true }, updateOutput);
+      }
+    });
+    eventEmitter.on(AgentEventType.ROUND_START, () => {
+      if (
+        this.currentDisplay?.waitingForExternalInput ||
+        this.currentDisplay?.awaitingApproval
+      ) {
+        this.updateDisplay(
+          { waitingForExternalInput: undefined, awaitingApproval: undefined },
+          updateOutput,
+        );
+      }
+    });
 
     eventEmitter.on(AgentEventType.TOOL_CALL, (...args: unknown[]) => {
       const event = args[0] as AgentToolCallEvent;
@@ -1547,6 +1570,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.updateDisplay(
           {
             toolCalls: [...this.currentToolCalls!],
+            awaitingApproval: waitingForApproval() ? true : undefined,
             ...clearPending,
           },
           updateOutput,
@@ -1652,12 +1676,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 {
                   toolCalls: [...this.currentToolCalls!],
                   pendingConfirmation: undefined,
+                  waitingForExternalInput: undefined,
+                  awaitingApproval: undefined,
                 },
                 updateOutput,
               );
             } else {
               this.updateDisplay(
-                { pendingConfirmation: undefined },
+                {
+                  pendingConfirmation: undefined,
+                  waitingForExternalInput: undefined,
+                  awaitingApproval: undefined,
+                },
                 updateOutput,
               );
             }
@@ -1670,6 +1700,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           {
             toolCalls: [...this.currentToolCalls!],
             pendingConfirmation: details,
+            awaitingApproval: waitingForApproval() ? true : undefined,
           },
           updateOutput,
         );

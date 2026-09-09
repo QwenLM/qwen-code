@@ -662,6 +662,10 @@ export interface AgentResultDisplay {
   // If the subagent is awaiting approval for a tool call,
   // this contains the confirmation details for inline UI rendering.
   pendingConfirmation?: ToolCallConfirmationDetails;
+  /** Whether the subagent is parked on Monitor-owned external input. */
+  waitingForExternalInput?: true;
+  /** Whether the subagent is parked on a pending tool approval. */
+  awaitingApproval?: true;
 
   toolCalls?: Array<{
     callId: string;
