@@ -26,8 +26,12 @@ import { ToolNames } from '../tools/tool-names.js';
 import {
   buildPermissionCheckContext,
   evaluatePermissionRules,
+  evaluateRestrictivePermissionRules,
 } from './permission-helpers.js';
-import type { PermissionDecision } from '../permissions/types.js';
+import type {
+  PermissionCheckContext,
+  PermissionDecision,
+} from '../permissions/types.js';
 import type { ToolCallConfirmationDetails } from '../tools/tools.js';
 
 export type PermissionFlowPermission = PermissionDecision;
@@ -71,17 +75,96 @@ export async function evaluatePermissionFlow(
 
   // ── L4: PermissionManager override ──────────────────────────────────
   const pm = config.getPermissionManager?.();
+  const toolRegistry = config.getToolRegistry?.();
+  const mcpInvocation = invocation as AnyToolInvocation & {
+    serverName?: unknown;
+    serverToolName?: unknown;
+  };
+  const rawMcpToolName =
+    toolName.startsWith('mcp__') &&
+    typeof mcpInvocation.serverName === 'string' &&
+    typeof mcpInvocation.serverToolName === 'string'
+      ? `mcp__${mcpInvocation.serverName}__${mcpInvocation.serverToolName}`
+      : undefined;
+
+  const registryAliasResolver =
+    toolRegistry?.getUnambiguousMcpPermissionAliases;
+  const legacyAliases = invocation.permissionAliases;
+
+  // Grant-safe aliases are deliberately collision-filtered. If we have an
+  // authoritative raw MCP identity but an incomplete registry mock, fail
+  // closed for grants by dropping lossy legacy aliases instead of restoring
+  // the collision behavior this PR removes. If no raw identity is available,
+  // retain the pre-existing aliases because there is no authoritative identity
+  // to replace them with.
+  const grantLegacyAliases =
+    toolName.startsWith('mcp__') && legacyAliases
+      ? toolRegistry && typeof registryAliasResolver === 'function'
+        ? registryAliasResolver.call(toolRegistry, toolName, legacyAliases)
+        : rawMcpToolName
+          ? []
+          : legacyAliases
+      : legacyAliases;
+
+  const permissionAliases = rawMcpToolName
+    ? [...new Set([...(grantLegacyAliases ?? []), rawMcpToolName])]
+    : grantLegacyAliases;
   const pmCtx = buildPermissionCheckContext(
     toolName,
     toolParams,
     config.getTargetDir?.() ?? '',
-    invocation.permissionAliases,
+    permissionAliases,
   );
-  const { finalPermission, pmForcedAsk } = await evaluatePermissionRules(
-    pm,
-    defaultPermission,
-    pmCtx,
-  );
+
+  let finalPermission: string = defaultPermission;
+  let pmForcedAsk = false;
+  let restrictiveMatchCtx: PermissionCheckContext | undefined;
+
+  if (pm && defaultPermission !== 'deny' && rawMcpToolName) {
+    // Ambiguous legacy aliases are unsafe as grants but must remain available
+    // to restrictive rules. Evaluate restrictions against both identity
+    // spellings: raw identity preserves collision resistance, while putting
+    // the registered provider-safe name first preserves historical sanitized
+    // deny/ask spellings. Ignore `allow` from these broad contexts and perform
+    // the real grant evaluation only with `pmCtx` below.
+    const fullAliases = [...new Set([rawMcpToolName, ...(legacyAliases ?? [])])];
+    const restrictiveContexts = [
+      buildPermissionCheckContext(
+        toolName,
+        toolParams,
+        config.getTargetDir?.() ?? '',
+        fullAliases,
+      ),
+      buildPermissionCheckContext(
+        toolName,
+        toolParams,
+        config.getTargetDir?.() ?? '',
+        [...new Set([toolName, rawMcpToolName, ...(legacyAliases ?? [])])],
+      ),
+    ];
+
+    const restrictive = await evaluateRestrictivePermissionRules(
+      pm,
+      defaultPermission,
+      restrictiveContexts,
+    );
+    if (restrictive.matchedContext) {
+      finalPermission = restrictive.finalPermission;
+      pmForcedAsk = restrictive.pmForcedAsk;
+      restrictiveMatchCtx = restrictive.matchedContext;
+    }
+  }
+
+  if (!restrictiveMatchCtx) {
+    const evaluated = await evaluatePermissionRules(
+      pm,
+      defaultPermission,
+      pmCtx,
+    );
+    finalPermission = evaluated.finalPermission;
+    pmForcedAsk = evaluated.pmForcedAsk;
+  }
+
   const requiresUserInteraction =
     invocation.requiresUserInteraction?.() === true;
   const effectivePermission =
@@ -103,7 +186,9 @@ export async function evaluatePermissionFlow(
     if (defaultPermission === 'deny') {
       result.denyMessage = `Tool "${toolName}" is denied: the tool's default permission is 'deny'.`;
     } else {
-      const matchingRule = pm?.findMatchingDenyRule(pmCtx);
+      const matchingRule = pm?.findMatchingDenyRule(
+        restrictiveMatchCtx ?? pmCtx,
+      );
       const ruleInfo = matchingRule
         ? ` Matching deny rule: "${matchingRule}".`
         : '';
