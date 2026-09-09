@@ -56,7 +56,7 @@ function fakeHandle(
   name: string,
   permissions: { query?: PermissionState; request?: PermissionState } = {},
 ): FileSystemDirectoryHandle {
-  return {
+  const handle = {
     kind: 'directory',
     name,
     queryPermission: vi.fn(async () => permissions.query ?? 'prompt'),
@@ -75,7 +75,11 @@ function fakeHandle(
         return this;
       },
     })),
+    // Entry identity per handle object: a different fakeHandle is a
+    // different directory; only this very object is the same entry.
+    isSameEntry: vi.fn(async (other: unknown) => other === handle),
   } as unknown as FileSystemDirectoryHandle;
+  return handle;
 }
 
 function fakeStore(
@@ -3449,6 +3453,356 @@ describe('useLocalFilesBridge restore', () => {
       blocker: 'workspace-ineligible',
       rootName: 'ai_coding',
     });
+    h.unmount();
+  });
+
+  it('treats a same-named foreign record as foreign while a bridge is live', async () => {
+    const mine = fakeHandle('project', { query: 'granted' });
+    const store = fakeStore(mine);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+    expect(h.get().status.phase).toBe('connected');
+
+    // A peer tab saves a different directory with the same basename into the
+    // single origin-global slot; a capabilities blip re-runs restore().
+    const foreign = fakeHandle('project', { query: 'granted' });
+    await store.save(foreign);
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    await h.flush();
+    // The live bridge keeps serving its own directory and the foreign record
+    // must not become this mount's grant.
+    expect(h.sockets).toHaveLength(1);
+    expect(socket.closeCount).toBe(0);
+
+    // Disconnect must not delete the peer's record.
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(foreign);
+    h.unmount();
+  });
+
+  it('keeps the live bridge when a differently-named foreign record lands mid-session', async () => {
+    const mine = fakeHandle('project', { query: 'granted' });
+    const store = fakeStore(mine);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+    await h.flush();
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+    expect(h.get().status.phase).toBe('connected');
+
+    // A peer tab overwrites the single record slot with a different
+    // directory; a capabilities blip then re-runs restore() over it. The
+    // transient verdict must not rebuild the live bridge onto the peer's
+    // handle: same session and selector, but a directory this mount never
+    // granted and is not serving.
+    const foreign = fakeHandle('peer-dir', { query: 'granted' });
+    await store.save(foreign);
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+    expect(socket.closeCount).toBe(0);
+
+    // Disconnect must not delete the peer's record either.
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(foreign);
+    h.unmount();
+  });
+
+  it('re-arms naming when a reconnect overwrites a foreign record', async () => {
+    const mine = fakeHandle('project', { query: 'granted' });
+    const store = fakeStore(mine);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+    await h.flush();
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+    expect(h.get().status.phase).toBe('connected');
+
+    // A peer's record latches foreign while the bridge is live; a Reconnect
+    // then writes this mount's own handle back over the record slot.
+    const foreign = fakeHandle('peer-dir', { query: 'granted' });
+    await store.save(foreign);
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    await h.flush();
+    await act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    expect(await store.load()).toBe(mine);
+
+    // The record is this mount's grant again: Disconnect must clear it.
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    h.unmount();
+  });
+
+  it('keeps a foreign record guarded when a re-save soft-fails', async () => {
+    const mine = fakeHandle('project', { query: 'granted' });
+    const store = fakeStore(mine);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+    await h.flush();
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+    expect(h.get().status.phase).toBe('connected');
+
+    // A peer's same-named record latches foreign while the bridge is live;
+    // from here on every save soft-fails, so a Reconnect cannot write this
+    // mount's handle back over the record.
+    const foreign = fakeHandle('project', { query: 'granted' });
+    await store.save(foreign);
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    await h.flush();
+    store.save = async () => false;
+    await act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    expect(await store.load()).toBe(foreign);
+
+    // The re-save wrote nothing: the record is still the peer's, and the
+    // soft failure must not disarm the guard that protects it.
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(foreign);
+    h.unmount();
+  });
+
+  it('latches a same-named foreign record across a session switch', async () => {
+    const mine = fakeHandle('project', { query: 'granted' });
+    const store = fakeStore(mine);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+    await h.flush();
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+    expect(h.get().status.phase).toBe('connected');
+
+    // A peer overwrites the single record slot with its own directory of the
+    // same basename: only entry identity can tell them apart, and a session
+    // switch re-runs the rebind effect without re-running restore(), so the
+    // latch has to be set there.
+    const foreign = fakeHandle('project', { query: 'granted' });
+    await store.save(foreign);
+    h.rerender({ ...common, sessionId: 'session-2' });
+    await h.flush();
+    await h.flush();
+    expect(h.sockets).toHaveLength(2);
+
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(foreign);
+    h.unmount();
+  });
+
+  it('clears a record the picker arm committed while disconnect landed', async () => {
+    const docs = fakeHandle('docs', { query: 'denied' });
+    const photos = fakeHandle('photos', { query: 'granted' });
+    const store = fakeStore(docs);
+    // Real IndexedDB serializes transactions: a load() that begins while a
+    // save is in flight resolves only after that save commits. The fake must
+    // too, or the revoke would read the pre-pick record and the window this
+    // pins never opens. The commit itself lands when the save is called;
+    // only its acknowledgement waits for the gate, so a disconnect can land
+    // after the commit and before the connect stamps anything.
+    let commitSave!: () => void;
+    let inFlight: Promise<unknown> = Promise.resolve();
+    const realSave = store.save.bind(store);
+    const realLoad = store.load.bind(store);
+    store.save = (handle) => {
+      void realSave(handle);
+      const gate = new Promise<void>((resolve) => {
+        commitSave = resolve;
+      });
+      inFlight = inFlight.then(() => gate);
+      return inFlight.then(() => true);
+    };
+    store.load = () => inFlight.then(() => realLoad());
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => photos),
+      store,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status).toMatchObject({
+      phase: 'needs-gesture',
+      rootName: 'docs',
+    });
+    // The picker closes and connect() parks inside the in-flight save; the
+    // Disconnect click lands in that window, while the mount's named grant
+    // is still the pre-pick record and the bind has stamped nothing yet.
+    const pendingConnect = act(async () => {
+      await h.get().connect();
+    });
+    for (let i = 0; i < 8 && typeof commitSave !== 'function'; i += 1) {
+      await h.flush();
+    }
+    expect(typeof commitSave).toBe('function');
+    const pendingDisconnect = act(async () => {
+      await h.get().disconnect();
+    });
+    await h.flush();
+    await act(async () => {
+      commitSave();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await pendingDisconnect;
+    await pendingConnect;
+    await h.flush();
+    // The record is this mount's own committed pick, not a peer's: the
+    // revoke must clear it instead of latching it foreign over the stale
+    // pre-click name.
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
     h.unmount();
   });
 
