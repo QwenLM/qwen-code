@@ -594,8 +594,20 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
     );
     console.log('Copied HTML export renderer to dist/');
   } else {
+    // Name what is actually missing. Since the stylesheet became a second
+    // artifact this branch is also reachable with the renderer JS present and
+    // only the CSS absent — a tree built before the split, then bundled without
+    // rebuilding web-templates — and the copy is all-or-nothing because
+    // prepare-package.js requires both. Stays a warning, not a throw: that
+    // script is the release gate, this one also serves --cli-only dev bundles.
+    const missingExportTranscriptAssets = [
+      exportTranscriptRenderer,
+      exportTranscriptCss,
+    ].filter((assetPath) => !existsSync(assetPath));
     console.warn(
-      'Warning: HTML export renderer not found; run a full `npm run build` before bundling.',
+      `Warning: HTML export renderer assets not found at ${missingExportTranscriptAssets.join(', ')}; ` +
+        'dist/ will carry no HTML export renderer. ' +
+        'Run a full `npm run build` before bundling to include it.',
     );
   }
 
