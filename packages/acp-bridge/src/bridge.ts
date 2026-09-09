@@ -8060,6 +8060,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const clientId = registerClient(existing, req.clientId);
       recordAttachRef(existing, clientId);
       let previousApprovalMode: ApprovalMode | undefined;
+      let appliedApprovalMode: ApprovalMode | undefined;
       if (req.approvalMode) {
         const applied = await applyApprovalModeForAttach(
           existing,
@@ -8067,6 +8068,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           clientId,
         );
         previousApprovalMode = applied.previous;
+        appliedApprovalMode = applied.current;
         // Remember at apply time, not after the restore's remaining
         // awaits: a concurrent `setSessionApprovalMode` landing in that
         // window is the newer selection and must not be overwritten.
@@ -8096,6 +8098,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
         await rollbackAttachRegistration(existing, clientId);
         throw error;
+      }
+      if (appliedApprovalMode !== undefined && existing.restoreState?.modes) {
+        existing.restoreState = {
+          ...existing.restoreState,
+          modes: {
+            ...existing.restoreState.modes,
+            currentModeId: appliedApprovalMode,
+          },
+        };
       }
       return {
         sessionId: existing.sessionId,
@@ -8250,6 +8261,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // `coalesceState.count`, so only the ledger is updated here.
       recordAttachRef(entry, clientId);
       let previousApprovalMode: ApprovalMode | undefined;
+      let appliedApprovalMode: ApprovalMode | undefined;
       if (req.approvalMode) {
         const applied = await applyApprovalModeForAttach(
           entry,
@@ -8257,6 +8269,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           clientId,
         );
         previousApprovalMode = applied.previous;
+        appliedApprovalMode = applied.current;
         // Remember at apply time, not after the restore's remaining
         // awaits: a concurrent `setSessionApprovalMode` landing in that
         // window is the newer selection and must not be overwritten.
@@ -8287,8 +8300,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         await rollbackAttachRegistration(entry, clientId);
         throw error;
       }
+      if (appliedApprovalMode !== undefined && entry.restoreState?.modes) {
+        entry.restoreState = {
+          ...entry.restoreState,
+          modes: {
+            ...entry.restoreState.modes,
+            currentModeId: appliedApprovalMode,
+          },
+        };
+      }
       return {
         ...restored,
+        state: entry.restoreState ?? restored.state,
         attached: true,
         clientId,
         createdAt: entry.createdAt,
@@ -8975,6 +8998,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               restoreApprovalMode,
               false,
               undefined,
+            );
+            writeStderrLine(
+              `qwen serve: replayed the remembered approval mode for session ${JSON.stringify(req.sessionId)}: ${restoreApprovalMode}`,
             );
           } catch (err) {
             // A concurrent explicit change may have parked a newer mode

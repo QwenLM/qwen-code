@@ -28542,6 +28542,9 @@ describe('sessionLanguage multi-session propagation', () => {
     });
     const clearActiveTodoPlanRevision = vi.fn();
     const clearTodoStopGuardTrust = vi.fn();
+    const sendCurrentModeUpdateNotification = vi
+      .fn()
+      .mockResolvedValue(undefined);
 
     vi.mocked(loadSettings).mockReturnValue(settings);
     vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
@@ -28555,6 +28558,7 @@ describe('sessionLanguage multi-session propagation', () => {
           isIdle: vi.fn().mockReturnValue(true),
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
+          sendCurrentModeUpdateNotification,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
@@ -28600,6 +28604,7 @@ describe('sessionLanguage multi-session propagation', () => {
       ).toHaveBeenCalledWith('plan');
       expect(clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
       expect(clearTodoStopGuardTrust).toHaveBeenCalledOnce();
+      expect(sendCurrentModeUpdateNotification).toHaveBeenCalledOnce();
 
       nextMode = 'default';
       await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
@@ -28609,6 +28614,7 @@ describe('sessionLanguage multi-session propagation', () => {
       ).toHaveBeenLastCalledWith('default');
       expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(2);
       expect(clearTodoStopGuardTrust).toHaveBeenCalledOnce();
+      expect(sendCurrentModeUpdateNotification).toHaveBeenCalledTimes(2);
     } finally {
       approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
     }
@@ -28967,6 +28973,9 @@ describe('sessionLanguage multi-session propagation', () => {
     });
     const clearActiveTodoPlanRevision = vi.fn();
     const clearTodoStopGuardTrust = vi.fn();
+    const sendCurrentModeUpdateNotification = vi
+      .fn()
+      .mockResolvedValue(undefined);
 
     vi.mocked(loadSettings).mockReturnValue(settings);
     vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
@@ -28979,6 +28988,7 @@ describe('sessionLanguage multi-session propagation', () => {
           isIdle: vi.fn().mockReturnValue(true),
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
+          sendCurrentModeUpdateNotification,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
@@ -29031,13 +29041,16 @@ describe('sessionLanguage multi-session propagation', () => {
       expect(approvalMode).toBe('plan');
       expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
       expect(clearTodoStopGuardTrust).toHaveBeenCalledTimes(1);
+      expect(sendCurrentModeUpdateNotification).toHaveBeenCalledOnce();
 
       // A follow-up no-edit reload must stay a per-session no-op.
       setApprovalMode.mockClear();
       clearActiveTodoPlanRevision.mockClear();
       clearTodoStopGuardTrust.mockClear();
+      sendCurrentModeUpdateNotification.mockClear();
       await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
       expect(setApprovalMode).not.toHaveBeenCalled();
+      expect(sendCurrentModeUpdateNotification).not.toHaveBeenCalled();
       expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
       expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
     } finally {
@@ -29081,6 +29094,9 @@ describe('sessionLanguage multi-session propagation', () => {
     });
     const clearActiveTodoPlanRevision = vi.fn();
     const clearTodoStopGuardTrust = vi.fn();
+    const sendCurrentModeUpdateNotification = vi
+      .fn()
+      .mockResolvedValue(undefined);
 
     vi.mocked(loadSettings).mockReturnValue(settings);
     vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
@@ -29093,6 +29109,7 @@ describe('sessionLanguage multi-session propagation', () => {
           isIdle: vi.fn().mockReturnValue(true),
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
+          sendCurrentModeUpdateNotification,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
           startCronScheduler: vi.fn(),
@@ -29136,6 +29153,7 @@ describe('sessionLanguage multi-session propagation', () => {
       mergedSettings = { tools: { approvalMode: 'default' } };
       await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
       expect(setApprovalMode).not.toHaveBeenCalled();
+      expect(sendCurrentModeUpdateNotification).toHaveBeenCalledOnce();
 
       // ...which keeps the mirror direction safe too: the file is default
       // while the user drafts in PLAN at runtime (session/set_mode never

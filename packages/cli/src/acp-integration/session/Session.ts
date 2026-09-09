@@ -10929,9 +10929,10 @@ export class Session implements SessionContext {
 
   /**
    * Sends a current_mode_update notification to the client.
-   * Called after the agent switches modes (e.g., from exit_plan_mode tool).
+   * Called after the agent switches modes (e.g., from exit_plan_mode tool or
+   * a workspace settings reload).
    */
-  private async sendCurrentModeUpdateNotification(): Promise<void> {
+  async sendCurrentModeUpdateNotification(): Promise<void> {
     const newModeId = this.config.getApprovalMode() as ApprovalModeValue;
     const update: SessionUpdate = {
       sessionUpdate: 'current_mode_update',

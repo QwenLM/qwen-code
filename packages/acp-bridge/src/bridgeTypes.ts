@@ -2208,9 +2208,10 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * `tools.approvalMode` to workspace settings.
    *
    * The bridge remembers the selected mode for this session id for the
-   * daemon's lifetime and replays it best-effort when the session is
-   * cold-restored after its ACP child was torn down; `persist` remains the
-   * only durability switch across a daemon restart.
+   * lifetime of the workspace's daemon runtime and replays it best-effort
+   * when the session is cold-restored after its ACP child was torn down.
+   * The memory does not survive runtime replacement or daemon restart;
+   * `persist` remains the only durability switch across those boundaries.
    */
   setSessionApprovalMode(
     sessionId: string,

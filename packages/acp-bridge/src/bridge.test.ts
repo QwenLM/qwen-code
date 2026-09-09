@@ -26912,6 +26912,36 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it.each(['load', 'resume'] as const)(
+      'surfaces a trust-gate rejection for an explicit cold-%s mode',
+      async (action) => {
+        const { factory } = approvalModeHarness({
+          rejectColdLoadApprovalMode: true,
+        });
+        const bridge = makeBridge({ channelFactory: factory });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await bridge.closeSession(session.sessionId);
+
+        const restoring =
+          action === 'load'
+            ? bridge.loadSession({
+                sessionId: session.sessionId,
+                workspaceCwd: WS_A,
+                approvalMode: ApprovalMode.YOLO,
+              })
+            : bridge.resumeSession({
+                sessionId: session.sessionId,
+                workspaceCwd: WS_A,
+                approvalMode: ApprovalMode.YOLO,
+              });
+        await expect(restoring).rejects.toMatchObject({
+          name: 'TrustGateError',
+        });
+        expect(bridge.sessionCount).toBe(0);
+        await bridge.shutdown();
+      },
+    );
+
     it('preserves a session approval mode after ACP child teardown', async () => {
       const handles: ChannelHandle[] = [];
       const factory: ChannelFactory = async () => {
@@ -26935,7 +26965,12 @@ describe('createAcpSessionBridge', () => {
         handles.push(handle);
         return handle.channel;
       };
-      const bridge = makeBridge({ channelFactory: factory });
+      const persistApprovalMode = vi.fn(async () => {});
+      const stderrSpy = vi.spyOn(process.stderr, 'write');
+      const bridge = makeBridge({
+        channelFactory: factory,
+        persistApprovalMode,
+      });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       await bridge.setSessionApprovalMode(
@@ -26956,6 +26991,15 @@ describe('createAcpSessionBridge', () => {
         params: { sessionId: session.sessionId, mode: ApprovalMode.YOLO },
       });
       expect(restored.state.modes?.currentModeId).toBe(ApprovalMode.YOLO);
+      expect(persistApprovalMode).not.toHaveBeenCalled();
+      expect(
+        stderrSpy.mock.calls.some(([line]) =>
+          String(line).includes(
+            `replayed the remembered approval mode for session ${JSON.stringify(session.sessionId)}: ${ApprovalMode.YOLO}`,
+          ),
+        ),
+      ).toBe(true);
+      stderrSpy.mockRestore();
       await bridge.shutdown();
     });
 
@@ -27434,11 +27478,12 @@ describe('createAcpSessionBridge', () => {
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       await bridge.closeSession(session.sessionId);
 
-      await bridge.loadSession({
+      const loaded = await bridge.loadSession({
         sessionId: session.sessionId,
         workspaceCwd: WS_A,
         approvalMode: ApprovalMode.YOLO,
       });
+      expect(loaded.state.modes?.currentModeId).toBe(ApprovalMode.YOLO);
       await bridge.closeSession(session.sessionId);
 
       const restored = await bridge.loadSession({
@@ -27461,11 +27506,12 @@ describe('createAcpSessionBridge', () => {
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       await bridge.closeSession(session.sessionId);
 
-      await bridge.resumeSession({
+      const resumed = await bridge.resumeSession({
         sessionId: session.sessionId,
         workspaceCwd: WS_A,
         approvalMode: ApprovalMode.YOLO,
       });
+      expect(resumed.state.modes?.currentModeId).toBe(ApprovalMode.YOLO);
       await bridge.closeSession(session.sessionId);
 
       const restored = await bridge.loadSession({
@@ -28051,12 +28097,18 @@ describe('createAcpSessionBridge', () => {
       const { factory, handles } = approvalModeHarness();
       const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.closeSession(session.sessionId);
+      await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
       const attached = await bridge.loadSession({
         sessionId: session.sessionId,
         workspaceCwd: WS_A,
         approvalMode: ApprovalMode.YOLO,
       });
       expect(attached.attached).toBe(true);
+      expect(attached.state.modes?.currentModeId).toBe(ApprovalMode.YOLO);
       await bridge.closeSession(session.sessionId);
 
       const restored = await bridge.loadSession({
@@ -28064,8 +28116,8 @@ describe('createAcpSessionBridge', () => {
         workspaceCwd: WS_A,
       });
 
-      expect(handles).toHaveLength(2);
-      expect(handles[1]?.agent.extMethodCalls).toContainEqual({
+      expect(handles).toHaveLength(3);
+      expect(handles[2]?.agent.extMethodCalls).toContainEqual({
         method: SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
         params: { sessionId: session.sessionId, mode: ApprovalMode.YOLO },
       });

@@ -13491,6 +13491,7 @@ class QwenAgent implements Agent {
               reloadedSessionMode !== undefined &&
               reloadedSessionMode !== convergedMode
             ) {
+              let modeConverged = false;
               if (reloadedSessionMode !== previousMode) {
                 try {
                   config.setApprovalMode(reloadedSessionMode);
@@ -13504,6 +13505,7 @@ class QwenAgent implements Agent {
                     id,
                     reloadedSessionMode,
                   );
+                  modeConverged = true;
                 } catch (err) {
                   debugLogger.warn(
                     `reload: setApprovalMode failed for session ${id}: ${err}`,
@@ -13511,6 +13513,16 @@ class QwenAgent implements Agent {
                 }
               } else {
                 this.sessionApprovalModeConverged.set(id, reloadedSessionMode);
+                modeConverged = true;
+              }
+              if (modeConverged) {
+                try {
+                  await session.sendCurrentModeUpdateNotification();
+                } catch (err) {
+                  debugLogger.warn(
+                    `reload: sendCurrentModeUpdateNotification failed for session ${id}: ${err}`,
+                  );
+                }
               }
             }
 

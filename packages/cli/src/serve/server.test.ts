@@ -15635,6 +15635,37 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it.each(['load', 'resume'] as const)(
+      'maps an explicit-mode %s trust-gate rejection to 403',
+      async (action) => {
+        const reject = async () => {
+          throw new TrustGateError(
+            'Cannot enable privileged approval modes in an untrusted folder.',
+          );
+        };
+        const bridge = fakeBridge({
+          loadImpl: reject,
+          resumeImpl: reject,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post(`/session/persisted-approval/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ approvalMode: 'yolo' });
+
+        expect(res.status).toBe(403);
+        expect(res.body).toMatchObject({
+          code: 'trust_gate',
+          errorKind: 'auth_env_error',
+        });
+      },
+    );
+
     it('passes explicit primary cwd through to the bridge', async () => {
       const bridge = fakeBridge({
         loadImpl: async (req) => ({
