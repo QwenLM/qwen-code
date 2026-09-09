@@ -218,6 +218,7 @@ interface ServeArgs {
   'agent-host-server'?: string;
   'agent-host-workspace-id'?: string;
   'agent-host-name'?: string;
+  'agent-host-provider': 'qwen' | 'codex';
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
   // handler reads `argv['http-bridge']` directly.
@@ -416,6 +417,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('agent-host-name', {
         type: 'string',
         description: 'Display name advertised for this Agent Host.',
+      })
+      .option('agent-host-provider', {
+        choices: ['qwen', 'codex'] as const,
+        default: 'qwen' as const,
+        description: 'Agent runtime launched for work claimed by this Host.',
       })
       .check((argv) => {
         // A wildcard or LAN primary bind already owns the port Local Control
@@ -1002,6 +1008,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
             serverUrl: argv['agent-host-server'],
             workspaceId: argv['agent-host-workspace-id'],
             workspaceCwd: primaryWorkspaceArg(argv.workspace) ?? process.cwd(),
+            provider: argv['agent-host-provider'],
             ...(agentHostEnrollmentToken
               ? { enrollmentToken: agentHostEnrollmentToken }
               : {}),

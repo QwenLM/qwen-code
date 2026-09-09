@@ -5,6 +5,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,7 +28,10 @@ import {
 const HEARTBEAT_MS = 5_000;
 const LEASE_RENEW_MS = 20_000;
 const RETRY_MS = 2_000;
-const PROVIDERS = ['Qwen Code ACP'];
+const PROVIDER_LABELS = {
+  qwen: 'Qwen Code ACP',
+  codex: 'Codex CLI',
+} as const;
 
 interface AgentHostCredential {
   schemaVersion: 1;
@@ -42,6 +46,7 @@ export interface AgentHostConnectionOptions {
   serverUrl: string;
   workspaceId: string;
   workspaceCwd: string;
+  provider: keyof typeof PROVIDER_LABELS;
   enrollmentToken?: string;
   name?: string;
 }
@@ -169,63 +174,138 @@ function modelPrompt(assignment: HostRunAssignment): string {
     .join('\n\n');
 }
 
+async function executeCodexPrompt(
+  workspaceCwd: string,
+  prompt: string,
+): Promise<string> {
+  // ponytail: one-shot CLI is enough for the demo; persist Codex thread ids
+  // only when same-task continuation is required.
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      'codex',
+      [
+        'exec',
+        '--json',
+        '--ephemeral',
+        '--sandbox',
+        'read-only',
+        '--cd',
+        workspaceCwd,
+        prompt,
+      ],
+      { cwd: workspaceCwd, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (code !== 0) {
+        reject(
+          new Error(
+            stderr.trim() || `Codex CLI exited with status ${String(code)}.`,
+          ),
+        );
+        return;
+      }
+      let summary = '';
+      for (const line of stdout.split('\n')) {
+        try {
+          const event = JSON.parse(line) as {
+            type?: string;
+            item?: { type?: string; text?: string };
+          };
+          if (
+            event.type === 'item.completed' &&
+            event.item?.type === 'agent_message' &&
+            typeof event.item.text === 'string'
+          ) {
+            summary = event.item.text.trim();
+          }
+        } catch {
+          // Codex warnings are not result events.
+        }
+      }
+      if (!summary) {
+        reject(new Error('Codex CLI finished without a final answer.'));
+        return;
+      }
+      resolve(summary);
+    });
+  });
+}
+
 async function executeAssignment(
   options: AgentHostConnectionOptions,
   credential: AgentHostCredential,
   assignment: HostRunAssignment,
 ): Promise<HostRunResult> {
-  const sessionId = agentThreadSessionId(
-    `${credential.hostId}:${assignment.agent.id}`,
-    assignment.threadId,
-  );
-  const sourceId = `${credential.hostId}:${assignment.agent.id}`;
-  const sessions = new SessionService(options.workspaceCwd);
-  const live = options.bridge
-    .listWorkspaceSessions(options.workspaceCwd)
-    .find((session) => session.sessionId === sessionId);
-  if (!live) {
-    const request = {
-      workspaceCwd: options.workspaceCwd,
-      sessionId,
-      sourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
-      sourceId,
-      approvalMode: ApprovalMode.PLAN,
-    };
-    if (await sessions.sessionExists(sessionId)) {
-      await options.bridge.resumeSession(request);
-    } else {
-      await options.bridge.spawnOrAttach({
-        ...request,
-        sessionScope: 'thread',
-      });
-    }
-  }
-
   const promptId = `agent-host:${assignment.runId}:${assignment.attempt}`;
   const renew = setInterval(
     () => void pickup(credential.serverUrl, credential, 0).catch(() => {}),
     LEASE_RENEW_MS,
   );
   renew.unref?.();
+  let summary: string | undefined;
   try {
-    await options.bridge.sendPrompt(
-      sessionId,
-      {
+    if (options.provider === 'codex') {
+      summary = await executeCodexPrompt(
+        options.workspaceCwd,
+        modelPrompt(assignment),
+      );
+    } else {
+      const sessionId = agentThreadSessionId(
+        `${credential.hostId}:${assignment.agent.id}`,
+        assignment.threadId,
+      );
+      const sourceId = `${credential.hostId}:${assignment.agent.id}`;
+      const sessions = new SessionService(options.workspaceCwd);
+      const live = options.bridge
+        .listWorkspaceSessions(options.workspaceCwd)
+        .find((session) => session.sessionId === sessionId);
+      if (!live) {
+        const request = {
+          workspaceCwd: options.workspaceCwd,
+          sessionId,
+          sourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+          sourceId,
+          approvalMode: ApprovalMode.PLAN,
+        };
+        if (await sessions.sessionExists(sessionId)) {
+          await options.bridge.resumeSession(request);
+        } else {
+          await options.bridge.spawnOrAttach({
+            ...request,
+            sessionScope: 'thread',
+          });
+        }
+      }
+      await options.bridge.sendPrompt(
         sessionId,
-        prompt: [{ type: 'text', text: assignment.prompt }],
-      },
-      undefined,
-      { promptId, modelPrompt: modelPrompt(assignment) },
-    );
+        {
+          sessionId,
+          prompt: [{ type: 'text', text: assignment.prompt }],
+        },
+        undefined,
+        { promptId, modelPrompt: modelPrompt(assignment) },
+      );
+      const turn = await options.bridge.getSessionTurnStatus(
+        sessionId,
+        undefined,
+        promptId,
+      );
+      summary = turn?.resultText?.trim();
+    }
   } finally {
     clearInterval(renew);
   }
-  const turn = await options.bridge.getSessionTurnStatus(
-    sessionId,
-    undefined,
-    promptId,
-  );
-  const summary = turn?.resultText?.trim();
   if (!summary) {
     throw new Error('Managed Agent finished without a final answer.');
   }
@@ -278,6 +358,7 @@ async function returnResult(
 export async function startAgentHostConnection(
   options: AgentHostConnectionOptions,
 ): Promise<void> {
+  const providers = [PROVIDER_LABELS[options.provider]];
   const serverUrl = normalizeServerUrl(options.serverUrl);
   const filePath = credentialPath(
     serverUrl,
@@ -302,7 +383,7 @@ export async function startAgentHostConnection(
         token: options.enrollmentToken,
         name: options.name?.trim() || os.hostname(),
         workspaceCwd: options.workspaceCwd,
-        providers: PROVIDERS,
+        providers,
       }),
     });
     credential = {
@@ -329,7 +410,7 @@ export async function startAgentHostConnection(
           },
           body: JSON.stringify({
             workspaceCwd: options.workspaceCwd,
-            providers: PROVIDERS,
+            providers,
           }),
         },
       );

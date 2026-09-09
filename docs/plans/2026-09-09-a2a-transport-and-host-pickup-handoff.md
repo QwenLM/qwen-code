@@ -113,7 +113,9 @@ type LeaseRefusal = 'no_such_run' | 'not_leasable' | 'held_by_other_host'
 
 随后用第二个真实 daemon 进程完成执行端闭环：Host `host_d43cad67-c491-4915-9186-481732a0458e` 领取 run `rn_8158e46e-6166-4c68-b8e7-7047674dc3f8`，在隐藏的 task-scoped ACP session 中执行约 24.2 秒，正确读出根 `package.json` 的包名 `@qwen-code/qwen-code` 和 `engines.node >=22.0.0`，结果回传后线程 `th_65775393-3b1b-4deb-ac05-a504a8fcb537` 进入 `in_review`。取件、续租和回传都由 Host 出站请求发起；本轮第二个 Host 与协调端仍在同一台物理机上，尚未证明跨机器网络部署。
 
-Demo 路径有意保持最小：远端 session 使用 Plan/read-only 权限，最终文本由 Host 映射为 `review`；取件协议携带的 Agent instructions 已进入 prompt，但完整 agent type 基础 persona、逐 Agent model 覆盖和精确 tool ceiling 尚未装入远端 runtime，远端 Agent 也不能直接调用 `thread_*` 继续拆分。这些不阻塞「受管 Host 领取并完成任务」演示，但不能把当前实现描述为完整的远程多 Agent 对等协作。
+Demo 路径有意保持最小：Host 用 `--agent-host-provider qwen|codex` 选择本机执行器。Qwen 路径使用 task-scoped ACP session；Codex 路径启动真实 `codex exec --json --ephemeral --sandbox read-only` 子进程。两者的最终文本都由 Host 映射为 `review`，取件协议携带的 Agent instructions 已进入 prompt，但完整 agent type 基础 persona、逐 Agent model 覆盖和精确 tool ceiling 尚未装入远端 runtime，远端 Agent 也不能直接调用 `thread_*` 继续拆分。Codex 当前还是一次一进程，没有恢复同一 Codex thread。这些不阻塞「受管 Host 领取并完成任务」演示，但不能把当前实现描述为完整的远程多 Agent 对等协作。
+
+Codex 实测（`codex-cli 0.144.6`）：Host `host_d43cad67-c491-4915-9186-481732a0458e` 领取 run `rn_31371a42-59b9-4a94-971a-311211d84fb4` 后，进程表可见 Host 直接启动 `codex exec`；Codex 回报 `CODEX_PIPELINE_OK`、包名 `@qwen-code/qwen-code`、Node 范围 `>=22.0.0` 和 commit `890f3738dfb2f80d8812c1afa9e4b3696e6b75a5`。结果进入线程 `th_294bf774-1a76-4fda-83b7-3cd3df931512`，run 完成且线程进入 `in_review`，耗时约 62.4 秒。Claude Code 本机未安装，因此没有验收。
 
 ---
 
