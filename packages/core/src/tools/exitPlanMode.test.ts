@@ -171,6 +171,63 @@ describe('ExitPlanModeTool', () => {
     expect(approvalMode).toBe(ApprovalMode.YOLO);
   });
 
+  it('captures the DAC execution policy at approval and freezes it through execute', async () => {
+    prePlanMode = ApprovalMode.YOLO;
+    let selectedMode = ApprovalMode.AUTO_EDIT;
+    config.getPlanExecutionMode = vi.fn(() => selectedMode);
+    const invocation = tool.build({ plan: 'DAC plan' });
+    const confirmation = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    selectedMode = ApprovalMode.DEFAULT;
+    await confirmation.onConfirm(ToolConfirmationOutcome.RestorePrevious, {
+      expectedPlanExecutionMode: ApprovalMode.DEFAULT,
+    });
+    selectedMode = ApprovalMode.YOLO;
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+    expect(config.setApprovalMode).toHaveBeenCalledWith(ApprovalMode.DEFAULT, {
+      fromApprovedPlanExit: true,
+    });
+  });
+
+  it.each([undefined, ApprovalMode.AUTO_EDIT])(
+    'rejects a DAC approval with a missing or stale policy (%s)',
+    async (expectedPlanExecutionMode) => {
+      let selectedMode = ApprovalMode.AUTO_EDIT;
+      config.getPlanExecutionMode = vi.fn(() => selectedMode);
+      const invocation = tool.build({ plan: 'DAC plan' });
+      const confirmation = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+      selectedMode = ApprovalMode.YOLO;
+
+      await expect(
+        confirmation.onConfirm(ToolConfirmationOutcome.RestorePrevious, {
+          expectedPlanExecutionMode,
+        }),
+      ).rejects.toThrow('Execution permission changed');
+      const rejected = await invocation.execute(new AbortController().signal);
+      expect(rejected.llmContent).toContain('Plan execution was not approved');
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
+      expect(config.setApprovalMode).not.toHaveBeenCalled();
+      expect(config.savePlan).not.toHaveBeenCalled();
+
+      const retry = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+      await retry.onConfirm(ToolConfirmationOutcome.RestorePrevious, {
+        expectedPlanExecutionMode: ApprovalMode.YOLO,
+      });
+      const approved = await invocation.execute(new AbortController().signal);
+      expect(approved.error).toBeUndefined();
+      expect(approvalMode).toBe(ApprovalMode.YOLO);
+    },
+  );
+
   it('executes the snapshot belonging to the confirmation that was approved', async () => {
     const params = { plan: 'First plan' };
     const invocation = tool.build(params);
