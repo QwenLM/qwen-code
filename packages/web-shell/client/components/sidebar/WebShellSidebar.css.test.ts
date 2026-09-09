@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 // shape instead. The session row action overlay is `position: absolute;
 // inset: 0` over the meta slot: without `pointer-events: none` on the hidden
 // container it swallows row taps (including on destructive Delete); without a
-// `hover: none` reveal, touch devices cannot reach pin/rename/export/delete
+// touch-media reveal, touch devices cannot reach pin/rename/export/delete
 // at all; and the meta slot's width reservation must follow the same
 // conditions as the reveal, or focus reserves a gutter for controls it never
 // shows. Strip comments so the guards match selectors only.
@@ -19,13 +19,15 @@ const sidebarCss = readFileSync(
 // the first such brace captures exactly one block.
 function mediaBlock(query: string): string {
   const match = sidebarCss.match(
-    new RegExp(`@media \\(${query}\\) \\{([\\s\\S]*?)\\n\\}`),
+    new RegExp(`@media ${query} \\{([\\s\\S]*?)\\n\\}`),
   );
   return match?.[1] ?? '';
 }
 
-const hoverMedia = mediaBlock('hover: hover');
-const touchMedia = mediaBlock('hover: none');
+const hoverMedia = mediaBlock('\\(hover: hover\\)');
+// The repo's touch query, matching TOUCH_COMPOSER_QUERY in
+// client/hooks/useIsTouchComposer.ts.
+const touchMedia = mediaBlock('\\(hover: none\\) and \\(pointer: coarse\\)');
 
 describe('WebShellSidebar session row actions stylesheet', () => {
   it('keeps the hidden actions overlay inert until revealed', () => {
@@ -48,18 +50,19 @@ describe('WebShellSidebar session row actions stylesheet', () => {
   });
 
   it('keeps the actions visible and tappable on touch devices', () => {
-    expect(touchMedia).toMatch(/\.sessionActions\s*\{[^}]*opacity:\s*1;/);
+    expect(touchMedia).toMatch(
+      /\.sessionActions\s*\{[^}]*position:\s*static;[^}]*opacity:\s*1;/,
+    );
     expect(touchMedia).toMatch(
       /\.sessionActionButton\s*\{[^}]*pointer-events:\s*auto;/,
     );
-    // The always-visible buttons paint over the trailing markers, so the
-    // markers must yield and the slot must reserve the overlay's width.
-    expect(touchMedia).toMatch(
-      /\.sessionMetaSlot:has\(\.sessionActions\)\s*\.sessionSourceIcon[^{]*\{[^}]*opacity:\s*0;/,
-    );
-    expect(touchMedia).toMatch(
-      /\.sessionMetaSlot:has\(\.sessionActions\)\s*\{[^}]*min-width:\s*var\(--session-actions-width/,
-    );
+    // On touch the buttons share the slot with the trailing markers instead
+    // of overlaying them, so the block must not hide any marker —
+    // .sessionAttention is the only per-row carrier of "input needed" and
+    // .sessionSourceIcon is the scheduled-task marker — nor reserve a gutter
+    // for an overlay.
+    expect(touchMedia).not.toMatch(/opacity:\s*0;/);
+    expect(touchMedia).not.toMatch(/min-width:\s*var\(--session-actions-width/);
   });
 
   it('reserves meta slot width only where the overlay can appear', () => {

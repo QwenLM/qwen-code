@@ -1228,19 +1228,11 @@
   }
 }
 
-@media (hover: none) {
-  .sessionMetaSlot:has(.sessionActions) {
-    min-width: var(--session-actions-width, 78px);
-  }
-
-  .sessionMetaSlot:has(.sessionActions) .sessionGitIcon,
-  .sessionMetaSlot:has(.sessionActions) .sessionLoading,
-  .sessionMetaSlot:has(.sessionActions) .sessionAttention,
-  .sessionMetaSlot:has(.sessionActions) .sessionSourceIcon {
-    opacity: 0;
-  }
-
+/* Touch devices get no hover reveal, so the actions stay in the flow and
+   share the slot with the markers instead of overlaying and hiding them. */
+@media (hover: none) and (pointer: coarse) {
   .sessionActions {
+    position: static;
     opacity: 1;
   }
 
