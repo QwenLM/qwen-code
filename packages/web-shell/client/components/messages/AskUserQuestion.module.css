@@ -70,15 +70,17 @@
 
 .collapseButton {
   display: flex;
-  width: 20px;
-  height: 20px;
+  gap: 4px;
+  height: 24px;
   align-items: center;
   justify-content: center;
-  padding: 0;
+  padding: 0 4px;
   border: 0;
   border-radius: 4px;
   background: transparent;
   color: var(--muted-foreground);
+  font: inherit;
+  font-size: 12px;
   cursor: pointer;
   transition: color 0.15s;
 }
@@ -94,7 +96,7 @@
 }
 
 .collapseIconCollapsed {
-  transform: rotate(-90deg);
+  transform: rotate(180deg);
 }
 
 .collapsed {

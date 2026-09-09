@@ -69,6 +69,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
+import { flattenPeerLabel } from '../ipc/peer-envelope.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -114,6 +115,49 @@ const TEMP_FILENAME = /^\d+\.json\.[0-9a-f]{12}\.tmp$/;
 /** Younger temps may belong to a writer mid-rename — leave them alone. */
 const TEMP_MAX_AGE_MS = 5 * 60 * 1000;
 
+/**
+ * What kind of process registered: an interactive terminal, a
+ * `qwen --acp` process running on its own, one the daemon spawned, or a
+ * program that is not Qwen Code at all.
+ *
+ * A label for listings and for aggregators that want to tell a user's own
+ * terminals apart from sessions something else is driving. Nothing that
+ * decides trust reads it: a record is written by the process it
+ * describes, so this is a claim like `name` and `cwd`. What a sender may
+ * do is decided by what its connection presents (see `uds-inbox.ts`).
+ */
+export type SessionKind = 'tui' | 'headless' | 'serve' | 'external';
+
+/** The kinds this build writes. Readers accept more; see {@link KIND_RE}. */
+export const SESSION_KINDS: readonly SessionKind[] = [
+  'tui',
+  'headless',
+  'serve',
+  'external',
+];
+
+/**
+ * What a reader keeps in `kind`.
+ *
+ * Deliberately wider than {@link SESSION_KINDS}: a newer build may write a
+ * kind this one has never heard of, and dropping it would make that
+ * indistinguishable from a record too old to carry one — which is the one
+ * case that reads as `tui`. Bounded and shape-checked like every other
+ * field that crosses a process boundary.
+ */
+const KIND_RE = /^[a-z][a-z0-9-]{0,15}$/;
+
+/**
+ * Longest explicit display name kept.
+ *
+ * Derived names are short by construction, but an explicit one comes from
+ * a caller and lands in `qwen sessions ps` and in peer listings, so it
+ * gets what a peer-supplied label gets: flattened to one line, then
+ * bounded. Shorter than the envelope's 200 because this one is printed in
+ * a fixed-width table column.
+ */
+export const MAX_SESSION_NAME_CHARS = 40;
+
 /** One live session, as recorded on disk. */
 export interface SessionRegistryRecord {
   schemaVersion: number;
@@ -132,6 +176,15 @@ export interface SessionRegistryRecord {
   /** Epoch milliseconds. */
   startedAt: number;
   qwenVersion: string | null;
+  /**
+   * What registered this session; see {@link SessionKind}.
+   *
+   * Typed as `string` rather than `SessionKind` because a reader keeps a
+   * kind it does not recognize (a newer build's) rather than dropping it.
+   * Absent means the writer predates the field, which is the interactive
+   * UI: nothing else registered before it existed.
+   */
+  kind?: string;
   /**
    * Path to this session's peer-messaging socket, when it has one.
    *
@@ -160,6 +213,48 @@ export interface RegisterSessionFields {
   sessionId: string;
   cwd: string;
   qwenVersion?: string | null;
+  /** What is registering. Defaults to `tui`, the only historical writer. */
+  kind?: SessionKind;
+  /**
+   * Display name to record instead of the derived one.
+   *
+   * For a caller whose directory says nothing useful about it — a voice
+   * front-end or a relay wants to be called what its user calls it, not
+   * after whatever directory it happens to have started in. Flattened and
+   * bounded on the way in; one that flattens to nothing falls back to the
+   * derived name rather than recording a session nobody can address.
+   */
+  name?: string;
+}
+
+/**
+ * The name to record: an explicit one, flattened and bounded, or the one
+ * derived from the working directory.
+ */
+function resolveSessionName(fields: RegisterSessionFields): string {
+  const explicit = flattenPeerLabel(fields.name ?? '');
+  if (explicit.length === 0) {
+    return deriveSessionName(fields.cwd, fields.sessionId);
+  }
+  // Counted in code points, like `deriveSessionName`'s own cap: slicing
+  // UTF-16 units can cut an astral character into a lone surrogate.
+  const points = Array.from(explicit);
+  return points.length > MAX_SESSION_NAME_CHARS
+    ? `${points.slice(0, MAX_SESSION_NAME_CHARS - 1).join('')}…`
+    : explicit;
+}
+
+/**
+ * How to describe a record's `kind` to a person.
+ *
+ * An unrecognized kind is passed through rather than replaced: it was
+ * written by a build that knows something this one does not, and showing
+ * the writer's own word is more useful than showing "unknown". An absent
+ * one reads as `tui` — the interactive UI was the only registrant before
+ * the field existed.
+ */
+export function describeSessionKind(kind: string | undefined): string {
+  return kind === undefined || kind.length === 0 ? 'tui' : kind;
 }
 
 export function getSessionRegistryDir(): string {
@@ -295,9 +390,10 @@ export async function registerSession(
     pidNs,
     sessionId: fields.sessionId,
     cwd: fields.cwd,
-    name: deriveSessionName(fields.cwd, fields.sessionId),
+    name: resolveSessionName(fields),
     startedAt: Date.now(),
     qwenVersion: fields.qwenVersion ?? null,
+    kind: fields.kind ?? 'tui',
   };
 
   try {
@@ -727,6 +823,7 @@ async function readRecord(filePath: string): Promise<ReadRecordResult> {
   const procStart = value['procStart'];
   const pidNs = value['pidNs'];
   const qwenVersion = value['qwenVersion'];
+  const kind = value['kind'];
   const ipcPath = value['ipcPath'];
   const ipcToken = value['ipcToken'];
 
@@ -742,6 +839,11 @@ async function readRecord(filePath: string): Promise<ReadRecordResult> {
       name,
       startedAt,
       qwenVersion: typeof qwenVersion === 'string' ? qwenVersion : null,
+      // Dropped rather than defaulted when it is missing or malformed:
+      // absent has a meaning of its own (a writer older than the field),
+      // and `describeSessionKind` is the one place that decides how that
+      // reads. A value this build does not know is kept as written.
+      ...(typeof kind === 'string' && KIND_RE.test(kind) ? { kind } : {}),
       // Optional rather than nulled: absent and empty both mean "not
       // messageable", and a record written before this field existed must
       // read back identically to one written after it.

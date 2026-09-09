@@ -36,6 +36,7 @@ vi.mock('./components/WorkspaceSessionProvider', () => ({
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
   getDaemonToken: () => 'token',
+  persistDaemonToken: vi.fn(),
   removeDaemonTokenFromUrl: vi.fn(),
   waitForDaemonTokenMessage: vi.fn(),
 }));
