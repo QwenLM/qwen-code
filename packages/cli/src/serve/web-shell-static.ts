@@ -31,7 +31,6 @@ const WEB_SHELL_CSP_DIRECTIVES = [
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self' data:",
   "img-src 'self' data: blob:",
-  "connect-src 'self'",
   "worker-src 'self' blob:",
   // base-uri does NOT fall back to default-src; lock it so an injected <base>
   // (the SPA renders AI-generated markdown) cannot repoint relative URLs to an
@@ -108,12 +107,36 @@ export function buildWebShellPermissionsPolicy(): string {
 export function buildWebShellCsp(
   frameAncestors: readonly string[] = [],
   frameSrcOrigins: readonly string[] = loopbackSandboxOrigins(undefined),
+  connectOrigins: readonly string[] = [],
 ): string {
   const fa = frameAncestors.length
     ? `frame-ancestors ${frameAncestors.join(' ')}`
     : "frame-ancestors 'none'";
   const frameSrc = `frame-src ${frameSrcOrigins.join(' ')}`;
-  return [...WEB_SHELL_CSP_DIRECTIVES, frameSrc, fa].join('; ');
+  const connectSrc = `connect-src 'self' ${connectOrigins.join(' ')}`.trim();
+  return [...WEB_SHELL_CSP_DIRECTIVES, connectSrc, frameSrc, fa].join('; ');
+}
+
+export function remoteDaemonConnectOrigins(raw: unknown): string[] {
+  if (typeof raw !== 'string') return [];
+  try {
+    const url = new URL(raw);
+    if (
+      (url.protocol !== 'https:' && url.protocol !== 'http:') ||
+      url.username ||
+      url.password ||
+      url.pathname !== '/' ||
+      url.search ||
+      url.hash
+    ) {
+      return [];
+    }
+    const websocket = new URL(url.origin);
+    websocket.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    return [url.origin, websocket.origin];
+  } catch {
+    return [];
+  }
 }
 
 /** Default (no-framing) Web Shell CSP. */
@@ -142,7 +165,11 @@ function createSendIndex(
   const indexPath = path.join(webShellDir, 'index.html');
   return (req: Request, res: Response): void => {
     const sandboxOrigins = loopbackSandboxOrigins(req.get('host'));
-    const csp = buildWebShellCsp(frameAncestors, sandboxOrigins);
+    const csp = buildWebShellCsp(
+      frameAncestors,
+      sandboxOrigins,
+      remoteDaemonConnectOrigins(req.query['daemon']),
+    );
     res
       .status(200)
       .set('Content-Security-Policy', csp)

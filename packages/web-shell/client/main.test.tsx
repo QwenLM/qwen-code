@@ -32,7 +32,9 @@ vi.mock('./components/WorkspaceSessionProvider', () => ({
 }));
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
+  getAllowedDaemonOrigin: (value: string) => value,
   getDaemonToken: () => 'token',
+  navigateToDaemon: vi.fn(),
   persistDaemonToken: vi.fn(),
   removeDaemonTokenFromUrl: vi.fn(),
   waitForDaemonTokenMessage: vi.fn(),
@@ -58,6 +60,11 @@ describe('StandaloneApp', () => {
   });
 
   it('keeps the controlled session target in sync with URL changes', () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?daemon=https%3A%2F%2Fdaemon.example.com',
+    );
     act(() => root.render(<StandaloneApp daemonToken="token" />));
 
     act(() => {
@@ -74,6 +81,9 @@ describe('StandaloneApp', () => {
     expect(window.location.pathname).toBe('/session/session-created');
     expect(new URLSearchParams(window.location.search).get('workspace')).toBe(
       'workspace-1',
+    );
+    expect(new URLSearchParams(window.location.search).get('daemon')).toBe(
+      'https://daemon.example.com',
     );
     expect(
       testState.props?.webShellProps.composerToolbarAdditionalActions,

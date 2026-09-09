@@ -10,6 +10,7 @@ import {
   buildWebShellPermissionsPolicy,
   loopbackSandboxOrigins,
   portFromHostHeader,
+  remoteDaemonConnectOrigins,
 } from './web-shell-static.js';
 
 describe('Web Shell sandbox framing', () => {
@@ -55,5 +56,34 @@ describe('Web Shell sandbox framing', () => {
     expect(policy).toContain('payment=()');
     expect(policy).toContain('clipboard-write=(self)');
     expect(policy).not.toContain('localhost');
+  });
+
+  it('adds only a validated remote daemon to connect-src', () => {
+    expect(
+      remoteDaemonConnectOrigins('https://daemon.example.com:4170'),
+    ).toEqual([
+      'https://daemon.example.com:4170',
+      'wss://daemon.example.com:4170',
+    ]);
+    expect(remoteDaemonConnectOrigins('http://127.0.0.1:4271')).toEqual([
+      'http://127.0.0.1:4271',
+      'ws://127.0.0.1:4271',
+    ]);
+    expect(remoteDaemonConnectOrigins('http://daemon.example.com')).toEqual([
+      'http://daemon.example.com',
+      'ws://daemon.example.com',
+    ]);
+    expect(
+      remoteDaemonConnectOrigins('https://daemon.example.com/path'),
+    ).toEqual([]);
+
+    const csp = buildWebShellCsp(
+      [],
+      loopbackSandboxOrigins('localhost:4170'),
+      remoteDaemonConnectOrigins('https://daemon.example.com:4170'),
+    );
+    expect(csp).toContain(
+      "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+    );
   });
 });

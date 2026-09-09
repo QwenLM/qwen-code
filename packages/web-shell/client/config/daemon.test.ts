@@ -51,12 +51,12 @@ describe('getAllowedDaemonOrigin (via getDaemonBaseUrl)', () => {
     expect(mod.getDaemonBaseUrl()).toBe('http://localhost:5173');
   });
 
-  it('rejects external host', async () => {
+  it('accepts an external HTTPS daemon', async () => {
     const result = await getDaemonBaseUrlWith(
       'http://localhost:5173',
-      'http://evil.com:5173',
+      'https://daemon.example.com:4170',
     );
-    expect(result).toBe('');
+    expect(result).toBe('https://daemon.example.com:4170');
   });
 
   it('rejects non-HTTP scheme', async () => {
@@ -67,12 +67,53 @@ describe('getAllowedDaemonOrigin (via getDaemonBaseUrl)', () => {
     expect(result).toBe('');
   });
 
-  it('rejects localhost with different port', async () => {
+  it('accepts a loopback daemon on a different port', async () => {
     const result = await getDaemonBaseUrlWith(
       'http://localhost:5173',
       'http://localhost:4170',
     );
-    expect(result).toBe('');
+    expect(result).toBe('http://localhost:4170');
+  });
+
+  it('accepts an external HTTP daemon', async () => {
+    const result = await getDaemonBaseUrlWith(
+      'http://localhost:5173',
+      'http://daemon.example.com:4170',
+    );
+    expect(result).toBe('http://daemon.example.com:4170');
+
+    const sameOrigin = await getDaemonBaseUrlWith(
+      'http://daemon.example.com:4170',
+      'http://daemon.example.com:4170',
+    );
+    expect(sameOrigin).toBe('http://daemon.example.com:4170');
+  });
+
+  it('rejects credentials, paths, queries, and fragments', async () => {
+    await expect(
+      getDaemonBaseUrlWith(
+        'http://localhost:5173',
+        'https://user:pass@daemon.example.com',
+      ),
+    ).resolves.toBe('');
+    await expect(
+      getDaemonBaseUrlWith(
+        'http://localhost:5173',
+        'https://daemon.example.com/api',
+      ),
+    ).resolves.toBe('');
+    await expect(
+      getDaemonBaseUrlWith(
+        'http://localhost:5173',
+        'https://daemon.example.com?token=secret',
+      ),
+    ).resolves.toBe('');
+    await expect(
+      getDaemonBaseUrlWith(
+        'http://localhost:5173',
+        'https://daemon.example.com#token=secret',
+      ),
+    ).resolves.toBe('');
   });
 
   it('returns empty for non-parseable URL', async () => {
@@ -92,6 +133,48 @@ describe('getAllowedDaemonOrigin (via getDaemonBaseUrl)', () => {
     });
     const mod = await import('./daemon');
     expect(mod.getDaemonBaseUrl()).toBe('');
+  });
+
+  it('does not treat an explicit loopback tunnel as host-local', async () => {
+    setup('http://127.0.0.1:5173/?daemon=http://127.0.0.1:4170');
+    const mod = await import('./daemon');
+    expect(mod.isLocalDaemon()).toBe(false);
+  });
+
+  it('keeps a same-origin loopback daemon host-local', async () => {
+    setup('http://127.0.0.1:5173');
+    const mod = await import('./daemon');
+    expect(mod.isLocalDaemon()).toBe(true);
+  });
+});
+
+describe('buildDaemonConnectionUrl', () => {
+  it('switches daemon while clearing session-scoped state', async () => {
+    const { buildDaemonConnectionUrl } = await import('./daemon');
+    const result = buildDaemonConnectionUrl(
+      'http://remote.example:4170/',
+      'http://localhost:5173/app/session/old?workspace=one&context=live&theme=light#token=secret',
+    );
+    expect(result).toBe(
+      'http://localhost:5173/app?theme=light&daemon=http%3A%2F%2Fremote.example%3A4170',
+    );
+  });
+
+  it('removes the daemon override when switching back to page origin', async () => {
+    const { buildDaemonConnectionUrl } = await import('./daemon');
+    expect(
+      buildDaemonConnectionUrl(
+        'http://localhost:5173',
+        'http://localhost:5173/?daemon=https%3A%2F%2Fremote.example',
+      ),
+    ).toBe('http://localhost:5173/');
+  });
+
+  it('rejects an invalid target', async () => {
+    const { buildDaemonConnectionUrl } = await import('./daemon');
+    expect(
+      buildDaemonConnectionUrl('file:///tmp/daemon', 'http://localhost:5173/'),
+    ).toBeUndefined();
   });
 });
 
@@ -166,6 +249,46 @@ describe('getDaemonToken', () => {
     );
   });
 
+  it('does not reuse the same-origin token for a selected remote daemon', async () => {
+    window.sessionStorage.setItem('qwen-daemon-token', 'local-secret');
+    setupToken('?daemon=https%3A%2F%2Fdaemon.example.com', '');
+    const mod = await import('./daemon');
+    expect(mod.getDaemonToken()).toBeUndefined();
+  });
+
+  it('persists and reloads a token under the selected daemon origin', async () => {
+    setupToken(
+      '?daemon=https%3A%2F%2Fdaemon.example.com%3A4170',
+      '#token=remote-secret',
+    );
+    const first = await import('./daemon');
+    expect(first.getDaemonToken()).toBe('remote-secret');
+    expect(
+      window.sessionStorage.getItem(
+        'qwen-daemon-token:https://daemon.example.com:4170',
+      ),
+    ).toBe('remote-secret');
+    expect(window.sessionStorage.getItem('qwen-daemon-token')).toBeNull();
+
+    vi.resetModules();
+    setupToken('?daemon=https%3A%2F%2Fdaemon.example.com%3A4170', '');
+    const second = await import('./daemon');
+    expect(second.getDaemonToken()).toBe('remote-secret');
+  });
+
+  it('clears a persisted token when the daemon accepts tokenless access', async () => {
+    setupToken('?daemon=https%3A%2F%2Fdaemon.example.com', '');
+    const mod = await import('./daemon');
+    mod.persistDaemonToken('old-secret');
+    mod.persistDaemonToken('');
+    expect(mod.getDaemonToken()).toBeUndefined();
+    expect(
+      window.sessionStorage.getItem(
+        'qwen-daemon-token:https://daemon.example.com',
+      ),
+    ).toBeNull();
+  });
+
   it('degrades gracefully when sessionStorage throws', async () => {
     const original = window.sessionStorage;
     Object.defineProperty(window, 'sessionStorage', {
@@ -228,6 +351,23 @@ describe('waitForDaemonTokenMessage', () => {
       }),
     );
     await expect(token).resolves.toBeUndefined();
+  });
+
+  it('does not reuse an extension token message for a remote daemon', async () => {
+    mockFramedWindow();
+    Object.defineProperty(window, 'location', {
+      value: {
+        href: 'http://localhost:4170/?daemon=https%3A%2F%2Fdaemon.example.com',
+        origin: 'http://localhost:4170',
+        hostname: 'localhost',
+        search: '?daemon=https%3A%2F%2Fdaemon.example.com',
+        hash: '',
+      },
+      writable: true,
+      configurable: true,
+    });
+    const mod = await import('./daemon');
+    await expect(mod.waitForDaemonTokenMessage(1000)).resolves.toBeUndefined();
   });
 });
 

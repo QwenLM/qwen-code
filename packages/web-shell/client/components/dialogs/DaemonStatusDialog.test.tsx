@@ -195,8 +195,13 @@ let fullState: HookState = {
   error: undefined,
 };
 const seenDetails: Array<string | undefined> = [];
+const workspaceState = {
+  baseUrl: 'http://localhost:4170',
+  status: 'connected' as const,
+};
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  useWorkspace: () => workspaceState,
   useStatusReport: (options: { detail?: string } = {}) => {
     seenDetails.push(options.detail);
     if (options.detail === 'full') {
@@ -215,14 +220,17 @@ const { DaemonStatusDialog } = await import('./DaemonStatusDialog');
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
-function mount(language: 'en' | 'zh-CN' = 'en') {
+function mount(
+  language: 'en' | 'zh-CN' = 'en',
+  onChangeTarget?: (daemonOrigin: string, token?: string) => void,
+) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root!.render(
       <I18nProvider language={language}>
-        <DaemonStatusDialog />
+        <DaemonStatusDialog onChangeTarget={onChangeTarget} />
       </I18nProvider>,
     );
   });
@@ -270,6 +278,66 @@ afterEach(() => {
 });
 
 describe('DaemonStatusDialog', () => {
+  it('shows and switches the daemon connection target', () => {
+    const onChangeTarget = vi.fn();
+    mount('en', onChangeTarget);
+    expect(container!.textContent).toContain('http://localhost:4170');
+    expect(container!.textContent).toContain('Connected');
+    const address = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-address',
+    )!;
+    const token = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-token',
+    )!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(address, 'https://remote.example:4170/');
+      address.dispatchEvent(new Event('input', { bubbles: true }));
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(token, 'remote-token');
+      token.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => {
+      address
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    });
+    expect(onChangeTarget).toHaveBeenCalledWith(
+      'https://remote.example:4170',
+      'remote-token',
+    );
+  });
+
+  it('keeps an invalid daemon address on the form', () => {
+    const onChangeTarget = vi.fn();
+    mount('en', onChangeTarget);
+    const address = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-address',
+    )!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(address, 'file:///tmp/daemon');
+      address.dispatchEvent(new Event('input', { bubbles: true }));
+      address
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    });
+    expect(container!.querySelector('[role="alert"]')?.textContent).toContain(
+      'valid HTTP or HTTPS',
+    );
+    expect(onChangeTarget).not.toHaveBeenCalled();
+  });
+
   it('renders live summary counters with the full-detail rollup badge', () => {
     mount();
     const text = container!.textContent ?? '';

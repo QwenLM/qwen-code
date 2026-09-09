@@ -6,7 +6,11 @@ import {
   type ReactNode,
 } from 'react';
 import AppStyles from '../App.module.css';
-import { persistDaemonToken } from '../config/daemon';
+import {
+  getAllowedDaemonOrigin,
+  navigateToDaemon,
+  persistDaemonToken,
+} from '../config/daemon';
 import type { WebShellLanguage } from '../i18n';
 import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Button } from './ui/button';
@@ -41,6 +45,8 @@ interface AuthCopy {
   invalidToken: string;
   enterToken: string;
   policyBlocked: string;
+  invalidAddress: string;
+  addressLabel: string;
   tokenLabel: string;
   connect: string;
   retry: string;
@@ -62,7 +68,9 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     enterToken: 'Enter the bearer token from the daemon terminal.',
     policyBlocked:
       'Access blocked by the daemon Origin or Host policy. Open its direct address, or check --allow-origin for cross-origin access.',
-    tokenLabel: 'Bearer token',
+    invalidAddress: 'Invalid daemon address. Enter an HTTP or HTTPS origin.',
+    addressLabel: 'Daemon address',
+    tokenLabel: 'Bearer token (optional)',
     connect: 'Connect',
     retry: 'Retry',
     hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
@@ -78,7 +86,9 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     enterToken: '请输入守护进程终端中显示的 bearer token。',
     policyBlocked:
       '访问被守护进程的 Origin 或 Host 策略拦截。请直接打开守护进程地址，或检查 --allow-origin 以允许跨域访问。',
-    tokenLabel: 'Bearer token',
+    invalidAddress: 'Daemon 地址无效。请输入 HTTP 或 HTTPS origin。',
+    addressLabel: 'Daemon 地址',
+    tokenLabel: 'Bearer token（可选）',
     connect: '连接',
     retry: '重试',
     hint: '该令牌拥有守护进程的完整访问权限。请仅在从守护进程终端或其二维码打开的页面中输入。',
@@ -100,23 +110,32 @@ function retryAfterMs(response: Response): number | undefined {
 export function StandaloneAuth({
   baseUrl,
   initialToken,
+  initialAddress = baseUrl,
   language = 'en',
   theme = WebShellThemeId.Dark,
+  invalidTarget = false,
+  onChangeTarget = navigateToDaemon,
   children,
 }: {
   baseUrl: string;
   initialToken?: string;
+  initialAddress?: string;
   /** Selects the gate copy. Defaults to English when omitted. */
   language?: WebShellLanguage;
   /** Selects the theme palette the app root will apply after mount. */
   theme?: WebShellTheme;
+  invalidTarget?: boolean;
+  onChangeTarget?: (daemonOrigin: string, token?: string) => void;
   children: (token: string | undefined) => ReactNode;
 }) {
   const copy = COPY[language] ?? COPY.en;
+  const [address, setAddress] = useState(initialAddress);
   const [token, setToken] = useState(initialToken ?? '');
   const [accepted, setAccepted] = useState<{ token?: string }>();
-  const [status, setStatus] = useState(copy.connecting);
-  const [busy, setBusy] = useState(true);
+  const [status, setStatus] = useState(
+    invalidTarget ? copy.invalidAddress : copy.connecting,
+  );
+  const [busy, setBusy] = useState(!invalidTarget);
   const [needsToken, setNeedsToken] = useState(false);
   // Every probe — the first one, a manual retry, and each auto-retry — is one
   // bump of this counter, so exactly one effect run owns the in-flight request
@@ -170,7 +189,7 @@ export function StandaloneAuth({
         });
         if (controllerRef.current !== controller) return;
         if (response.ok) {
-          if (candidate) persistDaemonToken(candidate);
+          persistDaemonToken(candidate, baseUrl);
           setAccepted({ token: candidate || undefined });
         } else if (response.status === 401) {
           setBusy(false);
@@ -231,6 +250,7 @@ export function StandaloneAuth({
   );
 
   useEffect(() => {
+    if (invalidTarget) return undefined;
     void connect(candidateRef.current);
     return () => {
       controllerRef.current?.abort();
@@ -238,9 +258,11 @@ export function StandaloneAuth({
       if (timerRef.current !== null) clearTimeout(timerRef.current);
       timerRef.current = null;
     };
-  }, [connect, attempt]);
+  }, [connect, attempt, invalidTarget]);
 
   if (accepted) return children(accepted.token);
+  const normalizedAddress = getAllowedDaemonOrigin(address.trim());
+  const changingTarget = invalidTarget || normalizedAddress !== baseUrl;
   return (
     <div
       // The generated Tailwind utilities and shadcn tokens are scoped to the
@@ -258,9 +280,11 @@ export function StandaloneAuth({
       <Card className="w-full max-w-md">
         <CardHeader className="items-center text-center">
           <CardTitle className="text-2xl">{copy.heading}</CardTitle>
-          <CardDescription className="font-mono text-xs break-all">
-            {baseUrl}
-          </CardDescription>
+          {!invalidTarget && (
+            <CardDescription className="font-mono text-xs break-all">
+              {baseUrl}
+            </CardDescription>
+          )}
         </CardHeader>
         <CardContent className="flex flex-col gap-5">
           <p
@@ -273,35 +297,56 @@ export function StandaloneAuth({
             className="flex flex-col gap-3"
             onSubmit={(event) => {
               event.preventDefault();
+              if (!normalizedAddress) {
+                setBusy(false);
+                setStatus(copy.invalidAddress);
+                return;
+              }
+              if (changingTarget) {
+                onChangeTarget(normalizedAddress, token.trim());
+                return;
+              }
               operatorProbeRef.current = true;
               candidateRef.current = token.trim();
               setAttempt((n) => n + 1);
             }}
           >
-            {needsToken && (
-              <>
-                <Label htmlFor="daemon-bearer-token" className="sr-only">
-                  {copy.tokenLabel}
-                </Label>
-                <Input
-                  id="daemon-bearer-token"
-                  type="password"
-                  autoComplete="off"
-                  autoFocus
-                  placeholder={copy.tokenLabel}
-                  className="h-11 text-center font-mono text-base tracking-[0.18em]"
-                  value={token}
-                  onChange={(event) => setToken(event.target.value)}
-                />
-              </>
-            )}
+            <Label htmlFor="daemon-address">{copy.addressLabel}</Label>
+            <Input
+              id="daemon-address"
+              type="url"
+              inputMode="url"
+              autoComplete="url"
+              autoFocus={invalidTarget}
+              placeholder="https://daemon.example.com:4170"
+              className="h-11 font-mono"
+              value={address}
+              onChange={(event) => setAddress(event.target.value)}
+            />
+            <Label htmlFor="daemon-bearer-token">{copy.tokenLabel}</Label>
+            <Input
+              id="daemon-bearer-token"
+              type="password"
+              autoComplete="off"
+              autoFocus={needsToken}
+              placeholder={copy.tokenLabel}
+              className="h-11 font-mono text-base tracking-[0.18em]"
+              value={token}
+              onChange={(event) => setToken(event.target.value)}
+            />
             <Button
               type="submit"
               size="lg"
               className="h-11 w-full text-base"
-              disabled={busy}
+              disabled={busy && !changingTarget}
             >
-              {busy ? copy.connecting : needsToken ? copy.connect : copy.retry}
+              {changingTarget
+                ? copy.connect
+                : busy
+                  ? copy.connecting
+                  : needsToken
+                    ? copy.connect
+                    : copy.retry}
             </Button>
           </form>
         </CardContent>

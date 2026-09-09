@@ -23,6 +23,10 @@ import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
 const DAEMON_BASE_URL = getDaemonBaseUrl();
+const REQUESTED_DAEMON_TARGET =
+  new URLSearchParams(window.location.search).get('daemon') || '';
+const INVALID_DAEMON_TARGET =
+  Boolean(REQUESTED_DAEMON_TARGET) && !DAEMON_BASE_URL;
 
 const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu', 'plan'] as const;
 
@@ -127,12 +131,10 @@ function replaceStandaloneSessionUrl(
   url.searchParams.delete('theme');
   url.searchParams.delete('language');
   url.searchParams.delete('lang');
-  // Boot already scrubbed ?token= (dev included), so drop it here too; dev
-  // keeps ?daemon= so a reload still targets the same local daemon.
+  // Boot already scrubbed ?token= (dev included), so drop it here too.
+  // `daemon` is connection identity, not a one-shot preference: keep it so
+  // session navigation and refresh stay on the selected remote daemon.
   url.searchParams.delete('token');
-  if (!import.meta.env.DEV) {
-    url.searchParams.delete('daemon');
-  }
   window.history.replaceState(null, '', url);
 }
 
@@ -250,7 +252,15 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
 }
 
 async function main() {
-  const daemonToken = getDaemonToken() ?? (await waitForDaemonTokenMessage());
+  const baseUrl = DAEMON_BASE_URL || window.location.origin;
+  const storedToken = INVALID_DAEMON_TARGET
+    ? undefined
+    : getDaemonToken(baseUrl);
+  const daemonToken =
+    storedToken ??
+    (!INVALID_DAEMON_TARGET && baseUrl === window.location.origin
+      ? await waitForDaemonTokenMessage()
+      : undefined);
   removeDaemonTokenFromUrl();
 
   const container = document.getElementById('root');
@@ -264,10 +274,12 @@ async function main() {
   ReactDOM.createRoot(container!).render(
     <React.StrictMode>
       <StandaloneAuth
-        baseUrl={DAEMON_BASE_URL || window.location.origin}
+        baseUrl={baseUrl}
         initialToken={daemonToken}
+        initialAddress={REQUESTED_DAEMON_TARGET || baseUrl}
         language={getInitialLanguage()}
         theme={getInitialTheme()}
+        invalidTarget={INVALID_DAEMON_TARGET}
       >
         {(token) => <StandaloneApp daemonToken={token} />}
       </StandaloneAuth>

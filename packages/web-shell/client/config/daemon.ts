@@ -1,3 +1,5 @@
+import { buildSessionPathname } from '../utils/sessionPath';
+
 export function getDaemonBaseUrl(): string {
   if (typeof window === 'undefined') {
     return '';
@@ -8,11 +10,14 @@ export function getDaemonBaseUrl(): string {
 }
 
 function isLoopbackHostname(hostname: string): boolean {
+  const ipv4 = hostname.split('.');
   return (
     hostname === 'localhost' ||
-    hostname === '127.0.0.1' ||
     hostname === '::1' ||
-    hostname === '[::1]'
+    hostname === '[::1]' ||
+    (ipv4.length === 4 &&
+      ipv4[0] === '127' &&
+      ipv4.slice(1).every((part) => /^\d+$/u.test(part) && Number(part) <= 255))
   );
 }
 
@@ -24,41 +29,64 @@ function isLoopbackHostname(hostname: string): boolean {
 export function isLocalDaemon(): boolean {
   if (typeof window === 'undefined') return false;
   const base = getDaemonBaseUrl();
-  const hostname = base ? new URL(base).hostname : window.location.hostname;
-  return isLoopbackHostname(hostname);
+  if (base && base !== window.location.origin) return false;
+  return isLoopbackHostname(window.location.hostname);
 }
 
-let cachedDaemonToken: string | undefined;
+const cachedDaemonTokens = new Map<string, string>();
 const DAEMON_AUTH_MESSAGE_TYPE = 'qwen-daemon-auth';
 const DEFAULT_TOKEN_MESSAGE_TIMEOUT_MS = 2500;
 const DAEMON_TOKEN_STORAGE_KEY = 'qwen-daemon-token';
 
+function daemonTokenStorageKey(baseUrl?: string): string {
+  const pageOrigin = new URL(window.location.href).origin;
+  const daemonOrigin = new URL(
+    baseUrl || getDaemonBaseUrl() || pageOrigin,
+    pageOrigin,
+  ).origin;
+  return daemonOrigin === pageOrigin
+    ? DAEMON_TOKEN_STORAGE_KEY
+    : `${DAEMON_TOKEN_STORAGE_KEY}:${daemonOrigin}`;
+}
+
 // sessionStorage access can throw (privacy modes, storage-disabled
 // embeds); the token flow must degrade to the pre-persistence behavior
 // rather than break page load.
-function readStoredDaemonToken(): string | undefined {
+function readStoredDaemonToken(key: string): string | undefined {
   try {
-    return window.sessionStorage.getItem(DAEMON_TOKEN_STORAGE_KEY) || undefined;
+    return window.sessionStorage.getItem(key) || undefined;
   } catch {
     return undefined;
   }
 }
 
-export function persistDaemonToken(token: string): void {
-  cachedDaemonToken = token;
+export function persistDaemonToken(token: string, baseUrl?: string): void {
+  const key = daemonTokenStorageKey(baseUrl);
+  if (!token) {
+    cachedDaemonTokens.delete(key);
+    try {
+      window.sessionStorage.removeItem(key);
+    } catch {
+      // Storage unavailable; the in-memory copy is already cleared.
+    }
+    return;
+  }
+  cachedDaemonTokens.set(key, token);
   try {
-    window.sessionStorage.setItem(DAEMON_TOKEN_STORAGE_KEY, token);
+    window.sessionStorage.setItem(key, token);
   } catch {
     // Storage unavailable — the token still works for this load via the
     // in-memory cache; a refresh will lose it, matching the old behavior.
   }
 }
 
-export function getDaemonToken(): string | undefined {
-  if (cachedDaemonToken) return cachedDaemonToken;
+export function getDaemonToken(baseUrl?: string): string | undefined {
   if (typeof window === 'undefined') {
     return undefined;
   }
+  const key = daemonTokenStorageKey(baseUrl);
+  const cached = cachedDaemonTokens.get(key);
+  if (cached) return cached;
   // Prefer the URL fragment (#token=) — unlike a ?token= query it is never
   // sent to the server, so it stays out of access logs and Referer headers
   // (this is what `qwen serve --open` now uses). Fall back to ?token= for
@@ -72,13 +100,14 @@ export function getDaemonToken(): string | undefined {
     // Persist per-tab so the token survives navigations that do not carry it.
     // sessionStorage (not localStorage) keeps the token scoped to this tab and
     // cleared when the tab closes.
-    persistDaemonToken(fromUrl);
+    persistDaemonToken(fromUrl, baseUrl);
     return fromUrl;
   }
   // Refresh path: the URL was already cleaned on the first load — fall
   // back to the per-tab persisted copy.
-  cachedDaemonToken = readStoredDaemonToken();
-  return cachedDaemonToken;
+  const stored = readStoredDaemonToken(key);
+  if (stored) cachedDaemonTokens.set(key, stored);
+  return stored;
 }
 
 export function waitForDaemonTokenMessage(
@@ -87,6 +116,8 @@ export function waitForDaemonTokenMessage(
   if (typeof window === 'undefined' || window.parent === window) {
     return Promise.resolve(undefined);
   }
+  const key = daemonTokenStorageKey();
+  if (key !== DAEMON_TOKEN_STORAGE_KEY) return Promise.resolve(undefined);
   return new Promise((resolve) => {
     let settled = false;
     const finish = (token: string | undefined): void => {
@@ -94,7 +125,7 @@ export function waitForDaemonTokenMessage(
       settled = true;
       window.removeEventListener('message', onMessage);
       clearTimeout(timer);
-      cachedDaemonToken = token;
+      if (token) cachedDaemonTokens.set(key, token);
       resolve(token);
     };
     const onMessage = (event: MessageEvent): void => {
@@ -135,26 +166,56 @@ export function removeDaemonTokenFromUrl(): void {
   if (changed) window.history.replaceState(null, '', url);
 }
 
-export function getDaemonAuthHeaders(): HeadersInit | undefined {
-  const token = getDaemonToken();
+export function getDaemonAuthHeaders(
+  baseUrl?: string,
+): HeadersInit | undefined {
+  const token = getDaemonToken(baseUrl);
   return token ? { Authorization: `Bearer ${token}` } : undefined;
 }
 
-function getAllowedDaemonOrigin(raw: string): string {
+export function getAllowedDaemonOrigin(raw: string): string {
   try {
-    const parsed = new URL(raw, window.location.origin);
-    const isHttp = parsed.protocol === 'http:' || parsed.protocol === 'https:';
-    if (!isHttp) return '';
-    if (parsed.origin === window.location.origin) return parsed.origin;
-    if (!isLoopbackHostname(parsed.hostname)) return '';
-    const pagePort =
-      window.location.port ||
-      (window.location.protocol === 'https:' ? '443' : '80');
-    const daemonPort =
-      parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
-    if (daemonPort !== pagePort) return '';
+    const parsed = new URL(raw);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+    if (
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== '/' ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      return '';
+    }
     return parsed.origin;
   } catch {
     return '';
   }
+}
+
+export function buildDaemonConnectionUrl(
+  raw: string,
+  currentHref: string,
+): string | undefined {
+  const daemonOrigin = getAllowedDaemonOrigin(raw);
+  if (!daemonOrigin) return undefined;
+  const url = new URL(currentHref);
+  url.pathname = buildSessionPathname(url.pathname, undefined);
+  url.searchParams.delete('workspace');
+  url.searchParams.delete('context');
+  url.searchParams.delete('token');
+  if (daemonOrigin === url.origin) {
+    url.searchParams.delete('daemon');
+  } else {
+    url.searchParams.set('daemon', daemonOrigin);
+  }
+  url.hash = '';
+  return url.toString();
+}
+
+export function navigateToDaemon(raw: string, token?: string): void {
+  const daemonOrigin = getAllowedDaemonOrigin(raw);
+  const nextUrl = buildDaemonConnectionUrl(raw, window.location.href);
+  if (!daemonOrigin || !nextUrl) return;
+  if (token !== undefined) persistDaemonToken(token.trim(), daemonOrigin);
+  window.location.assign(nextUrl);
 }
