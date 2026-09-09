@@ -126,6 +126,7 @@ describe('built-in channel registry', () => {
       'allowedUsers',
       'groupPolicy',
       'sessionScope',
+      'outputMode',
       'multiSession',
       'instructions',
     ]);
