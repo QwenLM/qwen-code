@@ -1144,9 +1144,7 @@
   color: color-mix(in srgb, var(--agent-blue-500) 95%, var(--foreground));
 }
 
-.sessionRow:hover .sessionMetaSlot,
-.sessionRow:focus-within .sessionMetaSlot,
-.sessionMetaSlot:has(.sessionActionButton:focus-visible),
+.sessionMetaSlot:has(.sessionActions:focus-within),
 .sessionMetaSlot:has([data-state='open']) {
   min-width: var(--session-actions-width, 78px);
 }
@@ -1178,16 +1176,13 @@
   animation: sidebarSpin 0.8s linear infinite;
 }
 
-.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionGitIcon,
+.sessionMetaSlot:has(.sessionActions:focus-within) .sessionGitIcon,
 .sessionMetaSlot:has([data-state='open']) .sessionGitIcon,
-.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionLoading,
+.sessionMetaSlot:has(.sessionActions:focus-within) .sessionLoading,
 .sessionMetaSlot:has([data-state='open']) .sessionLoading,
-.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionAttention,
-.sessionMetaSlot:has([data-state='open']) .sessionAttention {
-  opacity: 0;
-}
-
-.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionSourceIcon,
+.sessionMetaSlot:has(.sessionActions:focus-within) .sessionAttention,
+.sessionMetaSlot:has([data-state='open']) .sessionAttention,
+.sessionMetaSlot:has(.sessionActions:focus-within) .sessionSourceIcon,
 .sessionMetaSlot:has([data-state='open']) .sessionSourceIcon {
   opacity: 0;
 }
@@ -1203,13 +1198,17 @@
   pointer-events: none;
 }
 
-.sessionActions:has(.sessionActionButton:focus-visible),
+.sessionActions:focus-within,
 .sessionActions:has([data-state='open']) {
   opacity: 1;
   pointer-events: auto;
 }
 
 @media (hover: hover) {
+  .sessionRow:hover .sessionMetaSlot {
+    min-width: var(--session-actions-width, 78px);
+  }
+
   .sessionRow:hover:not(.runningSession) .sessionGitIcon,
   .sessionRow:hover:not(.runningSession) .sessionAttention,
   .sessionMetaSlot:hover .sessionGitIcon,
@@ -1225,6 +1224,27 @@
   .sessionRow:hover:not(.runningSession) .sessionActions,
   .sessionMetaSlot:hover .sessionActions {
     opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+@media (hover: none) {
+  .sessionMetaSlot:has(.sessionActions) {
+    min-width: var(--session-actions-width, 78px);
+  }
+
+  .sessionMetaSlot:has(.sessionActions) .sessionGitIcon,
+  .sessionMetaSlot:has(.sessionActions) .sessionLoading,
+  .sessionMetaSlot:has(.sessionActions) .sessionAttention,
+  .sessionMetaSlot:has(.sessionActions) .sessionSourceIcon {
+    opacity: 0;
+  }
+
+  .sessionActions {
+    opacity: 1;
+  }
+
+  .sessionActionButton {
     pointer-events: auto;
   }
 }

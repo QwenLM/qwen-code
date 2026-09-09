@@ -4845,9 +4845,12 @@ describe('WebShellSidebar session source switch', () => {
       ?.querySelector('[data-web-shell-session-title]')
       ?.closest('[role="button"]');
     expect(row).toBeTruthy();
-    expect(
-      row?.querySelector('[data-web-shell-scheduled-task-session]'),
-    ).toBeTruthy();
+    const sourceIcon = row?.querySelector(
+      '[data-web-shell-scheduled-task-session]',
+    );
+    expect(sourceIcon).toBeTruthy();
+    expect(sourceIcon?.closest('[class*="sessionMetaSlot"]')).toBeTruthy();
+    expect(sourceIcon?.closest('[class*="sessionStatusSlot"]')).toBeNull();
   });
 
   it('keeps the scheduled-task marker in the archived row meta slot', async () => {
