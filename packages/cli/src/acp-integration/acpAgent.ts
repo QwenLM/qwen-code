@@ -148,7 +148,7 @@ import {
   listWorkflowSnapshots,
   type TurnResultRecordPayload,
   sessionIdContext,
-  type registerSession as registerSessionType,
+  registerSession,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -330,7 +330,7 @@ import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
-import type { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
@@ -3510,13 +3510,10 @@ class QwenAgent implements Agent {
   private peerMessagingEnabled = false;
   private peerMessagingStart: Promise<PeerMessaging | null> | null = null;
   /**
-   * `registerSession`, once the lazy import above has resolved it. Null
-   * until then: a session published in that window is registered by the
-   * catch-up loop in `startPeerMessaging` rather than by its own
-   * publication, so nothing is lost and nothing waits on the import.
+   * Sessions already given a record. A session is published once, but a
+   * reload can hand the same id back through the same path, and two
+   * records for one session would be two names for it in every listing.
    */
-  private registerSessionRecord: typeof registerSessionType | null = null;
-  /** Sessions already given a record, so the catch-up loop cannot double. */
   private readonly registeredSessions = new Set<string>();
   private inboxAddress: { ipcPath: string; ipcToken: string } | null = null;
   private modelProviderReloadRevision = 0;
@@ -4570,9 +4567,8 @@ class QwenAgent implements Agent {
    * turned cross-session messaging on.
    *
    * Not awaited: binding a socket must not delay the first prompt, and a
-   * session published before it resolves still registers — the catch-up
-   * loop below covers those, and the address is patched into every
-   * record when it arrives (`publishInboxAddress`).
+   * session published before it resolves still registers — the address
+   * is patched into every record when it arrives (`publishInboxAddress`).
    */
   private startPeerMessaging(): void {
     if (this.startupSettings.merged.agents?.crossSessionMessaging !== true) {
@@ -4580,21 +4576,14 @@ class QwenAgent implements Agent {
     }
     if (this.peerMessagingStart) return;
     this.peerMessagingEnabled = true;
+    // Imported statically on purpose. The transport's own imports are all
+    // inside this file's existing static closure, so lazy-loading it buys
+    // nothing — and a dynamic import of the core barrel turns it into a
+    // code-splitting entry, which re-partitions the shared chunks and can
+    // land modules the ACP fast path must not load (iconv-lite's tables)
+    // in a chunk this file then imports statically.
     this.peerMessagingStart = (async () => {
       try {
-        // Imported here rather than at the top of the file: the feature is
-        // off by default, and an ACP process that will never message a
-        // peer should not pay to load the transport, the gate and the
-        // admission meter behind it.
-        const [{ PeerMessaging }, { registerSession }] = await Promise.all([
-          import('../peerMessaging/peer-messaging.js'),
-          import('@qwen-code/qwen-code-core'),
-        ]);
-        this.registerSessionRecord = registerSession;
-        // Sessions published while this was loading have no record yet.
-        for (const [sessionId, session] of this.sessions) {
-          this.registerHostedSession(sessionId, session.getConfig());
-        }
         const messaging = await PeerMessaging.start({
           // Inbound is refused outright, so neither the approval mode nor
           // the parity rule it feeds is ever consulted. Stated rather than
@@ -4651,8 +4640,6 @@ class QwenAgent implements Agent {
     // receive for, and this is also the first moment the agent exists.
     this.startPeerMessaging();
     if (!this.peerMessagingEnabled) return;
-    const registerSession = this.registerSessionRecord;
-    if (!registerSession) return;
     if (this.registeredSessions.has(sessionId)) return;
     this.registeredSessions.add(sessionId);
     config.trackSessionRegistration(

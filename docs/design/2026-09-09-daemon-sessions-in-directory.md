@@ -88,10 +88,16 @@ that can be addressed and never answered.
 
 **Bind on the first session, close on every exit.** The inbox is bound by
 the first session that needs one — an ACP process with no session has
-nothing to advertise — and the transport is imported at that moment
-rather than at startup, so a process that never messages a peer never
-loads it. Closing is registered as exit cleanup and also runs from the
-two teardown methods, because a bare signal reaches neither.
+nothing to advertise. Closing is registered as exit cleanup and also runs
+from the two teardown methods, because a bare signal reaches neither.
+
+The transport is imported statically, on purpose. Its own imports all
+sit inside the agent's existing static closure, so lazy-loading it saves
+nothing; and a dynamic import of the core barrel makes that barrel a
+code-splitting entry, which re-partitions the shared chunks and can land
+modules the ACP fast path must not load (iconv-lite's encoding tables) in
+a chunk the agent then imports statically — the startup bundle closure
+check exists to catch exactly that.
 
 **The process's own settings, captured once.** `this.settings` on the
 agent is re-pointed at whichever session is being handled. Whether to

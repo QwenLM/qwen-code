@@ -107,7 +107,14 @@ const { mockRestoreWorktreeContext, mockWithDaemonSpan } = vi.hoisted(() => {
   };
 });
 
+// The agent imports the peer-messaging transport statically; its own core
+// imports would reach past this suite's exhaustive core mock, and nothing
+// here turns messaging on.
+vi.mock('../peerMessaging/peer-messaging.js', () => ({
+  PeerMessaging: { start: vi.fn() },
+}));
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  registerSession: vi.fn(),
   createDebugLogger: () => ({
     debug: vi.fn(),
     error: vi.fn(),
