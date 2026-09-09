@@ -624,6 +624,79 @@ describe('AcpConnection child exit cleanup', () => {
     }
   });
 
+  it('a re-connected replacement keeps the superseded connection muted', async () => {
+    // Every other supersede test drives the gate through disconnect(), which
+    // nulls this.child and this.sdkConnection together, so the captured
+    // identity predicate (`this.sdkConnection !== wiredConnection`) and a
+    // weaker `!this.child` always agree. A real re-connect() installs a
+    // replacement child and a fresh sdkConnection while the old connection's
+    // stdout is still live — this.child is truthy again, so a gate weakened to
+    // `!this.child` would resume dispatching the retired connection's
+    // callbacks. This case pins the stronger predicate.
+    try {
+      const oldChild = createMockChild({
+        stdout: new PassThrough(),
+        stdin: new PassThrough(),
+        on: vi.fn(),
+      });
+      const newChild = createMockChild({
+        stdout: new PassThrough(),
+        stdin: new PassThrough(),
+        on: vi.fn(),
+      });
+      spawnMock.mockReset();
+      spawnMock.mockReturnValueOnce(oldChild).mockReturnValueOnce(newChild);
+
+      const conn = new AcpConnection() as unknown as AcpConnectionInternal & {
+        connect: (cliEntryPath: string) => Promise<void>;
+        onSessionUpdate: (data: unknown) => void;
+        fileHandler: {
+          handleWriteTextFile: (request: unknown) => Promise<unknown>;
+        };
+      };
+      conn.onSessionUpdate = vi.fn();
+      const writeSpy = vi
+        .spyOn(conn.fileHandler, 'handleWriteTextFile')
+        .mockResolvedValue({});
+
+      // First connect: capture the old client before it is superseded.
+      const first = conn.connect(process.execPath);
+      await vi.advanceTimersByTimeAsync(1000);
+      await first;
+      const oldClient = sdkClientFactory.factory?.(null);
+
+      // Re-connect: disconnect() retires the old child, then a replacement
+      // child and a fresh sdkConnection are installed while the old stdout is
+      // still dispatching.
+      const second = conn.connect(process.execPath);
+      await vi.advanceTimersByTimeAsync(1000);
+      await second;
+
+      expect(conn.child).toBe(newChild);
+
+      const writeTextFile = (
+        oldClient as unknown as {
+          writeTextFile: (request: unknown) => Promise<unknown>;
+        }
+      ).writeTextFile;
+      const sessionUpdate = (
+        oldClient as unknown as {
+          sessionUpdate: (notification: unknown) => Promise<void>;
+        }
+      ).sessionUpdate;
+
+      await expect(
+        writeTextFile({ path: '/tmp/x', content: 'x', sessionId: 's' }),
+      ).rejects.toBeInstanceOf(RequestError);
+      expect(writeSpy).not.toHaveBeenCalled();
+
+      await sessionUpdate({});
+      expect(conn.onSessionUpdate).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not stamp a superseded connection with a stale session id', async () => {
     // newSession/loadSession write this.sessionId only after awaiting the
     // connection they captured. A response from a retired CLI can resolve

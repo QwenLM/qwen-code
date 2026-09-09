@@ -155,9 +155,12 @@ export class AcpConnection {
       env,
       shell: false,
       // A detached child becomes a process-group leader on POSIX, so the
-      // disconnect() escalation can signal the whole group and reap the PTYs,
-      // ConPTY hosts and MCP children the CLI is tracking. Windows has no
-      // process group to signal — its tree kill goes through taskkill instead.
+      // disconnect() escalation can signal the whole group and reach the CLI
+      // root and its non-detached MCP stdio children. It does NOT reach
+      // descendants that call setsid() — detached hook supervisors and
+      // monitors, and node-pty sessions — so those survive the escalation.
+      // Windows has no process group to signal — its tree kill goes through
+      // taskkill instead.
       detached: process.platform !== 'win32',
     };
 
