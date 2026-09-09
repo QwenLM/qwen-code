@@ -7109,6 +7109,111 @@ describe('Session', () => {
       expect(mockSettings.setValue).not.toHaveBeenCalled();
     });
 
+    it.each(['max', 'none'] as const)(
+      'preserves global GPT %s across model switches and reloads',
+      async (selection) => {
+        const state = installReasoningPreference(selection, { trusted: true });
+        const modelId = selection === 'max' ? 'gpt-5.4' : 'gpt-6-astra';
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+        });
+        session.reloadReasoningSelection();
+        expect(state.user.settings.model.reasoningEffort).toBe(selection);
+        expect(state.workspace.settings.model.reasoningEffort).toBe(selection);
+        expect(state.live.reasoning).toEqual(
+          selection === 'max' ? { effort: 'max' } : undefined,
+        );
+        expect(state.rebuildable.reasoning).toEqual(state.live.reasoning);
+        expect(
+          vi
+            .mocked(mockSettings.setValue)
+            .mock.calls.filter((call) => call[1] === 'model.reasoningEffort'),
+        ).toEqual([]);
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `gpt-5.6-sol(${AuthType.USE_OPENAI})`,
+        });
+        expect(state.live.reasoning).toEqual(
+          selection === 'max' ? { effort: 'max' } : false,
+        );
+        expect(state.rebuildable.reasoning).toEqual(state.live.reasoning);
+      },
+    );
+
+    it.each([
+      ['gpt-6-astra', false, undefined],
+      ['gpt-6-astra', true, undefined],
+      ['gpt-5', false, undefined],
+      ['gpt-6-astra', false, false],
+    ] as const)(
+      'reconciles saved off for %s with configured toggleOnly=%s, canDisable=%s',
+      async (modelId, toggleOnly, canDisable) => {
+        const state = installReasoningPreference('none', { trusted: true });
+        Object.assign(mockConfig, {
+          getResolvedModelConfig: vi.fn(() => ({
+            generationConfig: {},
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                ...(toggleOnly
+                  ? { toggleOnly: true }
+                  : { efforts: ['low', 'high'], defaultEffort: 'high' }),
+                disableField: 'reasoning_effort',
+                ...(canDisable === false ? { canDisable } : {}),
+              },
+            },
+          })),
+        });
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+        });
+        session.reloadReasoningSelection();
+        for (const scope of [state.user, state.workspace]) {
+          for (const settings of [scope.settings, scope.originalSettings]) {
+            expect(settings.model).toEqual(
+              canDisable === false ? {} : { reasoningEffort: 'none' },
+            );
+          }
+        }
+        expect(state.live.reasoning).toBeUndefined();
+        expect(state.rebuildable.reasoning).toBeUndefined();
+        expect(
+          vi
+            .mocked(mockSettings.setValue)
+            .mock.calls.filter((call) => call[1] === 'model.reasoningEffort'),
+        ).toHaveLength(canDisable === false ? 2 : 0);
+      },
+    );
+
+    it('reconciles a GPT preference against explicit configured capabilities', async () => {
+      const state = installReasoningPreference('max', { trusted: true });
+      Object.assign(mockConfig, {
+        getResolvedModelConfig: vi.fn(() => ({
+          generationConfig: {},
+          capabilities: {
+            reasoning: {
+              thinking: true,
+              efforts: ['low', 'high'],
+              defaultEffort: 'high',
+              disableField: 'reasoning_effort',
+            },
+          },
+        })),
+      });
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `gpt-5.6-sol(${AuthType.USE_OPENAI})`,
+      });
+      expect(state.user.settings.model).not.toHaveProperty('reasoningEffort');
+      expect(state.workspace.settings.model).not.toHaveProperty(
+        'reasoningEffort',
+      );
+      expect(state.live.reasoning).toBeUndefined();
+      expect(state.rebuildable.reasoning).toBeUndefined();
+    });
+
     it('deletes an incompatible max preference from both writable scopes without downgrading it', async () => {
       const state = installReasoningPreference('max', { trusted: true });
 
@@ -9529,6 +9634,64 @@ describe('Session', () => {
         originatorClientId: 'client-1',
       };
 
+      it.each([false, true])(
+        'records the trusted identity before streaming (display=%s)',
+        async (withDisplayText) => {
+          let currentPromptId = '';
+          mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+            expect(
+              mockChatRecordingService.recordUserMessage,
+            ).toHaveBeenLastCalledWith(
+              'same prompt',
+              undefined,
+              withDisplayText
+                ? { displayText: 'visible prompt', hookContext: '' }
+                : undefined,
+              currentPromptId,
+            );
+            return Promise.resolve(createEmptyStream());
+          });
+          for (const promptId of ['daemon-first', 'daemon-second']) {
+            currentPromptId = promptId;
+            await session.prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt: [{ type: 'text', text: 'same prompt' }],
+                _meta: {
+                  promptId: 'client-supplied-id',
+                  ...(withDisplayText
+                    ? { 'qwen.daemon.promptDisplayText': 'visible prompt' }
+                    : {}),
+                },
+              },
+              { ...trustedContext, promptId },
+            );
+          }
+          expect(
+            mockChatRecordingService.recordUserMessage.mock.calls.map(
+              (args) => args[3],
+            ),
+          ).toEqual(['daemon-first', 'daemon-second']);
+        },
+      );
+
+      it('does not persist a client-supplied identity without a trusted context', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'untrusted identity' }],
+          _meta: { promptId: 'client-supplied-id' },
+        });
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          'untrusted identity',
+          undefined,
+          undefined,
+          undefined,
+        );
+      });
+
       it('records a completed turn_result for a daemon-admitted prompt', async () => {
         mockChat.sendMessageStream = vi
           .fn()
@@ -10519,6 +10682,9 @@ describe('Session', () => {
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
         '原始语音文本',
+        undefined,
+        undefined,
+        trustedContext.promptId,
       );
       expect(textParts(firstSentMessage())).toEqual([
         '<realtime_delegation>trusted model input</realtime_delegation>',
@@ -10569,6 +10735,7 @@ describe('Session', () => {
           hookContext: '',
           attachmentReferences: [imageReference, fileReference],
         },
+        undefined,
       );
     });
 
@@ -10595,6 +10762,7 @@ describe('Session', () => {
         'describe these',
         undefined,
         expect.objectContaining({ attachmentReferences }),
+        undefined,
       );
     });
 
@@ -10623,6 +10791,7 @@ describe('Session', () => {
         expect.objectContaining({
           attachmentReferences: [attachmentReference],
         }),
+        undefined,
       );
     });
 
@@ -13751,6 +13920,9 @@ describe('Session', () => {
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
         '3',
+        undefined,
+        undefined,
+        undefined,
       );
       expect(mockLlmClient.tryCompressChat).toHaveBeenCalledWith(
         'test-session-id########3',
@@ -13779,6 +13951,7 @@ describe('Session', () => {
         'internal channel instructions\n\nhello',
         undefined,
         { displayText: 'hello', hookContext: '' },
+        undefined,
       );
       expect(
         agentTelemetry.addAgentInputMessageAttributes,
@@ -17144,23 +17317,37 @@ describe('Session', () => {
       });
     });
 
-    describe('shell heartbeat forwarding', () => {
-      const runShellToolCall = async (
+    describe('tool progress forwarding', () => {
+      const runProgressToolCall = async (
         execute: ReturnType<typeof vi.fn>,
+        toolName = 'run_shell_command',
+        requiresApproval = false,
       ): Promise<void> => {
         const tool = {
-          name: 'run_shell_command',
+          name: toolName,
           kind: core.Kind.Execute,
           build: vi.fn().mockReturnValue({
             params: { command: 'quiet-soak-test' },
-            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDefaultPermission: vi
+              .fn()
+              .mockResolvedValue(requiresApproval ? 'ask' : 'allow'),
+            getConfirmationDetails: vi.fn().mockResolvedValue({
+              type: 'info',
+              title: 'Launch agent?',
+              prompt: 'Review changes',
+              onConfirm: vi.fn(),
+            }),
             getDescription: vi.fn().mockReturnValue('quiet-soak-test'),
             toolLocations: vi.fn().mockReturnValue([]),
             execute,
           }),
         };
         mockToolRegistry.getTool.mockReturnValue(tool);
-        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(
+            requiresApproval ? ApprovalMode.DEFAULT : ApprovalMode.YOLO,
+          );
 
         await (
           session as unknown as {
@@ -17180,7 +17367,7 @@ describe('Session', () => {
         ).runToolCalls(
           new AbortController().signal,
           'prompt-heartbeat',
-          [{ id: 'shell_hb_1', name: 'run_shell_command', args: {} }],
+          [{ id: 'shell_hb_1', name: toolName, args: {} }],
           {
             totalToolCalls: 0,
             invalidToolParamErrors: new Map(),
@@ -17203,6 +17390,115 @@ describe('Session', () => {
                 ?.shellProgress !== undefined,
           );
 
+      it('forwards agent readiness before execution settles, once, and ignores late updates', async () => {
+        let emit: ((chunk: unknown) => void) | undefined;
+        let finish!: () => void;
+        const finished = new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        const execute = vi.fn(
+          async (
+            _signal: AbortSignal,
+            updateOutput?: (chunk: unknown) => void,
+          ) => {
+            emit = updateOutput;
+            await finished;
+            return { llmContent: 'done', returnDisplay: 'done' };
+          },
+        );
+        const updates = () =>
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.map(([params]) => params.update)
+            .filter(
+              (update) => update._meta?.['subagentSessionReady'] === true,
+            );
+        const running = runProgressToolCall(execute, 'agent');
+        try {
+          await vi.waitFor(() => expect(emit).toBeDefined());
+          const progress = {
+            type: 'task_execution',
+            subagentSessionReady: true,
+          };
+          emit?.({ ...progress, subagentSessionReady: false });
+          expect(updates()).toHaveLength(0);
+          emit?.(progress);
+          emit?.(progress);
+          await vi.waitFor(() => expect(updates()).toHaveLength(1));
+          expect(updates()[0]).toMatchObject({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'shell_hb_1',
+            _meta: { toolName: 'agent', subagentSessionReady: true },
+          });
+          expect(updates()[0]).not.toHaveProperty('rawOutput');
+        } finally {
+          finish();
+          await running;
+        }
+        emit?.({ type: 'task_execution', subagentSessionReady: true });
+        expect(updates()).toHaveLength(1);
+      });
+
+      it('starts an approved agent as creating before execution without preparation frames', async () => {
+        vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        });
+        let emit: ((chunk: unknown) => void) | undefined;
+        let finish!: () => void;
+        const finished = new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        const execute = vi.fn(
+          async (
+            _signal: AbortSignal,
+            updateOutput?: (chunk: unknown) => void,
+          ) => {
+            emit = updateOutput;
+            await finished;
+            return { llmContent: 'done', returnDisplay: 'done' };
+          },
+        );
+        const readinessUpdates = () =>
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.map(([params]) => params.update)
+            .filter(
+              (update) =>
+                typeof update._meta?.['subagentSessionReady'] === 'boolean',
+            );
+        const running = runProgressToolCall(execute, 'agent', true);
+        try {
+          await vi.waitFor(() => expect(emit).toBeDefined());
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+          expect(readinessUpdates()).toEqual([
+            expect.objectContaining({
+              sessionUpdate: 'tool_call',
+              toolCallId: 'shell_hb_1',
+              status: 'in_progress',
+              _meta: expect.objectContaining({ subagentSessionReady: false }),
+            }),
+          ]);
+          const updates = vi.mocked(mockClient.sessionUpdate).mock;
+          const startIndex = updates.calls.findIndex(
+            ([params]) =>
+              params.update._meta?.['subagentSessionReady'] === false,
+          );
+          expect(updates.invocationCallOrder[startIndex]).toBeLessThan(
+            execute.mock.invocationCallOrder[0],
+          );
+          emit?.({ type: 'task_execution', subagentSessionReady: true });
+          await vi.waitFor(() => expect(readinessUpdates()).toHaveLength(2));
+          expect(readinessUpdates()[1]).toMatchObject({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'shell_hb_1',
+            _meta: { toolName: 'agent', subagentSessionReady: true },
+          });
+        } finally {
+          finish();
+          await running;
+        }
+      });
+
       it('forwards shell heartbeats as meta-only in_progress updates', async () => {
         const heartbeat = {
           type: 'shell_progress' as const,
@@ -17221,7 +17517,7 @@ describe('Session', () => {
           },
         );
 
-        await runShellToolCall(execute);
+        await runProgressToolCall(execute);
 
         const updates = heartbeatUpdates();
         expect(updates).toHaveLength(1);
@@ -17250,7 +17546,7 @@ describe('Session', () => {
           },
         );
 
-        await runShellToolCall(execute);
+        await runProgressToolCall(execute);
         expect(heartbeatUpdates()).toHaveLength(0);
 
         // A heartbeat tick racing the settle path must not regress the
@@ -17280,7 +17576,7 @@ describe('Session', () => {
           },
         );
 
-        await runShellToolCall(execute);
+        await runProgressToolCall(execute);
 
         const spanCall = endSpanSpy.mock.calls.find(
           ([, meta]) =>
@@ -24582,6 +24878,9 @@ describe('Session', () => {
         expect(finishedSpy).toHaveBeenCalledTimes(1);
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           '/btw question',
+          undefined,
+          undefined,
+          undefined,
         );
         expect(
           mockChatRecordingService.recordSlashCommand,
@@ -24679,12 +24978,24 @@ describe('Session', () => {
         });
         mockChatRecordingService.recordUserMessage.mockClear();
 
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/advisor check my work' }],
-        });
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: '/advisor check my work' }],
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-advisor',
+          },
+        );
 
-        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalled();
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          '/advisor check my work',
+          undefined,
+          undefined,
+          'daemon-advisor',
+        );
       });
 
       it.each([
@@ -27616,6 +27927,8 @@ describe('Session', () => {
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           'hello',
           permit,
+          undefined,
+          undefined,
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
       });
