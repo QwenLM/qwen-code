@@ -23,7 +23,7 @@ import './styles/standalone.css';
 
 const DAEMON_BASE_URL = getDaemonBaseUrl();
 
-const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu'] as const;
+const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu', 'plan'] as const;
 
 const LANGUAGE_STORAGE_KEY = 'qwen-code-web-shell-language';
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';

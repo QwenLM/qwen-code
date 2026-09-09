@@ -5542,6 +5542,27 @@ describe('DaemonClient', () => {
   });
 
   describe('setSessionApprovalMode (#4175 Wave 4 PR 17)', () => {
+    it.each([true, false])(
+      'forwards explicit Plan workflow state %s alongside execution permission',
+      async (planMode) => {
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, {
+            sessionId: 's-1',
+            mode: planMode ? 'plan' : 'yolo',
+            ...(planMode ? { planExecutionMode: 'yolo' } : {}),
+            previous: 'default',
+            persisted: false,
+          }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        const result = await client.setSessionApprovalMode('s-1', 'yolo', {
+          planMode,
+        });
+        expect(JSON.parse(calls[0]!.body!)).toEqual({ mode: 'yolo', planMode });
+        expect(result.planExecutionMode).toBe(planMode ? 'yolo' : undefined);
+      },
+    );
+
     it('POSTs the mode and returns the typed result', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {
