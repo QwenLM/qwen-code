@@ -609,6 +609,42 @@ export interface BindRunSessionInput {
   usageBaselineTokens?: number;
 }
 
+/**
+ * Name, on the claimed run, the session the port is about to create.
+ *
+ * The full `bindRunSession` below can only run after `start` returns, because
+ * it also records the transcript offset and usage baseline the runtime reports.
+ * Session creation happens inside `start`, though — and creation is where an
+ * `sourceType: agent` claim gets checked against the store. So the id is
+ * written here first, under the same claimed-attempt guard, and `bindRunSession`
+ * confirms it afterwards along with everything else it learned.
+ *
+ * Narrower than `bindRunSession` on purpose: it touches `sessionId` only, so a
+ * start that then fails leaves no half-written delivery accounting behind.
+ */
+export async function reserveRunSession(
+  projectRoot: string,
+  input: { threadId: string; runId: string; attempt: number; sessionId: string },
+): Promise<void> {
+  await withAgentStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(input.threadId);
+    if (!thread) throw new Error(`No thread with id "${input.threadId}".`);
+    const target = thread.runs.find((run) => run.id === input.runId);
+    if (
+      !target ||
+      target.status !== 'running' ||
+      target.attempts !== input.attempt
+    ) {
+      throw new Error(
+        `Run "${input.runId}" is not the claimed attempt on thread "${input.threadId}".`,
+      );
+    }
+    if (target.sessionId === input.sessionId) return;
+    target.sessionId = input.sessionId;
+    await transaction.writeThread(thread);
+  });
+}
+
 export async function bindRunSession(
   projectRoot: string,
   input: BindRunSessionInput,

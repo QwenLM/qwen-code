@@ -40,6 +40,7 @@ import {
   postMessageInTransaction,
   requeueRun,
   releaseRunClaim,
+  reserveRunSession,
   SYSTEM_AUTHOR_ID,
   upsertRunUsage,
 } from './thread-actions.js';
@@ -151,6 +152,25 @@ export interface AgentDispatchPort {
   totalTokens?(target: AgentSessionTarget): Promise<number | undefined>;
   /** Definition content hash, when the port can supply one (§9.4). */
   definitionVersion?(agent: WorkspaceAgent): Promise<string | undefined>;
+  /**
+   * The session id `start` will use, asked before it is used.
+   *
+   * The dispatcher records this on the claimed run *before* starting, so that
+   * by the time the runtime creates the session, the store already names it.
+   * That is what lets session creation authorize an `sourceType: agent` claim
+   * by looking the session up (`findAgentSessionBinding`) instead of trusting
+   * the caller. Without the reservation the first turn of every thread would
+   * be refused: `bindRunSession` runs after `start`, so at creation time no run
+   * would name the session yet.
+   *
+   * Ports that cannot predict the id return undefined and simply do not get
+   * the pre-binding.
+   */
+  plannedSessionId?(input: {
+    agent: WorkspaceAgent;
+    threadId: string;
+    sessionId?: string;
+  }): string | undefined;
 }
 
 export type DispatchResultKind =
@@ -815,6 +835,25 @@ export async function dispatchOnce(
       roster: agents,
       ...(definitionVersion ? { definitionVersion } : {}),
     });
+
+    // Reserve the session id before the port creates it. Session creation
+    // authorizes an `sourceType: agent` claim by finding a live run that names
+    // the session; `bindRunSession` below only runs once `start` has returned,
+    // so without this the first turn on every thread would be refused by the
+    // check meant to keep other callers out.
+    const plannedSessionId = port.plannedSessionId?.({
+      agent,
+      threadId: thread.id,
+      ...(sessionId ? { sessionId } : {}),
+    });
+    if (plannedSessionId) {
+      await reserveRunSession(projectRoot, {
+        threadId: thread.id,
+        runId: run.id,
+        attempt: claimed.run.attempts,
+        sessionId: plannedSessionId,
+      });
+    }
 
     const result = await port.start({
       action,

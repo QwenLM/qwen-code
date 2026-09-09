@@ -1116,6 +1116,11 @@ export interface ConfigParameters {
   /** Opt-in flag for the built-in `todo_write` tool. */
   todoWriteEnabled?: boolean;
   agentTeamEnabled?: boolean;
+  /**
+   * Opt-in for persistent workspace Agents collaborating on shared threads.
+   * Separate from `agentTeamEnabled`: neither implies the other.
+   */
+  agentCollaborationEnabled?: boolean;
   workflowsEnabled?: boolean;
   /** Enable the opt-in ACP/Web Shell Session Workflow gate. */
   sessionWorkflowEnabled?: boolean;
@@ -2445,6 +2450,7 @@ export class Config {
   private readonly lsToolEnabled: boolean = false;
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
+  private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private readonly artifactAutoOpen: boolean = true;
   private readonly artifactPublisher: 'local' | 'host' | 'oss' = 'local';
@@ -2778,6 +2784,7 @@ export class Config {
     this.lsToolEnabled = params.lsToolEnabled ?? false;
     this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
+    this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
     this.artifactPublisher = params.artifactPublisher ?? 'local';
@@ -7878,6 +7885,20 @@ export class Config {
     return this.agentTeamEnabled;
   }
 
+  /**
+   * Whether persistent workspace Agents may collaborate on shared threads.
+   *
+   * Independent of {@link isAgentTeamEnabled}: neither flag implies the other,
+   * and enabling this one permits collaboration without opening any Agent to
+   * an outside caller — that stays a separate, explicit act.
+   */
+  isAgentCollaborationEnabled(): boolean {
+    if (process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1') {
+      return true;
+    }
+    return this.agentCollaborationEnabled;
+  }
+
   isArtifactEnabled(): boolean {
     // Publishing writes outside the project and opens a browser, so it is
     // limited to interactive, non-SDK sessions. QWEN_CODE_DISABLE_ARTIFACT
@@ -9445,7 +9466,10 @@ export class Config {
   }
 
   getToolInvocationGuard(): ToolInvocationGuard | undefined {
-    return this.sessionSourceType === 'agent'
+    // Same gate as the tool registry above, so there is one source of truth
+    // for whether this session is a collaboration execution context.
+    return this.isAgentCollaborationEnabled() &&
+      this.sessionSourceType === 'agent'
       ? createAgentToolInvocationGuard(
           this.toolInvocationGuard,
           this.workspaceAgentExecutionAllowedTools,
@@ -9849,7 +9873,26 @@ export class Config {
     // shape and permission gating in sync between the two paths.
     await registerStructuredOutputIfRequested();
 
-    if (options?.forSubAgent || this.sessionSourceType === 'agent') {
+    // The six thread tools are the collaboration surface, so they are gated
+    // on the collaboration opt-in — not merely on being a subagent or on a
+    // session calling itself an agent. `sourceType` is attribution, not
+    // authorization: a client can set it when creating a session, so the
+    // opt-in, plus the server-binding check the dispatcher applies, are what
+    // decide whether these tools exist. The flag alone is not enough.
+    //
+    // Deliberately NOT `|| options?.forSubAgent`. A subagent runs on a
+    // `deriveConfig` child, and that is `Object.create(parent)`, so an agent's
+    // own subagent reads `sourceType === 'agent'` straight off the prototype
+    // chain and lands here anyway. Adding `forSubAgent` only widened the gate
+    // to subagents of *ordinary* conversations, which have no agent run frame
+    // — every one of these tools would have thrown "requires an active agent
+    // run context" on first use. Observed both ways with the six-combination
+    // probe: dropping the clause takes the plain-subagent row from six tools
+    // to zero and leaves the agent-subagent row at six.
+    if (
+      this.isAgentCollaborationEnabled() &&
+      this.sessionSourceType === 'agent'
+    ) {
       await registerLazy(ToolNames.THREAD_POST, async () => {
         const { ThreadPostTool } = await import('../tools/thread-tools.js');
         return new ThreadPostTool(this);

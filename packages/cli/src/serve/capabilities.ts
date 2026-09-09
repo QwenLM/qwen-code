@@ -118,6 +118,14 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // definitions. Built-in / extension agents stay read-only.
   workspace_agents: { since: 'v1' },
   workspace_agent_generate: { since: 'v1' },
+  // Persistent workspace Agents collaborating on shared task threads
+  // (`/workspaces/:workspace/agent/*`). Conditional on the
+  // `experimental.agentCollaboration` opt-in, resolved once at daemon
+  // startup: when it is off the routes are never mounted, so a client that
+  // sees this tag absent must not render the collaboration surface rather
+  // than render it and let the calls 404. Distinct from `workspace_agents`
+  // above, which is unconditional subagent-definition CRUD.
+  agent_collaboration_v1: { since: 'v1' },
   workspace_env: { since: 'v1' },
   workspace_preflight: { since: 'v1' },
   session_context: { since: 'v1' },
@@ -515,6 +523,12 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
  */
 export interface AdvertiseFeatureToggles {
   requireAuth?: boolean;
+  /**
+   * Whether the daemon mounted the workspace-agent collaboration routes
+   * (`agent_collaboration_v1`). Resolved from `experimental.agentCollaboration`
+   * once at daemon startup, so it does not change over a daemon's lifetime.
+   */
+  agentCollaborationEnabled?: boolean;
   mcpPoolActive?: boolean;
   externalToolGuardActive?: boolean;
   allowOriginActive?: boolean;
@@ -608,6 +622,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
   ['require_auth', (toggles) => toggles.requireAuth === true],
+  [
+    'agent_collaboration_v1',
+    (toggles) => toggles.agentCollaborationEnabled === true,
+  ],
   [
     'standalone_sessions_v1',
     (toggles) => toggles.standaloneSessionsAvailable === true,

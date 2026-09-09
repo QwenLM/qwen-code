@@ -1007,6 +1007,13 @@ export function createServeApp(
     }
     return () => guard.assertOpen();
   };
+  // Resolved once, below, from the settings read at daemon startup — not per
+  // request and not per session. The collaboration surface includes work no
+  // session owns: a recovery scan, a 5s dispatch timer and the Host transport
+  // routes. A per-session read cannot govern those, so the setting carries
+  // `requiresRestart: true` and this value is fixed for the daemon's lifetime.
+  // `agentTeamEnabled` reads per session; this one deliberately does not.
+  let agentCollaborationEnabled = false;
   let standaloneSessionsAvailable = false;
   const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
     createServeFeatures({
@@ -1061,6 +1068,7 @@ export function createServeApp(
       sessionShellCommandEnabled,
       multiWorkspaceSessionsEnabled: () =>
         workspaceRegistry.listEntries().length > 1,
+      agentCollaborationEnabled: () => agentCollaborationEnabled,
       dynamicWorkspaceRegistrationAvailable:
         deps.createWorkspaceRuntime !== undefined,
       persistentWorkspaceRegistrationAvailable:
@@ -1416,6 +1424,13 @@ export function createServeApp(
       return undefined;
     }
   })();
+  // Read from the same boot snapshot as Live Voice. The env override matches
+  // `Config.isAgentCollaborationEnabled` so a daemon and the sessions it hosts
+  // cannot disagree about whether the feature is on.
+  agentCollaborationEnabled =
+    process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1' ||
+    liveSettingsAtBoot?.experimental?.agentCollaboration === true;
+
   const liveConfigAtBoot = liveSettingsAtBoot
     ? readLiveVoiceConfiguration(liveSettingsAtBoot)
     : undefined;
@@ -2096,7 +2111,12 @@ export function createServeApp(
     });
   }
 
-  registerAgentHostTransportRoutes(app, workspaceRegistry);
+  // Same opt-in. These routes carry Host enrollment and heartbeat; that they
+  // authenticate is not a substitute for the experiment gate, since an
+  // enrolled Host is exactly the outbound execution path the opt-in governs.
+  if (agentCollaborationEnabled) {
+    registerAgentHostTransportRoutes(app, workspaceRegistry);
+  }
 
   // Credentials are a listener-scoped set, not one token: while Local Control
   // is on, the LAN listener accepts a revocable pairing token and rejects the
@@ -3128,13 +3148,22 @@ export function createServeApp(
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
 
-  registerWorkspaceAgentRoutes(app, {
-    workspaceRegistry,
-    mutate,
-    ...(deps.deliverChannelMessage
-      ? { deliverChannelMessage: deps.deliverChannelMessage }
-      : {}),
-  });
+  // Gated on the opt-in, and gated by *not registering* rather than by
+  // refusing inside the handlers: `registerWorkspaceAgentRoutes` runs a
+  // `recover()` sweep and arms a 5s interval as a side effect of registration,
+  // so a handler-level refusal would still leave the scanner reading
+  // collaboration storage and re-dispatching booked runs on a daemon whose
+  // operator never opted in. Skipping the call leaves the routes 404, which is
+  // also what the absent `agent_collaboration_v1` capability tells clients.
+  if (agentCollaborationEnabled) {
+    registerWorkspaceAgentRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      ...(deps.deliverChannelMessage
+        ? { deliverChannelMessage: deps.deliverChannelMessage }
+        : {}),
+    });
+  }
 
   // The same CRUD surface, workspace-qualified, so a multi-workspace Web Shell
   // manages every registered project's schedule against that project's own cron

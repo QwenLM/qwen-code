@@ -43,6 +43,7 @@ export * as view from '${repo}/packages/web-shell/client/components/workspace-ag
 export { buildAgentToolConfig, classifyAgentTool, createAgentToolInvocationGuard, THREAD_TOOL_NAMES } from '${repo}/${src}/capability.js';
 export { outstandingCloseObligations, acknowledgeCloseObligations } from '${repo}/${src}/thread-status.js';
 export { resolveAgentPersona } from '${repo}/${src}/persona.js';
+export { findAgentSessionBinding } from '${repo}/${src}/session-binding.js';
 export { deleteThread, enqueueThreadEvent } from '${repo}/${src}/store.js';
 export { ToolNames } from '${repo}/packages/core/src/tools/tool-names.js';
 `,
@@ -1929,6 +1930,106 @@ ok(
   'concurrent roster writes all land, none overwrite each other',
   (await M.readWorkspaceAgents(ROOT)).length === rosterBefore + many,
   `${rosterBefore} -> ${(await M.readWorkspaceAgents(ROOT)).length}`,
+);
+
+console.log('\n27. server binding: the store names the session before it exists');
+// Session creation is where an `sourceType: agent` claim gets checked, and the
+// check is "some live run names this session". `bindRunSession` only runs after
+// `start` returns, so unless the id is reserved first, the very first turn of
+// every thread refuses itself. Assert the ordering from inside `start`, which
+// is exactly where the runtime creates the session.
+const bind1 = await startFor('Binding order');
+const plannedId = 'sess-planned-1';
+let namedAtStart = null;
+let bindingAtStart = null;
+await M.dispatchOnce(ROOT, {
+  inspect: async () => ({ kind: 'absent' }),
+  plannedSessionId: () => plannedId,
+  cancel: async () => true,
+  start: async () => {
+    const run = (await M.readThread(ROOT, bind1.th.id)).runs.find(
+      (r) => r.id === bind1.runId,
+    );
+    namedAtStart = run?.sessionId ?? null;
+    bindingAtStart = await M.findAgentSessionBinding(
+      ROOT,
+      plannedId,
+      bind1.agentId,
+    );
+    return { status: 'started', sessionId: plannedId, consumedOnStart: true };
+  },
+});
+ok(
+  'the run already names the session by the time start() runs',
+  namedAtStart === plannedId,
+  String(namedAtStart),
+);
+ok(
+  'so the binding lookup a session-creation check makes already succeeds',
+  bindingAtStart?.runId === bind1.runId && bindingAtStart?.threadId === bind1.th.id,
+  JSON.stringify(bindingAtStart),
+);
+ok(
+  'a session no run names has no binding',
+  (await M.findAgentSessionBinding(ROOT, 'sess-forged', bind1.agentId)) ===
+    undefined,
+);
+ok(
+  'the right session under the wrong agent has no binding',
+  (await M.findAgentSessionBinding(ROOT, plannedId, 'ag_someone_else')) ===
+    undefined,
+);
+ok(
+  'a session with no id at all has no binding',
+  (await M.findAgentSessionBinding(ROOT, undefined, bind1.agentId)) === undefined,
+);
+
+// A started run stays live, which is the whole point: its session is being
+// dispatched right now, so the binding has to hold for the turns that follow.
+const bind1Run = (await M.readThread(ROOT, bind1.th.id)).runs.find(
+  (r) => r.id === bind1.runId,
+);
+ok(
+  'the dispatched run is still running, so its binding still holds',
+  bind1Run.status === 'running',
+  bind1Run.status,
+);
+// A finished run releases its session. Resuming that session as the agent must
+// not still be authorized by a run that is over.
+await M.finishRun(ROOT, bind1.th.id, bind1.runId, {
+  status: 'completed',
+  attempt: bind1Run.attempts,
+});
+ok(
+  'the run is terminal after it finishes',
+  (await M.readThread(ROOT, bind1.th.id)).runs.find((r) => r.id === bind1.runId)
+    .status === 'completed',
+);
+ok(
+  'and a terminal run no longer binds its session',
+  (await M.findAgentSessionBinding(ROOT, plannedId, bind1.agentId)) ===
+    undefined,
+);
+
+// A port that cannot predict its id gets no pre-binding, and must not blow up.
+const bind2 = await startFor('No planned id');
+let sawUnplanned = false;
+await M.dispatchOnce(ROOT, {
+  inspect: async () => ({ kind: 'absent' }),
+  cancel: async () => true,
+  start: async () => {
+    sawUnplanned = true;
+    return { status: 'started', sessionId: 'sess-late', consumedOnStart: true };
+  },
+});
+ok(
+  'a port without plannedSessionId still dispatches',
+  sawUnplanned,
+);
+ok(
+  'and bindRunSession still records the id it reports',
+  (await M.readThread(ROOT, bind2.th.id)).runs.find((r) => r.id === bind2.runId)
+    ?.sessionId === 'sess-late',
 );
 
 await fs.rm(tmp, { recursive: true, force: true });

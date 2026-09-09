@@ -128,6 +128,18 @@ export function createSessionDispatchPort(
   };
 
   return {
+    // Same rule `start` applies below, asked ahead of time so the dispatcher
+    // can name the session on the run before the runtime creates it.
+    plannedSessionId({ agent, threadId, sessionId }): string | undefined {
+      if (
+        agent.runtimeId !== undefined &&
+        agent.runtimeId !== LOCAL_AGENT_RUNTIME_ID
+      ) {
+        return undefined;
+      }
+      return sessionId ?? agentThreadSessionId(agent.id, threadId);
+    },
+
     async inspect({ agent, threadId, sessionId }): Promise<AgentBodyState> {
       if (
         agent.runtimeId !== undefined &&

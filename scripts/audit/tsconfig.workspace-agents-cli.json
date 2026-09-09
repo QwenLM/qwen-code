@@ -168,7 +168,10 @@
     "../../packages/cli/src/serve/routes/workspace-agents.ts",
     "../../packages/cli/src/acp-integration/session/agent-run-meta.ts",
     "../../packages/cli/src/acp-integration/acpAgent.ts",
-    "../../packages/cli/src/acp-integration/session/Session.ts"
+    "../../packages/cli/src/acp-integration/session/Session.ts",
+    "../../packages/cli/src/serve/server.ts",
+    "../../packages/cli/src/serve/capabilities.ts",
+    "../../packages/cli/src/serve/server/serve-features.ts"
   ],
   "exclude": [
     "../../packages/cli/src/**/*.test.ts"

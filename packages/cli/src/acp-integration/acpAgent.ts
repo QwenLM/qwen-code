@@ -148,6 +148,7 @@ import {
   type TurnResultRecordPayload,
   sessionIdContext,
   resolveAgentPersona,
+  findAgentSessionBinding,
   resolveModelId,
   buildModelIdContext,
 } from '@qwen-code/qwen-code-core';
@@ -14068,6 +14069,34 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(
             undefined,
             'An agent session must name the agent it is',
+          );
+        }
+        // Refuse, rather than silently continuing as an ordinary session. A
+        // downgrade would hand the client a session it believes is an agent's:
+        // it would carry the agent's name and be resumed as that agent later,
+        // with none of the persona or tools that make the claim true.
+        if (!config.isAgentCollaborationEnabled()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Agent collaboration is disabled on this daemon (experimental.agentCollaboration)',
+          );
+        }
+        // Server binding. `sourceType` and `sourceId` both arrive from the
+        // client, so on their own they are a claim, not a credential — without
+        // this check any caller with daemon access could ask for an agent's
+        // persona and its thread tools. What makes the claim true is that this
+        // workspace's store holds a live run for that agent naming this very
+        // session. Deliberately not gated on the opt-in: with collaboration on
+        // is exactly when the check has to hold.
+        const binding = await findAgentSessionBinding(
+          cwd,
+          wiredSessionId,
+          sessionSource.sourceId,
+        );
+        if (!binding) {
+          throw RequestError.invalidParams(
+            undefined,
+            'No dispatched run claims this session for that agent',
           );
         }
         const persona = await resolveAgentPersona(

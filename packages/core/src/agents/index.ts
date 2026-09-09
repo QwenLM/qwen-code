@@ -84,6 +84,8 @@ export {
 } from './workspace-agents/dispatcher.js';
 export type { AgentNotificationSender } from './workspace-agents/dispatcher.js';
 export { resolveAgentPersona } from './workspace-agents/persona.js';
+export { findAgentSessionBinding } from './workspace-agents/session-binding.js';
+export type { AgentSessionBinding } from './workspace-agents/session-binding.js';
 export type { AgentPersonaResolution } from './workspace-agents/persona.js';
 export type { AgentRunContext } from './workspace-agents/run-context.js';
 export {
