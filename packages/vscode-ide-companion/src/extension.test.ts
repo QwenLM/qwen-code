@@ -609,9 +609,7 @@ describe('activate', () => {
         }
       }
 
-      expect(provider.notifyPermissionDiffClosed).toHaveBeenCalledWith(
-        'req-1',
-      );
+      expect(provider.notifyPermissionDiffClosed).toHaveBeenCalledWith('req-1');
       registrySpy.mockRestore();
     });
   });

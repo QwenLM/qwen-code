@@ -28038,6 +28038,7 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
       'req-1',
       'proceed_once',
+      undefined,
     );
   });
 
