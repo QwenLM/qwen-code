@@ -92,6 +92,7 @@ import {
   registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
+  resolveChannelLocale,
   selectFirstModel,
   type ParsedChannel,
 } from './runtime.js';
@@ -545,6 +546,7 @@ export async function runChannelDaemonWorker(
     undefined,
     settings.merged.proxy as string | undefined,
   );
+  const locale = resolveChannelLocale(settings.merged.general?.language);
   const displayLanguage = resolveLanguage(
     resolveLanguageSetting(
       settings.merged.general?.language as string | undefined,
@@ -680,6 +682,7 @@ export async function runChannelDaemonWorker(
         name,
         await abortableStartup(
           createChannel(name, config, bridgeFacade, {
+            locale,
             ...(proxy ? { proxy } : {}),
             ...(displayLanguage ? { displayLanguage } : {}),
             router: createdRouter,
