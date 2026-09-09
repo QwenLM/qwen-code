@@ -33,6 +33,7 @@ function peerRow(over: Record<string, unknown> = {}) {
     ref: 'abc123',
     cwd: '/w/docs',
     pid: 200,
+    kind: 'tui',
     ipcPath: '/tmp/s1.sock',
     startedAt: 1_700_000_000_000,
     ...over,
@@ -222,10 +223,28 @@ describe('ListAgentsTool — peer sessions', () => {
           name: 'docs-cd',
           ref: 'abc123',
           cwd: '/w/docs',
+          kind: 'tui',
           started_at: new Date(1_700_000_000_000).toISOString(),
         },
       ],
     });
+  });
+
+  it("passes each session's kind through to the model", async () => {
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ sessionId: 's1', ref: 'aaa111', kind: 'serve' }),
+      peerRow({
+        sessionId: 's2',
+        ref: 'bbb222',
+        cwd: '/w/other',
+        kind: 'external',
+      }),
+    ]);
+    const parsed = JSON.parse(String((await run()).llmContent));
+    expect(parsed.sessions.map((s: { kind: string }) => s.kind)).toEqual([
+      'serve',
+      'external',
+    ]);
   });
 
   it('appends the ref only when two sessions share a name', async () => {
