@@ -13,11 +13,11 @@ import { dirname, join } from 'node:path';
 import { inspect } from 'node:util';
 import { DWClient } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
-import { BlockStreamer } from '@qwen-code/channel-base';
 import type {
   BackgroundResponseContext,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
   Envelope,
@@ -148,6 +148,7 @@ vi.mock('@qwen-code/channel-base', async () => {
     ChannelBase: class {
       protected config: Record<string, unknown>;
       protected name: string;
+      protected locale: 'en' | 'zh';
       handleInbound = vi.fn().mockResolvedValue(undefined);
       protected preflightInbound = vi.fn().mockResolvedValue(true);
       protected processInbound = vi.fn().mockResolvedValue(undefined);
@@ -267,9 +268,11 @@ vi.mock('@qwen-code/channel-base', async () => {
         name: string,
         config: Record<string, unknown>,
         _bridge: unknown,
+        options?: { locale?: 'en' | 'zh' },
       ) {
         this.name = name;
         this.config = config;
+        this.locale = options?.locale ?? 'en';
       }
     },
     sanitizeLogText: real.sanitizeLogText,
@@ -283,9 +286,6 @@ vi.mock('@qwen-code/channel-base', async () => {
     // ship green.
     truncateUtf16Units: real.truncateUtf16Units,
     isTerminalTaskLifecycleType: real.isTerminalTaskLifecycleType,
-    // Real: the block-boundary regression drives blocks through the actual
-    // streamer's trim contract, not a hand-built block shape.
-    BlockStreamer: real.BlockStreamer,
   };
 });
 
@@ -396,15 +396,6 @@ it('adds outbound media instructions without replacing custom instructions', () 
   expect(instructions).toContain('[FILE: /absolute/path/to/file]');
 });
 
-it('does not advertise file delivery in block streaming', () => {
-  const channel = createChannel({ blockStreaming: 'on' });
-  const instructions = (
-    channel as unknown as { config: { instructions: string } }
-  ).config.instructions;
-
-  expect(instructions).not.toContain('[FILE:');
-});
-
 it('does not change agent instructions for a Chinese display language', () => {
   const channel = createChannel({}, { displayLanguage: 'zh-CN' });
   const instructions = (
@@ -422,6 +413,11 @@ it('validates interactive card config in the adapter', () => {
       interactiveCards: { questionCard: { timeoutMs: 0 } },
     }),
   ).toThrow('questionCard.timeoutMs');
+  expect(() =>
+    createChannel({
+      interactiveCards: { permissionCard: { timeoutMs: 0 } },
+    }),
+  ).toThrow('permissionCard.timeoutMs');
 });
 
 it('does not initialize or subscribe to cards when configuration is omitted', () => {
@@ -443,6 +439,10 @@ it('does not initialize or subscribe to cards when configuration is omitted', ()
   expect(
     (channel as unknown as { questionCardController?: unknown })
       .questionCardController,
+  ).toBeUndefined();
+  expect(
+    (channel as unknown as { permissionCardController?: unknown })
+      .permissionCardController,
   ).toBeUndefined();
 });
 
@@ -511,6 +511,7 @@ it('refreshes the shared proactive token after a card request returns 401', asyn
 
 function createCallbackResultChannel(
   result: DingtalkCardCallbackResult,
+  options?: { locale?: 'en' | 'zh' },
 ): DingtalkChannelInstance {
   class CallbackResultChannel extends DingtalkChannel {
     protected override routeCardCallback(): DingtalkCardCallbackResult {
@@ -534,6 +535,7 @@ function createCallbackResultChannel(
       interactiveCards: {},
     } as never,
     {} as never,
+    options,
   );
 }
 
@@ -640,7 +642,7 @@ it('ACKs a parsed card callback before starting asynchronous handling', async ()
   });
 });
 
-it('ACKs before sending forbidden feedback to the original group', async () => {
+it('sends default-English forbidden feedback to the original group', async () => {
   createCallbackResultChannel({
     kind: 'forbidden',
     actorId: 'other-user',
@@ -669,6 +671,40 @@ it('ACKs before sending forbidden feedback to the original group', async () => {
     );
     expect(requestBody.openConversationId).toBe('group-1');
     expect(requestBody.userIds).toBeUndefined();
+    expect(JSON.parse(requestBody.msgParam).text).toContain(
+      'Only the task initiator',
+    );
+    expect(JSON.parse(requestBody.msgParam).text).toContain('had no effect');
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it('keeps Chinese forbidden feedback for Chinese channels', async () => {
+  createCallbackResultChannel(
+    {
+      kind: 'forbidden',
+      actorId: 'other-user',
+      target: { chatId: 'group-1', isGroup: true },
+    },
+    { locale: 'zh' },
+  );
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const { spy, groupSendCalls } = stubCardFeedbackFetch();
+
+  try {
+    dispatchCardCallback(client, {
+      userId: 'other-user',
+      value: JSON.stringify({
+        outTrackId: 'question-1',
+        actionValue: 'submit',
+      }),
+    });
+
+    await vi.waitFor(() => expect(groupSendCalls()).toHaveLength(1));
+    const requestBody = JSON.parse(
+      String((groupSendCalls()[0]![1] as RequestInit).body),
+    );
     expect(JSON.parse(requestBody.msgParam).text).toContain('任务发起人');
     expect(JSON.parse(requestBody.msgParam).text).toContain('未生效');
   } finally {
@@ -912,6 +948,51 @@ it('routes the built-in btn_stop action to the status card controller', () => {
   expect(claimStop).toHaveBeenCalledWith('status-1', 'owner-1');
 });
 
+it('routes permission callbacks before question callbacks', () => {
+  const permissionResult: DingtalkCardCallbackResult = {
+    kind: 'accepted',
+    execute: vi.fn().mockResolvedValue(undefined),
+  };
+  const claimPermission = vi.fn().mockReturnValue(permissionResult);
+  const claimQuestion = vi.fn().mockReturnValue({ kind: 'ignored' });
+  class CallbackRoutingChannel extends DingtalkChannel {
+    route(callback: DingtalkCardCallback) {
+      return this.routeCardCallback(callback);
+    }
+  }
+  const channel = new CallbackRoutingChannel(
+    'test-dingtalk',
+    {
+      type: 'dingtalk',
+      token: '',
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      senderPolicy: 'open',
+      allowedUsers: [],
+      sessionScope: 'user',
+      cwd: '/tmp',
+      groupPolicy: 'open',
+      dmPolicy: 'open',
+      groups: {},
+    } as never,
+    {} as never,
+  );
+  Object.assign(channel, {
+    permissionCardController: { claim: claimPermission },
+    questionCardController: { claim: claimQuestion },
+  });
+  const callback: DingtalkCardCallback = {
+    outTrackId: 'permission-1',
+    actionId: 'submit',
+    actorId: 'owner-1',
+    formData: { permission_decision: 'allow_once' },
+  };
+
+  expect(channel.route(callback)).toBe(permissionResult);
+  expect(claimPermission).toHaveBeenCalledWith(callback);
+  expect(claimQuestion).not.toHaveBeenCalled();
+});
+
 it('keeps callbacks and ACKs bound to the client that received them', async () => {
   const firstIndex = dingtalkSdkMock.instances.length;
   const channel = createChannel();
@@ -1078,6 +1159,15 @@ function getUserInputHook(
   const fn = (channel as unknown as Record<string, unknown>)[
     'presentUserInputRequest'
   ] as (context: ChannelUserInputRequestContext) => Promise<{ kind: string }>;
+  return fn.bind(channel);
+}
+
+function getPermissionHook(
+  channel: DingtalkChannelInstance,
+): (context: ChannelPermissionRequestContext) => Promise<{ kind: string }> {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'presentPermissionRequest'
+  ] as (context: ChannelPermissionRequestContext) => Promise<{ kind: string }>;
   return fn.bind(channel);
 }
 
@@ -1393,11 +1483,8 @@ describe('DingtalkChannel prompt reactions', () => {
     },
   );
 
-  it.each([
-    ['interactive status cards', {}],
-    ['block streaming cards', { blockStreaming: 'on' }],
-  ])('keeps lifecycle tags enabled for %s', async (_name, overrides) => {
-    const channel = createChannel(overrides);
+  it('keeps lifecycle tags enabled for interactive status cards', async () => {
+    const channel = createChannel();
     const attachReaction = vi.fn().mockResolvedValue(undefined);
     const recallReaction = vi.fn().mockResolvedValue(undefined);
     (
@@ -2912,26 +2999,6 @@ describe('DingtalkChannel status cards', () => {
     expect(internals.interactionPresenter?.options.language).toBe('zh-CN');
   });
 
-  it('keeps status cards disabled when block streaming is enabled', () => {
-    const channel = createChannel({ blockStreaming: 'on' });
-
-    expect(
-      (
-        channel as unknown as {
-          statusCardController?: unknown;
-          interactiveCardClient?: unknown;
-        }
-      ).statusCardController,
-    ).toBeUndefined();
-    expect(
-      (
-        channel as unknown as {
-          interactiveCardClient?: unknown;
-        }
-      ).interactiveCardClient,
-    ).toBeDefined();
-  });
-
   it('starts a status card only for the matching real inbound owner', () => {
     const channel = createChannel();
     const registerRun = vi.fn();
@@ -3590,6 +3657,23 @@ describe('DingtalkChannel question cards', () => {
     vi.restoreAllMocks();
   });
 
+  it('keeps question cards eligible when status cards are disabled', () => {
+    const channel = createChannel({
+      interactiveCards: { statusCard: { enabled: false } },
+    });
+    const internals = channel as unknown as {
+      interactiveCardClient?: unknown;
+      statusCardController?: unknown;
+      questionCardController?: unknown;
+      interactionPresenter?: unknown;
+    };
+
+    expect(internals.interactiveCardClient).toBeDefined();
+    expect(internals.statusCardController).toBeUndefined();
+    expect(internals.questionCardController).toBeDefined();
+    expect(internals.interactionPresenter).toBeDefined();
+  });
+
   it.each([
     undefined,
     { enabled: false },
@@ -3633,18 +3717,6 @@ describe('DingtalkChannel question cards', () => {
       expect(sendMessage).not.toHaveBeenCalled();
     },
   );
-
-  it('keeps question cards eligible while block streaming is enabled', () => {
-    const channel = createChannel({ blockStreaming: 'on' });
-
-    expect(
-      (
-        channel as unknown as {
-          questionCardController?: unknown;
-        }
-      ).questionCardController,
-    ).toBeDefined();
-  });
 
   it('repeats the source label on every split question fallback', async () => {
     const channel = createChannel();
@@ -3747,6 +3819,85 @@ describe('DingtalkChannel question cards', () => {
 
     await expect(
       getUserInputHook(channel)({ ...context, runId: 'unknown' }),
+    ).resolves.toEqual({ kind: 'unsupported' });
+  });
+});
+
+describe('DingtalkChannel permission cards', () => {
+  function permissionContext(): ChannelPermissionRequestContext {
+    return {
+      requestId: 'permission-1',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        senderId: 'owner-1',
+        chatId: 'cid-1',
+        isGroup: true,
+      },
+      title: 'Run tests',
+      decisions: [
+        { kind: 'allow_once', label: 'Allow once' },
+        { kind: 'deny', label: 'Deny' },
+      ],
+      onSettled: () => () => {},
+      respond: vi.fn().mockResolvedValue(true),
+    };
+  }
+
+  it.each([
+    undefined,
+    { enabled: false },
+    { permissionCard: { enabled: false } },
+  ])(
+    'returns unsupported when permission cards are disabled: %j',
+    async (interactiveCards) => {
+      const channel = createChannel({ interactiveCards });
+      (
+        channel as unknown as {
+          cardRuns: Map<string, unknown>;
+        }
+      ).cardRuns.set('run-1', {
+        ownerId: 'owner-1',
+        target: { chatId: 'cid-1', isGroup: true },
+      });
+
+      await expect(
+        getPermissionHook(channel)(permissionContext()),
+      ).resolves.toEqual({ kind: 'unsupported' });
+    },
+  );
+
+  it('presents through the matching attended run only', async () => {
+    const channel = createChannel();
+    const presentPermission = vi
+      .fn()
+      .mockResolvedValueOnce({ kind: 'presented' });
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          presentPermission: typeof presentPermission;
+        };
+        cardRuns: Map<string, unknown>;
+      }
+    ).interactionPresenter = { presentPermission };
+    (channel as unknown as { cardRuns: Map<string, unknown> }).cardRuns.set(
+      'run-1',
+      {
+        ownerId: 'owner-1',
+        target: { chatId: 'cid-1', isGroup: true },
+      },
+    );
+    const context = permissionContext();
+
+    await expect(getPermissionHook(channel)(context)).resolves.toEqual({
+      kind: 'presented',
+    });
+    expect(presentPermission).toHaveBeenCalledWith(context);
+
+    await expect(
+      getPermissionHook(channel)({ ...context, runId: 'unknown' }),
     ).resolves.toEqual({ kind: 'unsupported' });
   });
 });
@@ -7420,7 +7571,7 @@ describe('DingtalkChannel reply mentions', () => {
     ).toBe(true);
   });
 
-  it('mentions only the first block-streamed response', async () => {
+  it('mentions only the first response in a turn', async () => {
     const channel = createChannel({ atSender: true });
     seedWebhook(channel, 'cid123');
     seedMentionTarget(channel, 'm1', 'staff-1');
@@ -7429,8 +7580,8 @@ describe('DingtalkChannel reply mentions', () => {
       .mockResolvedValue(new Response('{}', { status: 200 }));
 
     getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
-    await getResponseHook(channel)('cid123', 'first block', 'session-1');
-    await getResponseHook(channel)('cid123', 'second block', 'session-1');
+    await getResponseHook(channel)('cid123', 'first response', 'session-1');
+    await getResponseHook(channel)('cid123', 'second response', 'session-1');
 
     const bodies = fetchSpy.mock.calls.map(([, init]) =>
       JSON.parse(String((init as RequestInit).body)),
@@ -8226,159 +8377,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
-  it.each([
-    ['reserved opening', '[FILE:', ''],
-    ['split reserved opening', '[FI', 'LE: '],
-  ])(
-    'keeps paths hidden when block streaming splits the %s',
-    async (_name, first, second) => {
-      const channel = createChannel({ blockStreaming: 'on' });
-      seedWebhook(channel, 'cid123');
-      getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
-      const fetchSpy = vi
-        .spyOn(globalThis, 'fetch')
-        .mockResolvedValue(new Response('{}'));
-      const send = (
-        channel as unknown as {
-          sendResponseMessage(
-            chatId: string,
-            text: string,
-            sessionId: string,
-          ): Promise<void>;
-        }
-      ).sendResponseMessage.bind(channel);
-
-      await send('cid123', first, 'session-1');
-      await send(
-        'cid123',
-        `${second}/workspace/private-report.txt]`,
-        'session-1',
-      );
-
-      expect(JSON.stringify(fetchSpy.mock.calls)).not.toContain(
-        '/workspace/private-report.txt',
-      );
-      expect(JSON.stringify(fetchSpy.mock.calls)).toContain(
-        'File delivery unavailable',
-      );
-      await getOutputSegmentEndHook(channel)(
-        'cid123',
-        'session-1',
-        segment(),
-        'completed',
-      );
-      expect(
-        (channel as unknown as { blockFileProjectors: Map<string, unknown> })
-          .blockFileProjectors.size,
-      ).toBe(1);
-      getPromptHook(channel, 'onPromptEnd')('cid123', 'session-1');
-      expect(
-        (channel as unknown as { blockFileProjectors: Map<string, unknown> })
-          .blockFileProjectors.size,
-      ).toBe(0);
-    },
-  );
-
-  it('keeps the block projector across a segment reset so split markers stay redacted', async () => {
-    const channel = createChannel({ blockStreaming: 'on' });
-    seedWebhook(channel, 'cid123');
-    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(new Response('{}'));
-    const send = getResponseHook(channel);
-
-    await send('cid123', 'Report\n[FILE: /workspace/secret-', 'session-1');
-    await getOutputSegmentEndHook(channel)(
-      'cid123',
-      'session-1',
-      segment(),
-      'response_boundary',
-    );
-    await send('cid123', 'report.txt]\nDone', 'session-1');
-
-    const texts = fetchSpy.mock.calls.map(
-      ([, init]) =>
-        (
-          JSON.parse(String((init as RequestInit).body)) as {
-            markdown: { text: string };
-          }
-        ).markdown.text,
-    );
-    expect(texts.join('\n')).not.toContain('report.txt');
-    expect(texts.join('\n')).toContain('File delivery unavailable');
-  });
-
-  it('keeps a reserved line pending across blocks that end on an early "]"', async () => {
-    const channel = createChannel({ blockStreaming: 'on' });
-    seedWebhook(channel, 'cid123');
-    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(new Response('{}'));
-    const send = getResponseHook(channel);
-
-    await send('cid123', 'before\n[FILE: /workspace/report [v2]', 'session-1');
-    await send('cid123', '.txt]\nafter', 'session-1');
-
-    const bodies = JSON.stringify(fetchSpy.mock.calls);
-    expect(bodies).not.toContain('.txt]');
-    expect(bodies).not.toContain('[FILE:');
-    expect(bodies).toContain('File delivery unavailable');
-  });
-
-  it('reports the unavailable notice once across later blocks', async () => {
-    const channel = createChannel({ blockStreaming: 'on' });
-    seedWebhook(channel, 'cid123');
-    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(new Response('{}'));
-    const send = getResponseHook(channel);
-
-    await send('cid123', '[FILE: /workspace/a.txt]\n', 'session-1');
-    await send('cid123', 'Answer part one\n', 'session-1');
-    await send('cid123', 'Answer part two\n', 'session-1');
-
-    const texts = fetchSpy.mock.calls.map(
-      ([, init]) =>
-        (
-          JSON.parse(String((init as RequestInit).body)) as {
-            markdown: { text: string };
-          }
-        ).markdown.text,
-    );
-    expect(texts.join('\n').match(/File delivery unavailable/g)).toHaveLength(
-      1,
-    );
-  });
-
-  it('keeps the group mention for the answer after a notice-only block', async () => {
-    const channel = createChannel({ atSender: true, blockStreaming: 'on' });
-    seedWebhook(channel, 'cid123');
-    seedMentionTarget(channel, 'm1', 'staff-1');
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(new Response('{}'));
-    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
-    const send = getResponseHook(channel);
-
-    await send('cid123', '[FILE: /workspace/a.txt', 'session-1');
-    await send('cid123', ']\nThe answer', 'session-1');
-
-    const bodies = fetchSpy.mock.calls.map(([, init]) =>
-      JSON.parse(String((init as RequestInit).body)),
-    ) as Array<{ markdown: { text: string }; at?: { atUserIds: string[] } }>;
-    expect(bodies).toHaveLength(2);
-    expect(bodies[0]!.markdown.text).toBe('[File delivery unavailable]');
-    expect(bodies[0]).not.toHaveProperty('at');
-    expect(bodies[1]!.markdown.text).toContain('@staff-1');
-    expect(bodies[1]!.markdown.text).toContain('The answer');
-    expect(bodies[1]!.at).toEqual({ atUserIds: ['staff-1'] });
-  });
-
-  it('delivers DM background responses without interleaving the block projector', async () => {
-    const channel = createChannel({ blockStreaming: 'on' });
+  it('delivers DM background responses after a turn response', async () => {
+    const channel = createChannel();
     seedWebhook(channel, 'cid123');
     getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
     seedSessionTarget(channel, 'session-1', {
@@ -8392,11 +8392,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       .mockResolvedValue(new Response('{}'));
     const send = getResponseHook(channel);
 
-    await send(
-      'cid123',
-      'Partial answer [FILE: /workspace/report.txt',
-      'session-1',
-    );
+    await send('cid123', 'Partial answer', 'session-1');
     await channel.dispatchBackgroundResponse(
       'session-1',
       'Background notification',
@@ -8409,12 +8405,10 @@ describe('DingtalkChannel outbound file delivery', () => {
     expect(bodies[1]!.markdown.text).toBe(
       '## 🤖 Agent · 后台任务\n\nBackground notification',
     );
-    expect(JSON.stringify(bodies)).not.toContain('[FILE:');
-    expect(JSON.stringify(bodies)).not.toContain('/workspace/report.txt');
   });
 
-  it('delivers group background responses proactively, past the block projector', async () => {
-    const channel = createChannel({ blockStreaming: 'on' });
+  it('delivers group background responses proactively', async () => {
+    const channel = createChannel();
     seedWebhook(channel, 'cid123');
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
@@ -8435,11 +8429,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       .mockResolvedValue(undefined);
 
     getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
-    await getResponseHook(channel)(
-      'cid123',
-      'Partial [FILE: /workspace/report.txt',
-      'session-1',
-    );
+    await getResponseHook(channel)('cid123', 'Partial answer', 'session-1');
 
     await channel.dispatchBackgroundResponse(
       'session-1',
@@ -8450,13 +8440,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       expect.objectContaining({ chatId: 'cidGroup==' }),
       '## 🤖 Agent · 后台任务\n\nBackground notification',
     );
-    // The notification bypassed sendReply entirely; only the turn's own
-    // block reached the webhook, and the held marker stayed in the projector.
     expect(fetchSpy).toHaveBeenCalledOnce();
-    expect(
-      (channel as unknown as { blockFileProjectors: Map<string, unknown> })
-        .blockFileProjectors.size,
-    ).toBe(1);
   });
 
   it.each([
@@ -8465,7 +8449,7 @@ describe('DingtalkChannel outbound file delivery', () => {
   ])(
     'silently drops a background response for %s',
     async (_name, seededSession, channelName) => {
-      const channel = createChannel({ blockStreaming: 'on' });
+      const channel = createChannel();
       seedSessionTarget(channel, seededSession, {
         channelName,
         senderId: 'user-1',
@@ -8495,7 +8479,7 @@ describe('DingtalkChannel outbound file delivery', () => {
   );
 
   it('silently drops an empty background response', async () => {
-    const channel = createChannel({ blockStreaming: 'on' });
+    const channel = createChannel();
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
       senderId: 'user-1',
@@ -8521,7 +8505,7 @@ describe('DingtalkChannel outbound file delivery', () => {
   });
 
   it('immediately sends every labeled Agent response segment by default', async () => {
-    const channel = createChannel({ blockStreaming: 'on' });
+    const channel = createChannel();
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
       senderId: 'user-1',
@@ -8580,7 +8564,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('aggregates one agent notification turn into one ordinary Markdown message', async () => {
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     seedSessionTarget(channel, 'session-1', {
@@ -8655,7 +8638,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -8706,7 +8688,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('uses the terminal status of a turn whose earlier segments were running', async () => {
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     seedSessionTarget(channel, 'session-1', {
@@ -8769,7 +8750,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -8819,7 +8799,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -8867,7 +8846,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -8926,7 +8904,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -8980,7 +8957,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -9037,7 +9013,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('joins overlapping segments of one task into a single aggregation', async () => {
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     seedSessionTarget(channel, 'session-1', {
@@ -9097,7 +9072,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -9142,7 +9116,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -9202,7 +9175,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('does not drain an aggregation whose delivery is already in flight', async () => {
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     seedSessionTarget(channel, 'session-1', {
@@ -9239,7 +9211,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('keeps interleaved agents in separate ordinary Markdown messages', async () => {
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     seedSessionTarget(channel, 'session-1', {
@@ -9309,7 +9280,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('uses the terminal status for an aggregated turn', async () => {
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     seedSessionTarget(channel, 'session-1', {
@@ -9348,7 +9318,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -9387,7 +9356,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('applies a completion marker that races the first target resolution', async () => {
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     const target: SessionTarget = {
@@ -9449,7 +9417,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       const target: SessionTarget = {
@@ -9512,7 +9479,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       const target: SessionTarget = {
@@ -9580,7 +9546,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('waits for every overlapping resolver before completing a turn', async () => {
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     const target: SessionTarget = {
@@ -9656,7 +9621,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('keeps a parked terminal until every overlapping resolver exits', async () => {
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     const target: SessionTarget = {
@@ -9732,7 +9696,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     'keeps a terminal-bearing segment when its resolver %s',
     async (outcome) => {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       const target: SessionTarget = {
@@ -9809,7 +9772,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       const target: SessionTarget = {
@@ -9888,7 +9850,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -9949,7 +9910,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       const target: SessionTarget = {
@@ -10050,7 +10010,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       const target: SessionTarget = {
@@ -10139,7 +10098,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('separates the next turn while the completed turn is still resolving', async () => {
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     const target: SessionTarget = {
@@ -10216,7 +10174,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       const target: SessionTarget = {
@@ -10286,7 +10243,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       const target: SessionTarget = {
@@ -10355,7 +10311,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('applies a parked terminal when the last resolver fails', async () => {
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     const target: SessionTarget = {
@@ -10430,7 +10385,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       const target: SessionTarget = {
@@ -10511,7 +10465,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       const target: SessionTarget = {
@@ -10591,7 +10544,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       const target: SessionTarget = {
@@ -10674,7 +10626,6 @@ describe('DingtalkChannel outbound file delivery', () => {
       vi.useFakeTimers();
       try {
         const channel = createChannel({
-          blockStreaming: 'on',
           aggregateBackgroundAgentResponses: true,
         });
         const target: SessionTarget = {
@@ -10743,7 +10694,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('flushes text when a session dies during target resolution', async () => {
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     const target: SessionTarget = {
@@ -10807,7 +10757,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -10867,7 +10816,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       const target: SessionTarget = {
@@ -10936,7 +10884,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -10988,7 +10935,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -11043,7 +10989,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -11377,7 +11322,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -11424,7 +11368,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     // agent had already produced -- the exact case the partial card exists
     // for. Before aggregation every segment was delivered on arrival.
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     seedSessionTarget(channel, 'session-1', {
@@ -11463,7 +11406,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it("keeps other sessions' aggregations when one session dies", async () => {
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     const targets = new Map<string, SessionTarget>([
@@ -11537,7 +11479,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('uses the reply fallback when draining a DM aggregation', async () => {
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     seedSessionTarget(channel, 'session-1', {
@@ -11590,7 +11531,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('flushes buffered output when a session retires without dying', async () => {
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     seedSessionTarget(channel, 'session-1', {
@@ -11626,7 +11566,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('flushes buffered output when the channel disconnects', async () => {
     const channel = createChannel({
-      blockStreaming: 'on',
       aggregateBackgroundAgentResponses: true,
     });
     seedSessionTarget(channel, 'session-1', {
@@ -11663,7 +11602,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -11704,7 +11642,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -11761,7 +11698,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -11810,7 +11746,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -11860,7 +11795,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -11921,7 +11855,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        blockStreaming: 'on',
         aggregateBackgroundAgentResponses: true,
       });
       seedSessionTarget(channel, 'session-1', {
@@ -12103,57 +12036,6 @@ describe('DingtalkChannel outbound file delivery', () => {
     ).toBe(0);
   });
 
-  it('flushes the block projector held tail when the turn ends', async () => {
-    const channel = createChannel({ blockStreaming: 'on' });
-    seedWebhook(channel, 'cid123');
-    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(new Response('{}'));
-
-    await getResponseHook(channel)('cid123', 'Answer ends here [', 'session-1');
-    getPromptHook(channel, 'onPromptEnd')('cid123', 'session-1');
-
-    await vi.waitFor(() => {
-      expect(fetchSpy.mock.calls).toHaveLength(2);
-    });
-    const lastBody = JSON.parse(
-      String((fetchSpy.mock.calls[1]![1] as RequestInit).body),
-    ) as { markdown: { text: string } };
-    expect(lastBody.markdown.text).toBe('[');
-    expect(lastBody.markdown.text).not.toContain('File delivery unavailable');
-    expect(
-      (channel as unknown as { blockFileProjectors: Map<string, unknown> })
-        .blockFileProjectors.size,
-    ).toBe(0);
-  });
-
-  it('redacts an unfinished marker at turn end instead of leaking a fragment', async () => {
-    const channel = createChannel({ blockStreaming: 'on' });
-    seedWebhook(channel, 'cid123');
-    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(new Response('{}'));
-
-    await getResponseHook(channel)(
-      'cid123',
-      'Report\n[FILE: /workspace/sec',
-      'session-1',
-    );
-    getPromptHook(channel, 'onPromptEnd')('cid123', 'session-1');
-
-    // Settle must not emit the held reserved line: the marker never
-    // completed, so nothing may follow it as a standalone message.
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(fetchSpy.mock.calls).toHaveLength(1);
-    expect(JSON.stringify(fetchSpy.mock.calls)).not.toContain('/workspace/sec');
-    expect(
-      (channel as unknown as { blockFileProjectors: Map<string, unknown> })
-        .blockFileProjectors.size,
-    ).toBe(0);
-  });
-
   it('keeps the status projector across a mid-turn segment reset', async () => {
     const channel = createChannel();
     const projected: string[] = [];
@@ -12190,48 +12072,6 @@ describe('DingtalkChannel outbound file delivery', () => {
 
     expect(projected.join('')).toBe('before\n\nafter');
     expect(projected.join('')).not.toContain('secret.txt');
-  });
-
-  it('delivers the line after a marker line ending exactly on a block boundary', async () => {
-    const channel = createChannel({ blockStreaming: 'on' });
-    seedWebhook(channel, 'cid123');
-    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(new Response('{}'));
-    const send = getResponseHook(channel);
-    const streamer = new BlockStreamer({
-      minChars: 20,
-      maxChars: 1000,
-      idleMs: 0,
-      send: (text) => send('cid123', text, 'session-1'),
-    });
-
-    streamer.push(
-      '[FILE: /workspace/report.txt]\n\nThe answer is 42.\nSecond line',
-    );
-    await streamer.flush();
-
-    const bodies = JSON.stringify(fetchSpy.mock.calls);
-    expect(bodies).toContain('The answer is 42.');
-    expect(bodies).toContain('File delivery unavailable');
-    expect(bodies).not.toContain('/workspace/report.txt');
-  });
-
-  it('drops the block projector when its session dies', async () => {
-    const channel = createChannel({ blockStreaming: 'on' });
-    seedWebhook(channel, 'cid123');
-    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
-
-    await getResponseHook(channel)('cid123', 'Answer text', 'session-1');
-    const projectors = (
-      channel as unknown as { blockFileProjectors: Map<string, unknown> }
-    ).blockFileProjectors;
-    expect(projectors.size).toBe(1);
-
-    channel.onSessionDied('session-1');
-    expect(projectors.size).toBe(0);
   });
 
   it("keeps other sessions' status projectors when one session dies", () => {

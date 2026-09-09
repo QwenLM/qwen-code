@@ -220,4 +220,8 @@ describe('token plan provider', () => {
       }),
     ).toBe(false);
   });
+
+  it('declares the built-in web search backend', () => {
+    expect(tokenPlanProvider.webSearch).toEqual({ backend: 'dashscope' });
+  });
 });

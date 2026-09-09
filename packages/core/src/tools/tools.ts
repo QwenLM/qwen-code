@@ -955,6 +955,8 @@ export interface ToolEditConfirmationDetails {
 }
 
 export interface ToolConfirmationPayload {
+  /** Execution permission displayed when approving a DAC plan. */
+  expectedPlanExecutionMode?: string;
   // used to override `modifiedProposedContent` for modifiable tools in the
   // inline modify flow
   newContent?: string;

@@ -124,6 +124,15 @@ describe('ECS runner qwen update workflow', () => {
     );
   });
 
+  it('pins the 90-minute resolve budget', () => {
+    const resolveJob = workflow.slice(
+      workflow.indexOf('  resolve:'),
+      workflow.indexOf('  update:'),
+    );
+    assert.ok(resolveJob.includes('timeout-minutes: 100'));
+    assert.ok(resolveJob.includes("RESOLVE_TIMEOUT_SECONDS: '5400'"));
+  });
+
   it('runs only when this workflow changes on main', () => {
     assert.ok(
       workflow.includes(

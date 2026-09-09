@@ -27,6 +27,12 @@ import type {
   WorkflowOrchestratorEmitter,
 } from './workflow-sandbox.js';
 import { WorkflowBudgetExceededError } from './workflow-budget.js';
+import {
+  isWorkflowAgentFailedError,
+  isWorkflowRunLevelError,
+  WorkflowAgentCapExceededError,
+  WorkflowAgentFailedError,
+} from './workflow-agent-failure.js';
 import { resolveStallMs, runStallResilient } from './workflow-stall.js';
 import { deriveAgentKey, deriveArgsSeed } from './workflow-journal.js';
 import type { WorkflowJournal, JournalReplay } from './workflow-journal.js';
@@ -419,6 +425,19 @@ export type WorkflowAgentDispatch = (
   dispatchId?: string,
 ) => Promise<WorkflowAgentResult>;
 
+/**
+ * The script-facing `agent()` — `countedDispatch`, the wrapper the sandbox
+ * actually calls. Wider than the dispatch it wraps by exactly one value:
+ * `null`, for an agent that failed on its own terms. The wrapped dispatch
+ * only ever resolves with a result or throws; deciding that a given throw is
+ * the agent's failure rather than the run's belongs to the wrapper.
+ */
+export type WorkflowCountedDispatch = (
+  prompt: string,
+  opts: WorkflowAgentOpts,
+  dispatchId?: string,
+) => Promise<WorkflowAgentResult | null>;
+
 function generateRunId(): string {
   return `wf_${randomBytes(8).toString('hex')}`;
 }
@@ -649,6 +668,34 @@ function attachDispatchTranscript(
 }
 
 /**
+ * The error for a subagent that ended on anything but GOAL.
+ *
+ * The message is identical for every mode — it is what the operator reads and
+ * what the failures list shows. What differs is the CLASS: MAX_TURNS, TIMEOUT
+ * and ERROR are the agent's own failure, so they carry
+ * `WorkflowAgentFailedError` and the dispatch layer settles the call to
+ * `null`. CANCELLED stays a plain `Error`, because at this depth it is
+ * ambiguous whether the stall watchdog or the run-wide signal aborted the
+ * attempt; the stall wrapper owns the information needed to tell them apart.
+ */
+function terminalDispatchError(
+  workflowAgentId: string,
+  mode: AgentTerminateMode,
+): Error {
+  const message = `Workflow subagent ${workflowAgentId} did not complete (terminate mode: ${mode}).`;
+  switch (mode) {
+    case AgentTerminateMode.MAX_TURNS:
+      return new WorkflowAgentFailedError(message, 'max_turns', mode);
+    case AgentTerminateMode.TIMEOUT:
+      return new WorkflowAgentFailedError(message, 'timeout', mode);
+    case AgentTerminateMode.ERROR:
+      return new WorkflowAgentFailedError(message, 'error', mode);
+    default:
+      return new Error(message);
+  }
+}
+
+/**
  * One single-attempt production dispatch. Receives the per-attempt abort
  * signal (the stall wrapper chains the parent signal into it + the watchdog
  * aborts it on stall) and the per-attempt event emitter (the stall watchdog
@@ -741,9 +788,7 @@ async function runSingleDispatch(
     // would happily loop on empty results.
     const mode = subagent.getTerminateMode();
     if (mode !== AgentTerminateMode.GOAL) {
-      throw new Error(
-        `Workflow subagent ${workflowAgentId} did not complete (terminate mode: ${mode}).`,
-      );
+      throw terminalDispatchError(workflowAgentId, mode);
     }
     return toModelVisibleSubagentResult(subagent.getFinalText(), mode);
   }
@@ -1164,9 +1209,7 @@ async function runOverridePath(
           mode !== AgentTerminateMode.GOAL &&
           mode !== AgentTerminateMode.CANCELLED
         ) {
-          throw new Error(
-            `Workflow subagent ${workflowAgentId} did not complete (terminate mode: ${mode}).`,
-          );
+          throw terminalDispatchError(workflowAgentId, mode);
         }
         // The dispatch aborts via schemaState.abortController on the
         // 3rd validation failure (attempts > 2) AND on success capture.
@@ -1176,24 +1219,28 @@ async function runOverridePath(
         // the messages so an operator sees what actually happened:
         // upstream's verbatim "after 2 in-conversation nudges" wording is
         // factually correct only for (b).
+        //
+        // Both are the agent's own content failure, not the run's: it
+        // answered, just not under the contract. The script sees `null` for
+        // that slot and decides what a missing structured result means.
         if (schemaState.attempts > 2) {
           // Error message verbatim from upstream Claude Code 2.1.168 strings.
-          throw new Error(
+          throw new WorkflowAgentFailedError(
             'subagent completed without calling StructuredOutput (after 2 in-conversation nudges).',
+            'no_structured_output',
           );
         }
-        throw new Error(
+        throw new WorkflowAgentFailedError(
           'subagent completed without calling structured_output ' +
             '(no validation attempt — model produced plain-text content).',
+          'no_structured_output',
         );
       }
 
       // Non-schema mode.
       const mode = subagent.getTerminateMode();
       if (mode !== AgentTerminateMode.GOAL) {
-        throw new Error(
-          `Workflow subagent ${workflowAgentId} did not complete (terminate mode: ${mode}).`,
-        );
+        throw terminalDispatchError(workflowAgentId, mode);
       }
       let finalText: WorkflowAgentResult = toModelVisibleSubagentResult(
         subagent.getFinalText(),
@@ -1703,8 +1750,14 @@ export class WorkflowOrchestrator {
     let prefixHash = deriveArgsSeed(req.args);
     let hadMiss = false;
     let journalAgentId = 0;
+    // The sandbox is assigned before its script can call countedDispatch.
+    // Keeping the reference here lets resume diagnostics enter the sandbox's
+    // source-of-truth log buffer as well as the live emitter stream.
+    const parentSandboxRef: { current: WorkflowSandbox | undefined } = {
+      current: undefined,
+    };
 
-    const countedDispatch: WorkflowAgentDispatch = (prompt, opts) => {
+    const countedDispatch: WorkflowCountedDispatch = (prompt, opts) => {
       // Must run before deriveAgentKey below: hash.update() throws an
       // opaque ERR_INVALID_ARG_TYPE for a non-string prompt, preempting
       // the dispatch's boundary error on the journaled path.
@@ -1723,6 +1776,7 @@ export class WorkflowOrchestrator {
       // Captured per-dispatch (NOT read from the shared counter later) so a
       // concurrent dispatch can't clobber the id used in the result append.
       let journalEntryId: string | undefined;
+      let respawnLine: string | undefined;
       if (journal) {
         journalKey = deriveAgentKey(prefixHash, prompt, opts);
         prefixHash = journalKey;
@@ -1767,15 +1821,40 @@ export class WorkflowOrchestrator {
             );
           }
         }
-        // First miss → suffix goes live; append a `started` marker so an
-        // interrupted run leaves a trace for the next resume.
+        // Running live over a key the journal started but never finished:
+        // the previous run either failed this dispatch or was interrupted
+        // with it in flight. Both re-run, but they are worth telling apart —
+        // a failure is likely to repeat, an interruption is not — so report
+        // which one instead of leaving the operator to infer it from a
+        // missing result.
+        //
+        // A key that HAS a journaled result is excluded even though it is
+        // running live: once any call misses, the prefix invariant sends
+        // every later call live too, including ones that completed last
+        // time. Those are re-run because of what happened upstream of them,
+        // and calling that a respawn would blame the invariant on the agent
+        // — in the ordinary interrupted fan-out (one agent in flight, its
+        // siblings already done) it would report every sibling as
+        // interrupted as well.
+        const priorStarts = replay?.started.get(journalKey);
+        if (
+          priorStarts &&
+          priorStarts.length > 0 &&
+          !replay?.results.has(journalKey)
+        ) {
+          const name =
+            typeof opts.label === 'string'
+              ? `"${stripAnsiAndControl(opts.label)}"`
+              : 'an agent';
+          respawnLine = replay?.failed.has(journalKey)
+            ? `[resume] re-running ${name}: it failed in the previous run`
+            : `[resume] respawning ${name}: interrupted in a previous run ` +
+              `(${priorStarts.length} prior attempt${priorStarts.length === 1 ? '' : 's'})`;
+        }
+        // First miss invalidates the suffix. The marker and respawn event are
+        // emitted only after the run-level admission gates below accept this
+        // call, so a refusal never leaves a phantom started/respawn record.
         hadMiss = true;
-        journalEntryId = String((journalAgentId += 1));
-        journal
-          .append({ type: 'started', key: journalKey, agentId: journalEntryId })
-          .catch((e) =>
-            debugLogger.warn(`journal started-append failed: ${e}`),
-          );
       }
 
       // P5 R3 (wenshao #7): budget gate runs BEFORE `agentCount += 1`
@@ -1815,13 +1894,14 @@ export class WorkflowOrchestrator {
       }
       // P5 R3 (wenshao #7): agent-count cap runs AFTER the budget gate.
       // See the reordering rationale at the top of countedDispatch.
-      agentCount += 1;
-      if (agentCount > maxAgents) {
+      if (agentCount >= maxAgents) {
         return rejectThroughPauseGate(
-          new Error(
-            `Workflow exceeded the maximum of ${maxAgents} agent() calls per run.`,
-          ),
+          new WorkflowAgentCapExceededError(maxAgents),
         );
+      }
+      agentCount += 1;
+      if (journal && journalKey !== undefined) {
+        journalEntryId = String((journalAgentId += 1));
       }
       // P4b: emit dispatch-start outside the scheduler so the registry
       // sees "queued" the moment the script issued the call, not after
@@ -1880,6 +1960,29 @@ export class WorkflowOrchestrator {
                 budget.spent(),
               );
             }
+            if (
+              journal &&
+              journalKey !== undefined &&
+              journalEntryId !== undefined
+            ) {
+              journal
+                .append({
+                  type: 'started',
+                  key: journalKey,
+                  agentId: journalEntryId,
+                })
+                .catch((e) =>
+                  debugLogger.warn(`journal started-append failed: ${e}`),
+                );
+            }
+            if (respawnLine) {
+              parentSandboxRef.current?.appendLog(respawnLine);
+              try {
+                emitter?.resumeRespawn?.(respawnLine);
+              } catch (e) {
+                debugLogger.warn('emitter.resumeRespawn threw:', e);
+              }
+            }
             const result = await this.dispatch(prompt, opts, dispatchId);
             emitCompletion();
             // P6: append the live result to the journal so a later resume
@@ -1932,7 +2035,38 @@ export class WorkflowOrchestrator {
                 debugLogger.warn('emitter.budgetUpdated threw:', e);
               }
             }
-            throw err;
+            // Journal only an admitted agent's own failure. Run-level limits
+            // and cancellation leave the call interrupted, not failed.
+            if (
+              journal &&
+              journalKey !== undefined &&
+              !signal?.aborted &&
+              !isWorkflowRunLevelError(err)
+            ) {
+              journal
+                .append({
+                  type: 'failed',
+                  key: journalKey,
+                  agentId: journalEntryId ?? '',
+                })
+                .catch((e) =>
+                  debugLogger.warn(`journal failed-append failed: ${e}`),
+                );
+            }
+            if (signal?.aborted || isWorkflowRunLevelError(err)) throw err;
+            // Every other rejection belongs to this admitted agent. Settle it
+            // here so sequential and fan-out calls share one contract even
+            // for failures that predate WorkflowAgentFailedError markers.
+            if (isWorkflowAgentFailedError(err)) {
+              debugLogger.warn(
+                `[Workflow] agent settled to null (${err.kind}): ${err.message}`,
+              );
+            } else {
+              debugLogger.warn(
+                `[Workflow] agent settled to null: ${extractErrorMessage(err)}`,
+              );
+            }
+            return null;
           }
         })
         .then(
@@ -1976,12 +2110,6 @@ export class WorkflowOrchestrator {
     // is created WITHOUT a `workflow` impl — that throws on a second-level
     // `workflow()` call, enforcing the single-level nesting limit.
     const resolveSavedWorkflow = req.resolveSavedWorkflow;
-    // The parent sandbox is created after this closure but before any
-    // script can invoke workflow(), so the late binding is always set
-    // by the time it runs.
-    const parentSandboxRef: { current: WorkflowSandbox | undefined } = {
-      current: undefined,
-    };
     const workflowImpl = resolveSavedWorkflow
       ? async (
           nameOrRef: string | { scriptPath: string },
@@ -2061,11 +2189,11 @@ export class WorkflowOrchestrator {
 
 /**
  * Settle a batch of thunks into a position-aligned `Array<T|null>` —
- * errors-as-data: a thunk that rejects (including an over-cap dispatch or a
- * stage error) becomes `null` at its index, never collapsing the batch.
+ * errors-as-data: a thunk or admitted agent that rejects becomes `null` at
+ * its index, never collapsing the batch.
  * `Promise.resolve().then(t)` funnels a synchronously-throwing thunk into the
- * rejection path. The ONE thing that rejects the whole batch is an abort, so
- * an aborted run surfaces a rejection rather than a silent array of nulls.
+ * rejection path. Cancellation and run-level dispatch gates reject the whole
+ * batch because no later agent call can succeed under either condition.
  * Concurrency is bounded at the dispatch layer (scheduler.run in countedDispatch),
  * not here — so nesting a parallel()/pipeline() inside a thunk cannot deadlock.
  *
@@ -2083,9 +2211,6 @@ export class WorkflowOrchestrator {
 async function settleToNullArray(
   thunks: Array<() => Promise<unknown>>,
   signal?: AbortSignal,
-  // P5 R3 Gap-3: which fan-out primitive is calling, for the budget-drop
-  // summary log. Defaults to 'parallel'.
-  kind: 'parallel' | 'pipeline' = 'parallel',
 ): Promise<unknown[]> {
   const settled = await Promise.allSettled(
     thunks.map((t) => Promise.resolve().then(t)),
@@ -2101,40 +2226,47 @@ async function settleToNullArray(
   // consistency choice, not a script-observable one.
   if (signal?.aborted)
     throw new DOMException('Workflow run aborted.', 'AbortError');
+  const visitedReasons = new WeakSet<object>();
+  const findRunFailureReason = (reason: unknown): unknown | undefined => {
+    if (reason === null || typeof reason !== 'object') return undefined;
+    if (visitedReasons.has(reason)) return undefined;
+    visitedReasons.add(reason);
+    try {
+      if ((reason as { __wfRunFailure?: unknown }).__wfRunFailure === true) {
+        return reason;
+      }
+      const errors = (reason as { errors?: unknown })?.errors;
+      if (!Array.isArray(errors)) return undefined;
+      for (const error of errors) {
+        const runFailure = findRunFailureReason(error);
+        if (runFailure !== undefined) return runFailure;
+      }
+    } catch {
+      return undefined;
+    }
+    return undefined;
+  };
+  for (const result of settled) {
+    if (result.status !== 'rejected') continue;
+    const runFailure = findRunFailureReason(result.reason);
+    if (runFailure !== undefined) throw runFailure;
+  }
   // Errors-as-data: a rejected thunk becomes null at its index. Log the
   // discarded rejection reason at debug level so operators investigating a
   // workflow that returned unexpected nulls can disambiguate between (a) a
-  // dispatch failure (rate limit / model outage), (b) the 1000-agent cap,
-  // (c) a pipeline stage exception, and (d) a non-JSON-serializable thunk
+  // dispatch failure (rate limit / model outage), (b) a pipeline stage
+  // exception, and (c) a non-JSON-serializable thunk
   // return — all of which surface as the same `null` to the script by
   // design. The log line is the only operator-side signal of which path
   // fired; the contract to the script stays opaque.
-  //
-  // P5 R3 Gap-3: budget-exhausted drops are counted separately and
-  // summarized so an operator can distinguish "N slots dropped because the
-  // token budget was hit" (expected, capacity-shaped) from arbitrary
-  // dispatch failures. Duck-type on the error name because the rejection
-  // reason may be a cross-realm Error whose `instanceof` is unreliable.
-  let budgetDropped = 0;
-  const result = settled.map((r, i) => {
+  return settled.map((r, i) => {
     if (r.status === 'fulfilled') return r.value;
-    const reason = r.reason as { name?: unknown; message?: unknown };
-    if (reason?.name === 'WorkflowBudgetExceededError') {
-      budgetDropped += 1;
-    } else {
-      debugLogger.warn(
-        `Workflow thunk at index ${i} rejected: ${String(reason?.message ?? r.reason)}`,
-      );
-    }
+    const reason = r.reason as { message?: unknown };
+    debugLogger.warn(
+      `Workflow thunk at index ${i} rejected: ${String(reason?.message ?? r.reason)}`,
+    );
     return null;
   });
-  if (budgetDropped > 0) {
-    debugLogger.warn(
-      `${kind}: ${budgetDropped} slot${budgetDropped === 1 ? '' : 's'} ` +
-        `dropped — token budget exceeded.`,
-    );
-  }
-  return result;
 }
 
 /**
@@ -2142,10 +2274,11 @@ async function settleToNullArray(
  * function whose agent() calls throttle through the per-run concurrency window
  * at the dispatch layer. A thunk that rejects, or resolves to a non-JSON-
  * serializable value, becomes `null` at its index (errors-as-data). `parallel()`
- * itself rejects only when given invalid arguments (non-array / non-function
- * element) or when the run is aborted. The result array is revived into the
- * vm realm by the sandbox wrapper (per-element JSON round-trip) — this host
- * array never reaches the script directly.
+ * itself rejects when given invalid arguments (non-array / non-function
+ * element), when the run is aborted, or when a token/agent-cap gate refuses a
+ * dispatch. The result array is revived into the vm realm by the sandbox
+ * wrapper (per-element JSON round-trip) — this host array never reaches the
+ * script directly.
  */
 function makeParallelImpl(
   signal: AbortSignal | undefined,
@@ -2200,11 +2333,11 @@ function makeParallelImpl(
  * Each item becomes one chain that runs the stages in sequence — staggered,
  * with NO barrier between stages, so item A can be in stage 3 while item B is
  * still in stage 1. Stage callbacks receive `(prev, item, idx)`; the first
- * stage's `prev` is the item itself. A stage that throws, returns `null`, or
- * returns a non-JSON-serializable value drops that item to `null` and skips
- * its remaining stages, leaving other items unaffected. Concurrency is
- * bounded at the dispatch layer, and the result array shares parallel()'s
- * per-element vm-realm revival.
+ * stage's `prev` is the item itself. An ordinary stage error, a `null`, or a
+ * non-JSON-serializable value drops that item to `null` and skips its remaining
+ * stages, leaving other items unaffected. A token/agent-cap refusal rejects
+ * the batch. Concurrency is bounded at the dispatch layer, and the result array
+ * shares parallel()'s per-element vm-realm revival.
  */
 function makePipelineImpl(
   signal: AbortSignal | undefined,
@@ -2248,7 +2381,6 @@ function makePipelineImpl(
     return settleToNullArray(
       branches.map(({ thunk }) => thunk),
       signal,
-      'pipeline',
     ).then((result) => {
       if (parent && branches.length > 0) {
         parent.tails = mergeFanoutTails(

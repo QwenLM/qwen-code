@@ -13,6 +13,7 @@ import {
   type AgentApprovalRequestEvent,
 } from './runtime/agent-events.js';
 import type { WorkflowRunHandle } from './runtime/workflow-runner.js';
+import { MAX_FAILURE_LINES } from './workflow-failure-lines.js';
 import { RESUME_ARGS_TOO_LARGE_NOTE } from './workflow-resume-call.js';
 import {
   WorkflowRunRegistry,
@@ -2000,6 +2001,134 @@ describe('WorkflowRunRegistry', () => {
   // The notification is the whole surface a backgrounded run has: it lands in
   // a later turn, when the handle and the tool result are long gone. What the
   // run cost, and how to get back into it, have to be in the message itself.
+  // A count says a fan-out came back thinner than it left; it does not say
+  // which agents are missing or why. That is the difference between the
+  // reader re-running the whole thing and re-running one prompt.
+  it('names the agents that failed, with their errors', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(reg('wf_failures', { isBackgrounded: true }));
+    for (const [id, label] of [
+      ['d1', 'scout'],
+      ['d2', 'audit <core>'],
+    ] as const) {
+      r.onDispatchQueued(entry.runId, {
+        id,
+        label,
+        prompt: 'p',
+        dependsOn: [],
+        queuedAt: 1,
+      });
+    }
+    r.onDispatchSettled(entry.runId, 'd1', 'terminate mode: MAX_TURNS', 2);
+    r.onDispatchSettled(entry.runId, 'd2', 'model <errored> & died', 2);
+    r.complete(entry.runId, [], 3_000);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    expect(modelText).toContain('<failures>');
+    expect(modelText).toContain('[scout] terminate mode: MAX_TURNS');
+    // Element text is escaped: a label or error carrying markup must not be
+    // able to close the tag it sits in.
+    expect(modelText).toContain(
+      '[audit &lt;core&gt;] model &lt;errored&gt; &amp; died',
+    );
+    expect(modelText).not.toContain('<core>');
+  });
+
+  it('caps the failures list and names the remainder', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(reg('wf_many', { isBackgrounded: true }));
+    for (let i = 0; i < MAX_FAILURE_LINES + 2; i++) {
+      r.onDispatchQueued(entry.runId, {
+        id: `d${i}`,
+        label: `agent-${i}`,
+        prompt: 'p',
+        dependsOn: [],
+        queuedAt: 1,
+      });
+      r.onDispatchSettled(entry.runId, `d${i}`, `boom ${i}`, 2);
+    }
+    r.complete(entry.runId, [], 3_000);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    const failuresBlock = modelText.slice(
+      modelText.indexOf('<failures>'),
+      modelText.indexOf('</failures>'),
+    );
+    expect(failuresBlock).toContain('[agent-0] boom 0');
+    expect(failuresBlock).not.toContain('[agent-10]');
+    expect(failuresBlock).toContain('… and 2 more failures omitted');
+    expect(modelText).toContain(`agents_failed=${MAX_FAILURE_LINES + 2}`);
+  });
+
+  it('omits the failures block when nothing failed', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(reg('wf_clean', { isBackgrounded: true }));
+    r.onDispatchQueued(entry.runId, {
+      id: 'd1',
+      prompt: 'p',
+      dependsOn: [],
+      queuedAt: 1,
+    });
+    r.onDispatchSettled(entry.runId, 'd1', undefined, 2);
+    r.complete(entry.runId, [], 3_000);
+
+    expect(completion.mock.calls[0][1] as string).not.toContain('<failures>');
+  });
+
+  // "Why is it running that agent again?" is the first question a resume
+  // raises, and the two answers call for different reactions.
+  it.each([
+    [true, '[resume] re-running "scout": it failed in the previous run'],
+    [
+      false,
+      '[resume] respawning "scout": interrupted in a previous run (2 prior attempts)',
+    ],
+  ])('logs a respawn (wasFailed=%s) and counts it', (wasFailed, expected) => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(reg('wf_respawn', { isBackgrounded: true }));
+
+    r.onResumeRespawn(entry.runId, expected);
+    expect(r.get(entry.runId)?.recentLogs.at(-1)).toContain(expected);
+    expect(
+      r
+        .get(entry.runId)
+        ?.events.filter(
+          (event) => event.type === 'log' && event.message === expected,
+        ),
+    ).toHaveLength(1);
+    // Settlement replaces the live mirror from the sandbox buffer. The
+    // respawn line must therefore be present in that buffer too.
+    r.setRecentLogs(entry.runId, [expected]);
+
+    expect(r.get(entry.runId)?.agentsRespawned).toBe(1);
+    expect(r.get(entry.runId)?.recentLogs.at(-1)).toContain(expected);
+
+    r.complete(entry.runId, [], 3_000);
+    expect(completion.mock.calls[0][1] as string).toContain(
+      'agents_respawned=1',
+    );
+  });
+
+  it('rejects the respawn counter and log together after terminal settlement', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_terminal_respawn'));
+    r.complete(entry.runId, [], 3_000);
+
+    const line = '[resume] respawning an agent: interrupted in a previous run';
+    r.onResumeRespawn(entry.runId, line);
+
+    expect(r.get(entry.runId)?.agentsRespawned).toBe(0);
+    expect(r.get(entry.runId)?.recentLogs).not.toContain(line);
+  });
+
   it('reports usage and the recovery route on a background failure', () => {
     const r = new WorkflowRunRegistry();
     const completion = vi.fn();
@@ -2038,7 +2167,8 @@ describe('WorkflowRunRegistry', () => {
     const modelText = completion.mock.calls[0][1] as string;
     expect(modelText).toContain(
       '<usage>agents_dispatched=2 agents_succeeded=1 agents_cached=0 ' +
-        'agents_failed=1 agents_cancelled=0 tokens_spent=4242 duration_ms=2500</usage>',
+        'agents_failed=1 agents_cancelled=0 agents_respawned=0 ' +
+        'tokens_spent=4242 duration_ms=2500</usage>',
     );
     expect(modelText).toContain('<recovery>');
     expect(modelText).toContain(
