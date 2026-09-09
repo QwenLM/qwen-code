@@ -326,22 +326,15 @@ export function registerSseEventsRoutes(
         );
         closeReason = 'event_bus_evicted';
         terminalEventType = 'client_evicted';
+        const evictionData = { ...diagnostic.data };
+        Reflect.deleteProperty(evictionData, 'triggerEventType');
+        Reflect.deleteProperty(evictionData, 'triggerEventBytes');
         try {
           res.write(
             formatSseFrame({
               v: 1,
               type: 'client_evicted',
-              data: {
-                reason: diagnostic.data.reason,
-                droppedAfter: diagnostic.data.droppedAfter,
-                queueSize: diagnostic.data.queueSize,
-                maxQueued: diagnostic.data.maxQueued,
-                queuedBytes: diagnostic.data.queuedBytes,
-                maxQueuedBytes: diagnostic.data.maxQueuedBytes,
-                ...(diagnostic.data.eventBytes === undefined
-                  ? {}
-                  : { eventBytes: diagnostic.data.eventBytes }),
-              },
+              data: evictionData,
             }),
           );
         } catch {
