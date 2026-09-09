@@ -285,6 +285,15 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/routes/workspace-git-branches.ts',
+    {
+      reason:
+        "The git error redaction mirrors the daemon process's own HOME/" +
+        'XDG_CONFIG_HOME to label the inherited config paths git echoes.',
+      accesses: { 'key:HOME': 1, 'key:XDG_CONFIG_HOME': 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/server/fs-factory.ts',
     {
       reason:
