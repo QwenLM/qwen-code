@@ -1588,7 +1588,7 @@ export async function searchWorkspaceSessionsForResponse(
     for (const hit of hits) {
       readOptions.signal?.throwIfAborted();
       const item = await sessionService.getSessionListItem(hit.sessionId);
-      if (item?.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE)
+      if (item && item.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE)
         bySessionId.set(
           hit.sessionId,
           applyOrganization(
