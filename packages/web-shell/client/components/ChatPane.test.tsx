@@ -13,6 +13,7 @@ import {
   GOAL_PAUSE_REASON_COMMAND,
 } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
+import { formatDateTime } from '../utils/formatDateTime';
 import {
   WebShellCustomizationProvider,
   type WebShellComposerToolbarRenderInfo,
@@ -539,6 +540,133 @@ function deferred<T>() {
 }
 
 describe('ChatPane', () => {
+  it('exposes the selected pane without confusing it with a running session', () => {
+    const props = { isActive: true };
+    render(props);
+    expect(testid('chat-pane')?.hasAttribute('data-pane-active')).toBe(true);
+    expect(testid('chat-pane')?.getAttribute('aria-current')).toBe('location');
+    sessionHasActivePromptValue = true;
+    rerender(props);
+    expect(testid('chat-pane')?.hasAttribute('data-pane-active')).toBe(true);
+    expect(testid('chat-pane')?.getAttribute('aria-current')).toBe('location');
+    rerender();
+    expect(testid('chat-pane')?.hasAttribute('data-pane-active')).toBe(false);
+    expect(testid('chat-pane')?.hasAttribute('aria-current')).toBe(false);
+  });
+
+  it('reports tool and question waiting state while hidden and clears it on unmount', () => {
+    const onApprovalChange = vi.fn();
+    const props = { hidden: true, onApprovalChange };
+    render(props);
+    expect(onApprovalChange).toHaveBeenLastCalledWith(
+      connectionState.sessionId,
+      false,
+    );
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    rerender(props);
+    expect(onApprovalChange).toHaveBeenLastCalledWith(
+      connectionState.sessionId,
+      true,
+    );
+    pendingPermission = null;
+    rerender(props);
+    expect(onApprovalChange).toHaveBeenLastCalledWith(
+      connectionState.sessionId,
+      false,
+    );
+    pendingPermission = {
+      id: 'ask-1',
+      rawInput: { questions: [{ question: 'pick', options: [] }] },
+    };
+    rerender(props);
+    expect(onApprovalChange).toHaveBeenLastCalledWith(
+      connectionState.sessionId,
+      true,
+    );
+    expect(submitPermission).not.toHaveBeenCalled();
+    act(() => root!.unmount());
+    root = null;
+    expect(onApprovalChange).toHaveBeenLastCalledWith(
+      connectionState.sessionId,
+      false,
+    );
+  });
+
+  it.each([
+    [false, '2026-01-02T00:00:00Z'],
+    [true, '2026-01-02T00:00:00Z'],
+    [false, undefined],
+  ] as const)(
+    'reuses title details without including actions and dismisses them when hidden (multiple workspaces: %s, updatedAt: %s)',
+    async (multiWorkspace, updatedAt) => {
+      vi.useFakeTimers();
+      try {
+        const props = {
+          title: 'Pane details',
+          workspaceCwd: '/work/split-project',
+          sessionSummary: {
+            sessionId: 'session-details',
+            workspaceCwd: '/work/split-project',
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt,
+            hasActivePrompt: false,
+            branch: { name: 'codex/split', baseBranch: 'main' },
+          },
+          onToggleMaximize: vi.fn(),
+        };
+        if (multiWorkspace) {
+          connectionState.capabilities = {
+            features: [],
+            workspaces: [
+              {
+                id: 'w0',
+                cwd: '/work/web-shell',
+                primary: true,
+                trusted: true,
+              },
+              {
+                id: 'w1',
+                cwd: '/work/split-project',
+                displayName: 'Payments API',
+                primary: false,
+                trusted: true,
+              },
+            ],
+          };
+        }
+        sessionHasActivePromptValue = true;
+        render(props);
+        const title = container!.querySelector('[data-slot="popover-anchor"]')!;
+        expect(title.textContent).toBe('Pane details');
+        expect(title.querySelector('button')).toBeNull();
+        const composerFocus = document.createElement('input');
+        container!.append(composerFocus);
+        composerFocus.focus();
+        await act(async () => {
+          title.dispatchEvent(new Event('pointerover', { bubbles: true }));
+          vi.advanceTimersByTime(300);
+        });
+        expect(
+          document.querySelector('[role="dialog"]')?.textContent,
+        ).toContain(multiWorkspace ? 'Payments API' : 'split-project');
+        expect(
+          document.querySelector('[role="dialog"]')?.textContent,
+        ).toContain('codex/split');
+        expect(
+          document.querySelector('[role="dialog"]')?.textContent,
+        ).toContain('Running');
+        expect(
+          document.querySelector('[role="dialog"]')?.textContent,
+        ).toContain(formatDateTime(updatedAt ?? '2026-01-01T00:00:00Z'));
+        expect(document.activeElement).toBe(composerFocus);
+        rerender({ ...props, hidden: true });
+        expect(document.querySelector('[role="dialog"]')).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('polls workflow tasks from the daemon capability, not the UI setting', async () => {
     connectionState.supportedCommands = { workflowsEnabled: true };
     messagesState = [

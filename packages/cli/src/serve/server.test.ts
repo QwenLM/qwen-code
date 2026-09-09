@@ -680,6 +680,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_skill_settings_toggle',
   'workspace_skill_settings_batch_toggle',
   'extension_batch_activation_v2',
+  'extension_activation_explicit_refresh',
   'workspace_skill_manage',
   'workspace_permissions',
   'workspace_trust',
@@ -4439,6 +4440,72 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
+    it.each([
+      [undefined, 5_000],
+      ['', 5_000],
+      ['   ', 5_000],
+      ['invalid', 5_000],
+      ['10000ms', 5_000],
+      ['NaN', 5_000],
+      ['Infinity', 5_000],
+      ['0', 5_000],
+      ['-1', 5_000],
+      ['999', 5_000],
+      ['1000.5', 5_000],
+      ['2147483648', 5_000],
+      ['1000', 1_000],
+      ['10000', 10_000],
+      [' 30000 ', 30_000],
+      ['2147483647', 2_147_483_647],
+    ])(
+      'resolves live-state polling environment %s to %i ms',
+      async (value, expected) => {
+        const app = createServeApp(baseOpts, undefined, {
+          bridge: fakeBridge(),
+          daemonEnv: { QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS: value },
+        });
+        const response = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(response.status).toBe(200);
+        expect(response.body.sessionLiveStatePollIntervalMs).toBe(expected);
+      },
+    );
+
+    it('keeps the process-wide live-state interval from the startup environment', async () => {
+      const daemonEnv = { QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS: '10000' };
+      const primary = makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: fakeBridge(),
+      });
+      const secondary: WorkspaceRuntime = {
+        ...makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: '/workspace/secondary',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+        env: {
+          mode: 'runtime-overlay',
+          overlayKeys: ['QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS'],
+          effectiveEnv: { QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS: '30000' },
+        },
+      };
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primary.bridge,
+        workspaceRegistry: createWorkspaceRegistry([primary, secondary]),
+        daemonEnv,
+      });
+      daemonEnv.QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS = '20000';
+      const response = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(response.status).toBe(200);
+      expect(response.body.sessionLiveStatePollIntervalMs).toBe(10_000);
+    });
+
     it('advertises workflow availability per workspace before a session exists', async () => {
       const primaryBridge = fakeBridge();
       const primary = makeWorkspaceRuntimeForTest({
@@ -7706,12 +7773,22 @@ describe('createServeApp', () => {
           .set('Authorization', 'Bearer secret')
           .send({ cancelled: true });
         releaseEnable?.();
-        await vi.waitFor(() => {
-          expect(
-            bridge.extensionEvents.filter(
-              (event) => event.status === 'enabled',
+        await vi.waitFor(async () => {
+          const operations = await Promise.all(
+            queued.map((response) =>
+              request(app)
+                .get(
+                  `/workspace/extensions/operations/${response.body.operationId}`,
+                )
+                .set('Host', `127.0.0.1:${tokenOpts.port}`)
+                .set('Authorization', 'Bearer secret'),
             ),
-          ).toHaveLength(9);
+          );
+          expect(
+            operations.every(
+              (operation) => operation.body.status === 'succeeded',
+            ),
+          ).toBe(true);
         });
       } finally {
         releaseEnable?.();
@@ -9277,7 +9354,7 @@ describe('createServeApp', () => {
       );
     });
 
-    it('queues extension enable and disable mutations', async () => {
+    it('commits extension enable and disable without refreshing sessions', async () => {
       const restore = mockExtensionManagerMethods();
       try {
         const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
@@ -9304,24 +9381,25 @@ describe('createServeApp', () => {
           .send({ scope: 'user' });
         expect(disable.status).toBe(202);
 
-        await vi.waitFor(() => {
-          expect(bridge.extensionEvents).toEqual(
-            expect.arrayContaining([
-              expect.objectContaining({
-                status: 'enabled',
-                name: 'test-ext',
-                refreshed: 1,
-                failed: 0,
-              }),
-              expect.objectContaining({
-                status: 'disabled',
-                name: 'test-ext',
-                refreshed: 1,
-                failed: 0,
-              }),
-            ]),
-          );
+        await vi.waitFor(async () => {
+          const enableOperation = await request(app)
+            .get(`/workspace/extensions/operations/${enable.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          const disableOperation = await request(app)
+            .get(`/workspace/extensions/operations/${disable.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(enableOperation.body).toMatchObject({
+            status: 'succeeded',
+            result: { status: 'enabled', name: 'test-ext' },
+          });
+          expect(disableOperation.body).toMatchObject({
+            status: 'succeeded',
+            result: { status: 'disabled', name: 'test-ext' },
+          });
         });
+        expect(bridge.extensionEvents).toEqual([]);
         expect(
           vi.mocked(ExtensionManager.prototype.enableExtension),
         ).toHaveBeenCalledWith(

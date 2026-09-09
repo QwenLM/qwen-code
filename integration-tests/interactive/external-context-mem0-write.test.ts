@@ -19,6 +19,11 @@ import {
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
 import { TestRig, type } from '../test-helper.js';
+import {
+  e2eRendererEnv,
+  pickE2eRenderer,
+  resolveE2eCliCommand,
+} from '../renderer-matrix.js';
 
 const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase().trim();
 const IS_SANDBOX = Boolean(
@@ -196,10 +201,14 @@ const ENVIRONMENT_KEYS = [
       await type(ptyProcess, '\r');
 
       if (scenario.expectsMcpConfirmation) {
-        expect(
-          await rig.waitForText('Allow execution of MCP tool', 30_000),
+        // Screen-based, not rig.waitForText: OpenTUI emits pty bytes by cell
+        // diff and drops spaces over previously-blank cells, so multi-word
+        // rows never appear verbatim in the raw stream on that leg.
+        await waitForScreen(
+          screen,
+          (value) => value.includes('Allow execution of MCP tool'),
           'ordinary MCP confirmation did not appear',
-        ).toBe(true);
+        );
         await type(ptyProcess, '\r');
       }
 
@@ -226,14 +235,26 @@ const ENVIRONMENT_KEYS = [
         expect(constrainedConfirmation).not.toContain('CONFIRM_TAIL');
 
         ptyProcess.write('\x13');
+        // CONFIRM_TAIL only becomes visible after expansion on both legs,
+        // so it is the transition detector. The hidden-label assertion
+        // differs by rendering model: OpenTUI's fixed alt-screen viewport
+        // keeps the dialog on screen but also keeps the transcript's own
+        // capped copy of the payload (with its label) above it, so the
+        // check must be scoped to the confirmation section; ink's expanded
+        // dialog grows past the viewport and scrolls the section heading
+        // away, where the whole-screen check is the one that holds.
         const expandedScreen = await waitForScreen(
           screen,
-          (value) =>
-            value.includes('CONFIRM_TAIL') && !value.includes('lines hidden'),
+          (value) => value.includes('CONFIRM_TAIL'),
           'expanded complete content confirmation',
         );
-        expect(expandedScreen).toContain('CONFIRM_TAIL');
-        expect(expandedScreen).not.toContain('lines hidden');
+        if (pickE2eRenderer() === 'opentui') {
+          const expandedConfirmation = confirmationSection(expandedScreen);
+          expect(expandedConfirmation).toContain('CONFIRM_TAIL');
+          expect(expandedConfirmation).not.toContain('lines hidden');
+        } else {
+          expect(expandedScreen).not.toContain('lines hidden');
+        }
       } else if (scenario.verifiesShortLiteral) {
         const screenWithConfirmation = await waitForScreen(
           screen,
@@ -246,22 +267,40 @@ const ENVIRONMENT_KEYS = [
         expect(confirmationScreen).toContain('`code-value`');
         expect(confirmationScreen).toContain('<u>under-value</u>');
       } else {
-        expect(
-          await rig.waitForText(
-            'Save this exact content to the bound Mem0 repository memory?',
-            30_000,
-          ),
+        await waitForScreen(
+          screen,
+          (value) =>
+            value.includes(
+              'Save this exact content to the bound Mem0 repository memory?',
+            ) && value.includes('Keep this'),
           'content-visible Hook confirmation did not appear',
-        ).toBe(true);
-        expect(rig._interactiveOutput).toContain('Keep this');
+        );
       }
       await type(ptyProcess, scenario.approveWrite ? '\r' : '\x1b');
 
       if (scenario.approveWrite) {
-        expect(
-          await rig.waitForText('MEM0_WRITE_E2E_DONE', 30_000),
-          'fake model turn did not complete',
-        ).toBe(true);
+        // Sync on request bodies, not transcript text: the OpenTUI leg
+        // redraws by cell diff, so rendered rows never reliably appear in
+        // the raw pty stream (see the screen-based waits above).
+        const modelRequests = fakeModel.requests;
+        const turnCompleted = await rig.poll(
+          () => modelRequests.length >= 2,
+          30_000,
+          200,
+        );
+        if (!turnCompleted) {
+          throw new Error(
+            `fake model turn did not complete. providerRequests=${providerRequests.length} modelRequests=${modelRequests.length}`,
+          );
+        }
+        // Turn-done oracle (Decision 2): the fake model's single-token
+        // completion marker must reach the rendered transcript — request
+        // counting alone proves a send, not a render.
+        await waitForScreen(
+          screen,
+          (value) => value.includes('MEM0_WRITE_E2E_DONE'),
+          'the model completion marker to reach the transcript',
+        );
       } else {
         await new Promise((resolve) => setTimeout(resolve, 1000));
         expect(fakeModel.requests).toHaveLength(1);
@@ -432,23 +471,35 @@ function fakeMem0McpSource(integrationRoot: string): string {
 
 function runInteractive(rig: TestRig, ...args: string[]) {
   rig._interactiveOutput = '';
+  const renderer = pickE2eRenderer();
   const { Terminal } = xtermHeadless;
+  // OpenTUI needs a tall viewport for the long-confirmation scenario: its
+  // expand guard only opens ctrl-s once the expanded tail window (height -
+  // 20 reserve rows) reveals more rows than the collapsed head window
+  // (fixed 20), and the tail must hold the whole payload for the expanded
+  // view to be label-free. Ink derives its cap from terminal height, so at
+  // 80 rows its collapsed body never bounds and the bounded-view oracle
+  // would not trigger — keep ink at its historical 38 rows.
+  const rows = renderer === 'opentui' ? 80 : 38;
   const terminal = new Terminal({
     cols: 110,
-    rows: 38,
+    rows,
     scrollback: 1000,
     allowProposedApi: true,
   });
   let pendingWrite = Promise.resolve();
   const ptyProcess = pty.spawn(
-    process.execPath,
+    resolveE2eCliCommand(renderer),
     [rig.bundlePath, '--no-chat-recording', ...args],
     {
       name: 'xterm-color',
       cols: 110,
-      rows: 38,
+      rows,
       cwd: rig.testDir!,
-      env: process.env as Record<string, string>,
+      env: {
+        ...process.env,
+        ...e2eRendererEnv(renderer),
+      } as Record<string, string>,
     },
   );
   ptyProcess.onData((data) => {

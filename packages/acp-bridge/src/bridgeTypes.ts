@@ -814,6 +814,9 @@ export interface BridgeSessionSummary {
   sourceId?: string;
   clientCount: number;
   hasActivePrompt: boolean;
+  /** Per-session active-work observation. `idle` is emitted only from a
+   * fresh snapshot that covers every negotiated hold category. */
+  activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
   /** True while a non-question permission request awaits a response. */
   isWaitingForPermission?: boolean;
   /** True while an ask_user_question request awaits a response. */
