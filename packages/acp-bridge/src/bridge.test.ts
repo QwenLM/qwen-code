@@ -6585,6 +6585,224 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('serves the in-memory journal on refreshed load while a question is pending', async () => {
+    const handle = makeChannel({
+      loadSessionImpl: () => ({
+        _meta: {
+          'qwen.session.loadReplay': {
+            v: 1,
+            updates: [
+              {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'initial prompt' },
+              },
+            ],
+          },
+        },
+      }),
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        // The persisted page can never contain the pending question:
+        // permission requests are journaled in memory only.
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'persisted tail' },
+                _meta: { 'qwen.session.recordId': 'record-persisted' },
+              },
+            },
+          ],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-pending-question',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    // Park the session on an unanswered ask_user_question. A parked turn
+    // does not keep promptActive set, so the refreshed-load guard would
+    // otherwise serve the persisted page with an empty liveJournal —
+    // stranding the interaction (badge on, no card) for the re-opening
+    // client.
+    const pendingAnswer = (
+      handle.agentConnection as unknown as {
+        requestPermission(p: unknown): Promise<unknown>;
+      }
+    ).requestPermission({
+      sessionId: loaded.sessionId,
+      toolCall: {
+        toolCallId: 'q1',
+        title: 'Ask user 1 question',
+        _meta: {
+          toolName: 'ask_user_question',
+          qwenInteractionKind: 'user_question',
+          qwenQuestions: [{ question: 'Continue?' }],
+        },
+      },
+      options: [
+        { optionId: 'proceed_once', name: 'Submit', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+      ],
+    });
+    await vi.waitFor(() =>
+      expect(
+        bridge.getSessionSummary(loaded.sessionId)?.isWaitingForUserQuestion,
+      ).toBe(true),
+    );
+
+    const reopened = await bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: 'client-reopen',
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    expect(
+      (reopened.liveJournal ?? []).some(
+        (event) => event.type === 'permission_request',
+      ),
+    ).toBe(true);
+    // The guarded branch switches the history source to the in-memory
+    // replay; the session's prior history must survive the switch.
+    const reopenedEvents = [
+      ...(reopened.compactedReplay ?? []),
+      ...(reopened.liveJournal ?? []),
+    ];
+    expect(
+      reopenedEvents.some(
+        (event) =>
+          event.type === 'session_update' &&
+          JSON.stringify(event.data).includes('initial prompt'),
+      ),
+    ).toBe(true);
+
+    const requestId = bridge.getSessionSummary(loaded.sessionId)
+      ?.pendingInteractions?.[0]?.requestId;
+    expect(requestId).toBeDefined();
+    bridge.respondToPermission(requestId!, {
+      outcome: { outcome: 'selected', optionId: 'proceed_once' },
+    });
+    await pendingAnswer;
+    await bridge.shutdown();
+  });
+
+  it('re-checks pending interactions at serve time when a question arrives mid-fetch', async () => {
+    let transcriptFetches = 0;
+    let pendingAnswer: Promise<unknown> | undefined;
+    const handle = makeChannel({
+      loadSessionImpl: () => ({
+        _meta: {
+          'qwen.session.loadReplay': {
+            v: 1,
+            updates: [
+              {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'initial prompt' },
+              },
+            ],
+          },
+        },
+      }),
+      extMethodImpl: async (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        transcriptFetches += 1;
+        if (transcriptFetches === 1) {
+          // The question arrives while the first transcript fetch is in
+          // flight: publish + registration land before the page returns.
+          pendingAnswer = (
+            handle.agentConnection as unknown as {
+              requestPermission(p: unknown): Promise<unknown>;
+            }
+          ).requestPermission({
+            sessionId: loaded.sessionId,
+            toolCall: {
+              toolCallId: 'q-mid-fetch',
+              title: 'Ask user 1 question',
+              _meta: {
+                toolName: 'ask_user_question',
+                qwenInteractionKind: 'user_question',
+                qwenQuestions: [{ question: 'Continue?' }],
+              },
+            },
+            options: [
+              { optionId: 'proceed_once', name: 'Submit', kind: 'allow_once' },
+              { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+            ],
+          });
+          await vi.waitFor(() =>
+            expect(
+              bridge.getSessionSummary(loaded.sessionId)
+                ?.isWaitingForUserQuestion,
+            ).toBe(true),
+          );
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'persisted tail' },
+                _meta: { 'qwen.session.recordId': 'record-persisted' },
+              },
+            },
+          ],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-mid-fetch-question',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const reopened = await bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: 'client-reopen',
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    expect(transcriptFetches).toBeGreaterThanOrEqual(1);
+    expect(
+      (reopened.liveJournal ?? []).some(
+        (event) => event.type === 'permission_request',
+      ),
+    ).toBe(true);
+
+    const requestId = bridge.getSessionSummary(loaded.sessionId)
+      ?.pendingInteractions?.[0]?.requestId;
+    expect(requestId).toBeDefined();
+    bridge.respondToPermission(requestId!, {
+      outcome: { outcome: 'selected', optionId: 'proceed_once' },
+    });
+    await pendingAnswer;
+    await bridge.shutdown();
+  });
+
   it('keeps the current turn error when refreshing from persisted history', async () => {
     const handle = makeChannel({
       promptImpl: () => {
