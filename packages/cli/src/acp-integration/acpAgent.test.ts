@@ -9981,7 +9981,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         baseUrl: 'https://openrouter.ai/api/v1',
         samplingParams: { reasoning_effort: 'high' },
       },
-      'medium',
+      'high',
       false,
     ],
     [

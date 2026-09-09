@@ -1370,8 +1370,13 @@ function reasoningPreviewSupports(
   value: ReasoningSelection,
 ): boolean {
   if (value === 'none') return reasoning.canDisable !== false;
+  if (reasoning.canEnable === false && !reasoning.enabled) return false;
   if (value === 'default') return true;
-  return reasoning.efforts.includes(value);
+  return (
+    reasoning.canEnable !== false &&
+    reasoning.enableValue !== 'default' &&
+    reasoning.efforts.includes(value)
+  );
 }
 
 const emptyComposerApi: WebShellComposerApi = {

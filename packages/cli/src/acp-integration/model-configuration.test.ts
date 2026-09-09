@@ -526,6 +526,30 @@ describe('GPT raw reasoning reporting', () => {
         baseUrl: 'https://openrouter.ai/api/v1',
         samplingParams: { reasoning_effort: 'high' },
       },
+      { enabled: true, effort: 'high', useDefaultEffort: false },
+    ],
+    [
+      {
+        model: 'gpt-5.4',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        samplingParams: { reasoning_effort: 'high' },
+        extra_body: { reasoning_effort: 'low' },
+      },
+      { enabled: true, effort: 'low', useDefaultEffort: false },
+    ],
+    [
+      {
+        baseUrl: 'https://openrouter.ai/api/v1',
+        samplingParams: { reasoning_effort: 'none' },
+      },
+      { enabled: false, useDefaultEffort: true },
+    ],
+    [
+      {
+        model: 'gpt-6-astra',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        samplingParams: { reasoning_effort: 'none' },
+      },
       { enabled: true, useDefaultEffort: true },
     ],
     [

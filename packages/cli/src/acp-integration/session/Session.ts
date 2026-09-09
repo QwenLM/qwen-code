@@ -10748,9 +10748,9 @@ export class Session implements SessionContext {
     const generation = this.config.getContentGeneratorConfig?.();
     const thinkingMandatory = generation?.thinkingMandatory === true;
     const modelReasoning = getConfiguredModelReasoning(this.config, modelId);
-    const gptModel =
-      getGptReasoningCapabilities(modelId) !== undefined &&
-      !parseModelReasoningCapabilities(modelReasoning);
+    const gptCapabilities = getGptReasoningCapabilities(modelId);
+    const configuredReasoning = parseModelReasoningCapabilities(modelReasoning);
+    const gptModel = gptCapabilities !== undefined && !configuredReasoning;
     const supportsPreference = (value: ReasoningSelection | undefined) =>
       value !== undefined &&
       value !== REASONING_EFFORT_DEFAULT &&
@@ -10775,7 +10775,11 @@ export class Session implements SessionContext {
       !hasSessionSelection &&
       rawSelection !== undefined &&
       !supported &&
-      !(gptModel && selection === REASONING_EFFORT_NONE) &&
+      !(
+        selection === REASONING_EFFORT_NONE &&
+        gptCapabilities !== undefined &&
+        configuredReasoning?.canDisable !== false
+      ) &&
       options.persist
     ) {
       try {

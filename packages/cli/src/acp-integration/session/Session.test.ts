@@ -6973,6 +6973,52 @@ describe('Session', () => {
       },
     );
 
+    it.each([
+      ['gpt-6-astra', false, undefined],
+      ['gpt-6-astra', true, undefined],
+      ['gpt-5', false, undefined],
+      ['gpt-6-astra', false, false],
+    ] as const)(
+      'reconciles saved off for %s with configured toggleOnly=%s, canDisable=%s',
+      async (modelId, toggleOnly, canDisable) => {
+        const state = installReasoningPreference('none', { trusted: true });
+        Object.assign(mockConfig, {
+          getResolvedModelConfig: vi.fn(() => ({
+            generationConfig: {},
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                ...(toggleOnly
+                  ? { toggleOnly: true }
+                  : { efforts: ['low', 'high'], defaultEffort: 'high' }),
+                disableField: 'reasoning_effort',
+                ...(canDisable === false ? { canDisable } : {}),
+              },
+            },
+          })),
+        });
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+        });
+        session.reloadReasoningSelection();
+        for (const scope of [state.user, state.workspace]) {
+          for (const settings of [scope.settings, scope.originalSettings]) {
+            expect(settings.model).toEqual(
+              canDisable === false ? {} : { reasoningEffort: 'none' },
+            );
+          }
+        }
+        expect(state.live.reasoning).toBeUndefined();
+        expect(state.rebuildable.reasoning).toBeUndefined();
+        expect(
+          vi
+            .mocked(mockSettings.setValue)
+            .mock.calls.filter((call) => call[1] === 'model.reasoningEffort'),
+        ).toHaveLength(canDisable === false ? 2 : 0);
+      },
+    );
+
     it('reconciles a GPT preference against explicit configured capabilities', async () => {
       const state = installReasoningPreference('max', { trusted: true });
       Object.assign(mockConfig, {

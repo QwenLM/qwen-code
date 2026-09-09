@@ -27,6 +27,13 @@ Base GPT-5.5 and GPT-5.6 default to medium and support disabling.
 GPT-5 Pro and GPT-5.5 Pro default to high; GPT-5.2 Pro and GPT-5.4 Pro
 default to medium. These Pro variants require thinking.
 
+The [GPT-5 family guide](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5)
+names `gpt-5`, `gpt-5-mini`, and `gpt-5-nano` and lists `minimal`, `low`,
+`medium`, and `high`. Their `minimal` mode still uses reasoning; `none` was
+introduced with [GPT-5.1](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.1).
+The shared SDK union is not a per-model support list. Keep these three models
+mandatory and do not translate an off request into unsupported `none`.
+
 GPT-6 Astra supports all five tiers and requires thinking. Recognize its
 exact identifier, dated snapshots, and provider prefixes; do not infer
 capabilities for other GPT-6 variants. Its controls start enabled at medium
@@ -55,8 +62,12 @@ in effect.
 GPT overrides are excluded from the existing Qwen-specific ACP override
 cleanup. Controls display the same clamped tier as the provider, while a shared
 preference survives a model switch that uses the built-in GPT fallback for use on other models. Explicit configured capabilities retain their stricter reconciliation.
+A saved off preference also survives when the mandatory constraint comes from
+the GPT table over declared capabilities; an explicit configured `canDisable: false`
+retains the existing strict reconciliation.
 Raw request overrides may determine a different effective tier. Native flat
 values and supported OpenRouter nested efforts report the effective raw tier;
+OpenRouter sampling flat values do too when they suppress configured nested effort.
 OpenRouter enabled flags and token budgets report enabled state with the model
 default tier. Native nested values and unrecognized raw tiers remain opaque.
 Any raw override that prevents replacing the configured tier rejects explicit
@@ -86,6 +97,11 @@ Welcome keeps switch-generated tiers tied to their source model and discards tha
 pending intent on a model change, preserving the target's existing preference;
 an explicit compatible tier still migrates. Welcome model changes do not turn
 existing max or none preferences into reset commands.
+Disabled previews with `canEnable: false` reject pending enabling intent both
+on model changes and when refreshed metadata is applied before the first prompt.
+Previews with a raw override also reject pending explicit tiers while already
+enabled: `enableValue: 'default'` or `canEnable: false` identifies controls
+whose configured tier cannot replace the raw value.
 ACP `default` retains its reset semantics. There are no new daemon routes or persistence
 formats. Responses-only models still require a compatible Chat Completions
 gateway; adding a Responses transport is outside this change.

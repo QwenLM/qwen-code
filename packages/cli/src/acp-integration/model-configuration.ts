@@ -180,10 +180,16 @@ export function getGptReasoningOverrideState(
         ) &&
         !isReasoningEffortPlaceholder(flat)
       : removedFlatNone;
+    const effort = removedFlatNone
+      ? undefined
+      : efforts.find((tier) => tier === flat);
     return suppressedConfiguredTier
       ? {
-          enabled: defaultEnabled,
-          useDefaultEffort: true,
+          enabled: removedFlatNone
+            ? defaultEnabled
+            : flat !== REASONING_EFFORT_NONE,
+          ...(effort ? { effort } : {}),
+          useDefaultEffort: effort === undefined,
           blocksTierChange: true,
         }
       : undefined;
