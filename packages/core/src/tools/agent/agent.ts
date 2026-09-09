@@ -2712,6 +2712,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         taskDescription: this.params.description,
         taskPrompt: this.params.prompt,
         executionMode: shouldRunInBackground ? 'background' : 'foreground',
+        subagentSessionReady: false,
         status: 'running' as const,
         subagentColor: subagentConfig.color,
       };
@@ -3317,6 +3318,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           depth: launchDepth,
           model: subagentModelId,
         });
+
+        this.updateDisplay({ subagentSessionReady: true }, updateOutput);
 
         // Subscribe to the subagent's tool-call event stream so the
         // detail dialog's Progress section reflects live activity. We
@@ -4163,6 +4166,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // childLaunchDepth() for the rationale.
           depth: launchDepth,
         });
+
+        this.updateDisplay({ subagentSessionReady: true }, updateOutput);
 
         const stopHookWarning = await runFramed();
         const terminateMode = subagent.getTerminateMode();

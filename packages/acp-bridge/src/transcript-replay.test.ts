@@ -511,6 +511,94 @@ describe('createTranscriptReplayMachine', () => {
     expect(machine.snapshot().goalState?.goal).toEqual(recommitted);
   });
 
+  it.each([
+    undefined,
+    null,
+    'invalid',
+    {},
+    { callId: '', subagentSessionReady: true },
+    { callId: 1, subagentSessionReady: true },
+    { callId: 'agent-1', subagentSessionReady: 'false' },
+  ])('reports and skips malformed readiness payload %j', (systemPayload) => {
+    const onDiagnostic = vi.fn();
+    const machine = createTranscriptReplayMachine({ onDiagnostic });
+    expect(
+      updates(
+        machine,
+        record('ready-malformed', 'system', {
+          subtype: 'agent_session_ready',
+          systemPayload,
+        }),
+      ),
+    ).toEqual([]);
+    expect(onDiagnostic).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        code: 'malformed_agent_session_ready',
+        recordId: 'ready-malformed',
+        path: 'systemPayload',
+      }),
+    );
+  });
+
+  it.each([false, true])(
+    'replays valid readiness %s without a diagnostic',
+    (subagentSessionReady) => {
+      const onDiagnostic = vi.fn();
+      const machine = createTranscriptReplayMachine({ onDiagnostic });
+      updates(
+        machine,
+        record('start', 'assistant', {
+          message: {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'agent-1', name: 'agent', args: {} } },
+            ],
+          },
+        }),
+      );
+      expect(
+        updates(
+          machine,
+          record('ready', 'system', {
+            subtype: 'agent_session_ready',
+            systemPayload: { callId: 'agent-1', subagentSessionReady },
+          }),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'agent-1',
+          _meta: expect.objectContaining({ subagentSessionReady }),
+        }),
+      ]);
+      expect(onDiagnostic).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'reports and skips readiness %s without a matching tool start',
+    (subagentSessionReady) => {
+      const onDiagnostic = vi.fn();
+      const machine = createTranscriptReplayMachine({ onDiagnostic });
+      expect(
+        updates(
+          machine,
+          record('orphan-ready', 'system', {
+            subtype: 'agent_session_ready',
+            systemPayload: { callId: 'missing-start', subagentSessionReady },
+          }),
+        ),
+      ).toEqual([]);
+      expect(onDiagnostic).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          code: 'orphan_agent_session_ready',
+          recordId: 'orphan-ready',
+          path: 'systemPayload.callId',
+        }),
+      );
+    },
+  );
+
   it('reports and skips a malformed goal_state record', () => {
     const onDiagnostic = vi.fn();
     const machine = createTranscriptReplayMachine({ onDiagnostic });

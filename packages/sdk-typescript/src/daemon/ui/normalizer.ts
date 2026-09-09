@@ -1135,6 +1135,11 @@ function normalizeToolUpdate(
       text: `Tool update missing toolCallId${title ? ` (${title})` : ''}`,
     };
   }
+  const subagentSessionReady =
+    isRecord(rawOutput) &&
+    typeof rawOutput['subagentSessionReady'] === 'boolean'
+      ? rawOutput['subagentSessionReady']
+      : metadata?.['subagentSessionReady'];
   const { provenance, serverId } = extractToolProvenance(update, toolName);
   // PR-K (post-rebase): daemon stamps `parentToolCallId` + `subagentType` in
   // `tool_call._meta` when the call was invoked inside a sub-agent
@@ -1170,6 +1175,9 @@ function normalizeToolUpdate(
     ...(serverId ? { serverId } : {}),
     ...(parentToolCallId ? { parentToolCallId } : {}),
     ...(subagentType ? { subagentType } : {}),
+    ...(typeof subagentSessionReady === 'boolean'
+      ? { subagentSessionReady }
+      : {}),
     ...(rawInput !== undefined ? { rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
     ...(resultPreview ? { resultPreview } : {}),
