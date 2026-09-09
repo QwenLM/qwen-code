@@ -976,6 +976,45 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
+    if (record.subtype === 'agent_session_ready') {
+      const payload = isObjectRecord(record.systemPayload)
+        ? record.systemPayload
+        : undefined;
+      if (
+        typeof payload?.['callId'] !== 'string' ||
+        payload['callId'].length === 0 ||
+        typeof payload['subagentSessionReady'] !== 'boolean'
+      ) {
+        this.report(
+          'malformed_agent_session_ready',
+          'Skipped a malformed subagent session readiness record.',
+          record.uuid,
+          'systemPayload',
+        );
+        return;
+      }
+      const callId = payload['callId'];
+      if (!this.pendingToolCalls.has(callId)) {
+        this.report(
+          'orphan_agent_session_ready',
+          'Skipped subagent readiness without a matching pending tool call.',
+          record.uuid,
+          'systemPayload.callId',
+        );
+        return;
+      }
+      yield emit({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: callId,
+        _meta: buildUpdateMeta({
+          ...meta,
+          extra: {
+            subagentSessionReady: payload['subagentSessionReady'],
+          },
+        }),
+      });
+      return;
+    }
     if (record.subtype === 'goal_state') {
       const payload = parseGoalStateRecordPayloadV2(record.systemPayload);
       if (!payload) {

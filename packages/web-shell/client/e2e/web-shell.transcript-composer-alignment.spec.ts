@@ -8,39 +8,42 @@ import {
   userTextEvent,
 } from './utils/mockDaemon';
 
-async function expectSameAxis(message: Locator, composer: Locator) {
+async function expectSameEdges(message: Locator, composer: Locator) {
   await expect
     .poll(async () => {
       const messageBox = await message.boundingBox();
       const composerBox = await composer.boundingBox();
       if (!messageBox || !composerBox) return Infinity;
-      return Math.abs(
-        messageBox.x +
-          messageBox.width / 2 -
-          (composerBox.x + composerBox.width / 2),
+      return Math.max(
+        Math.abs(messageBox.x - composerBox.x),
+        Math.abs(
+          messageBox.x + messageBox.width - composerBox.x - composerBox.width,
+        ),
       );
     })
     .toBeLessThanOrEqual(1);
 }
 
 for (const navigation of [true, false]) {
-  test(`transcript stays on the composer axis with turn navigation ${navigation ? 'enabled' : 'unsupported'} @smoke`, async ({
+  test(`transcript matches composer edges with turn navigation ${navigation ? 'enabled' : 'unsupported'} @smoke`, async ({
     page,
     baseURL,
   }, testInfo) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     const scenario = createWebShellDaemonScenario({
-      events: [
-        userTextEvent('What is the weather?', { id: 1 }),
+      events: Array.from({ length: 4 }, (_, index) => [
+        userTextEvent('What is the weather?', { id: index * 3 + 1 }),
         assistantTextEvent(
-          `the weather report is ready\n\n${Array.from(
-            { length: 80 },
-            (_, index) => `Forecast detail ${index + 1}.`,
-          ).join('\n\n')}`,
-          { id: 2 },
+          index < 3
+            ? 'Earlier forecast.'
+            : `the weather report is ready\n\n${Array.from(
+                { length: 80 },
+                (_, index) => `Forecast detail ${index + 1}.`,
+              ).join('\n\n')}`,
+          { id: index * 3 + 2 },
         ),
-        turnCompleteEvent('prompt-alignment', { id: 3 }),
-      ],
+        turnCompleteEvent(`prompt-alignment-${index}`, { id: index * 3 + 3 }),
+      ]).flat(),
     });
     if (navigation)
       scenario.capabilities.features.push('session_turn_navigation');
@@ -55,16 +58,15 @@ for (const navigation of [true, false]) {
           v: 1,
           sessionId: scenario.sessionId,
           snapshot: 'mock-snapshot',
-          totalTurns: 1,
+          totalTurns: 4,
           start: 0,
-          turns: [
-            {
-              ordinal: 0,
-              turnId: 'record-0',
-              kind: 'prompt',
-              label: 'What is the weather?',
-            },
-          ],
+          turns: Array.from({ length: 4 }, (_, ordinal) => ({
+            ordinal,
+            turnId: `record-${ordinal}`,
+            kind: 'prompt',
+            label: 'What is the weather?',
+            detail: 'The weather report includes the weekly forecast.',
+          })),
         },
       });
     });
@@ -79,9 +81,10 @@ for (const navigation of [true, false]) {
     );
     await expect(page.getByText('Loading...')).toHaveCount(0);
 
-    const rail = page.locator('[data-global-turn-navigation]');
-    if (navigation) await expect(rail).toBeVisible();
-    else await expect(rail).toHaveCount(0);
+    const rail = navigation
+      ? page.locator('[data-global-turn-navigation]')
+      : page.getByTestId('session-timeline');
+    await expect(rail).toBeVisible();
 
     const messageList = page.locator('[data-web-shell-message-list]');
     const message = messageList
@@ -97,30 +100,116 @@ for (const navigation of [true, false]) {
         ),
       )
       .toBeGreaterThan(0);
-    await expectSameAxis(message, composer);
-    const column = page.locator('[data-history-viewport] > div').last();
-    await expect(column).toHaveCSS(
-      'padding-right',
-      navigation ? '64px' : '0px',
-    );
-
-    // The columns have different widths in this band but still share an axis.
-    await page.setViewportSize({ width: 1300, height: 900 });
-    if (navigation) {
-      await expect(rail).toBeVisible();
+    for (const width of [1440, 1300, 1261, 1260, 1259, 1000, 802, 700, 599]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expectSameEdges(message, composer);
+      const viewport = page.locator('[data-history-viewport]');
       await expect
         .poll(async () => {
-          const messageBox = await message.boundingBox();
-          const composerBox = await composer.boundingBox();
-          return (composerBox?.width ?? 0) - (messageBox?.width ?? Infinity);
+          const scrollBox = await messageList.boundingBox();
+          const viewportBox = await viewport.boundingBox();
+          if (!scrollBox || !viewportBox) return Infinity;
+          return Math.abs(
+            scrollBox.x + scrollBox.width - viewportBox.x - viewportBox.width,
+          );
         })
-        .toBeGreaterThan(1);
+        .toBeLessThanOrEqual(1);
+      const viewportBox = await viewport.boundingBox();
+      if (viewportBox && viewportBox.width >= 1000) {
+        await expect(rail).toBeVisible();
+        const railBox = await rail.boundingBox();
+        const messageBox = await message.boundingBox();
+        expect(railBox!.x + railBox!.width).toBeLessThanOrEqual(messageBox!.x);
+      } else {
+        await expect(rail).toBeHidden();
+      }
     }
-    await expectSameAxis(message, composer);
-
-    await page.setViewportSize({ width: 599, height: 900 });
-    await expect(rail).toBeHidden();
-    await expect(column).toHaveCSS('padding-right', '0px');
-    await expectSameAxis(message, composer);
+    {
+      const shell = page.locator('[data-web-shell-root]');
+      for (const minWidth of [800, 1200, 1000]) {
+        await shell.evaluate((element, width) => {
+          element.style.setProperty(
+            '--chat-regular-content-width',
+            `${width}px`,
+          );
+        }, minWidth);
+        for (const offset of [-1, 0, 1]) {
+          await page.setViewportSize({
+            width: minWidth + 260 + offset,
+            height: 900,
+          });
+          if (offset < 0) await expect(rail).toBeHidden();
+          else await expect(rail).toBeVisible();
+        }
+      }
+      await page.setViewportSize({ width: 1260, height: 900 });
+      await shell.evaluate((element) => {
+        element.style.setProperty('--chat-regular-content-width', '1200px');
+      });
+      await expect(rail).toBeHidden();
+      await shell.evaluate((element) => {
+        element.style.setProperty('--chat-regular-content-width', '1000px');
+      });
+      await expect(rail).toBeVisible();
+    }
+    for (const width of [1440, 1260]) {
+      await page.setViewportSize({ width, height: 900 });
+      const button = rail.locator('button').first();
+      const tick = button.locator(':scope > span').first();
+      await button.hover();
+      await expect
+        .poll(async () => (await tick.boundingBox())?.width ?? 0)
+        .toBeGreaterThan(27);
+      const tickBox = await tick.boundingBox();
+      const railScrollBox = await rail.locator(':scope > div').boundingBox();
+      expect(tickBox!.x + tickBox!.width).toBeLessThanOrEqual(
+        railScrollBox!.x + railScrollBox!.width,
+      );
+      const preview = page.locator(
+        navigation
+          ? '[data-slot="tooltip-content"]'
+          : '#session-timeline-detail-tooltip',
+      );
+      await expect(preview).toBeVisible();
+      await expect(preview).toContainText('What is the weather?');
+      if (navigation)
+        await expect(preview).toContainText(
+          'The weather report includes the weekly forecast.',
+        );
+      await expect(preview).toHaveCSS('border-radius', '14px');
+      await expect(preview).toHaveCSS('padding', '12px 14px');
+      await expect(preview.locator('[data-slot="tooltip-arrow"]')).toBeHidden();
+      await preview.evaluate((element) => {
+        element.style.pointerEvents = 'none';
+      });
+      const buttonBox = await button.boundingBox();
+      expect(
+        await message.evaluate(
+          (element, y) =>
+            Boolean(
+              document
+                .elementFromPoint(element.getBoundingClientRect().x + 5, y)
+                ?.closest(
+                  '[data-global-turn-navigation], [data-testid="session-timeline"]',
+                ),
+            ),
+          buttonBox!.y + buttonBox!.height / 2,
+        ),
+      ).toBe(false);
+      await page.mouse.move(500, 10);
+      await expect(preview).toHaveCount(0);
+    }
+    await test.step('docked environment panel preserves composer alignment', async () => {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      const toggle = page.locator('[data-web-shell-environment-toggle]');
+      const panel = page.getByTestId('environment-panel');
+      await toggle.click();
+      await expect(panel).toBeVisible();
+      await expect(panel).toHaveAttribute('data-floating', 'false');
+      await expectSameEdges(message, composer);
+      await toggle.click();
+      await expect(panel).toBeHidden();
+      await expectSameEdges(message, composer);
+    });
   });
 }
