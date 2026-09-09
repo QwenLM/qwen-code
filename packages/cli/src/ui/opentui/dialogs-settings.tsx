@@ -32,6 +32,7 @@ import {
   getDialogSettingKeys,
   getSettingDefinition,
   getEffectiveValue,
+  nextBooleanSettingValue,
   setPendingSettingValueAny,
   saveModifiedSettings,
   getDisplayValue,
@@ -151,13 +152,14 @@ export function nextToggleValue(
     | {
         type?: SettingsType;
         options?: ReadonlyArray<{ value: SettingsValue }>;
+        default?: SettingsValue;
       }
     | undefined,
   currentValue: SettingsValue,
 ): SettingsValue | undefined {
   if (!definition || !TOGGLE_TYPES.has(definition.type)) return undefined;
   if (definition.type === 'boolean') {
-    return !(currentValue as boolean);
+    return nextBooleanSettingValue(currentValue, definition.default);
   }
   if (definition.type === 'enum' && definition.options) {
     const options = definition.options;
