@@ -744,9 +744,13 @@ export class ContentGenerationPipeline {
       // streamYieldedFunctionCall) and shut the transport replay gate that
       // recovers exactly this cut, while the post-completion acceptance arm
       // this flush feeds excludes tool calls anyway.
-      const parkedHasToolCall = pendingFinishResponse?.candidates?.some(
-        (candidate) =>
-          candidate.content?.parts?.some((part) => part.functionCall),
+      // TypeScript narrows pendingFinishResponse to null here (its only
+      // assignments sit inside the handleChunkMerging callback), so the
+      // property access needs the same explicit cast as the finishYielded
+      // merge above.
+      const parked = pendingFinishResponse as GenerateContentResponse | null;
+      const parkedHasToolCall = parked?.candidates?.some((candidate) =>
+        candidate.content?.parts?.some((part) => part.functionCall),
       );
       if (pendingFinishResponse && !finishYielded && !parkedHasToolCall) {
         logPendingProtocolTagSanitized(
