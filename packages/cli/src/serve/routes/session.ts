@@ -8490,6 +8490,9 @@ export function registerSessionRoutes(
           sessionId: session.sessionId,
           clientCount: session.clientCount,
           hasActivePrompt: session.hasActivePrompt,
+          ...(session.activeWorkState !== undefined
+            ? { activeWorkState: session.activeWorkState }
+            : {}),
           isWaitingForPermission: session.isWaitingForPermission ?? false,
           isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
           // Bridge-local activity watermark, absent until a running prompt in
