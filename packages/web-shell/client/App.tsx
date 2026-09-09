@@ -1363,22 +1363,21 @@ function getStandaloneRecoverySessionId(
 type PendingReasoningIntent = {
   modelId: string;
   value: ReasoningSelection;
+  fromToggle?: true;
 };
-
-function getReasoningSelection(
-  reasoning: DaemonReasoningControls,
-): ReasoningSelection {
-  if (!reasoning.enabled) return 'none';
-  return reasoning.effort === 'none' ? 'default' : reasoning.effort;
-}
 
 function reasoningPreviewSupports(
   reasoning: DaemonReasoningControls,
   value: ReasoningSelection,
 ): boolean {
   if (value === 'none') return reasoning.canDisable !== false;
+  if (reasoning.canEnable === false && !reasoning.enabled) return false;
   if (value === 'default') return true;
-  return reasoning.efforts.includes(value);
+  return (
+    reasoning.canEnable !== false &&
+    reasoning.enableValue !== 'default' &&
+    reasoning.efforts.includes(value)
+  );
 }
 
 const emptyComposerApi: WebShellComposerApi = {
@@ -8939,26 +8938,18 @@ export function App({
         reasoningIntent?.modelId === currentModelRef.current
           ? reasoningIntent
           : undefined;
-      const sourceReasoningPreview = models?.find(
-        (model) => model.id === currentModelRef.current,
-      )?.reasoningPreview;
-      const sourceReasoningSelection =
-        sourceReasoningIntent?.value ??
-        (sourceReasoningPreview
-          ? getReasoningSelection(sourceReasoningPreview)
-          : undefined);
       const reasoningPreview = models?.find(
         (model) => model.id === modelId,
       )?.reasoningPreview;
       const keepReasoningIntent =
-        sourceReasoningSelection &&
+        sourceReasoningIntent &&
         reasoningPreview &&
-        reasoningPreviewSupports(reasoningPreview, sourceReasoningSelection);
+        reasoningPreviewSupports(reasoningPreview, sourceReasoningIntent.value);
       setPendingReasoningIntent(
-        sourceReasoningIntent && keepReasoningIntent
-          ? { modelId, value: sourceReasoningIntent.value }
-          : sourceReasoningSelection && !keepReasoningIntent
-            ? { modelId, value: 'default' }
+        sourceReasoningIntent?.fromToggle && modelId !== currentModelRef.current
+          ? undefined
+          : sourceReasoningIntent && keepReasoningIntent
+            ? { ...sourceReasoningIntent, modelId }
             : undefined,
       );
       setPendingModel(modelId);
@@ -15602,7 +15593,7 @@ export function App({
   );
 
   const handleWelcomeReasoningEffort = useCallback(
-    (value: ReasoningSelection) => {
+    (value: ReasoningSelection, source?: 'toggle') => {
       const activeConnection = connectionRef.current;
       if (
         sessionWriteBlockedRef.current ||
@@ -15621,12 +15612,12 @@ export function App({
         setPendingReasoningIntent({ modelId, value });
         return;
       }
-      if (value === 'default') {
-        setPendingReasoningIntent({ modelId, value });
-        return;
-      }
-      if (!preview.efforts.includes(value)) return;
-      setPendingReasoningIntent({ modelId, value });
+      if (value !== 'default' && !preview.efforts.includes(value)) return;
+      setPendingReasoningIntent({
+        modelId,
+        value,
+        ...(source === 'toggle' ? { fromToggle: true } : {}),
+      });
     },
     [setPendingReasoningIntent],
   );
