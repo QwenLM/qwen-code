@@ -97,7 +97,6 @@ describe('alibabaStandardProvider', () => {
 
     const models = plan.modelProviders?.[0]?.models;
     expect(models?.[0]?.generationConfig).toEqual({
-      extra_body: { enable_thinking: true },
       contextWindowSize: 1000000,
     });
     expect(models?.[1]?.generationConfig).toEqual({

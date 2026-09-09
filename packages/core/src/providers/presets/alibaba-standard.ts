@@ -92,7 +92,6 @@ export const alibabaStandardProvider: ProviderConfig = {
         },
       },
       contextWindowSize: 1000000,
-      enableThinking: true,
     },
     {
       id: 'deepseek-v4-flash',

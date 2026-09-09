@@ -1763,6 +1763,7 @@ describe('ContentGenerationPipeline', () => {
       ],
       ['alibabaStandard', 'qwen3.8-flash', 'xhigh', 'reasoning_effort', false],
       ['alibabaStandard', 'qwen3.7-plus', undefined, 'enable_thinking', false],
+      ['alibabaStandard', 'deepseek-v4-pro', 'high', 'enable_thinking', false],
       ['alibabaStandard', 'deepseek-v4-pro', 'max', 'enable_thinking', false],
       [
         'alibabaStandard',
@@ -1866,6 +1867,13 @@ describe('ContentGenerationPipeline', () => {
           expect(wire.reasoning).toBeUndefined();
           if (mode === 'enabled') {
             expect(wire.reasoning_effort).toBe(effort);
+            if (
+              providerId === 'alibabaStandard' &&
+              model === 'deepseek-v4-pro'
+            ) {
+              expect(wire.enable_thinking).toBeUndefined();
+              expect(wire.thinking).toBeUndefined();
+            }
           } else if (!mandatory) {
             expect(wire.reasoning_effort).toBe(
               disableField === 'reasoning_effort' ? 'none' : undefined,
