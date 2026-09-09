@@ -258,6 +258,7 @@ import {
   registerWorkspaceLifecycleRoutes,
   registerWorkspaceQualifiedLifecycleRoutes,
 } from './routes/workspace-lifecycle.js';
+import { resolveMaxRegisteredWorkspaces } from './workspace-inputs.js';
 import {
   registerWorkspaceManagementRoutes,
   type WorkspaceManagementHandle,
@@ -548,6 +549,8 @@ export interface ServeAppDeps {
    */
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
+  /** Advertise only when the injected channel controller enforces this limit. */
+  maxChannelControlWorkspaces?: number;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
   getChannelWorkerControl?: () => ChannelWorkerControlState;
@@ -778,6 +781,22 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  const daemonEnv = deps.daemonEnv ?? process.env;
+  const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
+  const maxRegisteredWorkspaces = resolveMaxRegisteredWorkspaces(
+    opts.maxRegisteredWorkspaces,
+    daemonEnvAtBoot,
+  );
+  opts = { ...opts, maxRegisteredWorkspaces };
+  if (
+    deps.workspaceRegistry &&
+    deps.workspaceRegistry.listAllEntries().filter((entry) => !entry.internal)
+      .length > maxRegisteredWorkspaces
+  ) {
+    throw new Error(
+      `Initial workspace registry exceeds the configured limit of ${maxRegisteredWorkspaces}.`,
+    );
+  }
   const tokenConfigured =
     typeof opts.token === 'string' && opts.token.length > 0;
   if (opts.requireAuth === true && !tokenConfigured) {
@@ -944,8 +963,6 @@ export function createServeApp(
   const primaryRuntimeEnvMetadata =
     injectedWorkspaceRegistry?.primary.env ?? deps.primaryRuntimeEnv;
   const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
-  const daemonEnv = deps.daemonEnv ?? process.env;
-  const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
   const trustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
     workspaceTrusted: true,
   });
@@ -2230,6 +2247,7 @@ export function createServeApp(
     sessionShellCommandEnabled,
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
     getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
+    maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
     getPerfSnapshot: deps.getPerfSnapshot,
     getMetricsSeries: deps.getMetricsSeries,
     getTotalSessionAdmissionSnapshot:
@@ -2257,6 +2275,8 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     workspaceRegistry,
     permissionPolicy: primaryBridge.permissionPolicy,
+    maxRegisteredWorkspaces,
+    maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
     maxSessionsPerWorkspace: opts.maxSessions,
     maxTotalSessions: opts.maxTotalSessions,
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
@@ -2632,6 +2652,7 @@ export function createServeApp(
 
   // Dynamic workspace registration.
   const workspaceManagementHandle = registerWorkspaceManagementRoutes(app, {
+    maxRegisteredWorkspaces,
     workspaceRegistry,
     mutate,
     safeBody,

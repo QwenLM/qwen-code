@@ -7,7 +7,33 @@
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { isWithinRoot } from '../config/path-comparison.js';
 
-export const MAX_REGISTERED_WORKSPACES = 25;
+export const MAX_REGISTERED_WORKSPACES = 256;
+export const MAX_CONFIGURED_REGISTERED_WORKSPACES = 256;
+export const QWEN_SERVE_MAX_WORKSPACES_ENV = 'QWEN_SERVE_MAX_WORKSPACES';
+
+export function resolveMaxRegisteredWorkspaces(
+  configured: number | undefined,
+  env: Readonly<NodeJS.ProcessEnv>,
+): number {
+  const raw = env[QWEN_SERVE_MAX_WORKSPACES_ENV];
+  const value =
+    configured ??
+    (raw === undefined
+      ? MAX_REGISTERED_WORKSPACES
+      : /^\d+$/.test(raw.trim())
+        ? Number(raw.trim())
+        : Number.NaN);
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > MAX_CONFIGURED_REGISTERED_WORKSPACES
+  ) {
+    throw new TypeError(
+      `Invalid maxRegisteredWorkspaces (${QWEN_SERVE_MAX_WORKSPACES_ENV}): must be an integer from 1 to ${MAX_CONFIGURED_REGISTERED_WORKSPACES}.`,
+    );
+  }
+  return value;
+}
 
 export class DuplicateWorkspaceInputError extends Error {
   constructor(workspace: string) {
