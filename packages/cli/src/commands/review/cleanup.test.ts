@@ -296,37 +296,44 @@ describe('runCleanup', () => {
     expect(() => runCleanup('pr-123')).not.toThrow();
   });
 
-  it('degrades instead of throwing when the process cwd is deleted out from under it', () => {
-    // R19-4 (cleanup half): `redirectedAncestor`'s default stop reads
-    // process.cwd() in the CALLER's frame, outside the walk's own try, and
-    // REVIEW_TMP_DIR is a relative spelling — a launch directory deleted out
-    // from under the process (an operator `rm -rf` mid-review, the nested
-    // geometry) threw uv_cwd out of runCleanup before any degradation could
-    // run. With no live cwd the relative root cannot be resolved at all, so
-    // the sweep refuses with an explanation instead.
-    const anchor = process.cwd();
-    const gone = realFs.mkdtempSync(join(tmpdir(), 'cleanup-deleted-cwd-'));
-    process.chdir(gone);
-    try {
-      realFs.rmSync(gone, { recursive: true, force: true });
-      // The precondition, asserted rather than assumed: this is the throw the
-      // default stopAt used to let escape (the same shape the gitProbe
-      // witness pins in lib/git.integration.test.ts).
-      expect(process.cwd).toThrow(/uv_cwd/);
+  it.skipIf(process.platform === 'win32')(
+    'degrades instead of throwing when the process cwd is deleted out from under it',
+    () => {
+      // Gated off Windows (R28-9): the fixture deletes the process's own
+      // cwd, which Windows forbids — the rmSync throws ERROR_ACCESS_DENIED
+      // before any assertion, and the uv_cwd shape under test cannot be
+      // produced there at all.
+      // R19-4 (cleanup half): `redirectedAncestor`'s default stop reads
+      // process.cwd() in the CALLER's frame, outside the walk's own try, and
+      // REVIEW_TMP_DIR is a relative spelling — a launch directory deleted out
+      // from under the process (an operator `rm -rf` mid-review, the nested
+      // geometry) threw uv_cwd out of runCleanup before any degradation could
+      // run. With no live cwd the relative root cannot be resolved at all, so
+      // the sweep refuses with an explanation instead.
+      const anchor = process.cwd();
+      const gone = realFs.mkdtempSync(join(tmpdir(), 'cleanup-deleted-cwd-'));
+      process.chdir(gone);
+      try {
+        realFs.rmSync(gone, { recursive: true, force: true });
+        // The precondition, asserted rather than assumed: this is the throw the
+        // default stopAt used to let escape (the same shape the gitProbe
+        // witness pins in lib/git.integration.test.ts).
+        expect(process.cwd).toThrow(/uv_cwd/);
 
-      expect(() => runCleanup('pr-123')).not.toThrow();
-      expect(mocks.writeStderrLine).toHaveBeenCalledWith(
-        expect.stringContaining('working directory no longer exists'),
-      );
-      expect(process.exitCode).toBe(1);
-      // Nothing was swept from inside a root that cannot be resolved.
-      expect(mocks.rmSync).not.toHaveBeenCalled();
-      expect(mocks.releaseWorktree).not.toHaveBeenCalled();
-    } finally {
-      process.chdir(anchor);
-      process.exitCode = 0;
-    }
-  });
+        expect(() => runCleanup('pr-123')).not.toThrow();
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('working directory no longer exists'),
+        );
+        expect(process.exitCode).toBe(1);
+        // Nothing was swept from inside a root that cannot be resolved.
+        expect(mocks.rmSync).not.toHaveBeenCalled();
+        expect(mocks.releaseWorktree).not.toHaveBeenCalled();
+      } finally {
+        process.chdir(anchor);
+        process.exitCode = 0;
+      }
+    },
+  );
 
   it('reads process.cwd() ONCE per run — the entry capture — and never downstream (R30-6)', () => {
     // The mid-run half of the deleted-cwd class: the entry guard covers a cwd

@@ -36,7 +36,11 @@ import {
   readReviewWorktreeLeaseAt,
   reviewLeaseHeldByAnotherSession,
 } from '../../services/review-worktree-lease.js';
-import { untrustedGitfile, untrustedRepositoryFrom } from './lib/worktree.js';
+import {
+  redirectedAncestor,
+  untrustedGitfile,
+  untrustedRepositoryFrom,
+} from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
@@ -1058,9 +1062,8 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     //
     // The pointer it judges is the LAUNCH directory's, not the new tree's:
     // `git()` sets no cwd, so `worktree add` finds the repository from
-    // `process.cwd()`. Gating `wt` was a no-op — `cleanStale` above has just
-    // removed whatever stood there, and a tree that does not exist has no
-    // pointer to distrust.
+    // `process.cwd()`. Gating `wt`'s OWN pointer would be a no-op — a tree
+    // that does not exist yet has no pointer to distrust.
     //
     // OUTSIDE the try, because the catch below is a rollback. Thrown from
     // inside, the refusal was caught by the path that deletes the fetched ref,
@@ -1074,6 +1077,24 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     if (freshUntrusted !== null) {
       throw new Error(
         `refusing to create a review worktree: ${freshUntrusted}`,
+      );
+    }
+    // The DESTINATION's ancestors too (R27-9): `cleanStale` is not proof the
+    // parent of `wt` is real — `releaseWorktree` DECLINES the sweep when a
+    // symlink sits at an ancestor (`git.ts`), prints a line, and leaves the
+    // link standing. `mkdirSync(dirname(wt))` would then create THROUGH the
+    // link and `git worktree add wt ref` would create and check out the PR's
+    // code at the link's target — outside the review temp dir, where
+    // `mountRootFor` answers null and the build/test phase runs unsandboxed
+    // in a directory the planter chose. The same question releaseWorktree
+    // asks, at the same dirname, outside the rollback try for the same
+    // reason as the gate above.
+    const wtRedirected = redirectedAncestor(dirname(resolve(wt)));
+    if (wtRedirected !== null) {
+      throw new Error(
+        `refusing to create a review worktree at ${wt}: ${wtRedirected} is ` +
+          `a symlink, so the create and checkout would land wherever it ` +
+          `points — outside the review temp dir. Remove the link and re-run.`,
       );
     }
     try {

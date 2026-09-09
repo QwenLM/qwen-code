@@ -3027,11 +3027,18 @@ jobs:
           # Both locations: leases moved to `.qwen/review-leases` (out of the
           # directory the review sandbox mounts read-write), and a runner whose
           # workspace persists can still be holding one written by an older
-          # build in the old place. `-r`, because the old path is inside that
-          # mounted directory and a reviewed PR can leave a DIRECTORY at the
-          # lease's name, which plain `rm -f` cannot remove.
-          rm -rf .qwen/review-leases/qwen-review-lease-pr-*.json 2>/dev/null || true
-          rm -rf .qwen/tmp/qwen-review-lease-pr-*.json 2>/dev/null || true
+          # build in the old place. The lease name matches no `review-pr-*`
+          # glob above, and a reviewed PR can leave a DIRECTORY — or a
+          # mode-000 one — at a lease's name: a bare `rm -rf` fails on that
+          # shape, and discarding its stderr and status would leave the
+          # residue to wedge every later job on this runner with nothing in
+          # the log. One loop over both globs, through the same repair ladder
+          # the trees get: a survivor is repaired away or named in a warning,
+          # never silently kept.
+          for lease in .qwen/review-leases/qwen-review-lease-pr-*.json .qwen/tmp/qwen-review-lease-pr-*.json; do
+            [ -e "$lease" ] || [ -L "$lease" ] || continue
+            remove_review_tree "$lease"
+          done
           echo "review worktrees cleaned"
 
   # A review job that dies abnormally — runner crash, host loss, or the

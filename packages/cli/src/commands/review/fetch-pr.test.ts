@@ -1327,6 +1327,46 @@ describe('fetch-pr report assembly', () => {
       expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalled();
     });
 
+    it('refuses the step-4 create when a symlinked ancestor of the worktree path survived the sweep (R27-9)', async () => {
+      // `cleanStale`'s releaseWorktree DECLINES to free through a symlinked
+      // ancestor — it prints a line and leaves the link standing — so "the
+      // sweep just ran" is not proof the parent of `wt` is real. Without the
+      // ancestor arm beside the launch-dir gate, `mkdirSync(dirname(wt))`
+      // creates through the link and `git worktree add` checks the PR's code
+      // out at the link's target: outside the review temp dir, where
+      // `mountRootFor` answers null and the build/test phase runs
+      // unsandboxed in a directory the planter chose.
+      const tmpParent = join(process.cwd(), '.qwen', 'tmp');
+      const linkStat = {
+        isSymbolicLink: () => true,
+        isFile: () => false,
+      };
+      producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+        if (String(path) === tmpParent) return linkStat;
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+
+      await expect(reportFor({})).rejects.toThrow(
+        /refusing to create a review worktree at .*is a symlink/,
+      );
+      // Nothing was created through the link — no mkdir, no worktree add —
+      // and the fetched ref survives the refusal for the next run's
+      // cleanStale to sweep (the arm sits outside the rollback try).
+      expect(producerMocks.mkdirSync).not.toHaveBeenCalled();
+      expect(producerMocks.git).not.toHaveBeenCalledWith(
+        'worktree',
+        'add',
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(producerMocks.gitOpt).not.toHaveBeenCalledWith(
+        'branch',
+        '-D',
+        'qwen-review/pr-42',
+      );
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalled();
+    });
+
     it('clears the lease when the worktree add fails', async () => {
       producerMocks.git.mockImplementation((...args: string[]) => {
         if (args[0] === 'worktree') throw new Error('disk full');
