@@ -9309,6 +9309,78 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('uses the target provider raw override for cold reasoning preview', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn(() => '/work/status'),
+      getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getModel: vi.fn(() => 'qwen3.8-max'),
+      getAllConfiguredModels: vi.fn(() => [
+        { id: 'gpt-5.5', label: 'GPT 5.5', authType: AuthType.USE_OPENAI },
+      ]),
+      getResolvedModelConfig: vi.fn((authType: string, modelId: string) =>
+        authType === AuthType.USE_OPENAI && modelId === 'gpt-5.5'
+          ? {
+              baseUrl: 'https://api.openai.com/v1',
+              generationConfig: {
+                extra_body: { reasoning: { effort: 'high' } },
+              },
+            }
+          : undefined,
+      ),
+    } as unknown as Config;
+    const settings = makeSessionSettings({
+      model: {
+        reasoningEffort: 'none',
+        generationConfig: { extra_body: { reasoning_effort: 'none' } },
+      },
+    });
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings({ model: { reasoningEffort: 'high' } }),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    try {
+      const status = await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.workspaceProviders,
+        {},
+      );
+      expect(status['errors']).toBeUndefined();
+      expect(status).toMatchObject({
+        providers: [
+          {
+            models: [
+              {
+                modelId: 'gpt-5.5(openai)',
+                configOptions: [
+                  {
+                    id: 'reasoning_effort',
+                    currentValue: 'none',
+                    _meta: {
+                      'qwenCode/reasoning': { enableValue: 'default' },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+      expect(settings.merged.model?.reasoningEffort).toBe('none');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('session model selectors filter fastOnly and voiceOnly models', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);

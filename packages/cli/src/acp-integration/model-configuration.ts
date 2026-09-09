@@ -517,15 +517,53 @@ export function buildModelReasoningConfigPreview(
   modelId: string | undefined,
   state: ModelReasoningConfigState = {},
   configuredReasoning?: ModelReasoningConfiguration,
+  generation?: ContentGeneratorConfig,
 ): SessionConfigOption[] | undefined {
   const reasoning = getModelConfiguration(
     modelId,
     configuredReasoning,
   )?.reasoning;
   if (!reasoning?.thinking) return undefined;
+  const effectiveReasoning =
+    state.enabled === false
+      ? false
+      : state.enabled === true
+        ? { effort: state.effort }
+        : generation?.reasoning;
+  const override =
+    generation &&
+    getGptReasoningOverrideState(
+      {
+        ...generation,
+        reasoning: effectiveReasoning,
+      },
+      configuredReasoning,
+    );
+  const enableOverride =
+    generation &&
+    getGptReasoningOverrideState(
+      { ...generation, reasoning: undefined },
+      configuredReasoning,
+    );
   const option = buildModelReasoningConfigOption(
     modelId,
-    state,
+    {
+      ...state,
+      ...(override
+        ? {
+            enabled: override.enabled,
+            effort: override.useDefaultEffort ? undefined : override.effort,
+          }
+        : {}),
+      ...(enableOverride?.blocksTierChange
+        ? {
+            ...(effectiveReasoning === false ? { enabled: false } : {}),
+            ...(enableOverride.enabled && generation?.reasoning !== false
+              ? { enableValue: REASONING_EFFORT_DEFAULT }
+              : { canEnable: false as const }),
+          }
+        : {}),
+    },
     configuredReasoning,
   );
   return option ? [option] : undefined;

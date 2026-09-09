@@ -102,6 +102,13 @@ on model changes and when refreshed metadata is applied before the first prompt.
 Previews with a raw override also reject pending explicit tiers while already
 enabled: `enableValue: 'default'` or `canEnable: false` identifies controls
 whose configured tier cannot replace the raw value.
+Both cold workspace provider previews use the target provider's generation
+defaults to project raw override state and the same enable constraints as a live
+session. Provider defaults do not inherit ignored top-level generation settings.
+For models that allow thinking to be disabled, a saved off preference remains
+off in the preview. Enabling a raw-controlled model selects `default` when
+permitted; raw configurations that cannot enable thinking prevent turning it
+on before a session is created.
 ACP `default` retains its reset semantics. There are no new daemon routes or persistence
 formats. Responses-only models still require a compatible Chat Completions
 gateway; adding a Responses transport is outside this change.
