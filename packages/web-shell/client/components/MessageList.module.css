@@ -198,28 +198,33 @@
   position: sticky;
   top: 50vh;
   z-index: 4;
-  width: 0 !important;
+  width: 100% !important;
   height: 0;
   margin-right: 0 !important;
   margin-left: 0 !important;
   transition: none;
-  transform: translateX(-22px);
+  transform: translateX(-20px);
   pointer-events: none;
 }
 
 .sessionTimelinePanel {
   position: absolute;
   top: 0;
-  left: 22px;
-  width: 86px;
+  left: 0;
+  width: clamp(
+    20px,
+    calc((100% + 40px - var(--chat-content-width, 1000px)) / 2),
+    86px
+  );
+  padding-left: 5px;
   overflow: visible;
   color: var(--muted-foreground);
-  pointer-events: auto;
+  pointer-events: none;
   transform: translateY(-50%);
 }
 
 .sessionTimelineViewport {
-  width: 70px;
+  width: calc(100% + 32px);
   max-height: min(640px, max(220px, calc(100vh - 220px)));
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -271,7 +276,7 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  margin: 0;
+  margin: 0 32px 0 0;
   padding: 32px 0;
   list-style: none;
 }
@@ -286,7 +291,8 @@
   top: -6.5px;
   display: flex;
   align-items: center;
-  width: 58px;
+  width: 100%;
+  pointer-events: auto;
   height: 16px;
   padding: 0;
   border: 0;
@@ -308,6 +314,7 @@
 
 .sessionTimelineTick {
   display: block;
+  pointer-events: none;
   width: 10px;
   height: 3px;
   border-radius: 1px;
@@ -485,11 +492,5 @@
 
   .sessionTimelineDetails {
     animation: none;
-  }
-}
-
-@media (max-width: 720px) {
-  .sessionTimelinePanel {
-    display: none;
   }
 }

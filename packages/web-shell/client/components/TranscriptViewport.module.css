@@ -14,8 +14,6 @@
   );
 }
 
-@container (min-width: 600px) {
-  .navigation {
-    display: flex;
-  }
+.navigation:not([hidden]) {
+  display: flex;
 }
