@@ -13,6 +13,7 @@ import type { OmniUploadConfig } from './upload-config.js';
 import {
   OMNI_DISCLOSURE_TEXT_PREFIX,
   OMNI_RESOURCE_HANDLE_TEXT_PREFIX,
+  OMNI_RESOURCE_PATH_TEXT_PREFIX,
   OMNI_OMISSION_TEXT_PREFIX,
   OMNI_TRANSCRIPT_TEXT_PREFIX,
 } from './disclosure.js';
@@ -210,6 +211,7 @@ describe('buildOmniMediaGuidanceSection — recall guidance', () => {
     // that consumes it is deferred — so without this the model sees the
     // marker with no explanation and reprocesses what memory already holds.
     expect(section).toContain(OMNI_RESOURCE_HANDLE_TEXT_PREFIX);
+    expect(section).toContain(OMNI_RESOURCE_PATH_TEXT_PREFIX);
     expect(section).toContain('omni_recall_media_memory');
     expect(section).toMatch(/BEFORE reprocessing/);
     // It must describe BOTH annotation forms: the absolute path for a local
@@ -221,11 +223,19 @@ describe('buildOmniMediaGuidanceSection — recall guidance', () => {
   it('says nothing about the recall tool in sideQuery mode', () => {
     // D10: in sideQuery mode the harness injects recalled memory itself and
     // the tool is not even registered — telling the model to call it would
-    // invite a guaranteed unknown-tool error.
+    // invite a guaranteed unknown-tool error. But the REFERENCE guidance still
+    // ships in BOTH annotation forms (R3-6): the media tools below take a
+    // path/handle regardless of recall mode, so the model needs this to use
+    // them even though the recall tool is absent.
     const section = buildOmniMediaGuidanceSection(
       stubConfig({ recallMode: 'sideQuery' }),
     )!;
     expect(section).not.toContain('omni_recall_media_memory');
+    // Both reference forms are explained without naming the recall tool.
+    expect(section).toContain(OMNI_RESOURCE_HANDLE_TEXT_PREFIX);
+    expect(section).toContain(OMNI_RESOURCE_PATH_TEXT_PREFIX);
+    expect(section).toMatch(/absolute path/);
+    expect(section).toMatch(/opaque session handle/);
   });
 
   it('says nothing about recall when memory is not configured', () => {

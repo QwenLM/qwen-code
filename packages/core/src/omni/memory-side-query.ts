@@ -14,7 +14,6 @@ import {
   type MediaMemoryRecallResult,
 } from '../services/media-memory/index.js';
 import {
-  OMNI_RESOURCE_HANDLE_TEXT_PREFIX,
   parseResourceHandleText,
   parseResourcePathText,
 } from './disclosure.js';
@@ -31,8 +30,8 @@ const debugLogger = createDebugLogger('omni:memory');
  *
  * Constitutional bounds, enforced here and in the recall service:
  * - only resources the request explicitly carries (parsed from the
- *   【媒体资源】 annotations — either the handle form or the path form) are
- *   consulted — never a project-wide scan;
+ *   resource annotations — the 【媒体资源】 handle form or the 【媒体路径】
+ *   path form) are consulted — never a project-wide scan;
  * - the selector sees summaries (no raw media, full text, paths, or
  *   secrets — resource-annotation lines, which for a local file carry the
  *   absolute path, are stripped from the selector's request text) and may
@@ -73,11 +72,11 @@ const SELECTION_SCHEMA: Record<string, unknown> = {
 const MAX_SELECTOR_REQUEST_CHARS = 4000;
 
 /** Extract the session resource handles a request explicitly carries: every
- * 【媒体资源】 annotation part — the handle form directly, or the path form
- * reversed to its handle via `resolveByFileRef` — that resolves to a binding
- * this session's registry actually issued (M §9.3 — passive recall never
- * guesses beyond what the request references). Deduplicated, in
- * first-appearance order. */
+ * resource annotation part — the 【媒体资源】 handle form directly, or the
+ * 【媒体路径】 path form reversed to its handle via `resolveByFileRef` — that
+ * resolves to a binding this session's registry actually issued (M §9.3 —
+ * passive recall never guesses beyond what the request references).
+ * Deduplicated, in first-appearance order. */
 export function extractRequestResourceIds(
   config: Config,
   parts: readonly PartUnion[],
@@ -142,21 +141,35 @@ function stripSystemReminders(text: string): string {
   return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '');
 }
 
-/** Drop every 【媒体资源】 resource-annotation line (either form). Harness-
- * injected, not the user's question — the selector already has the candidate
- * manifest and judges relevance from the question alone, so these lines add
- * no signal. Critically, the PATH form carries the file's absolute local path
- * (home directory, OS username, project layout); leaving it in would send that
- * to the selector's model call and its API-traffic logs, violating the §17.5
- * acceptance item "selector 不接收原始媒体、大文本或本地路径". Matches the marker
- * as the first non-whitespace of a line (the writer's own line grammar). */
+/** Drop every line that actually PARSES as a resource annotation — the
+ * handle form (`【媒体资源】<name>：<handle>`) or the path form
+ * (`【媒体路径】<absolute path>`). Harness-injected, not the user's question —
+ * the selector already has the candidate manifest and judges relevance from
+ * the question alone, so these lines add no signal. Critically, the PATH form
+ * carries the file's absolute local path (home directory, OS username, project
+ * layout); leaving it in would send that to the selector's model call and its
+ * API-traffic logs, violating the §17.5 acceptance item "selector 不接收
+ * 原始媒体、大文本或本地路径".
+ *
+ * Gated on a successful parse, NOT on the bare marker prefix: ordinary prose
+ * that merely opens with a marker (`【媒体资源】清单`) is the user's question and
+ * must survive — the parse side (parseResourceHandleText's id grammar,
+ * parseResourcePathText's isAbsolutePathLike) already rejects it and the
+ * export keeps it in request.text, so the selector must agree. Mirrors
+ * extractRequestResourceIds' candidates (left-trim preserves a filename's
+ * legal trailing whitespace; full-trim covers line-formatting whitespace). */
 function stripResourceAnnotationLines(text: string): string {
   return text
     .split('\n')
-    .filter(
-      (line) =>
-        !line.replace(/^\s+/, '').startsWith(OMNI_RESOURCE_HANDLE_TEXT_PREFIX),
-    )
+    .filter((line) => {
+      const trimmed = line.trim();
+      const leftTrimmed = line.replace(/^\s+/, '');
+      return !(
+        parseResourceHandleText(trimmed) ??
+        parseResourcePathText(leftTrimmed) ??
+        parseResourcePathText(trimmed)
+      );
+    })
     .join('\n');
 }
 

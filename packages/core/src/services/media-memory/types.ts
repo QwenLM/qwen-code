@@ -11,9 +11,13 @@
  * recall service. Two invariants shape every type in this file:
  *
  * - Persistent identity is separate from filesystem reality. These
- *   persistent IDs are never model-visible; locators are sanitized before
- *   they enter a record. (Separately, the SESSION registry may surface a
- *   model-visible local file's own absolute path in its 【媒体资源】
+ *   persistent IDs are never model-USABLE references: recall and the media
+ *   policy gate accept only a session handle (`resourceId`) or a displayed
+ *   local path, never a `fileId` / `fileVersionId`. They do ride along as
+ *   provenance metadata inside a recall payload (which the recall tool
+ *   serializes whole to the model), and locators are sanitized before they
+ *   enter a record. (Separately, the SESSION registry may surface a
+ *   model-visible local file's own absolute path in its 【媒体路径】
  *   annotation — see `formatResourcePathText` — but that is the live path
  *   the model already read, never one of these persistent identifiers.)
  * - Only two collection triggers exist — FileRecognized and

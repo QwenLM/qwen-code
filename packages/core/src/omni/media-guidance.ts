@@ -33,6 +33,7 @@ import { resolveMediaPolicyModelAccess } from './policy/model-access.js';
 import {
   OMNI_DISCLOSURE_TEXT_PREFIX,
   OMNI_RESOURCE_HANDLE_TEXT_PREFIX,
+  OMNI_RESOURCE_PATH_TEXT_PREFIX,
   OMNI_OMISSION_TEXT_PREFIX,
   OMNI_TRANSCRIPT_TEXT_PREFIX,
 } from './disclosure.js';
@@ -134,20 +135,22 @@ export function buildOmniMediaGuidanceSection(config: Config): string | null {
   );
 
   // How the model references delivered media. Emitted in BOTH recall modes:
-  // the 【媒体资源】 marker rides every memory-known delivery, and the media
-  // tools below take a path/handle regardless of recall mode, so the model
-  // needs this to use them. (Its absence in sideQuery mode left the stale
-  // per-tool schema text as the model's only instruction.)
+  // a 【媒体路径】 / 【媒体资源】 marker rides every memory-known delivery,
+  // and the media tools below take a path/handle regardless of recall mode,
+  // so the model needs this to use them. (Its absence in sideQuery mode left
+  // the stale per-tool schema text as the model's only instruction.)
   const referenceGuidance = `
-- ${OMNI_RESOURCE_HANDLE_TEXT_PREFIX}<ref>: how you reference that media. For a local file you read, <ref> is its absolute path — you can re-read it or point tools at it directly. For media with no path you can see (tool results, URLs, recalled memory), <ref> is an opaque session handle.
-- The same <ref> names the media for the media tools below: pass a path as \`inputPath\`, an opaque handle as \`resourceId\`.`;
+- ${OMNI_RESOURCE_PATH_TEXT_PREFIX}<absolute path>: how a local file you read is referenced. The path is shown VERBATIM — byte-for-byte the real on-disk path — so you can re-read it or point the media tools at it directly.
+- ${OMNI_RESOURCE_HANDLE_TEXT_PREFIX}<name>：<handle>: how media with no path you can see (tool results, URLs, recalled memory) is referenced — <handle> is an opaque session handle.
+- Pass whichever reference you were shown to the media tools below: an absolute path as \`inputPath\`, an opaque session handle as \`resourceId\`.`;
 
   // The active recall tool is the ONE consumer that is mode-specific: it is
   // deferred (surfaces via ToolSearch), so without this the model can receive
-  // 【媒体资源】 markers and — told by the rest of this section to gather
-  // evidence with the policy tools — reprocess from scratch what memory
-  // already holds. Only stated when recall.mode is 'active': in sideQuery mode
-  // the harness injects recalled memory itself and the model must not call it.
+  // 【媒体路径】 / 【媒体资源】 markers and — told by the rest of this section
+  // to gather evidence with the policy tools — reprocess from scratch what
+  // memory already holds. Only stated when recall.mode is 'active': in
+  // sideQuery mode the harness injects recalled memory itself and the model
+  // must not call it.
   const recallGuidance =
     config.getOmniMemoryConfig?.()?.recall.mode === 'active'
       ? `

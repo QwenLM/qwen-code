@@ -248,12 +248,13 @@ export function evaluateMediaPolicyToolCall(params: {
   }
 
   // Session-reference input (M §5.2): a gated caller may name its source by
-  // the reference it was shown in a 【媒体资源】 annotation instead of a real
-  // path — the opaque handle minted at delivery/recall, or, for a
-  // model-visible local file, the absolute path itself. `resolveMediaReference`
-  // accepts either form (reversing a displayed path back to its binding, same
-  // as active recall). Resolution happens BEFORE the lockedArguments check so a
-  // resolved inputPath cannot sidestep an operator-pinned input.
+  // the reference it was shown in a 【媒体路径】 / 【媒体资源】 annotation
+  // instead of a real path — the opaque handle minted at delivery/recall, or,
+  // for a model-visible local file, the absolute path itself.
+  // `resolveMediaReference` accepts either form (reversing a displayed path
+  // back to its binding, same as active recall). Resolution happens BEFORE the
+  // lockedArguments check so a resolved inputPath cannot sidestep an
+  // operator-pinned input.
   if (typeof args['resourceId'] === 'string') {
     if (args['inputPath'] !== undefined) {
       return {

@@ -563,9 +563,9 @@ export class MediaMemoryRecallService {
    * A model-visible local source is annotated with its ABSOLUTE PATH rather
    * than a handle, and the model passes that path here. `resolveMediaReference`
    * resolves each identifier as a handle first (the common case), then as a
-   * session-bound fileRef — unescaping the displayed path so a native Windows
-   * path or a `：`-bearing name (which arrives escaped) still matches the raw
-   * `fileRef` the registry stores. So the displayed path recalls exactly as
+   * session-bound fileRef — the path form rides VERBATIM (never escaped), so a
+   * native Windows path or a `：`-bearing name matches the raw `fileRef` the
+   * registry stores byte-for-byte. So the displayed path recalls exactly as
    * the handle would. An identifier that is neither still rejects the whole
    * request. */
   private resolveBindings(

@@ -183,6 +183,49 @@ describe('collectModelPolicyCall', () => {
     expect(execution.finalArguments).not.toHaveProperty('resourceId');
   });
 
+  it('attributes the execution to the RE-BOUND version at a reverted path (R3-5)', async () => {
+    // Read bytes A (v-1), edit to B and re-read (v-2), then revert to A and
+    // re-read: the third bind re-delivers v-1 and refreshes its recency. A
+    // model call resolves its source via resolveByFileRef, which must return
+    // the version the model is CURRENTLY looking at (v-1), so the committed
+    // sourceVersionId is v-1 — not the superseded v-2. Without the recency
+    // refresh the execution mis-attributes to stale bytes.
+    const first = registry.bind({
+      fileId: 'f-src',
+      fileVersionId: 'v-1',
+      rootFileId: 'f-root',
+      fileRef: inputPath,
+      mediaType: 'image',
+    });
+    registry.bind({
+      fileId: 'f-src',
+      fileVersionId: 'v-2',
+      rootFileId: 'f-root',
+      fileRef: inputPath,
+      mediaType: 'image',
+    });
+    const reverted = registry.bind({
+      fileId: 'f-src',
+      fileVersionId: 'v-1',
+      rootFileId: 'f-root',
+      fileRef: inputPath,
+      mediaType: 'image',
+    });
+    expect(reverted).toBe(first); // idempotent re-bind of v-1
+    expect(registry.resolveByFileRef(inputPath)?.fileVersionId).toBe('v-1');
+
+    await collectModelPolicyCall({
+      config: bridgeConfig(),
+      batch: batchOf(),
+      descriptor: DESCRIPTOR,
+      args: { inputPath, outputDir, resourceId: reverted.resourceId },
+    });
+
+    const snapshot = await readSnapshot();
+    const execution = Object.values(snapshot.executions)[0]!;
+    expect(execution.sourceVersionId).toBe('v-1');
+  });
+
   it('leaves fixed-policy successes to the orchestrator', async () => {
     await collectModelPolicyCall({
       config: bridgeConfig(),

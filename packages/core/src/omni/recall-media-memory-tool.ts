@@ -18,6 +18,7 @@ import {
   OMNI_MEMORY_RECALL_KINDS,
   type OmniMemoryRecallKind,
 } from '../services/media-memory/index.js';
+import { resolveMediaReference } from '../services/media-memory/registry.js';
 import { createMediaMemoryRecallService } from './memory-recall.js';
 
 /**
@@ -29,9 +30,10 @@ import { createMediaMemoryRecallService } from './memory-recall.js';
  */
 
 export interface OmniRecallMediaMemoryParams {
-  /** Resource references from 【媒体资源】 annotations: an opaque session
-   * handle for path-less media, or the absolute path for a model-visible
-   * local file. Both resolve to the same session binding. */
+  /** Resource references from a delivered-media annotation: the absolute
+   * path from a 【媒体路径】 annotation (a model-visible local file), or the
+   * opaque session handle from a 【媒体资源】 annotation (path-less media).
+   * Both resolve to the same session binding. */
   resourceIds: string[];
   query: string;
   kinds?: OmniMemoryRecallKind[];
@@ -134,10 +136,11 @@ export class OmniRecallMediaMemoryTool extends BaseDeclarativeTool<
       'Recalls what is already known about media resources delivered in ' +
         'this session: prior transcripts, extracted keyframes, technical ' +
         'metadata, and processing history persisted by earlier sessions. ' +
-        'Pass the reference announced in the 【媒体资源】 annotation next to ' +
-        'delivered media — an opaque resourceId handle, or the absolute ' +
-        'path shown for a local file you read (handles from recall results ' +
-        'work too). Returns matching entries plus honest gaps — channels ' +
+        'Pass the reference announced next to delivered media — the ' +
+        '【媒体路径】<absolute path> of a local file you read, or the ' +
+        '【媒体资源】<resourceId> handle of path-less media (handles from ' +
+        'recall results work too). Returns matching entries plus honest ' +
+        'gaps — channels ' +
         'never processed or artifacts no longer available — and may ' +
         'suggest follow-up tool calls to gather missing evidence. Use ' +
         'this BEFORE reprocessing media: a transcript or keyframe set ' +
@@ -155,10 +158,11 @@ export class OmniRecallMediaMemoryTool extends BaseDeclarativeTool<
             items: { type: 'string', minLength: 1, maxLength: 4096 },
             minItems: 1,
             description:
-              'Resource references to consult, each taken from a 【媒体资源】 ' +
-              'annotation or a prior recall result: an opaque session ' +
-              'handle, or the absolute path shown for a local file you ' +
-              'read. An unresolvable reference rejects the whole request.',
+              'Resource references to consult, each taken from a 【媒体路径】 ' +
+              'or 【媒体资源】 annotation or a prior recall result: the ' +
+              'absolute path shown for a local file you read, or an opaque ' +
+              'session handle. An unresolvable reference rejects the whole ' +
+              'request.',
           },
           query: {
             type: 'string',
@@ -217,9 +221,27 @@ export class OmniRecallMediaMemoryTool extends BaseDeclarativeTool<
   ): string | null {
     const maxFiles =
       this.config.getOmniMemoryConfig()?.recall.active.maxFilesPerCall;
-    if (maxFiles !== undefined && params.resourceIds.length > maxFiles) {
+    if (maxFiles === undefined) return null;
+    // Count DISTINCT FILES, not raw references: one file is addressable by
+    // two identifiers (its 【媒体路径】 path and its 【媒体资源】 handle), so a
+    // compliant call naming one file both ways must not be charged twice.
+    // `resolveBindings` dedups per resolved binding (recall.ts), so the tool
+    // cap must count the same unit. Each unresolvable identifier still counts
+    // once, so the downstream unknown-reference rejection is not pre-empted.
+    const registry = this.config.getOmniMediaResourceRegistry?.();
+    const resolved = new Set<string>();
+    const unresolvable = new Set<string>();
+    for (const reference of params.resourceIds) {
+      const binding = registry
+        ? resolveMediaReference(registry, reference)
+        : undefined;
+      if (binding) resolved.add(binding.resourceId);
+      else unresolvable.add(reference);
+    }
+    const distinct = resolved.size + unresolvable.size;
+    if (distinct > maxFiles) {
       return (
-        `resourceIds lists ${params.resourceIds.length} references; at most ` +
+        `resourceIds resolves to ${distinct} distinct media files; at most ` +
         `${maxFiles} may be consulted per call ` +
         `(omni.memory.recall.active.maxFilesPerCall). Split the request.`
       );

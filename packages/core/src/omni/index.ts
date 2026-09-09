@@ -44,8 +44,8 @@ import {
   formatDisclosureText,
   formatOmissionText,
   formatResourceHandleText,
-  formatResourcePathText,
   formatTranscriptText,
+  harnessPathAnnotationPart,
 } from './disclosure.js';
 import {
   runFixedPolicies,
@@ -1083,8 +1083,13 @@ export async function readMediaViaOmniDelivery(params: {
       const binding = config
         .getOmniMediaResourceRegistry?.()
         ?.resolve(delivery.resourceId);
-      if (binding && binding.fileRef === filePath) {
-        return [{ text: formatResourcePathText(filePath) }];
+      if (binding && binding.fileRef === filePath && !/[\r\n]/.test(filePath)) {
+        // A path with a literal newline (POSIX-legal) would emit a multi-line
+        // annotation whose continuation line escapes the selector's line-based
+        // strip and leaks the path fragment, so fall back to the single-line
+        // handle form. The tag marks this Part harness-written so the exporter
+        // can tell it from a byte-identical user paste.
+        return [harnessPathAnnotationPart(filePath)];
       }
       return [
         { text: formatResourceHandleText(displayName, delivery.resourceId) },

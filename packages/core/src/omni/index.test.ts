@@ -379,7 +379,7 @@ describe('readMediaViaOmniDelivery result shape', () => {
     // to the media part (D8). A model-visible local source is referenced by
     // its ABSOLUTE PATH, not an opaque handle.
     const handleText = parts[0]!['text'] as string;
-    expect(handleText).toContain('【媒体资源】');
+    expect(handleText).toContain('【媒体路径】');
     expect(handleText).toContain(filePath);
     expect(handleText).not.toContain('：media-');
     // The session handle is still registered and recoverable from the path.
@@ -409,6 +409,85 @@ describe('readMediaViaOmniDelivery result shape', () => {
     expect(parts[1]!['text']).toContain('zoom_image');
     expect(parts[2]).toHaveProperty('fileData');
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'falls back to the single-line handle form when the path has a newline (R3-3)',
+    async () => {
+      // A newline in a DIRECTORY component (basename stays clean). The
+      // path-form branch would emit a MULTI-LINE 【媒体路径】 annotation, and
+      // the passive selector's line-based stripResourceAnnotationLines cannot
+      // remove a multi-line annotation — its tail fragment leaks the local
+      // path to the selector. The writer's `!/[\r\n]/` guard falls back to the
+      // single-line handle form instead. (Windows forbids newlines in paths,
+      // so the guard — and this witness — are POSIX-only.)
+      vi.doMock('./ffmpeg.js', () => ({
+        isFfmpegAvailable: vi.fn().mockResolvedValue(true),
+        isFfprobeAvailable: vi.fn().mockResolvedValue(true),
+      }));
+      vi.doMock('./recognition.js', () => ({
+        recognizeMediaFile: vi
+          .fn()
+          .mockResolvedValue(
+            mockRecognized('image', { width: 1920, height: 1080 }),
+          ),
+        hashFileSha256: vi.fn().mockResolvedValue('a'.repeat(64)),
+        extensionForMime: vi.fn().mockReturnValue('.png'),
+      }));
+      vi.doMock('./storage.js', () => ({
+        OmniObjectStore: class {
+          async putFile() {
+            return { objectPath: '/tmp/obj.png', deduped: false };
+          }
+          getOmniRootDir() {
+            return tmpDir;
+          }
+        },
+      }));
+      vi.doMock('./upload.js', () => ({
+        DashScopeUploader: class {
+          async uploadFile() {
+            return 'oss://bucket/key';
+          }
+        },
+        OSS_URL_PREFIX: 'oss://',
+      }));
+      const { readMediaViaOmniDelivery } = await import('./index.js');
+      const { MediaResourceRegistry } = await import(
+        '../services/media-memory/index.js'
+      );
+      const registry = new MediaResourceRegistry();
+
+      const oddDir = path.join(tmpDir, 'dir\nsub');
+      await fs.mkdir(oddDir, { recursive: true });
+      const filePath = path.join(oddDir, 'pic.png');
+      await fs.writeFile(filePath, 'not really media');
+
+      const result = await readMediaViaOmniDelivery({
+        filePath,
+        config: {
+          ...deliveryConfig(),
+          getOmniMemoryConfig: () => ({
+            collection: { maxInlineTextBytes: 4096 },
+          }),
+          getOmniMediaResourceRegistry: () => registry,
+        } as unknown as Config,
+        displayName: 'pic.png',
+        relativePathForDisplay: 'pic.png',
+        expectedModality: 'image',
+      });
+
+      const parts = result.llmContent as Array<Record<string, unknown>>;
+      const leadText = parts[0]!['text'] as string;
+      // Single-line HANDLE form, not the multi-line path form.
+      expect(leadText).toContain('：media-');
+      expect(leadText).not.toContain('【媒体路径】');
+      expect(leadText).not.toMatch(/[\r\n]/);
+      // The binding is still recoverable from the newline path.
+      expect(registry.resolveByFileRef(filePath)).toMatchObject({
+        mediaType: 'image',
+      });
+    },
+  );
 
   it('keeps the handle form when the binding fileRef is not the read path', async () => {
     // Mirror image of the path-form test above: a path-less source (tool /
@@ -2104,7 +2183,7 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     const parts = result.llmContent as Array<Record<string, unknown>>;
     expect(parts).toHaveLength(2);
     const handleText = parts[0]!['text'] as string;
-    expect(handleText).toContain('【媒体资源】');
+    expect(handleText).toContain('【媒体路径】');
     expect(handleText).toContain(filePath);
     expect(handleText).not.toContain('：media-');
     expect(registry.resolveByFileRef(filePath)).toMatchObject({

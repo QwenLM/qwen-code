@@ -6,7 +6,6 @@
 
 import { randomBytes } from 'node:crypto';
 import type { OmniModality } from '../../omni/recognition.js';
-import { unescapeAnnotationName } from '../../omni/disclosure.js';
 import type { MediaFileId, MediaFileVersionId } from './types.js';
 
 /**
@@ -147,12 +146,12 @@ export interface OmniMediaRegistryView {
  * annotation form the model may echo back (M §5.2):
  *
  *  - the opaque `media-<n>-<hex>` HANDLE (path-less media), matched verbatim;
- *  - the absolute PATH shown for a model-visible local file. The model sees
- *    that path in its ESCAPED annotation form (`escapeAnnotationName` doubles
- *    every `\` and escapes `：`), so a reference copied verbatim off a native
- *    Windows path or a `：`-bearing name arrives escaped. Try the unescaped
- *    form first so it matches the raw `fileRef` the registry stores, then the
- *    string as given (covers a model that already unescaped it).
+ *  - the absolute PATH shown for a model-visible local file. The path form
+ *    rides VERBATIM under its own `【媒体路径】` marker (never escaped), so the
+ *    string the model echoes is byte-for-byte the `fileRef` the registry
+ *    stores — an exact match, with no unescaping step to reorder or collide
+ *    (a `\`- or `：`-bearing POSIX name resolves to its own binding, never a
+ *    de-escaped sibling's).
  *
  * Shared by the active recall gate (`resolveBindings`) and the media-policy
  * call gate so both surfaces accept whichever form the annotation displayed.
@@ -161,9 +160,5 @@ export function resolveMediaReference(
   registry: Pick<MediaResourceRegistry, 'resolve' | 'resolveByFileRef'>,
   reference: string,
 ): MediaResourceBinding | undefined {
-  return (
-    registry.resolve(reference) ??
-    registry.resolveByFileRef(unescapeAnnotationName(reference)) ??
-    registry.resolveByFileRef(reference)
-  );
+  return registry.resolve(reference) ?? registry.resolveByFileRef(reference);
 }

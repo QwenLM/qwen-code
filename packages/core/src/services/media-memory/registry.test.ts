@@ -126,19 +126,58 @@ describe('resolveMediaReference', () => {
     expect(resolveMediaReference(registry, BINDING.fileRef)).toBe(bound);
   });
 
-  it('resolves an ESCAPED path the way the annotation displays it (Windows)', () => {
-    // A native Windows path is shown to the model through the annotation's
-    // escaping (escapeAnnotationName doubles every backslash). A model that
-    // echoes the DISPLAYED string back passes the escaped form; the registry
-    // stores the raw fileRef. resolveMediaReference must unescape so the two
-    // meet — otherwise every Windows local media loses its recall identity.
+  it('resolves a native Windows path VERBATIM (no escaping to reverse)', () => {
+    // The path form now rides verbatim under its own 【媒体路径】 marker, so
+    // the string the model echoes back is byte-for-byte the fileRef the
+    // registry stores — an exact match on every OS, with no unescape step to
+    // reorder or collide (displayed == raw).
     const registry = new MediaResourceRegistry();
     const bound = registry.bind(WINDOWS_BINDING);
-    const displayed = 'C:\\\\Users\\\\jane\\\\clip.mp4'; // escaped form
-    expect(registry.resolveByFileRef(displayed)).toBeUndefined(); // raw miss
-    expect(resolveMediaReference(registry, displayed)).toBe(bound);
-    // A model that already unescaped it must also work.
+    expect(registry.resolveByFileRef('C:\\Users\\jane\\clip.mp4')).toBe(bound);
     expect(resolveMediaReference(registry, WINDOWS_BINDING.fileRef)).toBe(
+      bound,
+    );
+  });
+
+  it('resolves a path containing a literal backslash to its OWN binding', () => {
+    // R1-1: `/tmp/proj/a\b` and `/tmp/proj/ab` are DISTINCT files bound in
+    // the same session. The old unescape-before-exact ordering turned the
+    // reference `/tmp/proj/a\b` into `/tmp/proj/ab` and resolved the WRONG
+    // binding. With the path form verbatim and resolution a pure exact lookup,
+    // each reference resolves to its own file.
+    const registry = new MediaResourceRegistry();
+    const backslash = registry.bind({
+      ...BINDING,
+      fileId: 'f-bs',
+      fileVersionId: 'v-bs',
+      rootFileId: 'f-bs',
+      fileRef: '/tmp/proj/a\\b',
+    });
+    const plain = registry.bind({
+      ...BINDING,
+      fileId: 'f-plain',
+      fileVersionId: 'v-plain',
+      rootFileId: 'f-plain',
+      fileRef: '/tmp/proj/ab',
+    });
+    expect(resolveMediaReference(registry, '/tmp/proj/a\\b')).toBe(backslash);
+    expect(resolveMediaReference(registry, '/tmp/proj/ab')).toBe(plain);
+  });
+
+  it('resolves a path whose filename contains the full-width colon', () => {
+    // R3-10: `：` is the handle grammar's name/payload separator, so the old
+    // escaped display turned `报告：final.mkv` into `报告\：final.mkv` and the
+    // raw fileRef never matched what the model echoed. The path form now rides
+    // verbatim, so a `：` in the filename resolves with no unescaping.
+    const registry = new MediaResourceRegistry();
+    const bound = registry.bind({
+      ...BINDING,
+      fileId: 'f-colon',
+      fileVersionId: 'v-colon',
+      rootFileId: 'f-colon',
+      fileRef: '/movies/报告：final.mkv',
+    });
+    expect(resolveMediaReference(registry, '/movies/报告：final.mkv')).toBe(
       bound,
     );
   });

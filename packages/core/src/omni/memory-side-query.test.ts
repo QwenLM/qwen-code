@@ -212,8 +212,8 @@ describe('omni memory sideQuery selector', () => {
     });
 
     it('resolves a path-form annotation whose filename ends in a handle-shaped suffix', async () => {
-      // The escaped separator must not be misread as a handle boundary; the
-      // whole path resolves back to its own binding.
+      // The path form's own 【媒体路径】 marker means the `：` in the filename
+      // is never a handle boundary; the verbatim path resolves to its binding.
       const fileRef = path.join(tmpDir, 'clip：media-3-9f2cabcd');
       const resourceId = await recordAndBindFileRef(fileRef);
       const parts = [{ text: formatResourcePathText(fileRef) }];
@@ -388,6 +388,38 @@ describe('omni memory sideQuery selector', () => {
       expect(seenRequest).toContain('what is in this picture?');
       expect(seenRequest).not.toContain(fileRef);
       expect(seenRequest).not.toContain(tmpDir);
+    });
+
+    it('keeps marker-prefixed PROSE in the selector request (parse-gated strip)', async () => {
+      // R3-8: stripResourceAnnotationLines must drop only lines that PARSE as
+      // a real annotation, not every line opening with a marker. A user's note
+      // `【媒体资源】清单…` (marker prefix, but no `：<handle>` payload) is
+      // their question — the old prefix-only strip deleted it, so the selector
+      // judged relevance from a truncated question. The parse gate keeps it.
+      const resourceId = await recordAndBind();
+      let seenRequest = '';
+      runSideQueryMock.mockImplementation((async (
+        _config: unknown,
+        options: { contents: Content[] },
+      ) => {
+        seenRequest = JSON.parse(
+          (options.contents[0]!.parts![0] as { text: string }).text,
+        ).request;
+        return { entryIds: [] };
+      }) as never);
+
+      await runOmniMemorySideQuery({
+        config: sideQueryConfig(),
+        requestParts: [
+          { text: '【媒体资源】清单 和 【媒体路径】清单 是我的笔记' },
+          { text: formatResourceHandleText('pic.png', resourceId) },
+        ],
+      });
+
+      // The prose survives; the genuine handle annotation is stripped.
+      expect(seenRequest).toContain('【媒体资源】清单');
+      expect(seenRequest).toContain('【媒体路径】清单');
+      expect(seenRequest).not.toContain(resourceId);
     });
 
     it('degrades to an empty recall with a reason when the selector fails', async () => {

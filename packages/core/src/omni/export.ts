@@ -13,6 +13,8 @@ import {
   OMNI_OMISSION_TEXT_PREFIX,
   OMNI_TRANSCRIPT_TEXT_PREFIX,
   OMNI_RESOURCE_HANDLE_TEXT_PREFIX,
+  OMNI_RESOURCE_PATH_TEXT_PREFIX,
+  isHarnessAnnotationPart,
   parseResourceHandleText,
   parseResourcePathText,
   splitAnnotationBody,
@@ -110,10 +112,11 @@ export interface OmniTrajectoryMediaAnnotation {
   /** Display name from the annotation (basename or URL base). */
   name: string;
   /** Session handle — set only when a 【媒体资源】 annotation showed the HANDLE
-   * form (path-less media). The path form (model-visible local media) leaves
-   * this unset: it shows the absolute path, and the exporter is a pure reader
-   * with no live registry, so the entry is keyed by the path basename instead.
-   * A present annotation therefore does NOT imply a resourceId. */
+   * form (path-less media). The path form (【媒体路径】, model-visible local
+   * media) leaves this unset: it shows the absolute path, and the exporter is
+   * a pure reader with no live registry, so the entry is keyed by the path
+   * basename instead. A present annotation therefore does NOT imply a
+   * resourceId. */
   resourceId?: string;
   disclosures: string[];
   /** Omission notice text, when the transport guard withheld the bytes. */
@@ -293,7 +296,11 @@ function mediaFor(
  * out of surrounding prose. Returns true when the part was an
  * annotation.
  */
-function consumeAnnotationPart(turn: TurnAccumulator, text: string): boolean {
+function consumeAnnotationPart(
+  turn: TurnAccumulator,
+  text: string,
+  isHarnessAnnotation: boolean,
+): boolean {
   if (text.startsWith(OMNI_RESOURCE_HANDLE_TEXT_PREFIX)) {
     const resourceId = parseResourceHandleText(text);
     if (resourceId) {
@@ -307,18 +314,32 @@ function consumeAnnotationPart(turn: TurnAccumulator, text: string): boolean {
       mediaFor(turn, name).resourceId = resourceId;
       return true;
     }
-    // Path form (model-visible local media): the annotation shows the
-    // file's ABSOLUTE PATH and carries no session handle. The exporter is a
-    // pure reader with no live registry (bindings never persist), so it
-    // cannot recover a resourceId — but the media entry must still exist,
-    // or the turn drops its media and the session filter never seeds the
-    // file's memory closure. Key the entry by the path's BASENAME: the
-    // file-record join is on the local source locator, and local sources
-    // record `locator: displayName` (index.ts) with displayName defaulting
-    // to the basename.
+    return false;
+  }
+  if (text.startsWith(OMNI_RESOURCE_PATH_TEXT_PREFIX)) {
+    // Path form (model-visible local media): the annotation shows the file's
+    // ABSOLUTE PATH and carries no session handle. The exporter is a pure
+    // reader with no live registry (bindings never persist), so it cannot
+    // recover a resourceId — but the media entry must still exist, or the
+    // turn drops its media and the session filter never seeds the file's
+    // memory closure.
+    //
+    // Consume it ONLY when the Part is provenance-tagged as harness-written.
+    // A user paste, or an @-mentioned TEXT file whose content opens with this
+    // marker, is byte-identical prose; consuming it would delete the user's
+    // line from request.text and fabricate a phantom media entry that drags
+    // an unrelated file's closure into the export.
+    if (!isHarnessAnnotation) return false;
     const filePath = parseResourcePathText(text);
     if (filePath) {
-      mediaFor(turn, path.basename(filePath));
+      // Key the entry by the path's BASENAME, derived OS-shape-independently:
+      // the grammar is deliberately cross-OS (a trajectory captured on one
+      // host is parsed on another), so host `path.basename` would leave a
+      // Windows drive/UNC path whole and the file-record join — on the local
+      // source locator, `displayName` defaulting to the basename (index.ts) —
+      // would never fire. This split preserves a trailing-whitespace filename
+      // exactly as the recorded locator does.
+      mediaFor(turn, filePath.split(/[\\/]/).pop() ?? filePath);
       return true;
     }
     return false;
@@ -371,7 +392,10 @@ function consumeRecordParts(
     // whitespace (POSIX), so a full trim would truncate the name — dropping the
     // media entry and, with it, the file's memory closure from the export.
     const forAnnotation = withoutReminders.replace(/^\s+/, '');
-    if (consumeAnnotationPart(turn, forAnnotation)) continue;
+    if (
+      consumeAnnotationPart(turn, forAnnotation, isHarnessAnnotationPart(part))
+    )
+      continue;
     // Prose: safe to fully trim.
     const prose = withoutReminders.trim();
     if (!prose) continue;

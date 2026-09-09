@@ -15,6 +15,7 @@ import {
   formatResourceHandleText,
   formatResourcePathText,
   formatTranscriptText,
+  harnessPathAnnotationPart,
 } from './disclosure.js';
 import {
   exportOmniTrajectory,
@@ -230,7 +231,9 @@ describe('exportOmniTrajectory', () => {
         message: {
           parts: [
             { text: '分析这部电影' },
-            { text: formatResourcePathText('/movies/film.mkv') },
+            // Tagged as harness-written: that provenance is what licenses the
+            // exporter to consume a path-shaped part (see the untagged case).
+            harnessPathAnnotationPart('/movies/film.mkv'),
             { text: formatDisclosureText('film.mkv', '原 1080p → 480p') },
           ],
         },
@@ -320,7 +323,7 @@ describe('exportOmniTrajectory', () => {
         type: 'user',
         timestamp: '2026-08-13T00:00:00.000Z',
         message: {
-          parts: [{ text: formatResourcePathText('/movies/film.mkv ') }],
+          parts: [harnessPathAnnotationPart('/movies/film.mkv ')],
         },
       }),
     ]);
@@ -339,6 +342,88 @@ describe('exportOmniTrajectory', () => {
     expect(files.find((f) => f.origin === 'user')?.source).toEqual({
       protocol: 'local',
       locator: 'film.mkv ',
+    });
+  });
+
+  it('does NOT consume an UNTAGGED path-shaped line (provenance gate)', async () => {
+    // R3-4: a path-form annotation's TEXT is byte-identical whether the
+    // harness emitted it or a user pasted / @-mentioned it, so text alone
+    // cannot tell a genuine annotation from prose. The exporter consumes a
+    // 【媒体路径】 part ONLY when it carries the harness provenance tag; an
+    // untagged look-alike stays prose and never fabricates a media entry that
+    // would drag the matching file's closure into the export.
+    await seedMemory(); // a file whose local locator is 'film.mkv'
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        timestamp: '2026-08-13T00:00:00.000Z',
+        message: {
+          // Same text harnessPathAnnotationPart produces, minus the tag.
+          parts: [{ text: formatResourcePathText('/movies/film.mkv') }],
+        },
+      }),
+    ]);
+
+    const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+    const turn = records.find((r) => r.kind === 'turn') as
+      | OmniTrajectoryTurnRecord
+      | undefined;
+    expect(turn).toBeDefined();
+    // Not consumed: the line survives as prose and no media entry is minted.
+    expect(turn!.request.text).toContain('/movies/film.mkv');
+    expect(turn!.request.media).toEqual([]);
+    // No phantom entry, so the matching file is not dragged into the export.
+    const files = records.filter((r) => r.kind === 'file');
+    expect(files).toHaveLength(0);
+  });
+
+  it('consumes a Windows drive-letter PATH form via a cross-OS basename', async () => {
+    // R3-1: the exporter may run on a different OS than the trajectory was
+    // captured on, so `path.basename` (host-grammar only) is the wrong tool
+    // for a Windows path parsed on POSIX — it returns the whole `C:\…`
+    // string, misses the file's local locator, and drops the file's closure.
+    // The basename split must recognize BOTH separators.
+    const memory = new MediaMemoryService(omniRootDir);
+    await memory.recordFileRecognized({
+      fileRef: 'C:\\Users\\jane\\clip.mp4',
+      sha256: 'd'.repeat(64),
+      mediaType: 'video',
+      metadata: { durationMs: 5000 },
+      sizeBytes: 100,
+      mimeType: 'video/mp4',
+      origin: 'user',
+      source: { protocol: 'local', locator: 'clip.mp4' },
+      recognition: {
+        ingestionConfigHash: '',
+        detectorVersion: 'omni-sniff-ffprobe/1',
+        probeStatus: 'complete',
+      },
+    });
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        timestamp: '2026-08-13T00:00:00.000Z',
+        message: {
+          parts: [harnessPathAnnotationPart('C:\\Users\\jane\\clip.mp4')],
+        },
+      }),
+    ]);
+
+    const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+    const turn = records.find((r) => r.kind === 'turn') as
+      | OmniTrajectoryTurnRecord
+      | undefined;
+    expect(turn).toBeDefined();
+    // Basename split on the backslash, so the name matches the local locator.
+    expect(turn!.request.media).toEqual([
+      { name: 'clip.mp4', disclosures: [], transcripts: [] },
+    ]);
+    const files = records.filter(
+      (r): r is OmniTrajectoryFileRecord => r.kind === 'file',
+    );
+    expect(files.find((f) => f.origin === 'user')?.source).toEqual({
+      protocol: 'local',
+      locator: 'clip.mp4',
     });
   });
 
