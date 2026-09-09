@@ -9,7 +9,13 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 const listLiveSessions = vi.fn();
 const probePeerSocketVerdict = vi.fn();
 
-vi.mock('../services/session-registry.js', () => ({
+// Only the enumeration is stubbed; everything else this module reads from
+// the registry — how a `kind` reads back, above all — stays real, so a
+// projection test is checking the projection rather than a copy of it.
+vi.mock('../services/session-registry.js', async () => ({
+  ...(await vi.importActual<typeof import('../services/session-registry.js')>(
+    '../services/session-registry.js',
+  )),
   listLiveSessions: (...args: unknown[]) => listLiveSessions(...args),
 }));
 vi.mock('./uds-client.js', () => ({
@@ -106,9 +112,23 @@ describe('toPeerSessionInfo', () => {
       ref: peerRef('s1'),
       cwd: '/w/app',
       pid: 100,
+      kind: 'tui',
       ipcPath: '/tmp/s1.sock',
       startedAt: 1_000,
     });
+  });
+
+  it("carries the record's own kind, and reads a record without one as tui", () => {
+    expect(
+      toPeerSessionInfo(
+        record({ ipcPath: '/tmp/s1.sock', kind: 'serve' }) as never,
+      )?.kind,
+    ).toBe('serve');
+    // A record written before the field existed came from the interactive
+    // UI: nothing else registered then.
+    expect(
+      toPeerSessionInfo(record({ ipcPath: '/tmp/s1.sock' }) as never)?.kind,
+    ).toBe('tui');
   });
 });
 
