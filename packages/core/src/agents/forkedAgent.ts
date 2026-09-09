@@ -559,6 +559,7 @@ export async function runForkedAgent(
         : await chat.sendMessageStream(model, sendParams, 'forked_query');
 
       let fullText = '';
+      let resultModel = model;
       let usage: ForkedQueryResult['usage'] = {
         inputTokens: 0,
         outputTokens: 0,
@@ -566,6 +567,19 @@ export async function runForkedAgent(
       };
 
       for await (const event of stream) {
+        if (event.type === StreamEventType.RETRY) {
+          if (!event.isContinuation) {
+            fullText = '';
+            usage = { inputTokens: 0, outputTokens: 0, cacheHitTokens: 0 };
+          }
+          continue;
+        }
+        if (event.type === StreamEventType.MODEL_FALLBACK) {
+          fullText = '';
+          usage = { inputTokens: 0, outputTokens: 0, cacheHitTokens: 0 };
+          resultModel = event.info.toModel;
+          continue;
+        }
         if (event.type !== StreamEventType.CHUNK) continue;
         const response = event.value;
         const parts = response.candidates?.[0]?.content?.parts ?? [];
@@ -601,7 +615,7 @@ export async function runForkedAgent(
         }
       }
 
-      return { text: trimmed, jsonResult, usage, model };
+      return { text: trimmed, jsonResult, usage, model: resultModel };
     });
   }
 

@@ -256,6 +256,97 @@ describe('runForkedAgent (cache path)', () => {
     vi.mocked(createRuntimeContentGeneratorView).mockReset();
   });
 
+  it('discards fresh-retry output and retains continuation output', async () => {
+    saveCacheSafeParams({}, [], 'test-model');
+    vi.mocked(LlmChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: vi.fn(async () =>
+            (async function* () {
+              yield {
+                type: StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: 'discarded' }] } }],
+                },
+              };
+              yield { type: StreamEventType.RETRY };
+              yield {
+                type: StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: 'kept' }] } }],
+                  usageMetadata: {
+                    promptTokenCount: 10,
+                    candidatesTokenCount: 2,
+                    totalTokenCount: 12,
+                  },
+                },
+              };
+              yield { type: StreamEventType.RETRY, isContinuation: true };
+              yield {
+                type: StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: ' suffix' }] } }],
+                },
+              };
+            })(),
+          ),
+        }) as unknown as LlmChat,
+    );
+
+    const result = await runForkedAgent({
+      config: {} as Config,
+      userMessage: 'test',
+      cacheSafeParams: getCacheSafeParams()!,
+    });
+
+    expect(result.text).toBe('kept suffix');
+    expect(result.usage.outputTokens).toBe(2);
+  });
+
+  it('reports the fallback model that produced the result', async () => {
+    saveCacheSafeParams({}, [], 'primary-model');
+    vi.mocked(LlmChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: vi.fn(async () =>
+            (async function* () {
+              yield {
+                type: StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: 'stale' }] } }],
+                },
+              };
+              yield {
+                type: StreamEventType.MODEL_FALLBACK,
+                info: {
+                  fromModel: 'primary-model',
+                  toModel: 'fallback-model',
+                  fallbackIndex: 1,
+                },
+              };
+              yield {
+                type: StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'replacement' }] } },
+                  ],
+                },
+              };
+            })(),
+          ),
+        }) as unknown as LlmChat,
+    );
+
+    const result = await runForkedAgent({
+      config: {} as Config,
+      userMessage: 'test',
+      cacheSafeParams: getCacheSafeParams()!,
+    });
+
+    expect(result.text).toBe('replacement');
+    expect(result.model).toBe('fallback-model');
+  });
+
   it('passes tools: [] in per-request config so the model cannot produce function calls', async () => {
     // Save cache params with real tools to simulate a normal conversation
     saveCacheSafeParams(
