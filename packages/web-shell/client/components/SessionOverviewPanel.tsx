@@ -371,7 +371,7 @@ function SessionOverviewPanelInner({
   const currentWorkspaceCwd =
     connection.workspaceCwd || workspaceCwd || primaryCwd;
 
-  // Live-state (2s channel) is the sidebar's refresh path: it patches the
+  // Live-state is the sidebar's refresh path: it patches the
   // catalog store's sessions with hasActivePrompt / isWaitingForPermission /
   // isWaitingForUserQuestion and coordinates full-catalog reconciles only when
   // something actually changed. Adopt it only when trusted live-state routes
@@ -407,6 +407,7 @@ function SessionOverviewPanelInner({
   const liveStateActive = manageLiveState && liveStateEnabled;
   useWorkspaceSessionLiveState(workspace.client, {
     enabled: liveStateActive,
+    pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
     workspaceCwds: liveStateWorkspaceCwds,
     groupWorkspaceCwds: [],
   });

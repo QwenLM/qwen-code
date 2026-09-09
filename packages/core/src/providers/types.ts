@@ -5,7 +5,11 @@
  */
 
 import type { AuthType, InputModalities } from '../core/contentGenerator.js';
-import type { ModelConfig, ModelProvidersConfig } from '../models/types.js';
+import type {
+  ModelCapabilities,
+  ModelConfig,
+  ModelProvidersConfig,
+} from '../models/types.js';
 
 // Re-export for convenience
 export type ProviderModelConfig = ModelConfig;
@@ -18,6 +22,7 @@ export type ProviderId = string;
 
 export interface ModelSpec {
   id: string;
+  capabilities?: ModelCapabilities;
   contextWindowSize?: number;
   enableThinking?: boolean;
   thinkingMandatory?: boolean;
