@@ -131,15 +131,21 @@ export const disposeConoutWorker = (ptyProcess: unknown): void => {
  *   `ClosePseudoConsole` when `get_pty_baton` returns null — with no throw, so
  *   not even the warn below fires; `struct pty_baton` has no destructor, so the
  *   erase leaks the HPCON rather than closing it. The call sites that run
- *   strictly after `onExit` (the shell-tool finalizer and `firePostSettle`'s
- *   `'exit'` entry) land in that no-op group. The remaining sites are the ones
- *   where a `kill()` already closed the HPCON while the shell was alive and
- *   recorded the note (the cancel path, and the web-terminal ready-case live
- *   release), so this function's `releasedHosts` early return skips the close;
- *   and the web-terminal deferred-case live release, which routes to
- *   `disposeConoutWorker` instead of this function so its queued `kill()` stays
- *   the single closer. The conhost half of #11303 is therefore NOT fixed by
- *   this function on the natural-exit path.
+ *   strictly after `onExit` land in that no-op group: the shell-tool finalizer
+ *   when no note was recorded (a natural exit, or a cancel that landed before
+ *   the shell's first output byte), `firePostSettle`'s `'exit'` entry, and the
+ *   web-terminal release of an already-exited session (`release()`'s `else`
+ *   arm) — the primary web-terminal path for #11303. The remaining sites are
+ *   the ones where a `kill()` already closed the HPCON while the shell was
+ *   alive and recorded the note (the cancel path and the interactive-shell kill
+ *   when `_isReady !== false`, plus the web-terminal live release whose wrapper
+ *   `kill()` really ran), so this function's `releasedHosts` early return skips
+ *   the close. Finally, a web-terminal release whose shell has not emitted its
+ *   first output byte routes to `disposeConoutWorker` instead of this function
+ *   — from the live arm AND from the exited arm alike, because `releaseHost`
+ *   branches only on `_isReady` and never on `session.exited` — so its queued
+ *   `kill()` stays the single closer. The conhost half of #11303 is therefore
+ *   NOT fixed by this function on the natural-exit path.
  *
  * The call is kept because the call *site* is right: the moment upstream closes
  * the HPCON when the baton is erased (a `ClosePseudoConsole` in
