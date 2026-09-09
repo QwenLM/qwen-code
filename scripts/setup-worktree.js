@@ -5,7 +5,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { constants as osConstants } from 'node:os';
 import { delimiter, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -74,6 +74,18 @@ function getHooksPath() {
   return result.status === 0 ? result.stdout.trim() : undefined;
 }
 
+// Husky runs `git config core.hooksPath .husky/_` with no --worktree, so the
+// value always lands in the config of the root that owns `.git` while the
+// `.husky/_` wrappers are created in the working directory it was invoked from.
+// Those are the same root here unless `.git` is a file, which is how git marks
+// a linked worktree pointing at the primary's `.git/worktrees/<name>`.
+function ownsRepositoryConfig() {
+  const gitEntry = statSync(resolve(rootDir, '.git'), {
+    throwIfNoEntry: false,
+  });
+  return gitEntry === undefined || gitEntry.isDirectory();
+}
+
 function install(cacheMode) {
   const result = runPnpm(['install', '--frozen-lockfile', cacheMode]);
   if (result.status === 0) {
@@ -82,6 +94,20 @@ function install(cacheMode) {
       envValue('HUSKY') === '0' ||
       (hooksPath !== undefined && hooksPath !== '.husky/_')
     ) {
+      exitWithResult(result);
+    }
+    // With the key unset, husky's write would add it to the config shared by
+    // every worktree of this repository while only this checkout receives
+    // `.husky/_`, silently repointing hook resolution for roots that never got
+    // the wrappers. Leave that config alone and say so instead. `prepare.js`'s
+    // `run('husky')` needs no such guard: it installs the checkout that owns
+    // the config it writes.
+    if (hooksPath === undefined && !ownsRepositoryConfig()) {
+      console.log(
+        'worktree setup: core.hooksPath is unset and this linked worktree does ' +
+          'not own the repository config; skipping Husky so the hooks path is ' +
+          'not rewritten for every other worktree.',
+      );
       exitWithResult(result);
     }
     const husky = runPnpm(['exec', 'husky']);
@@ -109,10 +135,10 @@ function exitWithResult(result) {
   process.exit(result.status ?? 1);
 }
 
+// install() exits the process on every path where the install succeeded, so it
+// returns only a failed result and the registry retry below is the only
+// decision left for this driver to make.
 const cachedInstall = install('--offline');
-if (cachedInstall.status === 0) {
-  process.exit(0);
-}
 
 if (
   cachedInstall.error ||
