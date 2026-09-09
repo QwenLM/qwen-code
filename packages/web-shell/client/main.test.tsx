@@ -33,6 +33,7 @@ vi.mock('./components/WorkspaceSessionProvider', () => ({
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
   getDaemonToken: () => 'token',
+  persistDaemonToken: vi.fn(),
   removeDaemonTokenFromUrl: vi.fn(),
   waitForDaemonTokenMessage: vi.fn(),
 }));
@@ -76,12 +77,15 @@ describe('StandaloneApp', () => {
     );
     expect(
       testState.props?.webShellProps.composerToolbarAdditionalActions,
-    ).toEqual(['addMenu']);
+    ).toEqual(['addMenu', 'plan']);
     expect(testState.props?.webShellProps.environmentPanel?.items).toContain(
       'artifacts',
     );
     expect(testState.props?.webShellProps.environmentPanel?.items).toContain(
       'attachments',
+    );
+    expect(testState.props?.webShellProps.header?.items).toContain(
+      'contextUsage',
     );
     expect(testState.props?.webShellProps.sidebar).toMatchObject({
       enabled: true,

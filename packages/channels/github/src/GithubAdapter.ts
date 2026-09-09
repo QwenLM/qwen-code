@@ -526,7 +526,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
-    config.blockStreaming = 'off';
     config.instructions = [
       config.instructions?.trim(),
       GITHUB_PUBLICATION_INSTRUCTIONS,

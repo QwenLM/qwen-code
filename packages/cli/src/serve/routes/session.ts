@@ -138,6 +138,7 @@ import {
   type SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
+import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
 import {
   exportSessionTranscript,
   parseSessionExportFormat,
@@ -862,48 +863,6 @@ export function registerSessionRoutes(
     string,
     SessionTranscriptCursorCodec
   >();
-  // Worktree-ownership operations (Part 4A restores, Part 4B resets) share
-  // one bridge: a restore must not pass ownership validation while a marker
-  // transfer for the same checkout is mid-flight, and two transfers for one
-  // checkout must not race the flip. Serialize them on a per-bridge promise
-  // chain keyed by the canonical worktree path. The bridge WeakMap scopes
-  // cleanup to bridge lifetime; the key map only grows while an operation
-  // is in flight (the release callback deletes the entry).
-  const worktreeOwnershipOpTails = new WeakMap<
-    AcpSessionBridge,
-    Map<string, Promise<void>>
-  >();
-  const acquireWorktreeOwnershipOp = async (
-    bridge: AcpSessionBridge,
-    worktreeKey: string,
-  ): Promise<() => void> => {
-    let tails = worktreeOwnershipOpTails.get(bridge);
-    if (!tails) {
-      tails = new Map();
-      worktreeOwnershipOpTails.set(bridge, tails);
-    }
-    const key = worktreeKey;
-    const previous = tails.get(key);
-    let releaseGate!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      releaseGate = resolve;
-    });
-    const tail = (previous ?? Promise.resolve()).then(() => gate);
-    tails.set(key, tail);
-    if (previous) {
-      await previous;
-    }
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      releaseGate();
-      if (tails.get(key) === tail) {
-        tails.delete(key);
-      }
-    };
-  };
-
   // Tracks workspaces with an active branch session (workspaceCwd → sessionId).
   // Prevents concurrent branch sessions that would conflict on HEAD. The
   // POST /session branch block additionally rejects branch creation while any
@@ -2695,6 +2654,7 @@ export function registerSessionRoutes(
               coordinator: archiveCoordinator,
               coordinatorLockHeld,
               assertCanMutate,
+              runtimeWorkspaceCwd: runtime.workspaceCwd,
               onError: ({ phase, sessionId, error }) => {
                 writeStderrLine(
                   `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
@@ -3966,10 +3926,8 @@ export function registerSessionRoutes(
               runtime.bridge.discardDeferredRestoreAskUserQuestionPrompt !==
                 undefined;
             if (isPart4AWorktreeRestore && part4AWorktreeKey !== undefined) {
-              releaseWorktreeRestore = await acquireWorktreeOwnershipOp(
-                runtime.bridge,
-                part4AWorktreeKey,
-              );
+              releaseWorktreeRestore =
+                await acquireWorktreeOwnershipOp(part4AWorktreeKey);
               if (isChannelRestore) {
                 // A reset moved this session's worktree ownership to a
                 // replacement: never restore the superseded session — tell
@@ -4716,7 +4674,6 @@ export function registerSessionRoutes(
             sessionId,
           );
           const releaseOwnership = await acquireWorktreeOwnershipOp(
-            runtime.bridge,
             preTarget.realTarget,
           );
           try {
@@ -8533,6 +8490,9 @@ export function registerSessionRoutes(
           sessionId: session.sessionId,
           clientCount: session.clientCount,
           hasActivePrompt: session.hasActivePrompt,
+          ...(session.activeWorkState !== undefined
+            ? { activeWorkState: session.activeWorkState }
+            : {}),
           isWaitingForPermission: session.isWaitingForPermission ?? false,
           isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
           // Bridge-local activity watermark, absent until a running prompt in
@@ -9147,6 +9107,7 @@ export function registerSessionRoutes(
         const body = safeBody(req);
         const mode = body['mode'];
         const persist = body['persist'];
+        const planMode = body['planMode'];
         if (
           typeof mode !== 'string' ||
           !APPROVAL_MODES.includes(mode as ApprovalMode)
@@ -9165,12 +9126,26 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (
+          planMode !== undefined &&
+          (typeof planMode !== 'boolean' || mode === 'plan')
+        ) {
+          res.status(400).json({
+            error:
+              '`planMode` must be a boolean with a non-plan execution mode',
+            code: 'invalid_plan_mode',
+          });
+          return;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const response = await runtime.bridge.setSessionApprovalMode(
           sessionId,
           mode as ApprovalMode,
-          { persist: persist === true },
+          {
+            persist: persist === true,
+            ...(typeof planMode === 'boolean' ? { planMode } : {}),
+          },
           clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json(response);

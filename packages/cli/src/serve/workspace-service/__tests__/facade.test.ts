@@ -12,7 +12,7 @@ import * as os from 'node:os';
 // Mock @qwen-code/qwen-code-core to avoid the undici dependency chain.
 // This is required so @qwen-code/acp-bridge/status can load (it imports
 // SkillError from core).
-vi.mock('@qwen-code/qwen-code-core', () => {
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   class SkillError extends Error {
     code: string;
     constructor(message: string, code: string) {
@@ -64,6 +64,10 @@ vi.mock('@qwen-code/qwen-code-core', () => {
       STREAM_JSON: 'stream-json',
     },
     REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
+    getGptReasoningCapabilities: vi.fn(() => undefined),
+    clampReasoningEffort: (
+      await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+    ).clampReasoningEffort,
     DEFAULT_STOP_HOOK_BLOCK_CAP: 5,
     DEFAULT_MAX_SUBAGENT_DEPTH: 5,
     DEFAULT_MAX_TOOL_CALLS_PER_TURN: 100,
@@ -73,6 +77,7 @@ vi.mock('@qwen-code/qwen-code-core', () => {
     DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD: 100_000,
     DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: 1024 * 1024,
     SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT: 100 * 1024 * 1024,
+    GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP: 900,
     DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES: ['.agentignore', '.aiignore'],
     QWEN_DIR: '.qwen',
     Storage,

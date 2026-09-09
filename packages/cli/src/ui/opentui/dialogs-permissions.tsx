@@ -589,10 +589,12 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
               'Permission rules are a tool name, optionally followed by a specifier in parentheses.',
             )}
           </text>
-          <text fg={C.text}>
-            {t('e.g.,')} <text attributes={1}>WebFetch</text> {t('or')}{' '}
+          <box flexDirection="row">
+            <text fg={C.text}>{`${t('e.g.,')} `}</text>
+            <text attributes={1}>WebFetch</text>
+            <text fg={C.text}>{` ${t('or')} `}</text>
             <text attributes={1}>Bash(ls:*)</text>
-          </text>
+          </box>
           <box height={1} />
           <box borderStyle="rounded" borderColor={C.dim} paddingX={1}>
             <text fg={newRuleInput ? C.text : C.dim}>
@@ -637,9 +639,9 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
             onHover={scopeList.setActiveIndex}
             onSelectIndex={scopeList.selectIndex}
             renderLabel={(item, { titleColor }) => (
-              <text fg={titleColor}>
-                {item.label} <text fg={C.dim}>{item.description}</text>
-              </text>
+              <text
+                fg={titleColor}
+              >{`${item.label}    ${item.description}`}</text>
             )}
           />
         </DialogFrame>
