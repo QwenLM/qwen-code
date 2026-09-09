@@ -393,6 +393,15 @@ export async function convertLlmToolsToOpenAI(
               !Array.isArray(sourceSchema) &&
               !('$id' in sourceSchema) &&
               isStrictlyValidSchema(sourceSchema);
+            const sourcePatternProperties = (
+              sourceSchema as Record<string, unknown> | undefined
+            )?.['patternProperties'];
+            const hasNoPatternProperties =
+              sourcePatternProperties === undefined ||
+              (typeof sourcePatternProperties === 'object' &&
+                sourcePatternProperties !== null &&
+                !Array.isArray(sourcePatternProperties) &&
+                Object.keys(sourcePatternProperties).length === 0);
             parameters = convertSchema(parameters, schemaCompliance);
             // #7315: gateways enforcing OpenAI's structured-output contract
             // promote every property to required when an object level has
@@ -404,6 +413,17 @@ export async function convertLlmToolsToOpenAI(
               parameters,
               canValidateLocally,
             );
+            if (
+              canValidateLocally &&
+              (sourceSchema as Record<string, unknown>)[
+                'additionalProperties'
+              ] === false &&
+              hasNoPatternProperties &&
+              parameters['type'] === 'object' &&
+              Object.keys(parameters).length === 1
+            ) {
+              parameters = undefined;
+            }
           }
 
           openAITools.push({

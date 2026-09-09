@@ -6111,6 +6111,16 @@ describe('OpenAIContentConverter', () => {
         properties: {},
         additionalProperties: false,
       };
+      const openSchema = {
+        type: 'object',
+        properties: {},
+      };
+      const draft2020Schema = {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      };
       const unsupportedSchema = {
         $schema: 'https://json-schema.org/draft/2019-09/schema',
         type: 'object',
@@ -6136,6 +6146,8 @@ describe('OpenAIContentConverter', () => {
         {
           functionDeclarations: [
             { name: 'supported', parametersJsonSchema: supportedSchema },
+            { name: 'open', parametersJsonSchema: openSchema },
+            { name: 'draft_2020', parametersJsonSchema: draft2020Schema },
             { name: 'unsupported', parametersJsonSchema: unsupportedSchema },
             {
               name: 'unsupported_vocabulary',
@@ -6156,7 +6168,13 @@ describe('OpenAIContentConverter', () => {
       const result = await converter.convertLlmToolsToOpenAI(tools);
 
       expect(result.map(({ function: declaration }) => declaration)).toEqual([
-        { name: 'supported', description: '', parameters: { type: 'object' } },
+        { name: 'supported', description: '' },
+        {
+          name: 'open',
+          description: '',
+          parameters: { type: 'object' },
+        },
+        { name: 'draft_2020', description: '' },
         {
           name: 'unsupported',
           description: '',
@@ -6193,6 +6211,31 @@ describe('OpenAIContentConverter', () => {
         unsupportedVocabularySchema.properties.tuple.prefixItems[0]
           .additionalProperties,
       ).toBe(false);
+    });
+
+    it('does not omit parameters lost during OpenAPI 3.0 conversion', async () => {
+      const parametersJsonSchema = {
+        type: 'object',
+        properties: {},
+        patternProperties: { '^x': { type: 'string' } },
+        additionalProperties: false,
+      };
+      const tools = [
+        {
+          functionDeclarations: [{ name: 'patterned', parametersJsonSchema }],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(
+        tools,
+        'openapi_30',
+      );
+
+      expect(result[0]?.function).toEqual({
+        name: 'patterned',
+        description: '',
+        parameters: { type: 'object' },
+      });
     });
 
     it('keeps grammar constraints for schemas with a top-level $id', async () => {
