@@ -1,9 +1,12 @@
 import './styles/globals.css';
 import { isSessionWriterBlockedCode } from './daemon/session/session-context';
+import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
+import { useBrowserNotificationSettings } from './browser-turn-notifications';
 import {
   forwardRef,
   memo,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -2976,6 +2979,11 @@ export function App({
         : normalizeLanguage(providedLanguage),
   );
   const t = useMemo(() => getTranslator(selectedLanguage), [selectedLanguage]);
+  const syncNotificationLanguage =
+    useBrowserNotificationSettings()?.syncLanguage;
+  useLayoutEffect(() => {
+    syncNotificationLanguage?.(selectedLanguage);
+  }, [selectedLanguage, syncNotificationLanguage]);
   const shadowDomOptions = useMemo(
     () => resolveWebShellShadowDom(shadowDom),
     [shadowDom],
@@ -13038,6 +13046,10 @@ export function App({
     [closeMobileDrawer, closePanel, loadSidebarSession, reportError, showChat],
   );
 
+  const notificationNavigationTarget = useContext(
+    TurnNotificationNavigationContext,
+  );
+
   // Markdown links and browser notifications share the session navigation path.
   useEffect(() => {
     const handler = (e: Event) => {
@@ -13084,13 +13096,34 @@ export function App({
           sessionContext = { kind: 'workspace', cwd: context.cwd };
         } else return;
       }
+      if (
+        e.currentTarget === notificationNavigationTarget &&
+        lockedWorkspaceCwd &&
+        (sessionContext?.kind !== 'workspace' ||
+          sessionContext.cwd !== lockedWorkspaceCwd)
+      )
+        return;
       if (typeof sessionId === 'string' && sessionId.trim()) {
         handleOpenSessionFromOverview(sessionId, workspaceCwd, sessionContext);
       }
     };
     window.addEventListener('qwen:open-session', handler);
-    return () => window.removeEventListener('qwen:open-session', handler);
-  }, [handleOpenSessionFromOverview]);
+    notificationNavigationTarget?.addEventListener(
+      'qwen:open-session',
+      handler,
+    );
+    return () => {
+      window.removeEventListener('qwen:open-session', handler);
+      notificationNavigationTarget?.removeEventListener(
+        'qwen:open-session',
+        handler,
+      );
+    };
+  }, [
+    handleOpenSessionFromOverview,
+    notificationNavigationTarget,
+    lockedWorkspaceCwd,
+  ]);
 
   // Listen for toast requests from deeply nested components (markdown links
   // and artifact actions reporting a failed external open, for example).

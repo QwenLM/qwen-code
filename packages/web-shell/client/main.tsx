@@ -200,7 +200,10 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
         <RootErrorFallback error={error} onRetry={reset} language={language} />
       )}
     >
-      <BrowserTurnNotifications language={language}>
+      <BrowserTurnNotifications
+        language={language}
+        options={{ defaultEnabled: true }}
+      >
         <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
           <WorkspaceSessionProvider
             sessionId={sessionId}

@@ -4,6 +4,10 @@ import {
   type DaemonProductSessionContext,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { App, type WebShellProps } from './App';
+import {
+  BrowserTurnNotifications,
+  type WebShellBrowserNotificationsOptions,
+} from './browser-turn-notifications';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
@@ -11,8 +15,11 @@ import { normalizeLanguage, type WebShellLanguage } from './i18n';
 export { WebShellTranscript } from './components/WebShellTranscript';
 export type { WebShellTranscriptProps } from './components/WebShellTranscript';
 export * from './daemon-react-sdk';
+export type { WebShellBrowserNotificationsOptions } from './browser-turn-notifications';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
+  /** Connect browser notifications with optional branding and an initial preference (off by default). */
+  browserNotifications?: WebShellBrowserNotificationsOptions;
   /** Daemon API base URL. Defaults to the browser origin when omitted. */
   baseUrl?: string;
   /** Bearer token passed to daemon requests. */
@@ -96,6 +103,7 @@ export function WebShell(props: WebShellProps) {
  */
 export function WebShellWithProviders(props: WebShellWithProvidersProps) {
   const {
+    browserNotifications,
     baseUrl,
     token,
     sessionId,
@@ -109,6 +117,21 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
     ...webShellProps
   } = props;
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
+  const shell = (
+    <DaemonWorkspaceProvider baseUrl={resolvedBaseUrl} token={token}>
+      <WorkspaceSessionProvider
+        sessionId={sessionId}
+        workspaceId={workspaceId}
+        workspaceCwd={workspaceCwd}
+        sessionContext={sessionContext}
+        lockWorkspaceCwd={lockWorkspaceCwd}
+        clientId={clientId}
+        restartSseOnPrompt={restartSseOnPrompt}
+        historyPageSize={historyPageSize}
+        webShellProps={webShellProps}
+      />
+    </DaemonWorkspaceProvider>
+  );
 
   return (
     <RootBoundary
@@ -118,19 +141,16 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
           : undefined
       }
     >
-      <DaemonWorkspaceProvider baseUrl={resolvedBaseUrl} token={token}>
-        <WorkspaceSessionProvider
-          sessionId={sessionId}
-          workspaceId={workspaceId}
-          workspaceCwd={workspaceCwd}
-          sessionContext={sessionContext}
-          lockWorkspaceCwd={lockWorkspaceCwd}
-          clientId={clientId}
-          restartSseOnPrompt={restartSseOnPrompt}
-          historyPageSize={historyPageSize}
-          webShellProps={webShellProps}
-        />
-      </DaemonWorkspaceProvider>
+      {browserNotifications ? (
+        <BrowserTurnNotifications
+          language={normalizeLanguage(webShellProps.language)}
+          options={browserNotifications}
+        >
+          {shell}
+        </BrowserTurnNotifications>
+      ) : (
+        shell
+      )}
     </RootBoundary>
   );
 }

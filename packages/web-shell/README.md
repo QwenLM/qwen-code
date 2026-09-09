@@ -16,7 +16,7 @@ Tailwind 或额外引入全局 CSS。
 ## 浏览器任务通知
 
 通过 `qwen serve` 打开的独立 Web Shell 可在 **Settings → UI → 浏览器任务通知**
-开启提醒。默认关闭，仅在用户点击后申请浏览器授权；偏好保存在当前浏览器站点，
+管理提醒。内置 `main.tsx` 显式设置默认开启；用户已保存的关闭选择优先。仅在用户点击后申请浏览器授权；偏好保存在当前浏览器站点，
 不写入 daemon 或 workspace 设置，同源标签页之间同步。
 
 页面在后台或窗口失焦时，当前聊天及 Split View 中仍挂载的聊天在回合结束或失败后
@@ -28,6 +28,26 @@ Tailwind 或额外引入全局 CSS。
 支持 Web Locks 且存储可用时，同源标签页协调去重；否则退化为页面内去重及相同 tag
 的通知替换。关闭网页、页面冻结或离开未挂载的聊天后不保证提醒。嵌入式组件不自动
 启用此能力；Channel 推送不在首版范围内。
+
+`WebShellWithProviders`（及别名 `StandaloneWebShell`）支持通过 `browserNotifications` 接入通知并配置名称和图标：
+
+```tsx
+<WebShellWithProviders
+  baseUrl="https://daemon.example.com"
+  sidebar
+  browserNotifications={{
+    defaultEnabled: true,
+    appName: 'DataAgent',
+    iconUrl: 'https://cdn.example.com/assets/dataagent.png',
+  }}
+/>
+```
+
+传入 `{}` 时使用默认 `QwenCode` 名称和随包图标；名称和图标均可单独省略，空白值也回退默认。标题显示“应用名称 · 会话标题”。图片 URL 由浏览器直接加载，可使用 HTTPS CDN 地址；加载失败不保证自动回退到默认图标。
+
+`defaultEnabled` 默认 `false`；设为 `true` 时仅对没有保存通知偏好的浏览器站点默认开启。用户明确开启或关闭的选择优先，刷新后也保留；挂载后修改默认值不会覆盖当前选择。不传 `browserNotifications` 时保持嵌入入口原有行为，不接入通知。即使默认开启，也不会自动申请权限，用户仍需在 Settings → UI 中允许浏览器通知。修改品牌值不会重新加载当前会话。通知点击只导航所属实例，并遵守其当前锁定工作区。
+
+低层 `WebShell` 的 daemon providers 由宿主管理，不支持这个配置属性；qwen serve 内置页面继续使用默认品牌。本配置仅影响通知，不改变侧边栏品牌、Chrome 来源地址或浏览器标志。
 
 ## Tailwind 与 shadcn/ui
 

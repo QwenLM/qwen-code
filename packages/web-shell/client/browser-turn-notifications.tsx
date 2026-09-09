@@ -17,6 +17,7 @@ import { getTranslator, type WebShellLanguage } from './i18n';
 import {
   createTurnNotificationObserver,
   TurnNotificationContext,
+  TurnNotificationNavigationContext,
   type TurnNotification,
 } from './daemon/session/turn-notification-context';
 
@@ -29,6 +30,21 @@ const NOTIFICATION_ICON_URL = new URL(
   import.meta.url,
 ).href;
 
+export interface WebShellBrowserNotificationsOptions {
+  /** Initial preference when none is saved. Defaults to false; never requests permission automatically. */
+  defaultEnabled?: boolean;
+  /** Application name prefixed to notification titles. Defaults to QwenCode. */
+  appName?: string;
+  /** Image URL, including HTTPS CDN URLs. Defaults to the bundled Qwen Code icon. */
+  iconUrl?: string;
+}
+
+interface BrowserTurnNotificationsProps {
+  children: ReactNode;
+  language: WebShellLanguage;
+  options?: WebShellBrowserNotificationsOptions;
+}
+
 type Permission = NotificationPermission | 'unavailable';
 
 interface BrowserNotificationSettings {
@@ -39,6 +55,7 @@ interface BrowserNotificationSettings {
   error: boolean;
   setEnabled(enabled: boolean): Promise<void>;
   refreshPermission(): void;
+  syncLanguage(language: WebShellLanguage): void;
 }
 
 const BrowserNotificationSettingsContext = createContext<
@@ -63,9 +80,12 @@ function readStoredPreference(): string | null | undefined {
   }
 }
 
-function readPreference() {
+function readPreference(defaultEnabled: boolean) {
   const stored = readStoredPreference();
-  return { enabled: stored === 'true', persistent: stored !== undefined };
+  return {
+    enabled: stored === 'true' || (stored == null && defaultEnabled),
+    persistent: stored !== undefined,
+  };
 }
 
 function notificationExcerpt(text: string, limit: number): string {
@@ -86,14 +106,12 @@ function notificationExcerpt(text: string, limit: number): string {
 export function BrowserTurnNotifications({
   children,
   language,
-}: {
-  children: ReactNode;
-  language: WebShellLanguage;
-}) {
+  options,
+}: BrowserTurnNotificationsProps) {
   if (typeof window === 'undefined' || window.top !== window.self)
     return <>{children}</>;
   return (
-    <StandaloneNotifications language={language}>
+    <StandaloneNotifications language={language} options={options}>
       {children}
     </StandaloneNotifications>
   );
@@ -102,11 +120,14 @@ export function BrowserTurnNotifications({
 function StandaloneNotifications({
   children,
   language,
-}: {
-  children: ReactNode;
-  language: WebShellLanguage;
-}) {
-  const [preference, setPreference] = useState(readPreference);
+  options,
+}: BrowserTurnNotificationsProps) {
+  const [navigationTarget] = useState(() => new EventTarget());
+  const [appLanguage, syncLanguage] = useState<WebShellLanguage>();
+  const [defaultEnabled] = useState(options?.defaultEnabled ?? false);
+  const [preference, setPreference] = useState(() =>
+    readPreference(defaultEnabled),
+  );
   const [currentPermission, setPermission] = useState(permission);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState(false);
@@ -139,7 +160,7 @@ function StandaloneNotifications({
       if (event.key !== null && event.key !== BROWSER_NOTIFICATIONS_STORAGE_KEY)
         return;
       version.current++;
-      const next = readPreference();
+      const next = readPreference(defaultEnabled);
       enabledRef.current = next.enabled;
       setPreference(next);
       setPending(false);
@@ -153,7 +174,7 @@ function StandaloneNotifications({
       window.removeEventListener('storage', sync);
       window.removeEventListener('focus', refreshPermission);
     };
-  }, [refreshPermission]);
+  }, [refreshPermission, defaultEnabled]);
 
   const setEnabled = useCallback(
     async (enabled: boolean) => {
@@ -178,14 +199,14 @@ function StandaloneNotifications({
       setPending(false);
       setPermission(permission());
       if (readStoredPreference() !== storedBeforeRequest) {
-        const next = readPreference();
+        const next = readPreference(defaultEnabled);
         enabledRef.current = next.enabled;
         setPreference(next);
         return;
       }
       if (nextPermission === 'granted') savePreference(true);
     },
-    [savePreference],
+    [savePreference, defaultEnabled],
   );
 
   notifyRef.current = (turn) => {
@@ -227,7 +248,8 @@ function StandaloneNotifications({
             // Storage restrictions degrade to page-local deduplication and tag replacement.
           }
         }
-        const t = getTranslator(language);
+        const t = getTranslator(appLanguage ?? language);
+        const appName = options?.appName?.trim() || 'QwenCode';
         const title = notificationExcerpt(turn.sessionTitle ?? '', 60);
         const prompt = notificationExcerpt(turn.promptText ?? '', 80);
         const excerpt =
@@ -236,7 +258,7 @@ function StandaloneNotifications({
             : notificationExcerpt(turn.responseText ?? '', 120);
         const status = t(`browserNotifications.${turn.outcome}`);
         const notification = new window.Notification(
-          title ? `QwenCode · ${title}` : 'QwenCode',
+          title ? `${appName} · ${title}` : appName,
           {
             body: [
               status,
@@ -245,7 +267,7 @@ function StandaloneNotifications({
             ]
               .filter(Boolean)
               .join('\n'),
-            icon: NOTIFICATION_ICON_URL,
+            icon: options?.iconUrl?.trim() || NOTIFICATION_ICON_URL,
             tag,
             ...{ renotify: false },
           },
@@ -258,7 +280,7 @@ function StandaloneNotifications({
           }
           try {
             if (turn.target) {
-              window.dispatchEvent(
+              navigationTarget.dispatchEvent(
                 new CustomEvent('qwen:open-session', { detail: turn.target }),
               );
             }
@@ -287,19 +309,22 @@ function StandaloneNotifications({
   };
 
   return (
-    <TurnNotificationContext.Provider value={observer}>
-      <BrowserNotificationSettingsContext.Provider
-        value={{
-          ...preference,
-          permission: currentPermission,
-          pending,
-          error,
-          setEnabled,
-          refreshPermission,
-        }}
-      >
-        {children}
-      </BrowserNotificationSettingsContext.Provider>
-    </TurnNotificationContext.Provider>
+    <TurnNotificationNavigationContext.Provider value={navigationTarget}>
+      <TurnNotificationContext.Provider value={observer}>
+        <BrowserNotificationSettingsContext.Provider
+          value={{
+            ...preference,
+            permission: currentPermission,
+            pending,
+            error,
+            setEnabled,
+            refreshPermission,
+            syncLanguage,
+          }}
+        >
+          {children}
+        </BrowserNotificationSettingsContext.Provider>
+      </TurnNotificationContext.Provider>
+    </TurnNotificationNavigationContext.Provider>
   );
 }

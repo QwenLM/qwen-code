@@ -11,6 +11,7 @@ import {
 } from './browser-turn-notifications';
 import {
   TurnNotificationContext,
+  TurnNotificationNavigationContext,
   type TurnNotificationObserver,
 } from './daemon/session/turn-notification-context';
 
@@ -18,6 +19,7 @@ type Settings = NonNullable<ReturnType<typeof useBrowserNotificationSettings>>;
 interface Capture {
   settings?: Settings;
   observer?: TurnNotificationObserver;
+  navigationTarget?: EventTarget;
 }
 const notifications: FakeNotification[] = [];
 class FakeNotification {
@@ -42,6 +44,7 @@ const roots: Root[] = [];
 function Probe({ capture }: { capture: Capture }) {
   capture.settings = useBrowserNotificationSettings();
   capture.observer = useContext(TurnNotificationContext);
+  capture.navigationTarget = useContext(TurnNotificationNavigationContext);
   return null;
 }
 function render(capture: Capture, wrapper?: (node: ReactNode) => ReactNode) {
@@ -115,6 +118,219 @@ afterEach(() => {
 });
 
 describe('browser task notifications', () => {
+  it('defaults on only when configured and preserves an explicit off choice after remount', async () => {
+    const capture: Capture = {};
+    const wrapper = (node: ReactNode) => (
+      <BrowserTurnNotifications
+        language="en"
+        options={{ defaultEnabled: true }}
+      >
+        {node}
+      </BrowserTurnNotifications>
+    );
+    const root = render(capture, wrapper);
+    attach(capture);
+    expect(capture.settings!.enabled).toBe(true);
+    expect(
+      window.localStorage.getItem(BROWSER_NOTIFICATIONS_STORAGE_KEY),
+    ).toBeNull();
+    await settle(capture);
+    expect(notifications).toHaveLength(1);
+    await act(() => capture.settings!.setEnabled(false));
+    act(() => root.render(null));
+    render(capture, wrapper);
+    attach(capture);
+    expect(capture.settings!.enabled).toBe(false);
+    await settle(capture, 'after-reload');
+    expect(notifications).toHaveLength(1);
+    expect(FakeNotification.requestPermission).not.toHaveBeenCalled();
+  });
+
+  it.each(['default', 'denied'] as const)(
+    'does not request permission or deliver automatically with default on and permission %s',
+    async (permission) => {
+      FakeNotification.permission = permission;
+      const capture: Capture = {};
+      render(capture, (node) => (
+        <BrowserTurnNotifications
+          language="en"
+          options={{ defaultEnabled: true }}
+        >
+          {node}
+        </BrowserTurnNotifications>
+      ));
+      attach(capture);
+      expect(capture.settings!.enabled).toBe(true);
+      await settle(capture);
+      expect(notifications).toHaveLength(0);
+      expect(FakeNotification.requestPermission).not.toHaveBeenCalled();
+      if (permission === 'default') {
+        await act(() => capture.settings!.setEnabled(true));
+        expect(FakeNotification.requestPermission).toHaveBeenCalledOnce();
+        await settle(capture, 'authorized');
+        expect(notifications).toHaveLength(1);
+      }
+    },
+  );
+
+  it('restores its initial default after storage deletion without treating prop changes as user choices', async () => {
+    window.localStorage.setItem(BROWSER_NOTIFICATIONS_STORAGE_KEY, 'false');
+    const capture: Capture = {};
+    const root = render(capture, (node) => (
+      <BrowserTurnNotifications
+        language="en"
+        options={{ defaultEnabled: true }}
+      >
+        {node}
+      </BrowserTurnNotifications>
+    ));
+    act(() =>
+      root.render(
+        <BrowserTurnNotifications
+          language="en"
+          options={{ defaultEnabled: false }}
+        >
+          <Probe capture={capture} />
+        </BrowserTurnNotifications>,
+      ),
+    );
+    expect(capture.settings!.enabled).toBe(false);
+    act(() => {
+      window.localStorage.removeItem(BROWSER_NOTIFICATIONS_STORAGE_KEY);
+      window.dispatchEvent(
+        new StorageEvent('storage', { key: BROWSER_NOTIFICATIONS_STORAGE_KEY }),
+      );
+    });
+    expect(capture.settings!.enabled).toBe(true);
+    await act(() => capture.settings!.setEnabled(false));
+    act(() => {
+      window.localStorage.clear();
+      window.dispatchEvent(new StorageEvent('storage', { key: null }));
+    });
+    expect(capture.settings!.enabled).toBe(true);
+  });
+
+  it('uses the configured default with unavailable storage and still allows turning off', async () => {
+    vi.spyOn(window.localStorage, 'getItem').mockImplementation(() => {
+      throw new Error('blocked');
+    });
+    vi.spyOn(window.localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('blocked');
+    });
+    const capture: Capture = {};
+    render(capture, (node) => (
+      <BrowserTurnNotifications
+        language="en"
+        options={{ defaultEnabled: true }}
+      >
+        {node}
+      </BrowserTurnNotifications>
+    ));
+    expect(capture.settings!.enabled).toBe(true);
+    expect(capture.settings!.persistent).toBe(false);
+    await act(() => capture.settings!.setEnabled(false));
+    expect(capture.settings!.enabled).toBe(false);
+  });
+
+  it('uses the synchronized App language after preference updates', async () => {
+    const capture: Capture = {};
+    render(capture);
+    attach(capture);
+    act(() => capture.settings!.syncLanguage('zh-CN'));
+    await act(() => capture.settings!.setEnabled(true));
+    await settle(capture);
+    expect(notifications[0]?.options.body).toBe('本轮已完成。');
+  });
+
+  it.each([
+    [{}, 'QwenCode', undefined],
+    [{ appName: '  ', iconUrl: '\n' }, 'QwenCode', undefined],
+    [{ appName: '  DataAgent  ' }, 'DataAgent', undefined],
+    [
+      { iconUrl: 'https://cdn.example.com/icon.png' },
+      'QwenCode',
+      'https://cdn.example.com/icon.png',
+    ],
+    [
+      { appName: 'DataAgent', iconUrl: ' https://cdn.example.com/icon.png ' },
+      'DataAgent',
+      'https://cdn.example.com/icon.png',
+    ],
+  ] as const)(
+    'uses independent branding defaults for %j',
+    async (options, name, icon) => {
+      window.localStorage.setItem(BROWSER_NOTIFICATIONS_STORAGE_KEY, 'true');
+      const capture: Capture = {};
+      render(capture, (node) => (
+        <BrowserTurnNotifications language="en" options={options}>
+          {node}
+        </BrowserTurnNotifications>
+      ));
+      attach(capture);
+      await settle(capture);
+      expect(notifications[0]?.title).toBe(name);
+      if (icon) expect(notifications[0]?.options.icon).toBe(icon);
+      else
+        expect(notifications[0]?.options.icon).toMatch(
+          /qwen-code-notification[^/]*\.png$/,
+        );
+    },
+  );
+
+  it('updates branding for new notifications without resetting the observer or preference', async () => {
+    const capture: Capture = {};
+    const root = render(capture, (node) => (
+      <BrowserTurnNotifications
+        language="en"
+        options={{ appName: 'DataAgent' }}
+      >
+        {node}
+      </BrowserTurnNotifications>
+    ));
+    attach(capture);
+    const observer = capture.observer;
+    await act(() => capture.settings!.setEnabled(true));
+    const notify = async (promptId: string) => {
+      await act(async () => {
+        capture.observer!.observe(
+          'scope',
+          'session',
+          {
+            type: 'turn_complete',
+            data: { sessionId: 'session', promptId, stopReason: 'end_turn' },
+          },
+          false,
+          { sessionTitle: 'Build result' },
+        );
+        await vi.waitFor(() =>
+          expect(notifications).toHaveLength(promptId === 'first' ? 1 : 2),
+        );
+      });
+    };
+    await notify('first');
+    act(() =>
+      root.render(
+        <BrowserTurnNotifications
+          language="en"
+          options={{
+            appName: 'Other App',
+            iconUrl: 'https://cdn.example.com/new.png',
+          }}
+        >
+          <Probe capture={capture} />
+        </BrowserTurnNotifications>,
+      ),
+    );
+    expect(capture.observer).toBe(observer);
+    expect(capture.settings!.enabled).toBe(true);
+    await notify('second');
+    expect(notifications[0]?.title).toBe('DataAgent · Build result');
+    expect(notifications[1]?.title).toBe('Other App · Build result');
+    expect(notifications[1]?.options.icon).toBe(
+      'https://cdn.example.com/new.png',
+    );
+  });
+
   it('defaults off despite permission, consumes disabled terminals and persists an explicit choice', async () => {
     const capture: Capture = {};
     render(capture);
@@ -352,7 +568,9 @@ describe('browser task notifications', () => {
         },
       };
       const open = vi.fn();
-      window.addEventListener('qwen:open-session', open);
+      const globalOpen = vi.fn();
+      capture.navigationTarget!.addEventListener('qwen:open-session', open);
+      window.addEventListener('qwen:open-session', globalOpen);
       try {
         await act(async () => {
           capture.observer!.observe(
@@ -379,10 +597,15 @@ describe('browser task notifications', () => {
         notifications[0]?.onclick?.();
         expect(focus).toHaveBeenCalledOnce();
         expect(open).toHaveBeenCalledOnce();
+        expect(globalOpen).not.toHaveBeenCalled();
         expect((open.mock.calls[0]![0] as CustomEvent).detail).toEqual(target);
         expect(notifications[0]?.close).toHaveBeenCalledOnce();
       } finally {
-        window.removeEventListener('qwen:open-session', open);
+        capture.navigationTarget!.removeEventListener(
+          'qwen:open-session',
+          open,
+        );
+        window.removeEventListener('qwen:open-session', globalOpen);
       }
     },
   );

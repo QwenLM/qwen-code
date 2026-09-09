@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonProductSessionContext } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { WebShellProps } from './App';
+import { useBrowserNotificationSettings } from './browser-turn-notifications';
 
 interface CapturedWorkspaceSessionProps {
   sessionId?: string;
@@ -15,6 +16,7 @@ interface CapturedWorkspaceSessionProps {
 
 const testState = vi.hoisted(() => ({
   props: undefined as CapturedWorkspaceSessionProps | undefined,
+  notificationEnabled: undefined as boolean | undefined,
 }));
 
 vi.mock('react-dom/client', async (importOriginal) => ({
@@ -27,6 +29,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 vi.mock('./components/WorkspaceSessionProvider', () => ({
   WorkspaceSessionProvider: (props: CapturedWorkspaceSessionProps) => {
     testState.props = props;
+    testState.notificationEnabled = useBrowserNotificationSettings()?.enabled;
     return null;
   },
 }));
@@ -54,7 +57,21 @@ describe('StandaloneApp', () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.restoreAllMocks();
   });
+
+  it.each([
+    [null, true],
+    ['false', false],
+    ['true', true],
+  ])(
+    'uses the standalone default unless the browser has saved %s',
+    (stored, enabled) => {
+      vi.spyOn(Storage.prototype, 'getItem').mockReturnValue(stored);
+      act(() => root.render(<StandaloneApp daemonToken="token" />));
+      expect(testState.notificationEnabled).toBe(enabled);
+    },
+  );
 
   it('keeps the controlled session target in sync with URL changes', () => {
     act(() => root.render(<StandaloneApp daemonToken="token" />));

@@ -16,6 +16,10 @@ export interface TurnNotificationTarget {
   sessionContext: DaemonProductSessionContext;
 }
 
+export const TurnNotificationNavigationContext = createContext<
+  EventTarget | undefined
+>(undefined);
+
 export interface TurnNotificationContent {
   target?: TurnNotificationTarget;
   sessionTitle?: string;
