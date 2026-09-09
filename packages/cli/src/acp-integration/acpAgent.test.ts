@@ -34,8 +34,18 @@ import { getDefaultReasoningConfig } from './model-configuration.js';
 import { getConversationDirectoryName } from '../utils/conversation-directory-identity.js';
 
 // Mock cleanup module before importing anything else
-const { mockRunExitCleanup } = vi.hoisted(() => ({
+const { mockRunExitCleanup, mockRegisterCleanup } = vi.hoisted(() => ({
   mockRunExitCleanup: vi.fn().mockResolvedValue(undefined),
+  mockRegisterCleanup: vi.fn(),
+}));
+const mockRegisterSession = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ registered: true, slot: 'ab12cd34' }),
+);
+const mockPeerMessagingStart = vi.hoisted(() => vi.fn());
+vi.mock('../peerMessaging/peer-messaging.js', () => ({
+  PeerMessaging: {
+    start: (...args: unknown[]) => mockPeerMessagingStart(...args),
+  },
 }));
 const { mockStartNonInteractiveOpenAILogHousekeeping } = vi.hoisted(() => ({
   mockStartNonInteractiveOpenAILogHousekeeping: vi.fn(),
@@ -52,6 +62,7 @@ const { mockMcpPoolDrainAll, mockMcpPoolGetSnapshot } = vi.hoisted(() => ({
 }));
 vi.mock('../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
+  registerCleanup: mockRegisterCleanup,
 }));
 vi.mock('../services/housekeeping/scheduler.js', () => ({
   startNonInteractiveOpenAILogHousekeeping:
@@ -234,6 +245,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     }
   },
   INVOCATION_CONTEXT_META_KEY: 'qwen-code/invocation',
+  registerSession: mockRegisterSession,
   PRIVATE_ACP_CAPABILITY_ENV: 'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
   PRIVATE_PARENT_CAPABILITY_META_KEY: 'qwen-code/private-parent-capability',
   parseInvocationContext: vi.fn(
@@ -4466,6 +4478,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
       getProjectRoot: vi.fn().mockReturnValue('/tmp'),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      // The session-registry seams. A hosted session registers a record of
+      // its own when cross-session messaging is on; with it off none of
+      // these is called, which is the state most of this suite runs in.
+      getCliVersion: vi.fn().mockReturnValue('9.9.9'),
+      trackSessionRegistration: vi.fn(),
+      updateSessionRegistryIpcPath: vi.fn().mockResolvedValue(undefined),
+      unregisterSessionRegistry: vi.fn().mockResolvedValue(undefined),
+      reassertSessionRegistryRecord: vi.fn().mockResolvedValue(undefined),
       // Per-session folder-trust flag (security.folderTrust.enabled of the
       // admission workspace), bound once at Config construction. Default off;
       // bootRelocatableSession overrides it to reflect the fed workspace.
@@ -4885,6 +4905,124 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     return { agent, agentPromise };
   }
+
+  describe('daemon-managed sessions in the session registry', () => {
+    /** Settings with cross-session messaging on, which is off by default. */
+    function messagingOn() {
+      return makeSessionSettings({
+        mcpServers: {},
+        agents: { crossSessionMessaging: true },
+      });
+    }
+
+    beforeEach(() => {
+      mockRegisterSession.mockClear();
+      mockPeerMessagingStart.mockReset();
+      mockPeerMessagingStart.mockResolvedValue({
+        close: vi.fn().mockResolvedValue(undefined),
+      });
+    });
+
+    it('gives each hosted session a record of its own, and the shared inbox address', async () => {
+      const innerConfig = await setupSessionMocks('hosted-a');
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      // The inbox is bound by the first session that needs one, so the
+      // address arrives after that session already has a record — the
+      // ordering production sees, and the one the fan-out exists for.
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      const options = mockPeerMessagingStart.mock.calls[0]![0] as {
+        updateSessionRegistryIpcPath: (
+          path: string,
+          token: string,
+        ) => Promise<void>;
+        getPolicySetting: () => string;
+        ownsSessionId: (id: string) => boolean;
+      };
+      await options.updateSessionRegistryIpcPath('/tmp/acp.sock', 'tok');
+
+      expect(mockRegisterSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'hosted-a',
+          cwd: '/tmp',
+          // One record per session, not one per process: they have their
+          // own ids, names and working directories.
+          slot: 'own',
+          kind: 'headless',
+        }),
+      );
+      expect(innerConfig.trackSessionRegistration).toHaveBeenCalledTimes(1);
+      // Every hosted session advertises the one inbox this process bound.
+      expect(innerConfig.updateSessionRegistryIpcPath).toHaveBeenCalledWith(
+        '/tmp/acp.sock',
+        'tok',
+      );
+      // Inbound is turned away rather than parked: nobody is watching a
+      // hold list on a daemon-managed session's behalf.
+      expect(options.getPolicySetting()).toBe('refuse');
+      expect(options.ownsSessionId('hosted-a')).toBe(true);
+      expect(options.ownsSessionId('someone-else')).toBe(false);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('records the daemon as the registrant when it spawned this process', async () => {
+      const previous = process.env['QWEN_CODE_SERVE'];
+      process.env['QWEN_CODE_SERVE'] = '1';
+      try {
+        await setupSessionMocks('hosted-serve');
+        const { agent, agentPromise } =
+          await bootInitializedAcpAgent(messagingOn());
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        await vi.waitFor(() =>
+          expect(mockPeerMessagingStart).toHaveBeenCalled(),
+        );
+
+        expect(mockRegisterSession).toHaveBeenCalledWith(
+          expect.objectContaining({ kind: 'serve' }),
+        );
+        mockConnectionState.resolve();
+        await agentPromise;
+      } finally {
+        if (previous === undefined) delete process.env['QWEN_CODE_SERVE'];
+        else process.env['QWEN_CODE_SERVE'] = previous;
+      }
+    });
+
+    it('registers nothing while cross-session messaging is off', async () => {
+      // A record with no inbox behind it would advertise an address that
+      // never answers, which is worse than not being listed at all.
+      await setupSessionMocks('hosted-off');
+      const { agent, agentPromise } = await bootInitializedAcpAgent(
+        makeSessionSettings(),
+      );
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      expect(mockPeerMessagingStart).not.toHaveBeenCalled();
+      expect(mockRegisterSession).not.toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it("removes a session's record when the session goes", async () => {
+      const innerConfig = await setupSessionMocks('hosted-gone');
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      expect(innerConfig.unregisterSessionRegistry).not.toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+
+      // Left behind, the record would keep advertising a session that is
+      // gone until this process exits.
+      expect(innerConfig.unregisterSessionRegistry).toHaveBeenCalled();
+    });
+  });
 
   async function withEmptyTrustedFolders<T>(
     run: (directory: string) => Promise<T>,
@@ -23645,6 +23783,16 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       resumedConversation?: { messages: unknown[] };
     } = {},
   ) {
+    // Same registry seams `makeInnerConfig` carries: teardown removes a
+    // hosted session's record before its Config shuts down, and a Config
+    // that cannot answer would turn a clean shutdown into a failure.
+    const registrySeams = {
+      getCliVersion: vi.fn().mockReturnValue('9.9.9'),
+      trackSessionRegistration: vi.fn(),
+      updateSessionRegistryIpcPath: vi.fn().mockResolvedValue(undefined),
+      unregisterSessionRegistry: vi.fn().mockResolvedValue(undefined),
+      reassertSessionRegistryRecord: vi.fn().mockResolvedValue(undefined),
+    };
     const recording = {
       rebuildTurnBoundaries: vi.fn(),
       flush: vi.fn().mockResolvedValue(undefined),
@@ -23657,6 +23805,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       ),
     };
     return {
+      ...registrySeams,
       initialize: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
       closeSessionWriter: vi.fn().mockResolvedValue(undefined),

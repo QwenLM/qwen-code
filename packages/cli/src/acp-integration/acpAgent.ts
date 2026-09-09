@@ -148,6 +148,7 @@ import {
   listWorkflowSnapshots,
   type TurnResultRecordPayload,
   sessionIdContext,
+  type registerSession as registerSessionType,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -327,7 +328,9 @@ import {
 } from '../i18n/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
-import { runExitCleanup } from '../utils/cleanup.js';
+import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
+import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
+import type { PeerMessaging } from '../peerMessaging/peer-messaging.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
@@ -2888,6 +2891,12 @@ export async function runAcpAgent(
       return agentInstance;
     }, stream);
     markAcpStartup('transportSetupEnd');
+    // Read at call time rather than captured: the connection sets
+    // `agentInstance` when it builds the agent, and this runs first. The
+    // inbox is bound by the first hosted session, but it has to be closed
+    // on every path out — including a bare signal, which reaches neither
+    // `disposeSessions` nor `finishManagedShutdown`.
+    registerCleanup(() => agentInstance?.closePeerMessaging());
   } catch (err) {
     eventLoopMonitor.dispose();
     throw err;
@@ -3476,6 +3485,40 @@ async function assertManagedConversationDirectoryIdentity(
 
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
+  /**
+   * Cross-session messaging for every session this process hosts.
+   *
+   * One inbox, not one per session: the address is a socket, the sessions
+   * are told apart by the `toSessionId` every sender pins on its frame,
+   * and binding a socket per session would multiply file descriptors by
+   * the session count for no added reach.
+   *
+   * Outbound only for now. Inbound is refused rather than held, because a
+   * hold is a question put to a person and nobody is watching a hold list
+   * on a daemon-managed session's behalf; a sender is told so at once
+   * instead of waiting out an expiry.
+   */
+  /**
+   * The settings this process started with.
+   *
+   * `this.settings` is re-pointed at whichever session is being handled,
+   * so it cannot answer a question about the process. Cross-session
+   * messaging is one of those: one inbox is bound per process, and
+   * whether to bind it is settled once, here.
+   */
+  private readonly startupSettings: LoadedSettings;
+  private peerMessagingEnabled = false;
+  private peerMessagingStart: Promise<PeerMessaging | null> | null = null;
+  /**
+   * `registerSession`, once the lazy import above has resolved it. Null
+   * until then: a session published in that window is registered by the
+   * catch-up loop in `startPeerMessaging` rather than by its own
+   * publication, so nothing is lost and nothing waits on the import.
+   */
+  private registerSessionRecord: typeof registerSessionType | null = null;
+  /** Sessions already given a record, so the catch-up loop cannot double. */
+  private readonly registeredSessions = new Set<string>();
+  private inboxAddress: { ipcPath: string; ipcToken: string } | null = null;
   private modelProviderReloadRevision = 0;
   private readonly historyMutationTails = new Map<string, Promise<void>>();
   private readonly startingSessionIds = new Set<string>();
@@ -3740,6 +3783,10 @@ class QwenAgent implements Agent {
 
   async finishManagedShutdown(configs: Config[]): Promise<void> {
     const failures: unknown[] = [];
+    // Ahead of the session teardown below: the expiry receipts an inbox
+    // owes its senders travel over the socket, and its own record clear
+    // is a patch the records must still be there for.
+    await this.closePeerMessaging();
     for (const [sessionId, session] of [...this.sessions]) {
       await this.removeStoredSessionEntry(sessionId, session, failures, {
         shutdownConfig: false,
@@ -4152,6 +4199,15 @@ class QwenAgent implements Agent {
     } catch (error) {
       cleanupErrors.push(error);
     }
+    // Before the Config shuts down, which does not touch the registry:
+    // a record left behind advertises a session that is gone, and peers
+    // would keep addressing it until this process exits.
+    this.registeredSessions.delete(sessionId);
+    try {
+      await session.getConfig().unregisterSessionRegistry();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
     if (options.shutdownConfig !== false) {
       try {
         await session.getConfig().shutdown({ shutdownTelemetry: false });
@@ -4509,7 +4565,159 @@ class QwenAgent implements Agent {
     await this.closeStoredSession(sessionId, opts);
   }
 
+  /**
+   * Bind one inbox for every session this process hosts, when the user
+   * turned cross-session messaging on.
+   *
+   * Not awaited: binding a socket must not delay the first prompt, and a
+   * session published before it resolves still registers — the catch-up
+   * loop below covers those, and the address is patched into every
+   * record when it arrives (`publishInboxAddress`).
+   */
+  private startPeerMessaging(): void {
+    if (this.startupSettings.merged.agents?.crossSessionMessaging !== true) {
+      return;
+    }
+    if (this.peerMessagingStart) return;
+    this.peerMessagingEnabled = true;
+    this.peerMessagingStart = (async () => {
+      try {
+        // Imported here rather than at the top of the file: the feature is
+        // off by default, and an ACP process that will never message a
+        // peer should not pay to load the transport, the gate and the
+        // admission meter behind it.
+        const [{ PeerMessaging }, { registerSession }] = await Promise.all([
+          import('../peerMessaging/peer-messaging.js'),
+          import('@qwen-code/qwen-code-core'),
+        ]);
+        this.registerSessionRecord = registerSession;
+        // Sessions published while this was loading have no record yet.
+        for (const [sessionId, session] of this.sessions) {
+          this.registerHostedSession(sessionId, session.getConfig());
+        }
+        const messaging = await PeerMessaging.start({
+          // Inbound is refused outright, so neither the approval mode nor
+          // the parity rule it feeds is ever consulted. Stated rather than
+          // left to a default: what a daemon-managed session may be told
+          // is settled here and nowhere else.
+          getApprovalMode: () => null,
+          getPolicySetting: () => 'refuse',
+          updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
+            this.publishInboxAddress(ipcPath, ipcToken),
+          ownsSessionId: (id) => this.sessions.has(id),
+          reassertSessionRecord: (id) => this.reassertSessionRecord(id),
+        });
+        return messaging;
+      } catch (error) {
+        debugLogger.error(
+          '[ACP] cross-session messaging failed to start:',
+          error,
+        );
+        return null;
+      }
+    })();
+  }
+
+  /** Close the inbox and stop advertising it. Safe to call more than once. */
+  async closePeerMessaging(): Promise<void> {
+    const pending = this.peerMessagingStart;
+    if (!pending) return;
+    this.peerMessagingStart = null;
+    try {
+      await (await pending)?.close();
+    } catch (error) {
+      debugLogger.debug(
+        `[ACP] closing cross-session messaging failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    this.inboxAddress = null;
+  }
+
+  /**
+   * Give a newly published session a registry record of its own.
+   *
+   * Only when messaging is on. A record with no inbox behind it would put
+   * a name in every peer's listing that can be addressed and never
+   * answered, which is worse than not appearing at all — the interactive
+   * UI registers unconditionally because its record also answers "what is
+   * running right now", a question nobody asks of a session a daemon is
+   * driving.
+   */
+  private registerHostedSession(sessionId: string, config: Config): void {
+    // Bound by the first session that needs it rather than at startup: an
+    // ACP process with no session has nothing to advertise and nobody to
+    // receive for, and this is also the first moment the agent exists.
+    this.startPeerMessaging();
+    if (!this.peerMessagingEnabled) return;
+    const registerSession = this.registerSessionRecord;
+    if (!registerSession) return;
+    if (this.registeredSessions.has(sessionId)) return;
+    this.registeredSessions.add(sessionId);
+    config.trackSessionRegistration(
+      registerSession({
+        sessionId,
+        cwd: config.getTargetDir(),
+        qwenVersion: config.getCliVersion() ?? null,
+        // What spawned this process, as far as it can tell: the daemon
+        // marks the children it starts, and anything else running
+        // `qwen --acp` is a client driving it directly.
+        kind: process.env[QWEN_CODE_SERVE_ENV] === '1' ? 'serve' : 'headless',
+        // One record per session rather than one per process: they have
+        // separate ids, names and working directories.
+        slot: 'own',
+      }),
+    );
+    if (this.inboxAddress) {
+      void config.updateSessionRegistryIpcPath(
+        this.inboxAddress.ipcPath,
+        this.inboxAddress.ipcToken,
+      );
+    }
+  }
+
+  /**
+   * Write the inbox address into every hosted session's record.
+   *
+   * They share one address, so this runs once per bind rather than once
+   * per session, and again with `undefined` at close so no record
+   * advertises a socket that is gone.
+   */
+  private async publishInboxAddress(
+    ipcPath: string | undefined,
+    ipcToken?: string,
+  ): Promise<void> {
+    this.inboxAddress =
+      ipcPath !== undefined && ipcToken !== undefined
+        ? { ipcPath, ipcToken }
+        : null;
+    await Promise.allSettled(
+      [...this.sessions.values()].map((session) =>
+        session.getConfig().updateSessionRegistryIpcPath(ipcPath, ipcToken),
+      ),
+    );
+  }
+
+  /**
+   * Re-assert the record of the session a misaddressed frame named.
+   *
+   * The sender's directory may be stale, or the record may be — a patch
+   * skipped in an fd-pressure window leaves it naming an id this session
+   * no longer holds, and every later send would be refused the same way.
+   * Only the named session's record is touched: the siblings' records
+   * have nothing to do with the frame that arrived.
+   */
+  private async reassertSessionRecord(sessionId?: string): Promise<void> {
+    if (sessionId === undefined) return;
+    await this.sessions
+      .get(sessionId)
+      ?.getConfig()
+      .reassertSessionRegistryRecord();
+  }
+
   async disposeSessions(): Promise<void> {
+    await this.closePeerMessaging();
     this.activeWorkReporter?.dispose();
     this.activeWorkReporter = undefined;
     for (const generation of this.generationControllers.values()) {
@@ -4546,6 +4754,8 @@ class QwenAgent implements Agent {
     private readonly externalToolGuardProviderAttached = false,
     private readonly conversationsRuntimeProvenance = false,
   ) {
+    // Before anything re-points `this.settings` at a session's own.
+    this.startupSettings = settings;
     // Pool kill switch via env var so operators can A/B compare or
     // roll back without rebuilding. `run-qwen-serve.ts` sets this when
     // `--no-mcp-pool` is passed at daemon startup.
@@ -14518,6 +14728,7 @@ class QwenAgent implements Agent {
         );
       }
       this.sessions.set(sessionId, session);
+      this.registerHostedSession(sessionId, config);
       // The session boots converged on the mode its settings derived; later
       // reloads track convergence from here. Restricted sessions derive
       // DEFAULT, mirroring the fold the reload loop applies to them.

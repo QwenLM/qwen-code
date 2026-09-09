@@ -12,7 +12,10 @@
  */
 
 import type { ApprovalMode } from '../config/approval-mode.js';
-import { readOwnSessionRecord } from '../services/session-registry.js';
+import {
+  readOwnSessionRecord,
+  type SessionRecordSlot,
+} from '../services/session-registry.js';
 import { modeClass } from './inbound-gate.js';
 import {
   hasToken,
@@ -53,8 +56,10 @@ export interface OwnPeerIdentity {
   ref: string;
 }
 
-export async function getOwnPeerIdentity(): Promise<OwnPeerIdentity | null> {
-  const record = await readOwnSessionRecord();
+export async function getOwnPeerIdentity(
+  slot?: SessionRecordSlot,
+): Promise<OwnPeerIdentity | null> {
+  const record = await readOwnSessionRecord(slot);
   // The same projection peers see, so the name this session reports for
   // itself is the flattened one they would type.
   const self = record === null ? null : toPeerSessionInfo(record);
@@ -593,6 +598,13 @@ export interface SendToPeerOptions {
    * the form that reaches it.
    */
   isReserved?: (address: string) => boolean;
+  /**
+   * Which of this process's registry records describes the sending
+   * session. Omitted by a process holding one session, which is most of
+   * them; a process hosting several has a record per session, and the
+   * `from`, name and id on the frame have to come from the right one.
+   */
+  slot?: SessionRecordSlot;
 }
 
 /**
@@ -605,21 +617,23 @@ export interface SendToPeerOptions {
 export async function sendToPeer(
   options: SendToPeerOptions,
 ): Promise<PeerSendOutcome> {
-  const own = await readOwnSessionRecord();
+  const own = await readOwnSessionRecord(options.slot);
   const self = own === null ? null : toPeerSessionInfo(own);
   if (!self) return { kind: 'disabled' };
 
   const directory = await listMessageablePeers();
-  // Exclude every incarnation of this session, not just its own socket:
-  // the registry is keyed by PID, and `qwen --resume <id>` from a second
-  // pane runs the same session id under another process — differently
-  // named when resumed from another directory. The receiver's gate
-  // accepts a frame pinned to its own id, so such a twin would deliver a
-  // message right back to this session while the ledger reads delivered.
-  const peers = directory.filter(
-    (peer) =>
-      peer.ipcPath !== self.ipcPath && peer.sessionId !== self.sessionId,
-  );
+  // Exclude every incarnation of this session — `qwen --resume <id>` from
+  // a second pane runs the same session id under another process,
+  // differently named when resumed from another directory. The receiver's
+  // gate accepts a frame pinned to its own id, so such a twin would
+  // deliver a message right back to this session while the ledger reads
+  // delivered.
+  //
+  // By session id alone. The reply address used to join the test as a
+  // proxy for the same thing, and stopped being one when a process could
+  // host several sessions: they share one inbox, so excluding by address
+  // would hide every sibling of the sending session from it.
+  const peers = directory.filter((peer) => peer.sessionId !== self.sessionId);
   const resolved = resolvePeerTarget(peers, options.target);
 
   if (resolved.kind === 'none') {

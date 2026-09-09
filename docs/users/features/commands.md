@@ -776,7 +776,8 @@ A table with columns: NAME, KIND, PID, AGE, DIRECTORY.
 KIND says what registered the session — `tui` for someone at a terminal,
 `external` for a program that is not a Qwen Code session at all (a voice
 front-end, a relay), and `headless` or `serve` for a session another
-program drives. It is a self-report, like NAME and DIRECTORY: every field
+program drives. Several `serve` rows can share one PID: the daemon hosts
+its sessions in one process, and each of them registers separately. It is a self-report, like NAME and DIRECTORY: every field
 here was written by the process it describes, and nothing about what a
 session is allowed to do depends on it. See
 [Cross-Session Protocol](./cross-session-protocol.md) for the record
@@ -1026,6 +1027,25 @@ on your behalf.
 Anyone who holds the token can send as that controller, so treat it like
 any other credential: give it to one program, keep it out of shared
 config, and revoke it when that program is done.
+
+### Daemon-managed sessions
+
+A session `qwen serve` is driving registers too, as `serve`, and appears
+in `qwen sessions ps` and in another session's `list_agents` like any
+other. It can send: its model can call `send_message` to reach a terminal
+you have open. Several of them share one process and one inbox, so a
+sender has to name the session it means — every Qwen Code session does
+that automatically.
+
+Messages sent _to_ one are refused rather than held. Holding is a
+question put to a person, and nobody is watching a held-message list on a
+daemon-managed session's behalf; a sender is told at once instead of
+waiting out an expiry. Where a held message should surface for those
+sessions is not settled yet.
+
+They register only while `agents.crossSessionMessaging` is on. With it
+off they stay invisible, because the only reason to list a session
+nobody can message would be to advertise an address that never answers.
 
 ### Programs that are not Qwen Code sessions
 

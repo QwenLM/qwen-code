@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SendMessageTool } from './send-message.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
+import { SHARED_RECORD_SLOT } from '../services/session-registry.js';
 import { ToolErrorType } from './tool-error.js';
 import type { ApprovalMode, Config } from '../config/config.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
@@ -47,6 +48,7 @@ function makeTeamConfig(opts?: {
     getBackgroundTaskRegistry: () =>
       opts?.registry ?? new BackgroundTaskRegistry(),
     getApprovalMode: () => opts?.approvalMode ?? DEFAULT_MODE,
+    getSessionRegistrySlot: () => SHARED_RECORD_SLOT,
   } as unknown as Config;
 }
 
@@ -768,6 +770,7 @@ describe('SendMessageTool — peer mode', () => {
       getApprovalMode: () => {
         throw new Error('not yet');
       },
+      getSessionRegistrySlot: () => SHARED_RECORD_SLOT,
     } as unknown as Config);
 
     await tool

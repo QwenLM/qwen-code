@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
+import { SHARED_RECORD_SLOT } from '../services/session-registry.js';
 
 const getOwnPeerIdentity = vi.fn();
 const listMessageablePeers = vi.fn();
@@ -54,6 +55,7 @@ describe('ListAgentsTool', () => {
     tool = new ListAgentsTool({
       getBackgroundTaskRegistry: () => registry,
       getTeamManager: () => null,
+      getSessionRegistrySlot: () => SHARED_RECORD_SLOT,
     } as unknown as Config);
   });
 
@@ -156,6 +158,7 @@ describe('ListAgentsTool — peer sessions', () => {
   ) {
     return new ListAgentsTool({
       getBackgroundTaskRegistry: () => registry,
+      getSessionRegistrySlot: () => SHARED_RECORD_SLOT,
       getTeamManager: () =>
         teammates.length === 0
           ? null
@@ -324,12 +327,37 @@ describe('ListAgentsTool — peer sessions', () => {
 
   it('excludes this session from its own listing', async () => {
     listMessageablePeers.mockResolvedValue([
-      peerRow({ name: 'self-00', ipcPath: '/tmp/self.sock' }),
+      peerRow({
+        sessionId: 'self',
+        ref: 'se1f00',
+        name: 'self-00',
+        ipcPath: '/tmp/self.sock',
+      }),
       peerRow({ sessionId: 's2', ref: 'bbb222' }),
     ]);
     const parsed = JSON.parse(String((await run()).llmContent));
     expect(parsed.sessions).toHaveLength(1);
     expect(parsed.sessions[0].name).toBe('docs-cd');
+  });
+
+  it("keeps a session that merely shares this one's inbox", async () => {
+    // A process hosting several sessions binds one inbox for all of them,
+    // so a sibling's reply address is this session's own. It is still a
+    // different session with its own id, its own work and its own model —
+    // hiding it would leave the sessions in one process unable to see
+    // each other at all.
+    listMessageablePeers.mockResolvedValue([
+      peerRow({
+        sessionId: 'sibling',
+        ref: 'bbb222',
+        name: 'app-11',
+        ipcPath: '/tmp/self.sock',
+      }),
+    ]);
+    const parsed = JSON.parse(String((await run()).llmContent));
+    expect(parsed.sessions).toEqual([
+      expect.objectContaining({ name: 'app-11', ref: 'bbb222' }),
+    ]);
   });
 
   it('excludes a differently named twin of this session', async () => {
@@ -353,7 +381,12 @@ describe('ListAgentsTool — peer sessions', () => {
 
   it("keeps a peer that merely shares this session's name", async () => {
     listMessageablePeers.mockResolvedValue([
-      peerRow({ name: 'self-00', ipcPath: '/tmp/self.sock' }),
+      peerRow({
+        sessionId: 'self',
+        ref: 'se1f00',
+        name: 'self-00',
+        ipcPath: '/tmp/self.sock',
+      }),
       peerRow({
         sessionId: 's2',
         ref: 'bbb222',

@@ -92,6 +92,18 @@ sessions may share a `name`; the address grammar a sender types is
 `name`, `name [ref]`, `[ref]` or the bare `ref`, and an ambiguous
 `name` is an error rather than a guess.
 
+**Several records from one process.** A process hosting more than one
+session at a time — the `qwen --acp` child a daemon spawns — writes one
+record per session, named `<pid>-<8 hex>.json`. The suffix is minted at
+registration and never changes; a session id swapped underneath is a
+patch to the record, not a rename of it. Every one of them carries the
+same `ipcPath`, because the process binds one inbox for all its sessions
+and tells them apart by the `toSessionId` on each frame — so **always
+send `toSessionId`**: a frame without one that reaches such a process is
+answered `misaddressed`, since there is no single session it could have
+meant. Liveness, sweeping and the PID/filename agreement work exactly as
+they do for the shared name.
+
 ## 2. The inbox socket
 
 One UNIX domain socket per session, at the first of these that binds:
@@ -285,7 +297,8 @@ that look like the envelope are defanged inside `content`.
   renamed itself, are both still to come.
 - **Same-name reporting.** `qwen sessions ps` and `list_agents` do not
   flag records that still collide.
-- **Daemon-managed sessions.** Only the interactive UI registers today, so
-  a session `qwen serve` drives is not in the registry, cannot be
-  addressed, and cannot send. The `serve` and `headless` kinds are
-  reserved for it.
+- **Inbound messages to daemon-managed sessions.** A session a daemon
+  drives registers and can send, but answers `refused` to anything sent
+  to it: a hold is a question put to a person, and nobody is watching a
+  hold list on its behalf. Where a held message should surface for those
+  sessions — its client, or the daemon's own API — is still open.

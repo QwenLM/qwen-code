@@ -28,11 +28,13 @@ import {
 // Hoisted mocks
 // ---------------------------------------------------------------------------
 
-const { mockRunExitCleanup } = vi.hoisted(() => ({
+const { mockRunExitCleanup, mockRegisterCleanup } = vi.hoisted(() => ({
   mockRunExitCleanup: vi.fn().mockResolvedValue(undefined),
+  mockRegisterCleanup: vi.fn(),
 }));
 vi.mock('../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
+  registerCleanup: mockRegisterCleanup,
 }));
 
 const { mockConnectionState } = vi.hoisted(() => {
