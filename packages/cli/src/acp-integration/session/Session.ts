@@ -10510,6 +10510,13 @@ export class Session implements SessionContext {
         v: 1,
         sessionId: this.sessionId,
         currentModeId: params.modeId,
+        ...(approvalMode === ApprovalMode.PLAN
+          ? {
+              planExecutionMode:
+                this.config.getPlanExecutionMode?.() ??
+                this.config.getPrePlanMode?.(),
+            }
+          : {}),
       })
       .catch((error) => {
         // Advisory only; a failed notification must not fail the mode
@@ -10877,6 +10884,13 @@ export class Session implements SessionContext {
         v: 1,
         sessionId: this.sessionId,
         currentModeId: newModeId,
+        ...(newModeId === ApprovalMode.PLAN
+          ? {
+              planExecutionMode:
+                this.config.getPlanExecutionMode?.() ??
+                this.config.getPrePlanMode?.(),
+            }
+          : {}),
         legacyFrameSent,
       });
     } catch (error) {
@@ -12784,6 +12798,7 @@ export class Session implements SessionContext {
 
               let output: RequestPermissionResponse & {
                 answers?: Record<string, string>;
+                expectedPlanExecutionMode?: string;
               };
               let outcome: ToolConfirmationOutcome;
               try {
@@ -12792,6 +12807,7 @@ export class Session implements SessionContext {
                   activeToolAbortSignal,
                 )) as RequestPermissionResponse & {
                   answers?: Record<string, string>;
+                  expectedPlanExecutionMode?: string;
                 };
                 const permissionRequestCancellation =
                   cancelBeforeExecutionIfAborted(toolName);
@@ -12864,6 +12880,12 @@ export class Session implements SessionContext {
 
               let confirmationPayload: ToolConfirmationPayload | undefined = {
                 answers: output.answers,
+                ...(output.expectedPlanExecutionMode !== undefined
+                  ? {
+                      expectedPlanExecutionMode:
+                        output.expectedPlanExecutionMode,
+                    }
+                  : {}),
               };
               if (planShellDecision.classification !== 'not-applicable') {
                 const approval = await validatePlanModeShellApproval({

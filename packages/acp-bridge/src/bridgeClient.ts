@@ -828,11 +828,14 @@ export class BridgeClient implements Client {
      * Called by the A2 `current_mode_update` demux when the agent
      * switches approval mode in-session (exit_plan_mode, ProceedAlways,
      * /mode). `previous` is read from the bridge state cache.
+     * `planExecutionMode` is the validated non-Plan execution policy while
+     * modeId is Plan; undefined outside Plan or when no valid policy is sent.
      */
     private readonly onModePromoted?: (
       entry: BridgeClientSessionEntry,
       modeId: string,
       originatorClientId: string | undefined,
+      planExecutionMode?: string,
     ) => void,
     /**
      * Reverse tool channel (issue #5626, Phase 2). Resolves the
@@ -2848,6 +2851,14 @@ export class BridgeClient implements Client {
       );
       return;
     }
+    const selected = params['planExecutionMode'];
+    const planExecutionMode =
+      currentModeId === 'plan' &&
+      typeof selected === 'string' &&
+      selected !== 'plan' &&
+      KNOWN_APPROVAL_MODES.has(selected)
+        ? selected
+        : undefined;
     const entry = this.resolveEntry(sessionId);
     if (!entry) {
       writeStderrLine(
@@ -2866,6 +2877,7 @@ export class BridgeClient implements Client {
         entry,
         currentModeId,
         entry.activePromptOriginatorClientId,
+        planExecutionMode,
       );
     } else {
       // Fallback path (no `onModePromoted` injected — tests / non-bridge
@@ -2889,6 +2901,7 @@ export class BridgeClient implements Client {
           previous: 'default',
           next: currentModeId,
           persisted: false,
+          ...(planExecutionMode ? { planExecutionMode } : {}),
         },
         ...(entry.activePromptOriginatorClientId
           ? { originatorClientId: entry.activePromptOriginatorClientId }

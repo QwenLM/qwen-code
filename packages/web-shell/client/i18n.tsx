@@ -2477,21 +2477,21 @@ const EN: Messages = {
   'mode.name.auto-edit': 'auto-edit',
   'mode.name.auto': 'auto',
   'mode.name.yolo': 'yolo',
+  'plan.toggle.on': 'Plan before executing',
+  'plan.toggle.off': (v) =>
+    `Planning; execute with ${v?.mode} after approval. Click to exit planning.`,
+  'approval.option.executePlan': (v) => `Approve and execute · ${v?.mode}`,
   'mode.label.plan': 'Plan',
-  'mode.label.planReview': 'Plan & Review',
   'mode.label.default': 'Ask Approval',
   'mode.label.auto-edit': 'Auto Edit',
   'mode.label.auto': 'Classifier Approval',
   'mode.label.yolo': 'Full Access',
   'mode.listLabel.plan': 'Plan (plan)',
-  'mode.listLabel.planReview': 'Plan & Review (plan)',
   'mode.listLabel.default': 'Ask Approval (default)',
   'mode.listLabel.auto-edit': 'Auto Edit (auto-edit)',
   'mode.listLabel.auto': 'Classifier Approval (auto)',
   'mode.listLabel.yolo': 'Full Access (yolo)',
   'mode.desc.plan': 'Analyze only, do not modify files or execute commands',
-  'mode.desc.planReview':
-    'Use Plan mode and review its workflow when one is available',
   'mode.desc.default':
     'Ask before running commands, editing files, or accessing external resources',
   'mode.desc.auto-edit':
@@ -2500,6 +2500,8 @@ const EN: Messages = {
     'Evaluate tool risk automatically, run safe actions, and confirm risky ones',
   'mode.desc.yolo': 'Automatically approve all tool calls in trusted contexts',
   'mode.select': 'Approval Mode',
+  'mode.changePending':
+    'A mode change or plan confirmation is pending. Try again when it finishes.',
   'mode.autoApproved': ((v) =>
     v?.tool
       ? `Auto-approved: ${v.tool}`
@@ -5908,25 +5910,26 @@ const ZH: Messages = {
   'mode.name.auto-edit': 'auto-edit',
   'mode.name.auto': 'auto',
   'mode.name.yolo': 'yolo',
+  'plan.toggle.on': '执行前先制定计划',
+  'plan.toggle.off': (v) => `规划中，批准后按${v?.mode}执行。点击退出规划。`,
+  'approval.option.executePlan': (v) => `批准并执行 · ${v?.mode}`,
   'mode.label.plan': '计划',
-  'mode.label.planReview': '计划并审阅',
   'mode.label.default': '请求批准',
   'mode.label.auto-edit': '自动编辑',
   'mode.label.auto': '智能审批',
   'mode.label.yolo': '完全访问权限',
   'mode.listLabel.plan': '计划（plan）',
-  'mode.listLabel.planReview': '计划并审阅（plan）',
   'mode.listLabel.default': '请求批准（default）',
   'mode.listLabel.auto-edit': '自动编辑（auto-edit）',
   'mode.listLabel.auto': '智能审批（auto）',
   'mode.listLabel.yolo': '完全访问权限（yolo）',
   'mode.desc.plan': '仅分析，不修改文件或执行命令',
-  'mode.desc.planReview': '使用 Plan 模式，并在 Workflow 可用时进行审阅',
   'mode.desc.default': '执行命令、编辑文件或访问外部资源前请求确认',
   'mode.desc.auto-edit': '自动批准文件编辑，命令执行等敏感操作仍会询问',
   'mode.desc.auto': '自动评估工具风险，安全操作直接执行，风险操作再确认',
   'mode.desc.yolo': '自动批准所有工具调用，适合可信任务环境',
   'mode.select': '审批模式',
+  'mode.changePending': '模式切换或计划确认尚未完成，请稍后重试。',
   'mode.autoApproved': ((v) =>
     v?.tool
       ? `已自动批准：${v.tool}`

@@ -92,6 +92,7 @@ vi.mock('./ChatPane', () => ({
     return (
       <div
         data-testid="chat-pane"
+        data-plan-visible={String(props.planControlVisible)}
         data-pane-workspace={props.workspaceCwd}
         data-maximized={props.isMaximized ? 'true' : 'false'}
         data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
@@ -959,6 +960,20 @@ describe('SplitView', () => {
       workspaceClient.listWorkspaceSessionsPage.mock.calls.length,
     ).toBeGreaterThan(before);
   });
+
+  it.each([undefined, false, true])(
+    'passes explicit Plan visibility to every pane: %s',
+    (planControlVisible) => {
+      render({ sessionIds: ['s1', 's2'], planControlVisible });
+      const panes = container!.querySelectorAll('[data-testid="chat-pane"]');
+      expect(panes).toHaveLength(2);
+      for (const pane of panes) {
+        expect(pane.getAttribute('data-plan-visible')).toBe(
+          String(planControlVisible ?? false),
+        );
+      }
+    },
+  );
 
   it('passes renderPaneHeaderActions through to each ChatPane', () => {
     render({
