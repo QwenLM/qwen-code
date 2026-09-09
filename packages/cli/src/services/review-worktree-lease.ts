@@ -82,14 +82,16 @@ function legacyLeasePath(repositoryRoot: string, target: string): string {
 }
 
 /**
- * The release date of the first build carrying the lease move out of
- * `.qwen/tmp` — MUST be reset to that release's actual date before shipping.
- * A legacy-path lease is honored in gate/acquisition reads only while its
- * mtime says it was written before this date: the legacy path lives in the
- * one directory reviewed code can still write, so a lease-shaped file
- * appearing there after the move could equally be a plant naming a foreign
- * session, and honoring it would hand that writable surface a permanent
- * denial of service against the pipeline meant to distrust it.
+ * The date the lease move out of `.qwen/tmp` landed on `main` — pinned to
+ * a date that has already passed, never a guessed future release date: a
+ * cutoff in the future honors every plant written before it, which is the
+ * shape this bound exists to deny. A legacy-path lease is honored in
+ * gate/acquisition reads only while its mtime says it was written before
+ * this date: the legacy path lives in the one directory reviewed code can
+ * still write, so a lease-shaped file appearing there after the move could
+ * equally be a plant naming a foreign session, and honoring it would hand
+ * that writable surface a permanent denial of service against the pipeline
+ * meant to distrust it.
  *
  * One-release-window semantics: mirrors new builds write at the legacy path
  * are for OLD builds' benefit (old builds read the legacy path directly,
@@ -101,7 +103,7 @@ function legacyLeasePath(repositoryRoot: string, target: string): string {
  * backdate it with `utimes` — a forged-mtime plant is the other residual
  * this bound cannot close.
  */
-export const LEGACY_LEASE_CUTOFF_MS = Date.UTC(2026, 8, 15);
+export const LEGACY_LEASE_CUTOFF_MS = Date.UTC(2026, 8, 9);
 
 function leasePath(repositoryRoot: string, target: string): string {
   return join(leaseDirectory(repositoryRoot), `${LEASE_PREFIX}${target}.json`);
@@ -541,7 +543,22 @@ export function cleanupReviewWorktreeLeases(params: {
     ]) {
       if (!existsSync(directory)) continue;
 
-      for (const entry of readdirSync(directory)) {
+      // Each leg fails alone: the pre-move directory lives inside the mount
+      // reviewed code owns (a chmod 000, a stale handle), and its failure
+      // must not disable the trusted lease directory's sweep — the
+      // finalizer exists to be independent of the mount.
+      let entries: string[];
+      try {
+        entries = readdirSync(directory);
+      } catch (error) {
+        debugLogger.debug(
+          `Failed to list ${directory} for lease cleanup:`,
+          error,
+        );
+        continue;
+      }
+
+      for (const entry of entries) {
         if (!isReviewLeaseFile(entry)) continue;
         const path = join(directory, basename(entry));
         const lease = readLease(path);

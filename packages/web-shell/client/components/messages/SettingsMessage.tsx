@@ -28,6 +28,7 @@ import {
   useI18n,
   type WebShellLanguage,
 } from '../../i18n';
+import { useBrowserNotificationSettings } from '../../browser-turn-notifications';
 import { LiveVoiceSettingsCard } from '../../live/LiveVoiceSettingsCard';
 import type { UseLiveVoiceSetupResult } from '../../live/useLiveVoiceSetup';
 import {
@@ -250,7 +251,7 @@ interface CategoryGroup {
 
 type SettingsPageItem =
   | { type: 'setting'; setting: DaemonSettingDescriptor }
-  | { type: 'local'; localKey: 'chatWidth' }
+  | { type: 'local'; localKey: 'chatWidth' | 'browserNotifications' }
   | { type: 'local-control' }
   | { type: 'live' };
 
@@ -394,7 +395,7 @@ function SettingInput({
 export type FlatRow =
   | { type: 'header'; category: string }
   | { type: 'setting'; setting: DaemonSettingDescriptor }
-  | { type: 'local'; localKey: 'chatWidth' };
+  | { type: 'local'; localKey: 'chatWidth' | 'browserNotifications' };
 
 /* Wraps around at both ends (matching the native CLI) while skipping
    category-header rows. Exported for tests. */
@@ -426,6 +427,11 @@ export function SettingsMessage({
 }: SettingsMessageProps) {
   const { language: selectedLanguage, t } = useI18n();
   const selectedTheme = useTheme();
+  const notifications = useBrowserNotificationSettings();
+  const refreshNotificationPermission = notifications?.refreshPermission;
+  useEffect(() => {
+    refreshNotificationPermission?.();
+  }, [refreshNotificationPermission]);
   const { status, settings, loading, error, reload, setValue, liveSetup } =
     settingsState;
   const [scope, setScope] = useState<Scope>('workspace');
@@ -434,6 +440,7 @@ export function SettingsMessage({
   const [message, setMessage] = useState<string | null>(null);
   const [restartPending, setRestartPending] = useState(false);
 
+  const hasNotifications = notifications !== undefined;
   const showInitialLoading = loading && !status;
   const categories = useMemo(() => {
     const visibleSettings = settings.filter(
@@ -474,6 +481,10 @@ export function SettingsMessage({
         items: [localItem],
       });
     }
+    if (hasNotifications) {
+      const group = groups.find((item) => item.items.includes(localItem));
+      group?.items.push({ type: 'local', localKey: 'browserNotifications' });
+    }
     if (liveSetup?.supported) {
       const experimental = groups.find((group) => group.id === 'Experimental');
       if (experimental) {
@@ -497,7 +508,7 @@ export function SettingsMessage({
       });
     }
     return groups;
-  }, [liveSetup, settings, t]);
+  }, [liveSetup, settings, t, hasNotifications]);
 
   useEffect(() => {
     if (categories.length === 0) return;
@@ -799,6 +810,73 @@ export function SettingsMessage({
                         const separator = index > 0 && (
                           <Separator className="mx-5 w-auto max-md:mx-4" />
                         );
+                        if (
+                          item.type === 'local' &&
+                          item.localKey === 'browserNotifications' &&
+                          notifications
+                        ) {
+                          const unavailable =
+                            notifications.permission === 'unavailable';
+                          const status = unavailable
+                            ? 'unavailable'
+                            : notifications.pending
+                              ? 'requesting'
+                              : notifications.permission === 'denied'
+                                ? 'denied'
+                                : notifications.error
+                                  ? 'error'
+                                  : notifications.enabled
+                                    ? notifications.permission === 'granted'
+                                      ? 'enabled'
+                                      : 'waiting'
+                                    : 'disabled';
+                          return (
+                            <div key={item.localKey}>
+                              {separator}
+                              <SettingsRow
+                                title={t('browserNotifications.label')}
+                                description={[
+                                  t('browserNotifications.description'),
+                                  t(`browserNotifications.${status}`),
+                                  ...(!notifications.persistent
+                                    ? [t('browserNotifications.temporary')]
+                                    : []),
+                                ].join(' ')}
+                                control={
+                                  <div className="flex items-center gap-2">
+                                    {notifications.enabled &&
+                                      notifications.permission ===
+                                        'default' && (
+                                        <Button
+                                          variant="outline"
+                                          size="sm"
+                                          disabled={notifications.pending}
+                                          onClick={() =>
+                                            void notifications.setEnabled(true)
+                                          }
+                                        >
+                                          {t('browserNotifications.allow')}
+                                        </Button>
+                                      )}
+                                    <Switch
+                                      aria-label={t(
+                                        'browserNotifications.label',
+                                      )}
+                                      checked={notifications.enabled}
+                                      disabled={
+                                        notifications.pending ||
+                                        (unavailable && !notifications.enabled)
+                                      }
+                                      onCheckedChange={(enabled) =>
+                                        void notifications.setEnabled(enabled)
+                                      }
+                                    />
+                                  </div>
+                                }
+                              />
+                            </div>
+                          );
+                        }
                         if (item.type === 'local') {
                           return (
                             <div key={item.localKey}>

@@ -444,7 +444,9 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
   const daemon = await installScenario(page, scenario, testInfo);
 
   await page.goto('/');
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
 
   const modelButton = page.locator('[data-web-shell-model-button]');
   await expect(modelButton).toContainText('qwen3.8-max · Extra High');
@@ -2000,7 +2002,9 @@ async function gotoSession(
   daemon: MockDaemonController,
 ): Promise<void> {
   await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   await completeReplay(
     page,
     daemon,
@@ -2017,7 +2021,9 @@ async function gotoComposerLayoutHarness(
   await page.goto(
     `/e2e/composer-layout-harness.html?sessionId=${encodeURIComponent(scenario.sessionId)}`,
   );
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   await completeReplay(page, daemon, scenario.sessionId);
 }
 

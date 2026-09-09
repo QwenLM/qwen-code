@@ -43,6 +43,7 @@ const fsMockState = vi.hoisted(() => ({
     plantContents: string;
     plantMtime: Date;
   } | null,
+  readdirFailureDir: null as string | null,
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -63,6 +64,14 @@ vi.mock('node:fs', async (importOriginal) => {
       }
       return actual.writeFileSync(path, data, options);
     },
+    readdirSync: ((path: string) => {
+      if (fsMockState.readdirFailureDir === path) {
+        throw Object.assign(new Error('EACCES: permission denied'), {
+          code: 'EACCES',
+        });
+      }
+      return actual.readdirSync(path);
+    }) as typeof actual.readdirSync,
   };
 });
 
@@ -80,6 +89,7 @@ function createRepository(): string {
 
 afterEach(() => {
   fsMockState.plantBeforeNewPathWrite = null;
+  fsMockState.readdirFailureDir = null;
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -542,6 +552,13 @@ describe('the one-release rollout window', () => {
   const legacyPathFor = (root: string) =>
     join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json');
 
+  it('pins the legacy cutoff to a date that has already passed', () => {
+    // A cutoff in the future honors every plant written before it — the
+    // shape the bound exists to deny — and a guessed future release date is
+    // how it gets there.
+    expect(LEGACY_LEASE_CUTOFF_MS).toBeLessThanOrEqual(Date.now());
+  });
+
   it('mirrors the lease at the legacy path for pre-move builds', () => {
     // A build from before the move reads ONLY `.qwen/tmp`; without the mirror
     // it passes its own gate over this live lease for the whole rollout
@@ -713,6 +730,54 @@ describe('the one-release rollout window', () => {
 
     expect(existsSync(worktree)).toBe(false);
     expect(existsSync(mirror)).toBe(false);
+    expect(existsSync(reviewLeasePath(root, 'pr-1'))).toBe(false);
+    expect(
+      execFileSync(
+        'git',
+        ['-C', root, 'branch', '--list', 'qwen-review/pr-1'],
+        { encoding: 'utf8' },
+      ).trim(),
+    ).toBe('');
+  });
+
+  it('still finalizes the trusted lease directory when the mounted leg cannot be read', () => {
+    // `.qwen/tmp` is the directory reviewed code owns: a chmod 000 (or a
+    // stale handle) makes its readdirSync throw, and a single shared catch
+    // then skipped the trusted `.qwen/review-leases` leg too — the run's own
+    // lease survived its own finalizer. Each leg now fails alone.
+    const root = createRepository();
+    const worktree = join(root, '.qwen', 'tmp', 'review-pr-1');
+    execFileSync('git', ['-C', root, 'branch', 'qwen-review/pr-1']);
+    execFileSync('git', [
+      '-C',
+      root,
+      'worktree',
+      'add',
+      '-q',
+      worktree,
+      'qwen-review/pr-1',
+    ]);
+    createReviewWorktreeLease({
+      sessionId: 'session-a',
+      promptId: 'prompt-parent',
+      target: 'pr-1',
+      repositoryRoot: root,
+      worktreePath: worktree,
+      branch: 'qwen-review/pr-1',
+    });
+    const mirror = legacyPathFor(root);
+    fsMockState.readdirFailureDir = join(root, '.qwen', 'tmp');
+
+    cleanupReviewWorktreeLeases({
+      sessionId: 'session-a',
+      promptId: 'prompt-parent',
+      repositoryRoot: root,
+    });
+
+    // The mounted leg degraded: its mirror survives. The trusted side was
+    // still finalized: worktree, branch and new-path lease are gone.
+    expect(existsSync(mirror)).toBe(true);
+    expect(existsSync(worktree)).toBe(false);
     expect(existsSync(reviewLeasePath(root, 'pr-1'))).toBe(false);
     expect(
       execFileSync(

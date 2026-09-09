@@ -60,6 +60,8 @@ export interface WorkflowSnapshot {
   dispatches?: WorkflowDispatchTrace[];
   agentsDispatched: number;
   agentsCompleted: number;
+  /** Absent on snapshots written before resume respawns were counted. */
+  agentsRespawned?: number;
   tokensSpent: number;
   tokenBudgetTotal: number | null;
   /** `perPhaseTokens` flattened to `[phaseOrNull, tokens]` pairs. */
@@ -97,6 +99,7 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
     })),
     agentsDispatched: task.agentsDispatched,
     agentsCompleted: task.agentsCompleted,
+    agentsRespawned: task.agentsRespawned ?? 0,
     tokensSpent: task.tokensSpent,
     tokenBudgetTotal: task.tokenBudgetTotal,
     perPhaseTokens: Array.from(task.perPhaseTokens.entries()),
@@ -399,6 +402,8 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
       (Array.isArray(events) && events.every(isWorkflowEvent))) &&
     isFiniteNumber(value['agentsDispatched']) &&
     isFiniteNumber(value['agentsCompleted']) &&
+    (value['agentsRespawned'] === undefined ||
+      isFiniteNumber(value['agentsRespawned'])) &&
     isFiniteNumber(value['tokensSpent']) &&
     (value['tokenBudgetTotal'] === null ||
       isFiniteNumber(value['tokenBudgetTotal'])) &&

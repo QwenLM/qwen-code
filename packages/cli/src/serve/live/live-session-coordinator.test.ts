@@ -1068,6 +1068,69 @@ describe('LiveSessionCoordinator', () => {
     );
   });
 
+  it('forwards both an overflow summary and its surviving worker notification', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    const active = (
+      harness.coordinator as unknown as {
+        active?: { workerIds: Set<string> };
+      }
+    ).active;
+    active?.workerIds.add('worker-1');
+
+    harness.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            text: 'Dropped 1 background notification (queue full).',
+          },
+          _meta: {
+            source: 'background_notification',
+            backgroundTask: { kind: 'queue', status: 'dropped' },
+          },
+        },
+      },
+    });
+    harness.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { text: 'Worker completed.' },
+          _meta: {
+            source: 'background_notification',
+            backgroundTask: {
+              taskId: 'worker-1',
+              kind: 'agent',
+              status: 'completed',
+            },
+          },
+        },
+      },
+    });
+    harness.publish({
+      type: 'background_notification_turn_complete',
+      data: { sessionId: 'live-new', reason: 'end_turn' },
+    });
+
+    await waitFor(() =>
+      expect(harness.realtime.sendBackendContext).toHaveBeenCalledOnce(),
+    );
+    const spoken = (
+      harness.realtime.sendBackendContext.mock.calls as unknown as Array<
+        [string]
+      >
+    )[0]?.[0];
+    expect(spoken).toContain('Dropped 1 background notification');
+    expect(spoken).toContain('Worker completed.');
+  });
+
   it('keeps Live usable while approved and denied tool permissions resolve', async () => {
     const harness = makeHarness();
     await harness.coordinator.start({
