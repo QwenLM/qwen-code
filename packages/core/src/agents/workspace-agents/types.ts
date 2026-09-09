@@ -249,7 +249,21 @@ export type ThreadRunStatus =
   | 'failed'
   | 'cancelled';
 
-export type RunCloseKind = 'waiting' | 'blocked' | 'review' | 'unclosed';
+/**
+ * How a run ended.
+ *
+ * `unclosed` is a kind an agent's turn records, not the absence of one. `stranded`
+ * is the only member the system writes on the agent's behalf: it marks a run
+ * that was live when the collaboration opt-in went away, so recovery must not
+ * treat it as a crash and revive it. A stranded run waits for a person, who
+ * decides whether to re-raise the work or drop it — the system does neither.
+ */
+export type RunCloseKind =
+  | 'waiting'
+  | 'blocked'
+  | 'review'
+  | 'unclosed'
+  | 'stranded';
 
 export interface RunUsageRound {
   attempt: number;

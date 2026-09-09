@@ -44,6 +44,7 @@ export { buildAgentToolConfig, classifyAgentTool, createAgentToolInvocationGuard
 export { outstandingCloseObligations, acknowledgeCloseObligations } from '${repo}/${src}/thread-status.js';
 export { resolveAgentPersona } from '${repo}/${src}/persona.js';
 export { findAgentSessionBinding } from '${repo}/${src}/session-binding.js';
+export { strandLocalRuns, STRANDED_FAILURE_STAGE } from '${repo}/${src}/stranded-runs.js';
 export { deleteThread, enqueueThreadEvent } from '${repo}/${src}/store.js';
 export { ToolNames } from '${repo}/packages/core/src/tools/tool-names.js';
 `,
@@ -2031,6 +2032,81 @@ ok(
   (await M.readThread(ROOT, bind2.th.id)).runs.find((r) => r.id === bind2.runId)
     ?.sessionId === 'sess-late',
 );
+
+console.log('\n28. stranded runs: the switch closes them, recovery must not revive');
+// Recovery treats a `running` run with no body as a crash and starts it again.
+// A run the operator switched off underneath looks identical to it, so the
+// difference is recorded at the one moment it is knowable: a daemon starting
+// with collaboration off.
+const st1 = await startFor('Stranded by the switch');
+const stRunBefore = (await M.readThread(ROOT, st1.th.id)).runs.find(
+  (r) => r.id === st1.runId,
+);
+ok('the run is live before the sweep', stRunBefore.status === 'running');
+
+const swept = await M.strandLocalRuns(ROOT);
+ok(
+  'the sweep reports what it closed',
+  swept.runsStranded >= 1,
+  JSON.stringify(swept),
+);
+const stRun = (await M.readThread(ROOT, st1.th.id)).runs.find(
+  (r) => r.id === st1.runId,
+);
+ok('a stranded run is terminal', stRun.status === 'failed', stRun.status);
+ok(
+  'and says why, so the UI can tell it from an ordinary failure',
+  stRun.closeKind === 'stranded' &&
+    stRun.failureStage === M.STRANDED_FAILURE_STAGE,
+  `${stRun.closeKind} / ${stRun.failureStage}`,
+);
+ok('and records when it ended', typeof stRun.endedAt === 'number');
+
+// The point of all of it: opting back in must not re-dispatch the work.
+let restartedStranded = false;
+await M.dispatchOnce(ROOT, {
+  inspect: async () => ({ kind: 'absent' }),
+  cancel: async () => true,
+  start: async ({ runId }) => {
+    if (runId === st1.runId) restartedStranded = true;
+    return { status: 'started', sessionId: 's', consumedOnStart: true };
+  },
+});
+ok(
+  're-enabling does not re-dispatch a stranded run',
+  !restartedStranded,
+);
+ok(
+  'and it stays terminal across that tick',
+  (await M.readThread(ROOT, st1.th.id)).runs.find((r) => r.id === st1.runId)
+    .status === 'failed',
+);
+
+// A second sweep must be a no-op, or a daemon restarting with the flag off
+// would churn the store on every boot.
+const sweptAgain = await M.strandLocalRuns(ROOT);
+ok(
+  'a second sweep strands nothing',
+  sweptAgain.runsStranded === 0 && sweptAgain.threadsChanged === 0,
+  JSON.stringify(sweptAgain),
+);
+
+// A workspace that never used collaboration must come out untouched — the
+// sweep must not create the store just to find it empty.
+const virgin = path.join(tmp, 'never-used');
+await fs.mkdir(virgin, { recursive: true });
+const virginResult = await M.strandLocalRuns(virgin);
+ok(
+  'a workspace with no collaboration storage is a no-op',
+  virginResult.runsStranded === 0 && virginResult.threadsChanged === 0,
+);
+let strandStoreCreated = true;
+try {
+  await fs.stat(M.getAgentsDir(virgin));
+} catch {
+  strandStoreCreated = false;
+}
+ok('and the sweep did not create its store', !strandStoreCreated);
 
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);

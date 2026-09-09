@@ -232,6 +232,7 @@ const CLOSE_KINDS = new Set<RunCloseKind>([
   'blocked',
   'review',
   'unclosed',
+  'stranded',
 ]);
 
 function isValidOutcome(value: unknown): value is MessageOutcome {

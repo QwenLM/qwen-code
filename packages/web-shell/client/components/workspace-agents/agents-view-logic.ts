@@ -120,7 +120,7 @@ export interface RunView {
     | 'completed'
     | 'failed'
     | 'cancelled';
-  closeKind?: 'waiting' | 'blocked' | 'review' | 'unclosed';
+  closeKind?: 'waiting' | 'blocked' | 'review' | 'unclosed' | 'stranded';
   closeAcknowledged: boolean;
   failureStage?: string;
   error?: string;
@@ -165,6 +165,10 @@ export function describeRun(run: RunView): string {
       return 'waiting for other work';
     case 'unclosed':
       return 'ended without a hand-off';
+    case 'stranded':
+      // Says what happened to it, not what the agent did — nothing the agent
+      // did ended this run, and a person has to decide what happens next.
+      return 'stranded when collaboration was turned off';
     default:
       return run.status === 'finishing' ? 'finishing' : 'nothing outstanding';
   }
@@ -200,7 +204,8 @@ export function buildRunRows(runs: readonly RunView[]): {
         run.status === 'failed' ||
         run.closeKind === 'blocked' ||
         run.closeKind === 'review' ||
-        run.closeKind === 'unclosed'),
+        run.closeKind === 'unclosed' ||
+        run.closeKind === 'stranded'),
   }));
   return {
     live: rows
