@@ -390,12 +390,8 @@ function createServeApp(...args: Parameters<typeof createServeAppImpl>) {
     deps?.liveConversationWorkspace
       ? {
           ...deps,
-          conversationRuntimeOwnershipFactory:
-            deps.conversationRuntimeOwnershipFactory ??
-            (() => ({
-              acquire: vi.fn(async () => ({ reclaimed: false })),
-              release: vi.fn(async () => false),
-            })),
+          checkLegacyConversationOwner:
+            deps.checkLegacyConversationOwner ?? vi.fn(async () => undefined),
         }
       : deps,
   );
@@ -684,6 +680,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_skill_settings_toggle',
   'workspace_skill_settings_batch_toggle',
   'extension_batch_activation_v2',
+  'extension_activation_explicit_refresh',
   'workspace_skill_manage',
   'workspace_permissions',
   'workspace_trust',
@@ -4283,6 +4280,46 @@ describe('createServeApp', () => {
       expect(res.text).toContain('<div id="root">');
     });
 
+    it('admits authenticated same-origin browser requests on a non-loopback bind without --allow-origin', async () => {
+      // Pins the remote same-origin middleware's MOUNT POSITION in the real
+      // app: moving installRemoteSelfOriginMiddleware below the CORS wall
+      // (or dropping it) turns the authed case back into 403 and kills the
+      // built-in remote Web Shell's mutations.
+      const app = createServeApp(
+        { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
+        undefined,
+        { webShellDir },
+      );
+      const remoteHost = `192.168.1.2:${baseOpts.port}`;
+      const remoteOrigin = `http://${remoteHost}`;
+      const authed = await request(app)
+        .post('/session/missing/prompt')
+        .set('Host', remoteHost)
+        .set('Origin', remoteOrigin)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'application/json')
+        .send({});
+      // Past the origin wall (not 403) AND past the bearer gate (not 401):
+      // the route's own 404/400 for the unknown session is the success shape.
+      expect(authed.status).not.toBe(403);
+      expect(authed.status).not.toBe(401);
+      const unauthed = await request(app)
+        .post('/session/missing/prompt')
+        .set('Host', remoteHost)
+        .set('Origin', remoteOrigin)
+        .set('Content-Type', 'application/json')
+        .send({});
+      expect(unauthed.status).toBe(401);
+      const crossOrigin = await request(app)
+        .post('/session/missing/prompt')
+        .set('Host', remoteHost)
+        .set('Origin', 'http://evil.example')
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'application/json')
+        .send({});
+      expect(crossOrigin.status).toBe(403);
+    });
+
     it('does not shadow /health on a browser navigation (Critical #1)', async () => {
       // Non-loopback + requireAuth registers /health POST-auth. A browser
       // navigation (Accept text/html) must fall THROUGH the SPA fallback to
@@ -4406,6 +4443,16 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ status: 'ok' });
     });
+
+    it('keeps the loopback Host gate ahead of pre-auth health', async () => {
+      // The DNS-rebinding defense must cover the pre-auth health route: a
+      // rebinding page probing /health with its own Host must be rejected,
+      // not answered 200 by the pre-auth handler.
+      const app = createServeApp(baseOpts);
+      const res = await request(app).get('/health').set('Host', 'evil.example');
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Invalid Host header' });
+    });
   });
 
   describe('GET /workspace/channel/observed-contacts', () => {
@@ -4443,6 +4490,72 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
+    it.each([
+      [undefined, 5_000],
+      ['', 5_000],
+      ['   ', 5_000],
+      ['invalid', 5_000],
+      ['10000ms', 5_000],
+      ['NaN', 5_000],
+      ['Infinity', 5_000],
+      ['0', 5_000],
+      ['-1', 5_000],
+      ['999', 5_000],
+      ['1000.5', 5_000],
+      ['2147483648', 5_000],
+      ['1000', 1_000],
+      ['10000', 10_000],
+      [' 30000 ', 30_000],
+      ['2147483647', 2_147_483_647],
+    ])(
+      'resolves live-state polling environment %s to %i ms',
+      async (value, expected) => {
+        const app = createServeApp(baseOpts, undefined, {
+          bridge: fakeBridge(),
+          daemonEnv: { QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS: value },
+        });
+        const response = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(response.status).toBe(200);
+        expect(response.body.sessionLiveStatePollIntervalMs).toBe(expected);
+      },
+    );
+
+    it('keeps the process-wide live-state interval from the startup environment', async () => {
+      const daemonEnv = { QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS: '10000' };
+      const primary = makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: fakeBridge(),
+      });
+      const secondary: WorkspaceRuntime = {
+        ...makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: '/workspace/secondary',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+        env: {
+          mode: 'runtime-overlay',
+          overlayKeys: ['QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS'],
+          effectiveEnv: { QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS: '30000' },
+        },
+      };
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primary.bridge,
+        workspaceRegistry: createWorkspaceRegistry([primary, secondary]),
+        daemonEnv,
+      });
+      daemonEnv.QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS = '20000';
+      const response = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(response.status).toBe(200);
+      expect(response.body.sessionLiveStatePollIntervalMs).toBe(10_000);
+    });
+
     it('advertises workflow availability per workspace before a session exists', async () => {
       const primaryBridge = fakeBridge();
       const primary = makeWorkspaceRuntimeForTest({
@@ -7710,12 +7823,22 @@ describe('createServeApp', () => {
           .set('Authorization', 'Bearer secret')
           .send({ cancelled: true });
         releaseEnable?.();
-        await vi.waitFor(() => {
-          expect(
-            bridge.extensionEvents.filter(
-              (event) => event.status === 'enabled',
+        await vi.waitFor(async () => {
+          const operations = await Promise.all(
+            queued.map((response) =>
+              request(app)
+                .get(
+                  `/workspace/extensions/operations/${response.body.operationId}`,
+                )
+                .set('Host', `127.0.0.1:${tokenOpts.port}`)
+                .set('Authorization', 'Bearer secret'),
             ),
-          ).toHaveLength(9);
+          );
+          expect(
+            operations.every(
+              (operation) => operation.body.status === 'succeeded',
+            ),
+          ).toBe(true);
         });
       } finally {
         releaseEnable?.();
@@ -9281,7 +9404,7 @@ describe('createServeApp', () => {
       );
     });
 
-    it('queues extension enable and disable mutations', async () => {
+    it('commits extension enable and disable without refreshing sessions', async () => {
       const restore = mockExtensionManagerMethods();
       try {
         const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
@@ -9308,24 +9431,25 @@ describe('createServeApp', () => {
           .send({ scope: 'user' });
         expect(disable.status).toBe(202);
 
-        await vi.waitFor(() => {
-          expect(bridge.extensionEvents).toEqual(
-            expect.arrayContaining([
-              expect.objectContaining({
-                status: 'enabled',
-                name: 'test-ext',
-                refreshed: 1,
-                failed: 0,
-              }),
-              expect.objectContaining({
-                status: 'disabled',
-                name: 'test-ext',
-                refreshed: 1,
-                failed: 0,
-              }),
-            ]),
-          );
+        await vi.waitFor(async () => {
+          const enableOperation = await request(app)
+            .get(`/workspace/extensions/operations/${enable.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          const disableOperation = await request(app)
+            .get(`/workspace/extensions/operations/${disable.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(enableOperation.body).toMatchObject({
+            status: 'succeeded',
+            result: { status: 'enabled', name: 'test-ext' },
+          });
+          expect(disableOperation.body).toMatchObject({
+            status: 'succeeded',
+            result: { status: 'disabled', name: 'test-ext' },
+          });
         });
+        expect(bridge.extensionEvents).toEqual([]);
         expect(
           vi.mocked(ExtensionManager.prototype.enableExtension),
         ).toHaveBeenCalledWith(
@@ -24996,6 +25120,46 @@ describe('createServeApp', () => {
       });
     });
 
+    it.each([true, false])(
+      'forwards DAC planMode=%s with its execution policy',
+      async (planMode) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(tokenOpts, undefined, { bridge });
+        const res = await auth(
+          request(app).post('/session/session-A/approval-mode'),
+        ).send({ mode: 'yolo', planMode });
+
+        expect(res.status).toBe(200);
+        expect(bridge.setApprovalModeCalls).toEqual([
+          expect.objectContaining({
+            sessionId: 'session-A',
+            mode: 'yolo',
+            opts: { persist: false, planMode },
+          }),
+        ]);
+      },
+    );
+
+    it.each([
+      { mode: 'plan', planMode: true },
+      { mode: 'plan', planMode: false },
+      { mode: 'yolo', planMode: 'true' },
+      { mode: 'default', planMode: null },
+    ])(
+      'rejects invalid DAC planning control %j before the bridge',
+      async (body) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(tokenOpts, undefined, { bridge });
+        const res = await auth(
+          request(app).post('/session/session-A/approval-mode'),
+        ).send(body);
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_plan_mode');
+        expect(bridge.setApprovalModeCalls).toEqual([]);
+      },
+    );
+
     it('forwards persist:true to the bridge', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
@@ -32750,6 +32914,134 @@ describe('createServeApp', () => {
         }),
       );
     });
+
+    it('logs origin-wall and Host-gate rejects, not just auth rejects', async () => {
+      // The access log mounts ahead of hostAllowlist and the CORS wall, so
+      // their 403 short-circuits are recorded like every other reject; a
+      // mount below either gate would silently drop the audit trail for
+      // rebinding and cross-origin attempts.
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', hostname: '0.0.0.0' },
+        undefined,
+        { daemonLog },
+      );
+
+      const wall = await request(app)
+        .post('/session')
+        .set('Host', `192.168.1.2:${baseOpts.port}`)
+        .set('Origin', 'http://evil.test')
+        .set('Authorization', 'Bearer secret')
+        .send({ cwd: WS_BOUND });
+      expect(wall.status).toBe(403);
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'request completed',
+        expect.objectContaining({
+          route: 'POST /session',
+          status: 403,
+        }),
+      );
+
+      // The primary Host gate is live on loopback binds (non-loopback binds
+      // pass it through by design and rely on the bearer gate), so the
+      // rebinding reject is pinned there.
+      vi.mocked(daemonLog.warn).mockClear();
+      const loopbackApp = createServeApp(
+        { ...baseOpts, token: 'secret' },
+        undefined,
+        { daemonLog },
+      );
+      const rebinding = await request(loopbackApp)
+        .get('/capabilities')
+        .set('Host', `evil.test:${baseOpts.port}`);
+      expect(rebinding.status).toBe(403);
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'request completed',
+        expect.objectContaining({
+          route: 'GET /capabilities',
+          status: 403,
+        }),
+      );
+    });
+
+    it('keeps operator lines logging through a wall-reject flood', async () => {
+      // Wall rejects draw from a separate small budget, so a credential-less
+      // host sustaining a reject flood can no longer starve the operator's
+      // own lines behind the aggregate warning.
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', hostname: '0.0.0.0' },
+        undefined,
+        { daemonLog },
+      );
+
+      for (let i = 0; i < 100; i += 1) {
+        const flood = await request(app)
+          .post('/session')
+          .set('Host', `192.168.1.2:${baseOpts.port}`)
+          .set('Origin', 'http://evil.test')
+          .send({ cwd: WS_BOUND });
+        expect(flood.status).toBe(403);
+      }
+      const authed = await request(app)
+        .get('/capabilities')
+        .set('Host', `192.168.1.2:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(authed.status).toBe(200);
+      expect(daemonLog.info).toHaveBeenCalledWith(
+        'request completed',
+        expect.objectContaining({ route: 'GET /capabilities', status: 200 }),
+      );
+      // Wall rejects are still individually logged — from their own budget.
+      expect(
+        vi
+          .mocked(daemonLog.warn)
+          .mock.calls.some(
+            ([message, ctx]) =>
+              message === 'request completed' &&
+              (ctx as { status?: number }).status === 403,
+          ),
+      ).toBe(true);
+    });
+
+    it('keeps operator lines logging through a null-origin flood', async () => {
+      // Same flood shape through the `Origin: null` arm — sandboxed iframes
+      // and cross-origin redirects send exactly this, so the marker must
+      // cover it too.
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', hostname: '0.0.0.0' },
+        undefined,
+        { daemonLog },
+      );
+
+      for (let i = 0; i < 65; i += 1) {
+        const flood = await request(app)
+          .post('/session')
+          .set('Host', `192.168.1.2:${baseOpts.port}`)
+          .set('Origin', 'null')
+          .send({ cwd: WS_BOUND });
+        expect(flood.status).toBe(403);
+      }
+      const authed = await request(app)
+        .get('/capabilities')
+        .set('Host', `192.168.1.2:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(authed.status).toBe(200);
+      expect(daemonLog.info).toHaveBeenCalledWith(
+        'request completed',
+        expect.objectContaining({ route: 'GET /capabilities', status: 200 }),
+      );
+      expect(
+        vi
+          .mocked(daemonLog.warn)
+          .mock.calls.some(
+            ([message, ctx]) =>
+              message === 'request completed' &&
+              (ctx as { status?: number }).status === 403,
+          ),
+      ).toBe(true);
+    });
   });
 
   describe('payload-too-large handling (A-UsP)', () => {
@@ -34097,12 +34389,34 @@ describe('runQwenServe', () => {
     delete process.env['QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS'];
   });
 
-  it('refuses to bind 0.0.0.0 without a token', async () => {
+  it('binds 0.0.0.0 without a token using a generated ephemeral bearer', async () => {
+    // Contract change (remote quickstart): a tokenless non-loopback bind no
+    // longer refuses; it generates a per-process bearer and gates every API
+    // route with it. The fail-closed half moved to the explicitly-empty case
+    // below — generation must never revive an operator's deliberate ''.
+    delete process.env['QWEN_SERVER_TOKEN'];
+    handle = await runQwenServe({
+      hostname: '0.0.0.0',
+      port: 0,
+      mode: 'http-bridge',
+    });
+    expect(handle.resolvedToken).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    const port = (handle.server.address() as { port: number }).port;
+    const noAuth = await fetch(`http://127.0.0.1:${port}/capabilities`);
+    expect(noAuth.status).toBe(401);
+    const withAuth = await fetch(`http://127.0.0.1:${port}/capabilities`, {
+      headers: { Authorization: `Bearer ${handle.resolvedToken}` },
+    });
+    expect(withAuth.status).toBe(200);
+  });
+
+  it('refuses to bind 0.0.0.0 with an explicitly empty token', async () => {
     await expect(
       runQwenServe({
         hostname: '0.0.0.0',
         port: 0,
         mode: 'http-bridge',
+        token: '',
       }),
     ).rejects.toThrow(/Refusing to bind/);
   });
@@ -34629,6 +34943,18 @@ describe('runQwenServe', () => {
       mode: 'http-bridge',
     });
     expect(handle.url).toMatch(/^http:\/\/0\.0\.0\.0:\d+$/);
+    // Pin the env source end-to-end: an operator-supplied token must win
+    // over generation, and must be the credential the API authenticates
+    // against (a regression that dropped the env read would silently swap
+    // in a generated token and 401 every configured client).
+    expect(handle.resolvedToken).toBe('env-secret');
+    const port = (handle.server.address() as { port: number }).port;
+    const noAuth = await fetch(`http://127.0.0.1:${port}/capabilities`);
+    expect(noAuth.status).toBe(401);
+    const withAuth = await fetch(`http://127.0.0.1:${port}/capabilities`, {
+      headers: { Authorization: 'Bearer env-secret' },
+    });
+    expect(withAuth.status).toBe(200);
   });
 
   it('starts on a loopback ephemeral port without a token', async () => {
@@ -35681,7 +36007,10 @@ describe('GET /session/:id/events (SSE)', () => {
       .get('/session/sess-%E2%80%A8A/events?connectReason=resume')
       .set('Host', `127.0.0.1:${baseOpts.port}`)
       .set('X-Qwen-Client-Id', 'client-1')
-      .then((response) => response);
+      .then(
+        (response) => response,
+        (error: Error) => error,
+      );
 
     await vi.waitFor(() => {
       expect(subscribeOptions?.onSubscriberDiagnostic).toBeTypeOf('function');
@@ -35746,8 +36075,13 @@ describe('GET /session/:id/events (SSE)', () => {
 
     release.resolve();
     const res = await responsePromise;
-    expect(res.headers['x-qwen-sse-stream-id']).toBe(streamId);
-    expect(getActiveSseCount()).toBe(beforeActive);
+    expect(res).toBeInstanceOf(Error);
+    // `res.destroy()` tears the client socket down before the server-side
+    // 'close' listener runs, so the active-stream counter settles a tick
+    // after the request promise rejects.
+    await vi.waitFor(() => {
+      expect(getActiveSseCount()).toBe(beforeActive);
+    });
   });
 
   it('starts live lag measurement only after replay_complete settles', async () => {
@@ -41850,8 +42184,17 @@ describe('Live Appshot server integration', () => {
       pushAudio: vi.fn(() => true),
       dispose: vi.fn(),
     } as unknown as LiveSessionCoordinator;
+    const stableBaseDir = path.join(tmp, 'stable');
+    const { writeLiveDiscoveryFile } = await import('./live/discovery.js');
+    await writeLiveDiscoveryFile(stableBaseDir, {
+      url: 'http://127.0.0.1:3210',
+      protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+      pid: process.pid,
+      instanceNonce: coordinator.daemonInstanceNonce,
+    });
     const app = createServeApp(baseOpts, undefined, {
       workspaceRegistry: registry,
+      liveDiscoveryStableBaseDir: stableBaseDir,
       liveConversationWorkspace: conversationWorkspace,
       liveCoordinator: coordinator,
       liveSessionCoordinator,
@@ -41861,6 +42204,8 @@ describe('Live Appshot server integration', () => {
     return {
       app,
       coordinator,
+      stableBaseDir,
+      liveSessionCoordinator,
       conversationWorkspace,
       preheat,
       getWorkspaceToolsStatus,
@@ -41888,6 +42233,72 @@ describe('Live Appshot server integration', () => {
       },
     };
   }
+
+  it.each(['live', 'dead'] as const)(
+    'refuses a foreign %s publisher for Live while standalone remains available',
+    async (ownerState) => {
+      const setup = await setupAppshotProbe();
+      try {
+        setup.connectHost('host_live_appshot_foreign_gate');
+        await vi.waitFor(() =>
+          expect(setup.coordinator.getStatus().available).toBe(true),
+        );
+        const captureHandler = setup.captureHandler;
+        expect(captureHandler).toEqual(expect.any(Function));
+        const capture = vi.spyOn(setup.coordinator, 'captureScreenContext');
+        const discovery = await import('./live/discovery.js');
+        const assertPublisher = vi.spyOn(
+          discovery,
+          'assertLiveDiscoveryPublisher',
+        );
+        const locator = discovery.getLiveDiscoveryPath(setup.stableBaseDir);
+        const original = JSON.parse(await fsp.readFile(locator, 'utf8'));
+        const foreignPid = ownerState === 'live' ? process.ppid : 2_147_483_647;
+        expect(foreignPid).not.toBe(process.pid);
+        if (ownerState === 'live')
+          expect(() => process.kill(foreignPid, 0)).not.toThrow();
+        else
+          expect(() => process.kill(foreignPid, 0)).toThrow(
+            expect.objectContaining({ code: 'ESRCH' }),
+          );
+        const foreignBytes = `${JSON.stringify({
+          ...original,
+          protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+          pid: foreignPid,
+          instanceNonce: 'foreign_live_publisher_nonce_0001',
+        })}\n`;
+        await fsp.writeFile(locator, foreignBytes);
+
+        const response = await request(setup.app)
+          .post('/live/start')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
+
+        expect(assertPublisher).toHaveBeenCalledWith(setup.stableBaseDir, {
+          pid: process.pid,
+          instanceNonce: setup.coordinator.daemonInstanceNonce,
+        });
+        expect(response.status).toBe(503);
+        expect(response.body).toMatchObject({
+          code: 'conversation_runtime_in_use',
+          retryable: true,
+          error: 'The Conversations runtime is owned by another daemon.',
+        });
+        expect(setup.coordinator.getStatus().callId).toBeUndefined();
+        expect(setup.liveSessionCoordinator.start).not.toHaveBeenCalled();
+        expect(capture).not.toHaveBeenCalled();
+        await expect(fsp.readFile(locator, 'utf8')).resolves.toBe(foreignBytes);
+        const sessions = await request(setup.app)
+          .get('/standalone/sessions')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(sessions.status).toBe(200);
+        expect(sessions.body.sessions).toEqual([]);
+        await expect(fsp.readFile(locator, 'utf8')).resolves.toBe(foreignBytes);
+      } finally {
+        await setup.cleanup();
+      }
+    },
+  );
 
   it.each([
     {

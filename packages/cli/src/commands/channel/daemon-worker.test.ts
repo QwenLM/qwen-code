@@ -7,6 +7,9 @@ const mockLoadChannelsConfig = vi.hoisted(() => vi.fn());
 const mockLoadChannelsFromExtensions = vi.hoisted(() => vi.fn());
 const mockParseConfiguredChannels = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
+const mockResolveChannelLocale = vi.hoisted(() =>
+  vi.fn((value: unknown) => (value === 'Chinese' ? 'zh' : 'en')),
+);
 const mockReadChannelMemory = vi.hoisted(() => vi.fn());
 const mockGetChannelMemoryRevision = vi.hoisted(() => vi.fn());
 const mockListChannelMemoryEntries = vi.hoisted(() => vi.fn());
@@ -58,6 +61,7 @@ const mockLoadSettings = vi.hoisted(() =>
       merged: {
         proxy?: string;
         experimental?: { cron?: boolean };
+        general?: { language?: string };
       };
     } => ({
       merged: { proxy: 'http://settings-proxy:8080' },
@@ -269,6 +273,7 @@ vi.mock('./runtime.js', () => ({
   registerPermissionRelay: mockRegisterPermissionRelay,
   registerSessionCleanup: mockRegisterSessionCleanup,
   registerToolCallDispatch: mockRegisterToolCallDispatch,
+  resolveChannelLocale: mockResolveChannelLocale,
   selectFirstModel: mockSelectFirstModel,
   sessionsPath: mockSessionsPath,
 }));
@@ -1013,8 +1018,14 @@ describe('runChannelDaemonWorker', () => {
   it('starts selected channels through a daemon-backed bridge facade', async () => {
     const sdk = createSdk();
     const ready = vi.fn();
-    const settings = { merged: { proxy: 'http://settings-proxy:8080' } };
+    const settings = {
+      merged: {
+        proxy: 'http://settings-proxy:8080',
+        general: { language: 'en' },
+      },
+    };
     mockLoadSettings.mockReturnValueOnce(settings);
+    vi.stubEnv('QWEN_CODE_LANG', 'zh');
 
     const handle = await runChannelDaemonWorker({
       daemonUrl: 'http://127.0.0.1:4170',
@@ -1073,6 +1084,7 @@ describe('runChannelDaemonWorker', () => {
         },
         stateDir:
           '/tmp/qwen/channels/daemon/workspace-hash/instances/telegram-hash',
+        displayLanguage: 'zh',
       }),
     );
     expect(mockDaemonChannelStateDir).toHaveBeenCalledWith(
@@ -1333,6 +1345,28 @@ describe('runChannelDaemonWorker', () => {
     );
     expect(mockCreateChannel.mock.calls[0]![3]).not.toHaveProperty(
       'loopController',
+    );
+
+    await handle.close();
+  });
+
+  it('passes the default Chinese language to daemon-managed channels', async () => {
+    const sdk = createSdk();
+    mockLoadSettings.mockReturnValueOnce({
+      merged: { general: { language: 'Chinese' } },
+    });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      daemonToken: 'secret-token',
+      promptAuthorization: 'worker-prompt-token',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockCreateChannel.mock.calls[0]?.[3]).toEqual(
+      expect.objectContaining({ locale: 'zh' }),
     );
 
     await handle.close();
@@ -2671,6 +2705,50 @@ describe('runChannelDaemonWorker', () => {
     await expect(handle.close()).rejects.toThrow('stop boom');
     expect(mockRouterDispose).toHaveBeenCalled();
     expect(mockRouterClearAll).not.toHaveBeenCalled();
+  });
+
+  it('waits for asynchronous channel cleanup before closing', async () => {
+    const sdk = createSdk();
+    let finishDisconnect!: () => void;
+    // disconnectChannels discards the disconnect() return value and awaits
+    // only waitForDisconnect, so the pending promise must hang off that hook
+    // for the test to detect a regression that closes before the drain.
+    const disconnect = vi.fn();
+    const waitForDisconnect = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishDisconnect = resolve;
+        }),
+    );
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect,
+      waitForDisconnect,
+      name: 'telegram',
+    });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    let closed = false;
+    const closing = handle.close().then(() => {
+      closed = true;
+    });
+
+    await vi.waitFor(() => expect(disconnect).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(waitForDisconnect).toHaveBeenCalledOnce());
+    // Let a real macrotask elapse: if close did not await the drain, it
+    // would have settled by now.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(closed).toBe(false);
+
+    finishDisconnect();
+    await closing;
+
+    expect(closed).toBe(true);
   });
 
   it('runs webhook tasks on the matching channel handle', async () => {

@@ -35,6 +35,10 @@
   overflow-y: hidden;
 }
 
+.floatingWorkflow > :not(.planContent):not(.workflow) {
+  flex-shrink: 0;
+}
+
 .workflow {
   flex: 1 1 auto;
   min-height: 0;
@@ -147,6 +151,7 @@
 
 .planContent {
   display: block;
+  min-height: 0;
   max-height: min(240px, 25vh);
   -webkit-line-clamp: unset;
 }

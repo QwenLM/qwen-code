@@ -33,6 +33,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
 import {
+  checkoutFilterCommands,
   discardWorktree,
   exposeDependencies,
   filterBlankEnv,
@@ -1898,6 +1899,7 @@ describe('filterCommandsIn — the include walk', () => {
     expect(filterCommandsIn(dir, dir)).toEqual({
       filters: ['filter.evil.process'],
       unread: [],
+      dangling: [],
     });
   });
 
@@ -1920,6 +1922,7 @@ describe('filterCommandsIn — the include walk', () => {
       expect(filterCommandsIn(dir, dir)).toEqual({
         filters: ['filter.evil.clean'],
         unread: [],
+        dangling: [],
       });
     } finally {
       rmSync(elsewhere, { recursive: true, force: true });
@@ -1943,6 +1946,7 @@ describe('filterCommandsIn — the include walk', () => {
       expect(filterCommandsIn(dir, dir)).toEqual({
         filters: ['filter.x.clean'],
         unread: [],
+        dangling: [],
       });
     } finally {
       rmSync(elsewhere, { recursive: true, force: true });
@@ -1963,6 +1967,7 @@ describe('filterCommandsIn — the include walk', () => {
     expect(filterCommandsIn(dir, dir)).toEqual({
       filters: ['filter.home.clean'],
       unread: [],
+      dangling: [],
     });
   });
 
@@ -2065,6 +2070,123 @@ describe('filterCommandsIn — the include walk', () => {
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
+  });
+
+  it('checkoutFilterCommands: a dangling include is not a hit, and localFilterCommands still reports it', () => {
+    // The two consumers ask different questions and the difference IS the fix.
+    // `actions/checkout` with persisted credentials writes `includeIf
+    // "gitdir:…"` directives into the repository-local config whose target is a
+    // per-job file, gone by the next job; on a persistent runner the directives
+    // accumulate in a reused `.git/config`. git ignores a dangling include, so
+    // a checkout the screen is about to authorise executes nothing from it —
+    // while the residue measurement, which hands back a result the rest of the
+    // review acts on, keeps refusing on it.
+    //
+    // Measured before this split: `localFilterCommands` returned 2 hits on a
+    // repository defining NO content filter, so all four efficacy screens
+    // refused and the phase shipped zero evidence while telling the reader the
+    // repository "defines content filter(s)".
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-dangling-')));
+    try {
+      const repo = join(base, 'repo');
+      mkdirSync(repo, { recursive: true });
+      const g = (...args: string[]) =>
+        execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+      g('init', '-q', '-b', 'main');
+      g('config', 'user.email', 't@t.t');
+      g('config', 'user.name', 't');
+      writeFileSync(join(repo, 'a.ts'), 'x\n');
+      g('add', '-A');
+      g('commit', '-qm', 'head');
+      // The runner's shape, both directives: the plain form and the wildcard
+      // form git writes for linked worktrees. Neither condition can match this
+      // tree, and that is deliberately NOT what the assertion turns on — the
+      // screen does not evaluate includeIf conditions, because a match test
+      // against only the screened tree's own gitdir would re-open the creation
+      // path, where `worktree add` registers a NEW admin entry. What it asks is
+      // whether the target exists.
+      appendFileSync(
+        join(repo, '.git', 'config'),
+        '[includeIf "gitdir:/github/workspace/.git"]\n' +
+          '\tpath = /github/runner_temp/git-credentials.config\n' +
+          '[includeIf "gitdir:/github/workspace/.git/worktrees/*"]\n' +
+          '\tpath = /github/runner_temp/git-credentials.config\n',
+      );
+
+      expect(checkoutFilterCommands(repo)).toEqual([]);
+      // Unchanged for the consumer that refuses on any hit.
+      expect(localFilterCommands(repo)).toHaveLength(2);
+      expect(localFilterCommands(repo).join(' ')).toContain(
+        'git-credentials.config',
+      );
+      // And the structured answer says which half they came from: nothing is
+      // defined and nothing was unreadable, so both are `dangling`.
+      const screen = filterCommandsIn(join(repo, '.git'), join(repo, '.git'));
+      expect(screen.filters).toEqual([]);
+      expect(screen.unread).toEqual([]);
+      expect(screen.dangling).toHaveLength(2);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('follows an include whose `..` the KERNEL resolves through a symlink, not lexically', () => {
+    // `<dir>/link` is a symlink, and `include.path = link/../evil.cfg` names a
+    // payload ONE LEVEL ABOVE the link's target. git concatenates and lets the
+    // kernel resolve, so it reads that payload; a lexical collapse — `resolve()`
+    // or `join()`, and plain `realpathSync` too, which normalizes before
+    // consulting a symlink — looks for `<dir>/evil.cfg` instead, finds nothing,
+    // and files a file git really reads as MISSING. Measured both ways: git's
+    // own merged read lists the payload's `filter.evil.smudge` while the
+    // collapsed walk answered `filters: []` with the payload in `dangling`, and
+    // a restore-shaped checkout then executed it on the host.
+    //
+    // That is the entrance the `dangling` bucket opened. The divergence itself
+    // predates it, but `unread` is refused by every consumer while `dangling`
+    // is the one answer a checkout site may drop — so moving this case between
+    // the two buckets is what turned a refusal into a certification of clean
+    // over a filter nobody read.
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-lexdiv-')));
+    try {
+      mkdirSync(join(outside, 'sub'), { recursive: true });
+      writeFileSync(
+        join(outside, 'evil.cfg'),
+        '[filter "evil"]\n\tsmudge = cat\n',
+      );
+      symlinkSync(join(outside, 'sub'), join(dir, 'link'));
+      writeFileSync(
+        join(dir, 'config'),
+        '[include]\n\tpath = link/../evil.cfg\n',
+      );
+
+      const screen = filterCommandsIn(dir, dir);
+      expect(screen.filters).toEqual(['filter.evil.smudge']);
+      // The point of the fix: this is NOT a missing target, so it must not land
+      // in the one bucket a checkout site is allowed to drop.
+      expect(screen.dangling).toEqual([]);
+      expect(screen.unread).toEqual([]);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('files a resolution failure that is NOT ENOENT as unread, so a checkout site refuses on it', () => {
+    // `dangling` is the only answer a caller may drop, so ENOENT has to be the
+    // only way in. The shape that decides it is `ENAMETOOLONG` — a short
+    // spelled path whose RESOLVED path exceeds PATH_MAX, where `realpathSync`
+    // throws and git still reads the file — but that fixture is PATH_MAX-sized
+    // and so platform-sized (1024 on macOS, 4096 on Linux). This pins the errno
+    // gate with a symlink loop instead: deterministic, and it fails resolution
+    // for a reason that is not "absent". A bare `catch` here filed every errno
+    // as missing, which is how the gate came to be load-bearing.
+    symlinkSync('loop', join(dir, 'loop'));
+    writeFileSync(join(dir, 'config'), '[include]\n\tpath = loop\n');
+
+    const screen = filterCommandsIn(dir, dir);
+    expect(screen.filters).toEqual([]);
+    expect(screen.dangling).toEqual([]);
+    expect(screen.unread).toHaveLength(1);
+    expect(screen.unread[0]).toContain('could not be resolved');
   });
 });
 

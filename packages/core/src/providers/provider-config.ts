@@ -120,6 +120,7 @@ function specToModelConfig(
     id: spec.id,
     name: prefix ? `[${prefix}] ${spec.id}` : spec.id,
     ...(spec.description ? { description: spec.description } : {}),
+    ...(spec.capabilities ? { capabilities: spec.capabilities } : {}),
     baseUrl,
     envKey,
     ...(spec.supportsImageGeneration ? { supportsImageGeneration: true } : {}),
@@ -164,11 +165,16 @@ function buildModelConfigs(
     );
   } else if (config.models && config.modelsEditable) {
     // Editable ModelSpec[] — look up per-model metadata for known IDs
-    const specMap = new Map(config.models.map((s) => [s.id, s]));
+    const specMap = new Map(config.models.map((s) => [s.id.toLowerCase(), s]));
     models = inputs.modelIds.map((id) => {
-      const spec = specMap.get(id);
+      const spec = specMap.get(id.toLowerCase());
       if (spec) {
-        return specToModelConfig(spec, prefix, inputs.baseUrl, envKey);
+        return specToModelConfig(
+          { ...spec, id },
+          prefix,
+          inputs.baseUrl,
+          envKey,
+        );
       }
       const genConfig = buildAdvancedGenerationConfig(inputs.advancedConfig);
       return {

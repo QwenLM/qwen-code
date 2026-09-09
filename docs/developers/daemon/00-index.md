@@ -58,7 +58,7 @@ Pick the path that matches your goal:
 - [`17-configuration.md`](./17-configuration.md) - env vars, CLI flags, `settings.json` keys that affect the daemon.
 - [`18-error-taxonomy.md`](./18-error-taxonomy.md) - typed errors per layer with remediation.
 - [`19-observability.md`](./19-observability.md) - `QWEN_SERVE_DEBUG`, debugging recipes, telemetry gaps.
-- [`20-quickstart-operations.md`](./20-quickstart-operations.md) - shortest startup path, curl checks, route map, and embedded invocation recipes.
+- [`20-quickstart-operations.md`](./20-quickstart-operations.md) - shortest startup path, curl checks, route map, and the embedding boundary (in-process hosting is internal; external integrations use `qwen serve --no-web` plus the HTTP/SSE protocol). The internal `createServeApp` lifecycle recipe lives in [`02-serve-runtime.md`](./02-serve-runtime.md).
 
 ## Glossary
 
@@ -126,7 +126,7 @@ Use these anchors when moving from the docs into the latest `main` code:
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | HTTP routes   | The route catalog lives in `qwen-serve-protocol.md`; this daemon set only references it and explains implementation ownership.                                                                          | [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md), [`20`](./20-quickstart-operations.md)               |
 | Event schema  | `EVENT_SCHEMA_VERSION = 1`; 53 known event types; id-less subscriber synthetic frames; `_meta.serverTimestamp` stamped by `EventBus.publish()` (with `formatSseFrame()` fallback for synthetic frames). | [`09`](./09-event-schema.md), [`10`](./10-event-bus.md)                                                       |
-| Capabilities  | `SERVE_PROTOCOL_VERSION = 'v1'`; 158 registered tags; 45 conditional tags.                                                                                                                              | [`11`](./11-capabilities-versioning.md)                                                                       |
+| Capabilities  | `SERVE_PROTOCOL_VERSION = 'v1'`; registered and conditional tags are defined by the authoritative registry.                                                                                             | [`11`](./11-capabilities-versioning.md)                                                                       |
 | Session shell | `POST /session/:id/shell` exists behind `--enable-session-shell`, bearer or trusted-loopback authority, and session-bound `X-Qwen-Client-Id`; capability tag is conditional.                            | [`11`](./11-capabilities-versioning.md), [`17`](./17-configuration.md), [`20`](./20-quickstart-operations.md) |
 | Rate limiting | Optional per-tier HTTP rate limit is exposed by CLI flags/env and conditional capability tag.                                                                                                           | [`11`](./11-capabilities-versioning.md), [`17`](./17-configuration.md)                                        |
 
@@ -141,12 +141,12 @@ Use these anchors when moving from the docs into the latest `main` code:
 
 ### Reference and operations
 
-| Area                    | Current state                                                                                                                                             | Primary docs                          |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
-| Configuration           | Full `qwen serve` flags, env vars, `settings.json`, `ServeOptions`, `BridgeOptions`, and important constants are collected in one page.                   | [`17`](./17-configuration.md)         |
-| Quickstart / operations | Shortest startup path, launch recipes, curl checks, Web Shell auth behavior, route split, shutdown behavior, and embedded invocation recipes are covered. | [`20`](./20-quickstart-operations.md) |
-| Errors                  | Boot-time explicit failures, route errors, bridge errors, EventBus errors, filesystem errors, and mediator errors are summarized with remediation.        | [`18`](./18-error-taxonomy.md)        |
-| Observability           | `QWEN_SERVE_DEBUG`, curl recipes, useful events, telemetry gaps, and investigation checklists are documented.                                             | [`19`](./19-observability.md)         |
+| Area                    | Current state                                                                                                                                                                                                                               | Primary docs                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| Configuration           | Full `qwen serve` flags, env vars, `settings.json`, `ServeOptions`, `BridgeOptions`, and important constants are collected in one page.                                                                                                     | [`17`](./17-configuration.md)         |
+| Quickstart / operations | Shortest startup path, launch recipes, curl checks, Web Shell auth behavior, route split, shutdown behavior, and the embedding boundary are covered. The internal `createServeApp` lifecycle recipe lives in [`02`](./02-serve-runtime.md). | [`20`](./20-quickstart-operations.md) |
+| Errors                  | Boot-time explicit failures, route errors, bridge errors, EventBus errors, filesystem errors, and mediator errors are summarized with remediation.                                                                                          | [`18`](./18-error-taxonomy.md)        |
+| Observability           | `QWEN_SERVE_DEBUG`, curl recipes, useful events, telemetry gaps, and investigation checklists are documented.                                                                                                                               | [`19`](./19-observability.md)         |
 
 ### Historical or deprecated surfaces
 
