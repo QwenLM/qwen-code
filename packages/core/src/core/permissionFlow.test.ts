@@ -117,6 +117,33 @@ describe('evaluatePermissionFlow', () => {
     );
   });
 
+  it('does not reassure for tool-wide catch-all deny rules (#11405)', async () => {
+    for (const raw of ['Bash(*)', 'Read(//**)', 'WebFetch(*)']) {
+      const mockPm = {
+        hasRelevantRules: vi.fn().mockReturnValue(true),
+        evaluate: vi.fn().mockResolvedValue('deny'),
+        findMatchingDenyRule: vi.fn().mockReturnValue(raw),
+        hasMatchingAskRule: vi.fn().mockReturnValue(false),
+      };
+
+      const result = await evaluatePermissionFlow(
+        mockConfig({ getPermissionManager: vi.fn().mockReturnValue(mockPm) }),
+        mockInvocation({
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        }),
+        'shell',
+        { command: 'echo hello' },
+      );
+
+      // The rule is still cited …
+      expect(result.denyMessage).toContain(`Matching deny rule: "${raw}"`);
+      // … but a fully-blocked tool must not be told it can try other uses.
+      expect(result.denyMessage).not.toContain(
+        'Other uses of this tool are still permitted',
+      );
+    }
+  });
+
   it('should return ask permission when PM has no relevant rules', async () => {
     const mockPm = {
       hasRelevantRules: vi.fn().mockReturnValue(false),
