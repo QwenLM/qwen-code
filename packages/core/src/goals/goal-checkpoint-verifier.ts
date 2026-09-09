@@ -100,10 +100,10 @@ export interface CreateGoalCheckpointVerifierOptions {
  * A well-formed checkpoint whose claim text overruns the aggregate budget.
  *
  * Split out of its parent so one corrective retry can be aimed at exactly
- * this failure: it is the one unusable-result shape a model can fix when
- * told the measured size, and the one the emitted schema cannot prevent --
- * JSON Schema has no aggregate byte bound, and the per-claim and per-item
- * bounds it does carry are stripped before the request goes out. It stays an
+ * this failure: it is a shape a model can fix when told the measured size,
+ * and one the emitted schema cannot prevent -- JSON Schema has no aggregate
+ * byte bound, and the per-claim and per-item bounds it does carry are
+ * stripped before the request goes out. It stays an
  * `InvalidGoalCheckpointError`, so a retry that overruns again reaches the
  * runtime as the unusable result it is.
  */
@@ -113,6 +113,28 @@ export class GoalCheckpointClaimBudgetError extends InvalidGoalCheckpointError {
       `Goal checkpoint claims total ${byteLength} bytes, over the ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES}-byte budget`,
     );
     this.name = 'GoalCheckpointClaimBudgetError';
+  }
+}
+
+/**
+ * A well-formed checkpoint carrying a claim longer than the protocol allows.
+ *
+ * Retryable for the same reason the aggregate overrun is: `maxLength` is
+ * stripped from the emitted schema before the request goes out, so the model
+ * is never told this bound and cannot honour it unprompted. Naming the
+ * measured length on a retry is the only way it reaches the model. The bound
+ * itself is re-asked, never relaxed -- `materializeGoalEvidenceCheckpoint`
+ * checks the same limit one step later.
+ */
+export class GoalCheckpointClaimLengthError extends InvalidGoalCheckpointError {
+  constructor(
+    readonly claimIndex: number,
+    readonly characterLength: number,
+  ) {
+    super(
+      `Goal checkpoint verifier claim ${claimIndex + 1} is ${characterLength} characters, over the ${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS}-character limit`,
+    );
+    this.name = 'GoalCheckpointClaimLengthError';
   }
 }
 
@@ -209,6 +231,55 @@ function claimBudgetRetryNote(byteLength: number): string {
   return `Your previous answer was rejected: its claim strings totalled ${byteLength} UTF-8 bytes, over the ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES}-byte budget. Return the same coverage within the budget, keeping every individual claim at or under ${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS} characters. Merge claims that share a source and state each fact once, cutting restatement rather than facts. Reply with the JSON object only.`;
 }
 
+/**
+ * What a model is told after one claim overran the per-claim limit.
+ */
+function claimLengthRetryNote(
+  claimIndex: number,
+  characterLength: number,
+): string {
+  return `Your previous answer was rejected: claim ${claimIndex + 1} was ${characterLength} characters, over the ${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS}-character limit for a single claim. Return the same coverage with every individual claim at or under ${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS} characters and all claims together at or under ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} UTF-8 bytes. Split the over-long claim into separate claims, or compress it, rather than dropping facts. Reply with the JSON object only.`;
+}
+
+interface CorrectiveRetry {
+  note: string;
+  debugMessage: string;
+  debugPayload: Record<string, number>;
+}
+
+/**
+ * The unusable results one corrective attempt can fix: exactly the bounds the
+ * emitted schema carries but the wire strips, so the model has never been
+ * told them. Everything else stays single-shot -- a malformed or unfaithful
+ * answer is not something restating the request fixes.
+ */
+function correctiveRetryFor(error: unknown): CorrectiveRetry | undefined {
+  if (error instanceof GoalCheckpointClaimBudgetError) {
+    return {
+      note: claimBudgetRetryNote(error.byteLength),
+      debugMessage:
+        'Retrying goal checkpoint verifier after claim budget overrun',
+      debugPayload: {
+        byteLength: error.byteLength,
+        budgetBytes: GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
+      },
+    };
+  }
+  if (error instanceof GoalCheckpointClaimLengthError) {
+    return {
+      note: claimLengthRetryNote(error.claimIndex, error.characterLength),
+      debugMessage:
+        'Retrying goal checkpoint verifier after a claim overran the per-claim limit',
+      debugPayload: {
+        claimIndex: error.claimIndex,
+        characterLength: error.characterLength,
+        limitCharacters: GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
+      },
+    };
+  }
+  return undefined;
+}
+
 export function createGoalCheckpointVerifier(
   config: Config,
   options: CreateGoalCheckpointVerifierOptions = {},
@@ -227,13 +298,13 @@ export function createGoalCheckpointVerifier(
       : timeoutController.signal;
 
     try {
-      // At most one corrective retry, and only for the aggregate claim
-      // budget. Every other unusable result stays single-shot: a malformed
-      // or unfaithful answer is not something restating the request fixes,
-      // and both attempts share the one ceiling armed above.
-      let overrunBytes: number | undefined;
+      // At most one corrective retry, and only for the bounds the emitted
+      // schema cannot get onto the wire. Every other unusable result stays
+      // single-shot, and both attempts share the one ceiling armed above.
+      let retry: CorrectiveRetry | undefined;
+      let retryCause: unknown;
       for (;;) {
-        const contents = retryContents(input, overrunBytes);
+        const contents = retryContents(input, retry?.note, retryCause);
         const result = await runSideQuery(config, {
           contents,
           abortSignal,
@@ -261,20 +332,12 @@ export function createGoalCheckpointVerifier(
         try {
           return parseGoalCheckpointVerifierText(result.text);
         } catch (error) {
-          if (
-            overrunBytes !== undefined ||
-            !(error instanceof GoalCheckpointClaimBudgetError)
-          ) {
-            throw error;
-          }
-          debugLogger.debug(
-            'Retrying goal checkpoint verifier after claim budget overrun',
-            {
-              byteLength: error.byteLength,
-              budgetBytes: GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
-            },
-          );
-          overrunBytes = error.byteLength;
+          const corrective =
+            retry === undefined ? correctiveRetryFor(error) : undefined;
+          if (!corrective) throw error;
+          debugLogger.debug(corrective.debugMessage, corrective.debugPayload);
+          retry = corrective;
+          retryCause = error;
         }
       }
     } finally {
@@ -289,19 +352,20 @@ export function createGoalCheckpointVerifier(
  *
  * A note that pushes an already-large payload over the request limit must
  * not convert a recoverable overrun into a Goal-stopping
- * `checkpoint_request` failure, so that case reports the overrun that
- * prompted the retry instead.
+ * `checkpoint_request` failure, so that case reports the bound violation
+ * that prompted the retry instead.
  */
 function retryContents(
   input: GoalCheckpointVerifierInput,
-  overrunBytes: number | undefined,
+  note: string | undefined,
+  retryCause: unknown,
 ): Content[] {
-  if (overrunBytes === undefined) return verifierContents(input);
+  if (note === undefined) return verifierContents(input);
   try {
-    return verifierContents(input, claimBudgetRetryNote(overrunBytes));
+    return verifierContents(input, note);
   } catch (error) {
     if (error instanceof GoalCheckpointVerifierInputTooLargeError) {
-      throw new GoalCheckpointClaimBudgetError(overrunBytes);
+      throw retryCause;
     }
     throw error;
   }
@@ -331,10 +395,17 @@ function parseClaim(
   // Trim before measuring, and count code points, so this validator agrees
   // with materializeGoalEvidenceCheckpoint on the shared protocol limit.
   const claim = value['claim'].trim();
-  if (!claim || [...claim].length > GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS) {
+  if (!claim) {
     throw new InvalidGoalCheckpointError(
       `Goal checkpoint verifier claim ${index + 1} is invalid`,
     );
+  }
+  // Its own class, so the retry gate can aim a corrective attempt at a bound
+  // the model was never sent. An empty claim stays a plain invalid result:
+  // restating the request does not fix a model that returned nothing.
+  const characterLength = [...claim].length;
+  if (characterLength > GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS) {
+    throw new GoalCheckpointClaimLengthError(index, characterLength);
   }
   return {
     proofKind: value['proofKind'],

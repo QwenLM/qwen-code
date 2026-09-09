@@ -18,6 +18,7 @@ import {
 import {
   createGoalCheckpointVerifier,
   GoalCheckpointClaimBudgetError,
+  GoalCheckpointClaimLengthError,
   GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
   GOAL_CHECKPOINT_VERIFIER_REQUEST_BYTE_LIMIT,
   GoalCheckpointVerifierInputTooLargeError,
@@ -342,6 +343,64 @@ describe('createGoalCheckpointVerifier', () => {
     expect(generateText).toHaveBeenCalledOnce();
   });
 
+  it('retries a claim over the per-claim limit, naming the measured length', async () => {
+    // Both bounds are stripped from the emitted schema before the request
+    // goes out, so a model is told neither. An answer that breaks the
+    // per-claim one earns the same corrective attempt the aggregate does --
+    // `parseClaim` reaches it first, so gating on the budget error alone
+    // spent a stall strike on a bound the model was never sent.
+    const overLong = GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS + 500;
+    const { config, generateText } = configForReplies(
+      claimsOfTexts([
+        'a'.repeat(overLong),
+        ...Array.from({ length: 8 }, () =>
+          'b'.repeat(GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS),
+        ),
+      ]),
+      claimsOfBytes(120),
+    );
+
+    const result = await createGoalCheckpointVerifier(config)(input());
+
+    expect(result.claims).toHaveLength(1);
+    expect(generateText).toHaveBeenCalledTimes(2);
+    const second = generateText.mock.calls[1]![0] as Parameters<
+      BaseLlmClient['generateText']
+    >[0];
+    const note = second.contents[0]?.parts?.[1]?.text ?? '';
+    expect(note).toContain(String(overLong));
+    expect(note).toContain(String(GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS));
+    // The retry re-asks the shared protocol bound, never relaxes it:
+    // `materializeGoalEvidenceCheckpoint` checks the same limit one step
+    // later, so a widened answer would only be rejected again.
+    expect(note).toContain(String(GOAL_CHECKPOINT_CLAIM_MAX_BYTES));
+  });
+
+  it('gives up when the retry overruns the per-claim limit again', async () => {
+    const overLong = 'a'.repeat(GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS + 1);
+    const { config, generateText } = configForReplies(
+      claimsOfTexts([overLong]),
+      claimsOfTexts([overLong]),
+    );
+
+    await expect(
+      createGoalCheckpointVerifier(config)(input()),
+    ).rejects.toBeInstanceOf(GoalCheckpointClaimLengthError);
+    expect(generateText).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry an empty claim, which restating the request cannot fix', async () => {
+    const { config, generateText } = configForReplies(
+      claimsOfTexts(['   ']),
+      claimsOfBytes(120),
+    );
+
+    await expect(
+      createGoalCheckpointVerifier(config)(input()),
+    ).rejects.toBeInstanceOf(InvalidGoalCheckpointError);
+    expect(generateText).toHaveBeenCalledOnce();
+  });
+
   it('reports the overrun rather than a request-too-large when the note does not fit', async () => {
     const over = GOAL_CHECKPOINT_CLAIM_MAX_BYTES + 7;
     // Measure the real first request, then fill its remaining allowance. Any
@@ -498,6 +557,76 @@ describe('createGoalCheckpointVerifier', () => {
     },
   );
 
+  it('spends one ceiling across both attempts, not a fresh one per attempt', async () => {
+    // The retry runs a second generation under the ceiling armed before the
+    // first, and four user-facing surfaces promise exactly that. Only the
+    // placement of `setTimeout` outside the attempt loop makes it true:
+    // arming per attempt keeps the shared-signal assertion above green while
+    // pushing abandonment out to ceiling + first-attempt cost, up to 1,800 s
+    // against the documented 900 s maximum. It also breaks the derivation of
+    // GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP from the stream guard's lifetime.
+    vi.useFakeTimers();
+    try {
+      const timeoutMs = 45_000;
+      const firstAttemptMs = 40_000;
+      let captured: AbortSignal | undefined;
+      const generateText = vi.fn();
+      generateText.mockImplementationOnce(
+        (request: { abortSignal?: AbortSignal }) => {
+          captured = request.abortSignal;
+          return new Promise((resolve) => {
+            setTimeout(
+              () =>
+                resolve({
+                  text: claimsOfBytes(GOAL_CHECKPOINT_CLAIM_MAX_BYTES + 1),
+                  usage: undefined,
+                }),
+              firstAttemptMs,
+            );
+          });
+        },
+      );
+      generateText.mockImplementationOnce(
+        (request: { abortSignal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            request.abortSignal?.addEventListener('abort', () => {
+              reject(request.abortSignal?.reason);
+            });
+          }),
+      );
+      const { config } = finishConfig(generateText);
+
+      const pending = createGoalCheckpointVerifier(config, { timeoutMs })(
+        input(),
+      );
+      // Hold the rejection so advancing past the ceiling cannot surface as
+      // an unhandled rejection before it is asserted below.
+      let rejected = false;
+      pending.catch(() => {
+        rejected = true;
+      });
+
+      // The first attempt burns most of the ceiling, then overruns the
+      // budget, so the corrective attempt starts with only the remainder.
+      await vi.advanceTimersByTimeAsync(firstAttemptMs);
+      expect(generateText).toHaveBeenCalledTimes(2);
+      expect(captured?.aborted).toBe(false);
+      expect(rejected).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(timeoutMs - firstAttemptMs - 1);
+      expect(captured?.aborted).toBe(false);
+      expect(rejected).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(captured?.aborted).toBe(true);
+      await expect(pending).rejects.toThrow(
+        `Goal checkpoint verifier timed out after ${timeoutMs}ms`,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('rejects a claim set over the aggregate budget, naming the measured size', () => {
     // Individually legal claims can still overrun the aggregate: the schema
     // has no way to express a total byte budget, and the per-claim bound it
@@ -585,7 +714,8 @@ describe('createGoalCheckpointVerifier', () => {
       ).claims[0]?.claim,
     ).toBe(astralAtLimit);
 
-    expect(() =>
+    let thrown: unknown;
+    try {
       parseGoalCheckpointVerifierText(
         JSON.stringify({
           claims: [
@@ -596,8 +726,19 @@ describe('createGoalCheckpointVerifier', () => {
             },
           ],
         }),
-      ),
-    ).toThrow(/claim 1 is invalid/i);
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    // Its own class, and it carries the measured length: the retry note is
+    // built from it, and the length is the only thing that can make the
+    // second answer differ at temperature 0.
+    expect(thrown).toBeInstanceOf(GoalCheckpointClaimLengthError);
+    expect(thrown).toBeInstanceOf(InvalidGoalCheckpointError);
+    expect((thrown as GoalCheckpointClaimLengthError).claimIndex).toBe(0);
+    expect((thrown as GoalCheckpointClaimLengthError).characterLength).toBe(
+      GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS + 1,
+    );
   });
 
   it('rejects non-exact or internally duplicate claim output', () => {
