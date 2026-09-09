@@ -773,6 +773,28 @@ function useStableProductSessionContext(
   return stableRef.current.context;
 }
 
+type LocallyBoundPromptIds = Map<string, Set<string>>;
+
+function bindPrompt(
+  bound: LocallyBoundPromptIds,
+  sessionId: string,
+  promptId: string,
+): void {
+  const promptIds = bound.get(sessionId) ?? new Set<string>();
+  promptIds.add(promptId);
+  bound.set(sessionId, promptIds);
+}
+
+function unbindPrompt(
+  bound: LocallyBoundPromptIds,
+  sessionId: string,
+  promptId: string,
+): void {
+  const promptIds = bound.get(sessionId);
+  promptIds?.delete(promptId);
+  if (promptIds?.size === 0) bound.delete(sessionId);
+}
+
 export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const {
     baseUrl,
@@ -1093,15 +1115,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const lastSessionIdRef = useRef<string | undefined>(undefined);
   const activePromptsRef = useRef<Map<string, ActivePrompt>>(new Map());
   const settledPromptsRef = useRef<Map<string, SettledPrompt>>(new Map());
-  const locallyBoundPromptKeysRef = useRef(new Set<string>());
-  // A locally bound prompt whose terminal an epoch reset may have destroyed.
-  // Recorded when `requestEpochResetReload` discards the binding, consumed
-  // after the reload's replay injection to publish a `failed` retirement when
-  // the fresh snapshot carried no terminal for it (a cold restore emits only
-  // `session_update` chunks). Cleared on use so unrelated reloads stay silent.
-  const epochResetBoundPromptRef = useRef<
-    { sessionId: string; promptId: string } | undefined
-  >(undefined);
+  const locallyBoundPromptIdsRef = useRef<LocallyBoundPromptIds>(new Map());
+  // Session whose locally bound prompts may have lost their terminal event
+  // across an epoch reset. The fresh load decides whether they are still live.
+  const epochResetSessionIdRef = useRef<string | undefined>(undefined);
   const promptSettlementListenersRef = useRef<Set<DaemonPromptSettledListener>>(
     new Set(),
   );
@@ -1114,7 +1131,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const publishPromptSettlement = useCallback(
     (event: DaemonPromptSettledEvent) => {
       const key = getPromptSettledKey(event.sessionId, event.promptId);
-      locallyBoundPromptKeysRef.current.delete(key);
+      unbindPrompt(
+        locallyBoundPromptIdsRef.current,
+        event.sessionId,
+        event.promptId,
+      );
       if (publishedPromptSettlementsRef.current.has(key)) return;
       publishedPromptSettlementsRef.current.add(key);
       const listeners = [...promptSettlementListenersRef.current];
@@ -1138,19 +1159,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   // destroyed without ever being observed (session died, auth/terminal error,
   // missing session). Stays inside the public outcome union and carries the
   // same (sessionId, promptId) key so a late real terminal is deduped.
-  const retireAbandonedPrompt = useCallback(
+  const retireAbandonedPrompts = useCallback(
     (sessionId: string, code: string) => {
-      const active = activePromptsRef.current.get(sessionId);
-      if (!active?.promptId) return;
-      publishPromptSettlement({
-        sessionId,
-        promptId: active.promptId,
-        outcome: 'failed',
-        error: {
-          message: 'Prompt terminal lost before delivery',
-          code,
-        },
-      });
+      const promptIds = locallyBoundPromptIdsRef.current.get(sessionId);
+      for (const promptId of [...(promptIds ?? [])]) {
+        publishPromptSettlement({
+          sessionId,
+          promptId,
+          outcome: 'failed',
+          error: {
+            message: 'Prompt terminal lost before delivery',
+            code,
+          },
+        });
+      }
     },
     [publishPromptSettlement],
   );
@@ -2893,42 +2915,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               );
               if (
                 replaySettlement &&
-                locallyBoundPromptKeysRef.current.has(
-                  getPromptSettledKey(
-                    replaySettlement.sessionId,
-                    replaySettlement.promptId,
-                  ),
-                )
+                locallyBoundPromptIdsRef.current
+                  .get(replaySettlement.sessionId)
+                  ?.has(replaySettlement.promptId)
               ) {
                 publishPromptSettlement(replaySettlement);
               }
-            }
-            // An epoch reset may have destroyed the terminal of a prompt this
-            // provider had bound: if the replay above did not settle it (the
-            // admission key is still present, so no terminal arrived), retire
-            // it as `failed` rather than leaving a host keyed on
-            // `onAssistantTurnSettled` waiting forever.
-            const epochResetBoundPrompt = epochResetBoundPromptRef.current;
-            epochResetBoundPromptRef.current = undefined;
-            if (
-              epochResetBoundPrompt &&
-              epochResetBoundPrompt.sessionId === activeSession.sessionId &&
-              locallyBoundPromptKeysRef.current.has(
-                getPromptSettledKey(
-                  epochResetBoundPrompt.sessionId,
-                  epochResetBoundPrompt.promptId,
-                ),
-              )
-            ) {
-              publishPromptSettlement({
-                sessionId: epochResetBoundPrompt.sessionId,
-                promptId: epochResetBoundPrompt.promptId,
-                outcome: 'failed',
-                error: {
-                  message: 'Prompt terminal lost across daemon epoch reset',
-                  code: 'epoch_reset',
-                },
-              });
             }
             if (sessionRef.current === activeSession) {
               for (const event of notificationReplayEvents) {
@@ -2944,6 +2936,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             // so dropping it unpins busy-session snapshots that can reach
             // tens of MiB after adaptive journal growth.
             activeSession.consumeReplaySnapshot();
+          }
+          if (epochResetSessionIdRef.current === activeSession.sessionId) {
+            epochResetSessionIdRef.current = undefined;
+            if (!hasSessionActivePrompt()) {
+              retireAbandonedPrompts(activeSession.sessionId, 'epoch_reset');
+            }
           }
           setConnection((current) => ({
             ...current,
@@ -3293,15 +3291,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const active = activePromptsRef.current.get(
               activeSession.sessionId,
             );
-            if (active?.promptId) {
-              // The reset may have destroyed the turn's terminal (a cold
-              // restore emits only `session_update` chunks, never terminals).
-              // Remember the bound prompt so the reload can retire it as
-              // `failed` if the fresh snapshot carries no terminal for it.
-              epochResetBoundPromptRef.current = {
-                sessionId: activeSession.sessionId,
-                promptId: active.promptId,
-              };
+            if (locallyBoundPromptIdsRef.current.has(activeSession.sessionId)) {
+              epochResetSessionIdRef.current = activeSession.sessionId;
             }
             active?.controller.abort();
             activePromptsRef.current.delete(activeSession.sessionId);
@@ -3949,11 +3940,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             continue;
           }
-          const failedSessionId = session?.sessionId;
+          const failedSessionId =
+            session?.sessionId ??
+            reconnectSessionId ??
+            epochResetSessionIdRef.current;
           const isAuthFailure = isAuthFailureHttpError(error);
           const isTerminal = isTerminalSessionHttpError(error);
           if (failedSessionId && (isAuthFailure || isTerminal)) {
-            retireAbandonedPrompt(failedSessionId, 'session_error');
+            retireAbandonedPrompts(failedSessionId, 'session_error');
+            if (epochResetSessionIdRef.current === failedSessionId) {
+              epochResetSessionIdRef.current = undefined;
+            }
             const active = activePromptsRef.current.get(failedSessionId);
             active?.controller.abort();
             activePromptsRef.current.delete(failedSessionId);
@@ -4283,7 +4280,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     addNotice,
     dismissNotice,
     publishPromptSettlement,
-    retireAbandonedPrompt,
+    retireAbandonedPrompts,
     setConnectionSynchronous,
   ]);
 
@@ -4387,7 +4384,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 errorStatus,
               );
             }
-            retireAbandonedPrompt(deadSessionId, 'session_missing');
+            retireAbandonedPrompts(deadSessionId, 'session_missing');
             const active = activePromptsRef.current.get(deadSessionId);
             active?.controller.abort();
             activePromptsRef.current.delete(deadSessionId);
@@ -4438,7 +4435,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     connection.status,
     heartbeatFailureThreshold,
     heartbeatIntervalMs,
-    retireAbandonedPrompt,
+    retireAbandonedPrompts,
   ]);
 
   const actions = useMemo<DaemonSessionActions>(
@@ -4577,8 +4574,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           liveJournalRepairRef.current = undefined;
         },
         onPromptAdmitted: (owner, admission) => {
-          locallyBoundPromptKeysRef.current.add(
-            getPromptSettledKey(owner.sessionId, admission.promptId),
+          bindPrompt(
+            locallyBoundPromptIdsRef.current,
+            owner.sessionId,
+            admission.promptId,
           );
           if (sessionRef.current === owner)
             turnNotifications.admit(owner, admission.promptId);
@@ -4590,8 +4589,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
         },
         onPromptRemoved: (owner, promptId, sessionId) => {
-          locallyBoundPromptKeysRef.current.delete(
-            getPromptSettledKey(sessionId ?? owner.sessionId, promptId),
+          unbindPrompt(
+            locallyBoundPromptIdsRef.current,
+            sessionId ?? owner.sessionId,
+            promptId,
           );
           if (sessionRef.current === owner)
             turnNotifications.remove(owner, promptId);
