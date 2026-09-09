@@ -1,5 +1,7 @@
 # Workspace agents implementation — step-by-step acceptance criteria
 
+> **Development handoff (2026-09-09):** Future work follows the [successor plan](./2026-09-09-agent-service-collaboration-plan.md), beginning with P0, and the [Agent service architecture](../design/2026-09-09-agent-service-collaboration.md). Keep the observations below as historical evidence, not as acceptance of A2A, remote Codex, or feature-off compatibility. Delivery remains one PR, #11206; no local CI loop or new child PR is required.
+
 > Companion to [`2026-09-06-multi-agent-board-collaboration.md`](./2026-09-06-multi-agent-board-collaboration.md) §5.2 (ten steps, as numbered on the `codex/multi-agent-mesh-foundation` branch) and [`2026-09-07-workspace-agents-review-round2-handoff.md`](./2026-09-07-workspace-agents-review-round2-handoff.md).
 > Delivery shape: **one implementation and delivery PR** (#11206). Runtime changes #11200 / #11202 / #11204 are merged into its branch. Because that branch was their PR base, GitHub records them as merged draft references; their review history remains available and none is merged separately to `main`.
 > Nothing in this file was executed by its author. "Evidence" means what the implementer reports, with observed values, in the PR description or a `docs/verification/workspace agents/` package.

@@ -1,5 +1,7 @@
 # What is missing against Multica, and how to close it
 
+> **Development handoff (2026-09-09):** Continue with the [Agent service architecture](../design/2026-09-09-agent-service-collaboration.md) and [successor plan](./2026-09-09-agent-service-collaboration-plan.md), starting at P0 rather than automatically implementing H2. Registered execution Hosts and existing external Agent services are different integration paths. H1 and the observations below remain evidence for their stated scope; they do not prove bidirectional service interoperability or experimental-off isolation.
+
 ## Architecture correction — persistent identity, task-scoped sessions
 
 The previous implementation score confused a working collaboration engine with

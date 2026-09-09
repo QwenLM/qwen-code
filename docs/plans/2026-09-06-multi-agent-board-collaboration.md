@@ -1,5 +1,7 @@
 # Multi-agent collaboration on a shared thread
 
+> **Development handoff (2026-09-09):** Read the [Agent service architecture](../design/2026-09-09-agent-service-collaboration.md) and [successor implementation plan](./2026-09-09-agent-service-collaboration-plan.md) before continuing. Start at P0: independent default-off experimental gates. The successor architecture §8 explicitly identifies superseded decisions; other storage and safety contracts below remain applicable. Historical runtime observations are not evidence that the new service boundary is implemented. Do not resume the old §5.2 sequence by default.
+
 > Current session-adapter caveat (2026-09-08): the earlier live demo below does
 > not verify the replacement ACP-session execution path. Dispatch now prepares
 > and binds a session before asynchronously activating its prompt. Live replies

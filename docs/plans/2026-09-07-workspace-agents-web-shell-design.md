@@ -1,5 +1,7 @@
 # Workspace agents in Web Shell — design direction
 
+> **Development handoff (2026-09-09):** The [Agent service architecture](../design/2026-09-09-agent-service-collaboration.md) and [successor plan](./2026-09-09-agent-service-collaboration-plan.md) now govern product entry and experimental gating: start from existing conversations, distinguish creating an Agent from connecting an existing service, and expose coordination only when enabled. The ledger-first navigation and cross-thread transcript assumptions below are historical; retain useful status, routing, accessibility, and rendering guidance where compatible with the successor.
+
 > For §5.2 step 9, written before any UI exists so the build does not start from a blank page or from whichever list component was nearest to hand.
 > Grounded in Multica's shipped UI, read at `multica-ai/multica@7a438bd5b`: `packages/views/issues/components/{issue-detail,execution-log-section,comment-trigger-chips,thread-nav-panel}.tsx` and `packages/views/issues/blocked-trigger-copy.ts`. Where this design diverges from theirs, the reason is stated.
 > Companion to [`2026-09-06-multi-agent-board-collaboration.md`](./2026-09-06-multi-agent-board-collaboration.md) and [`2026-09-07-workspace-agents-implementation-acceptance.md`](./2026-09-07-workspace-agents-implementation-acceptance.md).
