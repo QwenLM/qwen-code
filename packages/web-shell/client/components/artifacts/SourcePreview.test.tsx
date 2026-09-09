@@ -11,6 +11,7 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 const mock = vi.hoisted(() => ({
   current: true,
   trusted: true,
+  standalone: false,
   connection: {
     sessionId: 'session-a',
     workspaceCwd: '/workspace',
@@ -25,7 +26,10 @@ const mock = vi.hoisted(() => ({
 }));
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (original) => ({
   ...(await original<Record<string, unknown>>()),
-  useConnection: () => mock.connection,
+  useConnection: () => ({
+    ...mock.connection,
+    workspaceCwd: mock.standalone ? undefined : mock.connection.workspaceCwd,
+  }),
 }));
 vi.mock('../terminal/TerminalPanel', () => ({ TerminalPanel: () => null }));
 const target = {
@@ -62,8 +66,8 @@ async function render(value: SessionSource) {
               title: value.title,
               source: value,
               sourceSessionId: 'session-a',
-              workspaceCwd: '/workspace',
-              workspaceId: 'owner-a',
+              workspaceCwd: mock.standalone ? undefined : '/workspace',
+              workspaceId: mock.standalone ? undefined : 'owner-a',
               owner,
               sessionActions:
                 mock.sessionActions as unknown as DaemonSessionActions,
@@ -84,6 +88,7 @@ async function render(value: SessionSource) {
 beforeEach(() => {
   mock.current = true;
   mock.trusted = true;
+  mock.standalone = false;
   mock.connection.workspaceCwd = '/workspace';
   Object.values(mock.actions).forEach((fn) => fn.mockReset());
   mock.sessionActions.readAttachment.mockReset();
@@ -104,6 +109,43 @@ afterEach(async () => {
 });
 
 describe('source preview', () => {
+  it.each(['text/plain', 'text/html'])(
+    'previews standalone attachment bytes as %s without workspace access',
+    async (mimeType) => {
+      mock.standalone = true;
+      mock.sessionActions.readAttachment.mockResolvedValue({
+        data: btoa('<script>STANDALONE_SOURCE_BYTES</script>'),
+        mimeType,
+      });
+      await render(
+        source({
+          type: 'attachment',
+          attachmentId:
+            mimeType === 'text/html' ? 'reference.html' : 'reference.txt',
+        }),
+      );
+      expect(mock.sessionActions.readAttachment).toHaveBeenCalledOnce();
+      await vi.waitFor(async () => {
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        expect(container.textContent).toContain('STANDALONE_SOURCE_BYTES');
+      });
+      expect(container.querySelector('iframe')).toBeNull();
+      expect(mock.actions.stat).not.toHaveBeenCalled();
+      expect(mock.actions.readWorkspaceFile).not.toHaveBeenCalled();
+      expect(mock.actions.readFileBytes).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects standalone attachment access after its owner is revoked', async () => {
+    mock.standalone = true;
+    mock.current = false;
+    await render(source({ type: 'attachment', attachmentId: 'reference.txt' }));
+    expect(container.textContent).toContain('no longer available');
+    expect(mock.sessionActions.readAttachment).not.toHaveBeenCalled();
+  });
+
   it('opens URL metadata without fetching it', async () => {
     await render(source({ type: 'url', url: 'https://example.com/docs#part' }));
     expect(

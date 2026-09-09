@@ -2990,7 +2990,7 @@ function SourceDetail({
     connection.capabilities?.features.includes('session_sources') &&
     target?.workspaceId === tab.workspaceId &&
     (Boolean(target) ||
-      (tab.workspaceCwd === undefined && locator.type === 'url')) &&
+      (tab.workspaceCwd === undefined && locator.type !== 'workspace_file')) &&
     (locator.type !== 'workspace_file' ||
       source.workspaceCwd === connection.workspaceCwd);
   const path =
@@ -3004,7 +3004,7 @@ function SourceDetail({
     let cancelled = false;
     setData(undefined);
     setError(undefined);
-    if (!valid || !workspaceActions || locator.type === 'url') return;
+    if (!valid || locator.type === 'url') return;
     const load = async () => {
       if (locator.type === 'attachment') {
         const attachment = await tab.sessionActions.readAttachment(
@@ -3015,7 +3015,7 @@ function SourceDetail({
           character.charCodeAt(0),
         );
         setData(new Blob([bytes], { type: attachment.mimeType }));
-      } else if (isPdf) {
+      } else if (isPdf && workspaceActions) {
         const blob = await readWorkspaceFileAsBlob(
           workspaceActions.readFileBytes,
           path,
@@ -3064,7 +3064,7 @@ function SourceDetail({
         )}
       </div>
     );
-  if (!valid || !target)
+  if (!valid || (!target && locator.type !== 'attachment'))
     return (
       <div className={styles.empty} role="alert">
         {t('sources.unavailable')}
@@ -3098,7 +3098,7 @@ function SourceDetail({
           <Button
             onClick={() =>
               void downloadWorkspaceFile(
-                target.actions,
+                workspaceActions!,
                 path,
                 'application/octet-stream',
                 () => !tab.owner.isCurrent(),
@@ -3129,8 +3129,9 @@ function SourceDetail({
         <WorkspaceFilePreview
           key={attempt}
           workspacePath={path}
-          workspaceActions={target.actions}
+          workspaceActions={workspaceActions!}
           previewData={data}
+          previewOnly={locator.type === 'attachment'}
           previewMimeType={data?.type}
           previewKind={
             /\.html?$/i.test(path) ||
