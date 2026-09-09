@@ -69,14 +69,33 @@ error-text fields of the `RumEvent`:
 - `message` (top level, `RumExceptionEvent`/`RumResourceEvent`)
 - `properties.error_message`
 - `properties.error_excerpt` (pre-empting #10916's re-introduction)
-- `stack`
+- `stack` (defensive: nothing populates it today, but it is a free-text
+  error surface a future call site could fill)
 
 Non-error properties (model names, prompt ids, durations, counts) are
-untouched. The pass is idempotent so a double-application is harmless.
+untouched. The pass is idempotent so a double-application is harmless, and
+the retry path's re-queue only re-adds events that already passed through
+`enqueueLogEvent`, so re-queueing cannot smuggle unredacted text either.
 
-`truncateSpanError` is reused as the final step so the RUM bound matches the
-OTel bound (ANSI/control stripping, credential masking, then the same
-truncation cap) — one shared definition of "safe error text", two sinks.
+## Normalisation and the shared truncation bound
+
+Control characters are stripped before masking (LF/CR preserved) so a C0/C1
+character cannot sit between a secret key and its separator and split the
+mask's match. Unlike the OTel path's `stripAnsiAndControl`, newlines
+survive: the RUM feed's diagnostic value is the shape of the multi-line
+error block, which flattening would destroy.
+
+The truncation bound and its surrogate-pair guard are shared with the OTel
+span path through `truncateErrorText` (exported from `session-tracing.ts`,
+used by both paths) — one definition of the bound, two sinks. The
+normalisation deliberately differs (newlines survive here), so "parity"
+means the bound and the credential redaction, not byte-identical output
+with the OTel copy.
+
+Two free-form surfaces the choke point does not reach are recorded as known
+limits: `snapshots` (numeric everywhere except two event types today) and
+the payload-level `base_url` (assembled outside `enqueueLogEvent`). Neither
+carries a shell command line today.
 
 ## Where the mask lives
 

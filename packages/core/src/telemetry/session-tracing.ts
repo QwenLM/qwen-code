@@ -457,7 +457,10 @@ const TOOL_DESCRIPTION_MAX_CHARS = 4096;
  * ~32KB), so we keep the simpler char-count bound rather than paying
  * the encoder cost on every endXSpan.
  */
-function truncateSpanText(s: string, maxChars = SPAN_TEXT_MAX_CHARS): string {
+export function truncateErrorText(
+  s: string,
+  maxChars = SPAN_TEXT_MAX_CHARS,
+): string {
   if (s.length <= maxChars) return s;
   // Back up one code unit if the cut lands on a high surrogate so we
   // don't emit a lone surrogate followed by the sentinel — strict
@@ -467,6 +470,10 @@ function truncateSpanText(s: string, maxChars = SPAN_TEXT_MAX_CHARS): string {
   const code = s.charCodeAt(end - 1);
   if (code >= 0xd800 && code <= 0xdbff) end--;
   return s.slice(0, end) + '…[truncated]';
+}
+
+function truncateSpanText(s: string, maxChars = SPAN_TEXT_MAX_CHARS): string {
+  return truncateErrorText(s, maxChars);
 }
 
 export function truncateSpanError(s: string): string {

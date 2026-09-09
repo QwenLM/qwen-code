@@ -5,11 +5,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import {
-  sanitizeHookName,
-  redactErrorText,
-  ERROR_TEXT_MAX_CHARS,
-} from './sanitize.js';
+import { sanitizeHookName, redactErrorText } from './sanitize.js';
+import { truncateErrorText } from './session-tracing.js';
 
 describe('sanitizeHookName', () => {
   it('should return "unknown-command" for empty string', () => {
@@ -144,9 +141,29 @@ describe('redactErrorText', () => {
     expect(redactErrorText(text)).toBe(text);
   });
 
+  it('should preserve newlines while stripping other control characters', () => {
+    // A control char between the key and its separator must not defeat
+    // the mask, and the multi-line error block shape must survive.
+    const noisy = 'git push --token\u0007=ghs_abcdef\nError: fatal\u0000';
+    expect(redactErrorText(noisy)).toBe('git push --token=***\nError: fatal');
+    expect(redactErrorText('Command: x\nError: y')).toBe(
+      'Command: x\nError: y',
+    );
+  });
+
+  it('should share the truncation bound and surrogate guard with the OTel span path', () => {
+    // CJK-heavy text cut at the bound can split a surrogate pair; the
+    // shared helper backs off one code unit so no lone surrogate is emitted.
+    const cjk = '证'.repeat(2000);
+    const result = redactErrorText(cjk);
+    expect(result).toBe(truncateErrorText(cjk));
+    expect(result.endsWith('…[truncated]')).toBe(true);
+    expect(result.includes('\ud83d')).toBe(false);
+  });
+
   it('should truncate over-long error text', () => {
-    const result = redactErrorText('a'.repeat(ERROR_TEXT_MAX_CHARS + 100));
-    expect(result.length).toBe(ERROR_TEXT_MAX_CHARS + '…[truncated]'.length);
+    const result = redactErrorText('a'.repeat(1024 + 100));
+    expect(result.length).toBe(1024 + '…[truncated]'.length);
     expect(result.endsWith('…[truncated]')).toBe(true);
   });
 });

@@ -5,6 +5,7 @@
  */
 
 import { redactUrlCredentials } from '../extension/redaction.js';
+import { truncateErrorText } from './session-tracing.js';
 
 /**
  * Sanitize hook name to remove potentially sensitive information.
@@ -53,13 +54,12 @@ export function sanitizeHookName(hookName: string): string {
   return command;
 }
 
-/**
- * Maximum length, in UTF-16 code units, of an error string sent to the
- * usage-statistics sink. Mirrors the OTel span-attribute bound
- * (`SPAN_TEXT_MAX_CHARS` in session-tracing.ts) so both sinks apply the
- * same definition of safe error text.
- */
-export const ERROR_TEXT_MAX_CHARS = 1024;
+// C0/C1 control chars (incl. DEL) except LF and CR — the multi-line shell
+// error block is load-bearing in telemetry, so newlines survive, unlike
+// `stripAnsiAndControl` which flattens them.
+const CONTROL_CHARS_EXCEPT_NEWLINES_RE =
+  // eslint-disable-next-line no-control-regex -- C0/C1 stripping is the point
+  /[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
 
 const SECRET_KEY_PATTERN =
   '(?:password|passwd|pwd|token|secret|api[_-]?key|apikey|access[_-]?key|auth|credential|private[_-]?key|session[_-]?key)';
@@ -90,18 +90,23 @@ const BEARER_TOKEN_PATTERN = /\b(bearer\s+)[^\s"']+/gi;
  * process via the usage-statistics (RUM) sink. Composes the URL-userinfo
  * redactor with masks for Authorization headers, bare Bearer tokens, and
  * secret-looking flag/env assignments — the shapes that appear in shell
- * command lines echoed by tool error messages. Pattern-masked rather than
- * fingerprinted: the text stays debuggable, and misses are bounded by the
- * truncation cap.
+ * command lines echoed by tool error messages. Control characters are
+ * stripped (newlines preserved) so they cannot split a key from its
+ * separator and defeat a mask. Pattern-masked rather than fingerprinted:
+ * the text stays debuggable, and misses are bounded by the truncation cap.
+ *
+ * The truncation bound and surrogate-pair guard are shared with the OTel
+ * span path (`truncateErrorText` in session-tracing.ts) so both sinks
+ * apply one definition of safe error text; the normalisation differs
+ * deliberately — newlines survive here because the RUM feed's value is
+ * the shape of the multi-line error block.
  */
 export function redactErrorText(value: string): string {
-  let text = redactUrlCredentials(value);
+  let text = value.replace(CONTROL_CHARS_EXCEPT_NEWLINES_RE, '');
+  text = redactUrlCredentials(text);
   text = text.replace(AUTHORIZATION_HEADER_PATTERN, '$1***');
   text = text.replace(BEARER_TOKEN_PATTERN, '$1***');
   text = text.replace(SECRET_FLAG_PATTERN, '$1$2***');
   text = text.replace(SECRET_ENV_PATTERN, '$1=***');
-  if (text.length > ERROR_TEXT_MAX_CHARS) {
-    text = `${text.slice(0, ERROR_TEXT_MAX_CHARS)}…[truncated]`;
-  }
-  return text;
+  return truncateErrorText(text);
 }
