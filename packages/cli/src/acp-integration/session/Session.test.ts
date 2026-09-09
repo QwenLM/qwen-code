@@ -7109,6 +7109,111 @@ describe('Session', () => {
       expect(mockSettings.setValue).not.toHaveBeenCalled();
     });
 
+    it.each(['max', 'none'] as const)(
+      'preserves global GPT %s across model switches and reloads',
+      async (selection) => {
+        const state = installReasoningPreference(selection, { trusted: true });
+        const modelId = selection === 'max' ? 'gpt-5.4' : 'gpt-6-astra';
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+        });
+        session.reloadReasoningSelection();
+        expect(state.user.settings.model.reasoningEffort).toBe(selection);
+        expect(state.workspace.settings.model.reasoningEffort).toBe(selection);
+        expect(state.live.reasoning).toEqual(
+          selection === 'max' ? { effort: 'max' } : undefined,
+        );
+        expect(state.rebuildable.reasoning).toEqual(state.live.reasoning);
+        expect(
+          vi
+            .mocked(mockSettings.setValue)
+            .mock.calls.filter((call) => call[1] === 'model.reasoningEffort'),
+        ).toEqual([]);
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `gpt-5.6-sol(${AuthType.USE_OPENAI})`,
+        });
+        expect(state.live.reasoning).toEqual(
+          selection === 'max' ? { effort: 'max' } : false,
+        );
+        expect(state.rebuildable.reasoning).toEqual(state.live.reasoning);
+      },
+    );
+
+    it.each([
+      ['gpt-6-astra', false, undefined],
+      ['gpt-6-astra', true, undefined],
+      ['gpt-5', false, undefined],
+      ['gpt-6-astra', false, false],
+    ] as const)(
+      'reconciles saved off for %s with configured toggleOnly=%s, canDisable=%s',
+      async (modelId, toggleOnly, canDisable) => {
+        const state = installReasoningPreference('none', { trusted: true });
+        Object.assign(mockConfig, {
+          getResolvedModelConfig: vi.fn(() => ({
+            generationConfig: {},
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                ...(toggleOnly
+                  ? { toggleOnly: true }
+                  : { efforts: ['low', 'high'], defaultEffort: 'high' }),
+                disableField: 'reasoning_effort',
+                ...(canDisable === false ? { canDisable } : {}),
+              },
+            },
+          })),
+        });
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+        });
+        session.reloadReasoningSelection();
+        for (const scope of [state.user, state.workspace]) {
+          for (const settings of [scope.settings, scope.originalSettings]) {
+            expect(settings.model).toEqual(
+              canDisable === false ? {} : { reasoningEffort: 'none' },
+            );
+          }
+        }
+        expect(state.live.reasoning).toBeUndefined();
+        expect(state.rebuildable.reasoning).toBeUndefined();
+        expect(
+          vi
+            .mocked(mockSettings.setValue)
+            .mock.calls.filter((call) => call[1] === 'model.reasoningEffort'),
+        ).toHaveLength(canDisable === false ? 2 : 0);
+      },
+    );
+
+    it('reconciles a GPT preference against explicit configured capabilities', async () => {
+      const state = installReasoningPreference('max', { trusted: true });
+      Object.assign(mockConfig, {
+        getResolvedModelConfig: vi.fn(() => ({
+          generationConfig: {},
+          capabilities: {
+            reasoning: {
+              thinking: true,
+              efforts: ['low', 'high'],
+              defaultEffort: 'high',
+              disableField: 'reasoning_effort',
+            },
+          },
+        })),
+      });
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `gpt-5.6-sol(${AuthType.USE_OPENAI})`,
+      });
+      expect(state.user.settings.model).not.toHaveProperty('reasoningEffort');
+      expect(state.workspace.settings.model).not.toHaveProperty(
+        'reasoningEffort',
+      );
+      expect(state.live.reasoning).toBeUndefined();
+      expect(state.rebuildable.reasoning).toBeUndefined();
+    });
+
     it('deletes an incompatible max preference from both writable scopes without downgrading it', async () => {
       const state = installReasoningPreference('max', { trusted: true });
 
@@ -8583,6 +8688,64 @@ describe('Session', () => {
         originatorClientId: 'client-1',
       };
 
+      it.each([false, true])(
+        'records the trusted identity before streaming (display=%s)',
+        async (withDisplayText) => {
+          let currentPromptId = '';
+          mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+            expect(
+              mockChatRecordingService.recordUserMessage,
+            ).toHaveBeenLastCalledWith(
+              'same prompt',
+              undefined,
+              withDisplayText
+                ? { displayText: 'visible prompt', hookContext: '' }
+                : undefined,
+              currentPromptId,
+            );
+            return Promise.resolve(createEmptyStream());
+          });
+          for (const promptId of ['daemon-first', 'daemon-second']) {
+            currentPromptId = promptId;
+            await session.prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt: [{ type: 'text', text: 'same prompt' }],
+                _meta: {
+                  promptId: 'client-supplied-id',
+                  ...(withDisplayText
+                    ? { 'qwen.daemon.promptDisplayText': 'visible prompt' }
+                    : {}),
+                },
+              },
+              { ...trustedContext, promptId },
+            );
+          }
+          expect(
+            mockChatRecordingService.recordUserMessage.mock.calls.map(
+              (args) => args[3],
+            ),
+          ).toEqual(['daemon-first', 'daemon-second']);
+        },
+      );
+
+      it('does not persist a client-supplied identity without a trusted context', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'untrusted identity' }],
+          _meta: { promptId: 'client-supplied-id' },
+        });
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          'untrusted identity',
+          undefined,
+          undefined,
+          undefined,
+        );
+      });
+
       it('records a completed turn_result for a daemon-admitted prompt', async () => {
         mockChat.sendMessageStream = vi
           .fn()
@@ -9573,6 +9736,9 @@ describe('Session', () => {
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
         '原始语音文本',
+        undefined,
+        undefined,
+        trustedContext.promptId,
       );
       expect(textParts(firstSentMessage())).toEqual([
         '<realtime_delegation>trusted model input</realtime_delegation>',
@@ -9623,6 +9789,7 @@ describe('Session', () => {
           hookContext: '',
           attachmentReferences: [imageReference, fileReference],
         },
+        undefined,
       );
     });
 
@@ -9649,6 +9816,7 @@ describe('Session', () => {
         'describe these',
         undefined,
         expect.objectContaining({ attachmentReferences }),
+        undefined,
       );
     });
 
@@ -9677,6 +9845,7 @@ describe('Session', () => {
         expect.objectContaining({
           attachmentReferences: [attachmentReference],
         }),
+        undefined,
       );
     });
 
@@ -12805,6 +12974,9 @@ describe('Session', () => {
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
         '3',
+        undefined,
+        undefined,
+        undefined,
       );
       expect(mockLlmClient.tryCompressChat).toHaveBeenCalledWith(
         'test-session-id########3',
@@ -12833,6 +13005,7 @@ describe('Session', () => {
         'internal channel instructions\n\nhello',
         undefined,
         { displayText: 'hello', hookContext: '' },
+        undefined,
       );
       expect(
         agentTelemetry.addAgentInputMessageAttributes,
@@ -23759,6 +23932,9 @@ describe('Session', () => {
         expect(finishedSpy).toHaveBeenCalledTimes(1);
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           '/btw question',
+          undefined,
+          undefined,
+          undefined,
         );
         expect(
           mockChatRecordingService.recordSlashCommand,
@@ -23856,12 +24032,24 @@ describe('Session', () => {
         });
         mockChatRecordingService.recordUserMessage.mockClear();
 
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/advisor check my work' }],
-        });
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: '/advisor check my work' }],
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-advisor',
+          },
+        );
 
-        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalled();
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          '/advisor check my work',
+          undefined,
+          undefined,
+          'daemon-advisor',
+        );
       });
 
       it.each([
@@ -26793,6 +26981,8 @@ describe('Session', () => {
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           'hello',
           permit,
+          undefined,
+          undefined,
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
       });

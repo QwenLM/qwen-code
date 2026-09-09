@@ -757,12 +757,11 @@ qwen sessions list --json | jq .
 
 #### `qwen sessions ps`
 
-Lists the interactive Qwen Code sessions running on this machine right
-now. `sessions list` walks saved transcripts ("what have I worked on");
-this walks the live-process registry ("what is running at this moment").
-Records left behind by a killed session are swept as they are found.
-Headless sessions (`qwen -p`) do not register with the live-process
-registry, so they are not shown.
+Lists the Qwen Code sessions registered on this machine right now.
+`sessions list` walks saved transcripts ("what have I worked on"); this
+walks the live-process registry ("what is running at this moment").
+Records left behind by a killed session are swept as they are found. A
+one-shot `qwen -p` run never registers, so it is never shown.
 
 **Flags:**
 
@@ -772,7 +771,16 @@ registry, so they are not shown.
 
 **Human-readable output (default):**
 
-A table with columns: NAME, PID, AGE, DIRECTORY.
+A table with columns: NAME, KIND, PID, AGE, DIRECTORY.
+
+KIND says what registered the session — `tui` for someone at a terminal,
+`external` for a program that is not a Qwen Code session at all (a voice
+front-end, a relay), and `headless` or `serve` for a session another
+program drives. It is a self-report, like NAME and DIRECTORY: every field
+here was written by the process it describes, and nothing about what a
+session is allowed to do depends on it. See
+[Cross-Session Protocol](./cross-session-protocol.md) for the record
+format and for how to register a program of your own.
 
 **JSON output (`--json`):**
 
@@ -781,7 +789,7 @@ object with fields:
 
 ```
 schemaVersion, pid, procStart, pidNs, sessionId, cwd, name, startedAt,
-qwenVersion, ipcPath (when peer messaging is available)
+qwenVersion, kind, ipcPath (when peer messaging is available)
 ```
 
 Nothing else is written to stdout — an empty listing prints nothing at
@@ -1018,3 +1026,18 @@ on your behalf.
 Anyone who holds the token can send as that controller, so treat it like
 any other credential: give it to one program, keep it out of shared
 config, and revoke it when that program is done.
+
+### Programs that are not Qwen Code sessions
+
+Everything above works between sessions, but nothing in it is specific to
+one. A program that writes a registry record for itself and binds an
+inbox the same way is listed by `qwen sessions ps` and by `list_agents`,
+can be addressed by name from `send_message`, and receives delivery
+receipts for what it sends — a voice front-end, a relay, a build watcher.
+It should record `kind: "external"` so a listing can say what it is.
+
+[Cross-Session Protocol](./cross-session-protocol.md) is the contract for
+writing one: the record schema and how liveness is judged, the socket
+paths and framing, the auth line, every frame field, the receipt states
+and their transitions, and what a receiver does with a message before its
+model sees it.
