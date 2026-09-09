@@ -380,6 +380,11 @@ export class WorkflowRunner {
         registry?.onBudgetUpdated(runId, spent, total);
         emitUpdate();
       },
+      resumeRespawn: (line) => {
+        if (!isCurrentEntry()) return;
+        registry?.onResumeRespawn(runId, line);
+        emitUpdate();
+      },
     };
 
     const scheduler = new WorkflowDispatchScheduler(
@@ -481,6 +486,19 @@ export class WorkflowRunner {
               status: entry.status,
               agents_dispatched: entry.agentsDispatched,
               agents_completed: entry.agentsCompleted,
+              // Read off the dispatch traces rather than the counters: a
+              // dispatch that failed or replayed from cache still counts as
+              // completed, so without these three a run that lost half its
+              // fan-out and one that lost none report identically.
+              agents_failed: entry.dispatches.reduce(
+                (n, dispatch) => (dispatch.status === 'failed' ? n + 1 : n),
+                0,
+              ),
+              agents_cached: entry.dispatches.reduce(
+                (n, dispatch) => (dispatch.status === 'cached' ? n + 1 : n),
+                0,
+              ),
+              agents_respawned: entry.agentsRespawned ?? 0,
               phase_count: entry.phases.length,
               tokens_spent: entry.tokensSpent,
               duration_ms: (entry.endTime ?? entry.startTime) - entry.startTime,

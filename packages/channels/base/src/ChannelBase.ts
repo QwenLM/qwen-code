@@ -27,7 +27,6 @@ import type {
   UserInputPresentationResult,
   UserInputSettlementReason,
 } from './types.js';
-import { BlockStreamer } from './BlockStreamer.js';
 import {
   ChannelProactiveDeliveryError,
   isChannelProactiveDeliveryError,
@@ -324,7 +323,6 @@ type ActivePrompt = {
   loopPrompt?: boolean;
   done: Promise<void>;
   resolve: () => void;
-  stopStreaming?: () => void;
   /** The originating turn's chat/message, so a clear-time eviction can run this
    * turn's own onPromptEnd (its finally may settle long after — or never). */
   chatId: string;
@@ -2608,7 +2606,6 @@ export abstract class ChannelBase {
           return false;
         }
         active.cancelled = true;
-        this.stopActiveStreaming(active, sessionId, reason);
         this.dropCollectBuffer(sessionId);
         this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
         this.emitTaskCancellation(active, sessionId, reason);
@@ -5622,23 +5619,8 @@ export abstract class ChannelBase {
     return active?.senderName || active?.senderId || target.senderId || 'agent';
   }
 
-  private stopActiveStreaming(
-    active: ActivePrompt,
-    sessionId: string,
-    reason: string,
-  ): void {
-    try {
-      active.stopStreaming?.();
-    } catch (err) {
-      process.stderr.write(
-        `[${this.name}] stopStreaming threw during ${reason} for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
-      );
-    }
-  }
-
   /**
-   * Cancel the active turn and wait (bounded) for it to wind down. Stops the
-   * BlockStreamer so buffered text can't leak via the idle timer, then fires a
+   * Cancel the active turn and wait (bounded) for it to wind down. Fires a
    * best-effort cancelSession (NOT awaited — a wedged child/daemon can leave the
    * request pending forever). Returns true if active.done settled first, false
    * if the CLEAR_CANCEL_TIMEOUT_MS bound won (the turn never wound down). Used by
@@ -5652,7 +5634,6 @@ export abstract class ChannelBase {
     sessionId: string,
   ): Promise<boolean> {
     active.cancelled = true;
-    this.stopActiveStreaming(active, sessionId, 'cancel');
     // Fire-and-forget, but LOG the IPC failure: a swallowed reason leaves a
     // wedged turn undiagnosable (operator sees only the wind-down timeout below
     // with no cause).
@@ -6806,7 +6787,6 @@ export abstract class ChannelBase {
             process.stderr.write(
               `[${this.name}] steer: cancelled active turn for ${envelope.senderId} in session ${sessionId}\n`,
             );
-            this.stopActiveStreaming(active, sessionId, 'steer');
             // Fire-and-forget, but LOG the IPC failure rather than swallow it, so a
             // best-effort cancel that fails isn't silently invisible to operators.
             void this.bridge.cancelSession(sessionId).catch((err) => {
@@ -6866,7 +6846,6 @@ export abstract class ChannelBase {
     // resurrect it while preprocessing runs before this queue.
     const generation =
       namedTurn?.generation ?? this.sessionGenerations.get(sessionId) ?? 0;
-    const useBlockStreaming = this.config.blockStreaming === 'on';
     if (namedTurn) {
       namedTurn.claimed = true;
     } else {
@@ -7015,30 +6994,12 @@ export abstract class ChannelBase {
         );
       }
 
-      const streamer = useBlockStreaming
-        ? new BlockStreamer({
-            minChars: this.config.blockStreamingChunk?.minChars ?? 400,
-            maxChars: this.config.blockStreamingChunk?.maxChars ?? 1000,
-            idleMs: this.config.blockStreamingCoalesce?.idleMs ?? 1500,
-            send: (text) =>
-              this.sendResponseMessage(
-                envelope.chatId,
-                text,
-                sessionId,
-                sourceLabel,
-              ),
-          })
-        : null;
-      promptState.stopStreaming = () => streamer?.stop();
-
       // Chunks arriving while a cancel is PENDING are held here: pushing them
       // to any visible sink could send output the cancel can't recall. On a
       // failed cancel they're replayed; on success, discarded.
       const heldChunks: string[] = [];
-      let hasStreamedText = false;
       const releaseHeldChunks = () => {
         for (const held of heldChunks.splice(0)) {
-          hasStreamedText = true;
           const segment = this.ensureOutputSegment(sessionId, promptState);
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
@@ -7050,7 +7011,6 @@ export abstract class ChannelBase {
             chunk: held,
           });
           this.onResponseChunk(envelope.chatId, held, sessionId, segment);
-          streamer?.push(held);
         }
       };
       const onChunk = (sid: string, chunk: string) => {
@@ -7071,7 +7031,6 @@ export abstract class ChannelBase {
           return;
         }
         heldChunks.length = 0;
-        hasStreamedText = false;
         const segment = this.closeOutputSegment(sessionId, promptState);
         void this.notifyOutputSegmentEnd(
           envelope.chatId,
@@ -7079,7 +7038,6 @@ export abstract class ChannelBase {
           segment,
           'response_boundary',
         );
-        streamer?.stop();
       };
       // Queue wait and memory recall can outlive a bridge crash. Capture the
       // bridge only after the latest recovery has restored session routing.
@@ -7104,22 +7062,15 @@ export abstract class ChannelBase {
         // If cancelled, skip sending the response
         if (!promptState.cancelled && response) {
           promptState.deliveryStarted = true;
-          if (streamer) {
-            if (!hasStreamedText) {
-              streamer.push(response);
-            }
-            await streamer.flush();
-          } else {
-            const segment = this.ensureOutputSegment(sessionId, promptState);
-            await this.onResponseComplete(
-              envelope.chatId,
-              response,
-              sessionId,
-              segment,
-            );
-            if (segment && promptState.activeSegmentId === segment.segmentId) {
-              promptState.activeSegmentId = undefined;
-            }
+          const segment = this.ensureOutputSegment(sessionId, promptState);
+          await this.onResponseComplete(
+            envelope.chatId,
+            response,
+            sessionId,
+            segment,
+          );
+          if (segment && promptState.activeSegmentId === segment.segmentId) {
+            promptState.activeSegmentId = undefined;
           }
         }
         // Once delivery started the turn's outcome is fixed — don't let a
@@ -7188,13 +7139,6 @@ export abstract class ChannelBase {
       } finally {
         promptBridge.off('textChunk', onChunk);
         promptBridge.off('responseBoundary', onResponseBoundary);
-        if (streamer) {
-          streamer.stop();
-          // Queued block sends belong to this turn: let them land before
-          // onPromptEnd settles turn-scoped adapter state, or a send racing
-          // the settle can recreate discarded state and leak unredacted text.
-          await streamer.drain();
-        }
         // Identity guard: a turn that wedged past /clear's bounded wait gets
         // EVICTED — /clear gives up on active.done, deletes activePrompts, and a
         // turn the user starts AFTER the clear can re-seed activePrompts (and own
