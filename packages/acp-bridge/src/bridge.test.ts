@@ -6586,6 +6586,7 @@ describe('createAcpSessionBridge', () => {
   });
 
   it('serves the in-memory journal on refreshed load while a question is pending', async () => {
+    let transcriptFetches = 0;
     const handle = makeChannel({
       loadSessionImpl: () => ({
         _meta: {
@@ -6604,6 +6605,7 @@ describe('createAcpSessionBridge', () => {
         if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
           throw new Error(`unexpected extMethod ${method}`);
         }
+        transcriptFetches += 1;
         // The persisted page can never contain the pending question:
         // permission requests are journaled in memory only.
         return {
@@ -6632,11 +6634,11 @@ describe('createAcpSessionBridge', () => {
       historyPageSize: 100,
     });
 
-    // Park the session on an unanswered ask_user_question. A parked turn
-    // does not keep promptActive set, so the refreshed-load guard would
-    // otherwise serve the persisted page with an empty liveJournal —
-    // stranding the interaction (badge on, no card) for the re-opening
-    // client.
+    // Park the session on an unanswered ask_user_question. A parked
+    // Goal/background-notification turn does not keep promptActive set, so
+    // the refreshed-load guard would otherwise serve the persisted page with
+    // an empty liveJournal — stranding the interaction (badge on, no card)
+    // for the re-opening client.
     const pendingAnswer = (
       handle.agentConnection as unknown as {
         requestPermission(p: unknown): Promise<unknown>;
@@ -6676,6 +6678,10 @@ describe('createAcpSessionBridge', () => {
         (event) => event.type === 'permission_request',
       ),
     ).toBe(true);
+    // The guard's observable effect: no persisted-page fetch happens at all
+    // while an interaction is pending (this fixture's journal emits no
+    // history_truncated marker, so the anchor backfill fetches nothing here).
+    expect(transcriptFetches).toBe(0);
     // The guarded branch switches the history source to the in-memory
     // replay; the session's prior history must survive the switch.
     const reopenedEvents = [
@@ -6700,7 +6706,7 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('re-checks pending interactions at serve time when a question arrives mid-fetch', async () => {
+  it('stops refetching the persisted page when a question arrives mid-fetch', async () => {
     let transcriptFetches = 0;
     let pendingAnswer: Promise<unknown> | undefined;
     const handle = makeChannel({
@@ -6786,7 +6792,9 @@ describe('createAcpSessionBridge', () => {
       historyPageSize: 100,
     });
 
-    expect(transcriptFetches).toBeGreaterThanOrEqual(1);
+    // Exactly one fetch: the interaction arrived mid-fetch, so the loop
+    // leaves instead of re-fetching a page that cannot contain it.
+    expect(transcriptFetches).toBe(1);
     expect(
       (reopened.liveJournal ?? []).some(
         (event) => event.type === 'permission_request',
