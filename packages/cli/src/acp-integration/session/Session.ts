@@ -1985,6 +1985,8 @@ export class Session implements SessionContext {
    */
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
+  private mcpRecoveryNoticeTurn?: string;
+  private readonly mcpRecoveryNotices = new Set<string>();
   private refreshContextFilesOnWrite = false;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly createdAt: number = Date.now();
@@ -6762,6 +6764,7 @@ export class Session implements SessionContext {
           nextMessage.parts ?? [],
           pendingSend.signal,
           {
+            recoveryTurnId: toolPromptId,
             skipCompression:
               skipCompression || (guardForThisSend?.attempt ?? 0) > 1,
             getModelOverride: options.getModelOverride,
@@ -7709,6 +7712,7 @@ export class Session implements SessionContext {
     message: Part[],
     abortSignal: AbortSignal,
     options: {
+      recoveryTurnId?: string;
       skipCompression?: boolean;
       modelOverride?: string;
       getModelOverride?: () => string | undefined;
@@ -7742,8 +7746,18 @@ export class Session implements SessionContext {
       return { responseStream: null, stopReason: 'cancelled' };
     }
     if (mcpRecoveryNotices.length > 0) {
+      // A later tool loop may need another connection or fresh declarations,
+      // but identical status messages should appear only once per user turn.
       await llmClient.setTools();
+      await this.sendAvailableCommandsUpdate();
+      const recoveryTurnId = options.recoveryTurnId ?? promptId;
+      if (this.mcpRecoveryNoticeTurn !== recoveryTurnId) {
+        this.mcpRecoveryNoticeTurn = recoveryTurnId;
+        this.mcpRecoveryNotices.clear();
+      }
       for (const notice of mcpRecoveryNotices) {
+        if (this.mcpRecoveryNotices.has(notice)) continue;
+        this.mcpRecoveryNotices.add(notice);
         await this.#emitAgentDiagnosticMessageSafely(
           notice,
           'Failed to emit MCP recovery status',

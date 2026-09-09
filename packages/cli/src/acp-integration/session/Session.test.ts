@@ -16021,8 +16021,79 @@ describe('Session', () => {
 
     describe('MCP demand recovery', () => {
       it.each(['reconnected', 'remains disconnected'])(
+        'deduplicates %s notices across tool loops while refreshing each send',
+        async (state) => {
+          const notice = `MCP server 'counter' ${state}.`;
+          const recover =
+            mockToolRegistry.getMcpClientManager().recoverFailedConnections;
+          recover.mockResolvedValue([notice]);
+          const execute = vi
+            .fn()
+            .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' });
+          mockToolRegistry.getTool.mockReturnValue({
+            name: 'read_file',
+            kind: core.Kind.Read,
+            displayName: 'Read File',
+            description: 'Read file',
+            canUpdateOutput: false,
+            isOutputMarkdown: true,
+            build: vi.fn().mockReturnValue({
+              params: {},
+              execute,
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Read file'),
+              toolLocations: vi.fn().mockReturnValue([]),
+            }),
+          });
+          const send = vi.fn();
+          for (const id of ['read-1', 'read-2']) {
+            send.mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      { id, name: 'read_file', args: { file_path: id } },
+                    ],
+                  },
+                },
+              ]),
+            );
+          }
+          send.mockImplementation(async () => createEmptyStream());
+          mockChat.sendMessageStream = send;
+          const prompt = {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text' as const, text: 'read files' }],
+          };
+          const notices = () =>
+            vi
+              .mocked(mockClient.sessionUpdate)
+              .mock.calls.filter(
+                ([update]) =>
+                  update.update.sessionUpdate === 'agent_message_chunk' &&
+                  update.update.content.type === 'text' &&
+                  update.update.content.text === notice,
+              );
+          await session.prompt(prompt);
+          expect(execute).toHaveBeenCalledTimes(2);
+          expect(send).toHaveBeenCalledTimes(3);
+          expect(recover).toHaveBeenCalledTimes(3);
+          expect(notices()).toHaveLength(1);
+          // A second connection loss in the turn can change declarations, even
+          // when its recovery message is identical to the first one's.
+          expect(
+            mockLlmClient.setTools.mock.calls.length,
+          ).toBeGreaterThanOrEqual(3);
+          await session.prompt(prompt);
+          expect(notices()).toHaveLength(2);
+        },
+      );
+
+      it.each(['reconnected', 'remains disconnected'])(
         'refreshes declarations and reports %s before the model send',
         async (state) => {
+          const commands = vi.spyOn(session, 'sendAvailableCommandsUpdate');
           const notice = `MCP server 'counter' ${state}.`;
           const recover =
             mockToolRegistry.getMcpClientManager().recoverFailedConnections;
@@ -16036,6 +16107,7 @@ describe('Session', () => {
           });
           expect(recover).toHaveBeenCalledWith(expect.any(AbortSignal));
           expect(mockLlmClient.setTools).toHaveBeenCalled();
+          expect(commands).toHaveBeenCalled();
           expect(
             mockLlmClient.setTools.mock.invocationCallOrder[0],
           ).toBeLessThan(

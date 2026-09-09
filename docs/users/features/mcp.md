@@ -297,7 +297,7 @@ environment. This is kept as an escape hatch for at least one release.
 
 ### Connection-loss replay
 
-Outside shared daemon/ACP sessions, Qwen Code only reconnects and replays the current MCP tool call when the server has `trust: true`, the workspace is trusted, and the tool explicitly declares either `idempotentHint: true` or a consistent read-only annotation. Read-only annotations conflict with `destructiveHint: true` or `idempotentHint: false` and are not replayed.
+For tools outside the workspace MCP pool (including daemon sessions started with `--no-mcp-pool`), Qwen Code only reconnects and replays the current MCP tool call when the server has `trust: true`, the workspace is trusted, and the tool explicitly declares either `idempotentHint: true` or a consistent read-only annotation. Read-only annotations conflict with `destructiveHint: true` or `idempotentHint: false` and are not replayed.
 
 Calls with missing annotations, conflicting annotations, an untrusted server, or an untrusted workspace are not replayed after a connection failure. Qwen Code reports that the result may be unknown because the server could have completed the operation before the response was lost. Verify the outcome before trying again. This conservative behavior can differ from earlier releases that transparently retried unannotated tools.
 
@@ -305,9 +305,9 @@ Annotations are server-provided behavior hints, not permissions or an authorizat
 
 ### Shared daemon / ACP connection recovery
 
-Daemon sessions (including Channel sessions) share MCP connections. Cancelling a tool call sends a request cancellation; it does not request a server restart and the cancelled call is never replayed. A server may nevertheless exit or lose its transport while handling cancellation.
+When workspace MCP pooling is enabled, daemon sessions (including Channel sessions) share eligible MCP connections, including stdio processes. Cancelling a tool call sends a request cancellation; it does not request a server restart and the cancelled call is never replayed. A server may nevertheless exit or lose its transport while handling cancellation. Disabling the pool retains the legacy per-session connection behavior.
 
-When a previously connected server disconnects unexpectedly, the next model send in each affected session attempts to restore that session's connection and tools. Concurrent sessions share a replacement process. Recovery waits for the old transport cleanup, makes one connection attempt per demand, and applies a shared five-second cooldown after a failed attempt. There is no background retry loop. The session reports whether recovery succeeded or the server remains disconnected.
+When a previously connected server disconnects unexpectedly, the next model send in each affected session attempts to restore that session's connection, tools and prompt commands. This includes later tool loops and scheduled model turns. Concurrent sessions share a replacement process. Each model send can request recovery; failures impose a shared five-second cooldown, including failures while accepting the acquired connection into a session. All acquisition paths wait for old transport cleanup. There is no background reconnect timer. The session reports success or failure, with identical diagnostics shown once per user turn.
 
 Shared tools do not reconnect or replay a failed invocation themselves, even when annotated read-only or idempotent. A lost response may hide a completed operation: check its outcome before requesting that operation again. Recovery does not execute any tool or reuse a previous permission decision.
 

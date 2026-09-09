@@ -988,9 +988,65 @@ describe('DiscoveredMCPTool', () => {
         tool = tool.withAppResourceUi({ resourceUri: 'ui://test' });
       await expect(
         tool.build({ param: 'test' }).execute(new AbortController().signal),
-      ).rejects.toThrow('Connection closed');
+      ).rejects.toThrow('Do not retry automatically; verify the outcome');
       expect(callTool).toHaveBeenCalledTimes(1);
       expect(discoverToolsForServer).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['direct', 'callable'])(
+    'warns about an ambiguous shared call without replaying it (%s)',
+    async (mode) => {
+      const error = new Error('Connection closed');
+      const call = vi.fn().mockRejectedValue(error);
+      const callable = { ...mockCallableToolInstance, callTool: call };
+      const shared = new DiscoveredMCPTool(
+        callable,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        mode === 'direct' ? { callTool: call } : undefined,
+      ).withSessionConfig(false, false, false);
+      await expect(
+        shared.build({ param: 'test' }).execute(new AbortController().signal),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining(
+          'Do not retry automatically; verify the outcome',
+        ),
+        cause: error,
+      });
+      expect(call).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['business error', 'abort'])(
+    'preserves a shared invocation %s without a connection-loss warning',
+    async (kind) => {
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const error = new Error(
+        kind === 'abort' ? 'Connection closed' : 'Invalid input',
+      );
+      if (kind === 'abort') error.name = 'AbortError';
+      const callTool = vi.fn().mockRejectedValue(error);
+      const shared = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        { callTool },
+      ).withSessionConfig(false, false, false);
+      await expect(
+        shared.build({ param: 'test' }).execute(new AbortController().signal),
+      ).rejects.toBe(error);
+      expect(callTool).toHaveBeenCalledTimes(1);
     },
   );
 

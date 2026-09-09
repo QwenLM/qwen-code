@@ -812,7 +812,8 @@ export class McpClient {
     this.status = MCPServerStatus.DISCONNECTED;
     updateMCPServerStatus(this.serverName, MCPServerStatus.DISCONNECTED);
     this.isDisconnecting = true;
-    if (this.transport) {
+    const transport = this.transport;
+    if (transport) {
       // Streamable HTTP only: the SDK's `transport.close()` aborts local
       // state but leaves the server-side session alive. Per spec, a client
       // that no longer needs a session SHOULD terminate it explicitly
@@ -824,7 +825,7 @@ export class McpClient {
       // multi-session servers accumulate orphaned sessions. Best-effort —
       // a dead/unreachable server must not block teardown. Must run BEFORE
       // `close()` aborts the transport's request machinery.
-      const streamableTransport = this.transport as {
+      const streamableTransport = transport as {
         terminateSession?: () => Promise<void>;
       };
       if (typeof streamableTransport.terminateSession === 'function') {
@@ -849,9 +850,22 @@ export class McpClient {
           );
         }
       }
-      await this.transport.close();
+      try {
+        await transport.close();
+      } finally {
+        try {
+          // stdio close can return before the process close event. Settle
+          // SDK requests now, before reusing the client for another transport.
+          if (this.client.transport === transport) transport.onclose?.();
+        } finally {
+          transport.onclose = undefined;
+          transport.onerror = undefined;
+          transport.onmessage = undefined;
+          if (this.transport === transport) this.transport = undefined;
+        }
+      }
     }
-    this.client.close();
+    await this.client.close();
     this.instructions = undefined;
   }
 

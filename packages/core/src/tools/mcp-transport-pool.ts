@@ -199,36 +199,33 @@ export class McpTransportPool {
     ...args: Parameters<McpTransportPool['acquire']>
   ): Promise<PooledConnection> {
     const id = connectionIdOf(args[0], args[1]);
-    // A transport error can leave a live child being swept. Finish that
-    // teardown before starting its replacement, even across sessions.
-    await this.retiringEntries.get(id);
     const retryAfter = this.recoveryRetryAfter.get(id) ?? 0;
-    if (
-      retryAfter > Date.now() &&
-      !this.entries.has(id) &&
-      !this.spawnInFlight.has(id)
-    ) {
+    if (retryAfter > Date.now()) {
       throw new Error(`MCP recovery for '${args[0]}' is cooling down`);
     }
     try {
-      const connection = await this.acquire(...args);
-      this.recoveryRetryAfter.delete(id);
-      return connection;
+      // Do not clear another session's failure when an earlier concurrent
+      // acquire returns successfully. Cooldowns expire on their own.
+      return await this.acquire(...args);
     } catch (error) {
-      // One attempt per demand, with a workspace-wide cooldown on failure.
-      // Explicit discovery/restart continues to use the normal acquire path.
-      const retryAfter = Date.now() + 5_000;
-      this.recoveryRetryAfter.set(id, retryAfter);
-      // Expire even if this configuration is removed and never acquired again.
-      // An older failure must not clear a newer cooldown for the same key.
-      const expiry = setTimeout(() => {
-        if (this.recoveryRetryAfter.get(id) === retryAfter) {
-          this.recoveryRetryAfter.delete(id);
-        }
-      }, 5_000);
-      expiry.unref?.();
+      this.recordRecoveryFailure(id);
       throw error;
     }
+  }
+
+  /** Includes handles rejected by the session after acquire has returned. */
+  recordRecoveryFailure(id: ConnectionId): void {
+    // Explicit discovery/restart continues to use the normal acquire path.
+    const retryAfter = Date.now() + 5_000;
+    this.recoveryRetryAfter.set(id, retryAfter);
+    // Expire even if this configuration is removed and never acquired again.
+    // An older failure must not clear a newer cooldown for the same key.
+    const expiry = setTimeout(() => {
+      if (this.recoveryRetryAfter.get(id) === retryAfter) {
+        this.recoveryRetryAfter.delete(id);
+      }
+    }, 5_000);
+    expiry.unref?.();
   }
 
   /**
@@ -265,6 +262,24 @@ export class McpTransportPool {
     const poolable = isPoolable(cfg, this.opts.pooledTransports);
     const id = poolable ? connectionIdOf(serverName, cfg) : undefined;
     if (id !== undefined) {
+      // Discovery and demand recovery must both wait for the old child.
+      // A force-close publishes its barrier before it is evicted.
+      let cleanup: Promise<void> | undefined;
+      let completedCleanup: Promise<void> | undefined;
+      while (
+        (cleanup =
+          this.retiringEntries.get(id) ??
+          this.entries.get(id)?.waitForCleanup()) &&
+        cleanup !== completedCleanup
+      ) {
+        await cleanup;
+        completedCleanup = cleanup;
+        if (this.draining) {
+          throw new Error(
+            `McpTransportPool is draining; refusing acquire for ${serverName}`,
+          );
+        }
+      }
       const existing = this.entries.get(id);
       // defense-in-depth
       // against terminal-state attach race. With the silent-drop
@@ -808,6 +823,17 @@ export class McpTransportPool {
     // entry that just got `entries.set` from a completing spawn is
     // in the list.
     const entries = [...this.entries.values()];
+    const retiring = [...this.retiringEntries].filter(
+      ([id]) => !this.entries.has(id),
+    );
+    let retiredCount = 0;
+    const retirementWait = Promise.allSettled(
+      retiring.map(([, cleanup]) =>
+        cleanup.then(() => {
+          retiredCount++;
+        }),
+      ),
+    );
     const drained: number[] = [];
     const errors: Array<{
       entryIndex: number;
@@ -840,7 +866,7 @@ export class McpTransportPool {
     let drainTimer: ReturnType<typeof setTimeout> | undefined;
     const remaining = Math.max(0, deadline - Date.now());
     await Promise.race([
-      Promise.all(shutdownPromises).then(() => {
+      Promise.all([...shutdownPromises, retirementWait]).then(() => {
         if (drainTimer) clearTimeout(drainTimer);
       }),
       new Promise<void>((resolve) => {
@@ -848,11 +874,15 @@ export class McpTransportPool {
         drainTimer.unref?.();
       }),
     ]);
-    const drainedCount = drained.length;
+    const drainedCount = drained.length + retiredCount;
     const errorsCount = errors.length;
-    const forced = Math.max(0, entries.length - drainedCount - errorsCount);
+    const forced = Math.max(
+      0,
+      entries.length + retiring.length - drainedCount - errorsCount,
+    );
     const errorsCopy = [...errors];
     this.entries.clear();
+    this.retiringEntries.clear();
     this.unpooledIds.clear();
     this.sessionToEntries.clear();
     this.spawnInFlight.clear();

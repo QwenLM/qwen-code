@@ -435,8 +435,16 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ): Promise<ToolResult> {
     debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
 
-    if (signal.aborted) {
+    if (signal.aborted || isAbortError(error)) {
       throw error;
+    }
+
+    if (!this.reconnectOnError && this.isConnectionError(error)) {
+      // The session will restore its shared connection. The model must still
+      // be told that this call's outcome is unknown, to avoid a fresh retry.
+      throw new Error(DiscoveredMCPToolInvocation.UNSAFE_REPLAY_ERROR_MESSAGE, {
+        cause: error,
+      });
     }
 
     if (!this.shouldAttemptReconnect(error)) {
@@ -545,6 +553,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       return false;
     }
 
+    return this.isConnectionError(error);
+  }
+
+  private isConnectionError(error: unknown): boolean {
     if (getMCPServerStatus(this.serverName) === MCPServerStatus.DISCONNECTED) {
       return true;
     }
