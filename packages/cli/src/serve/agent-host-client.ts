@@ -8,11 +8,25 @@ import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { Storage } from '@qwen-code/qwen-code-core';
+import { setTimeout as delay } from 'node:timers/promises';
+import {
+  ApprovalMode,
+  SessionService,
+  Storage,
+  type HostRunAssignment,
+  type HostRunResult,
+} from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import type { AcpSessionBridge } from './acp-session-bridge.js';
 import { isLoopbackBind } from './loopback-binds.js';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  agentThreadSessionId,
+} from '../runtime/agent-session-source.js';
 
 const HEARTBEAT_MS = 5_000;
+const LEASE_RENEW_MS = 20_000;
+const RETRY_MS = 2_000;
 const PROVIDERS = ['Qwen Code ACP'];
 
 interface AgentHostCredential {
@@ -24,6 +38,7 @@ interface AgentHostCredential {
 }
 
 export interface AgentHostConnectionOptions {
+  bridge: AcpSessionBridge;
   serverUrl: string;
   workspaceId: string;
   workspaceCwd: string;
@@ -111,6 +126,155 @@ async function requestJson<T>(
   return result;
 }
 
+async function pickup(
+  serverUrl: string,
+  credential: AgentHostCredential,
+  waitMs = 25_000,
+): Promise<HostRunAssignment | undefined> {
+  const response = await fetch(
+    `${serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/pickup`,
+    {
+      method: 'POST',
+      headers: {
+        authorization: `AgentHost ${credential.secret}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ waitMs }),
+    },
+  );
+  if (response.status === 204) return undefined;
+  const result = (await response.json().catch(() => ({}))) as {
+    assignment?: HostRunAssignment;
+    error?: string;
+  };
+  if (!response.ok || !result.assignment) {
+    throw new Error(
+      result.error ?? `Agent Host pickup failed (${response.status}).`,
+    );
+  }
+  return result.assignment;
+}
+
+function modelPrompt(assignment: HostRunAssignment): string {
+  const instructions = assignment.agent.instructions?.trim();
+  return [
+    `You are ${assignment.agent.name}, an independent persistent workspace Agent running on a managed Host.`,
+    instructions
+      ? `Your workspace instructions:\n${instructions}`
+      : undefined,
+    'Work on the assigned task using read-only inspection tools. Do not call thread_* tools on this Host. End with a concise result for the parent Agent or person; the Host will post it back to the shared thread.',
+    assignment.prompt,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+async function executeAssignment(
+  options: AgentHostConnectionOptions,
+  credential: AgentHostCredential,
+  assignment: HostRunAssignment,
+): Promise<HostRunResult> {
+  const sessionId = agentThreadSessionId(
+    `${credential.hostId}:${assignment.agent.id}`,
+    assignment.threadId,
+  );
+  const sourceId = `${credential.hostId}:${assignment.agent.id}`;
+  const sessions = new SessionService(options.workspaceCwd);
+  const live = options.bridge
+    .listWorkspaceSessions(options.workspaceCwd)
+    .find((session) => session.sessionId === sessionId);
+  if (!live) {
+    const request = {
+      workspaceCwd: options.workspaceCwd,
+      sessionId,
+      sourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+      sourceId,
+      approvalMode: ApprovalMode.PLAN,
+    };
+    if (await sessions.sessionExists(sessionId)) {
+      await options.bridge.resumeSession(request);
+    } else {
+      await options.bridge.spawnOrAttach({
+        ...request,
+        sessionScope: 'thread',
+      });
+    }
+  }
+
+  const promptId = `agent-host:${assignment.runId}:${assignment.attempt}`;
+  const renew = setInterval(
+    () => void pickup(credential.serverUrl, credential, 0).catch(() => {}),
+    LEASE_RENEW_MS,
+  );
+  renew.unref?.();
+  try {
+    await options.bridge.sendPrompt(
+      sessionId,
+      {
+        sessionId,
+        prompt: [{ type: 'text', text: assignment.prompt }],
+      },
+      undefined,
+      { promptId, modelPrompt: modelPrompt(assignment) },
+    );
+  } finally {
+    clearInterval(renew);
+  }
+  const turn = await options.bridge.getSessionTurnStatus(
+    sessionId,
+    undefined,
+    promptId,
+  );
+  const summary = turn?.resultText?.trim();
+  if (!summary) {
+    throw new Error('Managed Agent finished without a final answer.');
+  }
+  return {
+    threadId: assignment.threadId,
+    runId: assignment.runId,
+    hostId: credential.hostId,
+    leaseId: assignment.lease.leaseId,
+    attempt: assignment.attempt,
+    status: 'completed',
+    close: { kind: 'review', summary },
+  };
+}
+
+async function returnResult(
+  serverUrl: string,
+  credential: AgentHostCredential,
+  result: HostRunResult,
+): Promise<void> {
+  for (;;) {
+    try {
+      await requestJson(
+        `${serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/result`,
+        {
+          method: 'POST',
+          headers: {
+            authorization: `AgentHost ${credential.secret}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(result),
+        },
+      );
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === 'stale_lease' || message === 'attempt_moved_on') {
+        writeStderrLine(
+          `qwen serve: discarded managed Agent result (${message}).`,
+        );
+        return;
+      }
+      writeStderrLine(
+        `qwen serve: managed Agent result upload failed; retrying: ${message}`,
+      );
+      await delay(RETRY_MS);
+    }
+  }
+}
+
 export async function startAgentHostConnection(
   options: AgentHostConnectionOptions,
 ): Promise<void> {
@@ -191,4 +355,40 @@ export async function startAgentHostConnection(
   writeStderrLine(
     `qwen serve: connected as Agent Host ${activeCredential.hostId} for ${options.workspaceId}.`,
   );
+
+  void (async () => {
+    for (;;) {
+      try {
+        const assignment = await pickup(serverUrl, activeCredential);
+        if (!assignment) continue;
+        writeStderrLine(
+          `qwen serve: Agent Host ${activeCredential.hostId} running ${assignment.agent.name} on ${assignment.threadId}.`,
+        );
+        let result: HostRunResult;
+        try {
+          result = await executeAssignment(
+            options,
+            activeCredential,
+            assignment,
+          );
+        } catch (error) {
+          result = {
+            threadId: assignment.threadId,
+            runId: assignment.runId,
+            hostId: activeCredential.hostId,
+            leaseId: assignment.lease.leaseId,
+            attempt: assignment.attempt,
+            status: 'failed',
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+        await returnResult(serverUrl, activeCredential, result);
+      } catch (error) {
+        writeStderrLine(
+          `qwen serve: Agent Host pickup failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        await delay(RETRY_MS);
+      }
+    }
+  })();
 }

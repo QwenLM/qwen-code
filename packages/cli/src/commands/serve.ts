@@ -998,6 +998,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
             '../serve/agent-host-client.js'
           );
           await startAgentHostConnection({
+            bridge: handle.bridge,
             serverUrl: argv['agent-host-server'],
             workspaceId: argv['agent-host-workspace-id'],
             workspaceCwd: primaryWorkspaceArg(argv.workspace) ?? process.cwd(),

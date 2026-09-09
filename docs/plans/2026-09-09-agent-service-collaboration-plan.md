@@ -100,12 +100,12 @@ P2/P3 已有最小可见入口；此步只收束体验：原有新建对话、�
 - **P1 已完成。** 契约冻结在 `a2a-contract.ts`：协议 `1.0`、`JSONRPC`、`@a2a-js/sdk@1.1.0`；映射与不支持项见 [冻结契约](../design/2026-09-09-a2a-frozen-contract.md)。互通验收者定为 `a2a-sdk`(Python)。
 - **P2 服务端与 A2A JSON-RPC 传输已完成，真实 A/B 执行闭环未做。** `@a2a-js/sdk@1.1.0` Express 服务端已挂在协作开关后；公开 card 不枚举 Agent，认证 card 只列 grant 允许的 Agent。Python `a2a-sdk==1.1.2` 实测接单、查询、列举、取消、同 `messageId` 幂等、同键异内容冲突回执及第二调用方隔离均通过；关闭协作开关时 card 为 404、普通 `/health` 为 200。冻结契约 §8 的“没有任何传输层”是 P1 当时的状态快照，已被本项取代。**未做：** 真实两台可达服务之间的任务执行、结果回传与反向调用。
 - **P3 的决定已落地，未接 Codex。** §5 的规则实现在 `codex-turn-result.ts`。**须你确认的后果：** 只读分析（正是计划首个对外任务）只产生 `agentMessage`，按此规则每次都落 `unclosed` 等人处置。
-- **P4 的租约状态机已完成，通道尚未开始。** `host-lease.ts` 可防旧 worker 覆盖新执行；但实现传输前发现现有 Host 凭证只证明“这是本 workspace 的某个 Host”，存储中没有 Host→Agent/任务授权或远程放置关系。因而原先“两项都只差传输”的判断不成立：直接长轮询会让任意已登记 Host 领取全 workspace 任务；把 `runtimeId` 当 Host id 又违反架构的职责分离。**未做：** 决定并实现最小 Host 授权/放置关系后，再接出站长轮询与结果回传。
-- **P5 的视图逻辑已完成，页面未做。** `summariseWorkspaceWork` 回答三问。**未做：** 单一入口发起本地加远程协作——要等 P2/P3 可达。
+- **P4 的 Demo 闭环已完成。** Agent 定义归 workspace，`execution` 明确授权可领取它的 managed Host；协调端已有长轮询、租约/attempt 校验和幂等结果回传，执行端已有领取、续租、本机 ACP model 执行与回传循环。真实 run `rn_8158e46e-6166-4c68-b8e7-7047674dc3f8` 在第二个 daemon 中执行约 24.2 秒，结果进入共享线程并把它推进 `in_review`。双 Host 状态机演示仍证明旧 worker 分别以 `stale_lease` 和 `attempt_moved_on` 被拒。**未做：** 跨物理机器部署；完整 agent type persona/model/tool ceiling；远端 Agent 直接调用 `thread_*`。
+- **P5 的工作台页面和视图逻辑已可用于 Demo。** Agents、Tasks 与 Runtime 页面能看到 managed-host Agent、远端 Host 在线状态、任务归属和最终 review。**未做：** 把本地与远程 Agent 的创建、分工和验收进一步收束进原有对话入口。
 
-仍阻塞的人的决定：实际 A/B 环境与可达方式、首个开放 Agent 的执行权限、审批接收人；以及上面 P3 那条后果是否接受。
+仍需产品决定：生产 A/B 环境与可达方式、远端 Agent 的最终权限上限、审批接收人；以及上面 P3 那条后果是否接受。它们不阻塞当前只读 Demo。
 
-下一棒入口见 [A2A 传输层与 Host 出站取件](./2026-09-09-a2a-transport-and-host-pickup-handoff.md)：A2A 已完成；Host 先补齐该文档顶部记录的授权/放置决定，再接传输。
+下一棒入口见 [A2A 传输层与 Host 出站取件](./2026-09-09-a2a-transport-and-host-pickup-handoff.md)：A2A 与受管 Host 的只读执行闭环已完成；Demo 后再补完整 persona/tool ceiling 和跨机器部署。
 
 ## 4. 接力清单
 

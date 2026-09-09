@@ -1,6 +1,6 @@
 # 交接：A2A 传输层与 Host 出站取件
 
-状态：任务 1 已完成并通过独立 Python SDK 互通；任务 2 的协调端授权放置、长轮询取件、结果回传与租约接管已实现并完成双 Host 行为演示，执行端 model worker 尚未接入。上游状态见[实施计划 §3b](./2026-09-09-agent-service-collaboration-plan.md)。交付分支仍为 `codex/multi-agent-mesh-foundation`（PR #11206）。
+状态：任务 1 已完成并通过独立 Python SDK 互通；任务 2 已补齐协调端授权放置、长轮询取件、结果回传、租约接管和执行端 model worker，并完成一次真实模型闭环。上游状态见[实施计划 §3b](./2026-09-09-agent-service-collaboration-plan.md)。交付分支仍为 `codex/multi-agent-mesh-foundation`（PR #11206）。
 
 A2A 的语义、存储与授权已落地。Host 放置采用操作者确认的最小模型：Agent 仍由 workspace store 拥有，`execution` 只区分本地与一组获准领取它的 managed Host；Host 注册本身不获得任何 Agent。没有引入 Host pool，也没有复用 `runtimeId` 承载授权。
 
@@ -111,7 +111,9 @@ type LeaseRefusal = 'no_such_run' | 'not_leasable' | 'held_by_other_host'
 
 一次独立行为脚本实际观察到：Host X 无法领取未授权 Agent；本地 dispatcher 不接触 managed-host Agent；Host A 重连取得同一 `leaseId`；租约过期后 Host B 取得新 `leaseId`，Host A 的晚结果以 `stale_lease` 拒绝；旧 attempt 以 `attempt_moved_on` 拒绝；Host B 的结果先持久化并把线程推进 `in_review`，同一结果重发返回 `alreadyApplied=true`。
 
-这证明了协调端传输和状态机，不证明执行端已能跑模型。当前 `agent-host-client.ts` 仍只注册和心跳，没有消费取件、调用本机 runtime、再回传结果的 worker loop；完整 persona/tool ceiling 也尚未通过取件协议装入远端 runtime。把这一段补齐前，产品只能称为「远端取件通道可用」，不能称为「远端 Agent 执行完成」。
+随后用第二个真实 daemon 进程完成执行端闭环：Host `host_d43cad67-c491-4915-9186-481732a0458e` 领取 run `rn_8158e46e-6166-4c68-b8e7-7047674dc3f8`，在隐藏的 task-scoped ACP session 中执行约 24.2 秒，正确读出根 `package.json` 的包名 `@qwen-code/qwen-code` 和 `engines.node >=22.0.0`，结果回传后线程 `th_65775393-3b1b-4deb-ac05-a504a8fcb537` 进入 `in_review`。取件、续租和回传都由 Host 出站请求发起；本轮第二个 Host 与协调端仍在同一台物理机上，尚未证明跨机器网络部署。
+
+Demo 路径有意保持最小：远端 session 使用 Plan/read-only 权限，最终文本由 Host 映射为 `review`；取件协议携带的 Agent instructions 已进入 prompt，但完整 agent type 基础 persona、逐 Agent model 覆盖和精确 tool ceiling 尚未装入远端 runtime，远端 Agent 也不能直接调用 `thread_*` 继续拆分。这些不阻塞「受管 Host 领取并完成任务」演示，但不能把当前实现描述为完整的远程多 Agent 对等协作。
 
 ---
 
