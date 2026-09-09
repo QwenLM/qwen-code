@@ -67,10 +67,29 @@ describe('base-tree trust store', () => {
     // the discriminating probe: keying on mtime alone keeps the key here.
     const before = baseTreeTrustPath(worktree, plan);
     const mtime = statSync(plan).mtimeMs;
-    chmodSync(plan, 0o400);
+    const ctime = statSync(plan).ctimeMs;
+    // The kernel's coarse timestamp tick can swallow a chmod landing in the
+    // same tick as the fixture's write (measured on this host's ext4: a
+    // chmod 7.7 µs after create leaves `ctimeMs` bit-identical; only a
+    // >=5 ms gap moves it), so touch until the ctime OBSERVABLY moves. The
+    // deadline bounds the loop on a 1 s-granularity filesystem, and the
+    // mode alternates so no filesystem can skip a same-mode chmod.
+    const deadline = Date.now() + 10_000;
+    let mode = 0o400;
+    while (statSync(plan).ctimeMs === ctime) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          'the filesystem never moved ctimeMs across 10 s of chmods — ' +
+            'the touch discrimination this test pins is unobservable here',
+        );
+      }
+      chmodSync(plan, mode);
+      mode = mode === 0o400 ? 0o600 : 0o400;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
     expect(statSync(plan).mtimeMs).toBe(mtime); // the control: mtime unmoved
     expect(baseTreeTrustPath(worktree, plan)).not.toBe(before);
-  });
+  }, 15_000);
 
   it('creates the run secret once and hands every later asker the same one', () => {
     const p = baseTreeTrustPath(worktree, plan);
