@@ -59,6 +59,23 @@ function settingsFile(
   };
 }
 
+/**
+ * A layer as the loader actually produces it: `originalSettings` is the
+ * pre-substitution snapshot and `settings` the substituted one. The
+ * placeholder guard compares the two, so placeholder fixtures must diverge.
+ */
+function substitutedFile(
+  original: Settings,
+  resolved: Settings,
+  filePath = '/settings.json',
+): SettingsFile {
+  return {
+    settings: resolved,
+    originalSettings: original,
+    path: filePath,
+  };
+}
+
 function makeSettings(scopes: {
   system?: Settings;
   systemDefaults?: Settings;
@@ -483,6 +500,20 @@ describe('resolveWebShellBrand', () => {
       ]);
     });
 
+    it('stays silent for a prefix-bound root when the default namespace is also bound', () => {
+      // With BOTH bindings, the unprefixed children ARE in the SVG namespace
+      // and render normally — the advisory must not cry wolf on the shape
+      // XSL/Batik pipelines emit.
+      const file = writeLogo(
+        '<svg:svg xmlns:svg="http://www.w3.org/2000/svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4"/></svg:svg>',
+      );
+      const { brand, warnings } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(warnings).toBeUndefined();
+      expect(brand.logoDataUri).toBeDefined();
+    });
+
     it('warns for a degenerate viewBox with no viewport area', () => {
       const file = writeLogo(
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 0 8"><circle cx="4" cy="4" r="4"/></svg>',
@@ -490,6 +521,38 @@ describe('resolveWebShellBrand', () => {
       const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: file }) }),
       );
+      expect(brand.logoDataUri).toBeDefined();
+      expect(warnings).toEqual([expect.stringContaining('zero-area viewport')]);
+    });
+
+    it('warns accurately for a malformed viewBox with only a width', () => {
+      // The browser ignores the malformed viewBox and has no height to scale
+      // against — the message must say THAT, not claim the file has no
+      // viewBox at all (it demonstrably has one, and a width too).
+      const file = writeLogo(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24" width="24px"><circle cx="4" cy="4" r="4"/></svg>',
+      );
+      const { brand, warnings } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(brand.logoDataUri).toBeDefined();
+      expect(warnings).toEqual([expect.stringContaining('malformed viewBox')]);
+    });
+
+    it('fails closed, not loud, on an out-of-range character reference', () => {
+      // &#x110000; is past Unicode's ceiling: decoding must not throw a
+      // RangeError out of the resolver — that would escape to the route's
+      // catch-all, drop the validly configured NAME too, and answer 200 {}
+      // with a message naming neither the key nor the file.
+      const file = writeLogo(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="&#x110000;" height="8"/>',
+      );
+      const { brand, warnings } = resolveWebShellBrand(
+        makeSettings({
+          user: brandSettings({ name: 'QiuQiu Code', logoPath: file }),
+        }),
+      );
+      expect(brand.name).toBe('QiuQiu Code');
       expect(brand.logoDataUri).toBeDefined();
       expect(warnings).toEqual([
         expect.stringContaining('no viewBox or width/height'),
@@ -561,18 +624,15 @@ describe('resolveWebShellBrand', () => {
       // loadSettings substitutes ${VAR} from the process-wide environment,
       // which loadEnvironment populates workspace-first at boot — so the
       // substituted value can come from a repository even though the
-      // operator's own layer wrote the placeholder. Brand keys therefore read
-      // the pre-substitution snapshot and refuse placeholders. The variable
-      // must be SET for the guard to fire: an unresolvable placeholder is
-      // preserved verbatim by the engine and kept as literal text.
+      // operator's own layer wrote the placeholder. Brand keys therefore
+      // compare the layer's substituted value against its pre-substitution
+      // snapshot and refuse whenever substitution actually fired.
       const logoPath = writeLogo(LOGO_SVG);
-      const user = settingsFile(
+      const user = substitutedFile(
+        brandSettings({ logoPath: '${BRAND_DIR}/logo.svg' }),
         brandSettings({ logoPath }),
         path.join(dir, 'settings.json'),
       );
-      user.originalSettings = brandSettings({
-        logoPath: '${BRAND_DIR}/logo.svg',
-      });
       const settings = new LoadedSettings(
         settingsFile({}, '/system/settings.json'),
         settingsFile({}, '/system-defaults.json'),
@@ -581,26 +641,19 @@ describe('resolveWebShellBrand', () => {
         true,
         new Set(),
       );
-      const previous = process.env['BRAND_DIR'];
-      process.env['BRAND_DIR'] = dir;
-      try {
-        const { brand, warnings } = resolveWebShellBrand(settings);
-        expect(brand.logoDataUri).toBeUndefined();
-        expect(warnings).toEqual([
-          expect.stringContaining('environment placeholder'),
-        ]);
-      } finally {
-        if (previous === undefined) delete process.env['BRAND_DIR'];
-        else process.env['BRAND_DIR'] = previous;
-      }
+      const { brand, warnings } = resolveWebShellBrand(settings);
+      expect(brand.logoDataUri).toBeUndefined();
+      expect(warnings).toEqual([
+        expect.stringContaining('environment placeholder'),
+      ]);
     });
 
     it('ignores a placeholder name for the same reason, bare $VAR form included', () => {
-      const user = settingsFile(
-        brandSettings({ name: 'Repo Brand' }),
+      const user = substitutedFile(
+        brandSettings({ name: '$PRODUCT_NAME' }),
+        brandSettings({ name: 'Repo Supplied Name' }),
         path.join(dir, 'settings.json'),
       );
-      user.originalSettings = brandSettings({ name: '$PRODUCT_NAME' });
       const settings = new LoadedSettings(
         settingsFile({}, '/system/settings.json'),
         settingsFile({}, '/system-defaults.json'),
@@ -609,24 +662,17 @@ describe('resolveWebShellBrand', () => {
         true,
         new Set(),
       );
-      const previous = process.env['PRODUCT_NAME'];
-      process.env['PRODUCT_NAME'] = 'Repo Supplied Name';
-      try {
-        const { brand, warnings } = resolveWebShellBrand(settings);
-        expect(brand.name).toBeUndefined();
-        expect(warnings).toEqual([
-          expect.stringContaining('environment placeholder'),
-        ]);
-      } finally {
-        if (previous === undefined) delete process.env['PRODUCT_NAME'];
-        else process.env['PRODUCT_NAME'] = previous;
-      }
+      const { brand, warnings } = resolveWebShellBrand(settings);
+      expect(brand.name).toBeUndefined();
+      expect(warnings).toEqual([
+        expect.stringContaining('environment placeholder'),
+      ]);
     });
 
     it('keeps a literal name that merely contains a dollar sign', () => {
-      // The guard refuses on substitution, not syntax: these values contain
-      // `$` but resolve to themselves, so nothing workspace-supplied could
-      // have entered them.
+      // The guard fires on substitution actually happening, never on syntax:
+      // these layers read the same before and after substitution, so nothing
+      // environment-supplied could have entered them.
       for (const name of ['$5 Off Mart', 'US$ Deals', 'Cost$Less']) {
         const settings = makeSettings({ user: brandSettings({ name }) });
         const { brand, warnings } = resolveWebShellBrand(settings);
@@ -639,72 +685,90 @@ describe('resolveWebShellBrand', () => {
       // Precedence is symmetrical with value-winning: the placeholder layer
       // wins over lower layers and the key is unset — not skipped — so a
       // managed brand does not reappear beneath it.
-      const previous = process.env['PRODUCT_NAME'];
-      process.env['PRODUCT_NAME'] = 'Repo Supplied Name';
-      try {
-        const settings = makeSettings({
-          systemDefaults: brandSettings({ name: 'Managed Brand' }),
-          user: brandSettings({ name: '${PRODUCT_NAME}' }),
-        });
-        const { brand, warnings } = resolveWebShellBrand(settings);
-        expect(brand).toEqual({});
-        expect(warnings).toEqual([
-          expect.stringContaining('environment placeholder'),
-        ]);
-      } finally {
-        if (previous === undefined) delete process.env['PRODUCT_NAME'];
-        else process.env['PRODUCT_NAME'] = previous;
-      }
+      const settings = new LoadedSettings(
+        settingsFile({}, '/system/settings.json'),
+        settingsFile(
+          brandSettings({ name: 'Managed Brand' }),
+          '/system-defaults.json',
+        ),
+        substitutedFile(
+          brandSettings({ name: '${PRODUCT_NAME}' }),
+          brandSettings({ name: 'Repo Supplied Name' }),
+          '/settings.json',
+        ),
+        settingsFile({}, '/workspace/.qwen/settings.json'),
+        true,
+        new Set(),
+      );
+      const { brand, warnings } = resolveWebShellBrand(settings);
+      expect(brand).toEqual({});
+      expect(warnings).toEqual([
+        expect.stringContaining('environment placeholder'),
+      ]);
     });
 
     it('lets an explicit empty value at a higher layer reset a placeholder below it, with no warning', () => {
-      const previous = process.env['PRODUCT_NAME'];
-      process.env['PRODUCT_NAME'] = 'Repo Supplied Name';
-      try {
-        const settings = makeSettings({
-          systemDefaults: brandSettings({ name: '${PRODUCT_NAME}' }),
-          user: brandSettings({ name: '' }),
-        });
-        const { brand, warnings } = resolveWebShellBrand(settings);
-        expect(brand).toEqual({});
-        expect(warnings).toBeUndefined();
-      } finally {
-        if (previous === undefined) delete process.env['PRODUCT_NAME'];
-        else process.env['PRODUCT_NAME'] = previous;
-      }
+      const settings = new LoadedSettings(
+        settingsFile({}, '/system/settings.json'),
+        substitutedFile(
+          brandSettings({ name: '${PRODUCT_NAME}' }),
+          brandSettings({ name: 'Repo Supplied Name' }),
+          '/system-defaults.json',
+        ),
+        settingsFile(brandSettings({ name: '' }), '/settings.json'),
+        settingsFile({}, '/workspace/.qwen/settings.json'),
+        true,
+        new Set(),
+      );
+      const { brand, warnings } = resolveWebShellBrand(settings);
+      expect(brand).toEqual({});
+      expect(warnings).toBeUndefined();
     });
 
     it('reports every misconfigured key, one warning per cause', () => {
       // A name placeholder and a missing logo in the same layer must each
       // surface their own line — joined output would displace one reason and
       // break the stderr prefix the protocol doc anchors.
-      const previous = process.env['PRODUCT_NAME'];
-      process.env['PRODUCT_NAME'] = 'Repo Supplied Name';
-      try {
-        const settings = makeSettings({
-          user: brandSettings({
+      const settings = new LoadedSettings(
+        settingsFile({}, '/system/settings.json'),
+        settingsFile({}, '/system-defaults.json'),
+        substitutedFile(
+          brandSettings({
             name: '${PRODUCT_NAME}',
             logoPath: path.join(dir, 'missing.svg'),
           }),
-        });
-        const { brand, warnings } = resolveWebShellBrand(settings);
-        expect(brand).toEqual({});
-        expect(warnings).toHaveLength(2);
-        expect(warnings?.join('\n')).toContain('environment placeholder');
-        expect(warnings?.join('\n')).toContain('does not exist');
-      } finally {
-        if (previous === undefined) delete process.env['PRODUCT_NAME'];
-        else process.env['PRODUCT_NAME'] = previous;
-      }
+          brandSettings({
+            name: 'Repo Supplied Name',
+            logoPath: path.join(dir, 'missing.svg'),
+          }),
+          '/settings.json',
+        ),
+        settingsFile({}, '/workspace/.qwen/settings.json'),
+        true,
+        new Set(),
+      );
+      const { brand, warnings } = resolveWebShellBrand(settings);
+      expect(brand).toEqual({});
+      expect(warnings).toHaveLength(2);
+      expect(warnings?.join('\n')).toContain('environment placeholder');
+      expect(warnings?.join('\n')).toContain('does not exist');
     });
 
     it('lets a literal at a higher layer override a placeholder below it', () => {
       // The placeholder layer wins by the same precedence a value wins by, so
       // a higher-layer literal simply masks it — no warning, literal used.
-      const settings = makeSettings({
-        systemDefaults: brandSettings({ name: '${PRODUCT_NAME}' }),
-        user: brandSettings({ name: 'User Brand' }),
-      });
+      const settings = new LoadedSettings(
+        settingsFile({}, '/system/settings.json'),
+        substitutedFile(
+          brandSettings({ name: '${PRODUCT_NAME}' }),
+          brandSettings({ name: 'Repo Supplied Name' }),
+          '/system-defaults.json',
+        ),
+        settingsFile(brandSettings({ name: 'User Brand' }), '/settings.json'),
+        settingsFile({}, '/workspace/.qwen/settings.json'),
+        true,
+        new Set(),
+      );
       const { brand, warnings } = resolveWebShellBrand(settings);
       expect(brand).toEqual({ name: 'User Brand' });
       expect(warnings).toBeUndefined();

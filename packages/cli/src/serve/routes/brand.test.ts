@@ -31,21 +31,22 @@ vi.mock('../../utils/stdioHelpers.js', async (importOriginal) => {
   return { ...actual, writeStderrLine: vi.fn() };
 });
 
+// The resolver reads the pre-substitution snapshot, so the stub must carry
+// every field a real SettingsFile has — omitting `originalSettings` hid
+// that dependency behind the `as never` until the placeholder guard moved
+// the read. The return type is annotated so a future field the resolver
+// needs fails typecheck here instead of silently reverting to `{}` bodies.
+const file = (settings: Record<string, unknown>): SettingsFile => ({
+  settings: settings as Settings,
+  originalSettings: structuredClone(settings) as Settings,
+  path: '/stub/settings.json',
+});
+
 function stubSettings(scopes: {
   system?: Record<string, unknown>;
   systemDefaults?: Record<string, unknown>;
   user?: Record<string, unknown>;
 }): void {
-  // The resolver reads the pre-substitution snapshot, so the stub must carry
-  // every field a real SettingsFile has — omitting `originalSettings` hid
-  // that dependency behind the `as never` until the placeholder guard moved
-  // the read. The return type is annotated so a future field the resolver
-  // needs fails typecheck here instead of silently reverting to `{}` bodies.
-  const file = (settings: Record<string, unknown>): SettingsFile => ({
-    settings: settings as Settings,
-    originalSettings: structuredClone(settings) as Settings,
-    path: '/stub/settings.json',
-  });
   vi.mocked(loadSettings).mockReturnValue({
     system: file(scopes.system ?? {}),
     systemDefaults: file(scopes.systemDefaults ?? {}),
@@ -134,6 +135,53 @@ describe('GET /brand', () => {
         /^qwen serve: GET \/brand: ui\.brand\.logoPath does not exist: /,
       ),
     );
+  });
+
+  it('writes one stderr line per misconfigured brand key', () => {
+    // A name placeholder AND a missing logo in the same layer must each get
+    // their own line — a joined line would displace one reason and break a
+    // log rule keyed on either prefix. The user layer is built as the loader
+    // actually produces it: substituted `settings` over a pre-substitution
+    // `originalSettings` snapshot.
+    vi.mocked(loadSettings).mockReturnValue({
+      system: file({}),
+      systemDefaults: file({}),
+      user: {
+        settings: {
+          ui: {
+            brand: {
+              name: 'Repo Supplied Name',
+              logoPath: path.join(dir, 'missing.svg'),
+            },
+          },
+        },
+        originalSettings: {
+          ui: {
+            brand: {
+              name: '${PRODUCT_NAME}',
+              logoPath: path.join(dir, 'missing.svg'),
+            },
+          },
+        },
+        path: '/stub/settings.json',
+      },
+      workspace: file({}),
+    } as unknown as LoadedSettings);
+
+    return request(makeApp())
+      .get('/brand')
+      .expect(200)
+      .then(() => {
+        expect(writeStderrLine).toHaveBeenCalledTimes(2);
+        expect(writeStderrLine).toHaveBeenCalledWith(
+          expect.stringMatching(/^qwen serve: GET \/brand: ui\.brand\.name /),
+        );
+        expect(writeStderrLine).toHaveBeenCalledWith(
+          expect.stringMatching(
+            /^qwen serve: GET \/brand: ui\.brand\.logoPath /,
+          ),
+        );
+      });
   });
 
   it('degrades to an empty brand instead of failing when settings cannot load', async () => {

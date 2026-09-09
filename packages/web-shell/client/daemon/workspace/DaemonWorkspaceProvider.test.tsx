@@ -11,6 +11,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
+  BRAND_RETRY_DELAY_MS,
   DaemonWorkspaceProvider,
   useDaemonWorkspace,
   useOptionalDaemonWorkspace,
@@ -494,32 +495,39 @@ describe('DaemonWorkspaceProvider', () => {
     // while the runtime starts, or a transport blip must not leave the shell
     // split-brained — built-in name in-app, cached white-label in the tab —
     // until a manual reload. One bounded retry fires without any caller.
-    sdkMocks.brand
-      .mockRejectedValueOnce(new DaemonHttpError(429, undefined, 'limited'))
-      .mockResolvedValueOnce({ name: 'QiuQiu Code' });
-    let context: DaemonWorkspaceContextValue | undefined;
+    // Fake timers drive the retry delay: the case must not sleep through the
+    // production constant on a real clock.
+    vi.useFakeTimers();
+    try {
+      sdkMocks.brand
+        .mockRejectedValueOnce(new DaemonHttpError(429, undefined, 'limited'))
+        .mockResolvedValueOnce({ name: 'QiuQiu Code' });
+      let context: DaemonWorkspaceContextValue | undefined;
 
-    function Harness() {
-      context = useOptionalDaemonWorkspace();
-      return null;
-    }
+      function Harness() {
+        context = useOptionalDaemonWorkspace();
+        return null;
+      }
 
-    await renderWithProvider(<Harness />);
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 0));
-    });
-    // The immediate aftermath is still the unsettled "unknown" state.
-    expect(sdkMocks.brand).toHaveBeenCalledTimes(1);
-    expect(context?.brandSettled).toBe(false);
-
-    await act(async () => {
-      await vi.waitFor(() => expect(sdkMocks.brand).toHaveBeenCalledTimes(2), {
-        timeout: 4000,
+      await renderWithProvider(<Harness />);
+      await act(async () => {
+        await Promise.resolve();
       });
-    });
+      // The immediate aftermath is still the unsettled "unknown" state.
+      expect(sdkMocks.brand).toHaveBeenCalledTimes(1);
+      expect(context?.brandSettled).toBe(false);
 
-    expect(context?.brand).toEqual({ name: 'QiuQiu Code' });
-    expect(context?.brandSettled).toBe(true);
+      await act(async () => {
+        vi.advanceTimersByTime(BRAND_RETRY_DELAY_MS);
+        await Promise.resolve();
+      });
+
+      expect(sdkMocks.brand).toHaveBeenCalledTimes(2);
+      expect(context?.brand).toEqual({ name: 'QiuQiu Code' });
+      expect(context?.brandSettled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('warns once a retryable failure persists past the retry, but not on a definitive 404', async () => {
@@ -527,6 +535,7 @@ describe('DaemonWorkspaceProvider', () => {
     // exhausted-retry state gets the console. A 404 is an expected old-daemon
     // state and stays silent.
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.useFakeTimers();
     try {
       sdkMocks.brand.mockRejectedValue(
         new DaemonHttpError(503, undefined, 'runtime starting'),
@@ -540,17 +549,16 @@ describe('DaemonWorkspaceProvider', () => {
 
       await renderWithProvider(<Harness />);
       await act(async () => {
-        await new Promise((r) => setTimeout(r, 0));
+        await Promise.resolve();
       });
       // Silent while the retry is still pending.
       expect(warn).not.toHaveBeenCalled();
 
       await act(async () => {
-        await vi.waitFor(
-          () => expect(sdkMocks.brand).toHaveBeenCalledTimes(2),
-          { timeout: 4000 },
-        );
+        vi.advanceTimersByTime(BRAND_RETRY_DELAY_MS);
+        await Promise.resolve();
       });
+      expect(sdkMocks.brand).toHaveBeenCalledTimes(2);
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining('brand could not be fetched'),
       );
@@ -562,12 +570,13 @@ describe('DaemonWorkspaceProvider', () => {
       );
       await act(async () => {
         context?.refreshBrand?.();
-        await new Promise((r) => setTimeout(r, 0));
+        await Promise.resolve();
       });
       expect(sdkMocks.brand).toHaveBeenCalledTimes(3);
       expect(context?.brandSettled).toBe(true);
       expect(warn).not.toHaveBeenCalled();
     } finally {
+      vi.useRealTimers();
       warn.mockRestore();
     }
   });

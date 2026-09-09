@@ -323,12 +323,12 @@
           "type": "object",
           "properties": {
             "name": {
-              "description": "Product name shown in the Web Shell sidebar, welcome header, About panel and browser tab title. Sanitized to a single line; capped at 80 characters. Environment variable placeholders are NOT expanded in this key — the substitution source is process-wide, so a workspace could supply the value; a placeholder value is ignored with a warning on the daemon's stderr. Leave empty to use the built-in name. The terminal banner has its own separate setting, `ui.customBannerTitle`.",
+              "description": "Product name shown in the Web Shell sidebar, welcome header, About panel and browser tab title. Sanitized to a single line; capped at 80 characters. A placeholder value that substitution would change ($VAR/${VAR} with the variable set) is refused with a warning on the daemon's stderr, because the substitution source is process-wide and a workspace could supply it; an unresolvable placeholder is kept verbatim. Leave empty to use the built-in name. The terminal banner has its own separate setting, `ui.customBannerTitle`.",
               "type": "string",
               "default": ""
             },
             "logoPath": {
-              "description": "Path to an SVG file used as the Web Shell sidebar logo and browser favicon. A leading \"~\" is expanded, and a relative path resolves against the directory of the settings file that declares it. The file must be a regular file — not a symlink, and not reachable through more than one hard link — at most 32 KiB both on disk and once UTF-8-decoded, and its root element must be a namespaced <svg> — a default xmlns, or an xmlns:svg binding on a prefix-bound root, is what makes it renderable as an image. Environment variable placeholders are NOT expanded in this key. Leave empty to use the built-in logo.",
+              "description": "Path to an SVG file used as the Web Shell sidebar logo and browser favicon. A leading \"~\" is expanded, and a relative path resolves against the directory of the settings file that declares it. The file must be a regular file — not a symlink, and not reachable through more than one hard link — at most 32 KiB both on disk and once UTF-8-decoded, and its root element must be a namespaced <svg> — a default xmlns, or an xmlns:svg binding on a prefix-bound root, is what makes it renderable as an image. Environment variable placeholders that would resolve are refused, as with the brand name. Leave empty to use the built-in logo.",
               "type": "string",
               "default": ""
             }

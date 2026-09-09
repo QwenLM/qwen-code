@@ -31,8 +31,12 @@ const DaemonWorkspaceContext = createContext<
 // See the useEffect cleanup in DaemonWorkspaceProvider for details.
 let pendingDisposeClient: DaemonClient | undefined;
 
-/** Delay before the one bounded retry after a retryable brand-fetch failure. */
-const BRAND_RETRY_DELAY_MS = 2_000;
+/**
+ * Delay before the one bounded retry after a retryable brand-fetch failure.
+ * Exported so the provider's own tests can drive it on fake timers instead
+ * of sleeping through it.
+ */
+export const BRAND_RETRY_DELAY_MS = 2_000;
 
 export type {
   DaemonWorkspaceActions,

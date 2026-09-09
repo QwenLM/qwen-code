@@ -76,10 +76,12 @@ The same boundary closes the placeholder side door. `loadSettings` substitutes
 `$VAR`/`${VAR}` placeholders from the process-wide environment, which
 `loadEnvironment` populates workspace-first at boot — so an operator-layer
 `${BRAND_NAME}` would resolve to whatever a repository's `.qwen/.env` or `env`
-block supplied. Brand keys therefore read each layer's pre-substitution
-snapshot (`originalSettings`), and a value that still contains a placeholder
-is ignored with a warning rather than resolved. Every other string leaf keeps
-the documented substitution behavior; brand is the exception because the
+block supplied. Brand keys therefore compare each layer's substituted value
+against its pre-substitution snapshot (`originalSettings`) and refuse with a
+warning whenever substitution actually fired. A placeholder that resolves to
+itself (the variable is unset) is kept verbatim, so a typo'd variable surfaces
+as the literal text rather than silently falling back. Every other string leaf
+keeps the documented substitution behavior; brand is the exception because the
 exclusion is its whole point.
 
 This is also why the merged settings value is not used: the merged value is
@@ -182,7 +184,7 @@ workspace-scoped, that channel reports merged effective values which would
 reintroduce the excluded layer, and a settings descriptor has no place for a
 derived data URI that is not the value the user wrote.
 
-The client fetches it once per connection, inside the workspace provider beside
+The client fetches it on connection setup, inside the workspace provider beside
 the capabilities fetch, and exposes it as an optional field on the workspace
 context. It stays out of the connection status machine: a failed brand fetch
 leaves the built-in brand in place and never marks the connection as errored.
