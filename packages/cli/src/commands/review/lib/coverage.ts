@@ -1813,13 +1813,16 @@ export function verificationGaps(
   }
 
   if (focusedNavigation) {
+    // Name what did NOT run: the renderer prefixes "Not reviewed: " to the
+    // subject, so naming the profile here would publish the inverted claim
+    // "Not reviewed: focused navigation review" — the review that ran.
     gaps.push({
-      subject: 'focused navigation review',
+      subject: 'the full review and reverse audit',
       reason:
-        'limited to the static navigation change; findings require independent verification. The full review and reverse audit are outside this profile, so it cannot certify Approve',
-      subjectZh: '导航专项审查',
+        'this pass was limited to the static navigation change; findings required independent verification, so it cannot certify Approve',
+      subjectZh: '完整审查与反向审计',
       reasonZh:
-        '范围限于静态导航改动，发现的问题须独立验证；此模式不包含完整审查和反向审计，因此不会 Approve',
+        '本次仅覆盖静态导航改动，发现仍需独立验证，因此无法认证 Approve',
     });
   }
   return { ok: gaps.length === 0, gaps, remediation, unverifiedFindings };

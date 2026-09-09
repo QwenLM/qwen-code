@@ -1567,7 +1567,13 @@ export function buildRoleBrief(
     if (
       role === 'docs-nav' &&
       opts.planPath &&
-      isPositivePrNumber(report.prNumber)
+      // Same shape gate as role 0's and 6d's welds: the plan is a file on
+      // disk, and a junk row must not be welded into a path the agent is
+      // told to read. The pointer is omitted, not fatal — the review
+      // proceeds without the context it names.
+      isPositivePrNumber(report.prNumber) &&
+      /^[1-9]\d*$/.test(String(report.prNumber)) &&
+      Number(report.prNumber) <= Number.MAX_SAFE_INTEGER
     ) {
       const context = join(
         dirname(resolve(opts.planPath)),

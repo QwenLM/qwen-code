@@ -1140,6 +1140,30 @@ describe('loadEnvironment', () => {
     }
   });
 
+  // The automatic-review marker is the same operator-decision class as the
+  // prebuild opt-in above: it selects the reduced docs-nav review profile,
+  // so a project .env must not opt its own review into the one-reviewer
+  // path. The read-time check (automaticReviewRequested) is the other tier.
+  it('never applies the review automatic marker from a project .env', () => {
+    const saved = process.env['QWEN_REVIEW_AUTOMATIC'];
+    delete process.env['QWEN_REVIEW_AUTOMATIC'];
+    try {
+      const workspace = makeWorkspace();
+      fs.writeFileSync(
+        path.join(workspace, '.env'),
+        'QWEN_REVIEW_AUTOMATIC=true\n',
+      );
+      loadEnvironment(testSettings({}), workspace);
+      expect(process.env['QWEN_REVIEW_AUTOMATIC']).toBeUndefined();
+    } finally {
+      if (saved === undefined) {
+        delete process.env['QWEN_REVIEW_AUTOMATIC'];
+      } else {
+        process.env['QWEN_REVIEW_AUTOMATIC'] = saved;
+      }
+    }
+  });
+
   // Windows env lookup is case-insensitive, so exact-case membership would
   // let case variants through every application gate on that platform.
   it('rejects entrypoint and trust-anchor keys regardless of case', () => {

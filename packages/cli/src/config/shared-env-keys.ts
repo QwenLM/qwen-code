@@ -58,6 +58,13 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // from repository content at all. prebuild.test.ts pins the membership
   // with both real symbols.
   'QWEN_REVIEW_PREBUILD',
+  // The automatic-review marker (commands/review/lib/docs-nav-profile.ts
+  // `automaticReviewRequested`) is an operator decision in the same class:
+  // it selects the reduced docs-nav profile, so a repository must not
+  // declare its own — possibly manual — review automatic and shrink the
+  // review of its own change to one reviewer with no reverse audit. CI
+  // welds it as a real step env, never a file.
+  'QWEN_REVIEW_AUTOMATIC',
   // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
   // disable TLS certificate verification for all outbound API connections. A
   // project `.env` must never enable either — that would let an untrusted repo

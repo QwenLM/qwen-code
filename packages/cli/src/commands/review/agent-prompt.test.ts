@@ -2835,6 +2835,19 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     },
   );
 
+  it('welds no context pointer for a malformed plan identity', () => {
+    // '007' passes `isPositivePrNumber` but is not a safe positive integer —
+    // the same tampered-plan family role 0's and 6d's welds refuse. The
+    // pointer is omitted, not welded; the causal scope paragraph still rides.
+    const brief = buildRoleBrief(
+      { ...PR_PLAN, prNumber: '007', reviewProfile: 'docs-nav' },
+      'docs-nav',
+      { planPath: join(absTmp, 'plan.json') },
+    );
+    expect(brief).not.toContain('-context.md');
+    expect(brief).toContain('causal base/head difference');
+  });
+
   it.each([
     '1a',
     '1b',

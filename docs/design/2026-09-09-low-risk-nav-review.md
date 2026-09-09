@@ -20,7 +20,9 @@ Classification uses the complete captured diff and the immutable base/head
 file contents. Initially the only eligible shape is one existing regular
 `docs/**/_meta.ts` file, fewer than 25 added plus removed lines, with an
 `export default` object containing only literal strings and objects on both
-sides. The set of top-level navigation keys must stay unchanged. Only labels,
+sides. The set AND ORDER of top-level navigation keys must stay unchanged — key
+order is the sidebar order, and a `type: 'separator'` groups the entries after
+it, so a pure reorder is structure, not presentation. Only labels,
 `title`, and `display` (`hidden` or `normal`) may change; other metadata must
 remain identical. Imports, calls, spreads, computed keys, escapes, renames,
 mode changes and unsupported syntax retain the full review. The classifier

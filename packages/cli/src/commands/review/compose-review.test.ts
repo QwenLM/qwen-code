@@ -657,7 +657,9 @@ describe('focused navigation publishing', () => {
         modelId: MODEL,
       });
       expect(r.event).toBe(event);
-      expect(r.body).toContain('focused navigation review');
+      expect(r.body).toContain(
+        'Not reviewed: the full review and reverse audit',
+      );
       expect(r.body).toContain('cannot certify Approve');
       expect(r.remediation.join('\n')).not.toContain('--role reverse-audit');
       expect(r.cappedBy).not.toContain('chunk-nobody-read');
@@ -681,6 +683,47 @@ describe('focused navigation publishing', () => {
     expect(r.event).toBe('COMMENT');
     expect(r.cappedBy).toContain('unreviewed-dimension');
     expect(r.remediation.join('\n')).toContain('--roster');
+  });
+
+  it('caps a verified-blocker focused round at Comment while the findings file carries a tag', () => {
+    // The profile runs no Step 5, so the tag backstop is the ONLY machine
+    // check that an unruled candidate never posts as a verified blocker —
+    // SKILL Step 4 passes the cumulative findings file as findingsPath.
+    const r = composeReview({
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      planPath: focusedPlan(true),
+      findingsPath: findingsFile(TAGGED),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
+  });
+
+  it('does not read the by-design anchor withhold as a stopped chain', () => {
+    // Round 2 of a navigation-only PR recovers a marker with a round and no
+    // sha: every focused round withholds the anchor by design (its disclosed
+    // gap caps the verdict), so the mechanism-health note must stay silent —
+    // reporting it would re-post a false malfunction on every round.
+    writeFileSync(
+      join(dir, 'qwen-review-pr-11426-prev-ledger.json'),
+      JSON.stringify({ round: 1, posted: 0, fresh: 0, findings: [] }),
+    );
+    const r = composeReview({
+      planPath: focusedPlan(false),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.health).toBeUndefined();
+    expect(r.body).not.toContain('did not close cleanly');
+    const ledger = parseLedger(r.body);
+    expect(ledger).not.toBeNull();
+    for (const field of ['sha', 'model', 'closed'])
+      expect(ledger).not.toHaveProperty(field);
   });
 });
 

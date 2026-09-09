@@ -6,7 +6,11 @@
 
 import { createTwoFilesPatch } from 'diff';
 import { describe, expect, it, vi } from 'vitest';
-import { isStaticDocsNavDiff } from './docs-nav-profile.js';
+import { PROJECT_ENV_HARDCODED_EXCLUSIONS } from '../../../config/shared-env-keys.js';
+import {
+  automaticReviewRequested,
+  isStaticDocsNavDiff,
+} from './docs-nav-profile.js';
 
 const PATH = 'docs/developers/_meta.ts';
 const BASE = `export default {
@@ -76,6 +80,16 @@ describe('static documentation navigation profile', () => {
     HEAD.replace("examples: 'Examples'", "examples: { display: 'children' }"),
     HEAD.replace("examples: 'Examples'", "examples: { type: 'menu' }"),
     HEAD.replace('examples:', 'newExamples:'),
+    // A pure top-level reorder: key order is the sidebar order, and a
+    // `type: 'separator'` groups the entries AFTER it, so order is
+    // structure, not presentation.
+    `export default {
+  examples: {
+    display: 'hidden',
+  },
+  architecture: 'Architecture',
+};
+`,
   ])('retains full review for changes beyond labels/visibility', (source) => {
     expect(classify(BASE, source)).toBe(false);
   });
@@ -137,5 +151,53 @@ describe('static documentation navigation profile', () => {
     ).toBe(false);
     expect(classify(BASE, HEAD.replace('};', '} broken'))).toBe(false);
     expect(classify(BASE, `/*${'x'.repeat(32_768)}*/${HEAD}`)).toBe(false);
+  });
+});
+
+describe('automaticReviewRequested', () => {
+  const never = () => false;
+
+  it('is on for true alone — the literal the workflow welds', () => {
+    expect(
+      automaticReviewRequested({ QWEN_REVIEW_AUTOMATIC: 'true' }, never),
+    ).toBe(true);
+    expect(
+      automaticReviewRequested({ QWEN_REVIEW_AUTOMATIC: ' true ' }, never),
+    ).toBe(true);
+  });
+
+  it('is off when unset and for every other value', () => {
+    expect(automaticReviewRequested({}, never)).toBe(false);
+    for (const value of ['', '0', '1', 'false', 'TRUE', 'True', 'yes']) {
+      expect(
+        automaticReviewRequested({ QWEN_REVIEW_AUTOMATIC: value }, never),
+      ).toBe(false);
+    }
+  });
+
+  it('is excluded from project .env files at load time', () => {
+    // The load-time tier (config/environment.ts canApplyParsedEnvKey): the
+    // key must not reach process.env from repository content at all,
+    // because a child inherits it with an empty provenance registry.
+    // environment.test.ts exercises the loader behavior; this pins the
+    // membership with both real symbols, mirroring prebuild.test.ts.
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_REVIEW_AUTOMATIC');
+  });
+
+  it('accepts a process-sourced value under the production default binding', () => {
+    // No injected predicate: the default isFileSourcedEnvKey binding runs,
+    // and in this test process nothing file-sourced the key.
+    expect(automaticReviewRequested({ QWEN_REVIEW_AUTOMATIC: 'true' })).toBe(
+      true,
+    );
+  });
+
+  it('ignores a value sourced from a .env file', () => {
+    expect(
+      automaticReviewRequested(
+        { QWEN_REVIEW_AUTOMATIC: 'true' },
+        (key) => key === 'QWEN_REVIEW_AUTOMATIC',
+      ),
+    ).toBe(false);
   });
 });

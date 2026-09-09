@@ -23,6 +23,7 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { DOCS_NAV_PROFILE } from './lib/docs-nav-profile.js';
 import { git, gitOpt, gitRaw } from './lib/git.js';
 import { manifestRepositoryContextProvider } from './lib/manifest-repository-context.js';
 import { isSameFile } from './lib/same-file.js';
@@ -51,6 +52,7 @@ interface MutablePlan {
   mergeBaseSha?: unknown;
   baseFetchFailed?: unknown;
   repositoryContext?: unknown;
+  reviewProfile?: unknown;
   [key: string]: unknown;
 }
 
@@ -430,11 +432,11 @@ export function runRepoContext(
   if (context === null) delete plan.repositoryContext;
   else plan.repositoryContext = context;
   if (
-    plan['reviewProfile'] === 'docs-nav' &&
+    plan.reviewProfile === DOCS_NAV_PROFILE &&
     context &&
     context.requiredAgents.length > 0
   ) {
-    delete plan['reviewProfile'];
+    delete plan.reviewProfile;
     writeStderrLine(
       'Repository-required reviewers keep this navigation change on the full review path.',
     );

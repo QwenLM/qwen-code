@@ -23,11 +23,11 @@
 // FRESH run: resuming stale state reviews code nobody is reviewing anymore.
 
 import { EFFORT_LEVELS } from '../parse-args.js';
+import { DOCS_NAV_PROFILE } from './docs-nav-profile.js';
 import { RESUME_MAX } from './run-ledger.js';
 
 /** Why a resume was refused. Stable identifiers: the report carries one. */
 export type ResumeRefusal =
-  | 'profile-not-resumable'
   | 'no-report' // no previous fetch report at the plan path
   | 'pr-mismatch' // the report on disk is another PR's
   | 'effort-mismatch' // an explicit --effort differs from the recorded run's
@@ -38,6 +38,7 @@ export type ResumeRefusal =
   | 'diff-unreadable' // the captured diff is gone or cannot be read
   | 'diff-hash-mismatch' // the diff file changed since it was captured
   | 'head-moved' // the PR head advanced — the once-per-review restart case
+  | 'profile-not-resumable' // a focused-profile run starts fresh by design
   | 'resume-cap'; // this review has already resumed RESUME_MAX times
 
 export type ResumeAssessment =
@@ -101,9 +102,6 @@ export function assessResume(
   if (prev.prNumber !== probes.prNumber) {
     return { ok: false, reason: 'pr-mismatch' };
   }
-  if (prev.reviewProfile === 'docs-nav') {
-    return { ok: false, reason: 'profile-not-resumable' };
-  }
   // A plan with no recorded effort ran the default (high) roster; an
   // explicit effort that differs is a request for different work, not a
   // continuation. (An invalid recorded level simply selects the default,
@@ -149,6 +147,12 @@ export function assessResume(
   // posted, so failing open here costs nothing that gate does not catch.
   if (probes.liveHeadSha !== null && probes.liveHeadSha !== prev.fetchedSha) {
     return { ok: false, reason: 'head-moved' };
+  }
+  // Below head-moved on purpose: a moved head must report (and be charged)
+  // as a head-moved restart even on a profiled run — masking it as
+  // profile-not-resumable would bypass the restart accounting.
+  if (prev.reviewProfile === DOCS_NAV_PROFILE) {
+    return { ok: false, reason: 'profile-not-resumable' };
   }
   if (probes.resumeCount >= RESUME_MAX) {
     return { ok: false, reason: 'resume-cap' };

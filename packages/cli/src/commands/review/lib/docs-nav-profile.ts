@@ -5,9 +5,31 @@
  */
 
 import { parse, type ParseError } from 'jsonc-parser';
+import { isFileSourcedEnvKey } from '../../../config/environment.js';
 import { parseDiff } from './diff-plan.js';
 
 export const DOCS_NAV_PROFILE = 'docs-nav';
+
+/**
+ * Whether this capture is the automatic workflow's. Operator-only, in the
+ * same two tiers as the review prebuild switch (lib/prebuild.ts): the key
+ * sits in `PROJECT_ENV_HARDCODED_EXCLUSIONS` so repository content never
+ * writes it into the environment (the provenance registry is per-process,
+ * and a child inherits a file-sourced value with no provenance attached),
+ * and this read refuses a value this process's own loader sourced from a
+ * file. The reviewed checkout must not choose its own review depth: the
+ * profile is derived from the base/head diff, never from a flag a
+ * repository can set.
+ */
+export function automaticReviewRequested(
+  env: NodeJS.ProcessEnv = process.env,
+  fileSourced: (key: string) => boolean = isFileSourcedEnvKey,
+): boolean {
+  return (
+    env['QWEN_REVIEW_AUTOMATIC']?.trim() === 'true' &&
+    !fileSourced('QWEN_REVIEW_AUTOMATIC')
+  );
+}
 
 type NavObject = { [key: string]: string | NavObject };
 
@@ -100,6 +122,13 @@ export function isStaticDocsNavDiff(
     return (
       keys.length > 0 &&
       keys.length === Object.keys(head).length &&
+      // Order is structure on a Nextra _meta.ts: it is the sidebar order,
+      // and a `type: 'separator'` groups the entries AFTER it, so a pure
+      // reorder changes the information architecture the full review
+      // exists to judge. (Keys cannot contain a newline — the token
+      // grammar's string classes exclude one — so the join is
+      // unambiguous.)
+      keys.join('\n') === Object.keys(head).join('\n') &&
       keys.every((key) => {
         if (!Object.hasOwn(head, key)) return false;
         const before = nonPresentation(base[key]);

@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DOCS_NAV_PROFILE } from './lib/docs-nav-profile.js';
 import {
   MAX_IDENTITY_BYTES,
   type RepositoryContextProvider,
@@ -174,7 +175,7 @@ describe('repo-context providers and trust boundary', () => {
       const { planPath } = run(
         root,
         worktree,
-        { files: [{ path: 'docs/_meta.ts' }], reviewProfile: 'docs-nav' },
+        { files: [{ path: 'docs/_meta.ts' }], reviewProfile: DOCS_NAV_PROFILE },
         [
           {
             provide: () => ({
@@ -190,7 +191,10 @@ describe('repo-context providers and trust boundary', () => {
       if (required)
         expect(readJson(planPath)).not.toHaveProperty('reviewProfile');
       else
-        expect(readJson(planPath)).toHaveProperty('reviewProfile', 'docs-nav');
+        expect(readJson(planPath)).toHaveProperty(
+          'reviewProfile',
+          DOCS_NAV_PROFILE,
+        );
     },
   );
 

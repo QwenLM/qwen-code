@@ -25,6 +25,7 @@ import {
   readReviewWorktreeLease,
   reviewLeaseHeldByAnotherSession,
 } from '../../services/review-worktree-lease.js';
+import * as environment from '../../config/environment.js';
 import { classifyHeavy } from './lib/heavy.js';
 import { DEADLINE_ENV, hasReviewDeadline } from './lib/deadline.js';
 import { PREBUILD_BUDGET_S, PREBUILD_ENV } from './lib/prebuild.js';
@@ -2921,6 +2922,22 @@ describe('fetch-pr report assembly', () => {
         expect(await reportFor({})).not.toHaveProperty('reviewProfile');
       },
     );
+
+    it('ignores the marker when its value came from a file', async () => {
+      // The beforeEach above sets the variable directly; the read must
+      // distinguish provenance — a value the environment loader sourced
+      // from a FILE (a repository's `.env` / `.qwen/.env`) is not the
+      // operator's, and the reviewed checkout must not choose its own
+      // review depth.
+      const spy = vi
+        .spyOn(environment, 'isFileSourcedEnvKey')
+        .mockImplementation((key) => key === 'QWEN_REVIEW_AUTOMATIC');
+      try {
+        expect(await reportFor({})).not.toHaveProperty('reviewProfile');
+      } finally {
+        spy.mockRestore();
+      }
+    });
 
     it('does not classify a degraded base', async () => {
       producerMocks.resolveMergeBase.mockReturnValue({

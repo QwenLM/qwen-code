@@ -68,6 +68,7 @@ import {
 } from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
 import {
+  automaticReviewRequested,
   DOCS_NAV_PROFILE,
   isStaticDocsNavDiff,
 } from './lib/docs-nav-profile.js';
@@ -1722,7 +1723,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         hasDeadline: hasReviewDeadline(process.env),
       }),
       ...planEffortField(args.effort),
-      ...(process.env['QWEN_REVIEW_AUTOMATIC'] === 'true' &&
+      ...(automaticReviewRequested() &&
       !args.resume &&
       !anchor?.incremental.effective &&
       !baseFetchFailed &&
