@@ -2787,12 +2787,17 @@ session SSE stream after `lastEventId` and correlate `turn_complete` or
 
 `turn_complete.data.stopReason` carries the ACP `StopReason` the agent
 returned — `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` or
-`cancelled` — plus two values the daemon originates itself: `error` when a turn
-fails inside the daemon rather than the agent, and
-`reconstructed_from_transcript` for a turn recovered from persisted history
-rather than observed live. **Treat the field as an open string**: it is typed
-`string` on the wire, the ACP set can grow, and a client that exhaustively
-switches on it will break on the next addition.
+`cancelled`. **Treat the field as an open string**: it is typed `string` on the
+wire, the ACP set can grow, and a client that exhaustively switches on it will
+break on the next addition.
+
+Two daemon-side outcomes do **not** arrive on this field. A turn that fails
+inside the daemon — deadline expiry, teardown flush, child crash — is published
+as a `turn_error` event carrying its `code` / `errorKind`, never as a
+`turn_complete` stopReason. A turn recovered from persisted history after a
+restart is not re-published on the stream at all; it surfaces as
+`promptTerminals[].stopReason === "reconstructed_from_transcript"` in the
+`POST /session/:id/load` response body.
 
 If the HTTP client disconnects mid-prompt, the daemon sends an ACP `cancel` notification to the agent, which winds the prompt down with `stopReason: "cancelled"`.
 

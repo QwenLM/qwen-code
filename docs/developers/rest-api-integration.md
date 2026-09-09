@@ -13,14 +13,14 @@ This page is the entry point. The full route reference is
 Six ways to build on the daemon, separated by one question — **how much of the
 front end do you own?**
 
-| Path                                 | You own                           | Status                                                                                    |
-| ------------------------------------ | --------------------------------- | ----------------------------------------------------------------------------------------- |
-| daemon + bundled Web Shell           | nothing — use it as shipped       | ships today ([user guide](../users/qwen-serve.md))                                        |
-| daemon `--no-web` + your own UI      | the entire front end              | ships today — **this page**                                                               |
-| daemon + branded Web Shell           | branding, not code                | not built ([#11357](https://github.com/QwenLM/qwen-code/issues/11357))                    |
-| daemon + self-hosted Web Shell build | the front-end build               | not built ([#11358](https://github.com/QwenLM/qwen-code/issues/11358))                    |
-| daemon via SDK `DaemonClient`        | client code, never raw HTTP       | ships today ([TS](./sdk-typescript.md), [Python](./sdk-python.md), [Java](./sdk-java.md)) |
-| daemon via MCP bridge                | nothing — another agent drives it | ships as `qwen-serve-mcp` in `@qwen-code/sdk`                                             |
+| Path                                 | You own                           | Status                                                                                                                                                                                                     |
+| ------------------------------------ | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| daemon + bundled Web Shell           | nothing — use it as shipped       | ships today ([user guide](../users/qwen-serve.md))                                                                                                                                                         |
+| daemon `--no-web` + your own UI      | the entire front end              | ships today — **this page**                                                                                                                                                                                |
+| daemon + branded Web Shell           | branding, not code                | not built ([#11357](https://github.com/QwenLM/qwen-code/issues/11357))                                                                                                                                     |
+| daemon + self-hosted Web Shell build | the front-end build               | not built ([#11358](https://github.com/QwenLM/qwen-code/issues/11358))                                                                                                                                     |
+| daemon via SDK `DaemonClient`        | client code, never raw HTTP       | ships today ([TS](./sdk-typescript.md), [Java](./sdk-java.md)) — the [Python SDK](./sdk-python.md) is process-transport-only and has no daemon client, so a Python integration drives path 2 over raw HTTP |
+| daemon via MCP bridge                | nothing — another agent drives it | ships as `qwen-serve-mcp` in `@qwen-code/sdk`                                                                                                                                                              |
 
 Integration paths that do not involve the daemon — headless `qwen -p`, ACP over
 stdio for editors, channels, extensions — are covered by their own guides.
@@ -102,10 +102,10 @@ These are the ones a REST integration needs. Treat the rest as internal.
 
 ### Permissions
 
-| Route                                                                              | Purpose                                          |
-| ---------------------------------------------------------------------------------- | ------------------------------------------------ |
-| [`POST /permission/:requestId`](./qwen-serve-protocol.md#post-permissionrequestid) | Answer a `permission_request`                    |
-| `POST /session/:id/permission/:requestId`                                          | Session-scoped form — _no dedicated section yet_ |
+| Route                                                                              | Purpose                                                                                                                                                                                                                                                                                     |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /session/:id/permission/:requestId`                                          | Answer a `permission_request`. Routed to the runtime that owns the session, so it is correct in every workspace state — _no dedicated section yet_                                                                                                                                          |
+| [`POST /permission/:requestId`](./qwen-serve-protocol.md#post-permissionrequestid) | Process-global form, wired to the **primary** workspace's bridge only: it `404`s for a session owned by another registered runtime, with the same body as a lost vote under the default `first-responder` policy — so a `404` here does not by itself mean the request was already answered |
 
 ### Read-only workspace context
 
@@ -143,8 +143,13 @@ curl -sX POST http://daemon:4170/session \
 
 **3. Subscribe before prompting.** `Last-Event-ID: 0` replays from the oldest
 retained event, which is how you catch events fired between create and
-subscribe — notably `model_switch_failed`, the only signal that a bad
-`modelServiceId` was rejected (the create itself still returns 200).
+subscribe — notably `model_switch_failed`. On an **attach** (the default
+`sessionScope: "single"` reusing an existing session) that event is the only
+signal that a bad `modelServiceId` was rejected, because the failure is
+deliberately not propagated as an HTTP error. On a **fresh create** — which is
+what `sessionScope: "thread"` in step 2 forces — the `200` body also carries
+`modelApplied: false`, and that is the deterministic one to act on rather than
+an event on a bounded ring.
 
 ```bash
 curl -N http://daemon:4170/session/$SID/events \
@@ -168,12 +173,18 @@ curl -sX POST http://daemon:4170/session/$SID/prompt \
 ```
 
 **5. Answer permission requests.** When the agent wants to run a tool it emits
-`permission_request` and the turn blocks until someone answers or the timeout
-fires. Decide up front how your integration answers — an auto-approve policy is
-a security decision, not a default.
+`permission_request` and the turn blocks until someone answers or you cancel —
+**by default there is no timeout** (`--permission-response-timeout-ms` defaults
+to `0` = wait indefinitely), so an unanswered request keeps holding a slot in
+the session's prompt queue until you cancel or close the session. Arm your own
+deadline if the flow needs one. Decide up front how your integration answers —
+an auto-approve policy is a security decision, not a default.
+
+Answer on the session-scoped route: it is routed to the runtime that owns the
+session, so it works whatever the workspace configuration.
 
 ```bash
-curl -sX POST http://daemon:4170/permission/$REQUEST_ID \
+curl -sX POST http://daemon:4170/session/$SID/permission/$REQUEST_ID \
   -H "Authorization: Bearer $QWEN_SERVER_TOKEN" -H 'Content-Type: application/json' \
   -d '{"outcome":{"outcome":"selected","optionId":"proceed_once"}}'
 ```
@@ -182,13 +193,13 @@ curl -sX POST http://daemon:4170/permission/$REQUEST_ID \
 
 ## Operations
 
-| Concern          | Where                                                                                                                                   |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| Concurrency caps | `--max-sessions`, `--max-total-sessions`; over-cap creates return `503` with `Retry-After`                                              |
-| Rate limiting    | `--rate-limit` plus the per-class `--rate-limit-*` flags                                                                                |
-| Idle cleanup     | `--session-idle-timeout-ms`; keep alive with `POST /session/:id/heartbeat`                                                              |
-| Memory           | `--memory-budget-mb`, `--child-heap-mode` — **observe-only today**: they report a modelled partition, size no child and refuse no spawn |
-| Prompt deadlines | `--prompt-deadline-ms`; expiry emits `turn_error`                                                                                       |
-| Errors           | [Error taxonomy](./daemon/18-error-taxonomy.md)                                                                                         |
-| Observability    | [Observability](./daemon/19-observability.md)                                                                                           |
-| Full flag list   | [Configuration](./daemon/17-configuration.md)                                                                                           |
+| Concern          | Where                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Concurrency caps | `--max-sessions`, `--max-total-sessions`; over-cap creates return `503` with `Retry-After`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Rate limiting    | `--rate-limit` plus the per-class `--rate-limit-*` flags                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Idle cleanup     | `--session-idle-timeout-ms`; keep alive with `POST /session/:id/heartbeat`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Memory           | `--child-heap-mode` — **observe-only**: reports a modelled per-child partition, sizes no child and refuses no spawn. `--memory-budget-mb` sizes no child and refuses no spawn either, but it does set the daemon-wide adaptive live-journal growth pool (5% of the effective budget, capped at 1024 MB, and 0 — growth disabled — below the 1024 MB minimum), which bounds how much SSE history `Last-Event-ID` replay can return; see `--max-journal-bytes`. Neither flag governs the heap ceiling ACP children are actually spawned with (`--max-old-space-size`, derived from host memory) |
+| Prompt deadlines | `--prompt-deadline-ms`; expiry emits `turn_error`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Errors           | [Error taxonomy](./daemon/18-error-taxonomy.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Observability    | [Observability](./daemon/19-observability.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Full flag list   | [Configuration](./daemon/17-configuration.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
