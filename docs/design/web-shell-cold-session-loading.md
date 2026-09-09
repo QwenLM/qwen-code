@@ -11,6 +11,10 @@ Reuse the existing loading and retry states. An empty composer can still mount
 while discovery runs, and a later discovery error must not unmount an unscoped
 session whose capabilities are already known.
 
+Seed the session connection with those known capabilities on its first render.
+Otherwise activity consumers briefly select catalog fallback before discovering
+live-state support, causing an extra full session-list request.
+
 React StrictMode also discards and immediately recreates the initial connection
 effect. Before starting a connection with no retained session, yield one microtask
 and check whether that effect was disposed. Retained connections keep their

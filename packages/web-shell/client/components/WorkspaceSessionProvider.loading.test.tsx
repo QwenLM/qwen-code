@@ -9,9 +9,20 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { WorkspaceSessionProvider } from './WorkspaceSessionProvider';
 
+const { observeLiveStateSupport } = vi.hoisted(() => ({
+  observeLiveStateSupport: vi.fn<(supported: boolean) => void>(),
+}));
+
 vi.mock('../App', () => ({
   App: () => {
     const connection = useConnection();
+    observeLiveStateSupport(
+      Boolean(
+        connection.capabilities?.features.includes(
+          'workspace_session_live_state',
+        ),
+      ),
+    );
     const blocks = useTranscriptBlocks();
     return (
       <output>
@@ -26,6 +37,7 @@ afterEach(() => vi.unstubAllGlobals());
 it.each([false, true])(
   'loads the initial transcript once after workspace discovery (StrictMode=%s)',
   async (strictMode) => {
+    observeLiveStateSupport.mockClear();
     localStorage.clear();
     sessionStorage.clear();
     let releaseCapabilities!: () => void;
@@ -49,7 +61,11 @@ it.each([false, true])(
           return json({
             v: 1,
             workspaceCwd: '/work/a',
-            features: ['client_identity', 'session_transcript_pagination'],
+            features: [
+              'client_identity',
+              'session_transcript_pagination',
+              'workspace_session_live_state',
+            ],
             workspaces: [
               { id: 'a', cwd: '/work/a', primary: true, trusted: true },
             ],
@@ -147,6 +163,7 @@ it.each([false, true])(
         root.render(strictMode ? <StrictMode>{tree}</StrictMode> : tree);
       });
       expect(calls).toEqual(['GET /capabilities']);
+      expect(observeLiveStateSupport).not.toHaveBeenCalled();
       await act(async () => {
         releaseCapabilities();
         await new Promise((resolve) => setTimeout(resolve, 100));
@@ -155,6 +172,8 @@ it.each([false, true])(
         await new Promise((resolve) => setTimeout(resolve, 100));
       });
       expect(container.textContent).toBe('connected:session-a:1');
+      expect(observeLiveStateSupport).toHaveBeenCalledWith(true);
+      expect(observeLiveStateSupport).not.toHaveBeenCalledWith(false);
       expect(loadBodies).toHaveLength(1);
       expect(calls.filter((call) => call.endsWith('/events'))).toHaveLength(1);
       expect(detachIds).toEqual([]);

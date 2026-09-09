@@ -1150,6 +1150,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const [attachSessionNonce, setAttachSessionNonce] = useState(0);
   const [newSessionNonce, setNewSessionNonce] = useState(0);
   const [connection, setConnection] = useState<DaemonConnectionState>({
+    capabilities: workspace?.capabilities,
     status: sessionContextResolutionError
       ? 'error'
       : autoConnect
