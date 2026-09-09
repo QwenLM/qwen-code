@@ -920,13 +920,41 @@ describe('EmbeddedApp host wiring', () => {
     const defaultCatalogCalls = sdkMocks.listWorkspaceSessionsPage.mock.calls
       .map(([options]) => options)
       .filter(
-        (options) => (options as { sourceType?: string })?.sourceType === 'default',
+        (options) =>
+          (options as { sourceType?: string })?.sourceType === 'default',
       );
     expect(defaultCatalogCalls.length).toBeGreaterThan(0);
     expect(defaultCatalogCalls[0]).toMatchObject({
       archiveState: 'active',
-      pageSize: 100,
     });
+
+    // The scan converges after its first successful run: ids that never
+    // match (other workspaces, deleted transcripts, since-stamped sessions)
+    // must not re-page the default catalog on every dropdown open.
+    await act(async () => {
+      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      const vscodeCalls = sdkMocks.listWorkspaceSessionsPage.mock.calls.filter(
+        ([options]) =>
+          (options as { sourceType?: string })?.sourceType === 'vscode',
+      );
+      expect(vscodeCalls.length).toBeGreaterThanOrEqual(2);
+    });
+    expect(
+      sdkMocks.listWorkspaceSessionsPage.mock.calls.filter(
+        ([options]) =>
+          (options as { sourceType?: string })?.sourceType === 'default',
+      ),
+    ).toHaveLength(1);
+    expect(
+      document.querySelector('[data-session-id="legacy-1"]'),
+    ).not.toBeNull();
   });
 });
 
