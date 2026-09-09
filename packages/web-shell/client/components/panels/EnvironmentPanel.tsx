@@ -339,6 +339,7 @@ export function EnvironmentPanel({
 
       {(items.includes('sources') || items.includes('attachments')) && (
         <SourcesSection
+          hidden={hidden}
           state={items.includes('sources') ? sources : undefined}
           attachments={attachments}
           attachmentsLoading={attachmentsLoading}

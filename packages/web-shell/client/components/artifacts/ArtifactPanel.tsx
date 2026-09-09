@@ -2989,7 +2989,8 @@ function SourceDetail({
     connection.sessionId === tab.sourceSessionId &&
     connection.capabilities?.features.includes('session_sources') &&
     target?.workspaceId === tab.workspaceId &&
-    Boolean(target) &&
+    (Boolean(target) ||
+      (tab.workspaceCwd === undefined && locator.type === 'url')) &&
     (locator.type !== 'workspace_file' ||
       source.workspaceCwd === connection.workspaceCwd);
   const path =
@@ -3044,13 +3045,7 @@ function SourceDetail({
     tab.sessionActions,
     workspaceActions,
   ]);
-  if (!valid || !target)
-    return (
-      <div className={styles.empty} role="alert">
-        {t('sources.unavailable')}
-      </div>
-    );
-  if (locator.type === 'url')
+  if (valid && locator.type === 'url')
     return (
       <div className="flex flex-col gap-3 p-4">
         <h3>{source.title}</h3>
@@ -3067,6 +3062,12 @@ function SourceDetail({
             {t('sources.openOriginal')}
           </a>
         )}
+      </div>
+    );
+  if (!valid || !target)
+    return (
+      <div className={styles.empty} role="alert">
+        {t('sources.unavailable')}
       </div>
     );
   const unsupported =

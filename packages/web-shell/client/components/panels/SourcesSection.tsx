@@ -19,6 +19,7 @@ import styles from './EnvironmentPanel.module.css';
 export type SourcesState = ReturnType<typeof useSessionSources>;
 
 interface SourcesSectionProps {
+  hidden?: boolean;
   state?: SourcesState;
   attachments?: readonly DaemonSessionAttachmentReference[];
   attachmentsLoading?: boolean;
@@ -34,6 +35,7 @@ interface SourcesSectionProps {
 }
 
 export function SourcesSection({
+  hidden = false,
   state,
   attachments = [],
   attachmentsLoading = false,
@@ -50,6 +52,9 @@ export function SourcesSection({
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const [adding, setAdding] = useState(false);
+  useEffect(() => {
+    if (hidden) setAdding(false);
+  }, [hidden]);
   useEffect(() => {
     setAdding(false);
     setExpanded(false);

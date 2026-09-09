@@ -5067,7 +5067,8 @@ export function App({
       );
       if (
         !tab.owner.isCurrent() ||
-        artifactWorkspaceCwd === undefined ||
+        (tab.workspaceCwd !== undefined &&
+          artifactWorkspaceCwd === undefined) ||
         tab.workspaceId !== artifactWorkspaceTarget?.workspaceId ||
         !sourcesState.supported ||
         (tab.sourceSessionId === connection.sessionId &&

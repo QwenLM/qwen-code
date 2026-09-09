@@ -874,6 +874,47 @@ describe('EnvironmentPanel', () => {
     expect(onDismiss).toHaveBeenCalledOnce();
   });
 
+  it.each([false, true])(
+    'closes the source dialog when hidden (floating=%s)',
+    async (floating) => {
+      const state = sourceState();
+      const onDismiss = vi.fn();
+      const view = mount({ sources: state, floating, onDismiss });
+      await act(async () =>
+        view
+          .querySelector<HTMLButtonElement>('[aria-label="Add source"]')!
+          .click(),
+      );
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+      const renderHidden = (hidden: boolean) =>
+        act(() =>
+          root!.render(
+            <I18nProvider language="en">
+              <EnvironmentPanel
+                tasks={[]}
+                onOpenTask={vi.fn()}
+                sources={state}
+                floating={floating}
+                hidden={hidden}
+                onDismiss={onDismiss}
+              />
+            </I18nProvider>,
+          ),
+        );
+      renderHidden(true);
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      expect(document.body.style.pointerEvents).not.toBe('none');
+      renderHidden(false);
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      act(() =>
+        document.body.dispatchEvent(
+          new Event('pointerdown', { bubbles: true }),
+        ),
+      );
+      expect(onDismiss).toHaveBeenCalledTimes(floating ? 1 : 0);
+    },
+  );
+
   it('keeps the legacy attachments option limited to uploaded files', () => {
     const view = mount({
       sources: sourceState(),
