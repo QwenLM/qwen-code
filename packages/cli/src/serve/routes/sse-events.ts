@@ -326,6 +326,27 @@ export function registerSseEventsRoutes(
         );
         closeReason = 'event_bus_evicted';
         terminalEventType = 'client_evicted';
+        try {
+          res.write(
+            formatSseFrame({
+              v: 1,
+              type: 'client_evicted',
+              data: {
+                reason: diagnostic.data.reason,
+                droppedAfter: diagnostic.data.droppedAfter,
+                queueSize: diagnostic.data.queueSize,
+                maxQueued: diagnostic.data.maxQueued,
+                queuedBytes: diagnostic.data.queuedBytes,
+                maxQueuedBytes: diagnostic.data.maxQueuedBytes,
+                ...(diagnostic.data.eventBytes === undefined
+                  ? {}
+                  : { eventBytes: diagnostic.data.eventBytes }),
+              },
+            }),
+          );
+        } catch {
+          /* socket already destroyed; reconnect still proceeds. */
+        }
         res.destroy();
       }
       return handled;
@@ -1053,7 +1074,7 @@ export function registerSseEventsRoutes(
         }
       } finally {
         cleanup();
-        if (!res.writableEnded) res.end();
+        if (!res.destroyed && !res.writableEnded) res.end();
       }
     })();
   });
