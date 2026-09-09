@@ -24,6 +24,7 @@ export interface TranscriptRecordInput {
   readonly uuid: string;
   readonly parentUuid: string | null;
   readonly sessionId: string;
+  readonly daemonPromptId?: string;
   readonly timestamp?: string;
   readonly type: TranscriptRecordType;
   readonly subtype?: string;
@@ -396,6 +397,11 @@ export function validateTranscriptRecord(
       uuid,
       parentUuid,
       sessionId,
+      daemonPromptId:
+        typeof value['daemonPromptId'] === 'string' &&
+        value['daemonPromptId'].trim().length > 0
+          ? value['daemonPromptId']
+          : undefined,
       type: type as TranscriptRecordType,
       ...(typeof subtype === 'string' ? { subtype } : { subtype: undefined }),
       ...(typeof timestamp === 'string' &&
