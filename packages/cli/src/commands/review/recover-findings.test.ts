@@ -376,14 +376,27 @@ describe('recover-findings', () => {
     );
     transcript('S0', 'fa0', auditPrompt, {
       opens: [auditBrief, auditInput],
-      finalText: 'No unpinned assumptions — audited 2 hunk(s) in a.ts.',
+      // A DISCLOSING verdict, not an all-clear: a finding-shaped line the
+      // sections channel must not hand back as a finding — the `--out`
+      // header says every section "still owe[s] Step 4 verification", and
+      // the audit's disclosures are not findings to verify.
+      finalText:
+        '- c1 — src/x.ts:40 — assumes: the hop count never legitimately ' +
+        'reaches 16 — unpinned; pin with: derive from MAX_SUBAGENT_DEPTH_LIMIT',
     });
 
     const r = recoverFindings({ plan, out: out() }, ENV);
+    // The key stays in the accounting — dropping it would move it to
+    // missingKeys and name an obligation the resumed run does not owe.
     expect(r.recoveredKeys).toEqual([auditKey, verifyKey]);
     expect(r.findingsFiles).toEqual([
       { key: verifyKey, path: verifyList, round: 2 },
     ]);
+    const md = readFileSync(out(), 'utf8');
+    expect(md).not.toContain('## fix-audit--');
+    expect(md).not.toContain('MAX_SUBAGENT_DEPTH_LIMIT');
+    // …while the verify agent's own verdict still renders.
+    expect(md).toContain('Verdicts: R1-1 confirmed.');
   });
 
   it('reports the latest certified reverse-audit round', () => {

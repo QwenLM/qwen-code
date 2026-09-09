@@ -364,6 +364,13 @@ export function recoverFindings(
     '',
   ];
   for (const key of recoveredKeys) {
+    // The fix auditor's DISCLOSURES are not findings either: the findings
+    // channel filters its input above, and the sections channel must not
+    // hand its verdict back under this file's "still owe Step 4
+    // verification" header — Step 6B's audit is re-run from a fresh
+    // snapshot on the resumed run, so nothing is lost. The key stays in
+    // `recoveredKeys` for the accounting: filtered here, at the render.
+    if (key.startsWith('fix-audit--')) continue;
     const rec = recovered.get(key) as AgentRecord;
     // Keys embed PR file paths (the invariant agents), and git allows
     // newlines in filenames — a raw key would let a hostile path forge
