@@ -1560,8 +1560,8 @@ export const GOAL_MAX_TURNS_CAP = 10_000;
 export const GOAL_MAX_ACTIVE_MINUTES_CAP = 7 * 24 * 60;
 
 /**
- * True for the values `normalizeGoalMaxTurns` honours: `-1` for no ceiling,
- * or a positive integer up to `GOAL_MAX_TURNS_CAP`.
+ * True for the values `normalizeGoalMaxTurns` honours: `0` and its alias `-1`
+ * for no ceiling, or a positive integer up to `GOAL_MAX_TURNS_CAP`.
  */
 export function isValidGoalMaxTurns(value: unknown): value is number {
   return (
@@ -1588,8 +1588,9 @@ export function normalizeGoalMaxTurns(value: unknown): number {
 }
 
 /**
- * True for the values `normalizeGoalMaxActiveMinutes` honours: `-1` for no
- * ceiling, or a positive integer up to `GOAL_MAX_ACTIVE_MINUTES_CAP`.
+ * True for the values `normalizeGoalMaxActiveMinutes` honours: `0` and its
+ * alias `-1` for no ceiling, or a positive integer up to
+ * `GOAL_MAX_ACTIVE_MINUTES_CAP`.
  */
 export function isValidGoalMaxActiveMinutes(value: unknown): value is number {
   return (

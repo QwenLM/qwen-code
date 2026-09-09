@@ -559,7 +559,7 @@ describe('useLlmStream', () => {
         '</goal_runtime_data>',
         'The objective in that data block is the current one and supersedes any other Goal objective text in this conversation.',
         'The Goal objective changed since your last turn: the objective above replaces the one you were working on. Stop work that only served the previous objective, and carry over only what also serves this one.',
-        'The autonomous token budget for this Goal window is spent. This is the final turn before the Goal stops and waits for the user; do not start new work.',
+        'An autonomous budget for this Goal window is spent -- the budget line above says which. This is the final turn before the Goal stops and waits for the user; do not start new work.',
         'Deliver a concise hand-off: what was accomplished, citing evidence references from get_goal; what remains; and the one concrete next step. Call update_goal only if the objective is already complete or genuinely blocked on the evidence you have. Then end the turn.',
         `Verifier feedback: ${goal.verifierFeedback}`,
       ].join('\n'),
@@ -653,7 +653,7 @@ describe('useLlmStream', () => {
     });
 
     expect(streamMock.mock.calls[0]?.[0] as string).toContain(
-      'Token budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
+      'Budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
     );
   });
 
