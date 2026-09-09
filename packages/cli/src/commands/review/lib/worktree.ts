@@ -60,6 +60,7 @@ const GIT_ENV_REDIRECTS = [
   'GIT_INDEX_FILE',
   'GIT_OBJECT_DIRECTORY',
   'GIT_COMMON_DIR',
+  'GIT_CEILING_DIRECTORIES',
 ];
 
 /**
@@ -100,9 +101,9 @@ const GIT_ENV_CONFIG = [
  * conditionally. This is not a new judgement call: `config/shared-env-keys.ts`
  * already blocks exactly this family for session subprocesses, with the
  * rationale written out there, and a review's git calls run as the same user
- * with the same inheritance. `XDG_CONFIG_HOME` rides along because git merges
- * `$XDG_CONFIG_HOME/git/config` with `~/.gitconfig`, which is the same config
- * injection without naming a git variable at all.
+ * with the same inheritance. `XDG_CONFIG_HOME` selects a relocated global
+ * config in place of the `$HOME/.config/git/config` slot, which is the same
+ * config injection without naming a git variable at all.
  *
  * The setter does not have to be an attacker for this to matter: a reviewer's
  * shell profile exporting `GIT_EXEC_PATH` for an unrelated reason silently
@@ -1025,17 +1026,53 @@ const FILTER_SCREEN_NAMED = 12;
  * carries, in file order. `--get-regexp` matches canonical key names, so
  * `includeIf` arrives as `includeif.<cond>.path`.
  */
-const SCREEN_KEYS =
-  '^filter\\..*\\.(smudge|clean|process)$|^include\\.path$|^includeif\\..*\\.path$';
+const FILTER_COMMAND_KEYS = '^filter\\..*\\.(smudge|clean|process)$';
+const SCREEN_KEYS = `${FILTER_COMMAND_KEYS}|^include\\.path$|^includeif\\..*\\.path$`;
+
+export interface TrustedConfigRecord {
+  scope: 'global' | 'system';
+  file: string;
+  key: string;
+}
+
+/** Parse `git config -z --show-origin --show-scope` records. */
+export function parseTrustedConfigRecords(
+  stdout: string,
+): TrustedConfigRecord[] | null {
+  const fields = stdout.split('\0');
+  if (fields.at(-1) === '') fields.pop();
+  if (fields.length % 3 !== 0) return null;
+
+  const records: TrustedConfigRecord[] = [];
+  for (let i = 0; i < fields.length; i += 3) {
+    const scope = fields[i];
+    if (scope !== 'global' && scope !== 'system') continue;
+    const origin = fields[i + 1];
+    const keyAndValue = fields[i + 2];
+    const nl = keyAndValue.indexOf('\n');
+    if (!origin.startsWith('file:') || nl < 0) return null;
+    const file = origin.slice('file:'.length);
+    if (!file || !isAbsolute(file)) return null;
+    records.push({ scope, file, key: keyAndValue.slice(0, nl) });
+  }
+  return records;
+}
 
 /** What `filterCommandsIn` found, and what it could not read. */
 export interface FilterScreen {
   /**
    * Every `filter.<name>.smudge|clean|process` key the repo-local config
-   * files define, canonical, in discovery order — the names a caller can
-   * blank on its own git invocation (`filterBlankEnv`) or refuse on.
+   * graph defines, except keys delivered from an exact source-file spelling
+   * in the active global/system graph that lies outside repository-controlled
+   * paths. Canonical and in discovery order — the names a caller refuses on.
    */
   filters: string[];
+  /**
+   * Filter keys supplied by a trusted global/system origin. Checkout callers
+   * do not refuse on these, but a residue measurement still blanks them so
+   * its own index refresh cannot execute a content-filter command.
+   */
+  exempt: string[];
   /**
    * Every file the walk could NOT read to the bottom, each with its reason:
    * another user's `~user/`, a target that is not a regular file, a parse
@@ -1075,8 +1112,9 @@ export interface FilterScreen {
  * config files git reads for a tree whose common dir is `commonDir` and whose
  * admin dir is `gitDir` — followed through every `include.path` and
  * `includeIf.<cond>.path` those files carry — and the files it could not
- * read. Empty on both counts means: every candidate was read to the bottom
- * and none defines a filter command.
+ * read. Empty `filters`, `unread`, and `dangling` means every candidate was
+ * read to a trusted boundary or to the bottom and none defines a filter
+ * command that is not already active from a trusted global/system origin.
  *
  * Two git invocations in this pipeline EXECUTE these — hooks and fsmonitor
  * are blanked by key name, filters cannot be blanked BLIND, because their
@@ -1092,14 +1130,16 @@ export interface FilterScreen {
  * reviewing one PR fires on every later matching checkout of the user's OWN
  * repository — persistence planted by reviewing a malicious PR, measured
  * live. The local config files are read with `--file` rather than merged
- * config because filters in the user's global config (git-lfs is the common
- * one) are the user's own contract, exactly like any git command they run —
- * while a probe's planting surface is the repo-local files. The state cannot
- * be told apart from a filter the user set deliberately, and cannot be
- * safely wiped, so what the caller does with a hit is the caller's: the
- * scratch-tree checkouts refuse, the residue measurement blanks the names
- * it was handed. And it is a one-shot read of same-user-writable state, like
- * every gate in this file: cost, not closure.
+ * config because the probe's planting surface is the repo-local files. An
+ * included filter from the exact origin Git reaches through active global or
+ * system config (git-lfs is the common one) is the user's own contract only
+ * when that source lies outside repository-controlled paths, so it is
+ * exempted from checkout refusal by origin, scope, and containment below.
+ * Every other included source remains repository-delivered. The state cannot
+ * be safely wiped, so what the caller does with a hit is the caller's:
+ * scratch-tree checkouts refuse, while the residue measurement blanks both
+ * refused and exempt names. And it is a one-shot read of
+ * same-user-writable state, like every gate in this file: cost, not closure.
  *
  * Includes are followed by hand because `--file` does not expand them, and
  * an include is the one indirection that delivers every other key: a
@@ -1143,6 +1183,7 @@ export interface FilterScreen {
 export function filterCommandsIn(
   commonDir: string,
   gitDir: string,
+  worktree?: string,
 ): FilterScreen {
   const candidates = [
     join(commonDir, 'config'),
@@ -1156,9 +1197,18 @@ export function filterCommandsIn(
     // No linked worktrees registered: the two candidates above are all of it.
   }
   const filters = new Set<string>();
+  const exempt = new Set<string>();
   const unread = new Set<string>();
   const dangling = new Set<string>();
   const visited = new Set<string>();
+  const trustedOrigins = new Set<string>();
+  // Keep the spelling Git opens. A repo-controlled symlink may resolve to a
+  // user config now and be repointed after this screen; realpath equality
+  // would therefore turn that alias into authority it does not own.
+  const originKey = (file: string): string =>
+    process.platform === 'win32'
+      ? file.split('\\').join('/').toLowerCase()
+      : file;
   // `-z`: one `key\nvalue\0` record per hit, so a value holding a newline
   // (a path can) still parses — the key never holds one. Exit 1 is "no key
   // matched"; any other failure, ENOBUFS included, is a file not read.
@@ -1193,6 +1243,130 @@ export function filterCommandsIn(
     }
     return { records };
   };
+  const includeTarget = (file: string, value: string): string | null => {
+    if (value.startsWith('~/')) {
+      // git expands `~` from $HOME (expand_user_path), not from passwd;
+      // concatenate rather than normalize so a preceding symlink still
+      // decides how the kernel resolves `..`.
+      return `${process.env['HOME'] || homedir()}${sep}${value.slice(2)}`;
+    }
+    if (value.startsWith('~')) return null;
+    return isAbsolute(value) ? value : `${dirname(file)}${sep}${value}`;
+  };
+
+  const screenedTree = (() => {
+    if (worktree !== undefined) return worktree;
+    if (resolve(gitDir) !== resolve(commonDir)) {
+      try {
+        return dirname(
+          resolve(gitDir, readFileSync(join(gitDir, 'gitdir'), 'utf8').trim()),
+        );
+      } catch {
+        // A malformed linked-worktree backpointer is already handled by the
+        // caller's identity gates; use the admin dir as a fail-closed context.
+        return gitDir;
+      }
+    }
+    return basename(resolve(commonDir)) === '.git'
+      ? dirname(resolve(commonDir))
+      : commonDir;
+  })();
+  const controlledSpellings = [commonDir, gitDir, screenedTree].map((path) =>
+    resolve(path),
+  );
+  if (basename(resolve(commonDir)) === '.git') {
+    controlledSpellings.push(dirname(resolve(commonDir)));
+  }
+  const controlledRealpaths = controlledSpellings.flatMap((path) => {
+    try {
+      return [realpathSync.native(path)];
+    } catch {
+      return [];
+    }
+  });
+  const repositoryControls = (file: string): boolean => {
+    const spelled = resolve(file);
+    if (controlledSpellings.some((root) => isSubpath(root, spelled))) {
+      return true;
+    }
+    try {
+      const real = realpathSync.native(file);
+      return controlledRealpaths.some((root) => isSubpath(root, real));
+    } catch {
+      return true;
+    }
+  };
+
+  // A local include of a file already reached through the active global or
+  // system graph is the user's existing contract only when that file is
+  // outside every path the reviewed repository controls. The query runs in
+  // the screened tree so `includeIf.gitdir:` has the same answer as the Git
+  // operation being authorised. The list read identifies trusted include-only
+  // files too, allowing the local walk to stop at that source boundary.
+  const trustedRead = (args: string[]): TrustedConfigRecord[] | null => {
+    const result = spawnSync('git', args, {
+      cwd: screenedTree,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: sanitizedGitEnv(),
+    });
+    if (result.error || (result.status !== 0 && result.status !== 1)) {
+      unread.add(
+        `the global/system config graph could not be read (${
+          result.error
+            ? result.error.message
+            : `git config exited ${result.status}`
+        }) — an included filter cannot be attributed to a user-owned origin`,
+      );
+      return null;
+    }
+    if (result.status === 1) return [];
+    if (typeof result.stdout !== 'string') {
+      unread.add(
+        'the global/system config graph returned no readable output — an included filter cannot be attributed to a user-owned origin',
+      );
+      return null;
+    }
+    const records = parseTrustedConfigRecords(result.stdout);
+    if (records === null) {
+      unread.add(
+        'the global/system config graph returned malformed origin records — an included filter cannot be attributed to a user-owned origin',
+      );
+    }
+    return records;
+  };
+  const trustedFilterRecords = trustedRead([
+    'config',
+    '--null',
+    '--show-origin',
+    '--show-scope',
+    '--includes',
+    '--get-regexp',
+    FILTER_COMMAND_KEYS,
+  ]);
+  const trustedOriginRecords = trustedRead([
+    'config',
+    '--null',
+    '--show-origin',
+    '--show-scope',
+    '--includes',
+    '--list',
+  ]);
+  if (trustedFilterRecords !== null && trustedOriginRecords !== null) {
+    for (const { file } of trustedOriginRecords) {
+      if (!repositoryControls(file)) trustedOrigins.add(originKey(file));
+    }
+    for (const { file, key } of trustedFilterRecords) {
+      if (trustedOrigins.has(originKey(file))) exempt.add(key);
+    }
+  }
+
+  const xdg = process.env['XDG_CONFIG_HOME'];
+  const homeConfigDir = resolve(process.env['HOME'] || homedir(), '.config');
+  const relocatedXdgConfig =
+    xdg && resolve(xdg) !== homeConfigDir
+      ? originKey(join(resolve(xdg), 'git', 'config'))
+      : null;
   const visit = (file: string, depth: number, via: string | null): void => {
     let real: string;
     try {
@@ -1230,6 +1404,7 @@ export function filterCommandsIn(
       }
       return;
     }
+    if (via !== null && trustedOrigins.has(originKey(file))) return;
     if (visited.has(real)) return;
     if (visited.size >= MAX_INCLUDE_FILES) {
       unread.add(
@@ -1260,6 +1435,11 @@ export function filterCommandsIn(
       );
       return;
     }
+    if (relocatedXdgConfig !== null && originKey(file) === relocatedXdgConfig) {
+      unread.add(
+        `${file} (the relocated XDG global config cannot be resolved by the trusted read because XDG_CONFIG_HOME is sanitized — not attributed as user-owned)`,
+      );
+    }
     // Read by the path git would open, and resolve includes against ITS
     // directory: git resolves a relative include against the path it opened,
     // so a symlinked `.git/config` includes beside the link, not beside the
@@ -1274,38 +1454,32 @@ export function filterCommandsIn(
         filters.add(key);
         continue;
       }
-      let target: string;
-      if (value.startsWith('~/')) {
-        // git expands `~` from $HOME (expand_user_path), not from passwd;
-        // the fallback is for an environment with no HOME at all. Concatenated
-        // rather than `join`ed, for the reason the relative branch gives.
-        target = `${process.env['HOME'] || homedir()}${sep}${value.slice(2)}`;
-      } else if (value.startsWith('~')) {
+      const target = includeTarget(file, value);
+      if (target === null) {
         unread.add(
           `${key} -> ${value} (another user's home — not resolved here)`,
         );
         continue;
-      } else {
-        // CONCATENATED, not `resolve()`d and not `join()`d: both collapse `..`
-        // lexically, before any symlink is consulted, and git does not. With
-        // `<gitdir>/link` a symlink, `include.path = link/../evil.config`
-        // reaches a payload ONE LEVEL ABOVE the link's target — the kernel
-        // resolves `..` against that target's parent — while a lexical collapse
-        // looks for `<gitdir>/evil.config`, finds nothing, and files a file git
-        // really reads as missing. Measured against this screen: git's own
-        // merged read lists the payload's `filter.evil.smudge` while the
-        // collapsed walk answered `filters: []`, and a restore-shaped checkout
-        // then executed it on the host. Absolute values pass through
-        // unnormalized for the same reason: `resolve()` collapses `..` inside
-        // them too.
-        target = isAbsolute(value) ? value : `${dirname(file)}${sep}${value}`;
       }
+      // CONCATENATED, not `resolve()`d and not `join()`d: both collapse `..`
+      // lexically, before any symlink is consulted, and git does not. With
+      // `<gitdir>/link` a symlink, `include.path = link/../evil.config`
+      // reaches a payload ONE LEVEL ABOVE the link's target — the kernel
+      // resolves `..` against that target's parent — while a lexical collapse
+      // looks for `<gitdir>/evil.config`, finds nothing, and files a file git
+      // really reads as missing. Measured against this screen: git's own
+      // merged read lists the payload's `filter.evil.smudge` while the
+      // collapsed walk answered `filters: []`, and a restore-shaped checkout
+      // then executed it on the host. Absolute values pass through
+      // unnormalized for the same reason: `resolve()` collapses `..` inside
+      // them too.
       visit(target, depth + 1, `${key} (in ${file})`);
     }
   };
   for (const candidate of candidates) visit(candidate, 0, null);
   return {
     filters: [...filters],
+    exempt: [...exempt],
     unread: [...unread],
     dangling: [...dangling],
   };
@@ -1393,7 +1567,7 @@ function screenForTree(worktree: string): FilterScreen | null {
   const commonDir = discover('--git-common-dir');
   const gitDir = discover('--git-dir');
   if (commonDir === null || gitDir === null) return null;
-  return filterCommandsIn(commonDir, gitDir);
+  return filterCommandsIn(commonDir, gitDir, worktree);
 }
 
 /**
@@ -1428,8 +1602,9 @@ export function localFilterCommands(worktree: string): string[] {
  * worktree add` registers a NEW admin entry under `<common>/worktrees/` — the
  * wildcard form git writes for exactly that case. A condition test matching
  * only the screened tree's own gitdir would therefore re-open the creation
- * path the screen exists to cover. Only the target's existence is asked here;
- * origin-resolution of what a hit came from is #10441.
+ * path the screen exists to cover. The local walk therefore still follows all
+ * includeIf targets; only the separate merged-config read evaluates their
+ * current activity when identifying user-owned source boundaries.
  */
 export function checkoutFilterCommands(worktree: string): string[] {
   const screen = screenForTree(worktree);
@@ -2268,7 +2443,11 @@ export function worktreeResidue(
       // a refusal would have left it unmeasured for good. What is refused is
       // a config the screen could not read to the bottom: a filter it cannot
       // see it cannot blank.
-      const screen = filterCommandsIn(commonDir, realpathSync(gitDir));
+      const screen = filterCommandsIn(
+        commonDir,
+        realpathSync(gitDir),
+        realpathSync(toplevel),
+      );
       // BOTH halves here, where `checkoutFilterCommands` takes only the first.
       // This consumer does not authorise one rewrite and then stop: it hands
       // back a measurement the rest of the review acts on, and a dangling
@@ -2289,7 +2468,7 @@ export function worktreeResidue(
             'include, or the file it names, if it is not yours',
         };
       }
-      filterBlanks = filterBlankEnv(screen.filters);
+      filterBlanks = filterBlankEnv([...screen.filters, ...screen.exempt]);
     }
   } catch {
     // A cwd that no longer resolves is not a tree this probe can measure.

@@ -48,6 +48,7 @@ import {
   localFilterCommands,
   mountNullKind,
   mountRootFor,
+  parseTrustedConfigRecords,
   redirectedAncestor,
   sanitizedGitEnv,
   unmountableRootSpelling,
@@ -226,6 +227,27 @@ describe('worktreeResidue', () => {
       `[filter "evil"]\n\tclean = touch ${marker} && cat\n`,
     );
     gitRepo('config', 'include.path', '../innocuous.cfg');
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    appendFileSync(
+      join(repo, '.git', 'info', 'attributes'),
+      'a.ts filter=evil\n',
+    );
+    const stale = new Date(Date.now() + 60_000);
+    utimesSync(join(tree, 'a.ts'), stale, stale);
+
+    const got = worktreeResidue(tree, 12, git('rev-parse', 'HEAD'));
+    expect(existsSync(marker)).toBe(false);
+    expect(got).toEqual({ paths: [], total: 0 });
+  });
+
+  it('blanks a globally exempt filter during the residue measurement', () => {
+    const marker = join(repo, 'PWNED-global-included');
+    const globalConfig = join(gitIsolation.home, '.gitconfig');
+    writeFileSync(
+      globalConfig,
+      `[filter "evil"]\n\tclean = touch ${marker} && cat\n`,
+    );
+    gitRepo('config', 'include.path', globalConfig);
     mkdirSync(join(repo, '.git', 'info'), { recursive: true });
     appendFileSync(
       join(repo, '.git', 'info', 'attributes'),
@@ -2061,9 +2083,224 @@ describe('filterCommandsIn — the include walk', () => {
     writeFileSync(join(dir, 'config'), '[include]\n\tpath = sub/payload.cfg\n');
     expect(filterCommandsIn(dir, dir)).toEqual({
       filters: ['filter.evil.process'],
+      exempt: [],
       unread: [],
       dangling: [],
     });
+  });
+
+  it('exempts an exact global-config origin, but not a repo-controlled alias to it', () => {
+    const globalConfig = join(gitIsolation.home, '.gitconfig');
+    writeFileSync(
+      globalConfig,
+      '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n' +
+        '[include]\n\tpath = /missing/user-owned.cfg\n',
+    );
+    writeFileSync(join(dir, 'config'), `[include]\n\tpath = ${globalConfig}\n`);
+    const exact = filterCommandsIn(dir, dir);
+    expect(exact.filters).toEqual([]);
+    expect(exact.exempt).toEqual(['filter.lfs.clean']);
+    expect(exact.dangling).toEqual([]);
+
+    // Canonical target equality is not enough: a path the repository controls
+    // can be repointed after the screen. Only the spelling Git reaches through
+    // the user's own config graph is the user's contract.
+    const alias = join(dir, 'global-alias.cfg');
+    symlinkSync(globalConfig, alias);
+    writeFileSync(join(dir, 'config'), `[include]\n\tpath = ${alias}\n`);
+    expect(filterCommandsIn(dir, dir).filters).toEqual(['filter.lfs.clean']);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps a POSIX backslash distinct from the global-config separator spelling',
+    () => {
+      const xdgConfig = join(gitIsolation.home, '.config', 'git', 'config');
+      mkdirSync(dirname(xdgConfig), { recursive: true });
+      writeFileSync(xdgConfig, '[filter "lfs"]\n\tclean = git-lfs clean\n');
+      const payload = join(gitIsolation.home, '.config', 'git\\config');
+      writeFileSync(payload, '[filter "lfs"]\n\tclean = evil-clean\n');
+      execFileSync('git', [
+        'config',
+        '--file',
+        join(dir, 'config'),
+        'include.path',
+        payload,
+      ]);
+
+      expect(filterCommandsIn(dir, dir).filters).toEqual(['filter.lfs.clean']);
+    },
+  );
+
+  it('recognises the XDG global config as a user-owned origin', () => {
+    const xdgConfig = join(gitIsolation.home, '.config', 'git', 'config');
+    mkdirSync(dirname(xdgConfig), { recursive: true });
+    writeFileSync(xdgConfig, '[filter "xdg"]\n\tsmudge = xdg-filter\n');
+    writeFileSync(join(dir, 'config'), `[include]\n\tpath = ${xdgConfig}\n`);
+
+    expect(filterCommandsIn(dir, dir).filters).toEqual([]);
+  });
+
+  it('follows includes in the active global graph before exempting an origin', () => {
+    const included = join(gitIsolation.home, 'filters.inc');
+    writeFileSync(included, '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n');
+    writeFileSync(
+      join(gitIsolation.home, '.gitconfig'),
+      `[include]\n\tpath = ${included}\n`,
+    );
+    writeFileSync(join(dir, 'config'), `[include]\n\tpath = ${included}\n`);
+
+    expect(filterCommandsIn(dir, dir).filters).toEqual([]);
+  });
+
+  it('does not trust a source behind an inactive global includeIf', () => {
+    const payload = join(gitIsolation.home, 'conditional.cfg');
+    writeFileSync(payload, '[filter "conditional"]\n\tclean = cat\n');
+    writeFileSync(
+      join(gitIsolation.home, '.gitconfig'),
+      `[includeIf "gitdir:/does-not-match/"]\n\tpath = ${payload}\n`,
+    );
+    writeFileSync(join(dir, 'config'), `[include]\n\tpath = ${payload}\n`);
+
+    expect(filterCommandsIn(dir, dir).filters).toEqual([
+      'filter.conditional.clean',
+    ]);
+  });
+
+  it('evaluates global includeIf against the linked tree and rejects repo-owned origins', () => {
+    const repo = join(dir, 'repo');
+    const tree = join(dir, 'linked');
+    mkdirSync(repo);
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    git(repo, 'init', '-q', '-b', 'main');
+    git(repo, 'config', 'user.email', 't@t.t');
+    git(repo, 'config', 'user.name', 't');
+    writeFileSync(join(repo, 'a.ts'), 'x\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qm', 'head');
+    git(repo, 'worktree', 'add', '--detach', '-q', tree, 'HEAD');
+    const commonDir = git(
+      tree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    );
+    const gitDir = git(
+      tree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+    const userFilter = join(gitIsolation.home, 'user-filter.cfg');
+    writeFileSync(userFilter, '[filter "user"]\n\tclean = cat\n');
+    git(repo, 'config', 'include.path', userFilter);
+    const globalIncludeIf = (condition: string, target: string) =>
+      `[includeIf ${JSON.stringify(condition)}]\n` +
+      `\tpath = ${JSON.stringify(target)}\n`;
+
+    // This condition holds in the main checkout but not in the linked tree.
+    writeFileSync(
+      join(gitIsolation.home, '.gitconfig'),
+      globalIncludeIf(`gitdir:${join(repo, '.git')}`, userFilter),
+    );
+    expect(filterCommandsIn(commonDir, gitDir).filters).toEqual([
+      'filter.user.clean',
+    ]);
+
+    // A directory condition active for both trees grants the user-owned file.
+    writeFileSync(
+      join(gitIsolation.home, '.gitconfig'),
+      globalIncludeIf(`gitdir:${dir}/`, userFilter),
+    );
+    expect(filterCommandsIn(commonDir, gitDir).filters).toEqual([]);
+
+    // Scope alone is insufficient: an active global include can point back
+    // into content controlled by the reviewed repository.
+    const trackedFilter = join(repo, 'shared-filter.cfg');
+    writeFileSync(trackedFilter, '[filter "tracked"]\n\tclean = cat\n');
+    git(repo, 'add', 'shared-filter.cfg');
+    git(repo, 'commit', '-qm', 'tracked filter fixture');
+    git(repo, 'config', '--replace-all', 'include.path', trackedFilter);
+    writeFileSync(
+      join(gitIsolation.home, '.gitconfig'),
+      globalIncludeIf(`gitdir:${dir}/`, trackedFilter),
+    );
+    expect(filterCommandsIn(commonDir, gitDir).filters).toEqual([
+      'filter.tracked.clean',
+    ]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'accounts for a failed global/system origin read',
+    () => {
+      const globalConfig = join(gitIsolation.home, '.gitconfig');
+      writeFileSync(globalConfig, '[filter "lfs"]\n\tclean = cat\n');
+      writeFileSync(
+        join(dir, 'config'),
+        `[include]\n\tpath = ${globalConfig}\n`,
+      );
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      const shimDir = join(dir, 'shim');
+      mkdirSync(shimDir);
+      const shim = join(shimDir, 'git');
+      writeFileSync(
+        shim,
+        '#!/bin/sh\n' +
+          'for arg do\n' +
+          '  [ "$arg" = "--show-scope" ] && exit 129\n' +
+          'done\n' +
+          `exec ${JSON.stringify(realGit)} "$@"\n`,
+      );
+      chmodSync(shim, 0o755);
+      const savedPath = process.env['PATH'];
+      try {
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+        const screen = filterCommandsIn(dir, dir);
+        expect(screen.filters).toEqual(['filter.lfs.clean']);
+        expect(screen.unread.join(' ')).toContain('git config exited 129');
+      } finally {
+        if (savedPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = savedPath;
+      }
+    },
+  );
+
+  it('parses system-scope origins through the same trusted-record seam', () => {
+    const systemConfig =
+      process.platform === 'win32'
+        ? 'C:/ProgramData/Git/config'
+        : '/etc/gitconfig';
+    expect(
+      parseTrustedConfigRecords(
+        `system\0file:${systemConfig}\0filter.lfs.clean\ngit-lfs clean\0`,
+      ),
+    ).toEqual([
+      {
+        scope: 'system',
+        file: systemConfig,
+        key: 'filter.lfs.clean',
+      },
+    ]);
+  });
+
+  it('names a relocated XDG global slot that the sanitized read cannot attribute', () => {
+    const xdg = join(gitIsolation.home, 'relocated-xdg');
+    const xdgConfig = join(xdg, 'git', 'config');
+    mkdirSync(dirname(xdgConfig), { recursive: true });
+    writeFileSync(xdgConfig, '[filter "xdg"]\n\tclean = cat\n');
+    writeFileSync(join(dir, 'config'), `[include]\n\tpath = ${xdgConfig}\n`);
+    const saved = process.env['XDG_CONFIG_HOME'];
+    try {
+      process.env['XDG_CONFIG_HOME'] = xdg;
+      const screen = filterCommandsIn(dir, dir);
+      expect(screen.filters).toEqual(['filter.xdg.clean']);
+      expect(screen.unread.join(' ')).toContain('relocated XDG global config');
+    } finally {
+      if (saved === undefined) delete process.env['XDG_CONFIG_HOME'];
+      else process.env['XDG_CONFIG_HOME'] = saved;
+    }
   });
 
   it('resolves a relative include against the path git OPENED, not its realpath', () => {
@@ -2084,6 +2321,7 @@ describe('filterCommandsIn — the include walk', () => {
       symlinkSync(join(elsewhere, 'cfg'), join(dir, 'config'));
       expect(filterCommandsIn(dir, dir)).toEqual({
         filters: ['filter.evil.clean'],
+        exempt: [],
         unread: [],
         dangling: [],
       });
@@ -2108,6 +2346,7 @@ describe('filterCommandsIn — the include walk', () => {
       );
       expect(filterCommandsIn(dir, dir)).toEqual({
         filters: ['filter.x.clean'],
+        exempt: [],
         unread: [],
         dangling: [],
       });
@@ -2129,6 +2368,7 @@ describe('filterCommandsIn — the include walk', () => {
     );
     expect(filterCommandsIn(dir, dir)).toEqual({
       filters: ['filter.home.clean'],
+      exempt: [],
       unread: [],
       dangling: [],
     });
@@ -2371,6 +2611,7 @@ describe('sanitizedGitEnv', () => {
       // sha1 source cannot read the source's objects through an alternates
       // pointer.
       process.env['GIT_DEFAULT_HASH'] = 'sha256';
+      process.env['GIT_CEILING_DIRECTORIES'] = '/tmp/elsewhere';
       process.env['PATH'] = saved['PATH'];
 
       const env = sanitizedGitEnv();
@@ -2383,6 +2624,7 @@ describe('sanitizedGitEnv', () => {
         'GIT_CONFIG_GLOBAL',
         'GIT_CONFIG_PARAMETERS',
         'GIT_DEFAULT_HASH',
+        'GIT_CEILING_DIRECTORIES',
       ]) {
         expect(env[key]).toBeUndefined();
       }
