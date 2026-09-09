@@ -486,6 +486,78 @@ describe('DaemonWorkspaceProvider', () => {
     );
   });
 
+  describe('useDaemonWorkspace guard diagnostics', () => {
+    const REGISTRY_KEY = '__qwenWebShellDaemonWorkspaceProviderCopies';
+
+    function renderBareConsumer() {
+      let error: Error | undefined;
+
+      function Harness() {
+        try {
+          useDaemonWorkspace();
+        } catch (e) {
+          error = e as Error;
+        }
+        return null;
+      }
+
+      container = document.createElement('div');
+      document.body.appendChild(container);
+      root = createRoot(container);
+      act(() => {
+        root?.render(<Harness />);
+      });
+      return error;
+    }
+
+    it('reports the consumer as outside the subtree once this module copy rendered a provider', async () => {
+      await renderWithProvider(null);
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+
+      const error = renderBareConsumer();
+
+      expect(error?.message).toContain(
+        'useDaemonWorkspace must be used within DaemonWorkspaceProvider',
+      );
+      expect(error?.message).toContain('outside its subtree');
+    });
+
+    it('reports when no provider has rendered in this page', () => {
+      const scope = globalThis as typeof globalThis & {
+        [REGISTRY_KEY]?: string[];
+      };
+      const saved = scope[REGISTRY_KEY];
+      scope[REGISTRY_KEY] = [];
+      try {
+        const error = renderBareConsumer();
+
+        expect(error?.message).toContain(
+          'no DaemonWorkspaceProvider has rendered in this page',
+        );
+      } finally {
+        scope[REGISTRY_KEY] = saved;
+      }
+    });
+
+    it('reports duplicate module copies with the foreign copy id', () => {
+      const scope = globalThis as typeof globalThis & {
+        [REGISTRY_KEY]?: string[];
+      };
+      const saved = scope[REGISTRY_KEY];
+      scope[REGISTRY_KEY] = ['other-copy'];
+      try {
+        const error = renderBareConsumer();
+
+        expect(error?.message).toContain('other-copy');
+        expect(error?.message).toContain('duplicate copies');
+      } finally {
+        scope[REGISTRY_KEY] = saved;
+      }
+    });
+  });
+
   it('exposes workspace actions', async () => {
     let actions: DaemonWorkspaceActions | undefined;
 

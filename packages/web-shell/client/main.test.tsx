@@ -15,6 +15,7 @@ interface CapturedWorkspaceSessionProps {
 
 const testState = vi.hoisted(() => ({
   props: undefined as CapturedWorkspaceSessionProps | undefined,
+  throwOnRender: false,
 }));
 
 vi.mock('react-dom/client', async (importOriginal) => ({
@@ -26,6 +27,9 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 }));
 vi.mock('./components/WorkspaceSessionProvider', () => ({
   WorkspaceSessionProvider: (props: CapturedWorkspaceSessionProps) => {
+    if (testState.throwOnRender) {
+      throw new Error('render boom');
+    }
     testState.props = props;
     return null;
   },
@@ -45,6 +49,7 @@ describe('StandaloneApp', () => {
 
   beforeEach(() => {
     testState.props = undefined;
+    testState.throwOnRender = false;
     window.history.replaceState(null, '', '/');
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -54,6 +59,29 @@ describe('StandaloneApp', () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.unstubAllGlobals();
+  });
+
+  it('reloads the page when the root error fallback retry is clicked', () => {
+    testState.throwOnRender = true;
+    const reload = vi.fn();
+    vi.stubGlobal('location', { ...window.location, reload });
+    // The boundary logs the caught error; keep the test output clean.
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    const retry = container.querySelector('button');
+    expect(retry?.textContent).toBe('Try again');
+
+    act(() => {
+      retry?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    consoleError.mockRestore();
   });
 
   it('keeps the controlled session target in sync with URL changes', () => {

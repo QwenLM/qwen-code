@@ -195,8 +195,16 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   return (
     <ErrorBoundary
       label="web-shell-root"
-      fallback={(error, reset) => (
-        <RootErrorFallback error={error} onRetry={reset} language={language} />
+      fallback={(error) => (
+        <RootErrorFallback
+          error={error}
+          // An in-place boundary retry re-mounts the same module graph, so a
+          // crash rooted in page-level module state (e.g. a duplicated
+          // context module in dev) would throw again. Only a full reload
+          // rebuilds the graph.
+          onRetry={() => window.location.reload()}
+          language={language}
+        />
       )}
     >
       <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>

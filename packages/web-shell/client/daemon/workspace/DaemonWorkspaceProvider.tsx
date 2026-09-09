@@ -27,6 +27,24 @@ const DaemonWorkspaceContext = createContext<
   DaemonWorkspaceContextValue | undefined
 >(undefined);
 
+// Module-copy marker for diagnosing "must be used within" failures. When the
+// page ends up with two copies of this module (a Vite dev module-graph hiccup,
+// a stale chunk next to a rebuilt one), each copy has its own
+// DaemonWorkspaceContext, so a consumer resolved to one copy reads no provider
+// even though a provider from the other copy is mounted. The registry records
+// which module copies have rendered a provider so the strict hook's error can
+// say which case it hit. Diagnostic only — the context itself is never shared.
+const moduleInstanceId = Math.random().toString(36).slice(2, 8);
+
+const PROVIDER_REGISTRY_KEY = '__qwenWebShellDaemonWorkspaceProviderCopies';
+
+function renderedProviderCopies(): string[] {
+  const scope = globalThis as typeof globalThis & {
+    [PROVIDER_REGISTRY_KEY]?: string[];
+  };
+  return (scope[PROVIDER_REGISTRY_KEY] ??= []);
+}
+
 // Module-level sentinel for deferred-disposal StrictMode guard.
 // See the useEffect cleanup in DaemonWorkspaceProvider for details.
 let pendingDisposeClient: DaemonClient | undefined;
@@ -217,6 +235,10 @@ export function DaemonWorkspaceProvider({
 
   const contextValue = useMemo<DaemonWorkspaceContextValue | undefined>(() => {
     if (!client) return undefined;
+    const copies = renderedProviderCopies();
+    if (!copies.includes(moduleInstanceId)) {
+      copies.push(moduleInstanceId);
+    }
     return {
       client,
       token,
@@ -252,8 +274,19 @@ export function DaemonWorkspaceProvider({
 export function useDaemonWorkspace(): DaemonWorkspaceContextValue {
   const context = useContext(DaemonWorkspaceContext);
   if (!context) {
+    const copies = renderedProviderCopies();
+    const detail = copies.includes(moduleInstanceId)
+      ? 'a DaemonWorkspaceProvider from this module copy rendered, so ' +
+        'this consumer is outside its subtree'
+      : copies.length > 0
+        ? `a DaemonWorkspaceProvider rendered from module copy ` +
+          `${copies.join(', ')}, but this hook resolved module copy ` +
+          `${moduleInstanceId} — the page holds duplicate copies of the ` +
+          `DaemonWorkspaceProvider module`
+        : 'no DaemonWorkspaceProvider has rendered in this page';
     throw new Error(
-      'useDaemonWorkspace must be used within DaemonWorkspaceProvider',
+      `useDaemonWorkspace must be used within DaemonWorkspaceProvider ` +
+        `(${detail})`,
     );
   }
   return context;
