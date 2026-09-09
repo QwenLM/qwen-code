@@ -79,7 +79,11 @@ question cards time out after 270,000 milliseconds (270 seconds).
       "clientSecret": "$DINGTALK_CLIENT_SECRET",
       "interactiveCards": {
         "enabled": true,
-        "statusCard": { "enabled": true },
+        "statusCard": {
+          "enabled": true,
+          "showModel": true,
+          "showReasoningEffort": true
+        },
         "questionCard": {
           "enabled": true,
           "timeoutMs": 270000
@@ -92,12 +96,21 @@ question cards time out after 270,000 milliseconds (270 seconds).
 
 Set `interactiveCards.enabled` to `false` to disable all interactive cards.
 Use `statusCard.enabled` or `questionCard.enabled` to disable one card type,
+use `statusCard.showModel` or `statusCard.showReasoningEffort` to hide either
+piece of status-card metadata (both default to enabled),
 and set `questionCard.timeoutMs` to a finite positive number to change how long
 Qwen Code waits for a question-card response. Values above 2,147,483,647
 milliseconds (about 24.8 days) are capped at that maximum. Interactive cards
 are configured through `settings.json` or the management API; the Web Shell
 channel editor does not render them, and it preserves the stored object when
 you edit other fields.
+
+When a running task requests tool permission, DingTalk shows the available
+permission actions in that task's status card. Only the user who started the
+task can use those actions. The selected result replaces the buttons in place
+and the same card continues streaming. If the status card is unavailable or
+cannot be updated, Qwen Code falls back to the text `/approve`,
+`/approve-always`, and `/deny` flow.
 
 ### Connection Recovery
 

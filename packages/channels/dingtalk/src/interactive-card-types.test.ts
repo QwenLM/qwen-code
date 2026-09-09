@@ -16,11 +16,19 @@ describe('interactive card config', () => {
     const questionCard = interactiveCards?.properties?.find(
       (field) => field.key === 'questionCard',
     );
+    const statusCard = interactiveCards?.properties?.find(
+      (field) => field.key === 'statusCard',
+    );
     const timeout = questionCard?.properties?.find(
       (field) => field.key === 'timeoutMs',
     );
 
     expect(DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM).toBe(0);
+    expect(statusCard?.properties?.map((field) => field.key)).toEqual([
+      'enabled',
+      'showModel',
+      'showReasoningEffort',
+    ]);
     expect(
       timeout?.kind === 'number' ? timeout.exclusiveMinimum : undefined,
     ).toBe(DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM);
@@ -28,7 +36,13 @@ describe('interactive card config', () => {
       {},
       { enabled: false },
       { statusCard: {} },
-      { statusCard: { enabled: false } },
+      {
+        statusCard: {
+          enabled: false,
+          showModel: false,
+          showReasoningEffort: false,
+        },
+      },
       { questionCard: {} },
       {
         questionCard: {
@@ -45,12 +59,20 @@ describe('interactive card config', () => {
   it('keeps omitted cards disabled while treating an object as opt-in', () => {
     expect(parseDingtalkInteractiveCardConfig(undefined)).toEqual({
       enabled: false,
-      statusCard: { enabled: true },
+      statusCard: {
+        enabled: true,
+        showModel: true,
+        showReasoningEffort: true,
+      },
       questionCard: { enabled: true, timeoutMs: 270_000 },
     });
     expect(parseDingtalkInteractiveCardConfig({})).toEqual({
       enabled: true,
-      statusCard: { enabled: true },
+      statusCard: {
+        enabled: true,
+        showModel: true,
+        showReasoningEffort: true,
+      },
       questionCard: { enabled: true, timeoutMs: 270_000 },
     });
   });
@@ -59,12 +81,20 @@ describe('interactive card config', () => {
     expect(
       parseDingtalkInteractiveCardConfig({
         enabled: true,
-        statusCard: { enabled: false },
+        statusCard: {
+          enabled: false,
+          showModel: false,
+          showReasoningEffort: true,
+        },
         questionCard: { enabled: true, timeoutMs: 1_000 },
       }),
     ).toEqual({
       enabled: true,
-      statusCard: { enabled: false },
+      statusCard: {
+        enabled: false,
+        showModel: false,
+        showReasoningEffort: true,
+      },
       questionCard: { enabled: true, timeoutMs: 1_000 },
     });
   });
@@ -85,6 +115,16 @@ describe('interactive card config', () => {
     expect(() =>
       parseDingtalkInteractiveCardConfig({ statusCard: { enabled: 'yes' } }),
     ).toThrow('statusCard.enabled');
+    expect(() =>
+      parseDingtalkInteractiveCardConfig({
+        statusCard: { showModel: 'yes' },
+      }),
+    ).toThrow('statusCard.showModel');
+    expect(() =>
+      parseDingtalkInteractiveCardConfig({
+        statusCard: { showReasoningEffort: 'yes' },
+      }),
+    ).toThrow('statusCard.showReasoningEffort');
   });
 
   it('clamps question timeouts at the setTimeout maximum delay', () => {
@@ -154,6 +194,65 @@ describe('card callback parser', () => {
       formData: { '0': 'Beijing' },
       hasBusinessPayload: true,
       isCancel: false,
+    });
+  });
+
+  it('parses dynamic button actions nested under params', () => {
+    expect(
+      parseDingtalkCardCallback({
+        userId: 'owner-1',
+        outTrackId: 'status-1',
+        value: JSON.stringify({
+          params: {
+            actionId: 'btn_permission_allow_once',
+          },
+        }),
+      }),
+    ).toEqual({
+      outTrackId: 'status-1',
+      actionId: 'btn_permission_allow_once',
+      parameterActionId: 'btn_permission_allow_once',
+      actorId: 'owner-1',
+      formData: {},
+      hasBusinessPayload: false,
+      isCancel: false,
+    });
+  });
+
+  it('keeps a dynamic button action separate from its template component id', () => {
+    expect(
+      parseDingtalkCardCallback({
+        userId: 'owner-1',
+        outTrackId: 'status-1',
+        value: JSON.stringify({
+          cardPrivateData: {
+            actionIds: ['dynamic-button-component'],
+            params: {
+              actionId: 'btn_permission_allow_once',
+            },
+          },
+        }),
+      }),
+    ).toMatchObject({
+      actionId: 'dynamic-button-component',
+      parameterActionId: 'btn_permission_allow_once',
+    });
+  });
+
+  it('preserves the generated component id when callback params are empty', () => {
+    expect(
+      parseDingtalkCardCallback({
+        userId: 'owner-1',
+        outTrackId: 'status-1',
+        value: JSON.stringify({
+          cardPrivateData: {
+            actionIds: ['btn_permission_allow_once1'],
+            params: '',
+          },
+        }),
+      }),
+    ).toMatchObject({
+      actionId: 'btn_permission_allow_once1',
     });
   });
 

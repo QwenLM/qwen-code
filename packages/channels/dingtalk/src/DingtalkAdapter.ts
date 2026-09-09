@@ -75,6 +75,7 @@ import type {
   ChannelAgentBridge,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
   SessionTarget,
@@ -626,6 +627,25 @@ const PROACTIVE_FILE_MSG_KEY = 'sampleFile';
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
 const ROBOT_MESSAGE_HOSTS = new Set(['api.dingtalk.com', 'oapi.dingtalk.com']);
+const STATUS_CARD_ACTION_IDS = [
+  'btn_stop',
+  'btn_new_session',
+  'btn_compact',
+  'btn_permission_allow_always',
+  'btn_permission_allow_once',
+  'btn_permission_reject',
+] as const;
+
+function normalizeStatusCardActionId(actionId: string): string {
+  return (
+    STATUS_CARD_ACTION_IDS.find(
+      (known) =>
+        actionId === known ||
+        (actionId.startsWith(known) &&
+          /^\d+$/.test(actionId.slice(known.length))),
+    ) ?? actionId
+  );
+}
 /**
  * gettoken business errors a retry cannot fix: an invalid appkey/secret or a
  * missing app. Any other errcode (-1 system busy, 88 throttled, ...) is
@@ -784,6 +804,7 @@ type MentionTargetEnvelope = Envelope & {
 
 interface CardRunCorrelation {
   ownerId: string;
+  quoteContent?: string;
   target: { chatId: string; isGroup: boolean };
   sender?: { senderName: string };
 }
@@ -1166,6 +1187,33 @@ export class DingtalkChannel extends ChannelBase {
           client: this.interactiveCardClient,
           cancelRun: (sessionId, runId) =>
             this.requestPromptRunCancellation(sessionId, runId),
+          quoteContent: (segment) =>
+            this.cardRuns.get(segment.runId)?.quoteContent ?? '',
+          sessionModelInfo: (segment) =>
+            this.bridge.getSessionModelInfo?.(segment.sessionId),
+          showModel: this.interactiveCardConfig.statusCard.showModel,
+          showReasoningEffort:
+            this.interactiveCardConfig.statusCard.showReasoningEffort,
+          ...(config.multiSession
+            ? {}
+            : {
+                executeCommand: (context, command) =>
+                  this.handleSessionCardCommand(
+                    {
+                      channelName: this.name,
+                      senderId: context.owner.id,
+                      senderName: context.owner.id,
+                      chatId: context.target.chatId,
+                      threadId: context.target.threadId,
+                      text: command,
+                      isGroup: context.target.isGroup === true,
+                      isMentioned: true,
+                      isReplyToBot: true,
+                    },
+                    context.sessionId,
+                    command,
+                  ),
+              }),
           ...(config.model ? { model: config.model } : {}),
           ...(options?.displayLanguage
             ? { language: options.displayLanguage }
@@ -1312,11 +1360,41 @@ export class DingtalkChannel extends ChannelBase {
   protected routeCardCallback(
     callback: DingtalkCardCallback,
   ): DingtalkCardCallbackResult {
-    if (callback.actionId === 'btn_stop') {
+    const actionId = callback.outTrackId.startsWith('qwen-status-')
+      ? normalizeStatusCardActionId(
+          callback.parameterActionId ?? callback.actionId,
+        )
+      : callback.actionId;
+    if (actionId === 'btn_stop') {
       return (
         this.statusCardController?.claimStop(
           callback.outTrackId,
           callback.actorId,
+        ) ?? { kind: 'ignored', actorId: callback.actorId }
+      );
+    }
+    if (actionId === 'btn_new_session' || actionId === 'btn_compact') {
+      return (
+        this.statusCardController?.claimCommand(
+          callback.outTrackId,
+          callback.actorId,
+          actionId === 'btn_new_session' ? '/new' : '/compress',
+        ) ?? { kind: 'ignored', actorId: callback.actorId }
+      );
+    }
+    const permissionActions = {
+      btn_permission_allow_always: 'allow_always',
+      btn_permission_allow_once: 'allow_once',
+      btn_permission_reject: 'reject_once',
+    } as const;
+    const permissionAction =
+      permissionActions[actionId as keyof typeof permissionActions];
+    if (permissionAction) {
+      return (
+        this.statusCardController?.claimPermission(
+          callback.outTrackId,
+          callback.actorId,
+          permissionAction,
         ) ?? { kind: 'ignored', actorId: callback.actorId }
       );
     }
@@ -2804,6 +2882,7 @@ export class DingtalkChannel extends ChannelBase {
         this.inboundCardOwners.delete(messageId);
         this.inboundCardOwners.set(messageId, {
           ownerId: envelope.senderId,
+          quoteContent: `${sanitizeSenderName(envelope.senderName || envelope.senderId)}：${(envelope.displayText ?? envelope.text).slice(0, 1800)}`,
           target: {
             chatId: envelope.chatId,
             isGroup: envelope.isGroup,
@@ -3912,6 +3991,20 @@ export class DingtalkChannel extends ChannelBase {
       return { kind: 'unsupported' };
     }
     return this.interactionPresenter.presentInput(context);
+  }
+
+  protected override async presentPermissionRequest(
+    context: ChannelPermissionRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    const run = this.cardRuns.get(context.runId);
+    if (run?.ownerId !== context.owner.id || !this.interactionPresenter) {
+      return { kind: 'unsupported' };
+    }
+    return this.interactionPresenter.presentPermission(context);
+  }
+
+  protected override canPresentPermissionRequest(): boolean {
+    return this.statusCardController !== undefined;
   }
 
   /**

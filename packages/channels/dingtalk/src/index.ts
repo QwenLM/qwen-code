@@ -52,6 +52,20 @@ export const plugin: ChannelPlugin = {
                 label: 'Enabled',
                 kind: 'boolean',
               },
+              {
+                key: 'showModel',
+                label: 'Show Model',
+                kind: 'boolean',
+                description:
+                  'Show the active session model in the status card footer; defaults to enabled',
+              },
+              {
+                key: 'showReasoningEffort',
+                label: 'Show Reasoning Effort',
+                kind: 'boolean',
+                description:
+                  'Show the active session reasoning effort in the status card footer when available; defaults to enabled',
+              },
             ],
           },
           {

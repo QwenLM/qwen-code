@@ -8,6 +8,7 @@ import type {
   ChannelMemoryTarget,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
   ChannelPromptOwner,
   ChannelProactiveTarget,
   ChannelRuntimeIdentity,
@@ -900,7 +901,8 @@ export abstract class ChannelBase {
     requestIds.push(event.requestId);
     this.pendingPermissionsByChat.set(chatKey, requestIds);
     try {
-      const presentation = this.tryPresentUserInput(pending);
+      const presentation =
+        this.tryPresentUserInput(pending) ?? this.tryPresentPermission(pending);
       if (presentation && (await presentation)) {
         return;
       }
@@ -1019,6 +1021,92 @@ export abstract class ChannelBase {
     })();
   }
 
+  private tryPresentPermission(
+    pending: PendingPermission,
+  ): Promise<boolean> | undefined {
+    const active = this.activePrompts.get(pending.sessionId);
+    if (
+      !active ||
+      active.loopPrompt ||
+      !active.owner ||
+      !this.canPresentPermissionRequest() ||
+      this.isUserQuestionPermission(pending)
+    ) {
+      return undefined;
+    }
+    const options = this.permissionPresentationOptions(pending);
+    if (options.length === 0) return undefined;
+
+    const precedingSegment = this.closeOutputSegment(
+      pending.sessionId,
+      active,
+      pending.target,
+    );
+    let respondInvoked = false;
+    const parameters = this.permissionParameterSummary(
+      pending.request.toolCall,
+    );
+    const context: ChannelPermissionRequestContext = {
+      requestId: pending.requestId,
+      sessionId: pending.sessionId,
+      runId: active.runId,
+      owner: active.owner,
+      target: pending.target,
+      toolName: this.permissionToolName(pending.request.toolCall),
+      action: this.permissionTitle(pending.request.toolCall),
+      ...(parameters ? { parameters } : {}),
+      options,
+      onSettled: (listener) => {
+        if (pending.settled) {
+          listener(pending.settled);
+          return () => {};
+        }
+        pending.settlementListeners.add(listener);
+        return () => {
+          pending.settlementListeners.delete(listener);
+        };
+      },
+      respond: (response) => {
+        respondInvoked = true;
+        return this.respondToUserInput(pending, response);
+      },
+    };
+    pending.userInputPresented = true;
+    return (async () => {
+      try {
+        if (precedingSegment) {
+          await this.notifyOutputSegmentEnd(
+            pending.target.chatId,
+            pending.sessionId,
+            precedingSegment,
+            'permission_requested',
+          );
+        }
+        const result = await this.presentPermissionRequest(context);
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        if (
+          result.kind === 'presented' ||
+          (result.kind === 'handled' && respondInvoked)
+        ) {
+          return true;
+        }
+        pending.userInputPresented = false;
+        return false;
+      } catch (err) {
+        process.stderr.write(
+          `[${this.name}] permission presentation failed for request ${sanitizeLogText(pending.requestId, 128)}: ${this.lifecycleError(err)}\n`,
+        );
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        pending.userInputPresented = false;
+        return false;
+      }
+    })();
+  }
+
   private normalizeUserQuestions(
     pending: PendingPermission,
   ): ChannelUserQuestion[] | undefined {
@@ -1092,6 +1180,19 @@ export abstract class ChannelBase {
       });
     }
     return questions;
+  }
+
+  private isUserQuestionPermission(pending: PendingPermission): boolean {
+    const toolCall = pending.request.toolCall as unknown as Record<
+      string,
+      unknown
+    >;
+    const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
+    return (
+      meta?.['qwenInteractionKind'] === 'user_question' ||
+      meta?.['toolName'] === 'ask_user_question' ||
+      toolCall['kind'] === 'ask_user_question'
+    );
   }
 
   private async respondToUserInput(
@@ -1295,6 +1396,16 @@ export abstract class ChannelBase {
     _context: ChannelUserInputRequestContext,
   ): Promise<UserInputPresentationResult> {
     return { kind: 'unsupported' };
+  }
+
+  protected async presentPermissionRequest(
+    _context: ChannelPermissionRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    return { kind: 'unsupported' };
+  }
+
+  protected canPresentPermissionRequest(): boolean {
+    return false;
   }
 
   private emitTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
@@ -2881,6 +2992,52 @@ export abstract class ChannelBase {
     this.commands.set(name.toLowerCase(), handler);
   }
 
+  private readonly cardCommandSessions = new WeakMap<Envelope, string>();
+
+  protected async handleSessionCardCommand(
+    envelope: Envelope,
+    sessionId: string,
+    command: '/new' | '/compress',
+  ): Promise<void> {
+    if (this.namedSessions) {
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        `请在当前任务中发送 ${command}。`,
+      );
+      return;
+    }
+    envelope.text = command === '/new' ? '/new confirm' : command;
+    this.cardCommandSessions.set(envelope, sessionId);
+    await this.handleInbound(envelope);
+  }
+
+  private isStaleCardCommand(envelope: Envelope): boolean {
+    const sessionId = this.cardCommandSessions.get(envelope);
+    if (!sessionId) return false;
+    if (
+      this.router.getSession(
+        this.name,
+        envelope.senderId,
+        envelope.chatId,
+        envelope.threadId,
+      ) === sessionId &&
+      this.router.isSessionLive(sessionId) &&
+      !this.activePrompts.has(sessionId)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  private async sendStaleCardCommandMessage(envelope: Envelope): Promise<void> {
+    await this.sendThreadMessage(
+      envelope.chatId,
+      envelope.threadId,
+      '此卡片的会话已变更或正在处理中，请使用最新卡片或等待任务结束。',
+    );
+  }
+
   protected registerCancelCommand(name = 'cancel'): void {
     this.registerCommand(name, async (envelope) => {
       // /cancel aborts an in-flight turn — destructive in a shared session, where
@@ -3197,6 +3354,43 @@ export abstract class ChannelBase {
     const rawLabel = typeof option?.name === 'string' ? option.name : '';
     const label = sanitizeQuotedText(rawLabel, 160).trim();
     return label || fallback;
+  }
+
+  private permissionPresentationOptions(
+    pending: PendingPermission,
+  ): ChannelPermissionRequestContext['options'] {
+    const once = this.approvalOption(pending);
+    const always = this.approvalAlwaysOption(pending);
+    const deny = this.denialOption(pending);
+    return [
+      ...(always
+        ? [
+            {
+              optionId: always.optionId,
+              kind: 'allow_always' as const,
+              label: '始终允许',
+            },
+          ]
+        : []),
+      ...(once
+        ? [
+            {
+              optionId: once.optionId,
+              kind: 'allow_once' as const,
+              label: '本次允许',
+            },
+          ]
+        : []),
+      ...(deny
+        ? [
+            {
+              optionId: deny.optionId,
+              kind: 'reject_once' as const,
+              label: '拒绝',
+            },
+          ]
+        : []),
+    ];
   }
 
   private approvalOption(
@@ -6374,6 +6568,10 @@ export abstract class ChannelBase {
     }
 
     // 3. Slash command handling — before session/agent routing
+    if (this.isStaleCardCommand(envelope)) {
+      await this.sendStaleCardCommandMessage(envelope);
+      return;
+    }
     let btwQuestion: string | undefined;
     if (parsed) {
       const handler = this.commands.get(parsed.command);
@@ -6524,6 +6722,20 @@ export abstract class ChannelBase {
           envelope.chatId,
           envelope.threadId,
           `No task is currently selected. Use ${this.prefixedCommand('/session new <name>')} or ${this.prefixedCommand('/session use <name>')}.`,
+        );
+        return;
+      }
+    } else if (this.cardCommandSessions.has(envelope)) {
+      if (this.isStaleCardCommand(envelope)) {
+        await this.sendStaleCardCommandMessage(envelope);
+        return;
+      }
+      sessionId = this.cardCommandSessions.get(envelope)!;
+      if (!this.isRecognizedCommand(envelope.text, sessionId)) {
+        await this.sendThreadMessage(
+          envelope.chatId,
+          envelope.threadId,
+          '当前会话暂不支持压缩上下文，请稍后重试。',
         );
         return;
       }

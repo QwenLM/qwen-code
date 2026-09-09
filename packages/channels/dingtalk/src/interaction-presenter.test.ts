@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   ChannelOutputSegmentContext,
+  ChannelPermissionRequestContext,
   ChannelUserInputRequestContext,
   UserInputSettlementReason,
 } from '@qwen-code/channel-base';
@@ -96,6 +97,30 @@ function questionContext(
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    respond: vi.fn().mockResolvedValue(true),
+  };
+}
+
+function permissionContext(): ChannelPermissionRequestContext {
+  return {
+    requestId: 'permission-1',
+    sessionId: 'session-1',
+    runId: 'run-1',
+    owner: { kind: 'channel_user', id: 'owner-1' },
+    target: {
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      senderId: 'owner-1',
+      isGroup: true,
+    },
+    toolName: 'run_shell_command',
+    action: 'Run tests',
+    parameters: 'command',
+    options: [
+      { optionId: 'once', kind: 'allow_once', label: '本次允许' },
+      { optionId: 'deny', kind: 'reject_once', label: '拒绝' },
+    ],
+    onSettled: () => () => {},
     respond: vi.fn().mockResolvedValue(true),
   };
 }
@@ -554,6 +579,32 @@ describe('DingtalkInteractionPresenter', () => {
       'finalize:segment-1',
       'create:question',
     ]);
+  });
+
+  it('keeps the existing status card alive while presenting permission inline', async () => {
+    const { client, presenter, sendFallback } = createHarness();
+    presenter.appendOutput(segment('segment-1'), 'Explanation');
+
+    await presenter.closeOutput('segment-1', '', 'permission_requested');
+    await expect(
+      presenter.presentPermission(permissionContext()),
+    ).resolves.toEqual({ kind: 'presented' });
+
+    expect(
+      vi
+        .mocked(client.createAndDeliver)
+        .mock.calls.map(([request]) => request.templateId),
+    ).toEqual([STATUS_CARD_TEMPLATE_ID]);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          cardState: 'waiting',
+          hasAction: 'false',
+          blockList: expect.stringContaining('btn_permission_allow_once'),
+        }),
+      }),
+    );
+    expect(sendFallback).not.toHaveBeenCalled();
   });
 
   it.each(['input_requested', 'completed'] as const)(

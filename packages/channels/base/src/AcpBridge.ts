@@ -22,6 +22,7 @@ import {
   CHANNEL_PROMPT_META_KEY,
   parseBackgroundResponseContext,
   resolvePromptImages,
+  readSessionModelInfo,
   type AvailableCommand,
   type ChannelAgentBridge,
   type ChannelBtwResult,
@@ -29,6 +30,7 @@ import {
   type ChannelAgentBridgeSessionOptions,
   type ChannelLoopToolHandler,
   type ToolCallEvent,
+  type SessionModelInfo,
 } from './ChannelAgentBridge.js';
 import {
   CHANNEL_LOOP_MCP_SERVER_NAME,
@@ -91,6 +93,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private channelLoopMcpServer: ChannelLoopMcpServer | undefined;
   private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
   private readonly knownSessionIds = new Set<string>();
+  private readonly sessionModelInfo = new Map<string, SessionModelInfo>();
   private readonly sessionBindingTokens = new Map<string, object | undefined>();
   private readonly toolCallKindsBySession = new Map<
     string,
@@ -114,6 +117,11 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
 
   get availableCommands(): AvailableCommand[] {
     return this._availableCommands;
+  }
+
+  getSessionModelInfo(sessionId: string): SessionModelInfo | undefined {
+    const info = this.sessionModelInfo.get(sessionId);
+    return info ? { ...info } : undefined;
   }
 
   async start(): Promise<void> {
@@ -159,6 +167,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       // channel start crash recovery, which reloads the persisted sessions.
       this.resolvePendingPermissions();
       this.knownSessionIds.clear();
+      this.sessionModelInfo.clear();
       this.sessionBindingTokens.clear();
       this.toolCallKindsBySession.clear();
       this.connection = null;
@@ -196,7 +205,18 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         ): Promise<Record<string, unknown>> =>
           this.handleExtMethod(method, params),
 
-        extNotification: async (): Promise<void> => {},
+        extNotification: async (method, params): Promise<void> => {
+          if (
+            method === 'qwen/notify/session/model-update' &&
+            typeof params['sessionId'] === 'string' &&
+            this.knownSessionIds.has(params['sessionId']) &&
+            typeof params['currentModelId'] === 'string'
+          ) {
+            this.sessionModelInfo.set(params['sessionId'], {
+              model: params['currentModelId'],
+            });
+          }
+        },
       }),
       stream,
     );
@@ -269,6 +289,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       options?.approvalMode,
     );
     this.knownSessionIds.add(response.sessionId);
+    this.sessionModelInfo.set(
+      response.sessionId,
+      readSessionModelInfo(response),
+    );
     this.sessionBindingTokens.set(response.sessionId, bindingToken);
     return response.sessionId;
   }
@@ -281,13 +305,14 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   ): Promise<string> {
     const conn = this.ensureConnection();
     await this.registerChannelLoopMcpServer();
-    await conn.unstable_resumeSession({
+    const response = await conn.unstable_resumeSession({
       sessionId,
       cwd,
       mcpServers: [],
     });
     await this.applySessionApprovalMode(conn, sessionId, options?.approvalMode);
     this.knownSessionIds.add(sessionId);
+    this.sessionModelInfo.set(sessionId, readSessionModelInfo(response));
     this.sessionBindingTokens.set(sessionId, bindingToken);
     return sessionId;
   }
@@ -399,6 +424,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       return;
     }
     if (!this.knownSessionIds.delete(sessionId)) return;
+    this.sessionModelInfo.delete(sessionId);
     this.sessionBindingTokens.delete(sessionId);
     this.toolCallKindsBySession.delete(sessionId);
     this.resolvePendingPermissions(sessionId);
@@ -429,6 +455,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   stop(): void {
     this.resolvePendingPermissions();
     this.knownSessionIds.clear();
+    this.sessionModelInfo.clear();
     this.sessionBindingTokens.clear();
     this.toolCallKindsBySession.clear();
     if (this.child) {
@@ -454,6 +481,16 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     const type = update['sessionUpdate'] as string;
 
     switch (type) {
+      case 'config_option_update': {
+        if (this.knownSessionIds.has(sessionId)) {
+          const info = readSessionModelInfo(update);
+          this.sessionModelInfo.set(sessionId, {
+            model: this.sessionModelInfo.get(sessionId)?.model,
+            ...info,
+          });
+        }
+        break;
+      }
       case 'agent_message_chunk': {
         const meta = update['_meta'] as Record<string, unknown> | undefined;
         if (typeof meta?.['parentToolCallId'] === 'string') {

@@ -274,6 +274,26 @@ export interface ChannelUserInputRequestContext {
   respond(response: ChannelUserInputResponse): Promise<boolean>;
 }
 
+export interface ChannelPermissionOption {
+  optionId: string;
+  kind: 'allow_once' | 'allow_always' | 'reject_once';
+  label: string;
+}
+
+export interface ChannelPermissionRequestContext {
+  requestId: string;
+  sessionId: string;
+  runId: string;
+  owner: ChannelPromptOwner;
+  target: SessionTarget;
+  toolName: string;
+  action: string;
+  parameters?: string;
+  options: ChannelPermissionOption[];
+  onSettled(listener: (reason: UserInputSettlementReason) => void): () => void;
+  respond(response: ChannelUserInputResponse): Promise<boolean>;
+}
+
 export interface ChannelOutputSegmentContext {
   channelName: string;
   sessionId: string;
@@ -288,6 +308,7 @@ export interface ChannelOutputSegmentContext {
 export type ChannelOutputSegmentEndReason =
   | 'response_boundary'
   | 'input_requested'
+  | 'permission_requested'
   | 'completed'
   | 'failed'
   | 'cancelled';

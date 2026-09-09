@@ -3,6 +3,7 @@ import { sanitizeSenderName } from '@qwen-code/channel-base';
 import type {
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
   ChannelUserInputRequestContext,
   SessionTarget,
   UserInputPresentationResult,
@@ -256,6 +257,27 @@ export class DingtalkInteractionPresenter {
         statusCards?.abandon(statusContext.segmentId);
         return true;
       }
+      if (reason === 'permission_requested') {
+        const deliveredViaCard =
+          statusCards !== undefined &&
+          (await statusCards.isCardLive(statusContext.segmentId)) &&
+          (await statusCards.flushPending(statusContext.segmentId));
+        if (deliveredViaCard) return true;
+        const fallbackText = stripPartialImageMarker(
+          text || presentation.content,
+        );
+        if (fallbackText && this.options.sendFallback) {
+          await this.sendFallback(
+            run,
+            presentation.context.target.chatId,
+            fallbackText,
+            presentation.context.sessionId,
+          );
+        }
+        statusCards?.abandon(statusContext.segmentId);
+        run.statusContext = undefined;
+        return Boolean(fallbackText);
+      }
       statusCards?.ensure(statusContext, this.cardTarget(statusContext.target));
       const completed =
         statusCards !== undefined &&
@@ -295,6 +317,29 @@ export class DingtalkInteractionPresenter {
     const questionCards = this.options.questionCards;
     if (!questionCards) return Promise.resolve({ kind: 'unsupported' });
     return questionCards.present(context, this.cardTarget(context.target));
+  }
+
+  presentPermission(
+    context: ChannelPermissionRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    const run = this.runs.get(context.runId);
+    if (
+      !run ||
+      run.terminal ||
+      run.ownerId !== context.owner.id ||
+      run.target.chatId !== context.target.chatId ||
+      run.target.isGroup !== context.target.isGroup
+    ) {
+      return Promise.resolve({ kind: 'unsupported' });
+    }
+    const statusCards = this.options.statusCards;
+    const statusContext = run.statusContext;
+    if (!statusCards || !statusContext) {
+      return Promise.resolve({ kind: 'unsupported' });
+    }
+    return this.enqueue(run, () =>
+      statusCards.presentPermission(statusContext.segmentId, context),
+    );
   }
 
   private terminalCopy(): {

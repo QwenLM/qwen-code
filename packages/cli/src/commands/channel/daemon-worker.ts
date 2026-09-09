@@ -330,6 +330,10 @@ export function createDaemonChannelBridgeFacade(
     facade.getAvailableCommands = bridge.getAvailableCommands.bind(bridge);
   }
 
+  if (bridge.getSessionModelInfo) {
+    facade.getSessionModelInfo = bridge.getSessionModelInfo.bind(bridge);
+  }
+
   if (opts.exposeShellCommand && bridge.shellCommand) {
     facade.shellCommand = bridge.shellCommand.bind(bridge);
   }

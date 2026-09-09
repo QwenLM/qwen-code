@@ -8,6 +8,7 @@ import type {
   ChannelMemoryEntry,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
   Envelope,
@@ -40,6 +41,13 @@ import type { CreatePairingRequestResult } from './PairingStore.js';
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
+  cardCommand(
+    envelope: Envelope,
+    sessionId: string,
+    command: '/new' | '/compress',
+  ) {
+    return this.handleSessionCardCommand(envelope, sessionId, command);
+  }
   sent: Array<{ chatId: string; text: string }> = [];
   threadMessages: Array<{
     chatId: string;
@@ -104,6 +112,14 @@ class TestChannel extends ChannelBase {
   userInputPresentationHandler?: (
     context: ChannelUserInputRequestContext,
   ) => Promise<UserInputPresentationResult>;
+  permissionPresentations: ChannelPermissionRequestContext[] = [];
+  permissionPresentationResult: UserInputPresentationResult = {
+    kind: 'unsupported',
+  };
+  permissionPresentationSupported = false;
+  permissionPresentationHandler?: (
+    context: ChannelPermissionRequestContext,
+  ) => Promise<UserInputPresentationResult>;
 
   async connect() {
     this.connected = true;
@@ -149,6 +165,20 @@ class TestChannel extends ChannelBase {
       return this.userInputPresentationHandler(context);
     }
     return this.userInputPresentationResult;
+  }
+
+  protected async presentPermissionRequest(
+    context: ChannelPermissionRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    this.permissionPresentations.push(context);
+    if (this.permissionPresentationHandler) {
+      return this.permissionPresentationHandler(context);
+    }
+    return this.permissionPresentationResult;
+  }
+
+  protected override canPresentPermissionRequest(): boolean {
+    return this.permissionPresentationSupported;
   }
 
   override supportsProactiveSend(): boolean {
@@ -1877,6 +1907,127 @@ describe('ChannelBase', () => {
       await active.finish();
     });
 
+    it('presents generic tool permissions without sending the text fallback', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationSupported = true;
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+
+      emitPermission(active.sessionId, 'req-inline');
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      expect(ch.permissionPresentations[0]).toMatchObject({
+        requestId: 'req-inline',
+        sessionId: active.sessionId,
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        toolName: 'run_shell_command',
+        action: 'Run req-inline',
+        parameters: 'command',
+        options: [
+          {
+            optionId: 'proceed_always_project',
+            kind: 'allow_always',
+            label: '始终允许',
+          },
+          {
+            optionId: 'proceed_once',
+            kind: 'allow_once',
+            label: '本次允许',
+          },
+          {
+            optionId: 'cancel',
+            kind: 'reject_once',
+            label: '拒绝',
+          },
+        ],
+      });
+      expect(ch.userInputPresentations).toEqual([]);
+      expect(ch.sent).toEqual([]);
+
+      await expect(
+        ch.permissionPresentations[0]!.respond({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        }),
+      ).resolves.toBe(true);
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-inline', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+
+      await active.finish();
+    });
+
+    it('preserves shared text fallback when inline presentation is unavailable', async () => {
+      const ch = createChannel({
+        allowedUsers: ['owner-1', 'peer-1'],
+        groupPolicy: 'open',
+        sessionScope: 'thread',
+      });
+      ch.permissionPresentationSupported = true;
+      const inbound = {
+        chatId: 'group-1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'owner-1',
+        threadId: 'thread-1',
+      };
+      const active = await startActiveSession(ch, inbound);
+
+      emitPermission(active.sessionId, 'req-inline-fallback');
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      await ch.handleInbound(
+        envelope({
+          ...inbound,
+          senderId: 'peer-1',
+          text: '/approve req-inline-fallback',
+        }),
+      );
+      expect(respondToPermissionMock()).toHaveBeenCalledWith(
+        'req-inline-fallback',
+        { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
+      );
+
+      await active.finish();
+    });
+
+    it('uses a permission boundary before presenting an inline tool permission', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationSupported = true;
+      const order: string[] = [];
+      Object.assign(ch, {
+        onOutputSegmentEnd: async (
+          _chatId: string,
+          _sessionId: string,
+          _segment: ChannelOutputSegmentContext,
+          reason: ChannelOutputSegmentEndReason,
+        ) => {
+          order.push(reason);
+        },
+      });
+      ch.permissionPresentationHandler = async () => {
+        order.push('present');
+        return { kind: 'presented' };
+      };
+      const active = await startActiveSession(ch);
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        active.sessionId,
+        'I need permission.',
+      );
+      await vi.waitFor(() => expect(ch.responseChunks).toHaveLength(1));
+
+      emitPermission(active.sessionId, 'req-after-output');
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      expect(order).toEqual(['permission_requested', 'present']);
+
+      await active.finish();
+    });
+
     it('ends visible output before presenting user input without projecting a legacy boundary', async () => {
       const ch = createChannel();
       const order: string[] = [];
@@ -1924,6 +2075,7 @@ describe('ChannelBase', () => {
 
     it('presents identified legacy user input from rawInput questions', async () => {
       const ch = createChannel();
+      ch.permissionPresentationSupported = true;
       ch.userInputPresentationResult = { kind: 'presented' };
       const active = await startActiveSession(ch);
 
@@ -1975,7 +2127,9 @@ describe('ChannelBase', () => {
 
     it('does not fall back to legacy input when canonical questions are malformed', async () => {
       const ch = createChannel();
+      ch.permissionPresentationSupported = true;
       ch.userInputPresentationResult = { kind: 'presented' };
+      ch.permissionPresentationResult = { kind: 'presented' };
       const active = await startActiveSession(ch);
 
       (bridge as unknown as EventEmitter).emit('permissionRequest', {
@@ -2011,6 +2165,7 @@ describe('ChannelBase', () => {
 
       await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
       expect(ch.userInputPresentations).toEqual([]);
+      expect(ch.permissionPresentations).toEqual([]);
       expect(ch.sent[0]!.text).toContain('Permission required to run a tool');
 
       await active.finish();
@@ -9552,6 +9707,61 @@ describe('ChannelBase', () => {
         await ch.handleInbound(envelope({ text: cmd }));
         expect(ch.sent[0]!.text).toContain('Session cleared');
       }
+    });
+
+    it('card commands clear only the original current session and reject old cards', async () => {
+      const ch = createChannel({
+        sessionScope: 'single',
+        allowedUsers: ['user1'],
+      });
+      await ch.handleInbound(envelope());
+      const sid = vi.mocked(bridge.prompt).mock.calls[0][0];
+      await ch.cardCommand(envelope(), sid, '/new');
+      expect(ch.sent.at(-1)?.text).toContain('Session cleared');
+      await ch.handleInbound(envelope());
+      const current = vi.mocked(bridge.prompt).mock.calls.at(-1)![0];
+      expect(current).not.toBe(sid);
+      await ch.cardCommand(envelope(), sid, '/new');
+      expect(ch.sent.at(-1)?.text).toContain('会话已变更');
+      await ch.handleInbound(envelope());
+      expect(vi.mocked(bridge.prompt).mock.calls.at(-1)![0]).toBe(current);
+    });
+
+    it('card compression uses the bound session and cannot act in another chat', async () => {
+      const ch = createChannel();
+      Object.assign(bridge, { availableCommands: [{ name: 'compress' }] });
+      await ch.handleInbound(envelope());
+      const sid = vi.mocked(bridge.prompt).mock.calls[0][0];
+      await ch.cardCommand(envelope(), sid, '/compress');
+      expect(vi.mocked(bridge.prompt).mock.calls.at(-1)!.slice(0, 2)).toEqual([
+        sid,
+        '/compress',
+      ]);
+      const calls = vi.mocked(bridge.prompt).mock.calls.length;
+      await ch.cardCommand(
+        envelope({ chatId: 'other-chat' }),
+        sid,
+        '/compress',
+      );
+      expect(bridge.prompt).toHaveBeenCalledTimes(calls);
+      expect(ch.sent.at(-1)?.text).toContain('会话已变更');
+    });
+
+    it('card compression refuses unsupported commands and busy sessions', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(envelope());
+      const sid = vi.mocked(bridge.prompt).mock.calls[0][0];
+      await ch.cardCommand(envelope(), sid, '/compress');
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      expect(ch.sent.at(-1)?.text).toContain('暂不支持');
+      const active = (ch as unknown as { activePrompts: Map<string, unknown> })
+        .activePrompts;
+      active.set(sid, {});
+      await ch.cardCommand(envelope(), sid, '/new');
+      expect(ch.sent.at(-1)?.text).toContain('正在处理中');
+      active.delete(sid);
+      await ch.handleInbound(envelope());
+      expect(vi.mocked(bridge.prompt).mock.calls.at(-1)![0]).toBe(sid);
     });
 
     it('/status shows session info', async () => {

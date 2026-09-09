@@ -1,10 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ChannelOutputSegmentContext } from '@qwen-code/channel-base';
+import type {
+  ChannelOutputSegmentContext,
+  ChannelPermissionRequestContext,
+  UserInputSettlementReason,
+} from '@qwen-code/channel-base';
 import {
   DingtalkCardRequestError,
   type DingtalkInteractiveCardClient,
 } from './interactive-card-client.js';
-import { StatusCardController } from './status-card-controller.js';
+import {
+  StatusCardController,
+  type StatusCardControllerOptions,
+} from './status-card-controller.js';
 
 type ExpectedCallbackResult =
   | { kind: 'accepted'; execute: () => Promise<void> }
@@ -45,6 +52,52 @@ function segment(
 
 const target = { chatId: 'cid-1', isGroup: true };
 
+function permissionContext(
+  overrides: Partial<ChannelPermissionRequestContext> = {},
+): {
+  context: ChannelPermissionRequestContext;
+  respond: ReturnType<typeof vi.fn>;
+  settle(reason: UserInputSettlementReason): void;
+} {
+  const listeners = new Set<(reason: UserInputSettlementReason) => void>();
+  const respond = vi.fn().mockResolvedValue(true);
+  return {
+    context: {
+      requestId: 'permission-1',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: { chatId: 'cid-1', isGroup: true },
+      toolName: 'run_shell_command',
+      action: 'Run tests',
+      parameters: 'command',
+      options: [
+        {
+          optionId: 'always-project',
+          kind: 'allow_always',
+          label: '始终允许',
+        },
+        {
+          optionId: 'once',
+          kind: 'allow_once',
+          label: '本次允许',
+        },
+        { optionId: 'deny', kind: 'reject_once', label: '拒绝' },
+      ],
+      onSettled: (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      respond,
+      ...overrides,
+    },
+    respond,
+    settle(reason) {
+      for (const listener of [...listeners]) listener(reason);
+    },
+  };
+}
+
 function tracking(controller: StatusCardController) {
   return controller as unknown as {
     recordsBySegment: Map<string, unknown>;
@@ -68,7 +121,12 @@ function createHarness(
   options: {
     model?: string;
     language?: string;
+    showModel?: boolean;
+    showReasoningEffort?: boolean;
     onError?(operation: string, error: unknown): void;
+    quoteContent?: StatusCardControllerOptions['quoteContent'];
+    sessionModelInfo?: StatusCardControllerOptions['sessionModelInfo'];
+    executeCommand?: StatusCardControllerOptions['executeCommand'];
   } = {},
 ) {
   const client = {
@@ -90,6 +148,376 @@ describe('StatusCardController', () => {
     vi.useRealTimers();
   });
 
+  it('includes the originating request and retains owner-bound terminal actions only', async () => {
+    const executeCommand = vi.fn().mockResolvedValue(undefined);
+    const { client, controller } = createHarness({
+      quoteContent: () => 'Alice：检查当前分支',
+      executeCommand,
+    });
+    controller.ensure(segment(), target);
+    const create = vi.mocked(client.createAndDeliver).mock.calls[0][0];
+    expect(create.cardParamMap.quoteContent).toBe('Alice：检查当前分支');
+    expect(
+      controller.claimCommand(create.outTrackId, 'owner-1', '/new').kind,
+    ).toBe('ignored');
+    await controller.complete('segment-1', 'done');
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          hasAction: 'true',
+          stop_action: 'false',
+        }),
+      }),
+    );
+    expect(tracking(controller).recordsByOutTrack.size).toBe(0);
+    expect(
+      controller.claimCommand(create.outTrackId, 'other', '/new').kind,
+    ).toBe('forbidden');
+    expect(
+      controller.claimCommand(create.outTrackId, 'other', '/new').kind,
+    ).toBe('ignored');
+    await acceptedExecution(
+      controller.claimCommand(create.outTrackId, 'owner-1', '/compress'),
+    )();
+    expect(executeCommand).toHaveBeenCalledWith(segment(), '/compress');
+    expect(
+      controller.claimCommand(create.outTrackId, 'owner-1', '/compress').kind,
+    ).toBe('ignored');
+    controller.dispose();
+  });
+
+  it('presents and resolves permission actions on the existing owner-bound card', async () => {
+    const { client, controller } = createHarness();
+    controller.ensure(segment(), target);
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    const created = vi.mocked(client.createAndDeliver).mock.calls[0]![0];
+    const permission = permissionContext();
+
+    await expect(
+      controller.presentPermission('segment-1', permission.context),
+    ).resolves.toEqual({ kind: 'presented' });
+    expect(client.updateInstance).toHaveBeenLastCalledWith({
+      outTrackId: created.outTrackId,
+      cardParamMap: expect.objectContaining({
+        cardState: 'waiting',
+        headerTitle: '等待确认',
+        hasAction: 'false',
+      }),
+    });
+    const pendingBlocks = JSON.parse(
+      String(
+        vi.mocked(client.updateInstance).mock.calls.at(-1)?.[0].cardParamMap
+          .blockList,
+      ),
+    ) as Array<Record<string, unknown>>;
+    expect(pendingBlocks[0]).toMatchObject({ type: 0 });
+    expect(
+      String(pendingBlocks[0]?.['markdown']).replaceAll('\\', ''),
+    ).toContain('工具：run_shell_command');
+    expect(pendingBlocks[1]).toMatchObject({
+      type: 4,
+      btns: [
+        expect.objectContaining({
+          text: '始终允许',
+          event: {
+            type: 'sendCardRequest',
+            params: { actionId: 'btn_permission_allow_always' },
+          },
+        }),
+        expect.objectContaining({
+          text: '本次允许',
+          event: {
+            type: 'sendCardRequest',
+            params: { actionId: 'btn_permission_allow_once' },
+          },
+        }),
+        expect.objectContaining({
+          text: '拒绝',
+          event: {
+            type: 'sendCardRequest',
+            params: { actionId: 'btn_permission_reject' },
+          },
+        }),
+      ],
+    });
+
+    expect(
+      controller.claimPermission(
+        created.outTrackId,
+        'other-user',
+        'allow_once',
+      ),
+    ).toEqual({
+      kind: 'forbidden',
+      actorId: 'other-user',
+      target,
+    });
+    await acceptedExecution(
+      controller.claimPermission(created.outTrackId, 'owner-1', 'allow_once'),
+    )();
+    expect(permission.respond).toHaveBeenCalledWith({
+      outcome: { outcome: 'selected', optionId: 'once' },
+    });
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        outTrackId: created.outTrackId,
+        cardParamMap: expect.objectContaining({
+          cardState: 'running',
+          hasAction: 'true',
+        }),
+      }),
+    );
+    const resolvedBlocks = JSON.parse(
+      String(
+        vi.mocked(client.updateInstance).mock.calls.at(-1)?.[0].cardParamMap
+          .blockList,
+      ),
+    ) as Array<Record<string, unknown>>;
+    expect(resolvedBlocks.at(-1)).toMatchObject({
+      type: 2,
+      text: '已本次允许',
+    });
+    expect(
+      controller.claimPermission(created.outTrackId, 'owner-1', 'allow_once')
+        .kind,
+    ).toBe('ignored');
+    await controller.complete('segment-1', 'Done.');
+    const terminalBlocks = JSON.parse(
+      String(
+        vi.mocked(client.updateInstance).mock.calls.at(-1)?.[0].cardParamMap
+          .blockList,
+      ),
+    ) as Array<Record<string, unknown>>;
+    expect(terminalBlocks).toEqual([{ type: 0, markdown: 'Done.' }]);
+    controller.dispose();
+  });
+
+  it('retains a rejected permission summary in the terminal card', async () => {
+    const { client, controller } = createHarness();
+    controller.ensure(segment(), target);
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    const { outTrackId } = vi.mocked(client.createAndDeliver).mock.calls[0]![0];
+    const permission = permissionContext();
+    await controller.presentPermission('segment-1', permission.context);
+    await acceptedExecution(
+      controller.claimPermission(outTrackId, 'owner-1', 'reject_once'),
+    )();
+
+    await controller.complete('segment-1', 'Unable to continue.');
+
+    const blocks = JSON.parse(
+      String(
+        vi.mocked(client.updateInstance).mock.calls.at(-1)?.[0].cardParamMap
+          .blockList,
+      ),
+    ) as Array<Record<string, unknown>>;
+    expect(blocks[0]).toMatchObject({
+      type: 0,
+      markdown: 'Unable to continue.',
+    });
+    expect(blocks.at(-1)).toMatchObject({ type: 2, text: '已拒绝' });
+    expect(String(blocks[1]?.['markdown']).replaceAll('\\', '')).toContain(
+      'run_shell_command',
+    );
+    controller.dispose();
+  });
+
+  it('removes permission controls while a rejection settles and finalizes', async () => {
+    const response = deferred<boolean>();
+    const permission = permissionContext({
+      respond: vi.fn().mockReturnValue(response.promise),
+    });
+    const { client, controller } = createHarness();
+    controller.ensure(segment(), target);
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    const { outTrackId } = vi.mocked(client.createAndDeliver).mock.calls[0]![0];
+    await controller.presentPermission('segment-1', permission.context);
+    const execute = acceptedExecution(
+      controller.claimPermission(outTrackId, 'owner-1', 'reject_once'),
+    );
+    const execution = execute();
+
+    await vi.waitFor(() => {
+      const pendingBlocks = JSON.parse(
+        String(
+          vi.mocked(client.updateInstance).mock.calls.at(-1)?.[0].cardParamMap
+            .blockList,
+        ),
+      ) as Array<Record<string, unknown>>;
+      expect(pendingBlocks.at(-1)).toMatchObject({
+        type: 2,
+        text: '已拒绝',
+      });
+      expect(pendingBlocks).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ type: 4 })]),
+      );
+    });
+
+    await controller.complete('segment-1', 'Unable to continue.');
+
+    const blocks = JSON.parse(
+      String(
+        vi.mocked(client.updateInstance).mock.calls.at(-1)?.[0].cardParamMap
+          .blockList,
+      ),
+    ) as Array<Record<string, unknown>>;
+    expect(blocks.at(-1)).toMatchObject({ type: 2, text: '已拒绝' });
+    expect(blocks).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 4 })]),
+    );
+
+    response.resolve(true);
+    await execution;
+    controller.dispose();
+  });
+
+  it('clears pending permission controls when the request settles elsewhere', async () => {
+    const { client, controller } = createHarness();
+    controller.ensure(segment(), target);
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    const permission = permissionContext();
+    await controller.presentPermission('segment-1', permission.context);
+
+    permission.settle('cancelled');
+
+    await vi.waitFor(() => {
+      const blocks = JSON.parse(
+        String(
+          vi.mocked(client.updateInstance).mock.calls.at(-1)?.[0].cardParamMap
+            .blockList,
+        ),
+      ) as Array<Record<string, unknown>>;
+      expect(blocks.at(-1)).toMatchObject({
+        type: 2,
+        text: '授权已取消',
+      });
+    });
+    controller.dispose();
+  });
+
+  it('replaces pending permission controls with terminal content', async () => {
+    const { client, controller } = createHarness();
+    controller.ensure(segment(), target);
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    await controller.presentPermission(
+      'segment-1',
+      permissionContext().context,
+    );
+
+    await controller.complete('segment-1', 'final answer');
+
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          blockList: '[{"type":0,"markdown":"final answer"}]',
+          hasAction: 'false',
+        }),
+      }),
+    );
+    controller.dispose();
+  });
+
+  it('clears pending permission controls before the stream finishes stopping', async () => {
+    const { client, controller } = createHarness();
+    controller.ensure(segment(), target);
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    await controller.presentPermission(
+      'segment-1',
+      permissionContext().context,
+    );
+    const streamFinalization = deferred<void>();
+    vi.mocked(client.openOrUpdateStream).mockImplementationOnce(
+      async () => streamFinalization.promise,
+    );
+    vi.mocked(client.updateInstance).mockClear();
+
+    controller.cancelRun('run-1', 'cancel_command');
+
+    await vi.waitFor(() =>
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            cardState: 'stopped',
+            flowStatus: 3,
+            stop_action: 'false',
+          }),
+        }),
+      ),
+    );
+    const blocks = JSON.parse(
+      String(
+        vi.mocked(client.updateInstance).mock.calls.at(-1)?.[0].cardParamMap
+          .blockList,
+      ),
+    ) as Array<Record<string, unknown>>;
+    expect(blocks).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 4 })]),
+    );
+
+    streamFinalization.resolve();
+    await vi.waitFor(() =>
+      expect(tracking(controller).recordsBySegment.size).toBe(0),
+    );
+    controller.dispose();
+  });
+
+  it('falls back cleanly when the inline permission update fails', async () => {
+    vi.useFakeTimers();
+    const onError = vi.fn();
+    const { client, controller } = createHarness({ onError });
+    controller.ensure(segment(), target);
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValueOnce(
+      new Error('permission update unavailable'),
+    );
+
+    await expect(
+      controller.presentPermission('segment-1', permissionContext().context),
+    ).resolves.toEqual({ kind: 'unsupported' });
+    expect(onError).toHaveBeenCalledWith(
+      'status card permission presentation',
+      expect.any(Error),
+    );
+
+    vi.mocked(client.openOrUpdateStream).mockClear();
+    controller.replace(segment(), target, 'continued');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(client.openOrUpdateStream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('continued'),
+        finalize: false,
+      }),
+    );
+    controller.dispose();
+  });
+
+  it('expires terminal actions without retaining active card records', async () => {
+    vi.useFakeTimers();
+    const executeCommand = vi.fn();
+    const { client, controller } = createHarness({ executeCommand });
+    controller.ensure(segment(), target);
+    await controller.complete('segment-1', 'done');
+    const { outTrackId } = vi.mocked(client.createAndDeliver).mock.calls[0][0];
+    vi.setSystemTime(Date.now() + 24 * 60 * 60 * 1000);
+    expect(controller.claimCommand(outTrackId, 'owner-1', '/new').kind).toBe(
+      'ignored',
+    );
+    expect(executeCommand).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
   it('creates and opens a status card on the first content snapshot', async () => {
     const { client, controller } = createHarness();
 
@@ -108,6 +536,11 @@ describe('StatusCardController', () => {
           statusLine: '0s',
           hasAction: 'true',
           stop_action: 'true',
+          cardState: 'running',
+          headerTitle: '处理中',
+          headerColor: 'blue',
+          quoteContent: '',
+          agentName: '',
         }),
       }),
     );
@@ -379,6 +812,139 @@ describe('StatusCardController', () => {
       }),
     );
   });
+
+  it('uses the owning session model and effort in running and completed status', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const sessionModelInfo = vi.fn(() => ({
+      model: ' qwen3.8-max(openai) ',
+      reasoningEffort: ' high ',
+    }));
+    const { client, controller } = createHarness({
+      model: 'channel-default',
+      sessionModelInfo,
+    });
+    const context = segment();
+    controller.replace(context, target, 'answer');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessionModelInfo).toHaveBeenCalledWith(context);
+    expect(client.createAndDeliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          statusLine: 'qwen3.8-max · high · 0s',
+        }),
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+    await controller.complete('segment-1', 'answer');
+    expect(client.updateInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          statusLine: 'Completed · qwen3.8-max · high · 2s',
+        }),
+      }),
+    );
+    controller.dispose();
+  });
+
+  it('keeps model-name parentheses that are not the OpenAI auth suffix', async () => {
+    const { client, controller } = createHarness({ model: 'custom(preview)' });
+    controller.ensure(segment(), target);
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    expect(
+      vi.mocked(client.createAndDeliver).mock.calls[0][0].cardParamMap
+        .statusLine,
+    ).toBe('custom(preview) · 0s');
+    controller.dispose();
+  });
+
+  it('can hide model and reasoning effort independently', async () => {
+    const sessionModelInfo = vi.fn(() => ({
+      model: 'qwen3.8-max',
+      reasoningEffort: 'high',
+    }));
+    const hiddenModel = createHarness({
+      showModel: false,
+      sessionModelInfo,
+    });
+    hiddenModel.controller.ensure(segment(), target);
+    await vi.waitFor(() =>
+      expect(hiddenModel.client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    expect(
+      vi.mocked(hiddenModel.client.createAndDeliver).mock.calls[0][0]
+        .cardParamMap.statusLine,
+    ).toBe('high · 0s');
+
+    const hiddenEffort = createHarness({
+      showReasoningEffort: false,
+      sessionModelInfo,
+    });
+    hiddenEffort.controller.ensure(
+      segment('segment-2', { runId: 'run-2' }),
+      target,
+    );
+    await vi.waitFor(() =>
+      expect(hiddenEffort.client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    expect(
+      vi.mocked(hiddenEffort.client.createAndDeliver).mock.calls[0][0]
+        .cardParamMap.statusLine,
+    ).toBe('qwen3.8-max · 0s');
+
+    hiddenModel.controller.dispose();
+    hiddenEffort.controller.dispose();
+  });
+
+  it('does not read session model metadata when both fields are hidden', async () => {
+    const sessionModelInfo = vi.fn(() => ({
+      model: 'qwen3.8-max',
+      reasoningEffort: 'high',
+    }));
+    const { client, controller } = createHarness({
+      model: 'channel-default',
+      showModel: false,
+      showReasoningEffort: false,
+      sessionModelInfo,
+    });
+    controller.ensure(segment(), target);
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    expect(sessionModelInfo).not.toHaveBeenCalled();
+    expect(
+      vi.mocked(client.createAndDeliver).mock.calls[0][0].cardParamMap
+        .statusLine,
+    ).toBe('0s');
+    controller.dispose();
+  });
+
+  it.each([' ', 'default', undefined])(
+    'omits unspecified effort (%s) and uses fresh session metadata for a later run',
+    async (reasoningEffort) => {
+      const sessionModelInfo = vi.fn((context: ChannelOutputSegmentContext) =>
+        context.sessionId === 'session-1'
+          ? { model: 'model-one', reasoningEffort }
+          : { model: 'model-two' },
+      );
+      const { client, controller } = createHarness({ sessionModelInfo });
+      controller.ensure(segment(), target);
+      controller.ensure(
+        segment('segment-2', { sessionId: 'session-2', runId: 'run-2' }),
+        target,
+      );
+      await vi.waitFor(() =>
+        expect(client.createAndDeliver).toHaveBeenCalledTimes(2),
+      );
+      const lines = vi
+        .mocked(client.createAndDeliver)
+        .mock.calls.map(([input]) => input.cardParamMap.statusLine);
+      expect(lines).toEqual(['model-one · 0s', 'model-two · 0s']);
+      controller.dispose();
+    },
+  );
 
   it('periodically republishes the full content for reconnected clients', async () => {
     vi.useFakeTimers();
@@ -744,6 +1310,10 @@ describe('StatusCardController', () => {
         cardParamMap: {
           blockList: '[{"type":0,"markdown":"answer"}]',
           content: 'answer',
+          markdown: 'answer',
+          cardState: 'completed',
+          headerTitle: '已完成',
+          headerColor: 'green',
           copy_content: 'answer',
           flowStatus: 3,
           statusLine: 'Completed · 0s',
@@ -916,6 +1486,9 @@ describe('StatusCardController', () => {
         expect.objectContaining({
           cardParamMap: {
             flowStatus: 3,
+            cardState: 'cancelled',
+            headerTitle: '已取消',
+            headerColor: 'grey',
             hasAction: 'false',
             stop_action: 'false',
           },
@@ -1319,6 +1892,9 @@ describe('StatusCardController', () => {
       expect.objectContaining({
         cardParamMap: {
           flowStatus: 3,
+          cardState: 'cancelled',
+          headerTitle: '已取消',
+          headerColor: 'grey',
           hasAction: 'false',
           stop_action: 'false',
         },

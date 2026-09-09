@@ -1,12 +1,17 @@
 export interface DingtalkInteractiveCardConfig {
   enabled: boolean;
-  statusCard: { enabled: boolean };
+  statusCard: {
+    enabled: boolean;
+    showModel: boolean;
+    showReasoningEffort: boolean;
+  };
   questionCard: { enabled: boolean; timeoutMs: number };
 }
 
 export interface DingtalkCardCallback {
   outTrackId: string;
   actionId: string;
+  parameterActionId?: string;
   actorId: string;
   formData: Record<string, unknown>;
   hasBusinessPayload?: boolean;
@@ -98,6 +103,16 @@ export function parseDingtalkInteractiveCardConfig(
     enabled: optionalBoolean(root['enabled'], 'enabled', configured),
     statusCard: {
       enabled: optionalBoolean(status?.['enabled'], 'statusCard.enabled', true),
+      showModel: optionalBoolean(
+        status?.['showModel'],
+        'statusCard.showModel',
+        true,
+      ),
+      showReasoningEffort: optionalBoolean(
+        status?.['showReasoningEffort'],
+        'statusCard.showReasoningEffort',
+        true,
+      ),
     },
     questionCard: {
       enabled: optionalBoolean(
@@ -131,6 +146,9 @@ export function parseDingtalkCardCallback(
     ...privateSources,
     root,
   ].filter((source): source is Record<string, unknown> => source !== undefined);
+  const params = sources
+    .map((source) => parseEmbeddedRecord(source['params']))
+    .find((source) => source !== undefined);
   const pickString = (...keys: string[]): string | undefined => {
     for (const source of sources) {
       for (const key of keys) {
@@ -144,18 +162,26 @@ export function parseDingtalkCardCallback(
   };
   const privateData = privateSources[0];
   const actionIds = privateData?.['actionIds'];
-  const actionId =
-    (Array.isArray(actionIds) &&
+  const parameterActionId = ['actionValue', 'eventKey', 'actionId']
+    .map((key) => params?.[key])
+    .find(
+      (candidate): candidate is string =>
+        typeof candidate === 'string' && candidate.trim().length > 0,
+    )
+    ?.trim();
+  const componentActionId =
+    Array.isArray(actionIds) &&
     typeof actionIds[0] === 'string' &&
     actionIds[0].trim()
       ? actionIds[0].trim()
-      : undefined) ?? pickString('actionValue', 'eventKey', 'actionId');
+      : undefined;
+  const actionId =
+    componentActionId ??
+    pickString('actionValue', 'eventKey', 'actionId') ??
+    parameterActionId;
   const outTrackId = pickString('outTrackId');
   const actorId = parseDingtalkCardActorId(root);
   if (!outTrackId || !actionId || !actorId) return undefined;
-  const params = sources
-    .map((source) => parseEmbeddedRecord(source['params']))
-    .find((source) => source !== undefined);
   const formData = sources
     .flatMap((source) => [
       parseEmbeddedRecord(source['formData']),
@@ -168,6 +194,7 @@ export function parseDingtalkCardCallback(
   return {
     outTrackId,
     actionId,
+    ...(parameterActionId ? { parameterActionId } : {}),
     actorId,
     formData: formData ?? {},
     hasBusinessPayload: formData !== undefined || hasCancelField,
