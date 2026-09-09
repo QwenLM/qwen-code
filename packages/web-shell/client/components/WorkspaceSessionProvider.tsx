@@ -242,6 +242,7 @@ function WorkspaceSessionProviderWorkspace({
     lockWorkspaceCwd,
   ]);
 
+  // Keep an unscoped session mounted when a later refresh fails.
   if (
     (effectiveWorkspaceCwd ||
       effectiveWorkspaceId ||

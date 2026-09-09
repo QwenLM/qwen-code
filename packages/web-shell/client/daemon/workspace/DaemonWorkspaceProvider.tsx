@@ -76,6 +76,7 @@ export function DaemonWorkspaceProvider({
       capabilitiesGenerationRef.current++;
     }
     if (!capabilitiesPromiseRef.current) {
+      capabilitiesGenerationRef.current++;
       const promise = client.capabilities().catch((error: unknown) => {
         if (capabilitiesPromiseRef.current === promise) {
           capabilitiesPromiseRef.current = undefined;
@@ -162,6 +163,7 @@ export function DaemonWorkspaceProvider({
 
     let disposed = false;
     const initialPromise = getCapabilities();
+    const initialGeneration = capabilitiesGenerationRef.current;
     void initialPromise
       .then((caps) => {
         // A user-triggered refresh may supersede the mount request before it
@@ -176,10 +178,11 @@ export function DaemonWorkspaceProvider({
         }
       })
       .catch((err: unknown) => {
+        // Rejection clears the promise cache before this handler runs.
         if (
           !disposed &&
           capabilitiesClientRef.current === client &&
-          capabilitiesPromiseRef.current === initialPromise
+          capabilitiesGenerationRef.current === initialGeneration
         ) {
           setError(err instanceof Error ? err : new Error(String(err)));
           setStatus('error');

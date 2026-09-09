@@ -11,6 +11,12 @@ Reuse the existing loading and retry states. An empty composer can still mount
 while discovery runs, and a later discovery error must not unmount an unscoped
 session whose capabilities are already known.
 
+Initial discovery failures must publish the workspace error even after the
+failed promise is removed from the cache. Track the request generation so a
+late failure cannot replace a newer refresh or a different client's state.
+The error screen's retry action performs a fresh discovery request; restoration
+starts only after that request succeeds.
+
 Seed the session connection with those known capabilities on its first render.
 Otherwise activity consumers briefly select catalog fallback before discovering
 live-state support, causing an extra full session-list request.
@@ -26,6 +32,13 @@ through real providers and the SDK. Both ordinary and StrictMode mounts must iss
 one load and one event-stream request, reach connected with the saved block, and
 avoid an intervening detach. Existing provider tests cover retained attachments,
 context changes, reconnection, and history pagination.
+
+The mounting gate belongs to Web Shell's product composition. Hosts combining
+the exported workspace and session providers directly must wait for initial
+capabilities before mounting an existing session, and expose discovery errors
+and retry above that gate. The shared-provider example in the package README
+shows this ordering. This change does not remove context restarts from a bare
+session provider; an actual workspace change must still restart restoration.
 
 An isolated copy of the reported session took approximately 1.2–1.4 seconds to
 restore after its daemon child exited. This change removes redundant frontend

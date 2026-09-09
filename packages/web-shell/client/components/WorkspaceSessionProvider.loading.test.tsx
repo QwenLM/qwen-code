@@ -6,6 +6,7 @@ import {
   DaemonWorkspaceProvider,
   useConnection,
   useTranscriptBlocks,
+  useWorkspace,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { WorkspaceSessionProvider } from './WorkspaceSessionProvider';
 
@@ -16,6 +17,7 @@ const { observeLiveStateSupport } = vi.hoisted(() => ({
 vi.mock('../App', () => ({
   App: () => {
     const connection = useConnection();
+    const workspace = useWorkspace();
     observeLiveStateSupport(
       Boolean(
         connection.capabilities?.features.includes(
@@ -25,18 +27,32 @@ vi.mock('../App', () => ({
     );
     const blocks = useTranscriptBlocks();
     return (
-      <output>
-        {connection.status}:{connection.sessionId}:{blocks.length}
-      </output>
+      <>
+        <output>
+          {connection.status}:{connection.sessionId}:{blocks.length}
+        </output>
+        <button
+          onClick={() => void workspace.refreshCapabilities?.().catch(() => {})}
+        >
+          Refresh workspace
+        </button>
+      </>
     );
   },
 }));
 
 afterEach(() => vi.unstubAllGlobals());
 
-it.each([false, true])(
-  'loads the initial transcript once after workspace discovery (StrictMode=%s)',
-  async (strictMode) => {
+it.each(
+  [false, true].flatMap((strictMode) =>
+    ['none', 'http', 'network'].map((initialFailure) => ({
+      strictMode,
+      initialFailure,
+    })),
+  ),
+)(
+  'loads once and survives a refresh failure (StrictMode=$strictMode, initialFailure=$initialFailure)',
+  async ({ strictMode, initialFailure }) => {
     observeLiveStateSupport.mockClear();
     localStorage.clear();
     sessionStorage.clear();
@@ -47,6 +63,8 @@ it.each([false, true])(
     const calls: string[] = [];
     const loadBodies: unknown[] = [];
     const detachIds: Array<string | null> = [];
+    let capabilityAttempts = 0;
+    let failRefresh = false;
     const json = (value: unknown) =>
       new Response(JSON.stringify(value), {
         headers: { 'Content-Type': 'application/json' },
@@ -57,7 +75,17 @@ it.each([false, true])(
         const url = new URL(String(input));
         calls.push(`${init?.method ?? 'GET'} ${url.pathname}`);
         if (url.pathname === '/capabilities') {
+          capabilityAttempts++;
           await capabilityReady;
+          if (capabilityAttempts === 1 && initialFailure === 'network') {
+            throw new TypeError('Failed to fetch');
+          }
+          if (
+            failRefresh ||
+            (capabilityAttempts === 1 && initialFailure === 'http')
+          ) {
+            return new Response('Daemon restarting', { status: 502 });
+          }
           return json({
             v: 1,
             workspaceCwd: '/work/a',
@@ -168,12 +196,37 @@ it.each([false, true])(
         releaseCapabilities();
         await new Promise((resolve) => setTimeout(resolve, 100));
       });
+      if (initialFailure !== 'none') {
+        expect(loadBodies).toHaveLength(0);
+        expect(observeLiveStateSupport).not.toHaveBeenCalled();
+        const retry = Array.from(container.querySelectorAll('button')).find(
+          (button) => button.textContent === 'Try again',
+        );
+        expect(retry).toBeDefined();
+        await act(async () => {
+          retry!.click();
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        });
+      }
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 100));
       });
-      expect(container.textContent).toBe('connected:session-a:1');
+      const transcript = container.querySelector('output');
+      expect(transcript?.textContent).toBe('connected:session-a:1');
+      expect(capabilityAttempts).toBe(initialFailure === 'none' ? 1 : 2);
       expect(observeLiveStateSupport).toHaveBeenCalledWith(true);
       expect(observeLiveStateSupport).not.toHaveBeenCalledWith(false);
+      expect(loadBodies).toHaveLength(1);
+      expect(calls.filter((call) => call.endsWith('/events'))).toHaveLength(1);
+      expect(detachIds).toEqual([]);
+      failRefresh = true;
+      await act(async () => {
+        container.querySelector('button')!.click();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      });
+      expect(capabilityAttempts).toBe(initialFailure === 'none' ? 2 : 3);
+      expect(container.querySelector('output')).toBe(transcript);
+      expect(transcript?.textContent).toBe('connected:session-a:1');
       expect(loadBodies).toHaveLength(1);
       expect(calls.filter((call) => call.endsWith('/events'))).toHaveLength(1);
       expect(detachIds).toEqual([]);

@@ -158,19 +158,44 @@ import {
   DaemonWorkspaceProvider,
   DaemonSessionProvider,
   WebShell,
+  useWorkspace,
 } from '@qwen-code/web-shell';
+
+function SessionViews() {
+  const workspace = useWorkspace();
+  if (!workspace.capabilities) {
+    if (workspace.status === 'error') {
+      return (
+        <button
+          onClick={() => void workspace.refreshCapabilities?.().catch(() => {})}
+        >
+          Try again
+        </button>
+      );
+    }
+    return <p role="status">Loading workspace…</p>;
+  }
+  return (
+    <DaemonSessionProvider sessionId="...">
+      <ChatPanel />
+      <WebShell theme="dark" language="zh-CN" />
+    </DaemonSessionProvider>
+  );
+}
 
 export function App() {
   return (
     <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170" token="...">
-      <DaemonSessionProvider sessionId="...">
-        <ChatPanel />
-        <WebShell theme="dark" language="zh-CN" />
-      </DaemonSessionProvider>
+      <SessionViews />
     </DaemonWorkspaceProvider>
   );
 }
 ```
+
+恢复已有会话时，直接组合 Provider 的宿主需要像示例一样，等待首次 capabilities
+成功后再挂载 `DaemonSessionProvider`，并在它上方提供发现失败的重试入口。
+否则主工作区稍后确定时，会话上下文变化可能触发重复恢复。后续刷新失败会保留已知
+capabilities，此时应保持会话挂载。该等待只用于首次发现，不应屏蔽真正的工作区切换。
 
 > **注意**：不要在已有 `DaemonSessionProvider` 下使用
 > `WebShellWithProviders`，否则会创建嵌套的重复 Provider。
