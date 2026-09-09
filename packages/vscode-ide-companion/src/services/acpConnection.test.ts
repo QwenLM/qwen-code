@@ -738,6 +738,91 @@ describe('AcpConnection child exit cleanup', () => {
     expect(acp.currentSessionId).toBeNull();
   });
 
+  it('a re-connected replacement does not stamp the retired session id', async () => {
+    // Mirrors 'does not stamp a superseded connection with a stale session id'
+    // but supersedes by re-connect instead of disconnect(). disconnect() nulls
+    // this.child and this.sdkConnection together, so a gate weakened to
+    // `!this.child` still bails there. After a re-connect this.child is truthy
+    // again (the replacement), so `!this.child` would NOT bail and the retired
+    // CLI's session/new + session/load would stamp their ids back onto the
+    // live connection. This case pins `this.sdkConnection !== conn` (and its
+    // `=== conn` mirror) against that substitution.
+    let resolveNewSession!: (value: unknown) => void;
+    let resolveLoadSession!: (value: unknown) => void;
+    const oldSdk = {
+      newSession: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveNewSession = resolve;
+          }),
+      ),
+      loadSession: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveLoadSession = resolve;
+          }),
+      ),
+    };
+    const conn = createConnection({
+      child: createMockChild(),
+      sdkConnection: oldSdk,
+      sessionId: 'live-session-1',
+    });
+    const acp = conn as unknown as AcpConnection;
+
+    const newPromise = acp.newSession();
+    const loadPromise = acp.loadSession('stale-session');
+
+    // Re-connect: install a replacement child and a fresh sdkConnection while
+    // the retired sdk's promises are still in flight.
+    conn.child = createMockChild();
+    conn.sdkConnection = { newSession: vi.fn(), loadSession: vi.fn() };
+    conn.sessionId = 'live-session-2';
+
+    resolveNewSession({ sessionId: 'stale-from-retired-cli' });
+    resolveLoadSession({});
+    await newPromise;
+    await loadPromise;
+
+    expect(acp.currentSessionId).toBe('live-session-2');
+  });
+
+  it('a re-connected replacement does not fire onEndTurn for a retired prompt', async () => {
+    // sendPrompt gates onEndTurn on the captured connection so a stale prompt
+    // resolving after a re-connect does not clear the replacement's streaming
+    // state. disconnect() nulls this.child and this.sdkConnection together, so
+    // `!this.child` still bails there; only a re-connect (this.child truthy
+    // again) can tell the two predicates apart.
+    let resolvePrompt!: (value: unknown) => void;
+    const oldSdk = {
+      prompt: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolvePrompt = resolve;
+          }),
+      ),
+    };
+    const onEndTurn = vi.fn();
+    const conn = createConnection({
+      child: createMockChild(),
+      sdkConnection: oldSdk,
+      sessionId: 'session-1',
+    });
+    (conn as unknown as AcpConnection).onEndTurn = onEndTurn;
+    const acp = conn as unknown as AcpConnection;
+
+    const promptPromise = acp.sendPrompt('hi');
+
+    conn.child = createMockChild();
+    conn.sdkConnection = { prompt: vi.fn() };
+    conn.sessionId = 'session-2';
+
+    resolvePrompt({ stopReason: 'end_turn' });
+    await promptPromise;
+
+    expect(onEndTurn).not.toHaveBeenCalled();
+  });
+
   it('disconnect does not force-kill a CLI that exited on its own', () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     vi.useFakeTimers();
