@@ -1287,6 +1287,7 @@ interface SessionEntry {
   currentModelId?: string;
   /** §2.3: cached approval mode, updated by every `publishApprovalModeChanged` call. */
   currentApprovalMode?: string;
+  planExecutionMode?: string;
   /** §2.3: monotonic counter bumped on every `model_switched` publish. */
   modelPublishGeneration: number;
   /** §2.3: monotonic counter bumped on every `approval_mode_changed` publish. */
@@ -1489,8 +1490,7 @@ function extractPermissionResponseMetadata(
   response: unknown,
 ): Readonly<Record<string, unknown>> | undefined {
   if (response === null || typeof response !== 'object') return undefined;
-  // Keep this extension deliberately narrow. Today the only non-ACP field
-  // expected by the agent is AskUserQuestion's `answers` payload.
+  const metadata: Record<string, unknown> = {};
   const answers = (response as { readonly answers?: unknown }).answers;
   if (
     answers !== null &&
@@ -1499,10 +1499,16 @@ function extractPermissionResponseMetadata(
   ) {
     const entries = Object.entries(answers as Record<string, unknown>);
     if (entries.every(([, v]) => typeof v === 'string')) {
-      return { answers };
+      metadata['answers'] = answers;
     }
   }
-  return undefined;
+  const expectedPlanExecutionMode = (
+    response as { readonly expectedPlanExecutionMode?: unknown }
+  ).expectedPlanExecutionMode;
+  if (typeof expectedPlanExecutionMode === 'string') {
+    metadata['expectedPlanExecutionMode'] = expectedPlanExecutionMode;
+  }
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
 }
 
 function parseWorkspaceMemoryRememberResult(
@@ -4692,7 +4698,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             publishModelSwitched(entry as SessionEntry, modelId, originator),
           // A2: centralised approval_mode_changed publish on in-session mode
           // promotion. `previous` is read from the bridge state cache.
-          (entry, modeId, originator) => {
+          (entry, modeId, originator, planExecutionMode) => {
             const se = entry as SessionEntry;
             publishApprovalModeChanged(
               se,
@@ -4700,6 +4706,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 previous: se.currentApprovalMode ?? 'default',
                 next: modeId,
                 persisted: false,
+                planExecutionMode,
               },
               originator,
             );
@@ -5977,11 +5984,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     mode: ApprovalMode,
     persist: boolean,
     originatorClientId?: string,
+    planMode?: boolean,
   ): Promise<{
     sessionId: string;
     mode: ApprovalMode;
     previous: ApprovalMode;
     persisted: boolean;
+    planExecutionMode?: ApprovalMode;
   }> {
     if (persist && !persistApprovalMode) {
       throw new Error(
@@ -6000,13 +6009,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           withTimeout(
             entry.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
-              { sessionId: entry.sessionId, mode },
+              {
+                sessionId: entry.sessionId,
+                mode,
+                ...(planMode !== undefined ? { planMode } : {}),
+              },
             ),
             initTimeoutMs,
             SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
           ),
           getTransportClosedReject(entry),
-        ])) as { previous: ApprovalMode; current: ApprovalMode };
+        ])) as {
+          previous: ApprovalMode;
+          current: ApprovalMode;
+          planExecutionMode?: ApprovalMode;
+        };
 
         if (
           typeof response.current !== 'string' ||
@@ -6016,6 +6033,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             `Agent returned unknown approval mode: ${JSON.stringify(response.current)}`,
           );
         }
+
+        if (
+          response.planExecutionMode !== undefined &&
+          (response.planExecutionMode === 'plan' ||
+            !KNOWN_APPROVAL_MODES.has(response.planExecutionMode))
+        ) {
+          throw new Error('Agent returned an invalid plan execution mode');
+        }
+        const planExecutionMode =
+          response.current === 'plan' ? response.planExecutionMode : undefined;
 
         let persisted = false;
         if (persist) {
@@ -6040,10 +6067,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             previous: response.previous,
             next: response.current,
             persisted,
+            planExecutionMode,
           },
           originatorClientId,
         );
-        if (persisted) {
+        // DAC controls remain session-scoped; persistence only changes the
+        // workspace default used by future sessions.
+        if (persisted && planMode === undefined) {
           broadcastWorkspaceEvent(
             {
               type: 'approval_mode_changed',
@@ -6062,6 +6092,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               continue;
             }
             peer.currentApprovalMode = response.current;
+            peer.planExecutionMode = undefined;
           }
         }
         succeeded = true;
@@ -6070,6 +6101,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           mode: response.current,
           previous: response.previous,
           persisted,
+          ...(planExecutionMode ? { planExecutionMode } : {}),
         };
       } finally {
         entry.approvalModeRoundtripInFlight = false;
@@ -6940,10 +6972,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
   const publishApprovalModeChanged = (
     entry: SessionEntry,
-    payload: { previous: string; next: string; persisted: boolean },
+    payload: {
+      previous: string;
+      next: string;
+      persisted: boolean;
+      planExecutionMode?: string;
+    },
     originatorClientId: string | undefined,
   ): void => {
     entry.currentApprovalMode = payload.next;
+    entry.planExecutionMode =
+      payload.next === 'plan' ? payload.planExecutionMode : undefined;
     entry.approvalModePublishGeneration++;
     // See `publishModelSwitched`: `publish()` never throws, so no wrapper.
     entry.events.publish({
@@ -6954,6 +6993,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         previous: payload.previous,
         next: payload.next,
         persisted: payload.persisted,
+        ...(entry.planExecutionMode
+          ? { planExecutionMode: entry.planExecutionMode }
+          : {}),
       },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
@@ -7016,9 +7058,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           publishModelSwitched(entry, actual, undefined);
         }
       } else {
-        const actual = (
-          status?.state?.modes as { currentModeId?: string } | undefined
-        )?.currentModeId;
+        const modes = status?.state?.modes as
+          | { currentModeId?: string; _meta?: Record<string, unknown> | null }
+          | undefined;
+        const actual = modes?.currentModeId;
+        const selected = modes?._meta?.['planExecutionMode'];
+        const planExecutionMode =
+          actual === 'plan' &&
+          typeof selected === 'string' &&
+          selected !== 'plan' &&
+          KNOWN_APPROVAL_MODES.has(selected)
+            ? selected
+            : undefined;
         // Same enum backstop as the demux path (`handleInSessionModeUpdate`):
         // `actual` is an agent-supplied id typed `unknown`, and the SDK's
         // `isApprovalModeChangedData` is a structural check (deliberately
@@ -7029,7 +7080,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           writeStderrLine(
             `[reconcile] session=${entry.sessionId} target=approvalMode action=dropped reason=unknown_mode mode=${actual}`,
           );
-        } else if (actual && actual !== entry.currentApprovalMode) {
+        } else if (
+          actual &&
+          (actual !== entry.currentApprovalMode ||
+            planExecutionMode !== entry.planExecutionMode)
+        ) {
           writeStderrLine(
             `[reconcile] session=${entry.sessionId} target=approvalMode action=corrected cached=${entry.currentApprovalMode ?? '<unset>'} actual=${actual}`,
           );
@@ -7039,6 +7094,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               previous: entry.currentApprovalMode ?? 'default',
               next: actual,
               persisted: false,
+              planExecutionMode,
             },
             undefined,
           );
@@ -7396,7 +7452,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     entry: SessionEntry,
     resp: {
       models?: { currentModelId?: unknown } | null;
-      modes?: { currentModeId?: unknown } | null;
+      modes?: {
+        currentModeId?: unknown;
+        _meta?: Record<string, unknown> | null;
+      } | null;
     },
   ): void => {
     const model = resp.models?.currentModelId;
@@ -7410,6 +7469,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     const mode = resp.modes?.currentModeId;
     if (typeof mode === 'string' && KNOWN_APPROVAL_MODES.has(mode)) {
       entry.currentApprovalMode = mode;
+      const selected = resp.modes?._meta?.['planExecutionMode'];
+      entry.planExecutionMode =
+        mode === 'plan' &&
+        typeof selected === 'string' &&
+        selected !== 'plan' &&
+        KNOWN_APPROVAL_MODES.has(selected)
+          ? selected
+          : undefined;
     } else if (mode != null) {
       writeStderrLine(
         `[seed] session=${entry.sessionId} target=approvalMode action=dropped value=${JSON.stringify(mode)} reason=${typeof mode !== 'string' ? 'invalid_type' : 'unknown_mode'}`,
@@ -9442,6 +9509,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ...(entry.currentApprovalMode
               ? { currentApprovalMode: entry.currentApprovalMode }
               : {}),
+            ...(entry.planExecutionMode
+              ? { planExecutionMode: entry.planExecutionMode }
+              : {}),
             maxJournalEvents: journalLimits?.maxEvents ?? maxJournalEvents,
             maxJournalBytes: journalLimits?.maxBytes ?? maxJournalBytes,
           };
@@ -10921,6 +10991,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           sessionId: entry.sessionId,
           currentModelId: entry.currentModelId ?? null,
           currentApprovalMode: entry.currentApprovalMode ?? null,
+          ...(entry.planExecutionMode
+            ? { planExecutionMode: entry.planExecutionMode }
+            : {}),
           recordingDegraded: entry.recordingDegraded,
         },
       });
@@ -13113,6 +13186,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         mode,
         opts.persist,
         originatorClientId,
+        opts.planMode,
       );
     },
 
