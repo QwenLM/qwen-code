@@ -9,9 +9,10 @@ daemon.
 
 ## Design
 
-Each successful `Artifact` publication also writes a separate, immutable local
-HTML snapshot. The existing publisher continues to update its stable latest
-URL. The snapshot contains the exact wrapped HTML published in that invocation,
+In managed ACP sessions with chat recording enabled, each successful `Artifact`
+publication also writes a separate, immutable local HTML snapshot. Ordinary CLI
+publication and sessions without recording do not create historical files. The
+existing publisher continues to update its stable latest URL. The snapshot contains the exact wrapped HTML published in that invocation,
 including inline styles, scripts, data, and embedded assets. Each invocation
 gets a new ID, even when the source path or content is unchanged.
 
@@ -27,6 +28,20 @@ their original timestamps and deletion markers. Only Artifact-produced snapshot
 descriptors with the expected UUID path and checksum qualify for local file URL
 restoration; ordinary local file links remain untrusted. Restore does not read
 the HTML, so missing bytes do not prevent restoring the conversation record.
+
+New snapshots also contain a `references/` directory with hashed session IDs,
+identified by `qwen.snapshot.references: 1` in their metadata. Publication creates
+the producing session's reference. A fork acquires its own reference before
+committing the transcript; a failed fork releases only its operation's reference.
+The owning runtime is captured explicitly. Session deletion releases only the
+snapshot UUIDs found in the exact transcripts being removed, including old side
+events; it does not scan other workspaces by session ID. Removal, eviction,
+successful rewind, and session deletion release that session's references. Files are removed only
+when the final reference is released. Failed removal persistence preserves the
+bytes needed by the durable history. Old snapshots without reference metadata
+are kept conservatively because their other fork owners cannot be established.
+Files left by a process crash before descriptor persistence or a failed cleanup
+are also kept; this change does not add an orphan-file collector.
 
 The new `GET /session/:id/artifacts/:artifactId/content` route is
 **live-session-owner scoped**, with the same owner resolution, client filtering,
@@ -46,8 +61,9 @@ opaque origin, so its scripts cannot modify that parent policy. This preserves
 the offline preview boundary while the shell allows live development URLs. The panel
 shows that this is a saved version and its creation time. Closing the panel
 removes only viewing state. Reopening from the original message fetches that
-same version. Latest publication cards are omitted from a turn when that same
-publication has its saved-version card, avoiding two indistinguishable outputs.
+same version. Local file publication cards are omitted from a turn when that same publication
+has its saved-version card. HTTP/HTTPS publication cards remain available for
+opening the latest hosted page.
 
 Refresh rebuilds an already loaded snapshot from its in-memory HTML, so it can
 recover a blank navigated frame without another daemon request. An initial load
@@ -65,8 +81,8 @@ starts from the delivered HTML when reopening a saved version.
 
 Snapshot descriptors use existing session artifact retention and its 200-record
 default limit. This increment does not implement an unlimited archive or change
-session deletion/retention policy. Snapshot files are not overwritten or garbage
-collected when another version is generated. Older live-link records cannot be
+session deletion/retention policy. A new publication never overwrites an earlier
+snapshot; snapshots remain until their final retained record is removed. Older live-link records cannot be
 retroactively reconstructed. Missing local snapshot bytes are reported as
 unavailable, including when moving a transcript without its runtime storage.
 

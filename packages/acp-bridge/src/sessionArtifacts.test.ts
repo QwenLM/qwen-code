@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs, type BigIntStats, type Stats } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,6 +17,7 @@ import {
 } from './sessionArtifacts.js';
 import {
   rebuildSessionArtifactSnapshot,
+  readArtifactSnapshot,
   stableSessionArtifactId,
   type RebuiltSessionArtifactSnapshot,
   type SessionArtifactEventRecordPayload,
@@ -6306,7 +6307,7 @@ describe('SessionArtifactStore', () => {
       const secondUuid = '9c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
       const snapshotArtifact = async (uuid: string, html: string) => {
         const dir = path.join(runtime, 'artifacts', 'snapshots', uuid);
-        await fs.mkdir(dir, { recursive: true });
+        await fs.mkdir(path.join(dir, 'references'), { recursive: true });
         await fs.writeFile(path.join(dir, 'index.html'), html);
         return {
           kind: 'html' as const,
@@ -6319,6 +6320,7 @@ describe('SessionArtifactStore', () => {
           url: pathToFileURL(path.join(dir, 'index.html')).href,
           metadata: {
             artifactType: 'web_preview_snapshot',
+            'qwen.snapshot.references': 1,
             publishedUrl: 'https://example.com/latest',
             'qwen.published.sha256': createHash('sha256')
               .update(html)
@@ -6379,7 +6381,7 @@ describe('SessionArtifactStore', () => {
         createdAt: string,
       ) => {
         const dir = path.join(runtime, 'artifacts', 'snapshots', uuid);
-        await fs.mkdir(dir, { recursive: true });
+        await fs.mkdir(path.join(dir, 'references'), { recursive: true });
         await fs.writeFile(path.join(dir, 'index.html'), html);
         return {
           id: stableSessionArtifactId(
@@ -6396,6 +6398,7 @@ describe('SessionArtifactStore', () => {
           url: pathToFileURL(path.join(dir, 'index.html')).href,
           metadata: {
             artifactType: 'web_preview_snapshot',
+            'qwen.snapshot.references': 1,
             publishedUrl: 'https://example.com/latest',
             'qwen.published.sha256': createHash('sha256')
               .update(html)
@@ -6447,6 +6450,159 @@ describe('SessionArtifactStore', () => {
       vi.unstubAllEnvs();
       await fs.rm(runtime, { recursive: true, force: true });
     }
+  });
+
+  describe('saved webpage ownership', () => {
+    const persistence = {
+      recordEvent: async () => {},
+      recordSnapshot: async () => {},
+    };
+    async function saved(sessionId: string, html: string) {
+      const uuid = randomUUID();
+      const dir = path.join(workspace, 'artifacts', 'snapshots', uuid);
+      await fs.mkdir(path.join(dir, 'references'), { recursive: true });
+      await fs.writeFile(path.join(dir, 'index.html'), html);
+      return {
+        id: stableSessionArtifactId(sessionId, `managed:preview-${uuid}`),
+        kind: 'html' as const,
+        storage: 'published' as const,
+        source: 'tool' as const,
+        toolName: 'artifact',
+        title: 'Saved page',
+        managedId: `preview-${uuid}`,
+        url: pathToFileURL(path.join(dir, 'index.html')).href,
+        status: 'available' as const,
+        retention: 'restorable' as const,
+        clientRetained: false,
+        createdAt: '2026-09-07T00:00:00.000Z',
+        updatedAt: '2026-09-07T00:00:00.000Z',
+        metadata: {
+          artifactType: 'web_preview_snapshot',
+          'qwen.snapshot.references': 1,
+          'qwen.published.sha256': createHash('sha256')
+            .update(html)
+            .digest('hex'),
+        },
+      };
+    }
+    function snapshot(
+      sessionId: string,
+      artifacts: Array<Awaited<ReturnType<typeof saved>>>,
+    ): RebuiltSessionArtifactSnapshot {
+      return {
+        v: 2,
+        sessionId,
+        sequence: 1,
+        artifacts,
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      };
+    }
+    function store(sessionId: string, maxArtifacts = 200) {
+      return new SessionArtifactStore({
+        sessionId,
+        workspaceCwd: workspace,
+        runtimeBaseDir: workspace,
+        maxArtifacts,
+        persistence,
+      });
+    }
+
+    it.each(['remove', 'evict'] as const)(
+      'keeps the parent readable after a fork %s',
+      async (action) => {
+        const page = await saved('parent', 'original');
+        const parent = store('parent');
+        await parent.restore(snapshot('parent', [page]));
+        const forked = {
+          ...page,
+          id: stableSessionArtifactId('fork', `managed:${page.managedId}`),
+        };
+        const fork = store('fork', 1);
+        await fork.restore(snapshot('fork', [forked]));
+        if (action === 'remove') await fork.remove(forked.id);
+        else
+          await fork.upsertMany([await saved('fork', 'new')], {
+            strict: true,
+            trustedPublisher: true,
+          });
+        expect((await parent.list()).artifacts[0]!.status).toBe('available');
+        await expect(readArtifactSnapshot(page, workspace)).resolves.toBe(
+          'original',
+        );
+        await parent.remove(page.id);
+        await expect(readArtifactSnapshot(page, workspace)).rejects.toThrow();
+      },
+    );
+
+    it.each(['reject', 'unavailable'] as const)(
+      'keeps durable bytes when restore pruning persistence is %s',
+      async (failure) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        const original = snapshot('owner', [first, second]);
+        const pruned = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          maxArtifacts: 1,
+          persistence:
+            failure === 'reject'
+              ? {
+                  ...persistence,
+                  recordEvent: async () => {
+                    throw new Error('disk full');
+                  },
+                }
+              : undefined,
+        });
+        const warnings = await pruned.restore(original);
+        expect(warnings).toContain(
+          'artifact removal not persisted; live removal kept',
+        );
+        expect((await pruned.list()).artifacts).toHaveLength(1);
+        await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+          'first',
+        );
+        const reloaded = store('owner');
+        await reloaded.restore(original);
+        expect((await reloaded.list()).artifacts).toHaveLength(2);
+        await expect(readArtifactSnapshot(second, workspace)).resolves.toBe(
+          'second',
+        );
+      },
+    );
+
+    it('reclaims discarded rewind history only after a complete restore', async () => {
+      const first = await saved('owner', 'first');
+      const second = await saved('owner', 'second');
+      const live = store('owner');
+      await live.restore(snapshot('owner', [first, second]));
+      await live.restore(snapshot('owner', [{ ...second, id: 'invalid-id' }]));
+      expect((await live.list()).artifacts).toHaveLength(2);
+      await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+        'first',
+      );
+      await live.restore(snapshot('owner', [second]));
+      await expect(readArtifactSnapshot(first, workspace)).rejects.toThrow();
+      await expect(readArtifactSnapshot(second, workspace)).resolves.toBe(
+        'second',
+      );
+    });
+
+    it('uses the runtime captured before the ambient environment changes', async () => {
+      const page = await saved('owner', 'secondary');
+      const live = store('owner');
+      await live.restore(snapshot('owner', [page]));
+      vi.stubEnv('QWEN_RUNTIME_DIR', path.join(workspace, 'primary'));
+      try {
+        await live.remove(page.id);
+        await expect(readArtifactSnapshot(page, workspace)).rejects.toThrow();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
   });
 
   it('does not trust persisted published file urls during restore', async () => {

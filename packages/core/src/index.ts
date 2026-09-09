@@ -245,6 +245,7 @@ export type {
 export {
   deleteArtifactSnapshot,
   readArtifactSnapshot,
+  retainArtifactSnapshot,
 } from './tools/artifact/artifact-snapshots.js';
 export {
   RecordArtifactTool,
@@ -372,8 +373,10 @@ export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/session-reference-service.js';
 export * from './ipc/inbound-gate.js';
+export * from './ipc/peer-admission.js';
 export * from './ipc/peer-controllers.js';
 export * from './ipc/peer-directory.js';
+export * from './ipc/peer-drop-reports.js';
 export * from './ipc/peer-envelope.js';
 export * from './ipc/peer-frames.js';
 export * from './ipc/peer-routing.js';
@@ -467,6 +470,7 @@ export { escapeXml } from './utils/xml.js';
 export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
+export * from './agents/background-notification-queue.js';
 export * from './services/web-terminal-registry.js';
 export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-snapshot.js';

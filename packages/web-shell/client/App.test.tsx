@@ -55,7 +55,8 @@ type MockConnection = {
   titleSource?: 'manual' | 'auto';
   workspaceCwd: string;
   currentModel: string | undefined;
-  currentMode: string;
+  currentMode: string | undefined;
+  planExecutionMode?: string;
   models: Array<{
     id: string;
     label?: string;
@@ -116,6 +117,11 @@ function activeGoalSnapshot(
 }
 
 type ChatEditorTestProps = {
+  currentMode?: string;
+  planMode?: boolean;
+  modeControlsDisabled?: boolean;
+  onTogglePlan?: () => void;
+  onSelectMode?: (mode: string) => void;
   onSubmit: (
     text: string,
     images?: { data: string; media_type: string }[],
@@ -412,6 +418,7 @@ const {
       switchStarted: true,
     }),
     submitPermission: vi.fn().mockResolvedValue(true),
+    respondToPermission: vi.fn().mockResolvedValue(true),
     clearGoal: vi.fn().mockResolvedValue(undefined),
     getGoal: vi.fn().mockResolvedValue({
       snapshot: { v: 2, activity: 'idle', goal: null },
@@ -602,6 +609,7 @@ const {
         }) => Promise<boolean | void> | boolean | void;
         manageLiveState?: boolean;
       } | null,
+      latestToolApprovalDisabled: false,
       latestToolApprovalKeyboardActive: null as boolean | null,
       toolApprovalKeyboardActiveHistory: [] as Array<boolean | null>,
       latestToolApprovalPlanTodos: [] as Array<{ id: string }>,
@@ -2172,9 +2180,12 @@ vi.doMock('./components/messages/ToolApproval', async () => {
   return {
     ToolApproval: (props: {
       keyboardActive?: boolean;
+      disabled?: boolean;
       planTodos?: Array<{ id: string }>;
+      planExecutionMode?: string;
       onConfirm?: (id: string, selectedOption: string) => void | Promise<void>;
     }) => {
+      testState.latestToolApprovalDisabled = props.disabled ?? false;
       testState.latestToolApprovalKeyboardActive = props.keyboardActive ?? null;
       testState.toolApprovalKeyboardActiveHistory.push(
         props.keyboardActive ?? null,
@@ -2185,6 +2196,7 @@ vi.doMock('./components/messages/ToolApproval', async () => {
       testState.latestToolApprovalOnConfirm = props.onConfirm ?? null;
       return React.createElement('div', {
         'data-web-shell-permission-panel': '',
+        'data-plan-execution-mode': props.planExecutionMode,
       });
     },
   };
@@ -7216,6 +7228,190 @@ describe('artifact panel fullscreen', () => {
     expect(testState.latestAskUserQuestionKeyboardActive).toBe(true);
   });
 
+  it('blocks same-tick plan handoff until a mode request completes, then permits approval', async () => {
+    mockConnection.currentMode = 'plan';
+    mockConnection.planExecutionMode = 'default';
+    testState.blocks = [makePlanPermissionBlock()];
+    const pendingMode = deferred<{ mode: string; planExecutionMode: string }>();
+    mockSessionActions.setApprovalMode.mockReturnValueOnce(pendingMode.promise);
+    renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectMode?.('yolo');
+      await expect(
+        testState.latestToolApprovalOnConfirm?.('req-1', 'restore_previous'),
+      ).rejects.toThrow('still pending');
+    });
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+    expect(testState.latestToolApprovalDisabled).toBe(true);
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(true);
+    await act(async () => {
+      pendingMode.resolve({ mode: 'plan', planExecutionMode: 'yolo' });
+    });
+    expect(testState.latestToolApprovalDisabled).toBe(false);
+    await act(async () => {
+      await testState.latestToolApprovalOnConfirm?.(
+        'req-1',
+        'restore_previous',
+      );
+    });
+    expect(mockSessionActions.respondToPermission).toHaveBeenCalledWith(
+      'req-1',
+      {
+        outcome: { outcome: 'selected', optionId: 'restore_previous' },
+        expectedPlanExecutionMode: 'default',
+      },
+    );
+  });
+
+  it('holds plan handoff through permission acknowledgement and disappearance until runtime exits Plan', async () => {
+    mockConnection.currentMode = 'plan';
+    mockConnection.planExecutionMode = 'yolo';
+    testState.blocks = [makePlanPermissionBlock()];
+    const permission = deferred<void>();
+    mockSessionActions.respondToPermission.mockReturnValueOnce(
+      permission.promise,
+    );
+    const { rerender } = renderApp();
+    await flush();
+    let submitted: void | Promise<void>;
+    act(() => {
+      submitted = testState.latestToolApprovalOnConfirm?.(
+        'req-1',
+        'restore_previous',
+      );
+      testState.latestChatEditorProps?.onSelectMode?.('default');
+      testState.latestChatEditorProps?.onTogglePlan?.();
+    });
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+    await act(async () => {
+      permission.resolve();
+      await submitted;
+    });
+    testState.blocks = [];
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(true);
+    testState.blocks = [
+      makePendingPermissionBlock({ requestId: 'background-approval' }),
+    ];
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(true);
+    act(() => testState.latestChatEditorProps?.onTogglePlan?.());
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+    mockConnection.currentMode = 'yolo';
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(false);
+    await act(async () =>
+      testState.latestChatEditorProps?.onSelectMode?.('default'),
+    );
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('default', {
+      planMode: false,
+    });
+  });
+
+  it('releases plan handoff after mode or permission failure so both controls can retry', async () => {
+    mockConnection.currentMode = 'plan';
+    testState.blocks = [makePlanPermissionBlock()];
+    renderApp();
+    await flush();
+    mockSessionActions.setApprovalMode.mockRejectedValueOnce(
+      new Error('mode failed'),
+    );
+    await act(async () =>
+      testState.latestChatEditorProps?.onSelectMode?.('yolo'),
+    );
+    expect(testState.latestToolApprovalDisabled).toBe(false);
+    mockSessionActions.submitPermission.mockRejectedValueOnce(
+      new Error('permission failed'),
+    );
+    await act(async () => {
+      await expect(
+        testState.latestToolApprovalOnConfirm?.('req-1', 'restore_previous'),
+      ).rejects.toThrow('permission failed');
+    });
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(false);
+    await act(async () => testState.latestChatEditorProps?.onTogglePlan?.());
+    expect(mockSessionActions.setApprovalMode).toHaveBeenLastCalledWith(
+      'default',
+      { planMode: false },
+    );
+  });
+
+  it('releases a plan handoff owner without letting its late failure unlock a replacement mode request', async () => {
+    mockConnection.currentMode = 'plan';
+    testState.blocks = [makePlanPermissionBlock()];
+    const permission = deferred<void>();
+    mockSessionActions.submitPermission.mockReturnValueOnce(permission.promise);
+    const { rerender } = renderApp();
+    await flush();
+    let submission: void | Promise<void>;
+    act(() => {
+      submission = testState.latestToolApprovalOnConfirm?.(
+        'req-1',
+        'restore_previous',
+      );
+    });
+    testState.ownerVersion += 1;
+    testState.blocks = [];
+    mockConnection.sessionId = 'replacement';
+    mockConnection.currentMode = 'default';
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(false);
+    const mode = deferred<{ mode: string }>();
+    mockSessionActions.setApprovalMode.mockReturnValueOnce(mode.promise);
+    act(() => testState.latestChatEditorProps?.onSelectMode?.('yolo'));
+    await act(async () => {
+      permission.reject(new Error('old owner failed'));
+      await expect(submission).rejects.toThrow('old owner failed');
+    });
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(true);
+    await act(async () => {
+      mode.resolve({ mode: 'yolo' });
+    });
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(false);
+  });
+
+  it('releases a plan handoff when its turn terminates even if Plan stays enabled', async () => {
+    mockConnection.currentMode = 'plan';
+    testState.streamingState = 'responding';
+    testState.blocks = [makePlanPermissionBlock()];
+    const { rerender } = renderApp();
+    await flush();
+    await act(async () => {
+      await testState.latestToolApprovalOnConfirm?.(
+        'req-1',
+        'restore_previous',
+      );
+    });
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(true);
+    testState.streamingState = 'idle';
+    testState.blocks = [];
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(false);
+  });
+
+  it('releases plan handoff after rejecting a plan without waiting for runtime mode to change', async () => {
+    mockConnection.currentMode = 'plan';
+    testState.blocks = [makePlanPermissionBlock()];
+    renderApp();
+    await flush();
+    await act(async () => {
+      await testState.latestToolApprovalOnConfirm?.('req-1', 'cancel');
+    });
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(false);
+    await act(async () =>
+      testState.latestChatEditorProps?.onSelectMode?.('yolo'),
+    );
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('yolo', {
+      planMode: true,
+    });
+  });
+
   it('rethrows a rejected permission submission so the overlay re-arms', async () => {
     // The main-chat approval overlay is onConfirm for every main-chat
     // approval. ToolApproval re-arms its double-submit guard only when the
@@ -9576,6 +9772,7 @@ async function triggerAutoRecap(): Promise<{
 // (getPermissionRawInput reads toolCall.input) — a bare toolName isn't enough.
 function makePendingPermissionBlock(
   overrides: {
+    requestId?: string;
     resolved?: boolean;
     toolName?: string;
     kind?: string;
@@ -9593,7 +9790,7 @@ function makePendingPermissionBlock(
   return {
     kind: 'permission',
     resolved: overrides.resolved ?? false,
-    requestId: 'req-1',
+    requestId: overrides.requestId ?? 'req-1',
     sessionId: 'session-1',
     title: 'Run ls',
     toolCall: {
@@ -9613,6 +9810,25 @@ function makePendingPermissionBlock(
       { optionId: 'cancel', label: 'Reject', raw: {} },
     ],
   };
+}
+
+function makePlanPermissionBlock() {
+  return makePendingPermissionBlock({
+    toolName: 'exit_plan_mode',
+    kind: 'switch_mode',
+    options: [
+      {
+        optionId: 'restore_previous',
+        label: 'Approve',
+        raw: { kind: 'allow_once' },
+      },
+      {
+        optionId: 'cancel',
+        label: 'Continue planning',
+        raw: { kind: 'reject_once' },
+      },
+    ],
+  });
 }
 
 beforeEach(() => {
@@ -9652,6 +9868,7 @@ beforeEach(() => {
   mockConnection.displayName = 'Session One';
   mockConnection.titleSource = undefined;
   mockConnection.currentMode = 'default';
+  mockConnection.planExecutionMode = undefined;
   mockConnection.currentModel = 'qwen';
   mockConnection.models = [{ id: 'qwen', label: 'Qwen' }];
   mockConnection.error = undefined;
@@ -9911,7 +10128,12 @@ beforeEach(() => {
   mockSessionActions.refreshCommands.mockResolvedValue(undefined);
   mockSessionActions.setModel.mockResolvedValue(undefined);
   mockSessionActions.setReasoningEffort.mockResolvedValue(undefined);
-  mockSessionActions.setApprovalMode.mockResolvedValue(undefined);
+  mockSessionActions.setApprovalMode.mockImplementation(
+    async (mode: string, options?: { planMode?: boolean }) => ({
+      mode: options?.planMode ? 'plan' : mode,
+      ...(options?.planMode ? { planExecutionMode: mode } : {}),
+    }),
+  );
   mockSessionActions.getRewindSnapshots.mockResolvedValue([]);
   mockSessionActions.rewindSession.mockResolvedValue(undefined);
   mockSessionActions.branchSession.mockResolvedValue({
@@ -13875,6 +14097,28 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="chat-context-header"]'),
     ).toBeNull();
+  });
+
+  it('shows the Plan entry only when explicitly configured and hides it on removal', () => {
+    const { rerender } = renderApp();
+    expect(
+      testState.latestChatEditorProps?.visibleToolbarActions,
+    ).not.toContain('plan');
+    rerender({ composerToolbarActions: ['approvalMode', 'plan'] });
+    expect(testState.latestChatEditorProps?.visibleToolbarActions).toContain(
+      'plan',
+    );
+    rerender({ composerToolbarActions: ['approvalMode'] });
+    expect(
+      testState.latestChatEditorProps?.visibleToolbarActions,
+    ).not.toContain('plan');
+    rerender({
+      composerToolbarActions: undefined,
+      composerToolbarAdditionalActions: ['plan'],
+    });
+    expect(testState.latestChatEditorProps?.visibleToolbarActions).toContain(
+      'plan',
+    );
   });
 
   it('appends composer actions without replacing context-sensitive defaults', () => {
@@ -19653,6 +19897,57 @@ describe('App session callbacks', () => {
     expect(composerWrapper()?.className).not.toContain('composerHidden');
   });
 
+  it.each([undefined, 'yolo'])(
+    'uses only the reported Plan execution policy for approval: %s',
+    async (planExecutionMode) => {
+      mockConnection.currentMode = 'plan';
+      mockConnection.planExecutionMode = planExecutionMode;
+      testState.blocks = [
+        makePendingPermissionBlock({
+          toolName: 'exit_plan_mode',
+          kind: 'switch_mode',
+        }),
+      ];
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container
+          .querySelector('[data-web-shell-permission-panel]')
+          ?.getAttribute('data-plan-execution-mode'),
+      ).toBe(planExecutionMode ?? null);
+    },
+  );
+
+  it('hides the composer during plan approval and restores it after resolution', async () => {
+    mockConnection.currentMode = 'plan';
+    mockConnection.planExecutionMode = 'default';
+    testState.blocks = [
+      makePendingPermissionBlock({
+        toolName: 'exit_plan_mode',
+        kind: 'switch_mode',
+      }),
+    ];
+    const { container, rerender } = renderApp();
+    await flush();
+    const composerWrapper = () =>
+      container.querySelector('[data-web-shell-composer]')?.parentElement;
+    expect(composerWrapper()?.className).toContain('composerHidden');
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+
+    await act(async () => {
+      testState.blocks = [];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(composerWrapper()?.className).not.toContain('composerHidden');
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).toBeNull();
+  });
+
   it('hides the composer while an ask-user question overlay is pending', async () => {
     const { container, rerender } = renderApp();
     await flush();
@@ -24574,6 +24869,141 @@ describe('App session callbacks', () => {
     expect(secondHandler).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['default', 'auto-edit', 'auto', 'yolo'])(
+    'shows selected %s separately from Plan and follows approved completion',
+    async (mode) => {
+      mockConnection.currentMode = 'plan';
+      mockConnection.planExecutionMode = mode;
+      const { rerender } = renderApp({
+        composerToolbarAdditionalActions: ['plan'],
+      });
+      await flush();
+      expect(testState.latestChatEditorProps?.currentMode).toBe(mode);
+      expect(testState.latestChatEditorProps?.planMode).toBe(true);
+      expect(testState.latestChatEditorProps?.visibleToolbarActions).toContain(
+        'plan',
+      );
+      mockConnection.currentMode = mode;
+      rerender();
+      await flush();
+      expect(testState.latestChatEditorProps?.currentMode).toBe(mode);
+      expect(testState.latestChatEditorProps?.planMode).toBe(false);
+    },
+  );
+
+  it('shares the Plan toggle with on/off commands without sending control words as prompts', async () => {
+    mockConnection.currentMode = 'yolo';
+    renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestChatEditorProps?.onTogglePlan?.();
+    });
+    expect(mockSessionActions.setApprovalMode).toHaveBeenLastCalledWith(
+      'yolo',
+      { planMode: true },
+    );
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/plan off');
+    });
+    expect(mockSessionActions.setApprovalMode).toHaveBeenLastCalledWith(
+      'yolo',
+      { planMode: false },
+    );
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/plan on');
+    });
+    expect(mockSessionActions.setApprovalMode).toHaveBeenLastCalledWith(
+      'yolo',
+      { planMode: true },
+    );
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/plan');
+    });
+    expect(mockSessionActions.setApprovalMode).toHaveBeenLastCalledWith(
+      'yolo',
+      { planMode: false },
+    );
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it.each(['/plan', '/plan on', '/plan off', '/plan exit'])(
+    'retains %s during a pending mode request and accepts it after completion',
+    async (command) => {
+      const pendingMode = deferred<{ mode: string }>();
+      mockSessionActions.setApprovalMode.mockReturnValueOnce(
+        pendingMode.promise,
+      );
+      const onToast = vi.fn();
+      renderApp({ onToast });
+      await flush();
+      act(() => {
+        testState.latestChatEditorProps?.onSelectMode?.('yolo');
+      });
+      expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(true);
+      onToast.mockClear();
+
+      let accepted: boolean | void;
+      act(() => {
+        accepted = testState.latestChatEditorProps?.onSubmit(command);
+      });
+      expect(accepted).toBe(false);
+      expect(mockSessionActions.setApprovalMode).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        pendingMode.resolve({ mode: 'yolo' });
+      });
+      await act(async () => {
+        accepted = testState.latestChatEditorProps?.onSubmit(command);
+      });
+      expect(accepted).toBe(true);
+      expect(mockSessionActions.setApprovalMode).toHaveBeenCalledTimes(2);
+      expect(mockSessionActions.setApprovalMode).toHaveBeenLastCalledWith(
+        'yolo',
+        { planMode: command === '/plan' || command === '/plan on' },
+      );
+    },
+  );
+
+  it('retains both welcome Plan and execution permission when defaults hydrate late', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.currentMode = undefined;
+    const { rerender } = renderApp();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onSelectMode?.('auto-edit');
+      testState.latestChatEditorProps?.onTogglePlan?.();
+    });
+    expect(testState.latestChatEditorProps?.currentMode).toBe('auto-edit');
+    expect(testState.latestChatEditorProps?.planMode).toBe(true);
+    mockConnection.currentMode = 'yolo';
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.currentMode).toBe('auto-edit');
+    expect(testState.latestChatEditorProps?.planMode).toBe(true);
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('takes both mode axes from a newly selected session after welcome Plan', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.currentMode = undefined;
+    const { rerender } = renderApp();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onSelectMode?.('yolo');
+      testState.latestChatEditorProps?.onTogglePlan?.();
+    });
+    expect(testState.latestChatEditorProps?.planMode).toBe(true);
+    mockConnection.sessionId = 'replacement-session';
+    mockConnection.currentMode = 'auto-edit';
+    testState.ownerVersion += 1;
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.currentMode).toBe('auto-edit');
+    expect(testState.latestChatEditorProps?.planMode).toBe(false);
+  });
+
   it('forwards input annotations for /plan prompts in active sessions', async () => {
     const annotation: DaemonInputAnnotation = {
       type: 'reference',
@@ -24594,7 +25024,9 @@ describe('App session callbacks', () => {
     await clickSubmit(container);
     await flush();
 
-    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('plan');
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('default', {
+      planMode: true,
+    });
     expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
       '@.husky/ explain',
       expect.objectContaining({
@@ -24604,14 +25036,16 @@ describe('App session callbacks', () => {
   });
 
   it('does not send a deferred plan prompt into a replacement owner', async () => {
-    const approval = deferred<void>();
+    const approval = deferred<{ mode: string; planExecutionMode: string }>();
     mockSessionActions.setApprovalMode.mockReturnValueOnce(approval.promise);
     const { container, rerender } = renderApp();
     await flush();
 
     testState.prompt = '/plan explain the migration';
     await clickSubmit(container);
-    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('plan');
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('default', {
+      planMode: true,
+    });
 
     act(() => {
       testState.ownerVersion += 1;
@@ -24619,7 +25053,7 @@ describe('App session callbacks', () => {
       rerender();
     });
     await act(async () => {
-      approval.resolve();
+      approval.resolve({ mode: 'plan', planExecutionMode: 'default' });
       await approval.promise;
     });
 
@@ -24628,14 +25062,16 @@ describe('App session callbacks', () => {
   });
 
   it('does not send a deferred plan prompt after an interrupted navigation', async () => {
-    const approval = deferred<void>();
+    const approval = deferred<{ mode: string; planExecutionMode: string }>();
     mockSessionActions.setApprovalMode.mockReturnValueOnce(approval.promise);
     const { container, rerender } = renderApp();
     await flush();
 
     testState.prompt = '/plan explain the migration';
     await clickSubmit(container);
-    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('plan');
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('default', {
+      planMode: true,
+    });
 
     act(() => {
       mockConnection.loadingTranscript = true;
@@ -24646,7 +25082,7 @@ describe('App session callbacks', () => {
       rerender({});
     });
     await act(async () => {
-      approval.resolve();
+      approval.resolve({ mode: 'plan', planExecutionMode: 'default' });
       await approval.promise;
     });
 
@@ -24656,7 +25092,7 @@ describe('App session callbacks', () => {
   });
 
   it('clears deferred plan preparation after a same-session reattach', async () => {
-    const approval = deferred<void>();
+    const approval = deferred<{ mode: string; planExecutionMode: string }>();
     mockSessionActions.setApprovalMode.mockReturnValueOnce(approval.promise);
     const { container, rerender } = renderApp();
     await flush();
@@ -24670,7 +25106,7 @@ describe('App session callbacks', () => {
       rerender();
     });
     await act(async () => {
-      approval.resolve();
+      approval.resolve({ mode: 'plan', planExecutionMode: 'default' });
       await approval.promise;
     });
 
@@ -24679,8 +25115,14 @@ describe('App session callbacks', () => {
   });
 
   it('does not let an A-to-B-to-A plan completion clear newer preparation', async () => {
-    const firstApproval = deferred<void>();
-    const secondApproval = deferred<void>();
+    const firstApproval = deferred<{
+      mode: string;
+      planExecutionMode: string;
+    }>();
+    const secondApproval = deferred<{
+      mode: string;
+      planExecutionMode: string;
+    }>();
     mockSessionActions.setApprovalMode
       .mockReturnValueOnce(firstApproval.promise)
       .mockReturnValueOnce(secondApproval.promise);
@@ -24708,13 +25150,13 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.isPreparing).toBe(true);
 
     await act(async () => {
-      firstApproval.resolve();
+      firstApproval.resolve({ mode: 'plan', planExecutionMode: 'default' });
       await firstApproval.promise;
     });
     expect(testState.latestChatEditorProps?.isPreparing).toBe(true);
 
     await act(async () => {
-      secondApproval.resolve();
+      secondApproval.resolve({ mode: 'plan', planExecutionMode: 'default' });
       await secondApproval.promise;
     });
     expect(testState.latestChatEditorProps?.isPreparing).toBe(false);
@@ -27764,6 +28206,7 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
       'req-1',
       'proceed_once',
+      undefined,
     );
   });
 

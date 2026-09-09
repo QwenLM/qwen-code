@@ -11,6 +11,8 @@ import path from 'node:path';
 import {
   collectRecordableWorkspaceFiles,
   deleteArtifactSnapshot,
+  retainArtifactSnapshot,
+  Storage,
   isOfficeDocumentExtension,
   isPrototypeMetadataKey,
   isRecordableDerivedChild,
@@ -233,6 +235,7 @@ export class SessionArtifactAuthorizationError extends Error {
 interface SessionArtifactStoreOptions {
   sessionId: string;
   workspaceCwd: string;
+  runtimeBaseDir?: string;
   maxArtifacts?: number;
   persistence?: SessionArtifactPersistence;
 }
@@ -265,6 +268,7 @@ interface WorkspaceStatusExpected {
 export class SessionArtifactStore {
   private readonly sessionId: string;
   private readonly workspaceCwd: string;
+  private readonly runtimeBaseDir: string;
   private readonly maxArtifacts: number;
   private readonly persistence?: SessionArtifactPersistence;
   private readonly artifacts = new Map<string, StoredArtifact>();
@@ -288,6 +292,7 @@ export class SessionArtifactStore {
   constructor(options: SessionArtifactStoreOptions) {
     this.sessionId = options.sessionId;
     this.workspaceCwd = options.workspaceCwd;
+    this.runtimeBaseDir = options.runtimeBaseDir ?? Storage.getRuntimeBaseDir();
     this.maxArtifacts = options.maxArtifacts ?? 200;
     this.persistence = options.persistence;
   }
@@ -478,6 +483,15 @@ export class SessionArtifactStore {
             .filter((change) => change.action === 'created')
             .map((change) => change.artifactId),
         );
+        for (const change of changes) {
+          if (change.action !== 'removed' && change.artifact) {
+            await retainArtifactSnapshot(
+              change.artifact,
+              this.runtimeBaseDir,
+              this.sessionId,
+            );
+          }
+        }
         const overflowRemoved = await this.evictOverflow(
           createdIds,
           changes,
@@ -820,6 +834,11 @@ export class SessionArtifactStore {
               retention !== 'ephemeral' ? true : undefined,
             insertSeq: ++this.insertSeq,
           };
+          await retainArtifactSnapshot(
+            stored,
+            this.runtimeBaseDir,
+            this.sessionId,
+          );
           this.artifacts.set(stored.id, stored);
           restoredCount++;
         } catch (error) {
@@ -868,11 +887,26 @@ export class SessionArtifactStore {
       const evicted = await this.evictOverflow(new Set(), []);
       if (evicted.removed.length > 0) {
         warnings.push('restored artifact list pruned to live limit');
-        warnings.push(...(await this.persistChanges(evicted.removed, false)));
-        await this.reclaimSnapshotFiles(
-          evicted.removed.map((change) => change.artifact),
+        const persistenceWarnings = await this.persistChanges(
+          evicted.removed,
+          false,
         );
+        warnings.push(...persistenceWarnings);
+        if (persistenceWarnings.length === 0) {
+          await this.reclaimSnapshotFiles(
+            evicted.removed.map((change) => change.artifact),
+          );
+        }
       }
+      const restoredIds = new Set([
+        ...snapshot.artifacts.map((artifact) => artifact.id),
+        ...preservedLiveEphemeralArtifacts.map((artifact) => artifact.id),
+      ]);
+      await this.reclaimSnapshotFiles(
+        [...previousState.artifacts.values()].filter(
+          (artifact) => !restoredIds.has(artifact.id),
+        ),
+      );
       this.setLastRestoreWarnings(warnings);
       return warnings;
     });
@@ -1919,17 +1953,25 @@ export class SessionArtifactStore {
     }
   }
 
-  // Snapshot bytes are written before their descriptor is ingested, so
-  // they would otherwise outlive the records that reference them. Reclaim
-  // them once a removal is final; the deleter only touches the exact file a
-  // snapshot descriptor points at inside this runtime's snapshot root.
   private async reclaimSnapshotFiles(
     artifacts: ReadonlyArray<DaemonSessionArtifact | undefined>,
   ): Promise<void> {
     for (const artifact of artifacts) {
       if (!artifact) continue;
+      const id = getWebPreviewSnapshotId(artifact);
+      if (
+        !id ||
+        [...this.artifacts.values()].some(
+          (kept) => getWebPreviewSnapshotId(kept) === id,
+        )
+      )
+        continue;
       try {
-        await deleteArtifactSnapshot(artifact);
+        await deleteArtifactSnapshot(
+          artifact,
+          this.runtimeBaseDir,
+          this.sessionId,
+        );
       } catch {
         // Reclamation must never break the store's removal paths.
       }

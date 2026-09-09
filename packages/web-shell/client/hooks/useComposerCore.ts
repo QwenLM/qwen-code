@@ -2519,7 +2519,24 @@ export function useComposerCore(
   const navigatePrevHistory = useCallback(() => {
     if (disabledRef.current) return;
     const view = viewRef.current;
-    if (!view) return;
+    if (!view) {
+      // Touch textarea backend: browse the same prompt history with a
+      // plain-text restore (inline tag chips are not recreated).
+      if (!isTouchComposer) return;
+      const history = shellModeRef.current
+        ? shellHistoryActionsRef.current
+        : historyActionsRef.current;
+      const current = mobileTextRef.current;
+      if (!history.isNavigating()) {
+        saveCurrentDraftRef.current();
+      }
+      const prev = history.navigateUp(current);
+      if (prev !== null) {
+        historyBrowseActiveRef.current = true;
+        restoreSelectedHistoryMatch(prev);
+      }
+      return;
+    }
     if (completionStatus(view.state) === 'active') {
       moveCompletionSelection(false)(view);
       view.focus();
@@ -2545,12 +2562,28 @@ export function useComposerCore(
       restoreHistoryEntry(view, prev);
     }
     view.focus();
-  }, [rememberPromptHistoryDraftTags, restoreHistoryEntry]);
+  }, [
+    isTouchComposer,
+    rememberPromptHistoryDraftTags,
+    restoreHistoryEntry,
+    restoreSelectedHistoryMatch,
+  ]);
 
   const navigateNextHistory = useCallback(() => {
     if (disabledRef.current) return;
     const view = viewRef.current;
-    if (!view) return;
+    if (!view) {
+      if (!isTouchComposer) return;
+      const history = shellModeRef.current
+        ? shellHistoryActionsRef.current
+        : historyActionsRef.current;
+      const next = history.navigateDown();
+      if (next !== null) {
+        historyBrowseActiveRef.current = history.isNavigating();
+        restoreSelectedHistoryMatch(next);
+      }
+      return;
+    }
     if (completionStatus(view.state) === 'active') {
       moveCompletionSelection(true)(view);
       view.focus();
@@ -2574,10 +2607,19 @@ export function useComposerCore(
       }
     }
     view.focus();
-  }, [restoreHistoryEntry, restorePromptHistoryDraftTags]);
+  }, [
+    isTouchComposer,
+    restoreHistoryEntry,
+    restorePromptHistoryDraftTags,
+    restoreSelectedHistoryMatch,
+  ]);
 
   const handleMobileChange = useCallback(
     (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+      // Mirror the CodeMirror updateListener: a genuine edit ends history
+      // browsing so the draft starts persisting again. Programmatic restores
+      // go through setMobileText, never this handler.
+      historyBrowseActiveRef.current = false;
       setMobileText(event.target.value);
     },
     [setMobileText],

@@ -24,10 +24,15 @@ describe('ArtifactTool', () => {
   let openSpy: ReturnType<typeof vi.fn>;
   let tool: ArtifactTool;
 
-  const makeConfig = (): Config =>
+  const makeConfig = (snapshots = true): Config =>
     ({
       getFileSystemService: () => new StandardFileSystemService(),
       getTargetDir: () => workdir,
+      isArtifactSnapshotsEnabled: () => snapshots,
+      getSessionId: () => 'artifact-session',
+      storage: {
+        getRuntimeBaseDir: () => path.join(outDir, 'runtime'),
+      },
       shouldAutoOpenArtifact: () =>
         process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] !== '1',
     }) as unknown as Config;
@@ -134,9 +139,30 @@ describe('ArtifactTool', () => {
     ).resolves.toContain('<p>v2</p>');
   });
 
+  it('does not accumulate historical files without a managed artifact store', async () => {
+    tool = new ArtifactTool(
+      makeConfig(false),
+      new LocalPublisher(outDir),
+      openSpy,
+    );
+    const file = await writeFragment('page.html', '<h1>Report</h1>');
+    const urls = new Set<string | undefined>();
+    for (let i = 0; i < 5; i++) {
+      const result = await tool.build({ file_path: file }).execute(signal);
+      expect(result.error).toBeUndefined();
+      expect(result.artifacts).toHaveLength(1);
+      expect(result.llmContent).not.toContain('saved');
+      urls.add(result.artifacts![0]!.url);
+    }
+    expect(urls.size).toBe(1);
+    await expect(
+      fs.stat(path.join(outDir, 'runtime', 'artifacts', 'snapshots')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('reports a saved-version failure even when latest publication succeeded', async () => {
     const file = await writeFragment('page.html', '<p>Published</p>');
-    vi.stubEnv('QWEN_RUNTIME_DIR', file);
+    await fs.writeFile(path.join(outDir, 'runtime'), 'not a directory');
     const result = await tool.build({ file_path: file }).execute(signal);
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain(

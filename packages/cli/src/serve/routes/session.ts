@@ -9150,6 +9150,7 @@ export function registerSessionRoutes(
         const body = safeBody(req);
         const mode = body['mode'];
         const persist = body['persist'];
+        const planMode = body['planMode'];
         if (
           typeof mode !== 'string' ||
           !APPROVAL_MODES.includes(mode as ApprovalMode)
@@ -9168,12 +9169,26 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (
+          planMode !== undefined &&
+          (typeof planMode !== 'boolean' || mode === 'plan')
+        ) {
+          res.status(400).json({
+            error:
+              '`planMode` must be a boolean with a non-plan execution mode',
+            code: 'invalid_plan_mode',
+          });
+          return;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const response = await runtime.bridge.setSessionApprovalMode(
           sessionId,
           mode as ApprovalMode,
-          { persist: persist === true },
+          {
+            persist: persist === true,
+            ...(typeof planMode === 'boolean' ? { planMode } : {}),
+          },
           clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json(response);

@@ -108,6 +108,10 @@ describe('nextToggleValue', () => {
     expect(nextToggleValue({ type: 'boolean' }, false)).toBe(true);
   });
 
+  it('turns an unset tri-state boolean off', () => {
+    expect(nextToggleValue({ type: 'boolean' }, undefined)).toBe(false);
+  });
+
   it('cycles enums and loops back to the first option', () => {
     const def = {
       type: 'enum' as const,

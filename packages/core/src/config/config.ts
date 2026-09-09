@@ -1290,13 +1290,9 @@ export interface ConfigParameters {
    */
   fastModel?: string;
   /**
-   * Built-in WebSearch tool settings (`tools.webSearch` / ENABLE_WEB_SEARCH +
-   * WEB_SEARCH_MODEL env overrides). The tool registers only when `enabled`
-   * is true and `model` resolves to a DashScope-compatible modelProviders
-   * entry carrying a direct API key — or, for environments that cannot write
-   * settings.json, when an env-declared backend is supplied (`baseUrl` from
-   * WEB_SEARCH_BASE_URL, `apiKeyEnv` naming the key variable), which takes
-   * precedence over modelProviders resolution.
+   * Built-in WebSearch settings. `enabled: false` disables the tool; when the
+   * setting is omitted, the tool may derive a backend from the active provider
+   * at startup. An explicit model or env-declared backend takes precedence.
    */
   webSearch?: WebSearchSettings;
   /**
@@ -2340,6 +2336,7 @@ export class Config {
   private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
+  private planExecutionMode?: ApprovalMode;
   private approvalModeRevision = 0;
   private manualPlanExitNoticeEventState: ManualPlanExitNoticeEventState = {
     version: 0,
@@ -2442,6 +2439,7 @@ export class Config {
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
+  private artifactSnapshotsEnabled = false;
   private readonly artifactAutoOpen: boolean = true;
   private readonly artifactPublisher: 'local' | 'host' | 'oss' = 'local';
   private readonly artifactHost?: ArtifactHostConfig;
@@ -4948,6 +4946,20 @@ export class Config {
   }
 
   /**
+   * The auth type of the currently selected model, read from `ModelsConfig`
+   * rather than the content generator config.
+   *
+   * Unlike {@link getAuthType}, this is usable before `refreshAuth` has run —
+   * the tool registry is built during `initialize()`, which happens first (the
+   * ACP bridge calls `initialize()` and only later `refreshAuth`). Callers that
+   * need the selected model's provider entry at registry-build time must use
+   * this.
+   */
+  getCurrentAuthType(): AuthType | undefined {
+    return this.modelsConfig.getCurrentAuthType();
+  }
+
+  /**
    * Resolve the effective input modalities of the current primary model. The
    * content generator config always carries resolved modalities (name-based
    * detection fills them in, defaulting unknown models to text-only), which is
@@ -7175,6 +7187,28 @@ export class Config {
     return this.prePlanMode ?? ApprovalMode.DEFAULT;
   }
 
+  getPlanExecutionMode(): ApprovalMode | undefined {
+    return Object.hasOwn(this, 'planExecutionMode')
+      ? this.planExecutionMode
+      : undefined;
+  }
+
+  setPlanMode(enabled: boolean, executionMode: ApprovalMode): void {
+    if (isDerivedConfig(this)) {
+      throw new Error('Derived Configs cannot change plan workflow mode');
+    }
+    if (executionMode === ApprovalMode.PLAN) {
+      throw new Error('Plan is not an execution approval mode');
+    }
+    if (!this.isTrustedFolder() && executionMode !== ApprovalMode.DEFAULT) {
+      throw new TrustGateError(
+        'Cannot enable privileged approval modes in an untrusted folder.',
+      );
+    }
+    this.setApprovalMode(enabled ? ApprovalMode.PLAN : executionMode);
+    this.planExecutionMode = enabled ? executionMode : undefined;
+  }
+
   getApprovalModeRevision(): number {
     return this.approvalModeRevision;
   }
@@ -7285,6 +7319,7 @@ export class Config {
       this.autoModeDenialState = resetDenialState();
     }
     this.approvalMode = mode;
+    if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
     if (fromMode !== mode) {
       this.approvalModeRevision++;
     }
@@ -7831,12 +7866,14 @@ export class Config {
 
   isArtifactEnabled(): boolean {
     // Publishing writes outside the project and opens a browser, so it is
-    // limited to interactive, non-SDK sessions. QWEN_CODE_DISABLE_ARTIFACT
+    // limited to interactive or managed preview sessions, excluding SDK use.
+    // Managed previews render in Web Shell instead of opening a host browser.
+    // QWEN_CODE_DISABLE_ARTIFACT
     // hard-disables both artifact tools; QWEN_CODE_ENABLE_ARTIFACT remains as
     // a compatibility override for old configs that explicitly disabled them.
     if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
     if (this.sdkMode) return false;
-    if (!this.interactive) return false;
+    if (!this.interactive && !this.isArtifactSnapshotsEnabled()) return false;
     if (process.env['QWEN_CODE_ENABLE_ARTIFACT'] === '1') return true;
     return this.artifactEnabled;
   }
@@ -7850,6 +7887,14 @@ export class Config {
 
   getArtifactPublisherKind(): 'local' | 'host' | 'oss' {
     return this.artifactPublisher;
+  }
+
+  isArtifactSnapshotsEnabled(): boolean {
+    return this.artifactSnapshotsEnabled && this.chatRecordingEnabled;
+  }
+
+  setArtifactSnapshotsEnabled(enabled: boolean): void {
+    this.artifactSnapshotsEnabled = enabled;
   }
 
   getArtifactHostConfig(): ArtifactHostConfig | undefined {
@@ -7912,6 +7957,7 @@ export class Config {
   }
 
   shouldAutoOpenArtifact(): boolean {
+    if (this.isArtifactSnapshotsEnabled()) return false;
     if (process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] === '1') return false;
     return this.artifactAutoOpen && !this.isBrowserLaunchSuppressed();
   }
@@ -9747,11 +9793,22 @@ export class Config {
         return new DisplayImageTool(this);
       });
     }
-    // WebSearch is opt-in: it registers only when explicitly enabled AND the
-    // configured search model resolves to a usable DashScope entry. A failed
-    // gate surfaces a one-time startup notice instead of a silently missing
-    // tool. Nothing is imported unless the feature is enabled.
-    if (this.webSearchSettings?.enabled) {
+    // WebSearch is opt-out: it registers whenever the gate can resolve a
+    // usable backend — either configured explicitly, or derived from the
+    // provider the main model runs on. `enabled: false` turns it off without
+    // importing anything. A gate failure surfaces a one-time startup notice
+    // only when the tool was actually asked for; a provider with no search
+    // backend fails silently (`gate.silent`), since warning about a feature
+    // the user never configured is noise.
+    const hasExplicitWebSearchBackend =
+      !!this.webSearchSettings?.model?.trim() ||
+      !!this.webSearchSettings?.baseUrl;
+    if (
+      !this.getBareMode() &&
+      !this.isSafeMode() &&
+      this.webSearchSettings?.enabled !== false &&
+      (this.webSearchSettings?.enabled === true || !hasExplicitWebSearchBackend)
+    ) {
       const { evaluateWebSearchGate } = await import('../tools/web-search.js');
       const gate = evaluateWebSearchGate(this);
       if (gate.ok) {
@@ -9759,7 +9816,11 @@ export class Config {
           const { WebSearchTool } = await import('../tools/web-search.js');
           return new WebSearchTool(this);
         });
-      } else if (!this.webSearchNoticeEmitted && !options?.forSubAgent) {
+      } else if (
+        !gate.silent &&
+        !this.webSearchNoticeEmitted &&
+        !options?.forSubAgent
+      ) {
         this.webSearchNoticeEmitted = true;
         this.warnings.push(gate.notice);
       }
