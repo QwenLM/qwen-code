@@ -202,7 +202,9 @@ export class LspServerManager {
       }
 
       const nextHash = desiredHashes.get(name);
-      if (this.serverConfigHashes.get(name) !== nextHash) {
+      if (this.serverConfigHashes.get(name) === nextHash) {
+        result.unchanged.push(name);
+      } else {
         await this.abortAndWaitForStartup(handle);
         await this.stopServer(name, handle);
         const nextHandle: LspServerHandle = {
@@ -220,8 +222,6 @@ export class LspServerManager {
           }
           result.restarted.push(name);
         }
-      } else {
-        result.unchanged.push(name);
       }
     }
 
@@ -263,7 +263,7 @@ export class LspServerManager {
 
   /**
    * Ensure tsserver has at least one file open so navto/navtree requests succeed.
-   * Sets warmedUp flag only after successful warm-up to allow retry on failure.
+   * Latches unsupported attempts to avoid repeated discovery; delivery failures retry.
    *
    * @param handle - The LSP server handle
    * @param force - Force re-warmup even if already warmed up
@@ -271,7 +271,7 @@ export class LspServerManager {
    */
   async warmupTypescriptServer(
     handle: LspServerHandle,
-    synchronizeDocument: (uri: string, languageId: string) => void,
+    synchronizeDocument: (uri: string, languageId: string) => boolean,
     force = false,
   ): Promise<void> {
     if (!handle.connection || !this.isTypescriptServer(handle)) {
@@ -294,7 +294,14 @@ export class LspServerManager {
           ? 'javascript'
           : 'typescript';
     try {
-      synchronizeDocument(uri, languageId);
+      const sent = synchronizeDocument(uri, languageId);
+      if (!sent) {
+        debugLogger.warn(
+          `TypeScript server ${handle.config.name} warm-up delivered no notification (textDocumentSync=${JSON.stringify(handle.textDocumentSync)})`,
+        );
+        handle.warmedUp = true;
+        return;
+      }
       // Give tsserver a moment to build the project.
       await new Promise((resolve) =>
         setTimeout(resolve, DEFAULT_LSP_WARMUP_DELAY_MS),

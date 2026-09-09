@@ -1121,6 +1121,11 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
               name: { type: 'string' },
               kind: { type: 'string' },
               rawKind: { type: 'number' },
+              documentRevision: {
+                type: 'string',
+                description:
+                  'Client freshness token. Echo unchanged; if absent or stale, prepare call hierarchy again.',
+              },
               detail: { type: 'string' },
               uri: { type: 'string' },
               range: { $ref: '#/definitions/LspRange' },

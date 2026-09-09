@@ -14,6 +14,7 @@ import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import { LspServerManager } from './lsp-server-manager.js';
 import { LspConnectionFactory } from './LspConnectionFactory.js';
 import type {
+  LspServerHandle,
   LspConnectionInterface,
   LspConnectionResult,
   LspServerConfig,
@@ -106,6 +107,39 @@ describe('LspServerManager', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('contains TypeScript warmup callback failures without marking the handle warm', async () => {
+    const manager = createTrustedManager();
+    const warmupFile = path.resolve('main.ts');
+    // SAFETY: Stub discovery only; the real warmup callback and catch execute.
+    vi.spyOn(
+      manager as unknown as { findFirstTypescriptFile(): string | undefined },
+      'findFirstTypescriptFile',
+    ).mockReturnValue(warmupFile);
+    const handle: LspServerHandle = {
+      config: { ...serverConfig, name: 'typescript' },
+      status: 'READY',
+      connection: {
+        request: vi.fn(),
+        send: vi.fn(),
+      } as unknown as LspConnectionInterface,
+    };
+    const synchronize = vi.fn(() => {
+      throw new Error('sync failed');
+    });
+    await expect(
+      manager.warmupTypescriptServer(handle, synchronize),
+    ).resolves.toBeUndefined();
+    expect(synchronize).toHaveBeenCalledExactlyOnceWith(
+      pathToFileURL(warmupFile).toString(),
+      'typescript',
+    );
+    expect(handle.warmedUp).toBeFalsy();
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      'TypeScript server warm-up failed:',
+      expect.objectContaining({ message: 'sync failed' }),
+    );
   });
 
   it.each<LspTextDocumentSync | undefined>([

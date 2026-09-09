@@ -69,6 +69,8 @@ export interface LspCallHierarchyItem {
   range: LspRange;
   /** The range that should be selected when navigating to this item. */
   selectionRange: LspRange;
+  /** Client-issued freshness token; echo unchanged, never send to the LSP server. */
+  documentRevision?: string;
   /** Opaque data used by the server for subsequent calls. */
   data?: unknown;
   /** The LSP server that provided this item. */
