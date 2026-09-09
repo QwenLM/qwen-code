@@ -899,6 +899,7 @@ export class LlmClient {
     signal: AbortSignal,
     loadGoalRuntime: (required: boolean) => Promise<GoalRuntime | undefined>,
     turnKey: string,
+    reportFailure?: (message: string) => void,
   ): Promise<void> {
     const take = this.config.takePendingGoalProposal;
     if (typeof take !== 'function') return;
@@ -933,6 +934,9 @@ export class LlmClient {
     }
     if (!result.applied) {
       debugLogger.debug(`Dropping an approved Goal proposal: ${result.reason}`);
+      reportFailure?.(
+        'The approved Goal could not be started. Check /goal before trying again, or run `/goal set <objective>`.',
+      );
     }
   }
 
@@ -2902,6 +2906,13 @@ export class LlmClient {
     let goalPermitReleased = false;
     let unsubscribeGoalState: (() => void) | undefined;
     const pendingGoalStateEvents: GoalStateStreamEvent[] = [];
+    const pendingGoalSettlementMessages: ServerLlmStreamEvent[] = [];
+    const reportGoalSettlementFailure = (message: string) => {
+      pendingGoalSettlementMessages.push({
+        type: LlmEventType.HookSystemMessage,
+        value: message,
+      });
+    };
     let hasEmittedActiveGoalProjection = false;
     let lastEmittedActiveGoal: ActiveGoalEventValue | undefined;
     const closeGoalStateEvents = () => {
@@ -2924,7 +2935,10 @@ export class LlmClient {
       });
     };
     const takePendingGoalEvents = (): ServerLlmStreamEvent[] => {
-      const events: ServerLlmStreamEvent[] = [];
+      const events = pendingGoalSettlementMessages.splice(
+        0,
+        pendingGoalSettlementMessages.length,
+      );
       for (const stateEvent of pendingGoalStateEvents.splice(
         0,
         pendingGoalStateEvents.length,
@@ -3283,6 +3297,7 @@ export class LlmClient {
               return runtime;
             },
             prompt_id,
+            reportGoalSettlementFailure,
           );
           for (const goalEvent of takePendingGoalEvents()) {
             yield goalEvent;
@@ -4581,6 +4596,7 @@ export class LlmClient {
               signal,
               loadGoalRuntime,
               prompt_id,
+              reportGoalSettlementFailure,
             );
             for (const goalEvent of takePendingGoalEvents()) {
               yield goalEvent;
@@ -4661,6 +4677,7 @@ export class LlmClient {
               signal,
               loadGoalRuntime,
               prompt_id,
+              reportGoalSettlementFailure,
             );
             for (const goalEvent of takePendingGoalEvents()) {
               yield goalEvent;
@@ -4718,6 +4735,7 @@ export class LlmClient {
             signal,
             loadGoalRuntime,
             prompt_id,
+            reportGoalSettlementFailure,
           );
           for (const goalEvent of takePendingGoalEvents()) {
             yield goalEvent;
@@ -4798,6 +4816,7 @@ export class LlmClient {
             signal,
             loadGoalRuntime,
             prompt_id,
+            reportGoalSettlementFailure,
           );
           for (const goalEvent of takePendingGoalEvents()) {
             yield goalEvent;
@@ -4855,6 +4874,7 @@ export class LlmClient {
             signal,
             loadGoalRuntime,
             prompt_id,
+            reportGoalSettlementFailure,
           );
           for (const goalEvent of takePendingGoalEvents()) {
             yield goalEvent;
@@ -4898,6 +4918,7 @@ export class LlmClient {
         signal,
         loadGoalRuntime,
         prompt_id,
+        reportGoalSettlementFailure,
       );
       for (const goalEvent of takePendingGoalEvents()) {
         yield goalEvent;

@@ -15516,6 +15516,20 @@ describe('createAcpSessionBridge', () => {
       expect(
         handle.agent.promptCalls[2]?._meta?.['qwen.goalProposalApproval'],
       ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, request, undefined, {
+        clientId: session.clientId,
+        restoreAskUserQuestion: true,
+      });
+      expect(
+        handle.agent.promptCalls[3]?._meta?.['qwen.goalProposalApproval'],
+      ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, request, undefined, {
+        clientId: session.clientId,
+        continue: true,
+      });
+      expect(
+        handle.agent.promptCalls[4]?._meta?.['qwen.goalProposalApproval'],
+      ).toBeUndefined();
       await bridge.shutdown();
     });
 
@@ -37196,9 +37210,11 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
 
   it('promotes messages after their client detaches without reapplying the cap', async () => {
     const prompts: string[] = [];
+    const goalApprovalMeta: unknown[] = [];
     const releases: Array<() => void> = [];
     const handle = makeChannel({
       promptImpl: async (req) => {
+        goalApprovalMeta.push(req._meta?.['qwen.goalProposalApproval']);
         prompts.push(
           (req.prompt[0] as { text?: string } | undefined)?.text ?? '',
         );
@@ -37245,6 +37261,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     releases[0]!();
     await first;
     await vi.waitFor(() => expect(prompts).toEqual(['first', 'follow up']));
+    expect(goalApprovalMeta).toEqual([true, undefined]);
     expect(bridge.getMidTurnMessages(session.sessionId)).toEqual({
       messages: [],
       settledMessageIds: [],

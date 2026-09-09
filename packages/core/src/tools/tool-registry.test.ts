@@ -403,14 +403,32 @@ describe('ToolRegistry', () => {
       });
       acpConfig.setGoalProposalHostSupported(true);
       const registry = new ToolRegistry(acpConfig);
+      registry.registerTool(new MockTool({ name: 'other_tool' }));
       registry.registerTool(new MockTool({ name: 'propose_goal' }));
-      expect(registry.getFunctionDeclarations()).toEqual([]);
+      expect(
+        registry.getFunctionDeclarations().map((tool) => tool.name),
+      ).toEqual(['other_tool']);
       acpConfig.setGoalProposalTurnKey('user-turn');
       expect(
         registry.getFunctionDeclarations().map((tool) => tool.name),
-      ).toEqual(['propose_goal']);
+      ).toEqual(['other_tool', 'propose_goal']);
       acpConfig.setGoalProposalTurnKey(undefined);
-      expect(registry.getFunctionDeclarations()).toEqual([]);
+      expect(
+        registry.getFunctionDeclarations().map((tool) => tool.name),
+      ).toEqual(['other_tool']);
+    });
+
+    it('keeps Goal proposals declared in an interactive terminal', () => {
+      const interactiveConfig = new Config({
+        ...baseConfigParams,
+        interactive: true,
+      });
+      const registry = new ToolRegistry(interactiveConfig);
+      registry.registerTool(new MockTool({ name: 'propose_goal' }));
+
+      expect(
+        registry.getFunctionDeclarations().map((tool) => tool.name),
+      ).toEqual(['propose_goal']);
     });
 
     it('excludes shouldDefer tools from getFunctionDeclarations by default', () => {

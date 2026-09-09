@@ -3943,7 +3943,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   it.each([
     [true, undefined, true],
     [false, undefined, false],
-    [true, 'channel', false],
+    [true, 'channel', true],
   ])(
     'gates Goal proposals on client support %s and session source %s',
     async (supported, sourceType, expected) => {

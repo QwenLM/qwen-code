@@ -341,6 +341,47 @@ describe('LlmClient Goal admission', () => {
     });
   });
 
+  it('reports a proposal that could not be applied to the terminal user', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(config.getSkipNextSpeakerCheck).mockReturnValue(true);
+    vi.mocked(runtime.getSnapshot).mockReturnValue({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
+    vi.mocked(runtime.dispatch).mockResolvedValueOnce({
+      snapshot: { v: 2, activity: 'idle', goal: null },
+    });
+    const store = pendingGoalProposalStore();
+    Object.assign(config, {
+      takePendingGoalProposal: store.take,
+      getUsageStatisticsEnabled: vi.fn(() => false),
+    });
+    turnMocks.run.mockImplementationOnce(() => {
+      store.set({
+        objective: 'ship it',
+        turnKey: 'failed-settlement-key',
+        reviewedGoal: null,
+      });
+      return emptyStream();
+    });
+
+    const events = await collect(
+      client.sendMessageStream(
+        [{ text: 'set a goal for this' }],
+        new AbortController().signal,
+        'failed-settlement-key',
+        { type: SendMessageType.UserQuery },
+      ),
+    );
+
+    expect(events).toContainEqual({
+      type: LlmEventType.HookSystemMessage,
+      value:
+        'The approved Goal could not be started. Check /goal before trying again, or run `/goal set <objective>`.',
+    });
+  });
+
   it('settles an approved proposal on the default skip-next-speaker exit', async () => {
     const { client, config, runtime } = setupGoalClient();
     vi.mocked(runtime.getSnapshot).mockReturnValue({

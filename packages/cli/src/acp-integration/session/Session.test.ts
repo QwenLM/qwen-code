@@ -491,6 +491,7 @@ describe('Session', () => {
   let session: Session;
   let currentModel: string;
   let currentAuthType: AuthType;
+  let goalProposalTurnKey: string | undefined;
   let originalProcessGuardMode: string | undefined;
   let originalServeStamp: string | undefined;
   let switchModelSpy: ReturnType<typeof vi.fn>;
@@ -722,6 +723,7 @@ describe('Session', () => {
     transcribeVoiceAudioSpy.mockReset();
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;
+    goalProposalTurnKey = undefined;
     switchModelSpy = vi
       .fn()
       .mockImplementation(async (authType: AuthType, modelId: string) => {
@@ -988,6 +990,11 @@ describe('Session', () => {
       getGoalRuntimeReady: vi.fn().mockResolvedValue(mockGoalRuntime),
       takePendingGoalProposal: vi.fn(),
       getGoalProposalHostSupported: vi.fn().mockReturnValue(false),
+      setGoalProposalTurnKey: vi.fn((turnKey: string | undefined) => {
+        if (goalProposalTurnKey === turnKey) return false;
+        goalProposalTurnKey = turnKey;
+        return true;
+      }),
       getGoalRuntimePrepared: vi.fn().mockResolvedValue(mockGoalRuntime),
       bindGoalTurnHost: vi.fn().mockImplementation((host) => {
         boundGoalHost = host;
@@ -32378,6 +32385,88 @@ describe('Session', () => {
       expect(mockGoalRuntime.dispatch).toHaveBeenCalledTimes(1);
     });
 
+    it('arms and clears declarations only for an approval-capable user turn', async () => {
+      mockConfig.getGoalProposalHostSupported = vi.fn().mockReturnValue(true);
+
+      await prompt();
+
+      expect(mockConfig.setGoalProposalTurnKey).toHaveBeenNthCalledWith(
+        1,
+        'test-session-id########1',
+      );
+      expect(mockConfig.setGoalProposalTurnKey).toHaveBeenNthCalledWith(
+        2,
+        undefined,
+      );
+      expect(mockLlmClient.setTools).toHaveBeenCalledTimes(2);
+
+      vi.mocked(mockConfig.setGoalProposalTurnKey).mockClear();
+      mockLlmClient.setTools.mockClear();
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'An unarmed turn.' }],
+      });
+      expect(mockConfig.setGoalProposalTurnKey).toHaveBeenCalledTimes(2);
+      expect(mockConfig.setGoalProposalTurnKey).toHaveBeenNthCalledWith(
+        1,
+        undefined,
+      );
+      expect(mockConfig.setGoalProposalTurnKey).toHaveBeenNthCalledWith(
+        2,
+        undefined,
+      );
+      expect(mockLlmClient.setTools).not.toHaveBeenCalled();
+    });
+
+    it('applies an approved proposal when a sibling permission is rejected', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'goal-proposal',
+                    name: 'propose_goal',
+                    args: { objective },
+                  },
+                  {
+                    id: 'question',
+                    name: core.ToolNames.ASK_USER_QUESTION,
+                    args: { questions: [] },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockImplementation(async () => createEmptyStream());
+      const proposalTool = new core.ProposeGoalTool(mockConfig);
+      mockToolRegistry.getTool.mockImplementation((name) =>
+        name === 'propose_goal'
+          ? proposalTool
+          : mockConfirmingTool(name, vi.fn()),
+      );
+      vi.mocked(mockClient.requestPermission)
+        .mockResolvedValueOnce({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        })
+        .mockResolvedValueOnce({
+          outcome: {
+            outcome: 'selected',
+            optionId: core.ToolConfirmationOutcome.Cancel,
+          },
+        });
+
+      await expect(prompt()).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+        action: 'create',
+        objective,
+      });
+    });
+
     it.each(['reject', 'cancel'] as const)(
       'does not create a Goal after permission %s',
       async (outcome) => {
@@ -32433,6 +32522,28 @@ describe('Session', () => {
       expect(pending).toBeUndefined();
     });
 
+    it('does not apply after cancellation while the Goal runtime loads', async () => {
+      let finishRuntimeLoad!: () => void;
+      const runtimeLoad = new Promise<core.GoalRuntime>((resolve) => {
+        finishRuntimeLoad = () =>
+          resolve(mockGoalRuntime as unknown as core.GoalRuntime);
+      });
+      vi.mocked(mockConfig.getGoalRuntimeReady).mockReturnValueOnce(
+        runtimeLoad,
+      );
+
+      const result = prompt();
+      await vi.waitFor(() =>
+        expect(mockConfig.getGoalRuntimeReady).toHaveBeenCalledOnce(),
+      );
+      await session.cancelPendingPrompt();
+      finishRuntimeLoad();
+
+      await expect(result).resolves.toEqual({ stopReason: 'cancelled' });
+      expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+      expect(pending).toBeUndefined();
+    });
+
     it('pauses a Goal if cancellation arrives while its creation is persisted', async () => {
       let completeCreate!: () => void;
       const gate = new Promise<void>((resolve) => {
@@ -32459,6 +32570,88 @@ describe('Session', () => {
         expectedRevision: 1,
         reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
       });
+    });
+
+    it('attributes a close during Goal creation to session disposal', async () => {
+      let completeCreate!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        completeCreate = resolve;
+      });
+      mockGoalRuntime.dispatch.mockImplementationOnce(async () => {
+        await gate;
+        return {
+          snapshot: {
+            goal: { goalId: 'approved-goal', revision: 1, status: 'active' },
+          },
+        };
+      });
+      const result = prompt();
+      await vi.waitFor(() =>
+        expect(mockGoalRuntime.dispatch).toHaveBeenCalledOnce(),
+      );
+      const releaseClose = session.beginClose();
+      completeCreate();
+      await result;
+
+      expect(mockGoalRuntime.dispatch).toHaveBeenNthCalledWith(2, {
+        action: 'pause',
+        expectedGoalId: 'approved-goal',
+        expectedRevision: 1,
+        reason: GOAL_PAUSE_REASON_SESSION_DISPOSED,
+      });
+      releaseClose();
+    });
+
+    it('reports when the approved proposal no longer matches the Goal', async () => {
+      mockGoalRuntime.getSnapshot.mockReturnValue({
+        v: 2,
+        activity: 'idle',
+        goal: null,
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(proposalStream())
+        .mockImplementationOnce(async () => {
+          mockGoalRuntime.getSnapshot.mockReturnValue({
+            v: 2,
+            activity: 'idle',
+            goal: { goalId: 'newer-goal', revision: 2, status: 'paused' },
+          });
+          return createEmptyStream();
+        });
+
+      await prompt();
+
+      expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'agent_message_chunk',
+            content: expect.objectContaining({
+              text: expect.stringContaining('/goal set'),
+            }),
+          }),
+        }),
+      );
+    });
+
+    it('reports when applying the approved proposal fails', async () => {
+      mockGoalRuntime.dispatch.mockRejectedValueOnce(
+        new Error('goal journal unavailable'),
+      );
+
+      await prompt();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'agent_message_chunk',
+            content: expect.objectContaining({
+              text: expect.stringContaining('/goal set'),
+            }),
+          }),
+        }),
+      );
     });
 
     it('holds a cancelled Goal when pause persistence fails, then permits a user pause and resume', async () => {
@@ -32522,6 +32715,17 @@ describe('Session', () => {
         }),
       );
 
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'What is the weather?' }],
+      });
+      expect(mockGoalRuntime.beginTurn).not.toHaveBeenCalled();
+      expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+      expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(
+        'goal-runtime:cancelled-start',
+        { requeue: false },
+      );
+
       const paused = {
         ...snapshot,
         goal: { ...goal, status: 'paused' as const },
@@ -32581,6 +32785,16 @@ describe('Session', () => {
       expect(mockConfig.setPendingGoalProposal).toHaveBeenCalledOnce();
       expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
       expect(pending).toBeUndefined();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'agent_message_chunk',
+            content: expect.objectContaining({
+              text: expect.stringContaining('/goal set'),
+            }),
+          }),
+        }),
+      );
     });
 
     it('discards approval when new user input is injected after the tool result', async () => {
@@ -32599,6 +32813,16 @@ describe('Session', () => {
       expect(mockConfig.setPendingGoalProposal).toHaveBeenCalledOnce();
       expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
       expect(pending).toBeUndefined();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'agent_message_chunk',
+            content: expect.objectContaining({
+              text: expect.stringContaining('/goal set'),
+            }),
+          }),
+        }),
+      );
     });
 
     it('refuses proposals from an automatic background-notification turn', async () => {
@@ -32627,6 +32851,20 @@ describe('Session', () => {
       expect(mockClient.requestPermission).not.toHaveBeenCalled();
       expect(mockConfig.setPendingGoalProposal).not.toHaveBeenCalled();
       expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'tool_call_update',
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                content: expect.objectContaining({
+                  text: expect.stringContaining('/goal set'),
+                }),
+              }),
+            ]),
+          }),
+        }),
+      );
     });
 
     it('refuses a prompt without a trusted approval responder', async () => {

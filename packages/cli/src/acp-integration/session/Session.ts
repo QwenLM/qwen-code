@@ -1510,6 +1510,7 @@ interface AgentResponseCapture {
     turnKey: string;
     controller: AbortController;
     completedNormally: boolean;
+    settlementBlocked?: boolean;
   };
   channelDelivery?: {
     finalText: string;
@@ -4703,7 +4704,19 @@ export class Session implements SessionContext {
     if (!goalTurn) {
       try {
         const runtime = this.config.getGoalRuntime();
-        if (runtime.getSnapshot().goal?.status === 'active') {
+        const activeGoal = runtime.getSnapshot().goal;
+        const heldGoalMatches =
+          this.heldGoalProposal?.goalId === activeGoal?.goalId &&
+          this.heldGoalProposal?.revision === activeGoal?.revision;
+        if (activeGoal?.status === 'active' && heldGoalMatches) {
+          for (const queued of this.goalQueue.splice(0)) {
+            queued.controller.abort(NEW_PROMPT_ABORT_REASON);
+            await runtime.releaseTurn(queued.turnKey, { requeue: false });
+          }
+          await this.messageEmitter.emitAgentMessage(
+            'Automatic Goal execution is still held. Run /goal pause, then /goal resume when ready.',
+          );
+        } else if (activeGoal?.status === 'active') {
           reservedGoalRuntime = runtime;
           reservedGoalTurnKey = `goal-user:${randomUUID()}`;
           runtime.beginTurn(reservedGoalTurnKey);
@@ -4945,6 +4958,14 @@ export class Session implements SessionContext {
           }
         : result;
       promptResult = completedResult;
+      const proposalTurn = responseCapture.goalProposalTurn;
+      if (proposalTurn) {
+        proposalTurn.completedNormally =
+          completedResult.stopReason === 'end_turn' &&
+          result.loopProtectionStopped !== true &&
+          !pendingSend.signal.aborted &&
+          proposalTurn.settlementBlocked !== true;
+      }
       await this.#settleGoalProposal(responseCapture);
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
@@ -4982,8 +5003,10 @@ export class Session implements SessionContext {
           this.activeGoalProposalTurn = undefined;
         }
       }
-      if (this.config.getGoalProposalHostSupported()) {
-        this.config.setGoalProposalTurnKey(undefined);
+      if (
+        this.config.getGoalProposalHostSupported() &&
+        this.config.setGoalProposalTurnKey(undefined)
+      ) {
         try {
           await this.config.getLlmClient().setTools();
         } catch (error) {
@@ -5213,7 +5236,7 @@ export class Session implements SessionContext {
     rejectOnLoopDetected = false,
     goalTurn?: AcpGoalTurn,
     channelTurn = false,
-  ): Promise<PromptResponse> {
+  ): Promise<PromptResponse & { loopProtectionStopped?: boolean }> {
     const sessionId = this.config.getSessionId();
     if (
       invocationContext !== undefined &&
@@ -5259,10 +5282,24 @@ export class Session implements SessionContext {
       this.activeGoalProposalTurn === turn &&
       !this.disposed &&
       !this.closing;
-    if (!ownsTurn()) return;
+    if (!ownsTurn()) {
+      if (!this.disposed && !this.closing) {
+        await this.messageEmitter.emitAgentMessage(
+          'The approved Goal was not started because the turn did not finish normally. Run `/goal set <objective>` if you still want to start it.',
+        );
+      }
+      return;
+    }
     try {
       const runtime = await this.config.getGoalRuntimeReady();
-      if (!ownsTurn()) return;
+      if (!ownsTurn()) {
+        if (!this.disposed && !this.closing) {
+          await this.messageEmitter.emitAgentMessage(
+            'The approved Goal was not started because the turn did not finish normally. Run `/goal set <objective>` if you still want to start it.',
+          );
+        }
+        return;
+      }
       const result = await applyPendingGoalProposal(runtime, proposal);
       // The automatic queue remains blocked until this prompt releases its
       // completion. Cancellation during persistence must pause before then.
@@ -5272,7 +5309,10 @@ export class Session implements SessionContext {
             action: 'pause',
             expectedGoalId: result.goal.goalId,
             expectedRevision: result.goal.revision,
-            reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+            reason:
+              this.closing || this.disposed
+                ? GOAL_PAUSE_REASON_SESSION_DISPOSED
+                : GOAL_PAUSE_REASON_USER_INTERRUPT,
           });
         } catch (error) {
           const current = runtime.getSnapshot().goal;
@@ -5296,13 +5336,13 @@ export class Session implements SessionContext {
         }
       } else if (!result.applied) {
         await this.messageEmitter.emitAgentMessage(
-          `The approved Goal could not be started: ${result.reason}`,
+          'The approved Goal could not be started. Check /goal before trying again, or run `/goal set <objective>`.',
         );
       }
     } catch (error) {
       debugLogger.warn('Failed to apply an approved Goal proposal', error);
       await this.messageEmitter.emitAgentMessage(
-        'The approved Goal could not be started. Check /goal before trying again.',
+        'The approved Goal could not be started. Check /goal before trying again, or run `/goal set <objective>`.',
       );
     }
   }
@@ -5315,12 +5355,14 @@ export class Session implements SessionContext {
     rejectOnLoopDetected = false,
     goalTurn?: AcpGoalTurn,
     channelTurn = false,
-  ): Promise<PromptResponse> {
+  ): Promise<PromptResponse & { loopProtectionStopped?: boolean }> {
     let managedMemoryRecallStarted = false;
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
-      async (): Promise<PromptResponse> => {
+      async (): Promise<
+        PromptResponse & { loopProtectionStopped?: boolean }
+      > => {
         await this.assertCanStartTurn();
         if (pendingSend.signal.aborted) {
           return { stopReason: 'cancelled' };
@@ -5341,10 +5383,12 @@ export class Session implements SessionContext {
           };
           this.activeGoalProposalTurn = responseCapture.goalProposalTurn;
         }
-        if (this.config.getGoalProposalHostSupported()) {
+        if (
+          this.config.getGoalProposalHostSupported() &&
           this.config.setGoalProposalTurnKey(
             responseCapture.goalProposalTurn?.turnKey,
-          );
+          )
+        ) {
           await this.config.getLlmClient().setTools();
         }
         const promptMetadata = (params as { _meta?: Record<string, unknown> })
@@ -6468,6 +6512,11 @@ export class Session implements SessionContext {
       modelOverride = model;
       return true;
     };
+    const blockGoalProposalSettlement = () => {
+      if (responseCapture?.goalProposalTurn) {
+        responseCapture.goalProposalTurn.settlementBlocked = true;
+      }
+    };
     let midTurnContinuationCount = 0;
 
     while (true) {
@@ -6484,6 +6533,7 @@ export class Session implements SessionContext {
       }
 
       if (this.todoStopGuardQueuedPromptPriority) {
+        blockGoalProposalSettlement();
         return { stopReason: 'end_turn' };
       }
 
@@ -6498,6 +6548,7 @@ export class Session implements SessionContext {
               pendingSend.signal,
             );
             if (claim === 'queued') {
+              blockGoalProposalSettlement();
               this.#preserveUnsentMessageHistory(
                 { role: 'user', parts: drained.parts },
                 true,
@@ -6509,6 +6560,7 @@ export class Session implements SessionContext {
             }
           }
           this.todoStopGuard.acceptMidTurnUserInput();
+          blockGoalProposalSettlement();
           const continuation = await this.#runStopContinuation(
             pendingSend,
             promptId + '_mid_turn_' + ++midTurnContinuationCount,
@@ -6536,6 +6588,7 @@ export class Session implements SessionContext {
             pendingSend.signal,
           );
           if (claim === 'queued') {
+            blockGoalProposalSettlement();
             return { stopReason: 'end_turn' };
           }
           if (claim === 'unavailable') {
@@ -6600,6 +6653,7 @@ export class Session implements SessionContext {
                 pendingSend.signal,
               );
               if (claim === 'queued') {
+                blockGoalProposalSettlement();
                 this.#preserveUnsentMessageHistory(
                   { role: 'user', parts: drained.parts },
                   true,
@@ -6611,6 +6665,7 @@ export class Session implements SessionContext {
               }
             }
             this.todoStopGuard.acceptMidTurnUserInput();
+            blockGoalProposalSettlement();
             const continuation = await this.#runStopContinuation(
               pendingSend,
               promptId + '_mid_turn_' + ++midTurnContinuationCount,
@@ -6638,6 +6693,7 @@ export class Session implements SessionContext {
               pendingSend.signal,
             );
             if (claim === 'queued') {
+              blockGoalProposalSettlement();
               return { stopReason: 'end_turn' };
             }
             if (claim === 'unavailable') {
@@ -6684,7 +6740,10 @@ export class Session implements SessionContext {
 
       if (guardDecision?.kind === 'exhausted') {
         await this.#emitTodoStopGuardExhausted(guardDecision);
-        if (!externalReason) return { stopReason: 'end_turn' };
+        if (!externalReason) {
+          blockGoalProposalSettlement();
+          return { stopReason: 'end_turn' };
+        }
       }
 
       if (externalReason && stopHookIterationCount >= stopHookBlockingCap) {
@@ -6707,15 +6766,13 @@ export class Session implements SessionContext {
           await this.#pauseGoalForStopHookCap();
         }
         this.todoStopGuard.suspend();
+        blockGoalProposalSettlement();
         await this.messageEmitter.emitAgentMessage(warning);
         debugLogger.warn(warning);
         return { stopReason: 'end_turn' };
       }
 
       if (!externalReason && !guardContinuation) {
-        if (responseCapture?.goalProposalTurn?.turnKey === promptId) {
-          responseCapture.goalProposalTurn.completedNormally = true;
-        }
         return { stopReason: 'end_turn' };
       }
 
@@ -8716,7 +8773,7 @@ export class Session implements SessionContext {
       messages.length > 0 &&
       proposalTurn?.controller.signal === abortSignal
     ) {
-      this.config.takePendingGoalProposal(proposalTurn.turnKey);
+      proposalTurn.settlementBlocked = true;
     }
     const parts: Part[] = [];
     for (const message of messages) {
@@ -12064,7 +12121,9 @@ export class Session implements SessionContext {
             this.activeGoalProposalTurn.controller.signal.aborted)
         ) {
           return earlyErrorResponse(
-            new Error('Goal proposals require an interactive user turn.'),
+            new Error(
+              'The Goal was not set: this turn cannot own a Goal approval. Hand the user a `/goal set <objective>` line instead.',
+            ),
             toolName,
             {
               status: 'error',

@@ -10434,7 +10434,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   delete meta['qwen.goalProposalApproval'];
                   if (
                     originatorClientId !== undefined &&
-                    !context?.channelPrompt
+                    entry.clientIds.has(originatorClientId) &&
+                    !context?.channelPrompt &&
+                    !isContinue &&
+                    !isRestoreAskUserQuestion
                   ) {
                     meta['qwen.goalProposalApproval'] = true;
                   }

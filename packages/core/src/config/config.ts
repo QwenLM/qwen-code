@@ -8034,8 +8034,10 @@ export class Config {
     return this.goalProposalHostSupported;
   }
 
-  setGoalProposalTurnKey(turnKey: string | undefined): void {
+  setGoalProposalTurnKey(turnKey: string | undefined): boolean {
+    if (this.goalProposalTurnKey === turnKey) return false;
     this.goalProposalTurnKey = turnKey;
+    return true;
   }
 
   isGoalProposalAvailable(): boolean {

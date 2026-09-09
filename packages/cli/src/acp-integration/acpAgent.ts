@@ -13916,11 +13916,7 @@ class QwenAgent implements Agent {
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
     }
-    if (
-      this.clientCapabilities?._meta?.['qwen.goalProposals'] === true &&
-      sessionSource?.sourceType !== 'channel' &&
-      !provisionalWorkspace
-    ) {
+    if (this.clientCapabilities?._meta?.['qwen.goalProposals'] === true) {
       config.setGoalProposalHostSupported(true);
     }
     if (chatRecording !== false) {
