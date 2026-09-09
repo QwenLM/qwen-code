@@ -6457,9 +6457,7 @@ async function runQwenServeImpl(
           // this warms are what `runtime.memory.children` sums, and a child
           // nobody refreshed reads as unmeasured there. No `isChannelLive`
           // filter is needed — `refreshChildResource` already no-ops without a
-          // live channel — and no concurrency limit is added, because the call
-          // is single-flight per bridge and the number of bridges is capped by
-          // MAX_DAEMON_WORKSPACES.
+          // live channel and is single-flight per bridge.
           for (const managed of workspaceRegistry.listManaged()) {
             // The shipped bridge's `refreshChildResource` never rejects: it
             // catches the RPC failure itself, keeps the last good cache, and
