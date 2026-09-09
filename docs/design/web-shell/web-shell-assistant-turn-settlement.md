@@ -29,7 +29,7 @@ when this provider previously admitted that prompt. That admission gate keeps
 ordinary persisted-history loading silent while surviving session switches and
 epoch-reset reloads that discard the active request controller.
 
-A prompt whose terminal is *destroyed* rather than delivered never produces a
+A prompt whose terminal is _destroyed_ rather than delivered never produces a
 terminal frame, so neither the live nor the replay publish path can fire. Three
 abandonment paths retire such a prompt with a synthesized `failed` settlement
 rather than leaving a host keyed on the idempotency key waiting forever: an
