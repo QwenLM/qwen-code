@@ -454,7 +454,6 @@ describe('CLI entry import boundary', () => {
     const runServeSource = readFileSync('src/serve/run-qwen-serve.ts', 'utf8');
 
     expect(runServeSource).not.toMatch(/from ['"]\.\/server\.js['"]/);
-    expect(runServeSource).not.toMatch(/from ['"]\.\/web-shell-static\.js['"]/);
     expect(runServeSource).not.toMatch(
       /from ['"]\.\/acp-session-bridge\.js['"]/,
     );
@@ -466,6 +465,10 @@ describe('CLI entry import boundary', () => {
     );
     expect(runServeSource).toContain("import('./server.js')");
     expect(runServeSource).toContain("import('@qwen-code/acp-bridge/bridge')");
+    // web-shell-static (express-static/CSP machinery) must stay out of the
+    // fast-path static closure at every depth, including transitive edges
+    // through server/self-origin.js and web-shell-preauth.js; the static
+    // source-graph walk below pins that instead of per-hop regexes.
   });
 
   it('keeps request helpers from value-importing the ACP compatibility shim', () => {
@@ -496,7 +499,9 @@ describe('CLI entry import boundary', () => {
 
     expect(graph.unresolvedLocalImports).toEqual([]);
     const forbiddenLocalFiles = [...graph.localFiles].filter(
-      (filePath) => filePath === 'src/serve/acp-session-bridge.ts',
+      (filePath) =>
+        filePath === 'src/serve/acp-session-bridge.ts' ||
+        filePath === 'src/serve/web-shell-static.ts',
     );
     expect(
       forbiddenLocalFiles,
@@ -1757,6 +1762,60 @@ describe('serve fast path environment bootstrap', () => {
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('trusted');
   });
+
+  it.each(['.env', '.qwen/.env', 'settings.env'])(
+    'keeps update download sources user-owned when loading %s',
+    (source) => {
+      const qwenHome = useTempQwenHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-update-source-')),
+      );
+      const keys = [
+        'QWEN_UPDATE_BASE_URL',
+        'qwen_update_base_url',
+        'Qwen_Update_Base_Url',
+      ];
+      for (const key of keys) vi.stubEnv(key, undefined);
+      const values = Object.fromEntries(
+        keys.map((key) => [key, 'https://project.example.com']),
+      );
+      const settings: ServeFastPathSettings = {
+        advanced: { excludedEnvVars: [] },
+      };
+      if (source === 'settings.env') {
+        settings.env = values;
+      } else {
+        const envPath = join(tempWorkspace, source);
+        mkdirSync(dirname(envPath), { recursive: true });
+        writeFileSync(
+          envPath,
+          Object.entries(values)
+            .map(([key, value]) => `${key}=${value}`)
+            .join('\n'),
+        );
+      }
+      try {
+        loadServeFastPathEnvironment(settings, tempWorkspace);
+        for (const key of keys) expect(process.env[key]).toBeUndefined();
+
+        const trustedUrl = 'https://downloads.example.com/releases';
+        writeFileSync(
+          join(qwenHome, '.env'),
+          `QWEN_UPDATE_BASE_URL=${trustedUrl}\n`,
+        );
+        loadServeFastPathEnvironment(settings, tempWorkspace);
+        expect(process.env['QWEN_UPDATE_BASE_URL']).toBe(trustedUrl);
+
+        process.env['QWEN_UPDATE_BASE_URL'] = 'https://shell.example.com';
+        loadServeFastPathEnvironment(settings, tempWorkspace);
+        expect(process.env['QWEN_UPDATE_BASE_URL']).toBe(
+          'https://shell.example.com',
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   // Regression for #8653: the fast path runs before runQwenServeImpl freezes
   // daemonRuntimeBaseEnv, so any loader key it applies is baked into the base

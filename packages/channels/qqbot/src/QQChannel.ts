@@ -225,7 +225,6 @@ export class QQChannel extends ChannelBase {
   private flushingSessions: Set<string> = new Set();
   private pendingStreamDelete: Set<string> = new Set();
   private _reconnectId: number = 0;
-  private blockStreaming: boolean = false;
   private flushedSessions: Set<string> = new Set();
   /**
    * Sessions with a prompt turn currently in flight, tracked via
@@ -233,9 +232,7 @@ export class QQChannel extends ChannelBase {
    *
    * This is the discriminator the cron textChunk handler uses to tell
    * "prompt-response chunk" from "cron/non-prompt chunk". streamState
-   * cannot serve that role (#6094): it is never populated when
-   * blockStreaming is 'on' (onResponseChunk early-returns), so prompt
-   * chunks leak into cronBuffer; and a residual entry from a finished
+   * cannot serve that role (#6094): a residual entry from a finished
    * turn's unsettled flush silently blocks cron delivery. This set is
    * reliable because ChannelBase always brackets a prompt turn with
    * onPromptStart and onPromptEnd (onPromptEnd runs in the prompt path's
@@ -298,7 +295,6 @@ export class QQChannel extends ChannelBase {
       );
       this.qqConfig.bufferFlushLength = QQChannel.MAX_BUFFER_LENGTH;
     }
-    this.blockStreaming = this.config.blockStreaming === 'on';
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     // In standalone mode (no external router), use the per-channel
     // sessions path so the channel owns its own session file.
@@ -333,9 +329,8 @@ export class QQChannel extends ChannelBase {
       // Sessions with an active prompt turn belong to the prompt path
       // (which delivers the response itself) — never capture their chunks
       // into the cron buffer. Keyed on activePromptSessions rather than
-      // streamState (#6094): streamState is empty under blockStreaming:'on'
-      // (prompt chunks would be duplicated) and can linger after a turn
-      // ends (cron chunks would be silently dropped).
+      // streamState (#6094): streamState can linger after a turn ends,
+      // which would silently drop cron chunks.
       if (this.activePromptSessions.has(sessionId)) return;
       let entry = this.cronBuffer.get(sessionId);
       if (!entry) {
@@ -1110,7 +1105,6 @@ export class QQChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): void {
-    if (this.blockStreaming) return;
     let state = this.streamState.get(sessionId);
     if (!state) {
       const messageId =

@@ -1044,6 +1044,11 @@
   color: var(--success-color, #3fb950);
 }
 
+.sessionStatusUnknown {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
 .sessionSourceIcon {
   width: 18px;
   height: 18px;
@@ -1493,35 +1498,6 @@
   cursor: pointer;
 }
 
-.manageWorkspacesRow {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  gap: 8px;
-  margin-top: 2px;
-  padding: 6px 10px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted-foreground);
-  font: inherit;
-  font-size: 12px;
-  line-height: 18px;
-  cursor: pointer;
-}
-
-.manageWorkspacesRow:hover,
-.manageWorkspacesRow:focus-visible {
-  background: var(--secondary);
-  color: var(--foreground);
-}
-
-.manageWorkspacesRow svg {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 auto;
-}
-
 .confirmContent {
   display: flex;
   flex-direction: column;
@@ -1688,20 +1664,16 @@
   text-overflow: ellipsis;
 }
 
-.footerCompact,
-.footerTight {
+.footerCompact {
   gap: 4px;
 }
 
 .footerCompact .footerPrimary,
-.footerCompact .footerActions,
-.footerTight .footerPrimary,
-.footerTight .footerActions {
+.footerCompact .footerActions {
   gap: 4px;
 }
 
-.footerCompact .footerButton,
-.footerTight .footerButton {
+.footerCompact .footerButton {
   width: 26px;
   height: 28px;
   flex: 0 0 26px;
@@ -1709,13 +1681,11 @@
   padding: 0;
 }
 
-.footerCompact .footerButtonLabel,
-.footerTight .footerButtonLabel {
+.footerCompact .footerButtonLabel {
   display: none;
 }
 
-.footerCompact .collapseButton,
-.footerTight .collapseButton {
+.footerCompact .collapseButton {
   width: 26px;
   height: 28px;
 }

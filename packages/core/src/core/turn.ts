@@ -37,7 +37,7 @@ import {
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
 import type { LoopType } from '../telemetry/types.js';
-import type { ActiveGoal } from '../goals/activeGoalStore.js';
+import type { ActiveGoal } from '../goals/goal-legacy-projection.js';
 import type {
   GoalSnapshotV2,
   GoalStateCause,
@@ -243,6 +243,14 @@ export function createDuplicateProviderToolCallResponse(
 ): ToolCallResponseInfo {
   const providerCallId = request.providerCallId ?? request.callId;
   const message = duplicateProviderToolCallMessage(providerCallId);
+  return createNotStartedToolErrorResponse(request, message);
+}
+
+export function createNotStartedToolErrorResponse(
+  request: ToolCallRequestInfo,
+  message: string,
+  errorType: ToolErrorType = ToolErrorType.EXECUTION_FAILED,
+): ToolCallResponseInfo {
   return {
     callId: request.callId,
     responseParts: [
@@ -256,7 +264,7 @@ export function createDuplicateProviderToolCallResponse(
     ],
     resultDisplay: message,
     error: new Error(message),
-    errorType: ToolErrorType.EXECUTION_FAILED,
+    errorType,
     executionStatus: 'not_started',
   };
 }
