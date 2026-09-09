@@ -47,23 +47,33 @@
 //     `fails` is a truthy constant (vitest truthy-checks them, so a reason
 //     string disables), a body-level `skip()`/`ctx.skip()` whose first
 //     argument is absent or any constant other than `false` (the runner's
-//     own rule) and that is not itself under a condition, and every
-//     registration nested inside a disabled `describe`. A body skip at file
+//     own rule) and that is not itself under a REAL condition — an
+//     `if (true)` wrapper never withholds its branch, and a `catch`
+//     whose `try` holds an assertion fires exactly when that assertion
+//     fails, so neither shelters a skip — and every registration
+//     nested inside a disabled `describe`. A body skip at file
 //     scope — a statement of the module, or inside a `beforeEach`/
 //     `beforeAll`/`afterEach`/`afterAll` callback the file registers —
 //     disables the whole file, which is what the runner does with it. A
-//     constant is a literal of any kind (object, array, regex and bigint
-//     included), `undefined`/`void 0`/`NaN`/`Infinity`, a unary
-//     `!`/`-`/`+`/`~` of a constant, or `+` of two constants.
+//     registration callback handed by NAME resolves to the single
+//     module-scope function declaration or function-valued variable
+//     initializer of that name — the runner receives that very
+//     function — while an absent, redeclared or nested binding stays
+//     opaque. A constant is a literal of any kind (object, array,
+//     regex and bigint included), `undefined`/`void 0`/`NaN`/`Infinity`,
+//     a unary `!`/`-`/`+`/`~` of a constant, `+` of two string/number
+//     constants, a comparison or equality of two primitive constants,
+//     a logical `&&`/`||`/`??` of two constants, and any of those
+//     behind a type-only wrapper (`as`, `<T>x`, `satisfies`, `!`).
 // Deliberately NOT measured, because they are runtime facts the runner is the
 // authority for, not declarations: whether an assertion is REACHABLE (dead
 // code, a condition that is false in CI, a helper never called), a
 // condition-valued guard (`it.skipIf(process.platform === 'win32')`,
-// `skip(cond, reason)`, `if (cond) ctx.skip()`, a skip in a `catch` —
-// this repository's environment-guard idiom; the assertions an honest
-// guard shelters are measured, its condition is not), and options or
-// collector names carried by a binding (`test('x', opts, fn)`,
-// `it[S]('x')`).
+// `skip(cond, reason)`, `if (cond) ctx.skip()`, a skip in a `catch`
+// whose `try` asserts nothing — this repository's environment-guard
+// idiom; the assertions an honest guard shelters are measured, its
+// condition is not), and options or collector names carried by a
+// binding (`test('x', opts, fn)`, `it[S]('x')`).
 //
 // `measure` takes {"path", "tip", "pre", "events":
 // [{"before", "after", "landed", "mainHolds"}]} — blob files (null =
@@ -145,15 +155,36 @@ function isStringLike(n) {
   return ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n);
 }
 
+// Type-only wrappers carry no value of their own — `as T`, `<T>x`,
+// `x satisfies T`, `x!` and parentheses all evaluate to their operand —
+// so every fold in constant() and the options-object test see through
+// them. `await` and `void` are NOT transparent (one unwraps a thenable,
+// the other discards the value) and keep their own handling instead.
+function unwrap(node) {
+  let n = node;
+  while (
+    ts.isParenthesizedExpression(n) ||
+    ts.isNonNullExpression(n) ||
+    ts.isAsExpression(n) ||
+    ts.isTypeAssertionExpression(n) ||
+    (ts.isSatisfiesExpression && ts.isSatisfiesExpression(n))
+  ) {
+    n = n.expression;
+  }
+  return n;
+}
+
 // The constant value of an expression the parser can decide without a
 // binding: literals of every kind (including object, array, regex and
 // bigint), `undefined`/`void 0`/`NaN`/`Infinity`, a unary `!`/`-`/`+`/`~`
-// of a constant, `+` of two constants, parentheses. `{ known: false }`
-// for anything else — so one operator away from a shape this folds is
-// never one operator away from escaping a signal.
+// of a constant, `+` of two string/number constants, a comparison or
+// equality of two primitive constants, a logical `&&`/`||`/`??` of two
+// constants, and any of those behind a type-only wrapper. `{ known:
+// false }` for anything else — so one operator away from a shape this
+// folds is never one operator away from escaping a signal.
 function constant(node) {
   if (!node) return { known: false };
-  if (ts.isParenthesizedExpression(node)) return constant(node.expression);
+  node = unwrap(node);
   if (node.kind === ts.SyntaxKind.TrueKeyword)
     return { known: true, value: true };
   if (node.kind === ts.SyntaxKind.FalseKeyword)
@@ -198,20 +229,76 @@ function constant(node) {
         return { known: false };
     }
   }
-  if (
-    ts.isBinaryExpression(node) &&
-    node.operatorToken.kind === ts.SyntaxKind.PlusToken
-  ) {
+  if (ts.isBinaryExpression(node)) {
     const l = constant(node.left);
     const r = constant(node.right);
-    if (
-      l.known &&
-      r.known &&
-      (typeof l.value === 'string' || typeof l.value === 'number') &&
-      (typeof r.value === 'string' || typeof r.value === 'number')
-    ) {
-      return { known: true, value: l.value + r.value };
+    if (!l.known || !r.known) return { known: false };
+    const op = node.operatorToken.kind;
+    // The logical operators select an operand by truthiness alone, which
+    // the object/array/regex placeholder (`true`) answers faithfully.
+    if (op === ts.SyntaxKind.AmpersandAmpersandToken) {
+      return { known: true, value: l.value ? r.value : l.value };
     }
+    if (op === ts.SyntaxKind.BarBarToken) {
+      return { known: true, value: l.value ? l.value : r.value };
+    }
+    if (op === ts.SyntaxKind.QuestionQuestionToken) {
+      return {
+        known: true,
+        value: l.value === null || l.value === undefined ? r.value : l.value,
+      };
+    }
+    if (op === ts.SyntaxKind.PlusToken) {
+      if (
+        (typeof l.value === 'string' || typeof l.value === 'number') &&
+        (typeof r.value === 'string' || typeof r.value === 'number')
+      ) {
+        return { known: true, value: l.value + r.value };
+      }
+      return { known: false };
+    }
+    // Comparison and equality evaluate natively — JS semantics ARE the
+    // runner's — but only on primitives: the object/array/regex fold is a
+    // truthiness placeholder, not a value (`{} === {}` must never fold
+    // true), and a bigint literal folds to a Number for arithmetic, which
+    // `1n === 1` would mis-fold.
+    const opaque = (n) => {
+      const u = unwrap(n);
+      return (
+        ts.isObjectLiteralExpression(u) ||
+        ts.isArrayLiteralExpression(u) ||
+        ts.isRegularExpressionLiteral(u) ||
+        ts.isBigIntLiteral(u)
+      );
+    };
+    if (opaque(node.left) || opaque(node.right)) return { known: false };
+    const a = l.value;
+    const b = r.value;
+    if (op === ts.SyntaxKind.EqualsEqualsEqualsToken) {
+      return { known: true, value: a === b };
+    }
+    if (op === ts.SyntaxKind.ExclamationEqualsEqualsToken) {
+      return { known: true, value: a !== b };
+    }
+    if (op === ts.SyntaxKind.EqualsEqualsToken) {
+      return { known: true, value: a == b };
+    }
+    if (op === ts.SyntaxKind.ExclamationEqualsToken) {
+      return { known: true, value: a != b };
+    }
+    if (op === ts.SyntaxKind.LessThanToken) {
+      return { known: true, value: a < b };
+    }
+    if (op === ts.SyntaxKind.LessThanEqualsToken) {
+      return { known: true, value: a <= b };
+    }
+    if (op === ts.SyntaxKind.GreaterThanToken) {
+      return { known: true, value: a > b };
+    }
+    if (op === ts.SyntaxKind.GreaterThanEqualsToken) {
+      return { known: true, value: a >= b };
+    }
+    return { known: false };
   }
   return { known: false };
 }
@@ -255,7 +342,15 @@ function chainOf(call) {
     ) {
       segments.push({ member: memberName(n) });
       n = n.expression;
-    } else if (ts.isNonNullExpression(n) || ts.isParenthesizedExpression(n)) {
+    } else if (
+      ts.isNonNullExpression(n) ||
+      ts.isParenthesizedExpression(n) ||
+      ts.isAsExpression(n) ||
+      ts.isTypeAssertionExpression(n) ||
+      (ts.isSatisfiesExpression && ts.isSatisfiesExpression(n))
+    ) {
+      // Type-only wrappers are chain-transparent: `(it as any).skip(...)`
+      // IS a skip of `it`.
       n = n.expression;
     } else {
       break;
@@ -340,16 +435,18 @@ function propertyName(name) {
 }
 
 function optionsDisable(call) {
-  return (call.arguments ?? []).some(
-    (o) =>
+  return (call.arguments ?? []).some((arg) => {
+    const o = unwrap(arg);
+    return (
       ts.isObjectLiteralExpression(o) &&
       o.properties.some(
         (p) =>
           ts.isPropertyAssignment(p) &&
           DISABLING_OPTIONS.has(propertyName(p.name)) &&
           truthyConstant(p.initializer),
-      ),
-  );
+      )
+    );
+  });
 }
 
 function titleOf(call, sf) {
@@ -387,15 +484,34 @@ function isBodySkip({ root, members, calls }) {
   return c.known && c.value !== false;
 }
 
-// True when `node` sits under a condition inside the nearest enclosing
-// function: an if/switch/loop, a ternary, or a short-circuit operand.
-function underCondition(node) {
+// True when `node` sits under a REAL condition inside the nearest
+// enclosing function: an if/switch/loop, a ternary, or a short-circuit
+// operand. Two wrappers only look conditional and are walked through: an
+// `if` whose test constant-folds TRUE never withholds its branch, and a
+// `catch` whose try block holds a counted assertion fires exactly when
+// that assertion fails — a skip in either is the runner's unconditional
+// outcome, not an environment guard. `assertionPositions` must be complete
+// when this runs: callers collect their skips during the visit and resolve
+// them after it.
+function underCondition(node, assertionPositions) {
   for (let p = node.parent; p && !ts.isFunctionLike(p); p = p.parent) {
+    if (ts.isIfStatement(p)) {
+      if (truthyConstant(p.expression)) continue;
+      return true;
+    }
+    if (ts.isCatchClause(p)) {
+      const tryBlock = ts.isTryStatement(p.parent) ? p.parent.tryBlock : null;
+      if (
+        tryBlock &&
+        assertionPositions.some((a) => a > tryBlock.pos && a < tryBlock.end)
+      ) {
+        continue;
+      }
+      return true;
+    }
     if (
-      ts.isIfStatement(p) ||
       ts.isConditionalExpression(p) ||
       ts.isSwitchStatement(p) ||
-      ts.isCatchClause(p) ||
       ts.isIterationStatement(p, false) ||
       (ts.isBinaryExpression(p) &&
         (p.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
@@ -416,6 +532,10 @@ function underCondition(node) {
 // ordinary control flow the runner awaits.
 function returnsNothing(ret) {
   if (!ret.expression) return true;
+  // A template's value is a string however its substitutions evaluate —
+  // never a thenable — so the runner ignores it exactly like the literal
+  // spellings constant() folds.
+  if (ts.isTemplateExpression(unwrap(ret.expression))) return true;
   return constant(ret.expression).known;
 }
 
@@ -474,6 +594,37 @@ export function count(text, path) {
   const registrations = [];
   const bodySkips = [];
   const hookBodies = [];
+  // A callback handed by NAME resolves to the single module-scope function
+  // declaration or function-valued variable initializer of that name — the
+  // runner receives that very function, so the registration measures
+  // through its body. An absent, redeclared or nested binding stays
+  // opaque.
+  const topFns = new Map();
+  const ambiguousFns = new Set();
+  const bindTopFn = (name, fnNode) => {
+    if (ambiguousFns.has(name) || topFns.has(name)) {
+      ambiguousFns.add(name);
+      topFns.delete(name);
+    } else {
+      topFns.set(name, fnNode);
+    }
+  };
+  for (const st of sf.statements) {
+    if (ts.isFunctionDeclaration(st) && st.name && st.body) {
+      bindTopFn(st.name.text, st);
+    } else if (ts.isVariableStatement(st)) {
+      for (const d of st.declarationList.declarations) {
+        if (
+          ts.isIdentifier(d.name) &&
+          d.initializer &&
+          (ts.isArrowFunction(d.initializer) ||
+            ts.isFunctionExpression(d.initializer))
+        ) {
+          bindTopFn(d.name.text, d.initializer);
+        }
+      }
+    }
+  }
   const visit = (node) => {
     if (ts.isCallExpression(node) && !extendsChain(node)) {
       const chain = chainOf(node);
@@ -483,16 +634,41 @@ export function count(text, path) {
         chain.calls.length > 0
       ) {
         const last = chain.calls[chain.calls.length - 1].call;
-        const fns = (last.arguments ?? []).filter(
-          (a) => ts.isArrowFunction(a) || ts.isFunctionExpression(a),
-        );
-        registrations.push({
-          kind: ROOTS.get(chain.root) ?? XROOTS.get(chain.root),
-          title: titleOf(last, sf),
-          disabled: registrationDisabled(chain),
-          pos: node.getStart(sf),
-          fn: fns.length ? fns[fns.length - 1] : null,
-        });
+        const lastArgs = last.arguments ?? [];
+        // A chain that never reaches a registration call registers
+        // nothing: `it.skipIf(cond)`, `it.each(cases)` and
+        // `test.extend({})` are collector FACTORIES, and binding one to a
+        // variable is not a test. The terminal call carries the title or
+        // the callback.
+        const terminates =
+          lastArgs.length > 0 &&
+          (isStringLike(lastArgs[0]) ||
+            ts.isTemplateExpression(lastArgs[0]) ||
+            lastArgs.some(
+              (a) => ts.isArrowFunction(a) || ts.isFunctionExpression(a),
+            ) ||
+            (lastArgs.length > 1 &&
+              ts.isIdentifier(lastArgs[lastArgs.length - 1]) &&
+              topFns.has(lastArgs[lastArgs.length - 1].text)));
+        if (terminates) {
+          const fns = lastArgs.filter(
+            (a) => ts.isArrowFunction(a) || ts.isFunctionExpression(a),
+          );
+          let fn = fns.length ? fns[fns.length - 1] : null;
+          if (!fn) {
+            const lastArg = lastArgs[lastArgs.length - 1];
+            if (ts.isIdentifier(lastArg)) {
+              fn = topFns.get(lastArg.text) ?? null;
+            }
+          }
+          registrations.push({
+            kind: ROOTS.get(chain.root) ?? XROOTS.get(chain.root),
+            title: titleOf(last, sf),
+            disabled: registrationDisabled(chain),
+            pos: node.getStart(sf),
+            fn,
+          });
+        }
       } else if (
         chain.root !== null &&
         HOOKS.has(chain.root) &&
@@ -504,7 +680,10 @@ export function count(text, path) {
         if (fns.length) hookBodies.push(fns[fns.length - 1]);
       } else if (isStatementLevel(node) && isAssertion(chain)) {
         assertionPositions.push(node.getStart(sf));
-      } else if (isBodySkip(chain) && !underCondition(node)) {
+      } else if (isBodySkip(chain)) {
+        // Conditional-or-not is decided after the visit: a catch clause is
+        // a condition only when its try holds no assertion, which needs
+        // the complete assertionPositions.
         bodySkips.push(node);
       }
     }
@@ -513,6 +692,7 @@ export function count(text, path) {
   visit(sf);
   let fileDisabled = false;
   for (const skip of bodySkips) {
+    if (underCondition(skip, assertionPositions)) continue;
     const target = skipTarget(skip, registrations);
     if (!target.applies) continue;
     if (target.scope) target.scope.disabled = true;
@@ -575,7 +755,14 @@ export function count(text, path) {
       r.disabled = true;
     }
   }
-  const silenced = registrations.filter((r) => r.disabled && r.fn);
+  // A body shared between a disabled and an enabled registration stays
+  // live: the enabled one executes it, so its assertions are surface.
+  const liveFns = new Set(
+    registrations.filter((r) => !r.disabled && r.fn).map((r) => r.fn),
+  );
+  const silenced = registrations.filter(
+    (r) => r.disabled && r.fn && !liveFns.has(r.fn),
+  );
   const executes = (p) => !silenced.some((r) => p > r.fn.pos && p < r.fn.end);
   const key = (r) => `${r.kind}:${r.title}`;
   const declaredAssertions = fileDisabled

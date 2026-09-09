@@ -4270,7 +4270,12 @@ the marker's head to the checked-out head, and the check
 rollup to the commit it describes (`headRefOid` is read in
 the same call as the rollup; a rollup for any other commit
 classifies `none`, unknown, never chargeable). A re-arm
-changes the window key and drops the whole set with it. A
+changes the window key and drops the whole set with it —
+and the charge itself fires only when the run's matrix
+window IS the live re-arm key: a supersede-exempt conflict
+round can still run under a stale window, and a charge
+keyed to that dead window is one the brake's live-window
+headline walk would never read, so it is not charged. A
 head classified from a base-conflict merge or a salvage merge
 stamps `pre=none`: the pushed head did not start from the
 head prepare classified. A cancelled check is neither red

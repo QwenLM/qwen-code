@@ -619,6 +619,11 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
   PUSH_PRE="${CHECK_STATE:-none}"
   [[ "${PUSH_RACE_MERGED}" == 'true' ]] && PUSH_PRE='none'
   [[ "${CONFLICT:-false}" == 'true' ]] && PUSH_PRE='none'
+  # A merge commit between the head prepare classified and the head this
+  # round pushes -- a clean in-round merge of main trips neither arm above
+  # -- means the pushed head carries content prepare never classified: the
+  # premise is unknown, and an unknown premise is never green.
+  [[ -n "$(git rev-list --merges "${REPORT_HEAD}..${PUSHED_HEAD}" 2>/dev/null)" ]] && PUSH_PRE='none'
   {
     echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
     echo

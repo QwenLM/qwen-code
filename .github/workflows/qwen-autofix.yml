@@ -4785,8 +4785,11 @@ jobs:
             | "\(.r // "") \(.h // "") \(.p // "") \(.k // "")"' \
             "${WORKDIR}/ic.json" 2> /dev/null || echo '')"
           read -r LP_ROUND LP_HEAD LP_PRE LP_KEY <<< "${LAST_PUSH}" || true
+          # Charged only in the live window: a supersede-exempt round's
+          # stale matrix WINDOW must not key a charge the brake never walks.
           if [[ -n "${LP_ROUND:-}" && "${LP_HEAD:-}" == "${CHECKED_OUT_HEAD}" \
             && "${LP_PRE:-}" == 'green' && "${LP_KEY:-}" == "${WINDOW:-none}" \
+            && "${WINDOW:-none}" == "${LIVE_REARM_KEY}" \
             && "${CHECK_STATE}" == 'red' ]]; then
             REGRESSED_ROUND="${LP_ROUND}"
             echo "🩸 #${PR}: round ${LP_ROUND} pushed ${CHECKED_OUT_HEAD:0:9} onto a green head and it is red now — charging that round as a regression"

@@ -254,6 +254,16 @@ const hasBashMapfile =
   spawnSync('bash', ['-c', 'mapfile -d "" -t x <<< y'], { stdio: 'ignore' })
     .status === 0;
 
+// sha256sum is GNU coreutils: a macOS host without the GNU toolchain
+// (Homebrew ships it as gsha256sum) cannot run the staging step's digest
+// lines — the step is written for the runner, where coreutils is always
+// present. Probe the host like hasBashMapfile does; the pin gates only the
+// verbatim phase of the staging witness, never its text pins.
+const hasSha256sum =
+  spawnSync('bash', ['-c', 'command -v sha256sum > /dev/null 2>&1'], {
+    stdio: 'ignore',
+  }).status === 0;
+
 // GitHub Actions expressions return operand VALUES from &&/||, not
 // booleans: && yields the first falsy operand (else the last operand), ||
 // the first truthy (else the last), '' is falsy, and && binds tighter
@@ -26923,6 +26933,23 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         ],
       }),
     },
+    // The same shape with the callback handed by NAME: the instrument
+    // resolves the module-scope binding, so the skipped body's assertions
+    // still measure as removed.
+    'skip-with-standin-named': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          'function body() {',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '}',
+          "it.skip('a', body);",
+          "it('a', () => {});",
+        ],
+      }),
+    },
     'delete-behind-guard': {
       files: {
         'pkg/a.test.ts': [
@@ -27621,6 +27648,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // Skip the body and plant an empty same-titled stand-in: the title
     // count balances, the executed assertions do not.
     rejectsWeakening('skip-with-standin', 'net 2 assertion(s) removed');
+    // ...and the same silencing with the callback handed by name: the
+    // binding resolves, so the skipped body still measures as removed.
+    rejectsWeakening('skip-with-standin-named', 'net 2 assertion(s) removed');
   });
 
   it('charges a weakening by the tip, whichever commit sequence produced it', () => {
@@ -28347,61 +28377,72 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // ...and the branch that runs in PRODUCTION once this lands: the
       // counter present, the parser where npm ci puts it. Text pins cannot
       // see ordering or a newly-failing command inside that `if`, and this
-      // step is unconditional, so a break there kills every round. Run it.
-      writeFileSync(
-        join(surfaceProbeDir, '.github', 'scripts', 'count-test-surface.mjs'),
-        readFileSync('.github/scripts/count-test-surface.mjs'),
-      );
-      mkdirSync(join(surfaceProbeDir, 'node_modules', 'typescript', 'lib'), {
-        recursive: true,
-      });
-      const plantedParser = '// planted typescript build\nmodule.exports={};\n';
-      writeFileSync(
-        join(
-          surfaceProbeDir,
-          'node_modules',
-          'typescript',
-          'lib',
-          'typescript.js',
-        ),
-        plantedParser,
-      );
-      rmSync(join(surfaceRunnerTemp, 'count-test-surface.mjs'), {
-        recursive: true,
-        force: true,
-      });
-      rmSync(join(surfaceRunnerTemp, 'weaken-parser'), {
-        recursive: true,
-        force: true,
-      });
-      writeFileSync(surfaceOutput, '');
-      const staged = runStage();
-      expect(staged.stderr).toBe('');
-      expect(staged.status).toBe(0);
-      expect(
-        readFileSync(join(surfaceRunnerTemp, 'count-test-surface.mjs'), 'utf8'),
-      ).toBe(readFileSync('.github/scripts/count-test-surface.mjs', 'utf8'));
-      expect(
-        readFileSync(
-          join(surfaceRunnerTemp, 'weaken-parser', 'typescript.cjs'),
-          'utf8',
-        ),
-      ).toBe(plantedParser);
-      // The digests the gate verifies against are of the bytes that were
-      // actually staged, and BOTH reach expression context.
-      const digestOf = (file) =>
-        createHash('sha256').update(readFileSync(file)).digest('hex');
-      const emitted = readFileSync(surfaceOutput, 'utf8');
-      expect(emitted).toContain(
-        `weaken_counter_sha256=${digestOf(
-          join(surfaceRunnerTemp, 'count-test-surface.mjs'),
-        )}\n`,
-      );
-      expect(emitted).toContain(
-        `weaken_parser_sha256=${digestOf(
-          join(surfaceRunnerTemp, 'weaken-parser', 'typescript.cjs'),
-        )}\n`,
-      );
+      // step is unconditional, so a break there kills every round. Run it —
+      // on hosts with the GNU coreutils the step's digest lines assume:
+      // they call sha256sum bare, and a macOS host without it (Homebrew
+      // ships gsha256sum) would fail the spawn for a reason the runner can
+      // never hit. The witness is the string pins PLUS the redacted-arm
+      // probes above on such a host.
+      if (hasSha256sum) {
+        writeFileSync(
+          join(surfaceProbeDir, '.github', 'scripts', 'count-test-surface.mjs'),
+          readFileSync('.github/scripts/count-test-surface.mjs'),
+        );
+        mkdirSync(join(surfaceProbeDir, 'node_modules', 'typescript', 'lib'), {
+          recursive: true,
+        });
+        const plantedParser =
+          '// planted typescript build\nmodule.exports={};\n';
+        writeFileSync(
+          join(
+            surfaceProbeDir,
+            'node_modules',
+            'typescript',
+            'lib',
+            'typescript.js',
+          ),
+          plantedParser,
+        );
+        rmSync(join(surfaceRunnerTemp, 'count-test-surface.mjs'), {
+          recursive: true,
+          force: true,
+        });
+        rmSync(join(surfaceRunnerTemp, 'weaken-parser'), {
+          recursive: true,
+          force: true,
+        });
+        writeFileSync(surfaceOutput, '');
+        const staged = runStage();
+        expect(staged.stderr).toBe('');
+        expect(staged.status).toBe(0);
+        expect(
+          readFileSync(
+            join(surfaceRunnerTemp, 'count-test-surface.mjs'),
+            'utf8',
+          ),
+        ).toBe(readFileSync('.github/scripts/count-test-surface.mjs', 'utf8'));
+        expect(
+          readFileSync(
+            join(surfaceRunnerTemp, 'weaken-parser', 'typescript.cjs'),
+            'utf8',
+          ),
+        ).toBe(plantedParser);
+        // The digests the gate verifies against are of the bytes that were
+        // actually staged, and BOTH reach expression context.
+        const digestOf = (file) =>
+          createHash('sha256').update(readFileSync(file)).digest('hex');
+        const emitted = readFileSync(surfaceOutput, 'utf8');
+        expect(emitted).toContain(
+          `weaken_counter_sha256=${digestOf(
+            join(surfaceRunnerTemp, 'count-test-surface.mjs'),
+          )}\n`,
+        );
+        expect(emitted).toContain(
+          `weaken_parser_sha256=${digestOf(
+            join(surfaceRunnerTemp, 'weaken-parser', 'typescript.cjs'),
+          )}\n`,
+        );
+      }
     } finally {
       rmSync(surfaceProbeDir, { recursive: true, force: true });
       rmSync(surfaceRunnerTemp, { recursive: true, force: true });
@@ -28687,6 +28728,62 @@ describe('count-test-surface: the declared test surface of a test file', () => {
       { a: 0, e: 2, d: ['test:a', 'test:b', 'test:c', 'test:d'] },
     ],
     [
+      'reads a constant through a type-only wrapper',
+      [
+        "it.skipIf(true as boolean)('a', fn);",
+        "it.runIf(false as boolean)('b', fn);",
+        "it('c', { skip: true } as const, fn);",
+        "it('d', { skip: (true as boolean) }, fn);",
+        "it.skipIf(<boolean>true)('e', fn);",
+        "it.skipIf(true!)('f', fn);",
+        "it.skipIf(true satisfies boolean)('g', fn);",
+        // A wrapper around a runtime value stays a condition.
+        "it.skipIf(process.env.CI as boolean)('h', fn);",
+      ],
+      {
+        a: 0,
+        e: 1,
+        d: [
+          'test:a',
+          'test:b',
+          'test:c',
+          'test:d',
+          'test:e',
+          'test:f',
+          'test:g',
+        ],
+      },
+    ],
+    [
+      'folds a comparison, equality or logical operator of two constants',
+      [
+        "it.skipIf(1 === 1)('a', fn);",
+        "describe.skipIf(2 > 1)('b', fn);",
+        "it.skipIf('x' !== '')('c', fn);",
+        "it.skipIf(1 && true)('d', fn);",
+        "it.runIf(1 > 2)('e', fn);",
+        "it('f', { skip: 1 === 1 }, fn);",
+        // Placeholder folds and bigint arithmetic stay opaque to
+        // comparison: `{} === {}` is false at runtime, `1n === 1` too.
+        "it.skipIf({} === {})('g', fn);",
+        "it.skipIf(1n === 1)('h', fn);",
+        "it['' || 'skip']('i', fn);",
+      ],
+      {
+        a: 0,
+        e: 2,
+        d: [
+          'test:a',
+          'describe:b',
+          'test:c',
+          'test:d',
+          'test:e',
+          'test:f',
+          'test:i',
+        ],
+      },
+    ],
+    [
       "applies the runner's own rule to body skips: only `false` keeps the test",
       [
         "it('a', (ctx) => { ctx.skip(null); });",
@@ -28791,6 +28888,18 @@ describe('count-test-surface: the declared test surface of a test file', () => {
       { a: 1, e: 6, d: ['test:g', 'test:h', 'test:i'] },
     ],
     [
+      'reads a constant return through wrappers and templates alike',
+      [
+        "it('a', () => { if (!r) return undefined as void; expect(x).toBe(1); });",
+        "it('b', () => { if (!r) return `full suite only: ${process.env.QWEN_FULL}`; expect(x).toBe(1); });",
+        "it('c', () => { if (!r) return `reason`; expect(x).toBe(1); });",
+        // A possibly-thenable return stays ordinary control flow.
+        "it('d', () => { if (!r) return go(); expect(x).toBe(1); });",
+        "it('e', () => { return expect(p).resolves.toBe(1); });",
+      ],
+      { a: 2, e: 5, d: [] },
+    ],
+    [
       'silences the assertions a describe body or a hook shelters',
       [
         "describe('d', () => {",
@@ -28847,6 +28956,78 @@ describe('count-test-surface: the declared test surface of a test file', () => {
       { a: 2, e: 2, d: [] },
     ],
     [
+      'reads a skip that cannot be escaped as a disable, however wrapped',
+      [
+        // The catch fires exactly when the assertion fails: the test can
+        // never report a failure, so the registration is disabled — the
+        // setup-failure guard this is one token away from.
+        "it('a', (ctx) => { try { expect(x).toBe(1); } catch { ctx.skip(); } });",
+        "it('b', (ctx) => { if (true) ctx.skip(); expect(x).toBe(1); });",
+        "it('c', (ctx) => { if (1 === 1) { ctx.skip(); } expect(x).toBe(1); });",
+      ],
+      { a: 0, e: 0, d: ['test:a', 'test:b', 'test:c'] },
+    ],
+    [
+      'measures a registration through a callback handed by name',
+      [
+        'function body(ctx) {',
+        '  ctx.skip();',
+        '  expect(1).toBe(1);',
+        '}',
+        "it('a', body);",
+        "it('b', fn);",
+      ],
+      { a: 0, e: 1, d: ['test:a'] },
+    ],
+    [
+      'measures the named-body shapes exactly like their inline spellings',
+      [
+        'function body() {',
+        '  expect(1).toBe(1);',
+        '}',
+        "it.skip('a', body);",
+        "it('a', () => {});",
+        'function suite() {',
+        "  it('b', () => { expect(2).toBe(2); });",
+        '}',
+        "describe.skip('c', suite);",
+      ],
+      { a: 0, e: 1, d: ['test:a', 'test:b', 'describe:c'] },
+    ],
+    [
+      'keeps a body shared with an enabled registration live',
+      [
+        'function body() {',
+        '  expect(1).toBe(1);',
+        '}',
+        "it('a', body);",
+        "it.skip('b', body);",
+      ],
+      { a: 1, e: 1, d: ['test:b'] },
+    ],
+    [
+      'reads a collector factory binding as no registration at all',
+      [
+        "const posixOnly = it.skipIf(process.platform !== 'linux');",
+        'const rows = it.each(getCases());',
+        'const myTest = test.extend({});',
+        "it('a', fn);",
+      ],
+      { a: 0, e: 1, d: [] },
+    ],
+    [
+      'sees a chain through a type-only wrapper',
+      [
+        "(it as any).skip('a', () => { expect(1).toBe(1); });",
+        "(it.skip as any)('b', () => { expect(1).toBe(1); });",
+        "it('c', (ctx) => { (ctx as any).skip(); expect(1).toBe(1); });",
+        "it('d', () => { (expect(1) as any).toBe(1); });",
+        "(describe as any).skip('e', () => { it('f', () => { expect(1).toBe(1); }); });",
+      ],
+      // test:d stays enabled — its body only ASSERTS through a wrapper.
+      { a: 1, e: 1, d: ['test:a', 'test:b', 'test:c', 'describe:e', 'test:f'] },
+    ],
+    [
       'counts assertions only where the runner would execute them',
       [
         "it.skip('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
@@ -28871,6 +29052,59 @@ describe('count-test-surface: the declared test surface of a test file', () => {
     ],
   ])('%s', (_title, source, expected, path) => {
     expect(surface(source, path)).toEqual(expected);
+  });
+
+  it('resolves a registration callback bound by name, exactly like the inline spelling', () => {
+    // The runner receives the SAME function whether the registration
+    // hands it over inline or by name, so the two spellings must measure
+    // alike: the body's skip reaches the registration, its assertions
+    // leave the surface, and a disabled describe's body propagates.
+    expect(
+      countTestSurface(
+        [
+          'function body(ctx) {',
+          '  ctx.skip();',
+          '  expect(1).toBe(1);',
+          '}',
+          "it('x', body);",
+        ].join('\n'),
+        'a.test.ts',
+      ),
+    ).toMatchObject({
+      assertions: 0,
+      enabled: 0,
+      disabled: ['test:x'],
+      enabledTitles: [],
+    });
+    expect(
+      countTestSurface(
+        [
+          'function suite() {',
+          "  it('a', () => { expect(1).toBe(1); });",
+          '}',
+          "describe.skip('d', suite);",
+        ].join('\n'),
+        'a.test.ts',
+      ),
+    ).toMatchObject({ enabledTitles: [], enabled: 0, assertions: 0 });
+    // The inline spellings these must agree with.
+    expect(
+      countTestSurface(
+        "it('x', (ctx) => { ctx.skip(); expect(1).toBe(1); });",
+        'a.test.ts',
+      ),
+    ).toMatchObject({
+      assertions: 0,
+      enabled: 0,
+      disabled: ['test:x'],
+      enabledTitles: [],
+    });
+    expect(
+      countTestSurface(
+        "describe.skip('d', () => { it('a', () => { expect(1).toBe(1); }); });",
+        'a.test.ts',
+      ),
+    ).toMatchObject({ enabledTitles: [], enabled: 0, assertions: 0 });
   });
 
   it('measures every dialect the gate selects, not only .ts', () => {
@@ -29206,6 +29440,10 @@ describe('review-address: regression accounting (af-155)', () => {
     // The commit the rollup describes (headRefOid read with the rollup).
     checksHead = HEAD,
     window = 'w1',
+    // The live re-arm key prepare computed: defaults to the run's window
+    // (the ordinary case); a supersede-exempt conflict round can still run
+    // under a stale matrix window.
+    liveKey = window,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'af148-'));
     try {
@@ -29217,7 +29455,7 @@ describe('review-address: regression accounting (af-155)', () => {
         'bash',
         [
           '-c',
-          `set -euo pipefail\nWORKDIR=${JSON.stringify(dir)}\nAUTOFIX_BOT=qwen-code-dev-bot\nDISPATCH_STATUS_CONTEXT='qwen-autofix/dispatch-pending'\nCHECKED_OUT_HEAD='${checkedOutHead}'\nROLLUP_HEAD='${checksHead}'\nWINDOW='${window}'\nPR=1\nGITHUB_OUTPUT=${JSON.stringify(outFile)}\n${script}`,
+          `set -euo pipefail\nWORKDIR=${JSON.stringify(dir)}\nAUTOFIX_BOT=qwen-code-dev-bot\nDISPATCH_STATUS_CONTEXT='qwen-autofix/dispatch-pending'\nCHECKED_OUT_HEAD='${checkedOutHead}'\nROLLUP_HEAD='${checksHead}'\nWINDOW='${window}'\nLIVE_REARM_KEY='${liveKey}'\nPR=1\nGITHUB_OUTPUT=${JSON.stringify(outFile)}\n${script}`,
         ],
         { encoding: 'utf8' },
       );
@@ -29380,56 +29618,43 @@ describe('review-address: regression accounting (af-155)', () => {
     // pushed code introduced, and an in-flight own check is observer
     // noise on the triggers whose suite attaches to the PR head. The
     // carve-out survives at the FEEDBACK sites (N_FAILED_CHECKS /
-    // N_RED_NOW).
-    expect(
-      run({
-        checks: [
-          {
-            name: 'review-scan',
-            conclusion: 'FAILURE',
-            workflowName: 'Qwen Autofix',
-          },
-          ...GREEN,
-        ],
-      }).state,
-    ).toBe('green');
-    expect(
-      run({
-        checks: [
-          {
-            name: 'review-address (1)',
-            conclusion: 'FAILURE',
-            workflowName: 'Qwen Autofix',
-          },
-          ...GREEN,
-        ],
-      }).state,
-    ).toBe('green');
-    expect(
-      run({
-        checks: [
-          {
-            name: 'review-address (1)',
-            conclusion: 'FAILURE',
-            workflowName: 'Qwen Autofix',
-          },
-        ],
-      }).state,
-    ).toBe('none');
-    // A red AUXILIARY lane of the fleet is the loop's own business too.
-    expect(
-      run({
-        checks: [
-          {
-            name: 'review-pr',
-            status: 'COMPLETED',
-            conclusion: 'FAILURE',
-            workflowName: '🧐 Qwen Pull Request Review',
-          },
-          ...GREEN,
-        ],
-      }).state,
-    ).toBe('green');
+    // N_RED_NOW). All FIVE own-lane workflow names are exercised — a name
+    // dropped from the jq filter would read as a PR-side regression here.
+    for (const loopWorkflow of [
+      'Qwen Autofix',
+      '🧐 Qwen Pull Request Review',
+      'Qwen CI Failure Patrol',
+      'Qwen Autofix Fork Bridge',
+      'Qwen Autofix Fork Signal',
+    ]) {
+      expect(
+        run({
+          checks: [
+            {
+              name: 'build',
+              status: 'COMPLETED',
+              conclusion: 'FAILURE',
+              workflowName: loopWorkflow,
+            },
+            ...GREEN,
+          ],
+        }).state,
+      ).toBe('green');
+      // An own lane ALONE is no signal at all: excluded by the filter, it
+      // leaves an empty set — unknown, never the red a charge needs.
+      expect(
+        run({
+          checks: [
+            {
+              name: 'build',
+              status: 'COMPLETED',
+              conclusion: 'FAILURE',
+              workflowName: loopWorkflow,
+            },
+          ],
+        }).state,
+      ).toBe('none');
+    }
     // The round's own in-flight check must not hold the verdict pending.
     expect(
       run({
@@ -29473,6 +29698,18 @@ describe('review-address: regression accounting (af-155)', () => {
     // A re-arm moved the window: the old round is not this window's charge.
     expect(
       run({ checks: RED, comments: pushMarker({ key: 'w0' }) }).regressed,
+    ).toBe('');
+    // ...and when this run's own matrix window is the stale one (a
+    // supersede-exempt conflict round after a re-arm), the charge stays
+    // with the live window: the brake walks headlines under the live key,
+    // so a charge keyed to the dead window would never land there.
+    expect(
+      run({
+        checks: RED,
+        comments: pushMarker({ key: 'w0' }),
+        window: 'w0',
+        liveKey: 'w1',
+      }).regressed,
     ).toBe('');
     // Head is green now — nothing to charge.
     expect(run({ checks: GREEN, comments: pushMarker({}) }).regressed).toBe('');
@@ -29555,6 +29792,12 @@ describe('review-address: regression accounting (af-155)', () => {
     );
     expect(pushAndReportScript).toContain(
       "[[ \"${CONFLICT:-false}\" == 'true' ]] && PUSH_PRE='none'",
+    );
+    // ...and so does any merge commit the push carries past the head
+    // prepare classified (a clean in-round merge of main trips neither arm
+    // above): the pushed head then holds content prepare never classified.
+    expect(pushAndReportScript).toContain(
+      '[[ -n "$(git rev-list --merges "${REPORT_HEAD}..${PUSHED_HEAD}" 2>/dev/null)" ]] && PUSH_PRE=\'none\'',
     );
     // When the push landed but the report post failed, a marker-only
     // comment still carries the push record — the only record a later
