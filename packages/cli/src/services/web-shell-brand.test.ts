@@ -265,6 +265,15 @@ describe('resolveWebShellBrand', () => {
       expect(brand.logoDataUri).toBeDefined();
     });
 
+    it('accepts a byte order mark before the prolog', () => {
+      const logoPath = writeLogo('\uFEFF' + LOGO_SVG);
+      const { brand, warnings } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath }) }),
+      );
+      expect(warnings).toBeUndefined();
+      expect(brand.logoDataUri).toBeDefined();
+    });
+
     it('accepts a DOCTYPE with an internal subset', () => {
       const logoPath = writeLogo(
         '<!DOCTYPE svg [ <!ENTITY x "y"> ]>\n' + LOGO_SVG,
@@ -362,8 +371,8 @@ describe('resolveWebShellBrand', () => {
     });
 
     it('accepts a quoted `>` in an attribute value before the xmlns', () => {
-      // `>` is legal inside an XML attribute value; a scanner blind to quote
-      // state ends the root tag early and misattributes the rejection. The
+      // `>` is legal inside an XML attribute value; a parser that ends the
+      // root tag at the first `>` misattributes the rejection. The
       // fixture carries a viewBox so only the quote handling is exercised.
       const file = writeLogo(
         '<svg viewBox="0 0 8 8" aria-label="Next >" xmlns="http://www.w3.org/2000/svg"><circle cx="4" cy="4" r="4"/></svg>',
@@ -470,6 +479,20 @@ describe('resolveWebShellBrand', () => {
       expect(brand.logoDataUri).toBeDefined();
     });
 
+    it('rejects a namespace binding that only a second decode would complete', () => {
+      // `&amp;` decodes once to a literal `&`, leaving `s&#118;g` — NOT the
+      // SVG namespace, and a browser agrees. A validator that decodes again
+      // (`&#118;` → `v`) would accept a document no browser renders as SVG.
+      const file = writeLogo(
+        '<svg xmlns="http://www.w3.org/2000/s&amp;#118;g" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4"/></svg>',
+      );
+      const { brand, warnings } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(brand.logoDataUri).toBeUndefined();
+      expect(warnings).toEqual([expect.stringContaining('namespaced <svg>')]);
+    });
+
     it('rejects a suffix-colliding attribute name carrying the namespace', () => {
       // `data-xmlns` is not `xmlns`: only the attribute-NAME boundary keeps
       // the match from firing inside it, and this document declares no
@@ -482,6 +505,81 @@ describe('resolveWebShellBrand', () => {
       );
       expect(brand.logoDataUri).toBeUndefined();
       expect(warnings).toEqual([expect.stringContaining('namespaced <svg>')]);
+    });
+
+    it.each([
+      [
+        'junk after the root element',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"/>junk',
+      ],
+      [
+        'a second root element',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"/><svg xmlns="http://www.w3.org/2000/svg"/>',
+      ],
+      [
+        'a duplicate attribute on the root',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8" viewBox="0 0 9 9"/>',
+      ],
+      [
+        'an undeclared entity',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8">&nosuch;</svg>',
+      ],
+      [
+        'a comment containing --',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><!-- a -- b --></svg>',
+      ],
+      [
+        'raw ]]> in character data',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8">]]></svg>',
+      ],
+      [
+        'a raw < inside an attribute value',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8" data-x="a<b"/>',
+      ],
+      [
+        'two DOCTYPE declarations',
+        '<!DOCTYPE svg><!DOCTYPE svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"/>',
+      ],
+      [
+        'an xml declaration inside the root',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><?xml version="1.0"?></svg>',
+      ],
+      [
+        'a CDATA section after the root',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"/><![CDATA[x]]>',
+      ],
+      [
+        'a NUL character reference',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8" width="&#0;"/>',
+      ],
+    ])('rejects a document a browser would refuse: %s', (_label, document) => {
+      // The resolver answers "would a browser render this as an image" with
+      // a real XML parser, so well-formedness errors refuse the logo even
+      // when the root declares the SVG namespace. Each fixture carries
+      // exactly one malformation, and is otherwise a valid scaling logo.
+      const file = writeLogo(document);
+      const { brand, warnings } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(brand.logoDataUri).toBeUndefined();
+      expect(warnings).toEqual([
+        expect.stringContaining('is not an SVG document'),
+      ]);
+    });
+
+    it('rejects a root element that is never closed', () => {
+      // The open tag is complete, so only the parser's EOF check refuses
+      // this — a parse that never closes the stream accepts it.
+      const file = writeLogo(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8">',
+      );
+      const { brand, warnings } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(brand.logoDataUri).toBeUndefined();
+      expect(warnings).toEqual([
+        expect.stringContaining('is not an SVG document'),
+      ]);
     });
 
     it('warns for a prefix-bound root whose children are unprefixed', () => {
@@ -540,10 +638,11 @@ describe('resolveWebShellBrand', () => {
     });
 
     it('fails closed, not loud, on an out-of-range character reference', () => {
-      // &#x110000; is past Unicode's ceiling: decoding must not throw a
-      // RangeError out of the resolver — that would escape to the route's
-      // catch-all, drop the validly configured NAME too, and answer 200 {}
-      // with a message naming neither the key nor the file.
+      // &#x110000; is past Unicode's ceiling, which is a well-formedness
+      // error the parser rejects. The refusal must stay scoped to the logo:
+      // the validly configured NAME still resolves, and the warning names
+      // the key and the file — a loud failure would drop the name too and
+      // answer 200 {} with a message naming neither.
       const file = writeLogo(
         '<svg xmlns="http://www.w3.org/2000/svg" width="&#x110000;" height="8"/>',
       );
@@ -553,9 +652,9 @@ describe('resolveWebShellBrand', () => {
         }),
       );
       expect(brand.name).toBe('QiuQiu Code');
-      expect(brand.logoDataUri).toBeDefined();
+      expect(brand.logoDataUri).toBeUndefined();
       expect(warnings).toEqual([
-        expect.stringContaining('no viewBox or width/height'),
+        expect.stringContaining('is not an SVG document'),
       ]);
     });
 
@@ -796,7 +895,7 @@ describe('resolveWebShellBrand', () => {
       ],
     ])('accepts a DOCTYPE with %s', (_label, prolog) => {
       // Quoted literals and the internal-subset bracket may hold `>`, `[` and
-      // `]`; the scanner must not treat any of them as the end of the DOCTYPE.
+      // `]`; the parser must not treat any of them as the end of the DOCTYPE.
       const file = writeLogo(prolog + LOGO_SVG);
       const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: file }) }),

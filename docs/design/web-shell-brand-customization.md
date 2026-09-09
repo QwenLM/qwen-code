@@ -134,9 +134,13 @@ SVG namespace — the default `xmlns="http://www.w3.org/2000/svg"`, or an
 `xmlns:svg` binding on a prefix-bound `<svg:svg>` root, which is equally
 renderable — tolerating a BOM, an XML declaration, comments, and a DOCTYPE
 with or without an internal subset before it. This is a renderability check,
-not a sanitizer. The check is quote-aware, so `>`, `[` and `]` inside quoted
-literals do not confuse it, and a namespace-shaped substring inside another
-attribute's value does not satisfy it. A root with no non-empty `viewBox`
+not a sanitizer. The document is parsed with saxes — the streaming XML parser
+jsdom itself uses — so a document a browser's XML parser would refuse
+(duplicate attributes, junk after the root element, undeclared entities,
+out-of-range character references) is refused here too, attribute values are
+entity-decoded exactly once before the namespace comparison, and a
+namespace-shaped substring inside another attribute's value does not satisfy
+it. A root with no non-empty `viewBox`
 and no explicit positive, non-percentage width/height is accepted with an
 advisory on the daemon's stderr, because the browser cannot scale such
 artwork into the fixed sidebar box and may render it blank. A rejection

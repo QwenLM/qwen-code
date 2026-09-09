@@ -10,7 +10,7 @@ import {
   createDebugLogger,
   stripTerminalControlSequences,
 } from '@qwen-code/qwen-code-core';
-import { XMLParser, XMLValidator } from 'fast-xml-parser';
+import { SaxesParser } from 'saxes';
 import type { LoadedSettings } from '../config/settings.js';
 import { resolvePath } from '../utils/resolvePath.js';
 
@@ -352,10 +352,10 @@ function readRegularFileNoFollow(
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
 
 /**
- * Parse the document with a real XML parser and require the root element to
- * be an `svg` element (any prefix) whose binding declares the SVG namespace,
- * returning its decoded attributes, its prefix, and whether the body holds
- * an element outside that prefix.
+ * Parse the document with a real streaming XML parser and require the root
+ * element to be an `svg` element (any prefix) whose binding declares the SVG
+ * namespace, returning its attributes, its prefix, and whether the body
+ * holds an element outside that prefix.
  *
  * The namespace requirement is renderability, not paranoia: a root element
  * not in the SVG namespace does not render as an image, so without the check
@@ -365,6 +365,13 @@ const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
  * never as injected markup, and SVG loaded as an image cannot run script. Do
  * not switch the client to inline rendering without adding a sanitizer here
  * first.
+ *
+ * saxes is the parser jsdom uses, so "would a browser's XML parser accept
+ * this" is answered by the same engine class rather than by a reimplemented
+ * case set: duplicate attributes, junk after the root element, undeclared
+ * entities, out-of-range character references, malformed comments and the
+ * rest are all well-formedness errors it reports. Attribute values arrive
+ * entity-decoded, exactly once — the same single decode a browser applies.
  */
 function parseSvgRoot(content: string):
   | {
@@ -373,176 +380,48 @@ function parseSvgRoot(content: string):
       hasUnprefixedElements: boolean;
     }
   | undefined {
-  // Well-formedness first: duplicate attributes, misplaced declarations and
-  // the like are rejected by the validator — this is where the unbounded
-  // "is this even XML" entrance space closes. The validator's own DOCTYPE
-  // scan is quote-blind (a `>` inside a system literal is legal XML but
-  // trips it), so the DOCTYPE is removed first — the parser below handles
-  // the original content either way.
-  if (XMLValidator.validate(stripDoctype(content)) !== true) return undefined;
-  const parsed: unknown = new XMLParser({
-    preserveOrder: true,
-    ignoreAttributes: false,
-    parseTagValue: false,
-    parseAttributeValue: false,
-    trimValues: false,
-  }).parse(content);
-  if (!Array.isArray(parsed)) return undefined;
-  const rootNode = parsed.find(
-    (node): node is Record<string, unknown> =>
-      typeof node === 'object' &&
-      node !== null &&
-      elementNameOf(node as Record<string, unknown>) !== undefined,
-  );
-  if (rootNode === undefined) return undefined;
-  const rootName = elementNameOf(rootNode);
-  if (rootName === undefined) return undefined;
-  // Any prefix may bind the SVG namespace — `<svg:svg xmlns:svg="…">` and
-  // `<inkscape:svg xmlns:inkscape="…">` are the same document to a browser.
-  const nameMatch = /^(?:([A-Za-z_][\w.-]*):)?svg$/.exec(rootName);
-  if (nameMatch === null) return undefined;
-  const prefix = nameMatch[1];
-  const attrs: Record<string, string> = {};
-  const rawAttrs = rootNode[':@'];
-  if (typeof rawAttrs === 'object' && rawAttrs !== null) {
-    for (const [key, value] of Object.entries(rawAttrs)) {
-      attrs[key.replace(/^@_/, '')] = decodeXmlEntities(String(value));
+  let failed = false;
+  let rootLocal: string | undefined;
+  let rootPrefix: string | undefined;
+  let rootAttrs: Record<string, string> | undefined;
+  let hasUnprefixedElements = false;
+  const parser = new SaxesParser();
+  parser.on('error', () => {
+    failed = true;
+  });
+  parser.on('opentag', (tag) => {
+    const qName = tag.name;
+    const colon = qName.indexOf(':');
+    const prefix = colon === -1 ? undefined : qName.slice(0, colon);
+    if (rootLocal === undefined) {
+      rootLocal = colon === -1 ? qName : qName.slice(colon + 1);
+      rootPrefix = prefix;
+      rootAttrs = { ...tag.attributes };
+      return;
     }
+    // A prefix-bound root with an element outside its prefix paints nothing
+    // for that element — it lands in no (or another) namespace. The default
+    // `xmlns` rescue is judged by the caller, which has the root's attrs.
+    if (rootPrefix !== undefined && prefix !== rootPrefix) {
+      hasUnprefixedElements = true;
+    }
+  });
+  try {
+    // close() is load-bearing, not a courtesy: without it the parser never
+    // sees EOF, so `<svg ...>` with no closing tag parses clean here while a
+    // browser's XML parser rejects it as unclosed.
+    parser.write(content).close();
+  } catch {
+    failed = true;
+  }
+  if (failed || rootLocal !== 'svg' || rootAttrs === undefined) {
+    return undefined;
   }
   // A prefix binding on an unprefixed root does not count — `xmlns:svg`
   // alone leaves `<svg>` in no namespace.
-  const binding = prefix === undefined ? 'xmlns' : `xmlns:${prefix}`;
-  if (attrs[binding] !== SVG_NAMESPACE) return undefined;
-  const body = rootNode[rootName];
-  const hasUnprefixedElements =
-    prefix !== undefined &&
-    Array.isArray(body) &&
-    containsDifferentlyBoundElement(body, prefix);
-  return { prefix, attrs, hasUnprefixedElements };
-}
-
-/**
- * The element name of a preserve-order node, or undefined for text, comment
- * and directive nodes (their keys are `#text`, `#comment`, `?xml`, `!DOCTYPE`
- * — none match the element-name shape).
- */
-function elementNameOf(node: Record<string, unknown>): string | undefined {
-  for (const key of Object.keys(node)) {
-    if (key === ':@') continue;
-    return /^(?:[A-Za-z_][\w.-]*:)?[A-Za-z_][\w.-]*$/.test(key)
-      ? key
-      : undefined;
-  }
-  return undefined;
-}
-
-/**
- * True when any element in the subtree carries no prefix or a prefix other
- * than the root's — those elements are in no (or another) namespace and
- * paint nothing under a prefix-bound root.
- */
-function containsDifferentlyBoundElement(
-  nodes: unknown[],
-  prefix: string,
-): boolean {
-  for (const node of nodes) {
-    if (typeof node !== 'object' || node === null) continue;
-    const name = elementNameOf(node as Record<string, unknown>);
-    if (name === undefined) continue;
-    const nodePrefix = name.includes(':')
-      ? name.slice(0, name.indexOf(':'))
-      : undefined;
-    if (nodePrefix !== prefix) return true;
-    const children = (node as Record<string, unknown>)[name];
-    if (
-      Array.isArray(children) &&
-      containsDifferentlyBoundElement(children, prefix)
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/** Decode the five predefined entities and numeric character references. */
-function decodeXmlEntities(value: string): string {
-  return value.replace(
-    /&(#x[0-9a-fA-F]+|#\d+|lt|gt|amp|quot|apos);/g,
-    (entity, body: string) => {
-      if (body === 'lt') return '<';
-      if (body === 'gt') return '>';
-      if (body === 'amp') return '&';
-      if (body === 'quot') return '"';
-      if (body === 'apos') return "'";
-      const codePoint = body.startsWith('#x')
-        ? parseInt(body.slice(2), 16)
-        : parseInt(body.slice(1), 10);
-      // Out-of-range or unparseable: keep the entity verbatim. Throwing here
-      // (String.fromCodePoint raises RangeError past 0x10FFFF) would escape
-      // the resolver and take the validly configured brand NAME down with
-      // the logo — the comparison simply fails closed instead.
-      if (!Number.isFinite(codePoint) || codePoint > 0x10ffff) {
-        return entity;
-      }
-      return String.fromCodePoint(codePoint);
-    },
-  );
-}
-
-/**
- * Remove the prolog's DOCTYPE (quote- and internal-subset-aware), because the
- * validator's own DOCTYPE scan treats a `>` inside a system literal as the
- * end of the declaration. Anything else in the prolog is left in place for
- * the validator to judge.
- */
-function stripDoctype(content: string): string {
-  let rest = content.replace(/^\uFEFF/, '');
-  let head = '';
-  for (;;) {
-    const ws = /^\s+/.exec(rest);
-    if (ws) {
-      head += ws[0];
-      rest = rest.slice(ws[0].length);
-    }
-    if (rest.startsWith('<?')) {
-      const end = rest.indexOf('?>');
-      if (end === -1) return content;
-      head += rest.slice(0, end + 2);
-      rest = rest.slice(end + 2);
-      continue;
-    }
-    if (rest.startsWith('<!--')) {
-      const end = rest.indexOf('-->');
-      if (end === -1) return content;
-      head += rest.slice(0, end + 3);
-      rest = rest.slice(end + 3);
-      continue;
-    }
-    if (!rest.startsWith('<!DOCTYPE')) return head + rest;
-    let quote: string | undefined;
-    let depth = 0;
-    for (let i = 0; i < rest.length; i++) {
-      const ch = rest[i];
-      if (quote !== undefined) {
-        if (ch === quote) quote = undefined;
-        continue;
-      }
-      if (ch === '"' || ch === "'") {
-        quote = ch;
-        continue;
-      }
-      if (ch === '[') {
-        depth++;
-        continue;
-      }
-      if (ch === ']' && depth > 0) {
-        depth--;
-        continue;
-      }
-      if (ch === '>' && depth === 0) return head + rest.slice(i + 1);
-    }
-    return content;
-  }
+  const binding = rootPrefix === undefined ? 'xmlns' : `xmlns:${rootPrefix}`;
+  if (rootAttrs[binding] !== SVG_NAMESPACE) return undefined;
+  return { prefix: rootPrefix, attrs: rootAttrs, hasUnprefixedElements };
 }
 
 /**
