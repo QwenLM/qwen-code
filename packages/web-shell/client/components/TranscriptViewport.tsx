@@ -59,6 +59,7 @@ export const TranscriptViewport = forwardRef<
   const appliedTarget = useRef<number | undefined>(undefined);
   const scrollIntent = useRef(0);
   const restoring = useRef(false);
+  const restoredScrollTop = useRef<number | undefined>(undefined);
   useLayoutEffect(() => {
     if (historical || loading) onCanScrollToBottomChange?.(true);
   }, [historical, loading, onCanScrollToBottomChange]);
@@ -157,12 +158,16 @@ export const TranscriptViewport = forwardRef<
           row.getBoundingClientRect().top -
           scroll.getBoundingClientRect().top -
           saved.offset;
+        restoredScrollTop.current = scroll.scrollTop;
         return;
       }
       const message = messages.find((candidate) =>
         candidate.sourceBlockIds?.includes(saved.source),
       );
-      if (message) list.current?.scrollToMessage(message.id, saved.callId);
+      if (message) {
+        list.current?.scrollToMessage(message.id, saved.callId);
+        restoredScrollTop.current = scroll.scrollTop;
+      }
     },
     [messages, rows, scroller],
   );
@@ -335,9 +340,11 @@ export const TranscriptViewport = forwardRef<
             handleScrollIntent();
         }}
         onScrollCapture={(event) => {
-          if (event.target !== scroller() || restoring.current) return;
-          const current = capture();
-          if (loading) anchor.current = current;
+          const scroll = scroller();
+          if (event.target !== scroll || restoring.current) return;
+          if (restoredScrollTop.current === scroll.scrollTop) return;
+          restoredScrollTop.current = undefined;
+          anchor.current = capture();
           loadAtEdge();
         }}
       >

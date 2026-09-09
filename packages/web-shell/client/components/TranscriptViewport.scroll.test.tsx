@@ -383,6 +383,48 @@ describe('TranscriptViewport scroll restoration and fallback', () => {
     expect(row(targetKey).getBoundingClientRect().top).toBe(before);
   });
 
+  it('keeps the reader position after a dispatched scroll supersedes the saved anchor', async () => {
+    const { click, list, row, getTranscriptPage, settleFrames, triggerResize } =
+      await setup();
+    await click('history.openEarlier');
+    settleFrames();
+    list().scrollTop = 100;
+    const targetKey = `msg:${observed.props!.messages[2]!.id}`;
+    getTranscriptPage.mockResolvedValue(page(['old1', 'old2']));
+    await click('history.loadEarlier');
+    settleFrames();
+
+    act(() => {
+      list().scrollTop -= 20;
+      list().dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    const afterReaderScroll = row(targetKey).getBoundingClientRect().top;
+    triggerResize();
+    settleFrames();
+
+    expect(row(targetKey).getBoundingClientRect().top).toBe(afterReaderScroll);
+  });
+
+  it('does not load another page for a delayed scroll event from restoration', async () => {
+    const { click, list, getTranscriptPage, settleFrames } = await setup();
+    await click('history.openEarlier');
+    settleFrames();
+    list().scrollTop = 0;
+    getTranscriptPage.mockResolvedValue(page(['old1', 'old2'], true));
+
+    await click('history.loadEarlier');
+    settleFrames();
+    expect(getTranscriptPage).toHaveBeenCalledTimes(2);
+    getTranscriptPage.mockImplementation(() => new Promise(() => {}));
+
+    act(() => {
+      list().dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    settleFrames();
+
+    expect(getTranscriptPage).toHaveBeenCalledTimes(2);
+  });
+
   it('preserves the legacy loader when the turn index is degraded', async () => {
     const { store, legacyLoad } = await setup({
       degraded: true,
