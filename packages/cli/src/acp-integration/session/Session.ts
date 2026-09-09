@@ -61,6 +61,7 @@ import type {
   WorkflowTask,
   BranchPoint,
   BackgroundStatusChangeCallback,
+  AdmissibleNotification,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -233,6 +234,9 @@ import {
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
   buildGoalContinuationParts,
+  decideNotificationAdmission,
+  DroppedNotificationTally,
+  MAX_BACKGROUND_NOTIFICATION_QUEUE,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -1491,6 +1495,26 @@ interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   channelExecution?: { executionId: string };
 }
 
+/**
+ * Projects a queued notification onto the slice the shared admission rule
+ * reads. `interim` marks a monitor pulse, which the rule evicts before a
+ * terminal result. ACP drops pulses before they are ever queued (see the
+ * monitor callback in `#registerBackgroundNotificationCallbacks`), so today it
+ * is always false and eviction is plain oldest-unprotected-first. Both the
+ * admission decision and the dropped tally run on this projection, so pulse
+ * priority takes effect on its own if that filter is ever relaxed.
+ */
+function toAdmissibleNotification(
+  item: QueuedBackgroundNotification,
+): AdmissibleNotification {
+  return {
+    kind: item.kind,
+    taskId: item.taskId,
+    interim: item.kind === 'monitor' && item.status === 'running',
+    persisted: item.persisted,
+  };
+}
+
 /** The slice of `CronJob` a fire delivers to this session. Structural, not the
  * imported type, so core stays a type-only dependency of the fire path. */
 interface CronFire {
@@ -1637,7 +1661,6 @@ function parsePromptChannelDelivery(
   };
 }
 
-const MAX_NOTIFICATION_QUEUE = 20;
 const MAX_DEFERRED_UNRELATED_CRON_QUEUE = 20;
 
 export function resolveExistingFile(
@@ -2075,6 +2098,12 @@ export class Session implements SessionContext {
     string,
     ChannelBackgroundExecution
   >();
+  /**
+   * Notifications lost to queue overflow since the last drain. Reported as one
+   * summary on the next notification turn rather than per loss, so an overflow
+   * burst cannot itself flood the session.
+   */
+  private readonly droppedNotifications = new DroppedNotificationTally();
   private notificationProcessing = false;
   private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
@@ -4255,6 +4284,7 @@ export class Session implements SessionContext {
       void this.#completeChannelNotification(item, undefined, true);
     }
     this.notificationQueue = [];
+    this.droppedNotifications.clear();
     this.cronQueue = [];
     for (const turn of this.goalQueue.splice(0)) {
       turn.controller.abort(SESSION_DISPOSE_ABORT_REASON);
@@ -4553,6 +4583,7 @@ export class Session implements SessionContext {
       void this.#completeChannelNotification(item, undefined, true);
     }
     this.notificationQueue = [];
+    this.droppedNotifications.clear();
     this.notificationProcessing = false;
 
     const queuedGoalTurn = queuedGoalTurns[0];
@@ -4800,6 +4831,7 @@ export class Session implements SessionContext {
         void this.#completeChannelNotification(item, undefined, true);
       }
       this.notificationQueue = [];
+      this.droppedNotifications.clear();
       this.notificationProcessing = false;
     }
     if (this.notificationCompletion) {
@@ -9903,39 +9935,52 @@ export class Session implements SessionContext {
     ) {
       observed.notificationAccepted = true;
     }
-    while (this.notificationQueue.length >= MAX_NOTIFICATION_QUEUE) {
-      let evictedIndex = 0;
-      if (
+    while (this.notificationQueue.length >= MAX_BACKGROUND_NOTIFICATION_QUEUE) {
+      // While the todo-stop guard defers unrelated automatic turns, a queued
+      // notification that continues the current work chain is the one thing
+      // that can release it — so those are protected and the unrelated ones
+      // absorb the overflow.
+      const guardDefersUnrelatedWork =
         this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
-        this.todoStopGuardQueuedPromptPriority
-      ) {
+        this.todoStopGuardQueuedPromptPriority;
+      // Decide over the projection, not the raw queue: `interim` lives only on
+      // the projection, so passing raw entries would silently disable pulse
+      // priority if the monitor filter below is ever relaxed. `isProtected`
+      // reads the original entry by index, since the guard predicate needs
+      // fields the projection deliberately drops.
+      const admission = decideNotificationAdmission(
+        this.notificationQueue.map(toAdmissibleNotification),
+        toAdmissibleNotification(item),
+        {
+          max: MAX_BACKGROUND_NOTIFICATION_QUEUE,
+          isProtected: (_projected, index) =>
+            guardDefersUnrelatedWork &&
+            this.#notificationContinuesTodoStopGuardWorkChain(
+              this.notificationQueue[index]!,
+            ),
+        },
+      );
+      if (admission.action === 'drop') {
         const incomingIsRelated =
           this.#notificationContinuesTodoStopGuardWorkChain(item);
-        evictedIndex = this.notificationQueue.findIndex(
-          (queued) =>
-            !this.#notificationContinuesTodoStopGuardWorkChain(queued),
+        debugLogger.warn(
+          incomingIsRelated
+            ? `Notification queue overflow: dropping related task=${item.taskId} kind=${item.kind} because all queued items are related`
+            : `Notification queue overflow: dropping unrelated task=${item.taskId} kind=${item.kind} while automatic work is deferred`,
         );
-        if (evictedIndex < 0 && !incomingIsRelated) {
-          debugLogger.warn(
-            `Notification queue overflow: dropping unrelated task=${item.taskId} kind=${item.kind} while automatic work is deferred`,
-          );
-          void this.#completeChannelNotification(item, undefined, true);
-          return;
-        }
-        if (evictedIndex < 0) {
-          debugLogger.warn(
-            `Notification queue overflow: dropping related task=${item.taskId} kind=${item.kind} because all queued items are related`,
-          );
-          void this.#completeChannelNotification(item, undefined, true);
-          return;
-        }
+        this.droppedNotifications.record(toAdmissibleNotification(item));
+        void this.#completeChannelNotification(item, undefined, true);
+        return;
       }
-      const [evicted] = this.notificationQueue.splice(evictedIndex, 1);
-      if (evicted)
-        void this.#completeChannelNotification(evicted, undefined, true);
+      if (admission.action === 'push') break;
+      const [evicted] = this.notificationQueue.splice(admission.index, 1);
       debugLogger.warn(
         `Notification queue overflow: evicting task=${evicted?.taskId ?? 'unknown'} kind=${evicted?.kind ?? 'unknown'}`,
       );
+      if (evicted) {
+        this.droppedNotifications.record(toAdmissibleNotification(evicted));
+        void this.#completeChannelNotification(evicted, undefined, true);
+      }
     }
     this.notificationQueue.push(item);
     this.#activeWorkChanged();
@@ -10225,19 +10270,52 @@ export class Session implements SessionContext {
             promptId,
             item.todoWorkChainId,
           );
+          // Report anything overflow discarded on the first turn that follows
+          // it, so the model learns what it will never be told about before it
+          // acts on the notifications that survived.
+          //
+          // Taken after admission, so a refused turn keeps the tally intact.
+          // Past this point the summary shares the notification's fate: the
+          // paths that can still bail (an aborted signal, a missing response
+          // stream) drop this item without re-queueing it either. That is
+          // deliberately unlike the TUI, whose drain re-queues a rejected
+          // batch and so must park the summary to match it.
+          const droppedSummary = this.droppedNotifications.take();
+          if (droppedSummary) {
+            await this.#emitDroppedNotificationSummary(droppedSummary);
+          }
           await this.#emitBackgroundNotificationDisplay(item);
 
           const notificationParts: Part[] = [{ text: item.modelText }];
+          if (droppedSummary) {
+            notificationParts.unshift({ text: droppedSummary.modelText });
+          }
           if (!item.persisted) {
-            this.config
-              .getChatRecordingService()
-              ?.recordNotification(notificationParts, item.displayText, {
+            const recording = this.config.getChatRecordingService();
+            if (droppedSummary) {
+              recording?.recordNotification(
+                [{ text: droppedSummary.modelText }],
+                droppedSummary.displayText,
+              );
+            }
+            recording?.recordNotification(
+              [{ text: item.modelText }],
+              item.displayText,
+              {
                 taskId: item.taskId,
                 status: item.status,
                 kind: item.kind,
                 toolUseId: item.toolUseId,
                 ...item.structured,
-              });
+              },
+            );
+          } else if (droppedSummary) {
+            this.config
+              .getChatRecordingService()
+              ?.recordNotification(
+                [{ text: droppedSummary.modelText }],
+                droppedSummary.displayText,
+              );
           }
 
           const notificationReminders =
@@ -10528,6 +10606,21 @@ export class Session implements SessionContext {
     } catch (error) {
       debugLogger.debug('Channel notification completion failed', error);
     }
+  }
+
+  async #emitDroppedNotificationSummary(summary: {
+    displayText: string;
+    status: 'dropped' | 'recorded';
+  }): Promise<void> {
+    await this.sendUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: summary.displayText },
+      _meta: {
+        source: 'background_notification',
+        qwenDiscreteMessage: true,
+        backgroundTask: { kind: 'queue', status: summary.status },
+      },
+    });
   }
 
   async #emitBackgroundNotificationDisplay(
