@@ -13127,9 +13127,9 @@ export class Session implements SessionContext {
             }
           }
 
-          if (!didRequestPermission && !isTodoWriteTool) {
-            // Auto-approved (L3 allow / L4 PM allow / L5 YOLO|AUTO_EDIT)
-            // → emit tool_call start notification
+          if ((!didRequestPermission || isAgentTool) && !isTodoWriteTool) {
+            // Approved agents also need the initial creating frame when the
+            // provider does not emit preparation updates.
             const startParams: ToolCallStartParams = {
               callId,
               toolName,
@@ -13309,10 +13309,31 @@ export class Session implements SessionContext {
           let toolSettled = false;
           let heartbeatCount = 0;
           let lastHeartbeat: ShellProgressData | undefined;
+          let subagentSessionReadySent = false;
           const onToolProgress = (chunk: ToolResultDisplay) => {
-            if (toolSettled || !isShellProgressData(chunk)) {
-              return;
+            if (toolSettled) return;
+            // Match ToolCallEmitter's initial false frame by callId so readiness
+            // updates the existing agent row before execution completes.
+            if (
+              isAgentTool &&
+              !subagentSessionReadySent &&
+              typeof chunk === 'object' &&
+              chunk !== null &&
+              'subagentSessionReady' in chunk &&
+              chunk.subagentSessionReady === true
+            ) {
+              subagentSessionReadySent = true;
+              void this.sendUpdate({
+                sessionUpdate: 'tool_call_update',
+                toolCallId: callId,
+                _meta: { toolName, subagentSessionReady: true },
+              }).catch((err) => {
+                debugLogger.debug(
+                  `[Session.runTool] subagent readiness update failed for ${callId}: ${err}`,
+                );
+              });
             }
+            if (!isShellProgressData(chunk)) return;
             heartbeatCount++;
             lastHeartbeat = chunk;
             void this.sendUpdate({
