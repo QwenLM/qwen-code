@@ -22,7 +22,10 @@
  * reason so the caller can emit a structured error envelope.
  */
 
-import { GOAL_TOKEN_BUDGET_CAP } from '@qwen-code/qwen-code-core';
+import {
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+  GOAL_TOKEN_BUDGET_CAP,
+} from '@qwen-code/qwen-code-core';
 
 export type BudgetKind = 'wall-time' | 'tool-calls';
 
@@ -203,6 +206,30 @@ export function validateGoalTokenBudget(value: unknown): number {
   if (value > GOAL_TOKEN_BUDGET_CAP) {
     throw new Error(
       `model.goalTokenBudget ${value} exceeds the supported ceiling (${GOAL_TOKEN_BUDGET_CAP}). Use a smaller value or -1 for unlimited.`,
+    );
+  }
+  return value;
+}
+
+export function validateGoalCheckpointTimeoutSeconds(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(
+      `model.goalCheckpointTimeoutSeconds must be a finite number; got ${String(value)}.`,
+    );
+  }
+  if (!Number.isInteger(value)) {
+    throw new Error(
+      `model.goalCheckpointTimeoutSeconds must be an integer number of seconds; got ${value}.`,
+    );
+  }
+  if (value < 1) {
+    throw new Error(
+      `model.goalCheckpointTimeoutSeconds must be at least 1; got ${value}. Unset it to use the default.`,
+    );
+  }
+  if (value > GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP) {
+    throw new Error(
+      `model.goalCheckpointTimeoutSeconds ${value} exceeds the supported ceiling (${GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP}s, the default stream lifetime cap, past which the stream guard rather than this setting ends the call). This ceiling is fixed; raising QWEN_STREAM_MAX_LIFETIME_MS does not lift it.`,
     );
   }
   return value;

@@ -27,6 +27,7 @@ const virtualizerTestState = vi.hoisted(() => ({
   getItemKeys: [] as Array<(index: number) => string | number>,
   itemSizeCache: new Map<string | number, number>(),
   resizeItem: vi.fn(),
+  scrollToIndex: vi.fn(),
   renderItems: true,
 }));
 const messageItemTestState = vi.hoisted(() => ({
@@ -145,7 +146,8 @@ vi.mock('@tanstack/react-virtual', () => ({
       measureElement: () => {},
       resizeItem: virtualizerTestState.resizeItem,
       itemSizeCache: virtualizerTestState.itemSizeCache,
-      scrollToIndex: () => {},
+      scrollToIndex: virtualizerTestState.scrollToIndex,
+      getOffsetForIndex: () => [320, 'center'],
     };
   },
 }));
@@ -318,6 +320,7 @@ function mount(
   messages: Message[],
   ref?: RefObject<MessageListHandle | null>,
   opts: {
+    frozenViewport?: boolean;
     hideSessionTimeline?: boolean;
     loadingTranscript?: boolean;
     catchingUp?: boolean;
@@ -368,6 +371,7 @@ function mount(
             >
               <MessageList
                 ref={ref}
+                frozenViewport={opts.frozenViewport}
                 messages={messages}
                 pendingApproval={opts.pendingApproval ?? null}
                 hideSessionTimeline={opts.hideSessionTimeline}
@@ -566,6 +570,87 @@ const simpleTurns = (count: number): Message[] =>
     const turn = index + 1;
     return [userMsg(`u${turn}`), asstMsg(`a${turn}`)] as Message[];
   }).flat();
+
+describe('MessageList — locate scroll timer lifecycle', () => {
+  it('does not schedule scroll work after unmounting before locate settles', () => {
+    vi.useFakeTimers();
+    const ref = createRef<MessageListHandle>();
+    const container = mount(simpleTurns(2), ref);
+    act(() => vi.advanceTimersByTime(32));
+
+    act(() => {
+      expect(ref.current?.scrollToMessage('u1')).toBe(true);
+    });
+    act(() => vi.advanceTimersByTime(149));
+
+    const index = mounted.findIndex((entry) => entry.container === container);
+    const [{ root }] = mounted.splice(index, 1);
+    act(() => root.unmount());
+    container.remove();
+    const requestFrame = vi.spyOn(globalThis, 'requestAnimationFrame');
+
+    act(() => vi.advanceTimersByTime(200));
+
+    expect(requestFrame).not.toHaveBeenCalled();
+  });
+
+  it('keeps normal and repeated locate scrolling and highlighting working', () => {
+    vi.useFakeTimers();
+    const scrollIntoView = vi.spyOn(Element.prototype, 'scrollIntoView');
+    const ref = createRef<MessageListHandle>();
+    const container = mount(simpleTurns(2), ref);
+    act(() => vi.advanceTimersByTime(32));
+
+    act(() => {
+      expect(ref.current?.scrollToMessage('u1')).toBe(true);
+    });
+    act(() => vi.advanceTimersByTime(32));
+    expect(
+      container
+        .querySelector('[data-testid="msg-u1"]')
+        ?.getAttribute('data-locate-flashing'),
+    ).toBe('true');
+
+    act(() => {
+      expect(ref.current?.scrollToMessage('u2')).toBe(true);
+    });
+    act(() => vi.advanceTimersByTime(32));
+    expect(
+      container
+        .querySelector('[data-testid="msg-u2"]')
+        ?.getAttribute('data-locate-flashing'),
+    ).toBe('true');
+    expect(
+      container
+        .querySelector('[data-testid="msg-u1"]')
+        ?.getAttribute('data-locate-flashing'),
+    ).toBeNull();
+    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+    expect(scrollIntoView).toHaveBeenLastCalledWith({ block: 'center' });
+    act(() => vi.advanceTimersByTime(150));
+  });
+
+  it('clears every pending locate timer after repeated navigation and unmount', () => {
+    vi.useFakeTimers();
+    const ref = createRef<MessageListHandle>();
+    const container = mount(simpleTurns(2), ref);
+    act(() => vi.advanceTimersByTime(32));
+
+    for (const id of ['u1', 'u2']) {
+      act(() => {
+        expect(ref.current?.scrollToMessage(id)).toBe(true);
+      });
+      act(() => vi.advanceTimersByTime(32));
+    }
+
+    const index = mounted.findIndex((entry) => entry.container === container);
+    const [{ root }] = mounted.splice(index, 1);
+    act(() => root.unmount());
+    container.remove();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
 
 describe('MessageList — failed prompt retry', () => {
   it('marks only the matching user message and forwards retry', () => {
@@ -952,6 +1037,113 @@ describe('MessageList — compact mode', () => {
 });
 
 describe('MessageList — turn collapse (DOM)', () => {
+  it('gives prompt and collapse siblings distinct row identities for a shared source', () => {
+    const c = mount(
+      [
+        { ...userMsg('u1'), sourceBlockIds: ['b1'] },
+        toolMsg('g1'),
+        asstMsg('a1'),
+        { ...userMsg('u2'), sourceBlockIds: ['b2'] },
+        toolMsg('g2'),
+        asstMsg('a2'),
+        { ...userMsg('u3'), sourceBlockIds: ['b3'] },
+        toolMsg('g3'),
+        asstMsg('a3'),
+      ],
+      undefined,
+      { frozenViewport: true },
+    );
+    expect(
+      [...c.querySelectorAll<HTMLElement>('[data-source-block-ids="b2"]')].map(
+        (row) => row.dataset.messageRowKey,
+      ),
+    ).toEqual(['msg:u2', 'tc:tc-u2']);
+  });
+
+  it('locates frozen virtual rows without leaving a recentering target behind', () => {
+    const ref = createRef<MessageListHandle>();
+    const c = mount(
+      Array.from({ length: 220 }, (_, index) => userMsg(`u${index}`)),
+      ref,
+      { frozenViewport: true },
+    );
+    virtualizerTestState.scrollToIndex.mockClear();
+    const list = c.querySelector<HTMLElement>('[data-web-shell-message-list]')!;
+    act(() => {
+      expect(ref.current?.scrollToMessage('u210')).toBe(true);
+    });
+    expect(list.scrollTop).toBe(320);
+    expect(virtualizerTestState.scrollToIndex).not.toHaveBeenCalled();
+  });
+
+  it('keeps historical edge fragments expanded while collapsing complete interior turns', () => {
+    const c = mount(
+      [
+        userMsg('u1'),
+        toolMsg('g1'),
+        asstMsg('a1'),
+        userMsg('u2'),
+        toolMsg('g2'),
+        asstMsg('a2'),
+        userMsg('u3'),
+        toolMsg('g3'),
+        asstMsg('a3'),
+      ],
+      undefined,
+      { frozenViewport: true },
+    );
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
+    expect(toggleRow(c, 'u2').getAttribute('aria-expanded')).toBe('false');
+    expect(toggleRow(c, 'u3').getAttribute('aria-expanded')).toBe('true');
+    expect(isCollapsed(c, 'g1')).toBe(false);
+    expect(isCollapsed(c, 'g2')).toBe(true);
+    expect(isCollapsed(c, 'g3')).toBe(false);
+  });
+
+  it('never reloads or follows the bottom in a frozen viewport', async () => {
+    vi.useFakeTimers();
+    const onReloadTranscript = vi.fn().mockResolvedValue(undefined);
+    const ref = createRef<MessageListHandle>();
+    const container = mount([userMsg('u1'), asstMsg('a1')], ref, {
+      frozenViewport: true,
+      transcriptBlockCount: WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 1,
+      onReloadTranscript,
+    });
+    const list = container.querySelector<HTMLElement>(
+      '[data-web-shell-message-list]',
+    )!;
+    Object.defineProperties(list, {
+      scrollHeight: { value: 1200 },
+      clientHeight: { value: 400 },
+    });
+    list.scrollTop = 150;
+    act(() => ref.current?.scrollToBottom());
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(onReloadTranscript).not.toHaveBeenCalled();
+    expect(list.scrollTop).toBe(150);
+  });
+
+  it('omits incomplete history fragment totals', () => {
+    const c = mount(
+      [
+        { ...userMsg('u1'), timestamp: 1_000 },
+        { ...toolMsg('g1'), timestamp: 2_000 },
+        {
+          ...asstMsg('a1'),
+          timestamp: 13_400,
+          usage: { inputTokens: 3100, outputTokens: 5100, cachedTokens: 2800 },
+        },
+      ],
+      undefined,
+      { frozenViewport: true },
+    );
+    expect(c.textContent).not.toContain('13s');
+    expect(c.textContent).not.toContain('↑3.1k');
+    expect(c.textContent).not.toContain('1 tool call');
+    expect(has(c, 'g1')).toBe(true);
+    expect(has(c, 'a1')).toBe(true);
+  });
+
   it('does not reload a responding transcript when pause is implicit', async () => {
     vi.useFakeTimers();
     const onReloadTranscript = vi.fn().mockResolvedValue(undefined);
@@ -4923,8 +5115,8 @@ describe('MessageList — turn collapse (DOM)', () => {
     scrollIntoView.mockRestore();
   });
 
-  it('hides the session timeline when the message list is narrow', async () => {
-    const rectSpy = mockMessageListWidth(1000);
+  it('hides the session timeline below the default content width', async () => {
+    const rectSpy = mockMessageListWidth(999);
 
     const c = mount(simpleTurns(4));
     await nextFrame();

@@ -2,6 +2,7 @@ import {
   forwardRef,
   memo,
   useImperativeHandle,
+  useId,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -91,6 +92,7 @@ import {
   XIcon,
 } from 'lucide-react';
 import { FileTypeIcon } from './FileTypeIcon';
+import { FileAttachmentContent } from './FileAttachmentContent';
 import { WorkspaceSelector } from './WorkspaceSelector';
 import {
   Popover,
@@ -129,6 +131,7 @@ const MAX_DROP_DIALOG_ROWS = 100;
 
 export type ComposerToolbarAction =
   | 'approvalMode'
+  | 'plan'
   | 'contextUsage'
   | 'gitBranch'
   | 'model'
@@ -137,10 +140,7 @@ export type ComposerToolbarAction =
   | 'widthMode'
   | 'voice'
   | 'workspace'
-  // Unlike the actions above, `addMenu` is never shown unless the host
-  // lists it explicitly in `visibleToolbarActions` — the generic gate
-  // defaults to "show" when the prop is absent, so `+` checks the prop
-  // directly to stay off by default.
+  // Like Plan, addMenu is only shown when explicitly listed by the host.
   | 'addMenu';
 
 // Dropped folders surface in `dataTransfer.files` as 0-byte Files; only the
@@ -162,6 +162,7 @@ function collectDroppedFiles(dataTransfer: DataTransfer): File[] {
 
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
+  'plan',
   'commands',
   'contextUsage',
   'gitBranch',
@@ -202,6 +203,9 @@ interface ChatEditorProps {
   onPopQueuedMessages?: () => boolean;
   onClearQueuedMessages?: () => boolean;
   currentMode?: string;
+  planMode?: boolean;
+  modeControlsDisabled?: boolean;
+  onTogglePlan?: () => void;
   sessionWorkflowEnabled?: boolean;
   currentModel?: string;
   gitBranch?: string;
@@ -401,7 +405,11 @@ function TopComposerTag({
     </span>
   );
   const tagElement = (
-    <span ref={anchorRef} className={styles.tag} data-web-shell-composer-tag>
+    <span
+      ref={anchorRef}
+      className={`${styles.tag}${isPreviewableFileComposerTag(tag) ? ` ${styles.fileTag}` : ''}`}
+      data-web-shell-composer-tag
+    >
       {hasTooltip ? (
         <TooltipPrimitive.Trigger asChild>
           {tagContent}
@@ -1495,7 +1503,9 @@ export const ChatEditor = memo(
       queuedMessages = [],
       onPopQueuedMessages,
       currentMode = 'default',
-      sessionWorkflowEnabled = false,
+      planMode = false,
+      modeControlsDisabled = false,
+      onTogglePlan,
       currentModel = '',
       gitBranch,
       gitWorktree,
@@ -1570,6 +1580,7 @@ export const ChatEditor = memo(
       atProviders: contextAtProviders,
       fileUploadEnabled,
       fileUploadDirectory,
+      fileDropAction,
     } = useWebShellCustomization();
     // At-mention provider props win when set (main composer). Split-view
     // ChatPane omits them and falls back to the App-level customization
@@ -1637,7 +1648,7 @@ export const ChatEditor = memo(
     );
     useLayoutEffect(() => {
       setPendingDropFiles(null);
-    }, [disabled, uploadTargetKey]);
+    }, [disabled, uploadTargetKey, attachmentsEnabled, fileDropAction]);
 
     // -- File upload ----------------------------------------------------------
     // The hook's cancel/reset granularity includes the session: ChatEditor is
@@ -1692,7 +1703,7 @@ export const ChatEditor = memo(
       cycleModeOnTab,
       onToggleShortcuts,
       disabled,
-      fileDragEnabled: attachmentsEnabled && fileUploadEnabled !== false,
+      fileDragEnabled: attachmentsEnabled,
       placeholderText,
       commands,
       skills,
@@ -1786,10 +1797,12 @@ export const ChatEditor = memo(
     };
     const [uploadDragActive, setUploadDragActive] = useState(false);
     const uploadDragDepthRef = useRef(0);
+    const uploadDropEnabled =
+      uploadEnabled && (!attachmentsEnabled || fileDropAction !== 'attach');
     const handleUploadDragEnter = useCallback(
       (event: ReactDragEvent<HTMLDivElement>) => {
         if (
-          !uploadEnabled ||
+          !uploadDropEnabled ||
           disabled ||
           !event.dataTransfer.types.includes('Files')
         )
@@ -1798,19 +1811,19 @@ export const ChatEditor = memo(
         uploadDragDepthRef.current += 1;
         setUploadDragActive(true);
       },
-      [uploadEnabled, disabled],
+      [uploadDropEnabled, disabled],
     );
     const handleUploadDragOver = useCallback(
       (event: ReactDragEvent<HTMLDivElement>) => {
         if (
-          !uploadEnabled ||
+          !uploadDropEnabled ||
           disabled ||
           !event.dataTransfer.types.includes('Files')
         )
           return;
         event.preventDefault();
       },
-      [uploadEnabled, disabled],
+      [uploadDropEnabled, disabled],
     );
     const handleUploadDragLeave = useCallback(() => {
       if (uploadDragDepthRef.current === 0) return;
@@ -1854,27 +1867,38 @@ export const ChatEditor = memo(
           event.preventDefault();
           return;
         }
-        if (fileUploadEnabled === false) {
-          // Host force-disables file drag-in entirely: cancel the drop so
-          // the browser cannot navigate to the file, but ingest nothing on
-          // any lane (the image lane is gated off too).
-          event.preventDefault();
-          return;
-        }
         if (!uploadEnabled || files.length === 0) {
-          core.imageTransferHandlers.onDropCapture(event);
+          if (attachmentsEnabled) {
+            core.imageTransferHandlers.onDropCapture(event);
+          } else {
+            event.preventDefault();
+          }
           return;
         }
         clearImageDragState();
         event.preventDefault();
         event.stopPropagation();
-        setPendingDropFiles(files);
+        if (!attachmentsEnabled || fileDropAction === 'upload') {
+          uploadFiles(files, fileUploadDirectory ?? '.', insertUploadReference);
+          focusComposer();
+        } else if (fileDropAction === 'attach') {
+          ingestFiles(files);
+          focusComposer();
+        } else {
+          setPendingDropFiles(files);
+        }
       },
       [
         core.imageTransferHandlers,
         clearImageDragState,
         disabled,
-        fileUploadEnabled,
+        attachmentsEnabled,
+        fileDropAction,
+        focusComposer,
+        fileUploadDirectory,
+        ingestFiles,
+        insertUploadReference,
+        uploadFiles,
         pendingDropFiles,
         uploadEnabled,
       ],
@@ -2011,14 +2035,18 @@ export const ChatEditor = memo(
       };
     }, [clearUploadDragState, uploadDragActive]);
     useEffect(() => {
-      if (disabled) clearUploadDragState();
-    }, [clearUploadDragState, disabled]);
+      if (disabled || !uploadDropEnabled) clearUploadDragState();
+    }, [clearUploadDragState, disabled, uploadDropEnabled]);
 
     useEffect(() => {
       onAttachmentsChange?.(core.hasAttachments);
     }, [core.hasAttachments, onAttachmentsChange]);
 
+    const planDescriptionId = useId();
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
+    useEffect(() => {
+      if (modeControlsDisabled) setModeDropdownOpen(false);
+    }, [modeControlsDisabled]);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const [quickActionsOpen, setQuickActionsOpen] = useState(false);
     const [branchPickerOpen, setBranchPickerOpen] = useState(false);
@@ -2041,6 +2069,7 @@ export const ChatEditor = memo(
       workspace: false,
       gitBranch: false,
       mode: false,
+      plan: false,
       model: false,
     });
     const toolbarLabelVisibilityRef = useRef(toolbarLabelVisibility);
@@ -2125,20 +2154,13 @@ export const ChatEditor = memo(
 
     const modeItems = useMemo<DropdownItem[]>(
       () =>
-        DAEMON_APPROVAL_MODES.map((id) => ({
+        DAEMON_APPROVAL_MODES.filter((id) => id !== 'plan').map((id) => ({
           id,
-          label:
-            id === 'plan' && sessionWorkflowEnabled
-              ? t('mode.listLabel.planReview')
-              : getModeListLabel(id, t),
-          description: t(
-            id === 'plan' && sessionWorkflowEnabled
-              ? 'mode.desc.planReview'
-              : `mode.desc.${id}`,
-          ),
+          label: getModeListLabel(id, t),
+          description: t(`mode.desc.${id}`),
           icon: <ModeIcon mode={id} />,
         })),
-      [sessionWorkflowEnabled, t],
+      [t],
     );
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
@@ -2152,6 +2174,9 @@ export const ChatEditor = memo(
       return visibleActionSet.has(action);
     };
     const showModeAction = showToolbarAction('approvalMode');
+    const showPlanAction = Boolean(
+      onTogglePlan && visibleActionSet?.has('plan'),
+    );
     const showModelAction = showToolbarAction('model');
     const showCommandAction = showToolbarAction('commands');
     const commandNames = useMemo(
@@ -2287,11 +2312,12 @@ export const ChatEditor = memo(
 
     const handleModeSelect = useCallback(
       (modeId: string) => {
+        if (modeControlsDisabled) return;
         onSelectMode?.(modeId);
         setModeDropdownOpen(false);
         core.focus();
       },
-      [onSelectMode, core],
+      [onSelectMode, core, modeControlsDisabled],
     );
 
     const handleModelSelect = useCallback(
@@ -2397,13 +2423,22 @@ export const ChatEditor = memo(
       }
       return (
         <>
-          {safeIconUrl && (
+          {isPreviewableFileComposerTag(tag) &&
+          !tag.icon &&
+          safeIconUrl === getComposerTagIconUrl('file') ? (
+            <FileTypeIcon
+              name={tagValue}
+              size={16}
+              className={styles.fileTagIcon}
+              aria-hidden="true"
+            />
+          ) : safeIconUrl ? (
             <span
               className={styles.tagIcon}
               style={cssUrlVar('--composer-tag-icon-url', safeIconUrl)}
               aria-hidden="true"
             />
-          )}
+          ) : null}
           {tagLabel && <span className={styles.tagLabel}>{tagLabel}</span>}
           {tagValue && <span className={styles.tagValue}>{tagValue}</span>}
         </>
@@ -2411,10 +2446,11 @@ export const ChatEditor = memo(
     };
 
     // Mode display label
-    const modeLabel =
-      currentMode === 'plan' && sessionWorkflowEnabled
-        ? t('mode.label.planReview')
-        : getModeLabel(currentMode, t);
+    const modeLabel = getModeLabel(currentMode, t);
+    const planLabel = t('mode.label.plan');
+    const planTooltip = planMode
+      ? t('plan.toggle.off', { mode: modeLabel })
+      : t('plan.toggle.on');
 
     const currentModelLabel = currentModel
       ? (availableModels.find((model) => model.id === currentModel)?.label ??
@@ -2472,6 +2508,7 @@ export const ChatEditor = memo(
     const showWorkspaceLabel = toolbarLabelVisibility.workspace;
     const showGitBranchLabel = toolbarLabelVisibility.gitBranch;
     const showModeLabel = toolbarLabelVisibility.mode;
+    const showPlanLabel = toolbarLabelVisibility.plan;
     const showModelLabel = toolbarLabelVisibility.model;
     const showCancelButton = isRunning && !core.hasContent;
     const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
@@ -2538,6 +2575,9 @@ export const ChatEditor = memo(
                 },
               ]
             : []),
+          ...(showPlanAction
+            ? [{ id: 'plan', expansionWidth: expansionWidth('plan') }]
+            : []),
           ...(showModelAction
             ? [
                 {
@@ -2581,6 +2621,7 @@ export const ChatEditor = memo(
           workspace: itemVisibility.workspace ?? false,
           gitBranch: itemVisibility.gitBranch ?? false,
           mode: itemVisibility.mode ?? false,
+          plan: itemVisibility.plan ?? false,
           model: itemVisibility.model ?? false,
         };
         const unchanged = Object.keys(next).every(
@@ -2640,11 +2681,13 @@ export const ChatEditor = memo(
       isRunning,
       modelLabelReady,
       modeLabel,
+      planLabel,
       normalizedModelChipLabel,
       sessionName,
       showAddMenuAction,
       showModelAction,
       showModeAction,
+      showPlanAction,
       workspaceIndicatorVisible,
       workspaceName,
       workspaceSelectVisible,
@@ -2705,19 +2748,32 @@ export const ChatEditor = memo(
                       })
                     }
                   >
-                    {busy ? (
-                      <LoaderCircleIcon
-                        className={styles.uploadRowSpinner}
-                        aria-hidden="true"
-                      />
-                    ) : (
-                      <UploadIcon aria-hidden="true" />
-                    )}
-                    <span className={styles.uploadRowName}>
+                    <FileTypeIcon
+                      name={upload.file.name}
+                      mimeType={upload.file.type}
+                      size={20}
+                      className={styles.uploadRowIcon}
+                      aria-hidden="true"
+                    />
+                    <span
+                      className={styles.uploadRowName}
+                      title={upload.file.name}
+                    >
                       {upload.file.name}
                     </span>
                     <span className={styles.uploadRowStatus}>
-                      {uploadStatusText(upload)}
+                      {busy && (
+                        <LoaderCircleIcon
+                          className={styles.uploadRowSpinner}
+                          aria-hidden="true"
+                        />
+                      )}
+                      <span
+                        className={styles.uploadRowStatusText}
+                        title={uploadStatusText(upload)}
+                      >
+                        {uploadStatusText(upload)}
+                      </span>
                     </span>
                   </button>
                   <button
@@ -2967,16 +3023,10 @@ export const ChatEditor = memo(
                             })
                           }
                         >
-                          <FileTypeIcon
+                          <FileAttachmentContent
                             name={file.name}
                             mimeType={file.media_type}
-                            size={14}
-                            className={styles.fileChipIcon}
-                            aria-hidden="true"
                           />
-                          <span className={styles.fileChipName}>
-                            {file.name}
-                          </span>
                         </button>
                         <button
                           type="button"
@@ -3112,6 +3162,7 @@ export const ChatEditor = memo(
                       disabled={disabled}
                       availabilityKey={JSON.stringify([
                         fileUploadEnabled === false,
+                        attachmentsEnabled,
                         uploadEnabled,
                         Boolean(
                           core.workspaceActionsRef.current?.globWorkspace ??
@@ -3126,9 +3177,7 @@ export const ChatEditor = memo(
                         ),
                         Boolean(skills?.length),
                       ])}
-                      addFileAvailable={
-                        attachmentsEnabled && fileUploadEnabled !== false
-                      }
+                      addFileAvailable={attachmentsEnabled}
                       uploadAvailable={uploadEnabled}
                       onAddFiles={handleAddMenuFiles}
                       onFilePickerCancel={focusComposer}
@@ -3236,6 +3285,7 @@ export const ChatEditor = memo(
                               showModeLabel ? '' : styles.toolBtnCompact
                             }`}
                             data-web-shell-mode-button
+                            disabled={modeControlsDisabled}
                             data-web-shell-toolbar-popover-trigger
                             onClick={(e) => {
                               e.stopPropagation();
@@ -3260,6 +3310,47 @@ export const ChatEditor = memo(
                         }
                       />
                     </div>
+                  )}
+                  {showPlanAction && (
+                    <TooltipProvider delayDuration={300}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <label
+                            className={`${styles.toolBtn} ${styles.planControl}`}
+                            data-web-shell-plan-control
+                            data-disabled={
+                              modeControlsDisabled ? '' : undefined
+                            }
+                          >
+                            {showPlanLabel ? (
+                              <span className={styles.toolBtnText}>
+                                {planLabel}
+                              </span>
+                            ) : (
+                              <span className={styles.toolBtnModeIcon}>
+                                <ModeIcon mode="plan" />
+                              </span>
+                            )}
+                            <Switch
+                              size="sm"
+                              className="after:inset-x-0"
+                              data-web-shell-plan-button
+                              aria-label={planLabel}
+                              aria-describedby={planDescriptionId}
+                              checked={planMode}
+                              disabled={modeControlsDisabled}
+                              onCheckedChange={onTogglePlan}
+                            />
+                          </label>
+                        </TooltipTrigger>
+                        <span id={planDescriptionId} className="sr-only">
+                          {planTooltip}
+                        </span>
+                        <TooltipContent side="top">
+                          {planTooltip}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   )}
                   {showModelAction && (
                     <div
@@ -3675,6 +3766,26 @@ export const ChatEditor = memo(
                   <ChevronDownIcon />
                 </span>
               </span>
+              {showPlanAction && (
+                <>
+                  <span
+                    data-toolbar-measure="plan:collapsed"
+                    className={`${styles.toolBtn} ${styles.planControl}`}
+                  >
+                    <span className={styles.toolBtnModeIcon}>
+                      <ModeIcon mode="plan" />
+                    </span>
+                    <Switch size="sm" tabIndex={-1} checked={planMode} />
+                  </span>
+                  <span
+                    data-toolbar-measure="plan:expanded"
+                    className={`${styles.toolBtn} ${styles.planControl}`}
+                  >
+                    <span className={styles.toolBtnText}>{planLabel}</span>
+                    <Switch size="sm" tabIndex={-1} checked={planMode} />
+                  </span>
+                </>
+              )}
               <span
                 data-toolbar-measure="model:collapsed"
                 className={`${styles.toolBtn} ${styles.modelToolBtn} ${styles.toolBtnCompact}`}

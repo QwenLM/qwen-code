@@ -17,6 +17,10 @@ import {
   useWorkspace,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { SIDEBAR_SESSION_PREVIEW_LIMIT } from '../../constants/sessions';
+import {
+  getDaemonErrorCode,
+  isSessionWriterBlockedCode,
+} from '../../daemon/session/session-context';
 import { useI18n } from '../../i18n';
 import { DialogShell } from '../dialogs/DialogShell';
 import { Button } from '../ui/button';
@@ -27,6 +31,7 @@ import workspaceStyles from './WorkspaceSection.module.css';
 interface StandaloneRecentsProps {
   archiveState: DaemonSessionArchiveState;
   currentSessionId?: string;
+  currentSessionReady?: boolean;
   refreshKey?: number;
   searchQuery?: string;
   onNewSession?: () => void;
@@ -101,6 +106,7 @@ function downloadExport(result: {
 export function StandaloneRecents({
   archiveState,
   currentSessionId,
+  currentSessionReady = false,
   refreshKey,
   searchQuery = '',
   onNewSession,
@@ -120,6 +126,8 @@ export function StandaloneRecents({
   const loadedRef = useRef(false);
   const previousRefreshKeyRef = useRef(refreshKey);
   const busySessionIdRef = useRef<string | undefined>(undefined);
+  const openGenerationRef = useRef(0);
+  const openingSessionIdRef = useRef<string | undefined>(undefined);
   const { t } = useI18n();
   const [sessions, setSessions] = useState<DaemonStandaloneSessionSummary[]>(
     [],
@@ -131,8 +139,14 @@ export function StandaloneRecents({
   const [showAll, setShowAll] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [loadError, setLoadError] = useState(false);
+  const [loadError, setLoadError] = useState<{ cursor?: string }>();
   const [busySessionId, setBusySessionId] = useState<string>();
+  const [sessionError, setSessionError] = useState<{
+    sessionId: string;
+    kind: 'open' | 'action';
+    messageKey: 'session.writerBlocked' | 'session.loadFailed';
+    retry: () => void;
+  }>();
   const [renameCandidate, setRenameCandidate] =
     useState<DaemonStandaloneSessionSummary>();
   const [renameValue, setRenameValue] = useState('');
@@ -150,7 +164,6 @@ export function StandaloneRecents({
       loadGenerationRef.current = generation;
       setLoadingMore(false);
       setLoading(true);
-      setLoadError(false);
       try {
         const targetCount = preservePages ? sessionsRef.current.length : 0;
         let page = await workspace.client.listStandaloneSessionsPage({
@@ -171,16 +184,35 @@ export function StandaloneRecents({
         loadedRef.current = true;
         setSessions(loaded);
         setCursor(page.nextCursor);
+        setLoadError(undefined);
       } catch (error) {
         if (loadGenerationRef.current !== generation) return;
-        setLoadError(true);
-        onError(error, t('sidebar.standaloneLoadFailed'));
+        console.warn('[web-shell] standalone session list failed:', error);
+        setLoadError({});
       } finally {
         if (loadGenerationRef.current === generation) setLoading(false);
       }
     },
-    [archiveState, onError, supported, t, workspace.client],
+    [archiveState, supported, workspace.client],
   );
+
+  useEffect(() => {
+    setSessionError((current) =>
+      current?.kind === 'open' ? undefined : current,
+    );
+    if (openingSessionIdRef.current !== currentSessionId)
+      ++openGenerationRef.current;
+  }, [currentSessionId]);
+
+  useEffect(() => {
+    if (currentSessionReady) {
+      setSessionError((current) =>
+        current?.kind === 'open' && current.sessionId === currentSessionId
+          ? undefined
+          : current,
+      );
+    }
+  }, [currentSessionId, currentSessionReady]);
 
   useEffect(() => {
     const refreshRequested = previousRefreshKeyRef.current !== refreshKey;
@@ -202,7 +234,7 @@ export function StandaloneRecents({
   }, [archiveState, connection.sessionContext?.kind, load, streamingState]);
 
   useEffect(() => {
-    onStatusChange?.({ count: sessions.length, loading, error: loadError });
+    onStatusChange?.({ count: sessions.length, loading, error: !!loadError });
   }, [loadError, loading, onStatusChange, sessions.length]);
 
   useEffect(() => {
@@ -224,14 +256,16 @@ export function StandaloneRecents({
         appendUnique(current, withoutChildren(page.sessions)),
       );
       setCursor(page.nextCursor);
+      setLoadError(undefined);
     } catch (error) {
       if (loadGenerationRef.current === generation) {
-        onError(error, t('sidebar.standaloneLoadFailed'));
+        console.warn('[web-shell] standalone session page failed:', error);
+        setLoadError({ cursor });
       }
     } finally {
       if (loadGenerationRef.current === generation) setLoadingMore(false);
     }
-  }, [archiveState, cursor, loadingMore, onError, t, workspace.client]);
+  }, [archiveState, cursor, loadingMore, workspace.client]);
 
   const run = useCallback(
     async (
@@ -241,11 +275,33 @@ export function StandaloneRecents({
       if (busySessionIdRef.current) return false;
       busySessionIdRef.current = sessionId;
       setBusySessionId(sessionId);
+      setSessionError(undefined);
       try {
         await action();
         return true;
       } catch (error) {
-        onError(error, t('sidebar.standaloneActionFailed'));
+        if (isSessionWriterBlockedCode(getDaemonErrorCode(error))) {
+          console.warn(
+            '[web-shell] standalone session action blocked by writer fence:',
+            error,
+          );
+          setRenameCandidate((current) =>
+            current?.sessionId === sessionId ? undefined : current,
+          );
+          setDeleteCandidate((current) =>
+            current?.sessionId === sessionId ? undefined : current,
+          );
+          setSessionError({
+            sessionId,
+            kind: 'action',
+            messageKey: 'session.writerBlocked',
+            retry: () => {
+              void run(sessionId, action);
+            },
+          });
+        } else {
+          onError(error, t('sidebar.standaloneActionFailed'));
+        }
         return false;
       } finally {
         busySessionIdRef.current = undefined;
@@ -267,7 +323,7 @@ export function StandaloneRecents({
 
   const archiveSession = useCallback(
     async (session: DaemonStandaloneSessionSummary) => {
-      const succeeded = await run(session.sessionId, async () => {
+      await run(session.sessionId, async () => {
         const result = await workspace.client.archiveStandaloneSessions([
           session.sessionId,
         ]);
@@ -276,23 +332,24 @@ export function StandaloneRecents({
           result.alreadyArchived.includes(session.sessionId) ||
           result.notFound?.includes(session.sessionId)
         ) {
+          removeMutated(session.sessionId);
           return;
         }
         const failure = result.errors.find(
           (entry) => entry.sessionId === session.sessionId,
         );
-        throw new Error(
-          failure?.message ?? t('sidebar.standaloneActionFailed'),
+        throw Object.assign(
+          new Error(failure?.message ?? t('sidebar.standaloneActionFailed')),
+          { body: failure },
         );
       });
-      if (succeeded) removeMutated(session.sessionId);
     },
     [removeMutated, run, t, workspace.client],
   );
 
   const unarchiveSession = useCallback(
     async (session: DaemonStandaloneSessionSummary) => {
-      const succeeded = await run(session.sessionId, async () => {
+      await run(session.sessionId, async () => {
         const result = await workspace.client.unarchiveStandaloneSessions([
           session.sessionId,
         ]);
@@ -301,16 +358,17 @@ export function StandaloneRecents({
           result.alreadyActive.includes(session.sessionId) ||
           result.notFound?.includes(session.sessionId)
         ) {
+          removeMutated(session.sessionId);
           return;
         }
         const failure = result.errors.find(
           (entry) => entry.sessionId === session.sessionId,
         );
-        throw new Error(
-          failure?.message ?? t('sidebar.standaloneActionFailed'),
+        throw Object.assign(
+          new Error(failure?.message ?? t('sidebar.standaloneActionFailed')),
+          { body: failure },
         );
       });
-      if (succeeded) removeMutated(session.sessionId);
     },
     [removeMutated, run, t, workspace.client],
   );
@@ -328,15 +386,16 @@ export function StandaloneRecents({
           const failure = result.errors.find(
             (entry) => entry.sessionId === session.sessionId,
           );
-          throw new Error(
-            failure?.message ?? t('sidebar.standaloneActionFailed'),
+          throw Object.assign(
+            new Error(failure?.message ?? t('sidebar.standaloneActionFailed')),
+            { body: failure },
           );
         }
         if (result.fileCleanupPending.includes(session.sessionId)) {
           onNotice(t('sidebar.standaloneCleanupPending'));
         }
+        removeMutated(session.sessionId);
       });
-      if (succeeded) removeMutated(session.sessionId);
       return succeeded;
     },
     [onNotice, removeMutated, run, t, workspace.client],
@@ -344,18 +403,33 @@ export function StandaloneRecents({
 
   const openSession = useCallback(
     async (sessionId: string) => {
+      const generation = ++openGenerationRef.current;
+      openingSessionIdRef.current = sessionId;
+      setSessionError(undefined);
       try {
         await onLoadSession(sessionId);
       } catch (error) {
-        onError(error, t('session.loadFailed'));
+        if (generation !== openGenerationRef.current) return;
+        if (isSessionWriterBlockedCode(getDaemonErrorCode(error))) return;
+        console.warn('[web-shell] standalone session load failed:', error);
+        setSessionError({
+          sessionId,
+          kind: 'open',
+          messageKey: 'session.loadFailed',
+          retry: () => {
+            void openSession(sessionId);
+          },
+        });
       }
     },
-    [onError, onLoadSession, t],
+    [onLoadSession],
   );
 
   if (!supported) return null;
   if (
     archiveState === 'archived' &&
+    !loadError &&
+    !sessionError &&
     !loading &&
     sessions.length === 0 &&
     !cursor
@@ -427,6 +501,36 @@ export function StandaloneRecents({
             </div>
           )}
         </div>
+        {sessionError && (
+          <div role="alert" className="px-2 py-1 text-xs text-muted-foreground">
+            <span>
+              {sessionError.sessionId.slice(0, 8)}: {t(sessionError.messageKey)}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={!!busySessionId}
+              onClick={sessionError.retry}
+            >
+              {t('common.retry')}
+            </Button>
+          </div>
+        )}
+        {loadError && (
+          <div role="alert" className="px-2 py-1 text-xs text-muted-foreground">
+            {t('sidebar.standaloneLoadFailed')}
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={loading || loadingMore}
+              onClick={() => {
+                void (loadError.cursor ? loadMore() : load(true));
+              }}
+            >
+              {t('common.retry')}
+            </Button>
+          </div>
+        )}
         {(expanded || Boolean(query)) && (
           <div className="flex flex-col gap-0.5">
             {displayedSessions.map((session) => {
@@ -461,7 +565,7 @@ export function StandaloneRecents({
                 onDelete: () => setDeleteCandidate(session),
               });
             })}
-            {!loading && visibleSessions.length === 0 && (
+            {!loading && !loadError && visibleSessions.length === 0 && (
               <div className={workspaceStyles.empty}>
                 {archiveState === 'active'
                   ? t('sidebar.noSessions')

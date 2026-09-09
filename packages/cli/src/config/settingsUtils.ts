@@ -269,6 +269,7 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'security', key: 'allowPrivateNetworkHooks' },
   { section: 'security', key: 'allowedInsecureVoiceBaseUrls' },
   { section: 'goals', key: 'modelProposed' },
+  { section: 'outboundCorrelation', key: 'allowDynamicHeaderValues' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;
@@ -394,6 +395,21 @@ export function settingExistsInScope(
   const path = key.split('.');
   const value = getNestedValue(scopeSettings as Record<string, unknown>, path);
   return value !== undefined;
+}
+
+function settingPathExists(key: string, settings: Settings): boolean {
+  let current: unknown = settings;
+  for (const segment of key.split('.')) {
+    if (
+      typeof current !== 'object' ||
+      current === null ||
+      !Object.hasOwn(current, segment)
+    ) {
+      return false;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return true;
 }
 
 /**
@@ -573,7 +589,7 @@ export function getDisplayValue(
   const definition = getSettingDefinition(key);
 
   let value: SettingsValue;
-  if (pendingSettings && settingExistsInScope(key, pendingSettings)) {
+  if (pendingSettings && settingPathExists(key, pendingSettings)) {
     // Show the value from the pending (unsaved) edits when it exists
     value = getEffectiveValue(key, pendingSettings, {});
   } else if (settingExistsInScope(key, settings)) {
@@ -584,12 +600,16 @@ export function getDisplayValue(
     value = getDefaultValue(key);
   }
 
-  let valueString = String(value);
+  let valueString = value === undefined ? t('(not set)') : String(value);
 
   // Special handling for outputLanguage 'auto' value
   if (key === 'general.outputLanguage' && isAutoLanguage(value as string)) {
     valueString = t('Auto (follow user input)');
-  } else if (definition?.type === 'enum' && definition.options) {
+  } else if (
+    value !== undefined &&
+    definition?.type === 'enum' &&
+    definition.options
+  ) {
     const option = definition.options?.find((option) => option.value === value);
     if (option?.label) {
       valueString = t(option.label) || option.label;
@@ -612,6 +632,14 @@ export function getDisplayValue(
   }
 
   return valueString;
+}
+
+export function nextBooleanSettingValue(
+  currentValue: unknown,
+  defaultValue?: unknown,
+): boolean {
+  if (currentValue !== undefined) return !currentValue;
+  return defaultValue === undefined ? false : !defaultValue;
 }
 
 /**
