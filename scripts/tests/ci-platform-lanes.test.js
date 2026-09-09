@@ -102,6 +102,13 @@ it('keeps lint_and_static sized for cold-cache pool runs', () => {
   expect(timeoutMinutesOn('lint_and_static', '')).toBe(45);
 });
 
+it('keeps browser gates hosted independently of the shared Linux runner', () => {
+  expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe('ubuntu-latest');
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(20);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(20);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(20);
+});
+
 // One helper for both "an <event> run reaches exactly these jobs" invariants.
 //
 // It decides by EVALUATING each gate for the event, not by looking for tokens
