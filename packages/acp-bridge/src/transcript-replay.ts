@@ -645,8 +645,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
     const userMeta: UpdateMetaOptions =
-      typeof record.promptId === 'string' && record.promptId.trim().length > 0
-        ? { ...meta, extra: { ...meta.extra, promptId: record.promptId } }
+      typeof record.daemonPromptId === 'string' &&
+      record.daemonPromptId.trim().length > 0
+        ? { ...meta, extra: { ...meta.extra, promptId: record.daemonPromptId } }
         : meta;
     const payload = isObjectRecord(record.systemPayload)
       ? record.systemPayload

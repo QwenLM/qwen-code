@@ -84,7 +84,7 @@ describe('createTranscriptReplayMachine', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
       record('user-1', 'user', {
-        promptId: 'daemon-prompt-1',
+        daemonPromptId: 'daemon-prompt-1',
         message: {
           role: 'user',
           parts: [
@@ -109,6 +109,7 @@ describe('createTranscriptReplayMachine', () => {
     expect(projected).toHaveLength(3);
     for (const update of projected) {
       expect(update.sessionUpdate).toBe('user_message_chunk');
+      expect(update._meta).not.toHaveProperty('daemonPromptId');
       expect(update._meta).toMatchObject({
         promptId: 'daemon-prompt-1',
         qwenTranscript: { sourceRecordIds: ['user-1'] },

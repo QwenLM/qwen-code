@@ -276,7 +276,7 @@ function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
 
 export interface ChatRecord {
   /** Daemon admission identity, distinct from CLI file-history prompt IDs. */
-  promptId?: string;
+  daemonPromptId?: string;
   /** Unique identifier for this logical message */
   uuid: string;
   /** UUID of the parent message; null for root (first message in session) */
@@ -1882,14 +1882,14 @@ export class ChatRecordingService {
     message: PartListUnion,
     goalContext?: GoalTurnPermit,
     promptPayload?: UserPromptRecordPayload,
-    promptId?: string,
+    daemonPromptId?: string,
   ): void {
     try {
       this.trackUserDisplayTextForTitle(promptPayload?.displayText);
       this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
-        ...(promptId ? { promptId } : {}),
+        ...(daemonPromptId ? { daemonPromptId } : {}),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
         ...(promptPayload ? { systemPayload: promptPayload } : {}),
