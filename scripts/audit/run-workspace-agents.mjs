@@ -47,6 +47,8 @@ export { findAgentSessionBinding } from '${repo}/${src}/session-binding.js';
 export { strandLocalRuns, STRANDED_FAILURE_STAGE } from '${repo}/${src}/stranded-runs.js';
 export * from '${repo}/${src}/a2a-contract.js';
 export * from '${repo}/${src}/external-intake.js';
+export * from '${repo}/${src}/a2a-grants.js';
+export * from '${repo}/${src}/a2a-server.js';
 export { deleteThread, enqueueThreadEvent } from '${repo}/${src}/store.js';
 export { ToolNames } from '${repo}/packages/core/src/tools/tool-names.js';
 `,
@@ -2531,6 +2533,210 @@ ok(
   'cancelling a done task leaves it done, not rewritten as cancelled',
   reCancel?.thread.status === 'done',
   reCancel?.thread.status,
+);
+
+console.log('\n32. the five required A2A operations, over the local store');
+await M.updateWorkspaceAgents(ROOT, (a) => [
+  ...a,
+  { id: 'ag_open', name: 'opened', createdAt: 1, description: 'Read-only analysis' },
+  { id: 'ag_closed', name: 'notopened', createdAt: 1 },
+]);
+const a2aIssued = await M.issueA2AGrant(ROOT, {
+  callerId: 'partner-a',
+  agentId: 'ag_open',
+  scope: 'analysis',
+});
+const a2aA = { callerId: 'partner-a', secret: a2aIssued.secret };
+ok('issuing a grant returns the secret exactly once', typeof a2aIssued.secret === 'string' && a2aIssued.secret.length > 20);
+ok(
+  'and never stores it — only a digest is persisted',
+  !JSON.stringify(await M.listA2AGrants(ROOT)).includes(a2aIssued.secret),
+);
+ok(
+  'the listed grant carries no digest either',
+  (await M.listA2AGrants(ROOT)).every((g) => g.secretHash === undefined),
+  JSON.stringify(await M.listA2AGrants(ROOT)),
+);
+
+const a2aSent = await M.a2aSendMessage(ROOT, a2aA, {
+  agentId: 'ag_open',
+  messageId: 'm-1',
+  title: 'Analyse the sample repo',
+  body: 'List the top-level packages',
+});
+ok('an authorized caller can submit work', a2aSent.ok === true, JSON.stringify(a2aSent));
+ok(
+  'and gets a Task whose contextId is the thread tree, not the thread',
+  a2aSent.value.contextId === a2aSent.value.id,
+);
+ok(
+  'reported in a state the spec names',
+  a2aSent.value.status.state.startsWith('TASK_STATE_'),
+  a2aSent.value.status.state,
+);
+ok(
+  'with our extension namespaced by its URI, so extensions cannot collide',
+  Object.keys(a2aSent.value.metadata)[0] === M.QWEN_A2A_EXTENSION_URI,
+  JSON.stringify(Object.keys(a2aSent.value.metadata)),
+);
+
+// Retry through the protocol surface, not just the store.
+const a2aResent = await M.a2aSendMessage(ROOT, a2aA, {
+  agentId: 'ag_open',
+  messageId: 'm-1',
+  title: 'Analyse the sample repo',
+  body: 'List the top-level packages',
+});
+ok('resending the same message yields the same task', a2aResent.ok && a2aResent.value.id === a2aSent.value.id);
+const a2aConflicting = await M.a2aSendMessage(ROOT, a2aA, {
+  agentId: 'ag_open',
+  messageId: 'm-1',
+  title: 'Analyse the sample repo',
+  body: 'Something else entirely',
+});
+ok(
+  'reusing the id for different content is a conflict naming the existing task',
+  a2aConflicting.ok === false &&
+    a2aConflicting.kind === 'conflict' &&
+    a2aConflicting.existingTaskId === a2aSent.value.id,
+  JSON.stringify(a2aConflicting),
+);
+
+ok(
+  'the task is readable by its owner',
+  (await M.a2aGetTask(ROOT, a2aA, a2aSent.value.id)).ok === true,
+);
+const a2aListed = await M.a2aListTasks(ROOT, a2aA, 'ag_open');
+ok('and listed for it', a2aListed.ok && a2aListed.value.length === 1);
+
+// Every authorization boundary the plan lists.
+const badSecret = { callerId: 'partner-a', secret: 'not-the-secret' };
+ok(
+  'a wrong secret is refused',
+  (await M.a2aSendMessage(ROOT, badSecret, { agentId: 'ag_open', messageId: 'm-2', title: 't', body: 'b' })).kind === 'refused',
+);
+ok(
+  'an agent this caller was not granted is refused',
+  (await M.a2aSendMessage(ROOT, a2aA, { agentId: 'ag_closed', messageId: 'm-3', title: 't', body: 'b' })).kind === 'refused',
+);
+ok(
+  'and an unknown agent is refused the same way, revealing nothing',
+  (await M.a2aSendMessage(ROOT, a2aA, { agentId: 'ag_nonexistent', messageId: 'm-4', title: 't', body: 'b' })).kind ===
+    (await M.a2aSendMessage(ROOT, a2aA, { agentId: 'ag_closed', messageId: 'm-5', title: 't', body: 'b' })).kind,
+);
+const unknownCaller = { callerId: 'stranger', secret: a2aIssued.secret };
+ok(
+  'a caller holding a valid secret it was not issued is refused',
+  (await M.a2aSendMessage(ROOT, unknownCaller, { agentId: 'ag_open', messageId: 'm-6', title: 't', body: 'b' })).kind === 'refused',
+);
+
+// a2aA second authorized client shares the queue but not the work.
+const issuedB = await M.issueA2AGrant(ROOT, {
+  callerId: 'partner-b',
+  agentId: 'ag_open',
+  scope: 'analysis',
+});
+const a2aB = { callerId: 'partner-b', secret: issuedB.secret };
+const sentB = await M.a2aSendMessage(ROOT, a2aB, {
+  agentId: 'ag_open',
+  messageId: 'm-1',
+  title: "a2aB's work",
+  body: 'Different work, same message id',
+});
+ok('a second authorized client can call the same agent', sentB.ok === true);
+ok('and its work is distinct', sentB.value.id !== a2aSent.value.id);
+ok(
+  "it cannot read the first client's task",
+  (await M.a2aGetTask(ROOT, a2aB, a2aSent.value.id)).kind === 'not_found',
+);
+ok(
+  "nor cancel it",
+  (await M.a2aCancelTask(ROOT, a2aB, a2aSent.value.id)).kind === 'not_found',
+);
+const listedB = await M.a2aListTasks(ROOT, a2aB, 'ag_open');
+ok(
+  'and lists only its own',
+  listedB.ok && listedB.value.length === 1 && listedB.value[0].id === sentB.value.id,
+);
+
+// Scope. a2aA read-only grant may not do full-scope work.
+const a2aScoped = await M.checkA2AGrant(ROOT, {
+  callerId: 'partner-a', agentId: 'ag_open', secret: a2aIssued.secret, required: 'full',
+});
+ok('an analysis grant does not satisfy a full-scope call', a2aScoped.ok === false && a2aScoped.reason === 'out_of_scope');
+const fullIssued = await M.issueA2AGrant(ROOT, {
+  callerId: 'partner-c', agentId: 'ag_open', scope: 'full',
+});
+const fullCheck = await M.checkA2AGrant(ROOT, {
+  callerId: 'partner-c', agentId: 'ag_open', secret: fullIssued.secret, required: 'analysis',
+});
+ok('but a full grant satisfies an analysis call', fullCheck.ok === true);
+
+// Expiry and revocation are different things and both must bite.
+const a2aExpired = await M.issueA2AGrant(ROOT, {
+  callerId: 'partner-d', agentId: 'ag_open', scope: 'analysis', expiresAt: 1,
+});
+ok(
+  'an expired grant is refused',
+  (await M.a2aSendMessage(ROOT, { callerId: 'partner-d', secret: a2aExpired.secret }, { agentId: 'ag_open', messageId: 'm-7', title: 't', body: 'b' })).kind === 'refused',
+);
+ok('revoking a grant reports that it was there', (await M.revokeA2AGrant(ROOT, { callerId: 'partner-b', agentId: 'ag_open' })) === true);
+ok('revoking twice reports that it was not', (await M.revokeA2AGrant(ROOT, { callerId: 'partner-b', agentId: 'ag_open' })) === false);
+ok(
+  'a revoked caller can no longer submit',
+  (await M.a2aSendMessage(ROOT, a2aB, { agentId: 'ag_open', messageId: 'm-8', title: 't', body: 'b' })).kind === 'refused',
+);
+ok(
+  'nor read the work it had already submitted',
+  (await M.a2aGetTask(ROOT, a2aB, sentB.value.id)).kind === 'refused',
+);
+ok(
+  "and the first client is unaffected by the second's revocation",
+  (await M.a2aGetTask(ROOT, a2aA, a2aSent.value.id)).ok === true,
+);
+
+// Re-issuing replaces rather than accumulating.
+const a2aReissued = await M.issueA2AGrant(ROOT, { callerId: 'partner-a', agentId: 'ag_open', scope: 'analysis' });
+ok(
+  'the old secret stops working when a grant is re-issued',
+  (await M.a2aSendMessage(ROOT, a2aA, { agentId: 'ag_open', messageId: 'm-9', title: 't', body: 'b' })).kind === 'refused',
+);
+ok(
+  'and the new one works',
+  (await M.a2aSendMessage(ROOT, { callerId: 'partner-a', secret: a2aReissued.secret }, { agentId: 'ag_open', messageId: 'm-10', title: 't', body: 'b' })).ok === true,
+);
+ok(
+  'with exactly one grant for that pair, not two',
+  (await M.listA2AGrants(ROOT)).filter((g) => g.callerId === 'partner-a' && g.agentId === 'ag_open').length === 1,
+);
+
+// A retired agent is not a way in, even with a live grant. Needs an agent with
+// no live work: `retireWorkspaceAgent` refuses to retire one mid-turn, so
+// reusing the busy agent above asserted a refusal in a world where the retire
+// had silently not happened — the assertion failed, which is how this was found.
+await M.updateWorkspaceAgents(ROOT, (a) => [
+  ...a,
+  { id: 'ag_retiree', name: 'retiree', createdAt: 1 },
+]);
+const retireeGrant = await M.issueA2AGrant(ROOT, {
+  callerId: 'partner-e', agentId: 'ag_retiree', scope: 'analysis',
+});
+const retireeCaller = { callerId: 'partner-e', secret: retireeGrant.secret };
+ok(
+  'the grant works while the agent is addressable',
+  (await M.a2aListTasks(ROOT, retireeCaller, 'ag_retiree')).ok === true,
+);
+ok(
+  'and the agent actually retires',
+  (await M.retireWorkspaceAgent(ROOT, 'ag_retiree')) === 'updated',
+);
+ok(
+  'after which the same live grant admits nobody',
+  (await M.a2aSendMessage(ROOT, retireeCaller, { agentId: 'ag_retiree', messageId: 'm-11', title: 't', body: 'b' })).kind === 'refused',
+);
+ok(
+  'and its tasks are no longer readable through it either',
+  (await M.a2aListTasks(ROOT, retireeCaller, 'ag_retiree')).kind === 'refused',
 );
 
 await fs.rm(tmp, { recursive: true, force: true });

@@ -91,6 +91,29 @@ export {
   listExternalThreadsForCaller,
   getExternalThreadForCaller,
   cancelExternalThreadForCaller,
+} from './workspace-agents/external-intake.js';
+export {
+  issueA2AGrant,
+  revokeA2AGrant,
+  checkA2AGrant,
+  listA2AGrants,
+  A2A_GRANT_SCOPES,
+} from './workspace-agents/a2a-grants.js';
+export {
+  a2aSendMessage,
+  a2aGetTask,
+  a2aListTasks,
+  a2aCancelTask,
+  a2aAgentCardForCaller,
+} from './workspace-agents/a2a-server.js';
+export type {
+  A2ATaskView,
+  A2AAgentCard,
+  A2ACaller,
+  A2AFailure,
+} from './workspace-agents/a2a-server.js';
+export type { A2AGrant, A2AGrantScope } from './workspace-agents/types.js';
+export {
   ExternalIntakeConflictError,
 } from './workspace-agents/external-intake.js';
 export type {

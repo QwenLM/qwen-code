@@ -34,6 +34,7 @@ import {
   type AgentNotifyTarget,
   type WorkspaceAgentsFile,
   type AgentWorkspaceState,
+  type A2AGrant,
   type ExternalIntake,
   type MessageOutcome,
   type RunCloseKind,
@@ -474,6 +475,18 @@ function isValidNotifyTarget(value: unknown): boolean {
   );
 }
 
+function isValidA2AGrant(value: unknown): value is A2AGrant {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['callerId']) &&
+    isValidId(value['agentId']) &&
+    (value['scope'] === 'analysis' || value['scope'] === 'full') &&
+    isNonEmptyString(value['secretHash']) &&
+    isFiniteTimestamp(value['createdAt']) &&
+    (value['expiresAt'] === undefined || isFiniteTimestamp(value['expiresAt']))
+  );
+}
+
 function isValidWorkspace(value: unknown): value is AgentWorkspaceState {
   return (
     isRecord(value) &&
@@ -482,7 +495,13 @@ function isValidWorkspace(value: unknown): value is AgentWorkspaceState {
     (value['hostSessionId'] === undefined ||
       isNonEmptyString(value['hostSessionId'])) &&
     isPositiveInteger(value['nextRunSequence']) &&
-    isValidNotifyTarget(value['notifyTarget'])
+    isValidNotifyTarget(value['notifyTarget']) &&
+    // A malformed grant list fails the whole record rather than being dropped.
+    // Dropping it would silently revoke every external caller — or, if the
+    // malformed entry were the one being read past, silently admit one.
+    (value['callerGrants'] === undefined ||
+      (Array.isArray(value['callerGrants']) &&
+        value['callerGrants'].every(isValidA2AGrant)))
   );
 }
 
@@ -1328,6 +1347,34 @@ export async function setAgentNotifyTarget(
           const { notifyTarget: _dropped, ...rest } = workspace;
           return rest;
         })();
+    await atomicWriteJSON(getWorkspaceFilePath(projectRoot), next, {
+      noFollow: true,
+    });
+    return next;
+  });
+}
+
+/**
+ * Read-modify-write the caller grants under the workspace lock.
+ *
+ * A read followed by a separate write would let two concurrent issues drop one
+ * another — and a dropped grant is a caller who thinks it has access and does
+ * not, or worse, one whose revocation silently did not take.
+ */
+export async function updateAgentWorkspaceCallerGrants(
+  projectRoot: string,
+  update: (grants: readonly A2AGrant[]) => A2AGrant[],
+): Promise<AgentWorkspaceState> {
+  return withWorkspaceLock(projectRoot, async () => {
+    const workspace = await ensureMigratedUnlocked(projectRoot);
+    const grants = update(workspace.callerGrants ?? []);
+    const next: AgentWorkspaceState =
+      grants.length > 0
+        ? { ...workspace, callerGrants: grants }
+        : (() => {
+            const { callerGrants: _dropped, ...rest } = workspace;
+            return rest;
+          })();
     await atomicWriteJSON(getWorkspaceFilePath(projectRoot), next, {
       noFollow: true,
     });

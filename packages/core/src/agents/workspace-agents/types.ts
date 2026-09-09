@@ -57,6 +57,33 @@ export interface AgentNotifyTarget {
   target: { type: 'user'; id: string } | { type: 'chat'; id: string };
 }
 
+/**
+ * How much an external caller may ask of one agent.
+ *
+ * `analysis` is read-only work, which is what the plan opens first; `full`
+ * is everything that agent can do. Coarse on purpose — a scope nobody can
+ * read is a scope nobody enforces correctly.
+ */
+export type A2AGrantScope = 'analysis' | 'full';
+
+/**
+ * One external caller's permission to call one agent.
+ *
+ * Per agent, never per daemon: opening agent A says nothing about agent B, and
+ * a grant in one direction confers nothing in the other. The secret is stored
+ * only as a digest and never travels in a thread, a prompt, a tool argument
+ * or a log line.
+ */
+export interface A2AGrant {
+  callerId: string;
+  agentId: string;
+  scope: A2AGrantScope;
+  secretHash: string;
+  createdAt: number;
+  /** Absent means it does not expire on its own; revocation still applies. */
+  expiresAt?: number;
+}
+
 export interface AgentWorkspaceState {
   schemaVersion: typeof AGENTS_SCHEMA_VERSION;
   workspaceId: string;
@@ -64,6 +91,8 @@ export interface AgentWorkspaceState {
   nextRunSequence: number;
   /** Absent until a person picks one; see {@link AgentNotifyTarget}. */
   notifyTarget?: AgentNotifyTarget;
+  /** External callers allowed in, and to which agent. Absent means none. */
+  callerGrants?: A2AGrant[];
 }
 
 export interface WorkspaceAgentsFile {
