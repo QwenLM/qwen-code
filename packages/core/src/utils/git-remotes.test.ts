@@ -213,14 +213,16 @@ describe('isValidRemoteUrl', () => {
 
 describe('isRemovableRemoteName', () => {
   // Removal must not be stricter than git: names a hand-edited config can
-  // hold stay removable — the only floors are non-emptiness and the NUL
-  // byte execFile cannot carry; the `--` terminator guards the exec vector
-  // (pinned by the dash-leading round-trip below — git parses a leading
-  // `-` as a switch without it).
+  // hold stay removable — the floors are non-emptiness, the NUL byte
+  // execFile cannot carry, and (since the tracking-refs sweep landed) a
+  // `/`, whose tracking namespace is a subdirectory of the prefix
+  // remote's and cannot be swept safely; the `--` terminator guards the
+  // exec vector (pinned by the dash-leading round-trip below — git
+  // parses a leading `-` as a switch without it).
   it.each([
     ['origin', true],
     ['a.lock', true],
-    ['a/b', true],
+    ['a/b', false],
     ['a:b', true],
     ['HEAD', true],
     ['-y', true],
@@ -1498,6 +1500,24 @@ describe('fetchGitRemotes repository scope', () => {
     const remotes = await gitRemoteRemove(sub, 'origin', fixtureEnv);
     expect(remotes).toEqual([]);
     expect(git(dir, 'remote')).toBe('');
+  });
+
+  it('refuses a slashed remote name before the sweep can reach a sibling namespace', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    // refs/remotes/origin/staging/* is a live namespace of its own —
+    // origin's staging/* branch tracking refs, or a configured
+    // `origin/staging` remote's — and a slashed removal target's sweep
+    // pattern cannot tell them apart, so the panel refuses the shape
+    // before anything runs.
+    git(dir, 'update-ref', 'refs/remotes/origin/staging/main', 'HEAD');
+    await expect(
+      gitRemoteRemove(dir, 'origin/staging', fixtureEnv),
+    ).rejects.toThrow('invalid remote name');
+    expect(git(dir, 'for-each-ref', 'refs/remotes/origin')).toContain(
+      'refs/remotes/origin/staging/main',
+    );
   });
 
   it('sweeps orphaned tracking refs a refspec-less worktree removal leaves behind', async () => {

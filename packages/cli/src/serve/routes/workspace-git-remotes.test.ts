@@ -324,7 +324,7 @@ describe('workspace qualified Git remotes routes (input validation)', () => {
     expect(response.body.error).toBe('invalid_remote_url');
   });
 
-  it.each(['', 'a\0b'])(
+  it.each(['', 'a\0b', 'origin/staging'])(
     'rejects remote name %j on remove with 400 invalid_remote_name',
     async (name) => {
       const response = await request(validatedApp())

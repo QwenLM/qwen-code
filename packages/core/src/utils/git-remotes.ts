@@ -98,8 +98,15 @@ export function isValidRemoteUrl(url: string): boolean {
 // never carries a NUL), though git may still refuse the removal itself —
 // e.g. a configured fetch refspec it cannot parse dies before mutating
 // anything, and the route classifies that 409 remote_config_unparsable.
+// One exception: a SLASHED name's tracking namespace is a subdirectory of
+// the prefix remote's (refs/remotes/origin/staging/* lives inside
+// refs/remotes/origin/*), so the post-removal sweep cannot tell the
+// remote's own refs from the prefix remote's branch refs — and a
+// never-configured slashed name would 404 only AFTER the converge-arm
+// sweep destroyed them. The panel refuses the shape; the terminal's
+// `git remote remove` remains the tool for it.
 export function isRemovableRemoteName(name: string): boolean {
-  return name.length > 0 && !name.includes('\0');
+  return name.length > 0 && !name.includes('\0') && !name.includes('/');
 }
 
 function isNoMatchConfigError(err: unknown): boolean {

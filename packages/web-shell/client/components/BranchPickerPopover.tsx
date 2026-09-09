@@ -112,10 +112,15 @@ function rootScope(element: Element | null): Document | ShadowRoot {
 // stripped invisible class, because CSS collapses edge and repeated
 // whitespace out of the inked text — `origin` and `origin ` render one
 // row — so the tooltip (and the name's aria-label) spells those
-// characters out too.
-function escapeNameChars(value: string): string {
+// characters out too. With `nonAscii`, EVERY non-printable-ASCII
+// character is spelled out — for rows marked on canonical-equivalence
+// or script-mixing grounds, where the ambiguity IS an ink-identical
+// glyph (a Cyrillic `о` reads as `o`).
+function escapeNameChars(value: string, nonAscii = false): string {
   return value.replace(
-    /[\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029]/gu,
+    nonAscii
+      ? /[^\x21-\x7E]/gu
+      : /[\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029]/gu,
     (ch) => `\\u{${ch.codePointAt(0)?.toString(16)}}`,
   );
 }
@@ -1866,10 +1871,24 @@ function RemotesView({
               // two lookalikes never present one identity. CSS also
               // collapses edge and repeated whitespace out of the inked
               // text, so a name differing only by whitespace (origin vs
-              // "origin ") flags the same way.
+              // "origin ") flags the same way. Two more structural
+              // arms, because the class list alone has no last corner:
+              // canonical-equivalence twins (an NFD name inks like its
+              // NFC twin), and a Latin name mixing in another script's
+              // letters (the Cyrillic-`о` homoglyph shape). Both mark
+              // the UNUSUAL row, keeping the house polarity: a plain
+              // sibling row stays unmarked.
+              const nfcName = r.name.normalize('NFC');
+              const mixedScripts =
+                /\p{Script=Latin}/u.test(r.name) &&
+                /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u.test(
+                  r.name,
+                );
               const hiddenChars =
                 displayName !== r.name ||
-                r.name.replace(/\s+/g, ' ').trim() !== r.name;
+                r.name.replace(/\s+/g, ' ').trim() !== r.name ||
+                nfcName !== r.name ||
+                mixedScripts;
               // The marker's visible part shows the name as CSS inks it
               // (whitespace collapsed, edges trimmed) so the raw name's
               // padding does not double the separator before the marker;
@@ -1881,7 +1900,7 @@ function RemotesView({
                   : t('branchPicker.remotes.invisibleName')
                 : displayName;
               const escapedName = hiddenChars
-                ? escapeNameChars(r.name)
+                ? escapeNameChars(r.name, nfcName !== r.name || mixedScripts)
                 : undefined;
               const ariaName = escapedName
                 ? `${rowName} ${escapedName}`

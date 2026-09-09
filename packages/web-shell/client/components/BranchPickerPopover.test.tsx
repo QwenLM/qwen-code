@@ -2785,6 +2785,66 @@ describe('BranchPickerPopover remotes view', () => {
     expect(workspaceGitRemotes.mock.calls.length).toBeGreaterThan(calls);
   });
 
+  it('marks canonical-equivalence and script-mixing lookalikes', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        remote('origin'),
+        // A Cyrillic \u043e in a Latin name: inks identically to the
+        // row above, no invisible character involved.
+        remote('оrigin'),
+        // Canonical twins: composed vs decomposed é.
+        remote('café'),
+        remote('cafe\u0301'),
+        // A legitimate non-ASCII name must NOT be marked.
+        remote('上游'),
+      ],
+    });
+    await openRemotesView();
+
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    // The plain Latin row stays unmarked; its Cyrillic twin is marked
+    // and its tooltip spells the confusable out as a codepoint.
+    expect(rowOf('origin')?.textContent).not.toContain('(hidden characters)');
+    expect(rowOf('оrigin')?.textContent).toContain('(hidden characters)');
+    expect(
+      rowOf('оrigin')
+        ?.querySelector('[data-testid="remote-name"]')
+        ?.getAttribute('title'),
+    ).toContain('\\u{43e}');
+    // Canonical twins: the decomposed (NFD) row is marked — the unusual
+    // spelling carries the marker, like the ZWSP precedent — while the
+    // NFC row stays plain.
+    expect(rowOf('café')?.textContent).not.toContain('(hidden characters)');
+    expect(rowOf('cafe\u0301')?.textContent).toContain('(hidden characters)');
+    expect(
+      rowOf('cafe\u0301')
+        ?.querySelector('[data-testid="remote-name"]')
+        ?.getAttribute('title'),
+    ).toContain('\\u{301}');
+    // The legitimate non-ASCII name renders as itself, unmarked.
+    expect(rowOf('上游')?.textContent).not.toContain('(hidden characters)');
+    expect(
+      rowOf('上游')
+        ?.querySelector('[data-testid="remote-name"]')
+        ?.getAttribute('title'),
+    ).toBe('上游');
+  });
+
   it('tells apart rows whose sanitized names collide', async () => {
     workspaceGitRemotes.mockResolvedValue({
       v: 1,
