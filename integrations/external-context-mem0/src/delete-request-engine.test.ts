@@ -358,6 +358,27 @@ describe('Mem0 single-record deletion HTTP engine', () => {
     },
   );
 
+  it.each([201, 202])(
+    'reports deleted after HTTP %s when the follow-up GET confirms absence',
+    async (status) => {
+      const fetcher = vi
+        .fn<FetchLike>()
+        .mockResolvedValueOnce(Response.json(record()))
+        .mockResolvedValueOnce(
+          Response.json({ message: 'accepted' }, { status }),
+        )
+        .mockResolvedValueOnce(absent());
+      expect(
+        await createDeleteRequestEngine(runtime(), fetcher).forget(input()),
+      ).toMatchObject({ status: 'deleted' });
+      expect(calls(fetcher).map((call) => call.method)).toEqual([
+        'GET',
+        'DELETE',
+        'GET',
+      ]);
+    },
+  );
+
   it.each([301, 400, 401, 403, 404, 429, 500])(
     'rejects non-success DELETE HTTP %s even with valid JSON',
     async (status) => {
