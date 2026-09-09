@@ -49,6 +49,7 @@ export * from '${repo}/${src}/a2a-contract.js';
 export * from '${repo}/${src}/external-intake.js';
 export * from '${repo}/${src}/a2a-grants.js';
 export * from '${repo}/${src}/a2a-server.js';
+export * from '${repo}/${src}/codex-turn-result.js';
 export { deleteThread, enqueueThreadEvent } from '${repo}/${src}/store.js';
 export { ToolNames } from '${repo}/packages/core/src/tools/tool-names.js';
 `,
@@ -2737,6 +2738,98 @@ ok(
 ok(
   'and its tasks are no longer readable through it either',
   (await M.a2aListTasks(ROOT, retireeCaller, 'ag_retiree')).kind === 'refused',
+);
+
+console.log('\n33. what a Codex turn ending is evidence of (P3)');
+// Codex has no closing tools, so without a rule every Codex turn would end
+// `unclosed` forever. Architecture §5's rule: a structured result item, or
+// nothing. The prose is never consulted.
+const codexTurn = (status, items, error) => ({
+  status,
+  completedItemTypes: items,
+  ...(error ? { error } : {}),
+});
+
+ok(
+  'a file change is a result',
+  M.classifyCodexTurn(codexTurn('completed', ['commandExecution', 'fileChange'])).kind ===
+    'result_ready',
+);
+ok(
+  'so is an explicit review completion',
+  M.classifyCodexTurn(codexTurn('completed', ['enteredReviewMode', 'exitedReviewMode'])).kind ===
+    'result_ready',
+);
+ok(
+  'and the evidence names which item made it one',
+  JSON.stringify(
+    M.classifyCodexTurn(codexTurn('completed', ['fileChange', 'fileChange'])).evidence,
+  ) === '["fileChange"]',
+);
+
+// The rule's whole purpose.
+ok(
+  'an assistant message is NOT a result, however finished it sounds',
+  M.classifyCodexTurn(codexTurn('completed', ['agentMessage'])).kind === 'unclosed',
+);
+ok(
+  'nor are commands run, searches made or plans written',
+  ['commandExecution', 'webSearch', 'plan', 'reasoning', 'mcpToolCall'].every(
+    (item) => M.classifyCodexTurn(codexTurn('completed', [item])).kind === 'unclosed',
+  ),
+);
+ok(
+  'a turn that produced nothing at all is unclosed, not successful',
+  M.classifyCodexTurn(codexTurn('completed', [])).kind === 'unclosed',
+);
+// The consequence worth knowing: read-only analysis, which is exactly the first
+// task the plan opens externally, lands here.
+ok(
+  'a read-only analysis therefore waits for a person',
+  M.classifyCodexTurn(codexTurn('completed', ['commandExecution', 'agentMessage'])).kind ===
+    'unclosed',
+);
+
+ok(
+  'an interrupted turn is neither a result nor a failure',
+  M.classifyCodexTurn(codexTurn('interrupted', ['fileChange'])).kind === 'interrupted',
+);
+ok(
+  'a failed turn keeps the error Codex gave',
+  (() => {
+    const out = M.classifyCodexTurn(
+      codexTurn('failed', [], { message: 'boom', codexErrorInfo: 'UsageLimitExceeded' }),
+    );
+    return out.kind === 'failed' && out.codexErrorInfo === 'UsageLimitExceeded';
+  })(),
+);
+ok(
+  'and a failed turn is a failure even if it produced a deliverable first',
+  M.classifyCodexTurn(codexTurn('failed', ['fileChange'], { message: 'boom' })).kind === 'failed',
+);
+
+ok(
+  'a delivered result closes for review, not as a silent success',
+  M.codexOutcomeToCloseKind(M.classifyCodexTurn(codexTurn('completed', ['fileChange']))) ===
+    'review',
+);
+ok(
+  'a vague Codex turn is recorded exactly as a vague local one is',
+  M.codexOutcomeToCloseKind(M.classifyCodexTurn(codexTurn('completed', ['agentMessage']))) ===
+    'unclosed',
+);
+ok(
+  'and an interrupted or failed turn claims no close kind at all',
+  M.codexOutcomeToCloseKind(M.classifyCodexTurn(codexTurn('interrupted', []))) === undefined &&
+    M.codexOutcomeToCloseKind(
+      M.classifyCodexTurn(codexTurn('failed', [], { message: 'x' })),
+    ) === undefined,
+);
+ok(
+  'the close kinds it can produce are ones the store accepts',
+  ['review', 'unclosed'].every((kind) =>
+    ['waiting', 'blocked', 'review', 'unclosed', 'stranded'].includes(kind),
+  ),
 );
 
 await fs.rm(tmp, { recursive: true, force: true });

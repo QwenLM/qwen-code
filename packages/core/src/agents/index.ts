@@ -100,6 +100,17 @@ export {
   A2A_GRANT_SCOPES,
 } from './workspace-agents/a2a-grants.js';
 export {
+  classifyCodexTurn,
+  codexOutcomeToCloseKind,
+  CODEX_RESULT_ITEM_TYPES,
+} from './workspace-agents/codex-turn-result.js';
+export type {
+  CodexTurnStatus,
+  CodexItemType,
+  CodexTurnObservation,
+  CodexTurnOutcome,
+} from './workspace-agents/codex-turn-result.js';
+export {
   a2aSendMessage,
   a2aGetTask,
   a2aListTasks,
