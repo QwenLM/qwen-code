@@ -5,10 +5,9 @@
  */
 
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
-import { MAX_DAEMON_WORKSPACES } from '@qwen-code/acp-bridge/channelControlTimeouts';
 import { isWithinRoot } from '../config/path-comparison.js';
 
-export const MAX_REGISTERED_WORKSPACES = MAX_DAEMON_WORKSPACES;
+export const MAX_REGISTERED_WORKSPACES = 25;
 
 export class DuplicateWorkspaceInputError extends Error {
   constructor(workspace: string) {

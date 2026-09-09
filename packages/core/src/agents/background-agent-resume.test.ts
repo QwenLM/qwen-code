@@ -3059,7 +3059,7 @@ describe('BackgroundAgentResumeService', () => {
     expect(readMetaStatus(metaPath)).toBe('cancelled');
   });
 
-  it('drops usage-only assistant records while preserving tool history and pending user text', async () => {
+  it('drops unfinished nested calls and readiness markers while preserving stable history', async () => {
     const sessionId = 'session-pending-user';
     const agentId = 'agent-pending-user';
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -3149,6 +3149,28 @@ describe('BackgroundAgentResumeService', () => {
           timestamp: '2026-04-20T00:00:00.500Z',
           type: 'user',
           message: { role: 'user', parts: [{ text: 'and another thing' }] },
+        }),
+        JSON.stringify({
+          uuid: 'nested-call',
+          timestamp: '2026-04-20T00:00:00.600Z',
+          parentUuid: 'u2',
+          sessionId,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'nested', name: 'agent', args: {} } },
+            ],
+          },
+        }),
+        JSON.stringify({
+          uuid: 'nested-state',
+          timestamp: '2026-04-20T00:00:00.700Z',
+          parentUuid: 'nested-call',
+          sessionId,
+          type: 'system',
+          subtype: 'agent_session_ready',
+          systemPayload: { callId: 'nested', subagentSessionReady: true },
         }),
       ].join('\n') + '\n',
       'utf8',

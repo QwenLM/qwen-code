@@ -4,21 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * The runtime state of a `/goal` registered in a session. Lives only in memory:
- * the source of truth for restore-after-resume is the conversation history
- * `goal_status` attachments, not this store.
- */
-export interface ActiveGoal {
-  condition: string;
-  iterations: number;
-  deferredEvaluations?: number;
-  setAt: number;
-  tokensAtStart: number;
-  lastReason?: string;
-  hookId: string;
-}
+import type { ActiveGoal } from './goal-legacy-projection.js';
 
+/**
+ * Holds the runtime state of a `/goal` registered in a session. Lives only in
+ * memory: the source of truth for restore-after-resume is the conversation
+ * history `goal_status` attachments, not this store.
+ */
 const store = new Map<string, ActiveGoal>();
 
 export function activeGoalEquals(
