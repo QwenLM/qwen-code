@@ -63,6 +63,8 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
+  getGptReasoningCapabilities,
+  parseModelReasoningCapabilities,
   ApprovalMode,
   CompressionStatus,
   isCompressionFailureStatus,
@@ -354,9 +356,11 @@ import {
   applyReasoningSelection,
   clearReasoningRequestOverrides,
   getConfiguredModelReasoning,
+  getDefaultReasoningConfig,
   isReasoningSelectionSupported,
   parseReasoningSelection,
   REASONING_EFFORT_DEFAULT,
+  REASONING_EFFORT_NONE,
   type ReasoningSelection,
 } from '../model-configuration.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -10758,22 +10762,7 @@ export class Session implements SessionContext {
   }
 
   getDefaultReasoningConfig(): ContentGeneratorConfig['reasoning'] {
-    // Runtime snapshots already include the persisted selection, not its defaults.
-    const authType = this.config.getAuthType?.();
-    const model =
-      authType && !this.config.getActiveRuntimeModelSnapshot?.()
-        ? this.config.getResolvedModelConfig?.(
-            authType,
-            this.config.getModel(),
-            this.config.getCurrentModelRegistryBaseUrl?.() ?? undefined,
-          )
-        : undefined;
-    if (model) return model.generationConfig.reasoning;
-    return (
-      this.settings.merged.model?.generationConfig as
-        | Partial<ContentGeneratorConfig>
-        | undefined
-    )?.reasoning;
+    return getDefaultReasoningConfig(this.config, this.settings);
   }
 
   reloadReasoningSelection(): void {
@@ -10861,15 +10850,20 @@ export class Session implements SessionContext {
     const generation = this.config.getContentGeneratorConfig?.();
     const thinkingMandatory = generation?.thinkingMandatory === true;
     const modelReasoning = getConfiguredModelReasoning(this.config, modelId);
-    let supported =
-      selection !== undefined &&
-      selection !== REASONING_EFFORT_DEFAULT &&
-      isReasoningSelectionSupported(
-        modelId,
-        selection,
-        thinkingMandatory,
-        modelReasoning,
-      );
+    const gptCapabilities = getGptReasoningCapabilities(modelId);
+    const configuredReasoning = parseModelReasoningCapabilities(modelReasoning);
+    const gptModel = gptCapabilities !== undefined && !configuredReasoning;
+    const supportsPreference = (value: ReasoningSelection | undefined) =>
+      value !== undefined &&
+      value !== REASONING_EFFORT_DEFAULT &&
+      ((gptModel && value !== REASONING_EFFORT_NONE) ||
+        isReasoningSelectionSupported(
+          modelId,
+          value,
+          thinkingMandatory,
+          modelReasoning,
+        ));
+    let supported = supportsPreference(selection);
 
     const appliesSessionDefault =
       hasSessionSelection && selection === REASONING_EFFORT_DEFAULT;
@@ -10877,20 +10871,17 @@ export class Session implements SessionContext {
       this.sessionReasoningSelection = undefined;
       hasSessionSelection = false;
       selection = parseReasoningSelection(rawSelection);
-      supported =
-        selection !== undefined &&
-        selection !== REASONING_EFFORT_DEFAULT &&
-        isReasoningSelectionSupported(
-          modelId,
-          selection,
-          thinkingMandatory,
-          modelReasoning,
-        );
+      supported = supportsPreference(selection);
     }
     if (
       !hasSessionSelection &&
       rawSelection !== undefined &&
       !supported &&
+      !(
+        selection === REASONING_EFFORT_NONE &&
+        gptCapabilities !== undefined &&
+        configuredReasoning?.canDisable !== false
+      ) &&
       options.persist
     ) {
       try {

@@ -7109,6 +7109,111 @@ describe('Session', () => {
       expect(mockSettings.setValue).not.toHaveBeenCalled();
     });
 
+    it.each(['max', 'none'] as const)(
+      'preserves global GPT %s across model switches and reloads',
+      async (selection) => {
+        const state = installReasoningPreference(selection, { trusted: true });
+        const modelId = selection === 'max' ? 'gpt-5.4' : 'gpt-6-astra';
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+        });
+        session.reloadReasoningSelection();
+        expect(state.user.settings.model.reasoningEffort).toBe(selection);
+        expect(state.workspace.settings.model.reasoningEffort).toBe(selection);
+        expect(state.live.reasoning).toEqual(
+          selection === 'max' ? { effort: 'max' } : undefined,
+        );
+        expect(state.rebuildable.reasoning).toEqual(state.live.reasoning);
+        expect(
+          vi
+            .mocked(mockSettings.setValue)
+            .mock.calls.filter((call) => call[1] === 'model.reasoningEffort'),
+        ).toEqual([]);
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `gpt-5.6-sol(${AuthType.USE_OPENAI})`,
+        });
+        expect(state.live.reasoning).toEqual(
+          selection === 'max' ? { effort: 'max' } : false,
+        );
+        expect(state.rebuildable.reasoning).toEqual(state.live.reasoning);
+      },
+    );
+
+    it.each([
+      ['gpt-6-astra', false, undefined],
+      ['gpt-6-astra', true, undefined],
+      ['gpt-5', false, undefined],
+      ['gpt-6-astra', false, false],
+    ] as const)(
+      'reconciles saved off for %s with configured toggleOnly=%s, canDisable=%s',
+      async (modelId, toggleOnly, canDisable) => {
+        const state = installReasoningPreference('none', { trusted: true });
+        Object.assign(mockConfig, {
+          getResolvedModelConfig: vi.fn(() => ({
+            generationConfig: {},
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                ...(toggleOnly
+                  ? { toggleOnly: true }
+                  : { efforts: ['low', 'high'], defaultEffort: 'high' }),
+                disableField: 'reasoning_effort',
+                ...(canDisable === false ? { canDisable } : {}),
+              },
+            },
+          })),
+        });
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+        });
+        session.reloadReasoningSelection();
+        for (const scope of [state.user, state.workspace]) {
+          for (const settings of [scope.settings, scope.originalSettings]) {
+            expect(settings.model).toEqual(
+              canDisable === false ? {} : { reasoningEffort: 'none' },
+            );
+          }
+        }
+        expect(state.live.reasoning).toBeUndefined();
+        expect(state.rebuildable.reasoning).toBeUndefined();
+        expect(
+          vi
+            .mocked(mockSettings.setValue)
+            .mock.calls.filter((call) => call[1] === 'model.reasoningEffort'),
+        ).toHaveLength(canDisable === false ? 2 : 0);
+      },
+    );
+
+    it('reconciles a GPT preference against explicit configured capabilities', async () => {
+      const state = installReasoningPreference('max', { trusted: true });
+      Object.assign(mockConfig, {
+        getResolvedModelConfig: vi.fn(() => ({
+          generationConfig: {},
+          capabilities: {
+            reasoning: {
+              thinking: true,
+              efforts: ['low', 'high'],
+              defaultEffort: 'high',
+              disableField: 'reasoning_effort',
+            },
+          },
+        })),
+      });
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `gpt-5.6-sol(${AuthType.USE_OPENAI})`,
+      });
+      expect(state.user.settings.model).not.toHaveProperty('reasoningEffort');
+      expect(state.workspace.settings.model).not.toHaveProperty(
+        'reasoningEffort',
+      );
+      expect(state.live.reasoning).toBeUndefined();
+      expect(state.rebuildable.reasoning).toBeUndefined();
+    });
+
     it('deletes an incompatible max preference from both writable scopes without downgrading it', async () => {
       const state = installReasoningPreference('max', { trusted: true });
 
