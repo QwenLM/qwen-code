@@ -1358,6 +1358,32 @@ describe('runScratchTree --standalone', () => {
     expect(r.note).not.toContain('NOT clean');
   });
 
+  itWhereContainmentExists(
+    'refuses to build the standalone tree through a rewritten review-worktree gitfile',
+    () => {
+      // `headSha` is read through the review worktree's own gitfile, inside
+      // the mount, and with no --fetched-sha pin nothing else answers for
+      // which commit that is: a planted HEAD would put the plant's content
+      // in the tree the agent is told holds the commit under review — the
+      // substitution the linked shape refuses at its rebuild gate.
+      plantAdminEntry(
+        join(repo, '.qwen', 'tmp', '.evil-wt'),
+        adminEntryOf(worktree),
+        worktree,
+        join(repo, '.git'),
+      );
+      const r = run();
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('review temp dir');
+      // The tree was never created, which is what says the build never ran.
+      expect(
+        existsSync(
+          scratchWorktreePath(worktree, 'prose-exec--round-1--abc123'),
+        ),
+      ).toBe(false);
+    },
+  );
+
   it('says the containment is of STATE — a command-valued key written inside still executes there', () => {
     // R14-1: "dies with the tree" read as a sandbox. `git config
     // core.hooksPath .githooks`, a committed hook, then `git commit` ran the

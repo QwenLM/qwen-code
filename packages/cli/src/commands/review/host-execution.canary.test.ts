@@ -509,6 +509,12 @@ describe('a planted repository reaches no host-side execution', () => {
         // spelling still matches the marker lexically, so this call is a
         // refusal — not the "nothing to police" the old gate memoized.
         renameSync(join(repo, '.qwen'), join(repo, '.qwen-real'));
+        // The premise, pinned rather than assumed (the deleted-cwd tests pin
+        // `uv_cwd` the same way): Node serves the PRE-rename spelling from
+        // its cwd cache — if a future runtime or an in-process `chdir`
+        // changed that, the gate below would be answering about a different
+        // directory and this test would be green for the wrong reason.
+        expect(process.cwd()).toBe(tree);
         expect(gitProbe('rev-parse', 'HEAD')).toEqual({
           out: null,
           status: null,

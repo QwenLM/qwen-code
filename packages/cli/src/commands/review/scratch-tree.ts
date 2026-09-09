@@ -607,6 +607,31 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       'not measured for a standalone tree: the measurement is a `git status` ' +
       'in the shared review worktree, and this shape runs no checkout or ' +
       'status there';
+    // `headSha` was read through the review worktree's own gitfile — inside
+    // the mount — and when the caller brought no `--fetched-sha` nothing
+    // else pins it. No execution rides the pointer on this path (the
+    // checkout runs in the fresh repository), but a planted HEAD would put
+    // the plant's content in the tree the agent is told holds the commit
+    // under review — the substitution the linked shape refuses at its
+    // rebuild gate. Ask the same location question here, before the build.
+    const worktreeUntrusted = untrustedGitfile(worktree);
+    if (worktreeUntrusted !== null) {
+      return {
+        available: false,
+        reused: false,
+        standalone: true,
+        dependencies: null,
+        sharedTreeResidue: [],
+        sharedTreeResidueTotal: 0,
+        sharedTreeUnmeasured: unmeasured,
+        note:
+          `refusing to build a standalone scratch tree: the review worktree's ` +
+          `pointer ${worktreeUntrusted}, so the commit this tree would be ` +
+          'checked out at is whatever it names — not necessarily the reviewed ' +
+          'head. Settle the pointer (or pass --fetched-sha from the fetch ' +
+          'report, which pins the head above) and re-run.',
+      };
+    }
     try {
       discardStandaloneTree(worktree, tree);
       buildStandaloneTree(worktree, tree, headSha);

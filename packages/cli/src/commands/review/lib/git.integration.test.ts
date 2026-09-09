@@ -227,6 +227,43 @@ describe('releaseWorktree', () => {
     ).not.toThrow();
   });
 
+  it('reports the symlink arm could not even ASK git to prune', () => {
+    // The symlink arm has the same hole the main arm had: `prune` never
+    // asked (spawn ENOENT, the timeout kill) used to read as "no objection"
+    // while the link was unlinked and reported removed — `freed: true` over
+    // a surviving registration. The tree is registered BEFORE the link is
+    // stood in for it, and the prune that could not run is the one that
+    // clears it.
+    git('worktree', 'add', '-q', 'wt', '-b', 'topic');
+    const adminEntry = join(repo, '.git', 'worktrees', 'wt');
+    rmSync(join(repo, 'wt'), { recursive: true, force: true });
+    symlinkSync(join(repo, 'wt'), join(repo, 'wt'));
+
+    const savedPath = process.env['PATH'];
+    let got: ReturnType<typeof releaseWorktree> | undefined;
+    try {
+      process.env['PATH'] = join(repo, 'no-such-bin');
+      got = releaseWorktree(join(repo, 'wt'));
+    } finally {
+      process.env['PATH'] = savedPath;
+    }
+
+    // The link is unlinked (the path is clear), but the registration
+    // survived a prune that never ran — so freed is false with a reason.
+    expect(got).toMatchObject({ existed: true, freed: false });
+    expect(got?.reason).toContain('could not be run at all');
+    expect(existsSync(join(adminEntry, 'gitdir'))).toBe(true);
+    // Restored, a real prune clears it and the path is reusable.
+    expect(releaseWorktree(join(repo, 'wt'))).toMatchObject({
+      existed: false,
+      freed: false,
+    });
+    expect(existsSync(join(adminEntry, 'gitdir'))).toBe(false);
+    expect(() =>
+      git('worktree', 'add', '-q', 'wt', '-b', 'topic2'),
+    ).not.toThrow();
+  });
+
   it('reports the release it could not even ASK git to make', () => {
     // `{status: null, refusal: null}` is the probe's third shape: spawn
     // ENOENT or the timeout kill — git was never asked. Keying "not freed"

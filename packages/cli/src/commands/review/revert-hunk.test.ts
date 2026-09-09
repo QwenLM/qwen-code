@@ -830,6 +830,55 @@ describe('runRevertHunk', () => {
     );
   });
 
+  it('refuses an ancestor swap at the OUTER layer of a nested review temp root (R24-1, dogfood geometry)', () => {
+    // The bound is the OUTERMOST review temp root: in the nested (review
+    // inside a review) layout, the outer layer's components are inside a
+    // writable surface too, and a bound computed at the deepest marker would
+    // stop the walk before reaching them. The link here sits at the OUTER
+    // layer's component — a `lastIndexOf` drift would bound at the inner
+    // root and never lstat it.
+    const repo = join(tempDir('rh-nested-'), 'repo');
+    mkdirSync(repo, { recursive: true });
+    git(repo, 'init', '-q', '-b', 'main');
+    git(repo, 'config', 'user.email', 't@t');
+    git(repo, 'config', 'user.name', 't');
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-qm', 'pr head');
+    const diffPath = join(repo, 'p.diff');
+    writeFileSync(
+      diffPath,
+      [
+        'diff --git a/a.ts b/a.ts',
+        'index 1111111..2222222 100644',
+        '--- a/a.ts',
+        '+++ b/a.ts',
+        '@@ -1 +1 @@',
+        '-export const x = 1;',
+        '+export const x = 2;',
+        '',
+      ].join('\n'),
+    );
+    // The nested geometry: <repo>/.qwen/tmp/outer/.qwen/tmp/shard/scratch.
+    const shard = join(repo, '.qwen', 'tmp', 'outer', '.qwen', 'tmp', 'shard');
+    mkdirSync(shard, { recursive: true });
+    const scratch = join(shard, 'scratch');
+    git(repo, 'worktree', 'add', '--detach', scratch);
+    // The swap at the OUTER layer: `outer` becomes a link.
+    const outer = join(repo, '.qwen', 'tmp', 'outer');
+    const outerReal = join(repo, '.qwen', 'tmp', 'outer-real');
+    renameSync(outer, outerReal);
+    symlinkSync(outerReal, outer);
+
+    const r = runRevertHunk({ diff: diffPath, tree: scratch, hunk: 'a.ts:1' });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.note).toContain('ancestor');
+    expect(readFileSync(join(scratch, 'a.ts'), 'utf8')).toBe(
+      'export const x = 2;\n',
+    );
+  });
+
   it('still applies in a scratch tree under the review temp root with no redirect (R24-1 control)', () => {
     // The bounded walk must not buy its refusal at the price of the ordinary
     // path: a genuine linked worktree under `.qwen/tmp` has every ancestor

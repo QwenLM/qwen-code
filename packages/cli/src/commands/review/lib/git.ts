@@ -84,17 +84,27 @@ function gitOpts() {
  * for a spelling inside the review temp dir — and served it to whatever tree
  * the same spelling was later stood back up over, filter-carrying gitfile
  * included. A spelling that carries the marker is therefore NEVER memoized:
- * inside a review temp dir the question is RE-ASKED on every call. That is
- * not the TOCTOU residual this design documents and does not close, which is
- * about a pointer rewritten between a check and its own use: here the OUTER
- * review's containerized build/test phase holds the directory read-write for
- * the length of a whole command, so it rewrites the pointer BETWEEN calls,
- * and a verdict memoized for the process served the first clean answer to
- * every later wrapper — `status` refreshing the plant's index and running its
- * clean filter, `show <base>:<path>` handing the plant's content back as this
- * review's own rules. `fetch-pr` asks twice for the same reason; this asks
- * every time, and the spawn it costs exists only in the one geometry where
- * the gate speaks.
+ * inside a review temp dir the question is RE-ASKED on every call.
+ *
+ * The rename attack's premise is worth naming precisely: after an ancestor
+ * rename, `process.cwd()` serves the PRE-rename spelling not because of any
+ * kernel property — Linux `getcwd(2)` follows renames — but because Node
+ * caches the cwd (`cachedCwd`) until an in-process `chdir` invalidates it.
+ * So the one thing that re-opens the window on every platform is a future
+ * `process.chdir` in this process while the outer phase holds the mount:
+ * today no production review code chdirs after startup (grep it before
+ * adding one), and the canary pins the premise by asserting the stale
+ * spelling right after the rename. That is not the TOCTOU residual this
+ * design documents and does not close, which is about a pointer rewritten
+ * between a check and its own use: here the OUTER review's containerized
+ * build/test phase holds the directory read-write for the length of a whole
+ * command, so it rewrites the pointer BETWEEN calls, and a verdict memoized
+ * for the process served the first clean answer to every later wrapper —
+ * `status` refreshing the plant's index and running its clean filter, `show
+ * <base>:<path>` handing the plant's content back as this review's own
+ * rules. `fetch-pr` asks twice for the same reason; this asks every time,
+ * and the spawn it costs exists only in the one geometry where the gate
+ * speaks.
  */
 let trustedLaunchDir: string | null = null;
 
