@@ -315,6 +315,33 @@ describe('WebTerminalRegistry', () => {
     expect(conoutDispose).toHaveBeenCalledOnce();
   });
 
+  it('still completes a deferred release when the conout worker dispose throws', async () => {
+    osPlatform.mockReturnValue('win32');
+    // The throw guard inside disposeConoutWorker — the twin of the one in
+    // releaseConPtyHost. release() calls session.pty.releaseHost?.() bare,
+    // after the session is already deleted from the map, and dispose()'s loop
+    // has no per-iteration guard, so a throw escaping the worker dispose would
+    // abort the teardown of every session still queued behind it.
+    conoutDispose.mockImplementation(() => {
+      throw new Error('dispose boom');
+    });
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:release-deferred-throws',
+      workspaceCwd: '/workspace',
+    });
+    (spawn.mock.results[0].value as { _isReady?: boolean })._isReady = false;
+
+    // Remove the try/catch around _conoutSocketWorker.dispose() in
+    // disposeConoutWorker and this throws out of release() instead of
+    // returning true.
+    expect(registry.release('terminal:release-deferred-throws')).toBe(true);
+    expect(conoutDispose).toHaveBeenCalledOnce();
+    // The queued kill() is still the single closer.
+    expect(nativeKill).not.toHaveBeenCalled();
+    expect(kill).toHaveBeenCalledOnce();
+  });
+
   it('does not double-close a live session whose kill already closed it', async () => {
     osPlatform.mockReturnValue('win32');
     // Model node-pty's real WindowsTerminal.kill(): when ready it closes the
