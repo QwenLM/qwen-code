@@ -286,6 +286,10 @@ class TestableGithubChannel extends GithubChannel {
   ): Promise<void> {
     return this.sendThreadMessage(chatId, threadId, text);
   }
+
+  getAllowedUsersForTest(): string[] {
+    return this.config.allowedUsers;
+  }
 }
 
 class LiveGithubChannel extends GithubChannel {
@@ -1056,8 +1060,7 @@ describe('GithubChannel', () => {
       ).gate;
       expect(gate.isAllowed('alice')).toBe(true);
       expect(gate.isAllowed('bob')).toBe(false);
-      // config is normalized too — ChannelBase reads it directly
-      expect(config.allowedUsers).toEqual(['alice']);
+      expect(channel.getAllowedUsersForTest()).toEqual(['alice']);
       channel.disconnect();
     });
 
@@ -1076,7 +1079,10 @@ describe('GithubChannel', () => {
       } finally {
         channel.disconnect();
       }
-      expect(config.allowedUsers).toEqual(['test-bot', 'test-bot']);
+      expect(channel.getAllowedUsersForTest()).toEqual([
+        'test-bot',
+        'test-bot',
+      ]);
     });
 
     it('warns when the authenticated GitHub account is part of a mixed allowlist', async () => {
@@ -1110,7 +1116,7 @@ describe('GithubChannel', () => {
       channel.disconnect();
       await expect(channel.connect()).resolves.toBeUndefined();
       channel.disconnect();
-      expect(config.allowedUsers).toEqual(['alice']);
+      expect(channel.getAllowedUsersForTest()).toEqual(['alice']);
     });
 
     it('forces final-only delivery and appends the publication policy', () => {
