@@ -61,6 +61,7 @@ import {
 } from './artifacts/TurnOutputs';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { useSharedNow } from '../hooks/useSharedNow';
+import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import {
   isActiveToolStatus,
   toolContainsCallId,
@@ -69,7 +70,10 @@ import { getMcpAppDisplay } from './messages/McpApp';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
-import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
+import {
+  SESSION_TIMELINE_MIN_VISIBLE_ENTRIES,
+  WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS,
+} from '../constants/sessions';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 
 const noopTurnOutputAction = () => undefined;
@@ -2206,7 +2210,6 @@ const FOLLOW_BOTTOM_THRESHOLD_PX = 30;
 const LOAD_OLDER_HISTORY_THRESHOLD_PX = 160;
 const OLDER_HISTORY_ANCHOR_WAIT_FRAMES = 30;
 export const VIRTUAL_SCROLL_THRESHOLD = 200;
-const SESSION_TIMELINE_MIN_VISIBLE_ENTRIES = 4;
 
 export function shouldUseVirtualScroll(
   totalCount: number,
@@ -3266,8 +3269,11 @@ export const MessageList = memo(
       }
       return { key: null };
     }, [backgroundSummaryGraceActive, displayItems]);
-    const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
-      useState(false);
+    const containerRef = useRef<HTMLDivElement>(null);
+    const isSessionTimelineVisible = useChatNavigationVisible(
+      containerRef,
+      !hideSessionTimeline,
+    );
     const [automaticallyExpandedAgentKeys, setAutomaticallyExpandedAgentKeys] =
       useState<ReadonlySet<string>>(() => new Set());
     const handleAutomaticAgentExpansionChange = useCallback(
@@ -3287,8 +3293,7 @@ export const MessageList = memo(
       t: typeof t;
       entries: SessionTimelineEntry[];
     } | null>(null);
-    // Signature + entries are O(transcript text); only pay for them while the
-    // rail can actually show (container >= 1160px — never on mobile).
+    // Signature + entries are O(transcript text); only pay while the rail can show.
     const sessionTimelineEntries = useMemo(() => {
       if (!isSessionTimelineVisible) return EMPTY_SESSION_TIMELINE_ENTRIES;
       const signature = getSessionTimelineSignature(mergedMessages);
@@ -3433,7 +3438,6 @@ export const MessageList = memo(
     const pendingFollowRecheckFrame = useRef<number | undefined>(undefined);
     const pendingOverflowFrame = useRef<number | undefined>(undefined);
     catchingUpRef.current = catchingUp;
-    const containerRef = useRef<HTMLDivElement>(null);
     const olderHistoryRetryBlocked = useRef(false);
     const olderHistoryAnchorFrame = useRef<number | undefined>(undefined);
     const olderHistoryAnchorWaitFrame = useRef<number | undefined>(undefined);
@@ -3755,30 +3759,6 @@ export const MessageList = memo(
 
     const hasEnoughSessionTimelineEntries =
       sessionTimelineEntries.length >= SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
-
-    useLayoutEffect(() => {
-      if (hideSessionTimeline) {
-        setIsSessionTimelineVisible((prev) => (prev ? false : prev));
-        return;
-      }
-
-      const el = containerRef.current;
-      if (!el) return;
-
-      const updateVisibility = () => {
-        const width = el.getBoundingClientRect().width;
-        const nextVisible = width >= 1160;
-        setIsSessionTimelineVisible((prev) =>
-          prev === nextVisible ? prev : nextVisible,
-        );
-      };
-
-      updateVisibility();
-      if (typeof ResizeObserver === 'undefined') return;
-      const observer = new ResizeObserver(updateVisibility);
-      observer.observe(el);
-      return () => observer.disconnect();
-    }, [hideSessionTimeline]);
 
     // ── Scroll-follow state ──────────────────────────────────────────────
     //

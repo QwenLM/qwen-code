@@ -70,7 +70,7 @@ afterEach(() => {
 const live: Message[] = [
   { id: 'live', role: 'user', content: 'live', timestamp: 1 },
 ];
-async function setup(supported = true, cursorOnly = false) {
+async function setup(supported = true, cursorOnly = false, turnCount = 4) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.stubGlobal('requestAnimationFrame', () => 1);
   vi.stubGlobal('cancelAnimationFrame', () => undefined);
@@ -97,9 +97,14 @@ async function setup(supported = true, cursorOnly = false) {
       v: 1,
       sessionId: 'session',
       snapshot: 'snapshot',
-      totalTurns: 1,
+      totalTurns: turnCount,
       start: 0,
-      turns: [{ ordinal: 0, turnId: 'old', kind: 'prompt', label: 'old' }],
+      turns: Array.from({ length: turnCount }, (_, ordinal) => ({
+        ordinal,
+        turnId: ordinal === 0 ? 'old' : `turn-${ordinal}`,
+        kind: 'prompt' as const,
+        label: 'old',
+      })),
     }),
     getTranscriptPage,
     materializeTranscriptEvents: () => ({
@@ -159,6 +164,15 @@ async function setup(supported = true, cursorOnly = false) {
 }
 
 describe('TranscriptViewport', () => {
+  it.each([0, 3, 4])(
+    'requires at least four indexed turns (count=%i)',
+    async (count) => {
+      await setup(true, false, count);
+      expect(
+        container!.querySelector('[data-global-turn-navigation]') !== null,
+      ).toBe(count >= 4);
+    },
+  );
   it('pins the visible child of an expanded cross-page tool group', async () => {
     const { store, client, click, getTranscriptPage } = await setup();
     let toolId = 'newer-tool';

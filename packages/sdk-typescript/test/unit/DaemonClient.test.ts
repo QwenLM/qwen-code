@@ -6874,6 +6874,63 @@ describe('DaemonClient', () => {
         ]),
       ).resolves.toHaveLength(3);
     });
+
+    it.each([
+      ['legacy', undefined, 2_130_000],
+      ['legacy', 12, 12],
+      ['legacy', 0, 0],
+      ['workspace', undefined, 2_130_000],
+      ['workspace', 12, 12],
+      ['workspace', 0, 0],
+    ] as const)(
+      'preserves the %s channel-control budget with timeoutMs=%s',
+      async (scope, timeoutMs, expectedBudgetMs) => {
+        vi.useFakeTimers();
+        try {
+          let finish: ((response: Response) => void) | undefined;
+          const { fetch, calls } = recordingFetch(
+            (req) =>
+              new Promise<Response>((resolve, reject) => {
+                finish = resolve;
+                req.signal?.addEventListener(
+                  'abort',
+                  () => reject(req.signal?.reason),
+                  { once: true },
+                );
+              }),
+          );
+          const client = new DaemonClient({
+            baseUrl: 'http://daemon',
+            fetch,
+            fetchTimeoutMs: 1,
+          });
+          const request =
+            scope === 'legacy'
+              ? client.stopChannelWorker({ timeoutMs })
+              : client
+                  .workspaceByCwd('/work/secondary')
+                  .stopWorkspaceChannel('bot', { timeoutMs });
+          const result = request.catch((error: unknown) => error);
+
+          await vi.advanceTimersByTimeAsync(0);
+          expect(calls).toHaveLength(1);
+          if (expectedBudgetMs === 0) {
+            await vi.advanceTimersByTimeAsync(2_130_000);
+            expect(calls[0]?.signal?.aborted ?? false).toBe(false);
+            finish!(jsonResponse(200, { changed: true }));
+            await expect(result).resolves.toEqual({ changed: true });
+          } else {
+            await vi.advanceTimersByTimeAsync(expectedBudgetMs - 1);
+            expect(calls[0]?.signal?.aborted).toBe(false);
+            await vi.advanceTimersByTimeAsync(1);
+            expect(calls[0]?.signal?.aborted).toBe(true);
+            await expect(result).resolves.toBe(calls[0]?.signal?.reason);
+          }
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
   });
 
   describe('restartMcpServer (#4175 Wave 4 PR 17)', () => {
