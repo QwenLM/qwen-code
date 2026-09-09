@@ -5296,6 +5296,7 @@ export class Session implements SessionContext {
               typeof promptDisplayTextValue === 'string'
                 ? promptDisplayTextValue
                 : undefined;
+            const submittedPrompt = promptDisplayText ?? promptText;
             const modelPromptBlocks: PromptRequest['prompt'] =
               modelPrompt === undefined
                 ? params.prompt
@@ -5625,6 +5626,9 @@ export class Session implements SessionContext {
                   eventName: 'UserPromptSubmit',
                   input: {
                     prompt: promptText,
+                    ...(isFreshUserTurn && submittedPrompt.trim().length > 0
+                      ? { submitted_prompt: submittedPrompt }
+                      : {}),
                   },
                   signal: pendingSend.signal,
                 },

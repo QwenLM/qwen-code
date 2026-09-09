@@ -30636,11 +30636,142 @@ describe('Session', () => {
           expect(messageBus.request).toHaveBeenCalledWith(
             expect.objectContaining({
               eventName: 'UserPromptSubmit',
-              input: { prompt: 'hello' },
+              input: { prompt: 'hello', submitted_prompt: 'hello' },
             }),
             expect.anything(),
           );
         });
+
+        it.each<{
+          name: string;
+          prompt: PromptRequest['prompt'];
+          submitted?: string;
+          displayText?: string;
+          modelPrompt?: string;
+          retry?: boolean;
+          metaRetry?: boolean;
+        }>([
+          {
+            name: 'text blocks without resource bodies',
+            prompt: [
+              { type: 'text', text: '  check' },
+              {
+                type: 'resource',
+                resource: {
+                  uri: 'file:///notes.txt',
+                  text: 'PRIVATE RESOURCE',
+                },
+              },
+              { type: 'text', text: 'this\n' },
+            ],
+            submitted: '  check this\n',
+          },
+          {
+            name: 'trusted display projection',
+            prompt: [{ type: 'text', text: 'internal channel instructions' }],
+            displayText: 'original question',
+            submitted: 'original question',
+          },
+          {
+            name: 'empty display projection without internal fallback',
+            prompt: [{ type: 'text', text: 'internal channel instructions' }],
+            displayText: '',
+          },
+          {
+            name: 'model-only delegation excluded',
+            prompt: [{ type: 'text', text: 'original question' }],
+            modelPrompt:
+              '<realtime_delegation>private model context</realtime_delegation>',
+            submitted: 'original question',
+          },
+          { name: 'blank text', prompt: [{ type: 'text', text: ' \n ' }] },
+          {
+            name: 'resource-only submission',
+            prompt: [
+              {
+                type: 'resource',
+                resource: {
+                  uri: 'file:///notes.txt',
+                  text: 'PRIVATE RESOURCE',
+                },
+              },
+            ],
+          },
+          {
+            name: 'legacy retry',
+            prompt: [{ type: 'text', text: 'retry question' }],
+            retry: true,
+          },
+          {
+            name: 'daemon retry',
+            prompt: [{ type: 'text', text: 'retry question' }],
+            metaRetry: true,
+          },
+        ])(
+          'preserves submission provenance: $name',
+          async ({
+            prompt,
+            submitted,
+            displayText,
+            modelPrompt,
+            retry,
+            metaRetry,
+          }) => {
+            const messageBus = {
+              request: vi.fn().mockResolvedValue({ success: true, output: {} }),
+            };
+            mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+            mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+            mockConfig.hasHooksForEvent = vi
+              .fn()
+              .mockImplementation(
+                (eventName: string) => eventName === 'UserPromptSubmit',
+              );
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValue(createEmptyStream());
+
+            await session.prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt,
+                ...(retry ? { retry: true } : {}),
+                _meta: {
+                  ...(displayText !== undefined
+                    ? { 'qwen.daemon.promptDisplayText': displayText }
+                    : {}),
+                  ...(metaRetry ? { 'qwen.daemon.retry': true } : {}),
+                },
+              } as PromptRequest,
+              modelPrompt === undefined
+                ? undefined
+                : {
+                    version: 1,
+                    sessionId: 'test-session-id',
+                    promptId: 'daemon-prompt-id',
+                  },
+              undefined,
+              modelPrompt,
+            );
+
+            expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+            expect(messageBus.request).toHaveBeenCalledWith(
+              expect.objectContaining({
+                eventName: 'UserPromptSubmit',
+                input: {
+                  prompt: prompt
+                    .filter((block) => block.type === 'text')
+                    .map((block) => (block.type === 'text' ? block.text : ''))
+                    .join(' '),
+                  ...(submitted === undefined
+                    ? {}
+                    : { submitted_prompt: submitted }),
+                },
+              }),
+              expect.anything(),
+            );
+          },
+        );
 
         it('blocks prompt when UserPromptSubmit hook returns blocking decision', async () => {
           const messageBus = {
