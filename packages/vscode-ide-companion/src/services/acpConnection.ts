@@ -538,8 +538,48 @@ export class AcpConnection {
     return response;
   }
 
+  /**
+   * The agent keeps every session alive until told otherwise, and a retained
+   * session still fires autonomous model turns when its background tasks
+   * complete — each turn can spawn shells, which is what grew conhost.exe
+   * without bound in #11303 while the window stayed open. Replacing the
+   * current session (session/new, session/load) therefore closes the
+   * superseded one. Fire-and-forget: a refused or unsupported close (older
+   * CLI) must not block the user's new session, and a later session/load of
+   * the closed id simply re-reads the flushed transcript.
+   */
+  private closeSupersededSession(
+    conn: ClientSideConnection,
+    previousSessionId: string | null,
+    nextSessionId: string | null,
+  ): void {
+    if (!previousSessionId || previousSessionId === nextSessionId) {
+      return;
+    }
+    conn
+      .extMethod('qwen/control/session/close', {
+        sessionId: previousSessionId,
+        requireFlush: true,
+      })
+      .then((result) => {
+        if (result['closed'] !== true) {
+          logger.warn(
+            '[ACP] Superseded session close was refused:',
+            previousSessionId,
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        logger.warn(
+          '[ACP] Failed to close superseded session:',
+          error instanceof Error ? error.message : String(error),
+        );
+      });
+  }
+
   async newSession(cwd: string = process.cwd()): Promise<NewSessionResponse> {
     const conn = this.ensureConnection();
+    const previousSessionId = this.sessionId;
     logger.log('[ACP] Sending session/new request with cwd:', cwd);
     const response: NewSessionResponse = await conn.newSession({
       cwd,
@@ -558,6 +598,7 @@ export class AcpConnection {
     }
     this.sessionId = response.sessionId || null;
     logger.log('[ACP] Session created with ID:', this.sessionId);
+    this.closeSupersededSession(conn, previousSessionId, this.sessionId);
     return response;
   }
 
@@ -622,6 +663,7 @@ export class AcpConnection {
     cwdOverride?: string,
   ): Promise<LoadSessionResponse> {
     const conn = this.ensureConnection();
+    const previousSessionId = this.sessionId;
     logger.log('[ACP] Sending session/load request for session:', sessionId);
     const cwd = cwdOverride || this.workingDir;
     let response: LoadSessionResponse;
@@ -653,6 +695,7 @@ export class AcpConnection {
     }
     logger.log('[ACP] Session load succeeded for session:', sessionId);
     this.sessionId = sessionId;
+    this.closeSupersededSession(conn, previousSessionId, sessionId);
     return response;
   }
 

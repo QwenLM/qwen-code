@@ -898,6 +898,118 @@ describe('AcpConnection child exit cleanup', () => {
   });
 });
 
+describe('AcpConnection superseded session close (#11303)', () => {
+  // The agent keeps a session alive until told otherwise, and a retained
+  // session still fires autonomous model turns when its background tasks
+  // complete. Replacing the current session must therefore tell the agent to
+  // close the superseded one, or every New Session / history switch strands
+  // one more live session in the CLI process.
+
+  it('newSession closes the superseded session on the same connection', async () => {
+    const extMethod = vi.fn().mockResolvedValue({ closed: true });
+    const sdk = {
+      newSession: vi.fn().mockResolvedValue({ sessionId: 'session-b' }),
+      extMethod,
+    };
+    const conn = createConnection({
+      child: createMockChild(),
+      sdkConnection: sdk,
+      sessionId: 'session-a',
+    });
+
+    await (conn as unknown as AcpConnection).newSession();
+
+    expect(extMethod).toHaveBeenCalledWith('qwen/control/session/close', {
+      sessionId: 'session-a',
+      requireFlush: true,
+    });
+    expect(conn.sessionId).toBe('session-b');
+  });
+
+  it('newSession does not close anything for the first session', async () => {
+    const extMethod = vi.fn().mockResolvedValue({ closed: true });
+    const sdk = {
+      newSession: vi.fn().mockResolvedValue({ sessionId: 'session-a' }),
+      extMethod,
+    };
+    const conn = createConnection({
+      child: createMockChild(),
+      sdkConnection: sdk,
+      sessionId: null,
+    });
+
+    await (conn as unknown as AcpConnection).newSession();
+
+    expect(extMethod).not.toHaveBeenCalled();
+  });
+
+  it('loadSession closes the superseded session on the same connection', async () => {
+    const extMethod = vi.fn().mockResolvedValue({ closed: true });
+    const sdk = {
+      loadSession: vi.fn().mockResolvedValue({}),
+      extMethod,
+    };
+    const conn = createConnection({
+      child: createMockChild(),
+      sdkConnection: sdk,
+      sessionId: 'session-a',
+    });
+
+    await (conn as unknown as AcpConnection).loadSession('session-c');
+
+    expect(extMethod).toHaveBeenCalledWith('qwen/control/session/close', {
+      sessionId: 'session-a',
+      requireFlush: true,
+    });
+    expect(conn.sessionId).toBe('session-c');
+  });
+
+  it('loadSession does not close when reloading the current session', async () => {
+    // Re-loading the session already on screen (e.g. history hydration after a
+    // reconnect) must not close it out from under the live conversation.
+    const extMethod = vi.fn().mockResolvedValue({ closed: true });
+    const sdk = {
+      loadSession: vi.fn().mockResolvedValue({}),
+      extMethod,
+    };
+    const conn = createConnection({
+      child: createMockChild(),
+      sdkConnection: sdk,
+      sessionId: 'session-a',
+    });
+
+    await (conn as unknown as AcpConnection).loadSession('session-a');
+
+    expect(extMethod).not.toHaveBeenCalled();
+  });
+
+  it('a failed close does not fail the new session', async () => {
+    // Older CLIs have no session/close ext method; the replacement session
+    // must still succeed, and the swallowed rejection must not surface as an
+    // unhandled rejection.
+    const extMethod = vi.fn().mockRejectedValue(new Error('Method not found'));
+    const sdk = {
+      newSession: vi.fn().mockResolvedValue({ sessionId: 'session-b' }),
+      extMethod,
+    };
+    const conn = createConnection({
+      child: createMockChild(),
+      sdkConnection: sdk,
+      sessionId: 'session-a',
+    });
+    const acp = conn as unknown as AcpConnection;
+
+    await expect(acp.newSession()).resolves.toMatchObject({
+      sessionId: 'session-b',
+    });
+    // Let the fire-and-forget rejection settle so an unhandled one would fail
+    // the run rather than leak into an unrelated later test.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(conn.sessionId).toBe('session-b');
+  });
+});
+
 describe('AcpConnection onDisconnected callback', () => {
   it('has a default no-op onDisconnected handler', () => {
     const acpConn = new AcpConnection();
