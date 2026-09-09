@@ -21,8 +21,8 @@ import {
   recordGoalIteration,
   resetGoalDeferrals,
   setActiveGoal,
-  type ActiveGoal,
 } from './activeGoalStore.js';
+import type { ActiveGoal } from './goal-legacy-projection.js';
 import { judgeGoal } from './goalJudge.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
