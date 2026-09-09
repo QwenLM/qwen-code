@@ -86,6 +86,26 @@ export type { AgentNotificationSender } from './workspace-agents/dispatcher.js';
 export { resolveAgentPersona } from './workspace-agents/persona.js';
 export { findAgentSessionBinding } from './workspace-agents/session-binding.js';
 export {
+  A2A_PROTOCOL_VERSION,
+  A2A_TRANSPORT_BINDING,
+  A2A_AGENT_CARD_PATH,
+  A2A_CONTENT_TYPE,
+  A2A_SDK_SPEC,
+  A2A_TERMINAL_STATES,
+  A2A_REQUIRED_OPERATIONS,
+  A2A_OPTIONAL_OPERATIONS,
+  A2A_UNSUPPORTED,
+  QWEN_A2A_EXTENSION_URI,
+  toA2ATaskState,
+  isA2ATerminal,
+  externalRequestKey,
+  toQwenA2ATaskMetadata,
+} from './workspace-agents/a2a-contract.js';
+export type {
+  A2ATaskState,
+  QwenA2ATaskMetadata,
+} from './workspace-agents/a2a-contract.js';
+export {
   strandLocalRuns,
   STRANDED_FAILURE_STAGE,
 } from './workspace-agents/stranded-runs.js';

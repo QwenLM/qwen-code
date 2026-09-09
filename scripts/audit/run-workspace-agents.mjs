@@ -45,6 +45,7 @@ export { outstandingCloseObligations, acknowledgeCloseObligations } from '${repo
 export { resolveAgentPersona } from '${repo}/${src}/persona.js';
 export { findAgentSessionBinding } from '${repo}/${src}/session-binding.js';
 export { strandLocalRuns, STRANDED_FAILURE_STAGE } from '${repo}/${src}/stranded-runs.js';
+export * from '${repo}/${src}/a2a-contract.js';
 export { deleteThread, enqueueThreadEvent } from '${repo}/${src}/store.js';
 export { ToolNames } from '${repo}/packages/core/src/tools/tool-names.js';
 `,
@@ -2107,6 +2108,148 @@ try {
   strandStoreCreated = false;
 }
 ok('and the sweep did not create its store', !strandStoreCreated);
+
+console.log('\n29. the frozen external contract (P1)');
+// A2A is a rolling document, so "compatible" only means something against a
+// pinned version. These assertions are what pins it.
+ok(
+  'the protocol version is Major.Minor, as the spec requires of the wire',
+  /^\d+\.\d+$/.test(M.A2A_PROTOCOL_VERSION),
+  M.A2A_PROTOCOL_VERSION,
+);
+ok(
+  'exactly one transport binding is claimed, and it is a spec-defined one',
+  ['JSONRPC', 'GRPC', 'HTTP+JSON'].includes(M.A2A_TRANSPORT_BINDING),
+  M.A2A_TRANSPORT_BINDING,
+);
+ok(
+  'the five required operations are all named',
+  M.A2A_REQUIRED_OPERATIONS.length === 5 &&
+    ['sendMessage', 'getTask', 'listTasks', 'cancelTask', 'getAuthenticatedExtendedAgentCard'].every(
+      (op) => M.A2A_REQUIRED_OPERATIONS.includes(op),
+    ),
+  JSON.stringify(M.A2A_REQUIRED_OPERATIONS),
+);
+ok(
+  'every optional operation is gated on a capability flag it needs',
+  Object.values(M.A2A_OPTIONAL_OPERATIONS).every((cap) =>
+    cap === 'streaming' || cap === 'pushNotifications',
+  ),
+  JSON.stringify(M.A2A_OPTIONAL_OPERATIONS),
+);
+ok(
+  'no optional operation is also listed as required',
+  Object.keys(M.A2A_OPTIONAL_OPERATIONS).every(
+    (op) => !M.A2A_REQUIRED_OPERATIONS.includes(op),
+  ),
+);
+ok(
+  'the four terminal states are the four the spec calls terminal',
+  M.A2A_TERMINAL_STATES.size === 4 &&
+    ['TASK_STATE_COMPLETED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED', 'TASK_STATE_REJECTED'].every(
+      (state) => M.A2A_TERMINAL_STATES.has(state),
+    ),
+  JSON.stringify([...M.A2A_TERMINAL_STATES]),
+);
+
+// Every local status has to decide what a caller sees. Adding a ThreadStatus
+// without deciding is the failure this catches.
+const LOCAL_STATUSES = ['open', 'in_progress', 'blocked', 'in_review', 'done'];
+for (const status of LOCAL_STATUSES) {
+  const state = M.toA2ATaskState(status);
+  ok(
+    `${status} maps to a state a caller can act on: ${state}`,
+    typeof state === 'string' && state.startsWith('TASK_STATE_'),
+    state,
+  );
+}
+ok(
+  'an unknown local status throws rather than defaulting',
+  (() => {
+    try {
+      M.toA2ATaskState('invented');
+      return false;
+    } catch {
+      return true;
+    }
+  })(),
+);
+ok(
+  'only done is terminal to a caller; a blocked thread is not finished',
+  M.isA2ATerminal(M.toA2ATaskState('done')) &&
+    !M.isA2ATerminal(M.toA2ATaskState('blocked')) &&
+    !M.isA2ATerminal(M.toA2ATaskState('in_review')) &&
+    !M.isA2ATerminal(M.toA2ATaskState('in_progress')),
+);
+
+// The protocol only offers a client-minted messageId, so the server scopes it.
+const keyBase = {
+  callerId: 'caller-a',
+  targetAgentId: 'ag_1',
+  messageId: 'msg-1',
+};
+ok(
+  'the same submission yields the same key',
+  M.externalRequestKey(keyBase) === M.externalRequestKey({ ...keyBase }),
+);
+ok(
+  'a different caller with the same message id is a different request',
+  M.externalRequestKey(keyBase) !==
+    M.externalRequestKey({ ...keyBase, callerId: 'caller-b' }),
+);
+ok(
+  'and so is the same id aimed at a different agent',
+  M.externalRequestKey(keyBase) !==
+    M.externalRequestKey({ ...keyBase, targetAgentId: 'ag_2' }),
+);
+// Ids are opaque strings from outside. A caller that can put the joining
+// character inside one must not be able to forge another caller's key.
+ok(
+  'a caller cannot forge another key by smuggling a separator into an id',
+  M.externalRequestKey({ callerId: 'a', targetAgentId: 'b:c', messageId: 'd' }) !==
+    M.externalRequestKey({ callerId: 'a', targetAgentId: 'b', messageId: 'c:d' }),
+);
+for (const missing of ['callerId', 'targetAgentId', 'messageId']) {
+  ok(
+    `a key with no ${missing} is refused, not silently built`,
+    (() => {
+      try {
+        M.externalRequestKey({ ...keyBase, [missing]: '' });
+        return false;
+      } catch {
+        return true;
+      }
+    })(),
+  );
+}
+
+// Usage is not in the A2A data model, so ours travels in the extension and a
+// daemon with no figure must report absence, not zero.
+const meta = M.toQwenA2ATaskMetadata({
+  status: 'blocked',
+  rootThreadId: 'th_root',
+  tokensUsed: 42,
+});
+ok(
+  'the extension preserves the distinction A2A merges',
+  meta.localStatus === 'blocked' &&
+    M.toA2ATaskState('blocked') === M.toA2ATaskState('in_review'),
+);
+ok('and carries usage when there is a figure', meta.tokensUsed === 42);
+const metaNoUsage = M.toQwenA2ATaskMetadata({
+  status: 'open',
+  rootThreadId: 'th_root',
+});
+ok(
+  'an unknown usage figure is absent, never reported as zero',
+  !('tokensUsed' in metaNoUsage),
+  JSON.stringify(metaNoUsage),
+);
+ok(
+  'the extension is identified by an absolute URI, as A2A requires',
+  /^https:\/\//.test(M.QWEN_A2A_EXTENSION_URI),
+  M.QWEN_A2A_EXTENSION_URI,
+);
 
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
