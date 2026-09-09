@@ -9029,6 +9029,75 @@ describe('useLlmStream', () => {
     expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
   });
 
+  it('records a bridged Goal duplicate as bookkeeping without scheduling it', async () => {
+    const recordToolResult = vi.fn();
+    (
+      mockConfig as Config & {
+        getChatRecordingService: () => {
+          recordToolResult: typeof recordToolResult;
+        };
+      }
+    ).getChatRecordingService = () => ({ recordToolResult });
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-history',
+      revision: 1,
+      turnId: 'turn-history',
+    };
+    const args = { name: 'get_goal', arguments: {} };
+    const client = new MockedLlmClientClass(mockConfig);
+    client.getHistoryToolCallFingerprints = vi
+      .fn()
+      .mockReturnValue(
+        new Map([['tool-history', getToolCallFingerprint('tool_call', args)]]),
+      );
+
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-history',
+              providerCallId: 'tool-history',
+              name: 'tool_call',
+              args,
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-history',
+              goalContext: permit,
+            },
+          };
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          };
+        })(),
+      );
+
+    const { result } = renderTestHook([], client);
+
+    await act(async () => {
+      await result.current.submitQuery('run shell');
+    });
+
+    expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    const toolResultParts = mockSendMessageStream.mock.calls[1][0] as Part[];
+    expect(toolResultParts[0].functionResponse?.id).toBe('tool-history');
+    expect(toolResultParts[0].functionResponse?.response?.['error']).toContain(
+      'Duplicate provider tool call id "tool-history"',
+    );
+    expect(recordToolResult).toHaveBeenCalledWith(
+      toolResultParts,
+      expect.objectContaining({ executionStatus: 'not_started' }),
+      { goalContext: permit, provenance: 'goal_runtime' },
+    );
+    expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+  });
+
   it('schedules an id-colliding tool call whose args differ from the handled call', async () => {
     const client = new MockedLlmClientClass(mockConfig);
     client.getHistoryToolCallFingerprints = vi

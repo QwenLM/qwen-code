@@ -36984,6 +36984,44 @@ describe('Session', () => {
       );
     });
 
+    it('records a duplicated bridged Goal read as Goal bookkeeping', async () => {
+      const permit: core.GoalTurnPermit = {
+        goalId: 'goal-duplicate',
+        revision: 1,
+        turnId: 'turn-duplicate',
+      };
+      const args = { name: 'get_goal', arguments: {} };
+      vi.mocked(mockChat.getHistoryToolCallFingerprints).mockReturnValue(
+        new Map([['goal_1', core.getToolCallFingerprint('tool_call', args)]]),
+      );
+      const [duplicatePart] = core.normalizeModelToolCallIds(
+        [
+          {
+            functionCall: {
+              id: 'goal_1',
+              name: 'tool_call',
+              args,
+            },
+          },
+        ],
+        new Set(['goal_1']),
+        new Set<string>(),
+      );
+
+      await core.goalTurnContext.run(permit, () =>
+        (session as unknown as ToolCallInternals).runToolCalls(
+          new AbortController().signal,
+          'prompt-goal-duplicate',
+          [duplicatePart.functionCall!],
+        ),
+      );
+
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledOnce();
+      expect(
+        mockChatRecordingService.recordToolResult.mock.calls[0]?.[2],
+      ).toEqual({ goalContext: permit, provenance: 'goal_runtime' });
+    });
+
     it('executes an id-colliding functionCall whose args differ from the handled call', async () => {
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'fresh result',

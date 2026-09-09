@@ -5,13 +5,14 @@
  */
 
 import type { RecordToolResultOptions } from '../services/chatRecordingService.js';
-import { ToolNames } from '../tools/tool-names.js';
+import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 import type { GoalTurnPermit } from './goal-protocol.js';
 import { goalTurnContext } from './goal-turn-context.js';
 
 /** The slice of a tool-call request this reads. */
 export interface GoalToolResultRequest {
   name: string;
+  args?: Record<string, unknown>;
   goalContext?: GoalTurnPermit;
 }
 
@@ -41,10 +42,13 @@ export function goalToolResultProvenance(
 ): RecordToolResultOptions | undefined {
   const { goalContext } = request;
   if (!goalContext) return undefined;
-  if (
-    request.name === ToolNames.GET_GOAL ||
-    request.name === ToolNames.UPDATE_GOAL
-  ) {
+  const requestName = canonicalToolName(request.name);
+  const bridgedName = request.args?.['name'];
+  const toolName =
+    requestName === ToolNames.TOOL_CALL && typeof bridgedName === 'string'
+      ? canonicalToolName(bridgedName)
+      : requestName;
+  if (toolName === ToolNames.GET_GOAL || toolName === ToolNames.UPDATE_GOAL) {
     return { goalContext: { ...goalContext }, provenance: 'goal_runtime' };
   }
   return { goalContext: { ...goalContext } };
@@ -60,10 +64,12 @@ export function goalToolResultProvenance(
  */
 export function ambientGoalToolResultProvenance(
   toolName: string,
+  args?: Record<string, unknown>,
 ): RecordToolResultOptions | undefined {
   const goalContext = goalTurnContext.getStore();
   return goalToolResultProvenance({
     name: toolName,
+    ...(args ? { args } : {}),
     ...(goalContext ? { goalContext } : {}),
   });
 }

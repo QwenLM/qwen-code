@@ -45,6 +45,36 @@ describe('goalToolResultProvenance', () => {
     },
   );
 
+  it.each([ToolNames.GET_GOAL, ToolNames.UPDATE_GOAL])(
+    'marks a bridged %s result as the Goal’s own bookkeeping',
+    (name) => {
+      expect(
+        goalToolResultProvenance({
+          name: ToolNames.TOOL_CALL,
+          args: { name, arguments: {} },
+          goalContext: permit,
+        }),
+      ).toEqual({
+        goalContext: permit,
+        provenance: 'goal_runtime',
+      });
+    },
+  );
+
+  it.each([
+    { name: 'read_file', arguments: {} },
+    { name: 42, arguments: {} },
+    { arguments: {} },
+  ])('does not misclassify a non-Goal bridge target', (args) => {
+    expect(
+      goalToolResultProvenance({
+        name: ToolNames.TOOL_CALL,
+        args,
+        goalContext: permit,
+      }),
+    ).toEqual({ goalContext: permit });
+  });
+
   it('leaves a tool call made outside a Goal turn unstamped', () => {
     expect(goalToolResultProvenance({ name: 'read_file' })).toBeUndefined();
   });
@@ -61,6 +91,19 @@ describe('ambientGoalToolResultProvenance', () => {
   it('applies the same bookkeeping rule inside a turn', () => {
     const options = goalTurnContext.run(permit, () =>
       ambientGoalToolResultProvenance(ToolNames.GET_GOAL),
+    );
+    expect(options).toEqual({
+      goalContext: permit,
+      provenance: 'goal_runtime',
+    });
+  });
+
+  it('applies the bookkeeping rule to a bridged Goal tool', () => {
+    const options = goalTurnContext.run(permit, () =>
+      ambientGoalToolResultProvenance(ToolNames.TOOL_CALL, {
+        name: ToolNames.GET_GOAL,
+        arguments: {},
+      }),
     );
     expect(options).toEqual({
       goalContext: permit,

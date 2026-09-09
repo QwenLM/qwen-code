@@ -688,6 +688,7 @@ type PendingToolResultRecord = {
   sequence: number;
   callId: string;
   toolName: string;
+  toolArgs: Record<string, unknown>;
   responseParts: Part[];
   persistedOutputFiles?: string[];
   policyToolName?: string;
@@ -704,7 +705,7 @@ type PendingToolResultRecord = {
 
 type QueueToolResultRecord = (
   fc: FunctionCall,
-  record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence'>,
+  record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence' | 'toolArgs'>,
 ) => void;
 
 type HistoryMutationRunner = <T>(operation: () => Promise<T>) => Promise<T>;
@@ -10919,6 +10920,7 @@ export class Session implements SessionContext {
     const queueToolResultRecord: QueueToolResultRecord = (fc, record) => {
       pendingToolResultRecords.push({
         ...record,
+        toolArgs: (fc.args ?? {}) as Record<string, unknown>,
         ordinal: dedupedFunctionCalls.indexOf(fc),
         sequence: toolResultRecordSequence++,
       });
@@ -10981,7 +10983,10 @@ export class Session implements SessionContext {
         ) {
           return;
         }
-        const goalProvenance = ambientGoalToolResultProvenance(record.toolName);
+        const goalProvenance = ambientGoalToolResultProvenance(
+          record.toolName,
+          record.toolArgs,
+        );
         this.config.getChatRecordingService()?.recordToolResult(
           finalized[index].responseParts,
           {
