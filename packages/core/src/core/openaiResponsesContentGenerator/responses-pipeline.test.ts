@@ -15,6 +15,7 @@ import {
 } from 'vitest';
 import type { GenerateContentParameters } from '@google/genai';
 import { FunctionCallingConfigMode, FinishReason } from '@google/genai';
+import { inspect } from 'node:util';
 import {
   ResponsesPipeline,
   mergeStreamResponses,
@@ -27,14 +28,27 @@ import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { ResponsesApiRequest } from './types.js';
 import { preloadRuntimeFetchModule } from '../../utils/runtimeFetchOptions.js';
+import { classifyRetryError } from '../../utils/retryErrorClassification.js';
 
 // The pipeline calls the `fetch` buildRuntimeFetchOptions returns (pinned
 // alongside its dispatcher) rather than the global `fetch`, so the mock must
 // intercept it there -- stubbing global `fetch` alone is bypassed and the
 // real undici fetch attempts a live network call (see #8169 review).
-const { buildRuntimeFetchOptionsMock } = vi.hoisted(() => ({
+const { buildRuntimeFetchOptionsMock, debugMock } = vi.hoisted(() => ({
   buildRuntimeFetchOptionsMock: vi.fn(),
+  debugMock: vi.fn(),
 }));
+vi.mock('../../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (tag: string) => ({
+      ...actual.createDebugLogger(tag),
+      debug: debugMock,
+    }),
+  };
+});
 vi.mock('../../utils/runtimeFetchOptions.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../utils/runtimeFetchOptions.js')>();
@@ -182,12 +196,16 @@ describe('ResponsesPipeline', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe('https://api.openai.com/v1/responses');
-    expect(init.headers['Authorization']).toBe('Bearer test-key');
-    expect(init.headers['Accept']).toBe('text/event-stream');
+    expect(new Headers(init.headers).get('Authorization')).toBe(
+      'Bearer test-key',
+    );
+    expect(new Headers(init.headers).get('Accept')).toBe('text/event-stream');
     // Pin the explicit Content-Type: undici defaults a string body to
     // text/plain;charset=UTF-8 when it is absent, which strict
     // OpenAI-compatible gateways reject with 415/400.
-    expect(init.headers['Content-Type']).toBe('application/json');
+    expect(new Headers(init.headers).get('Content-Type')).toBe(
+      'application/json',
+    );
     const body = JSON.parse(init.body) as ResponsesApiRequest;
     expect(body.model).toBe('gpt-5');
     expect(body.stream).toBe(true);
@@ -1367,7 +1385,219 @@ describe('ResponsesPipeline', () => {
     for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
       // drain
     }
-    expect(fetchMock.mock.calls[0]![1].headers['X-Proxy-Auth']).toBe('token');
+    expect(
+      new Headers(fetchMock.mock.calls[0]![1].headers).get('X-Proxy-Auth'),
+    ).toBe('token');
+  });
+
+  it.each(['Authorization', 'authorization', 'AuThOrIzAtIoN'])(
+    'replaces default headers case-insensitively with custom %s',
+    async (authorization) => {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          customHeaders: {
+            [authorization]: 'Bearer gateway-token',
+            accept: 'text/event-stream; charset=utf-8',
+            'content-type': 'application/json; charset=utf-8',
+            'X-Gateway': 'custom',
+          },
+        }),
+        makeCliConfig(),
+      );
+
+      await pipeline.execute(textRequest('hi'), 'p1');
+
+      const headers = new Headers(fetchMock.mock.calls[0]![1].headers);
+      expect(headers.get('authorization')).toBe('Bearer gateway-token');
+      expect(headers.get('accept')).toBe('text/event-stream; charset=utf-8');
+      expect(headers.get('content-type')).toBe(
+        'application/json; charset=utf-8',
+      );
+      expect(headers.get('x-gateway')).toBe('custom');
+    },
+  );
+
+  it('redacts credentials from the logged request URL', async () => {
+    mockResponse(
+      sseEvent('response.completed', { response: { status: 'completed' } }),
+    );
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig({
+        baseUrl: 'https://review-user:review-secret@gateway.example',
+      }),
+      makeCliConfig(),
+    );
+
+    await pipeline.execute(textRequest('hi'), 'p1');
+
+    expect(debugMock).toHaveBeenCalledWith(
+      'POST https://<redacted>@gateway.example/v1/responses',
+      expect.any(String),
+    );
+    expect(inspect(debugMock.mock.calls)).not.toContain('review-secret');
+    expect(inspect(debugMock.mock.calls)).not.toContain('review-user');
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      'https://review-user:review-secret@gateway.example/v1/responses',
+    );
+  });
+
+  it('redacts credentials when fetch rejects an invalid custom header value', async () => {
+    buildRuntimeFetchOptionsMock.mockReturnValue({ fetch: globalThis.fetch });
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig({
+        baseUrl: 'http://127.0.0.1:1',
+        customHeaders: {
+          'X-Gateway':
+            'https://review-user:review-secret@gateway.example\ninvalid',
+        },
+      }),
+      makeCliConfig(),
+    );
+
+    const error: unknown = await pipeline
+      .connectStream(textRequest('hi'), 'p1')
+      .catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/invalid header value/i);
+    expect(inspect(error)).not.toContain('review-user');
+    expect(inspect(error)).not.toContain('review-secret');
+  });
+
+  it.each([0, 480, 650])(
+    'does not expose error-body credentials at offset %i on the propagated error',
+    async (offset) => {
+      const prefix = 'x'.repeat(offset);
+      fetchMock.mockResolvedValue(
+        new Response(
+          `${prefix}https://review-user:review-error-secret@gateway.example/denied`,
+          { status: 502 },
+        ),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      const error: unknown = await pipeline
+        .connectStream(textRequest('hi'), 'p1')
+        .catch((error: unknown) => error);
+
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toMatchObject({ status: 502 });
+      expect((error as Error).message).toBe(
+        `Responses API error 502: ${`${prefix}https://<redacted>@gateway.example/denied`.slice(0, 500)}`,
+      );
+      for (const rendered of [inspect(error), JSON.stringify(error)]) {
+        expect(rendered).not.toContain('review-user');
+        expect(rendered).not.toContain('review-error-secret');
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['', 'early@'])(
+    'does not expose credentials cut off by the error-body read limit (password prefix: %s)',
+    async (passwordPrefix) => {
+      fetchMock.mockResolvedValue(
+        new Response(
+          `https://review-user:${passwordPrefix}${'long-secret'.repeat(7_000)}@gateway.example`,
+          { status: 502 },
+        ),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      const error: unknown = await pipeline
+        .connectStream(textRequest('hi'), 'p1')
+        .catch((error: unknown) => error);
+
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toMatchObject({ status: 502 });
+      for (const rendered of [inspect(error), JSON.stringify(error)]) {
+        expect(rendered).not.toContain('review-user');
+        expect(rendered).not.toContain('long-secret');
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'redacts escaped URL credentials in JSON errors (quoted upstream: %s)',
+    async (quoted) => {
+      const upstream = JSON.stringify({
+        error: {
+          message: 'https://review-user:review-secret@gateway.example/denied',
+        },
+      }).replaceAll('/', '\\/');
+      const body = quoted
+        ? JSON.stringify({ error: { message: upstream } })
+        : upstream;
+      fetchMock.mockResolvedValue(new Response(body, { status: 502 }));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      const error: unknown = await pipeline
+        .connectStream(textRequest('hi'), 'p1')
+        .catch((error: unknown) => error);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('gateway.example/denied');
+      for (const rendered of [inspect(error), JSON.stringify(error)]) {
+        expect(rendered).not.toContain('review-user');
+        expect(rendered).not.toContain('review-secret');
+      }
+    },
+  );
+
+  it('preserves fail-fast quota classification for oversized error bodies', async () => {
+    const body = JSON.stringify({
+      error: {
+        code: 'Throttling.AllocationQuota',
+        message: 'Allocated quota exceeded',
+      },
+    }).padEnd(64_001, ' ');
+    fetchMock.mockResolvedValue(new Response(body, { status: 429 }));
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig(),
+      makeCliConfig(),
+    );
+
+    const error: unknown = await pipeline
+      .connectStream(textRequest('hi'), 'p1')
+      .catch((error: unknown) => error);
+
+    expect(error).toMatchObject({ status: 429 });
+    expect(classifyRetryError(error)).toMatchObject({ diagnosis: 'fail-fast' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('handles long backslash runs without blocking error diagnostics', async () => {
+    fetchMock.mockResolvedValue(
+      new Response('\\'.repeat(64_001), { status: 502 }),
+    );
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig(),
+      makeCliConfig(),
+    );
+
+    const start = performance.now();
+    const error: unknown = await pipeline
+      .connectStream(textRequest('hi'), 'p1')
+      .catch((error: unknown) => error);
+    const elapsed = performance.now() - start;
+
+    expect(error).toMatchObject({ status: 502 });
+    expect((error as Error).message).toBe(
+      `Responses API error 502: ${'\\'.repeat(500)}`,
+    );
+    expect(elapsed).toBeLessThan(1_000);
   });
 
   it('forwards user aborts to fetch via a composed connect signal', async () => {
@@ -1575,9 +1805,9 @@ describe('ResponsesPipeline', () => {
       for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
         // drain
       }
-      expect(fetchMock.mock.calls[0]![1].headers['Authorization']).toBe(
-        'Bearer env-secret',
-      );
+      expect(
+        new Headers(fetchMock.mock.calls[0]![1].headers).get('Authorization'),
+      ).toBe('Bearer env-secret');
     } finally {
       if (prev === undefined) delete process.env['RESP_TEST_KEY'];
       else process.env['RESP_TEST_KEY'] = prev;
@@ -1602,8 +1832,8 @@ describe('ResponsesPipeline', () => {
         // drain
       }
       expect(
-        fetchMock.mock.calls[0]![1].headers['Authorization'],
-      ).toBeUndefined();
+        new Headers(fetchMock.mock.calls[0]![1].headers).get('Authorization'),
+      ).toBeNull();
     } finally {
       if (prev !== undefined) process.env['RESP_TEST_KEY_MISSING'] = prev;
     }
@@ -1831,6 +2061,46 @@ describe('ResponsesPipeline', () => {
 
       expect(await drain(pipeline, replayRequest())).toBeUndefined();
       expectRetryDiffersOnlyByInput(OVER_LONG_ONLY_INPUT);
+    });
+
+    it('preserves replay recovery when the error body also contains credentials', async () => {
+      fetchMock.mockResolvedValueOnce(
+        errorResponse(
+          400,
+          directBody(
+            'input[1].id',
+            `${MAX_64_MESSAGE} https://review-user:review-secret@gateway.example`,
+          ),
+        ),
+      );
+      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      expect(await drain(pipeline, replayRequest())).toBeUndefined();
+      expectRetryDiffersOnlyByInput(OVER_LONG_ONLY_INPUT);
+    });
+
+    it('does not retry an oversized rejection even when redaction would shrink it below the limit', async () => {
+      const rejection = directBody(
+        'input[1].id',
+        `${MAX_64_MESSAGE} https://review-user:${'s'.repeat(1_000)}@gateway.example`,
+      );
+      const body = rejection.padEnd(64_001, ' ');
+      fetchMock.mockResolvedValueOnce(errorResponse(400, body));
+      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      const error = await drain(pipeline, replayRequest());
+
+      expect(error).toMatchObject({ status: 400 });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(parsedCall(0).input).toEqual(ORIGINAL_INPUT);
     });
 
     it('downgrades every replayed reasoning item and retries when no maximum is reported', async () => {

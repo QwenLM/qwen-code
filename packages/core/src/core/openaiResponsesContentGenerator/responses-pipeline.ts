@@ -26,8 +26,10 @@ import {
   downgradeRejectedReasoningItems,
   parseReasoningIdRejection,
 } from './responses-reasoning-rejection.js';
+import type { ReasoningIdRejection } from './responses-reasoning-rejection.js';
 import {
   buildRuntimeFetchOptions,
+  redactProxyCredentials,
   redactProxyError,
 } from '../../utils/runtimeFetchOptions.js';
 import {
@@ -319,10 +321,8 @@ export class ResponsesPipeline {
     error: unknown,
   ): ResponsesApiRequest | undefined {
     if (typeof error !== 'object' || error === null) return undefined;
-    const { status, responseBody } = error as Partial<ResponsesApiError>;
-    if (typeof status !== 'number') return undefined;
-
-    const rejection = parseReasoningIdRejection(status, responseBody);
+    const { reasoningIdRejection: rejection } =
+      error as Partial<ResponsesApiError>;
     if (!rejection) return undefined;
 
     const input = downgradeRejectedReasoningItems(apiRequest.input, rejection);
@@ -565,8 +565,8 @@ export class ResponsesPipeline {
     const url = `${baseUrl}/v1/responses`;
 
     const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream',
+      'content-type': 'application/json',
+      accept: 'text/event-stream',
     };
 
     const apiKey =
@@ -575,15 +575,20 @@ export class ResponsesPipeline {
         ? process.env[this.config.apiKeyEnvKey]
         : undefined);
     if (apiKey) {
-      headers['Authorization'] = `Bearer ${apiKey}`;
+      headers['authorization'] = `Bearer ${apiKey}`;
     }
 
     if (this.config.customHeaders) {
-      Object.assign(headers, this.config.customHeaders);
+      for (const [name, value] of Object.entries(this.config.customHeaders)) {
+        headers[name.toLowerCase()] = value;
+      }
     }
 
     const body = JSON.stringify(apiRequest);
-    debugLogger.debug(`POST ${url}`, body.substring(0, 500));
+    debugLogger.debug(
+      `POST ${redactProxyCredentials(url)}`,
+      body.substring(0, 500),
+    );
 
     // Compose the caller's AbortSignal with a connect-timeout controller so a
     // connect-phase timeout also aborts the in-flight fetch (freeing the
@@ -679,11 +684,23 @@ export class ResponsesPipeline {
         signal,
         connectController,
       );
-      const err = new Error(
-        `Responses API error ${response.status}: ${errBody.substring(0, 500)}`,
+      // Classify the original evidence: redaction can shrink an oversized body
+      // below the classifier's limit. Keep only numeric metadata on the error.
+      const rejection = parseReasoningIdRejection(response.status, errBody);
+      // Gateway JSON (including quoted upstream errors) can escape slashes.
+      let diagnosticBody = errBody.replace(/\\+\/?/g, (match) =>
+        match.endsWith('/') ? '/' : match,
       );
-      (err as ResponsesApiError).status = response.status;
-      (err as ResponsesApiError).responseBody = errBody;
+      if (errBody.length > CLASSIFIABLE_ERROR_BODY_CHARS) {
+        // A truncated URL authority can end before the credential's '@'.
+        diagnosticBody = diagnosticBody.replace(/\/\/[^/\s]*$/, '//<redacted>');
+      }
+      const excerpt = redactProxyCredentials(diagnosticBody).substring(0, 500);
+      const err = new Error(
+        `Responses API error ${response.status}: ${excerpt}`,
+      ) as ResponsesApiError;
+      err.status = response.status;
+      err.reasoningIdRejection = rejection;
       throw redactProxyError(err);
     }
 
@@ -1078,7 +1095,7 @@ function sanitizePromptCacheKey(key: string): string {
 
 interface ResponsesApiError extends Error {
   status: number;
-  responseBody: string;
+  reasoningIdRejection?: ReasoningIdRejection;
 }
 
 export function mergeStreamResponses(
