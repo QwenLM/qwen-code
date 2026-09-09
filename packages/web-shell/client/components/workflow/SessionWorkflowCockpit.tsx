@@ -7,6 +7,7 @@ import { PlanExecutionView } from '../messages/PlanExecutionView';
 import {
   buildSessionWorkflowProjection,
   getDefaultWorkflowTodoId,
+  type SessionWorkflowProjection,
 } from './session-workflow-model';
 import styles from './SessionWorkflowCockpit.module.css';
 
@@ -18,6 +19,12 @@ interface SessionWorkflowCockpitProps {
   todos: readonly TodoItem[];
   tools: readonly ACPToolCall[];
   tasks: readonly DaemonSessionTaskStatus[];
+  /**
+   * The projection shared by every workflow surface for this render. The app
+   * derives it once (it also feeds the inspector beside this cockpit); when
+   * absent — a standalone mount, a test — it is derived from the raw props.
+   */
+  projection?: SessionWorkflowProjection;
   selectedTodoId?: string;
   onSelectedTodoIdChange: (todoId: string | undefined) => void;
   onBackToChat: () => void;
@@ -32,6 +39,7 @@ export function SessionWorkflowCockpit({
   todos,
   tools,
   tasks,
+  projection: sharedProjection,
   selectedTodoId,
   onSelectedTodoIdChange,
   onBackToChat,
@@ -39,9 +47,13 @@ export function SessionWorkflowCockpit({
 }: SessionWorkflowCockpitProps) {
   const { t } = useI18n();
   const backButtonRef = useRef<HTMLButtonElement>(null);
+  // Fallback only: with a shared projection this memo returns the passed-in
+  // object without rebuilding, and the embedded graph reuses it too, so one
+  // render of the whole workflow surface derives the projection once.
   const projection = useMemo(
-    () => buildSessionWorkflowProjection(todos, tools, tasks),
-    [tasks, todos, tools],
+    () =>
+      sharedProjection ?? buildSessionWorkflowProjection(todos, tools, tasks),
+    [sharedProjection, tasks, todos, tools],
   );
   const defaultTodoId = getDefaultWorkflowTodoId(todos, projection);
 
@@ -116,6 +128,7 @@ export function SessionWorkflowCockpit({
       <main className={styles.canvas}>
         <PlanExecutionView
           hideTitle
+          projection={projection}
           todos={todos}
           tools={tools}
           tasks={tasks}

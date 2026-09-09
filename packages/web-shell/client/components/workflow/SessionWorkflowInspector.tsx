@@ -18,6 +18,7 @@ import {
   workflowClock,
   workflowInitials,
   workflowTaskStatusKey,
+  type SessionWorkflowProjection,
 } from './session-workflow-model';
 import styles from './SessionWorkflowInspector.module.css';
 
@@ -25,6 +26,12 @@ export interface SessionWorkflowInspectorProps {
   todos: readonly TodoItem[];
   tools: readonly ACPToolCall[];
   tasks: readonly DaemonSessionTaskStatus[];
+  /**
+   * The projection shared by every workflow surface for this render. The app
+   * derives it once and hands the same object to the cockpit, the embedded
+   * graph and this inspector; when absent it is derived from the raw props.
+   */
+  projection?: SessionWorkflowProjection;
   artifacts: readonly DaemonSessionArtifact[];
   selectedTodoId?: string;
   onSelectedTodoIdChange: (todoId: string | undefined) => void;
@@ -38,6 +45,7 @@ export function SessionWorkflowInspector({
   todos,
   tools,
   tasks,
+  projection: sharedProjection,
   artifacts,
   selectedTodoId,
   onSelectedTodoIdChange,
@@ -47,9 +55,12 @@ export function SessionWorkflowInspector({
   canvasMode = false,
 }: SessionWorkflowInspectorProps) {
   const { language, t } = useI18n();
+  // Fallback only: with the app's shared projection this returns the
+  // passed-in object without rebuilding.
   const projection = useMemo(
-    () => buildSessionWorkflowProjection(todos, tools, tasks),
-    [tasks, todos, tools],
+    () =>
+      sharedProjection ?? buildSessionWorkflowProjection(todos, tools, tasks),
+    [sharedProjection, tasks, todos, tools],
   );
   const defaultTodoId = getDefaultWorkflowTodoId(todos, projection);
   const effectiveSelectedTodoId = projection.todosById.has(selectedTodoId ?? '')
