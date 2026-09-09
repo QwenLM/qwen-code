@@ -1261,6 +1261,19 @@ function extractRuleFromCommand(commandNode: SyntaxNode): string | null {
   const rootName = getCommandName(commandNode);
   if (!rootName) return null;
 
+  const nameNode = commandNode.childForFieldName('name');
+  const envPrefix = nameNode
+    ? commandNode.namedChildren
+        .filter(
+          (child) =>
+            /^variable_assignments?$/.test(child.type) &&
+            child.endIndex <= nameNode.startIndex,
+        )
+        .map((child) => child.text)
+        .join(' ')
+    : '';
+  const qualifiedRoot = envPrefix ? `${envPrefix} ${rootName}` : rootName;
+
   const argNodes = getArgumentNodes(commandNode);
   const argTexts = argNodes.map((n) => n.text);
 
@@ -1271,12 +1284,12 @@ function extractRuleFromCommand(commandNode: SyntaxNode): string | null {
   }
 
   const knownSubs = KNOWN_SUBCOMMANDS[rootName];
-  let rule = rootName;
+  let rule = qualifiedRoot;
 
   if (knownSubs && knownSubs.size > 0 && idx < argTexts.length) {
     const potentialSub = argTexts[idx]!.toLowerCase();
     if (knownSubs.has(potentialSub)) {
-      rule = `${rootName} ${argTexts[idx]!}`;
+      rule = `${qualifiedRoot} ${argTexts[idx]!}`;
 
       // Docker multi-level: docker compose <sub>
       if (
@@ -1286,8 +1299,7 @@ function extractRuleFromCommand(commandNode: SyntaxNode): string | null {
       ) {
         const composeSub = argTexts[idx + 1]!.toLowerCase();
         if (DOCKER_COMPOSE_SUBCOMMANDS.has(composeSub)) {
-          rule = `${rootName} compose ${argTexts[idx + 1]!}`;
-          // Remaining args after compose sub
+          rule = `${qualifiedRoot} compose ${argTexts[idx + 1]!}`;
           if (idx + 2 < argTexts.length) {
             rule += ' *';
           }
@@ -1295,7 +1307,6 @@ function extractRuleFromCommand(commandNode: SyntaxNode): string | null {
         }
       }
 
-      // Remaining args after subcommand
       if (idx + 1 < argTexts.length) {
         rule += ' *';
       }
@@ -1303,7 +1314,6 @@ function extractRuleFromCommand(commandNode: SyntaxNode): string | null {
     }
   }
 
-  // No known subcommand – if there are any args, append *
   if (argTexts.length > 0) {
     rule += ' *';
   }
