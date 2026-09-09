@@ -1230,6 +1230,47 @@ describe('BridgeClient — A2UI session update publishing', () => {
   });
 });
 
+describe('BridgeClient — mode promotion fallback', () => {
+  it.each(['plan', 'auto-edit'])(
+    'publishes %s policy metadata without an onModePromoted callback',
+    async (currentModeId) => {
+      const publish = vi.fn();
+      const entry = { sessionId: 'sess:mode', events: { publish } };
+      const client = new BridgeClient(
+        (() => entry) as never,
+        vi.fn(),
+        { request: vi.fn() },
+        0,
+        Infinity,
+      );
+
+      await client.extNotification('qwen/notify/session/mode-update', {
+        v: 1,
+        sessionId: entry.sessionId,
+        currentModeId,
+        planExecutionMode: 'yolo',
+      });
+
+      const promoted = publish.mock.calls.find(
+        ([event]) => event.type === 'approval_mode_changed',
+      )?.[0];
+      expect(promoted).toMatchObject({
+        data: {
+          sessionId: entry.sessionId,
+          previous: 'default',
+          next: currentModeId,
+          persisted: false,
+        },
+      });
+      if (currentModeId === 'plan') {
+        expect(promoted.data.planExecutionMode).toBe('yolo');
+      } else {
+        expect(promoted.data).not.toHaveProperty('planExecutionMode');
+      }
+    },
+  );
+});
+
 describe('BridgeClient — original timestamp preservation', () => {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run');

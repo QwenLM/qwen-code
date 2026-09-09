@@ -25103,6 +25103,46 @@ describe('createServeApp', () => {
       });
     });
 
+    it.each([true, false])(
+      'forwards DAC planMode=%s with its execution policy',
+      async (planMode) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(tokenOpts, undefined, { bridge });
+        const res = await auth(
+          request(app).post('/session/session-A/approval-mode'),
+        ).send({ mode: 'yolo', planMode });
+
+        expect(res.status).toBe(200);
+        expect(bridge.setApprovalModeCalls).toEqual([
+          expect.objectContaining({
+            sessionId: 'session-A',
+            mode: 'yolo',
+            opts: { persist: false, planMode },
+          }),
+        ]);
+      },
+    );
+
+    it.each([
+      { mode: 'plan', planMode: true },
+      { mode: 'plan', planMode: false },
+      { mode: 'yolo', planMode: 'true' },
+      { mode: 'default', planMode: null },
+    ])(
+      'rejects invalid DAC planning control %j before the bridge',
+      async (body) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(tokenOpts, undefined, { bridge });
+        const res = await auth(
+          request(app).post('/session/session-A/approval-mode'),
+        ).send(body);
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_plan_mode');
+        expect(bridge.setApprovalModeCalls).toEqual([]);
+      },
+    );
+
     it('forwards persist:true to the bridge', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
