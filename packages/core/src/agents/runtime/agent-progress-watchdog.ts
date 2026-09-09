@@ -17,6 +17,7 @@ import type {
 const MODEL_CONTROL_PROGRESS_TIMEOUT_MS = 15 * 60_000;
 const TOOL_PROGRESS_TIMEOUT_MS = 10 * 60_000;
 const UNRESPONSIVE_ABORT_GRACE_MS = 5_000;
+const MAX_RETRY_DEADLINE_EXTENSION_MS = 6 * 60 * 60_000;
 
 export class AgentProgressTimeoutError extends Error {
   constructor(
@@ -97,11 +98,12 @@ export function attachAgentProgressWatchdog(
     if (
       disposed ||
       waitingForExternalInput ||
-      [...tools.values()].some((tool) => tool.state !== 'queued')
+      [...tools.values()].some((tool) => tool.state === 'executing')
     )
       return;
     modelTimer = schedule(
-      Math.min(MODEL_CONTROL_PROGRESS_TIMEOUT_MS + retryDelayMs, 2_147_483_647),
+      MODEL_CONTROL_PROGRESS_TIMEOUT_MS +
+        Math.min(retryDelayMs, MAX_RETRY_DEADLINE_EXTENSION_MS),
       () =>
         abort(
           new AgentProgressTimeoutError(
@@ -137,8 +139,11 @@ export function attachAgentProgressWatchdog(
     roundHadToolCalls = false;
     armModel();
   };
-  const onRoundEnd = () => {
-    waitingForExternalInput = !roundHadToolCalls && isWaitingForExternalInput();
+  const onRoundEnd = (event: AgentRoundEvent) => {
+    waitingForExternalInput =
+      event.waitingForExternalInput === true &&
+      !roundHadToolCalls &&
+      isWaitingForExternalInput();
     armModel();
   };
   const onModelRetry = (event: AgentRoundEvent) => {

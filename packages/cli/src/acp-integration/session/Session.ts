@@ -9766,12 +9766,12 @@ export class Session implements SessionContext {
         item,
         false,
       );
-      if (accepted && !this.disposed && !this.closing) {
+      if (!this.disposed && !this.closing) {
         this.#enqueueBackgroundNotification({
           ...item,
           continuesTodoStopGuardWorkChain:
             this.#agentContinuesTodoStopGuardWorkChain(item.taskId),
-          persisted: true,
+          ...(accepted ? { persisted: true } : {}),
           recordOnly: true,
         });
       }
@@ -9953,7 +9953,13 @@ export class Session implements SessionContext {
         try {
           if (item.recordOnly) {
             try {
-              await this.#emitBackgroundNotificationDisplay(item);
+              await this.#emitBackgroundNotificationDisplay(item).catch(
+                (error) => {
+                  debugLogger.warn(
+                    `Unresponsive Agent notification display failed [session ${this.sessionId}, task ${item.taskId}]: ${this.#formatError(error)}`,
+                  );
+                },
+              );
             } finally {
               await this.#emitBackgroundNotificationEndTurn('end_turn');
             }

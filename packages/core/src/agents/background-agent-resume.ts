@@ -1281,7 +1281,11 @@ export class BackgroundAgentResumeService {
               });
             }
 
-            const terminateMode = subagent.getTerminateMode();
+            const terminateMode = getAgentProgressTimeout(
+              turnAbortController.signal,
+            )
+              ? AgentTerminateMode.TIMEOUT
+              : subagent.getTerminateMode();
             const modelVisibleText = toModelVisibleSubagentResult(
               subagent.getFinalText(),
               terminateMode,
@@ -1322,7 +1326,10 @@ export class BackgroundAgentResumeService {
                   : {}),
               });
               registry.complete(meta.agentId, finalText, stats);
-            } else if (terminateMode === AgentTerminateMode.CANCELLED) {
+            } else if (
+              terminateMode === AgentTerminateMode.CANCELLED ||
+              registry.get(meta.agentId)?.status === 'cancelled'
+            ) {
               registry.finalizeCancelled(meta.agentId, finalText, stats);
               persistBackgroundCancellation(
                 metaPath,

@@ -1303,6 +1303,7 @@ export class AgentCore {
               subagentId: this.subagentId,
               round: turnCounter,
               promptId,
+              waitingForExternalInput: true,
               timestamp: Date.now(),
             } as AgentRoundEvent);
 

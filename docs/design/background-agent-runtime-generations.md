@@ -1,12 +1,14 @@
 # Background Agent runtime generations
 
+[中文](background-agent-runtime-generations.zh-CN.md)
+
 ## Problem
 
 A background Agent that does not settle after cancellation can leave its ACP child usable enough to answer transport probes but unsafe for fresh work. Replacing that child must not move its existing Sessions, create unbounded children, or route new work back to the draining generation.
 
 ## Design
 
-Each ACP bridge channel has one of three states: `active`, `draining`, or `dying`. Existing Session entries continue to route through their recorded channel while it drains. Existing timeout retirement paths and explicit recycle requests mark only the affected generation as draining; fresh work then creates a new active generation.
+Each ACP bridge channel has one of three states: `active`, `draining`, or `dying`. Existing Session entries continue to route through their recorded channel while it drains. Explicit recycle requests mark only the affected generation as draining; fresh work then creates a new active generation. Existing timeout retirement keeps its previous reap-after-drain behavior without starting another generation.
 
 Fresh work admits at most two non-dying generations. If both are draining, admission fails with `503 runtime_recycling` until one exits. Restore and recycle recovery may start a replacement while dying processes await reap; dying generations remain tracked until channel exit so synchronous shutdown can still reach them.
 

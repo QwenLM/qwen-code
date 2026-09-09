@@ -3547,7 +3547,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               // the parent model (and the UI) don't treat incomplete runs as
               // completed.
               //
-              const terminateMode = bgSubagent.getTerminateMode();
+              const progressTimeout = getAgentProgressTimeout(
+                turnAbortController.signal,
+              );
+              const terminateMode = progressTimeout
+                ? AgentTerminateMode.TIMEOUT
+                : bgSubagent.getTerminateMode();
               const subagentRawText = bgSubagent.getFinalText();
               const hadWorktreeIsolation = worktreeIsolation !== null;
               const recordTerminalOutcome = () =>
@@ -3556,7 +3561,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                     terminateMode,
                     signalAborted:
                       turnAbortController.signal.aborted &&
-                      !getAgentProgressTimeout(turnAbortController.signal),
+                      !progressTimeout,
                     resultSummaryPresent: Boolean(
                       subagentRawText && subagentRawText.length > 0,
                     ),
@@ -3639,7 +3644,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 registry.complete(hookOpts.agentId, finalText, completionStats);
               } else if (
                 terminateMode === AgentTerminateMode.CANCELLED ||
-                terminateMode === AgentTerminateMode.SHUTDOWN
+                terminateMode === AgentTerminateMode.SHUTDOWN ||
+                registry.get(hookOpts.agentId)?.status === 'cancelled'
               ) {
                 // SHUTDOWN is grouped with CANCELLED in the span taxonomy
                 // (deriveSubagentOutcomeMetadata); align the registry side

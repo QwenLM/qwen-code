@@ -87,6 +87,7 @@ export interface AgentRoundEvent {
   subagentId: string;
   round: number;
   promptId: string;
+  waitingForExternalInput?: true;
   /** Expected model backoff before the next attempt starts. */
   retryDelayMs?: number;
   timestamp: number;

@@ -1,5 +1,7 @@
 # Background Agent progress watchdog
 
+[中文](background-agent-progress-watchdog.zh-CN.md)
+
 ## Problem
 
 An ordinary background Agent can remain registered as running while its model,
@@ -17,14 +19,17 @@ internal deadlines:
 
 Model streaming, round transitions, usage, and external input renew the model
 deadline. Tool output and liveness heartbeats renew only that tool's deadline.
-The model deadline is suspended during transport retry backoff. A tool's own
-deadline starts when the scheduler reports it executing, so a silent tool is
-not charged to the model deadline. Parallel tools retain independent deadlines.
+Retry delays surfaced by qwen-code extend the model deadline by at most six
+hours; provider-internal retries remain covered by the ordinary deadline. A
+tool's own deadline starts when the scheduler reports it executing, so a silent
+tool is not charged to the model deadline. Parallel tools retain independent
+deadlines.
 
-The relevant tool deadline is suspended while user approval is pending. The
-model deadline is suspended only after a no-tool round enters a Monitor-owned
-external-input wait, and resumes when input arrives. A timer delayed by host
-suspend or a local event-loop gap is rearmed rather than charged to the Agent.
+The relevant tool deadline is replaced by the model deadline while user
+approval is pending. The model deadline is suspended only after a no-tool round
+enters a Monitor-owned external-input wait, and resumes when input arrives. A
+timer delayed by host suspend or a local event-loop gap is rearmed rather than
+charged to the Agent.
 
 On expiry the watchdog aborts the turn with an `AgentProgressTimeoutError`.
 Cooperative model and tool paths map that reason to `TIMEOUT`; the background

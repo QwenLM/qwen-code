@@ -3756,9 +3756,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       await killChannelWithLog(ci, context);
       return;
     }
-    if (ci.state === 'draining') return;
-    ci.state = 'draining';
-    if (channelInfo === ci) cancelIdleTimer();
     ci.retireWhenSessionsDrain = true;
     writeStderrLine(
       `qwen serve: ${context}; deferring channel retirement until ${ci.sessionIds.size} active session(s) drain`,
@@ -3774,6 +3771,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (!owner || owner.state === 'dying') {
       throw new SessionNotFoundError(sessionId);
     }
+    owner.state = 'draining';
+    if (channelInfo === owner) cancelIdleTimer();
     await retireChannelAfterSessionsDrain(
       owner,
       `runtime recycle requested by session ${JSON.stringify(sessionId)}`,
@@ -5645,7 +5644,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // lifecycle marker before installing a session from a response that was
       // admitted immediately ahead of the fatal frame.
       await Promise.resolve();
-      if (ci.state !== 'active') {
+      if (ci.isDying) {
         throw new BridgeChannelClosedError('after newSession');
       }
 
@@ -8649,7 +8648,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         restoreEvents.close();
         throw new Error('AcpSessionBridge is shutting down');
       }
-      if (ci.state !== 'active' || !aliveChannels.has(ci)) {
+      if (ci.isDying || !aliveChannels.has(ci)) {
         restoreEvents.close();
         throw new Error(
           `Session ${req.sessionId} restored on a closed agent channel`,
@@ -11270,7 +11269,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             };
           }
 
-          const ci = await ensureChannel();
+          const ci = await ensureChannel('recovery');
           let restored;
           try {
             const hideInheritedHistory = req.replayInheritedHistory === false;
