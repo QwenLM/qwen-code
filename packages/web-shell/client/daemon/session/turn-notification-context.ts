@@ -19,6 +19,7 @@ export interface TurnNotificationTarget {
 export interface TurnNotificationContent {
   target?: TurnNotificationTarget;
   sessionTitle?: string;
+  promptText?: string;
   responseText?: string;
 }
 
@@ -180,15 +181,16 @@ export function getTurnNotificationContent(
   const content: TurnNotificationContent = { sessionTitle };
   const promptId = (event.data as { promptId?: unknown } | undefined)?.promptId;
   if (typeof promptId !== 'string' || !promptId.trim()) return content;
-  if (!sessionTitle?.trim()) {
-    const request = blocks.find(
-      (block) =>
-        block.kind === 'user' &&
-        block.promptId === promptId &&
-        block.parentToolCallId === undefined &&
-        block.text.trim(),
-    );
-    if (request?.kind === 'user')
+  const request = blocks.find(
+    (block) =>
+      block.kind === 'user' &&
+      block.promptId === promptId &&
+      block.parentToolCallId === undefined &&
+      block.text.trim(),
+  );
+  if (request?.kind === 'user') {
+    content.promptText = request.text;
+    if (!sessionTitle?.trim())
       content.sessionTitle = request.text.trim().split('\n')[0];
   }
   if (event.type === 'turn_error') return content;
@@ -252,7 +254,7 @@ export function createTurnNotificationObserver(
     },
     admit(scope, promptId, label) {
       if (promptId && !handled.has(keyFor(scope, promptId)))
-        scopes.get(scope)?.pending.set(promptId, label?.trim().split('\n')[0]);
+        scopes.get(scope)?.pending.set(promptId, label?.trim());
     },
     remove(scope, promptId) {
       if (scopes.has(scope) && promptId) consume(scope, promptId);
@@ -286,7 +288,7 @@ export function createTurnNotificationObserver(
           state.pending.set(
             promptId,
             typeof value['text'] === 'string'
-              ? value['text'].trim().split('\n')[0]
+              ? value['text'].trim()
               : undefined,
           );
         return;
@@ -305,12 +307,15 @@ export function createTurnNotificationObserver(
         typeof value['stopReason'] !== 'string'
       )
         return;
-      const sessionTitle = content?.sessionTitle || state.pending.get(promptId);
+      const promptText = content?.promptText || state.pending.get(promptId);
+      const sessionTitle =
+        content?.sessionTitle || promptText?.trim().split('\n')[0];
       if (!consume(scope, promptId)) return;
       try {
         notify({
           ...content,
           ...(sessionTitle ? { sessionTitle } : {}),
+          ...(promptText ? { promptText } : {}),
           key: keyFor(scope, promptId),
           outcome:
             event.type === 'turn_error'

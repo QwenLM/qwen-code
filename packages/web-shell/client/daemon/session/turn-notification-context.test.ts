@@ -208,17 +208,23 @@ describe('turn notification content', () => {
   it('uses this turn request when a new session has no title yet', () => {
     const blocks = [
       block('old request', { kind: 'user', promptId: 'old' }),
+      block('child request', { kind: 'user', parentToolCallId: 'tool' }),
+      block('unidentified request', { kind: 'user', promptId: undefined }),
       block('  Fix notifications\nMore context', { kind: 'user' }),
       block('Done'),
     ];
     expect(getTurnNotificationContent(terminal(), blocks, undefined)).toEqual({
       sessionTitle: 'Fix notifications',
+      promptText: '  Fix notifications\nMore context',
       responseText: 'Done',
     });
     expect(
-      getTurnNotificationContent(terminal(), blocks, 'Explicit title')
-        ?.sessionTitle,
-    ).toBe('Explicit title');
+      getTurnNotificationContent(terminal(), blocks, 'Explicit title'),
+    ).toEqual({
+      sessionTitle: 'Explicit title',
+      promptText: '  Fix notifications\nMore context',
+      responseText: 'Done',
+    });
   });
 
   it('uses admitted labels when the local user block has no prompt id', () => {
@@ -239,6 +245,7 @@ describe('turn notification content', () => {
     expect(notify).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionTitle: 'Current request',
+        promptText: 'Current request\nDetails',
         responseText: 'Done',
       }),
     );
@@ -247,15 +254,70 @@ describe('turn notification content', () => {
       sessionTitle: 'Explicit title',
     });
     expect(notify).toHaveBeenLastCalledWith(
-      expect.objectContaining({ sessionTitle: 'Explicit title' }),
+      expect.objectContaining({
+        sessionTitle: 'Explicit title',
+        promptText: 'Request fallback',
+      }),
     );
+  });
+
+  it('keeps multiline queued prompts across replay and clears them on release', async () => {
+    const notify = vi.fn();
+    const observer = createTurnNotificationObserver(notify);
+    const release = observer.retain('scope');
+    observer.observe('scope', 's', {
+      type: 'pending_prompt_started',
+      data: { sessionId: 's', promptId: 'p', text: 'Question\nDetails' },
+    });
+    observer.observe('scope', 's', terminal(), true, {
+      sessionTitle: 'Existing title',
+    });
+    expect(notify).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sessionTitle: 'Existing title',
+        promptText: 'Question\nDetails',
+      }),
+    );
+    observer.admit('scope', 'removed', 'Removed question');
+    observer.remove('scope', 'removed');
+    observer.observe('scope', 's', terminal('removed'), true);
+    expect(notify).toHaveBeenCalledOnce();
+    observer.admit('scope', 'later', 'Abandoned question');
+    release();
+    await Promise.resolve();
+    observer.retain('scope');
+    observer.observe('scope', 's', terminal('later'), false, {
+      sessionTitle: 'Title is not the question',
+    });
+    expect(notify).toHaveBeenLastCalledWith({
+      key: JSON.stringify(['scope', 'later']),
+      outcome: 'completed',
+      sessionTitle: 'Title is not the question',
+    });
+  });
+
+  it('includes the exact user prompt on failure without a partial reply', () => {
+    expect(
+      getTurnNotificationContent(
+        {
+          type: 'turn_error',
+          data: { sessionId: 's', promptId: 'p', error: 'private error' },
+        },
+        [
+          block('Previous question', { kind: 'user', promptId: 'old' }),
+          block('Current question', { kind: 'user' }),
+          block('partial response'),
+        ],
+        'Title',
+      ),
+    ).toEqual({ sessionTitle: 'Title', promptText: 'Current question' });
   });
 
   it('does not borrow old replies or expose partial failure replies and insight payloads', () => {
     expect(
       getTurnNotificationContent(
         terminal('new'),
-        [block('old answer')],
+        [block('old question', { kind: 'user' }), block('old answer')],
         undefined,
       ),
     ).toEqual({ sessionTitle: undefined });

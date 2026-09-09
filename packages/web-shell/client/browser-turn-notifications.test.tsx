@@ -134,7 +134,7 @@ describe('browser task notifications', () => {
     expect(notifications[0]?.options.tag).not.toContain('scope');
   });
 
-  it('shows a compact session title and a plain-text reply excerpt without storing them', async () => {
+  it('shows a compact title, prompt and reply excerpts without storing them', async () => {
     vi.stubGlobal('navigator', {
       locks: { request: async (_name: string, action: () => void) => action() },
     });
@@ -157,6 +157,7 @@ describe('browser task notifications', () => {
         false,
         {
           sessionTitle: '  Fix **notifications**\n in Chrome ',
+          promptText: '**Please** fix\n[alerts](https://example.com/private)',
           responseText:
             '# Result\n**Fixed** the [notification](https://example.com/private).\n- Added `tests`.',
         },
@@ -170,11 +171,11 @@ describe('browser task notifications', () => {
       /qwen-code-notification[^/]*\.png$/,
     );
     expect(notifications[0]?.options.body).toBe(
-      'This turn has completed.\nResult Fixed the notification. Added tests.',
+      'This turn has completed.\nPrompt: Please fix alerts\nReply: Result Fixed the notification. Added tests.',
     );
     expect(
       window.localStorage.getItem('qwen-code-web-shell-notification-claims'),
-    ).not.toMatch(/Fix|Result|private/);
+    ).not.toMatch(/Fix|Result|private|Please|alerts/);
   });
 
   it('bounds Unicode titles and excerpts, and keeps status-only fallbacks', async () => {
@@ -187,12 +188,16 @@ describe('browser task notifications', () => {
         [
           'long',
           'turn_complete',
-          { sessionTitle: '🔔'.repeat(80), responseText: '😀'.repeat(160) },
+          {
+            sessionTitle: '🔔'.repeat(80),
+            promptText: '问'.repeat(80),
+            responseText: '😀'.repeat(160),
+          },
         ],
         [
           'empty',
           'turn_complete',
-          { sessionTitle: '  ', responseText: '<br>  ' },
+          { sessionTitle: '  ', promptText: '<br>  ', responseText: '<br>  ' },
         ],
         [
           'failure',
@@ -218,7 +223,11 @@ describe('browser task notifications', () => {
     )!;
     expect(long.title).toBe('QwenCode · ' + '🔔'.repeat(59) + '…');
     expect(long.options.body).toBe(
-      'This turn has completed.\n' + '😀'.repeat(119) + '…',
+      'This turn has completed.\nPrompt: ' +
+        '问'.repeat(80) +
+        '\nReply: ' +
+        '😀'.repeat(119) +
+        '…',
     );
     expect(
       notifications.find((n) => n.title === 'QwenCode')?.options.body,
@@ -227,6 +236,50 @@ describe('browser task notifications', () => {
       notifications.find((n) => n.title === 'QwenCode · Failed task')?.options
         .body,
     ).toBe('This turn failed. Return to view the details.');
+  });
+
+  it('localizes and bounds prompts independently, including failed turns', async () => {
+    window.localStorage.setItem(BROWSER_NOTIFICATIONS_STORAGE_KEY, 'true');
+    const capture: Capture = {};
+    render(capture, (node) => (
+      <BrowserTurnNotifications language="zh-CN">
+        {node}
+      </BrowserTurnNotifications>
+    ));
+    attach(capture);
+    await act(async () => {
+      capture.observer!.observe(
+        'scope',
+        'session',
+        {
+          type: 'turn_error',
+          data: { sessionId: 'session', promptId: 'failed' },
+        },
+        false,
+        { promptText: '😀'.repeat(81), responseText: 'partial private answer' },
+      );
+      capture.observer!.observe(
+        'scope',
+        'session',
+        {
+          type: 'turn_complete',
+          data: {
+            sessionId: 'session',
+            promptId: 'done',
+            stopReason: 'end_turn',
+          },
+        },
+        false,
+        { promptText: '第二轮问题', responseText: '**完成**' },
+      );
+      await vi.waitFor(() => expect(notifications).toHaveLength(2));
+    });
+    expect(notifications.map((n) => n.options.body)).toEqual(
+      expect.arrayContaining([
+        '本轮执行失败，请返回查看。\n提问：' + '😀'.repeat(79) + '…',
+        '本轮已完成。\n提问：第二轮问题\n回复：完成',
+      ]),
+    );
   });
 
   it('requests permission only when the user enables and keeps a denied preference off', async () => {

@@ -19711,6 +19711,7 @@ describe('DaemonSessionProvider', () => {
         expect.objectContaining({
           outcome: 'completed',
           sessionTitle: displayName || 'Local request',
+          promptText: 'Local request\nExtra context',
           responseText: 'final answer',
           target: {
             sessionId: 'session-1',
@@ -19807,6 +19808,7 @@ describe('DaemonSessionProvider', () => {
       expect.objectContaining({
         outcome: 'completed',
         sessionTitle: 'Restored title',
+        promptText: 'request',
         responseText: 'Recovered answer',
       }),
     );

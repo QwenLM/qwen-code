@@ -3545,7 +3545,9 @@ const EN: Messages = {
     `Settings file was corrupted${v?.recovered === 'true' ? ' (recovered from backup)' : ''}`,
   'browserNotifications.label': 'Browser task notifications',
   'browserNotifications.description':
-    'Notify when the current chat or a split-view chat finishes or fails while this page is in the background or unfocused. Shows the session title and a reply excerpt. Saved for this browser site only; the page must remain open.',
+    'Notify when the current chat or a split-view chat finishes or fails while this page is in the background or unfocused. Shows the session title, prompt and reply excerpts. Saved for this browser site only; the page must remain open.',
+  'browserNotifications.prompt': (v) => `Prompt: ${v?.text ?? ''}`,
+  'browserNotifications.reply': (v) => `Reply: ${v?.text ?? ''}`,
   'browserNotifications.completed': 'This turn has completed.',
   'browserNotifications.failed':
     'This turn failed. Return to view the details.',
@@ -6941,7 +6943,9 @@ const ZH: Messages = {
     `设置文件已损坏${v?.recovered === 'true' ? '（已从备份恢复）' : ''}`,
   'browserNotifications.label': '浏览器任务通知',
   'browserNotifications.description':
-    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。通知包含会话标题和回复摘录。仅保存在此浏览器站点；网页需保持打开。',
+    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。通知包含会话标题、提问和回复摘录。仅保存在此浏览器站点；网页需保持打开。',
+  'browserNotifications.prompt': (v) => `提问：${v?.text ?? ''}`,
+  'browserNotifications.reply': (v) => `回复：${v?.text ?? ''}`,
   'browserNotifications.completed': '本轮已完成。',
   'browserNotifications.failed': '本轮执行失败，请返回查看。',
   'browserNotifications.ended': '本轮已结束，请返回查看结果。',

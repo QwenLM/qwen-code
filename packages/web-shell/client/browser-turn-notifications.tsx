@@ -229,6 +229,7 @@ function StandaloneNotifications({
         }
         const t = getTranslator(language);
         const title = notificationExcerpt(turn.sessionTitle ?? '', 60);
+        const prompt = notificationExcerpt(turn.promptText ?? '', 80);
         const excerpt =
           turn.outcome === 'failed'
             ? ''
@@ -237,7 +238,13 @@ function StandaloneNotifications({
         const notification = new window.Notification(
           title ? `QwenCode · ${title}` : 'QwenCode',
           {
-            body: excerpt ? `${status}\n${excerpt}` : status,
+            body: [
+              status,
+              prompt && t('browserNotifications.prompt', { text: prompt }),
+              excerpt && t('browserNotifications.reply', { text: excerpt }),
+            ]
+              .filter(Boolean)
+              .join('\n'),
             icon: NOTIFICATION_ICON_URL,
             tag,
             ...{ renotify: false },
