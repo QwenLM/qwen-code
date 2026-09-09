@@ -146,9 +146,60 @@ const GIT_ENV_EXEC = [
  *
  * Null for a cwd outside any temp dir — a `/review` of a local checkout, where
  * the tree under test IS the user's working copy and there is no sibling
- * layout to mount.
+ * layout to mount. Null for two more reasons besides, and they are NOT the
+ * same answer: an unmountable spelling (containment cannot exist there, so
+ * the mount is no trust boundary) and a REFUSAL (a redirect, a root that
+ * vanished mid-check). The mount side needs only the null; the gates need the
+ * split, and `mountNullKind` answers it from the same single implementation —
+ * a second arithmetic to keep in lockstep is how the two drifts this function
+ * already shipped happened.
  */
 export function mountRootFor(cwd: string): string | null {
+  return mountRootVerdict(cwd).root;
+}
+
+/**
+ * Which kind of nothing a null mount root is, for the gates that consume one.
+ *
+ * - `outside`: the spelling carries no review-temp marker at all. Nothing to
+ *   police; silent.
+ * - `unmountable`: the root's spelling is one the container's mount grammar
+ *   cannot write (`unmountableRootSpelling` — every absolute Windows path, a
+ *   colon-bearing POSIX checkout, a UNC share). Containment cannot exist
+ *   there, so the mount was never a trust boundary: the review's phases ran
+ *   as the host user all along, and a planted pointer buys its writer nothing
+ *   it could not already do. Silent — exactly what the gates' docstrings
+ *   promise ("nothing at all where containment cannot exist"). Reading this
+ *   null as a refusal made every location gate refuse unconditionally on
+ *   Windows — measured as 43 red tests in the scratch-tree and revert-hunk
+ *   suites under the declared Windows model.
+ * - `refused`: inside the spelling, mountable, and STILL no root — the walk
+ *   caught a symlink redirect, or the root vanished between the spelling and
+ *   the realpath (the rename attack). Those are exactly the shapes a
+ *   host-side command must not resolve through. Fail closed.
+ */
+export type MountNullKind = 'outside' | 'unmountable' | 'refused';
+
+/**
+ * The kind of a null `mountRootFor` just answered — the gates' half of the
+ * split `mountRootFor`'s docstring describes.
+ *
+ * Recomputed, never derived from the null alone: the gates' mount provider is
+ * injectable (the suites drive the judgement with fixture roots), so the null
+ * carries no reason with it, and re-asking the real question keeps an
+ * injected null over a real fixture honest. Asked only after a null; a root
+ * that mounts fine by the time this re-ask lands means the two observations
+ * raced, and the fail-closed reading of a flipped answer is the refusal.
+ */
+export function mountNullKind(cwd: string): MountNullKind {
+  return mountRootVerdict(cwd).nullKind ?? 'refused';
+}
+
+/** `mountRootFor` and `mountNullKind`'s shared answer — see them. */
+function mountRootVerdict(cwd: string): {
+  root: string | null;
+  nullKind: MountNullKind | null;
+} {
   const resolved = resolve(cwd);
   const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
   // `+ sep` so a process standing AT the review temp dir is judged inside it.
@@ -156,7 +207,7 @@ export function mountRootFor(cwd: string): string | null {
   // the launch-directory question went unpolicied there, and the negative was
   // memoized as trusted.
   const at = (resolved + sep).lastIndexOf(marker);
-  if (at < 0) return null;
+  if (at < 0) return { root: null, nullKind: 'outside' };
   const root = resolved.slice(0, at + marker.length - 1);
   // A LEXICAL root is not a safe mount target. `resolve` never touches the
   // filesystem, so a symlink at or above `.qwen/tmp` — committable as mode
@@ -168,11 +219,17 @@ export function mountRootFor(cwd: string): string | null {
   //
   // The walk's bound is geometry-aware. `outermostReviewTmpRoot(root) ===
   // root` is the flat case — one review temp dir on the path — and the bound
-  // is the repository root: the root itself stays inside the walk (a link at
-  // `.qwen` redirects the whole path), but the walk does not climb past the
-  // checkout into the user's own layout. A bound one component higher lstats
-  // the checkout's DIRECT parent before the stop test fires, so a link there
-  // — a checkout one hop below a linked directory, the everyday macOS shape —
+  // is the `.qwen` directory: `.qwen/tmp` and `.qwen` stay inside the walk (a
+  // link at either redirects the whole path), but the walk does not reach the
+  // CHECKOUT itself. `redirectedAncestor` lstats the stop directory before
+  // the stop test fires, so a bound at the repository root policed the
+  // checkout's own directory — and a checkout whose own name is a link (a
+  // `--tree` argument typed through a `current -> release-N` link, a shell's
+  // logical $PWD) refused at every gate even though the answer handed back
+  // here is canonicalised by `realpathSync` below, so that link redirects
+  // nothing the mount trusts. A bound one component higher still lstats the
+  // checkout's DIRECT parent before the stop test fires, so a link there —
+  // a checkout one hop below a linked directory, the everyday macOS shape —
   // was read as a redirect in a path the pipeline owns, and `--sandbox=auto`
   // silently degraded to unsandboxed execution of the reviewed code over a
   // false refusal. The sibling walks (scratch-tree's, `worktreeResidue`'s)
@@ -185,10 +242,10 @@ export function mountRootFor(cwd: string): string | null {
   // the walk, exactly as `adminEntryInsideReviewTmp` judges distrust against
   // the outermost root rather than the one the mount was cut at.
   const outermost = outermostReviewTmpRoot(root);
-  const bound = outermost === root ? resolve(root, '..', '..') : outermost;
+  const bound = outermost === root ? resolve(root, '..') : outermost;
   try {
     if (redirectedAncestor(root, bound) !== null) {
-      return null;
+      return { root: null, nullKind: 'refused' };
     }
     const real = realpathSync(root);
     // `-v src:dst` separates its fields with `:`, so a root that contains one
@@ -201,10 +258,15 @@ export function mountRootFor(cwd: string): string | null {
     // that is not. `unmountableRootSpelling` owns the refusal class; saying
     // so here gives `auto` its direct fallback and `required` its refusal
     // instead of the runtime's parse error on every single command.
-    if (unmountableRootSpelling(real)) return null;
-    return real;
+    if (unmountableRootSpelling(real)) {
+      return { root: null, nullKind: 'unmountable' };
+    }
+    return { root: real, nullKind: null };
   } catch {
-    return null;
+    // A root that vanished between the spelling and the realpath is the
+    // rename attack's shape — an ancestor moved out from under the path —
+    // not a mountable answer that failed to materialise.
+    return { root: null, nullKind: 'refused' };
   }
 }
 
@@ -239,14 +301,18 @@ export function unmountableRootSpelling(root: string): boolean {
  *
  * The gates consume this beside `mountRootFor`, not instead of it, because
  * that function's null is overloaded: "outside any temp dir, nothing to
- * police" and "inside one, but REFUSED — a symlink redirects it, or the
- * spelling cannot be mounted" were the same value, and every gate read a
- * refusal as "nothing to police". That is the fail-open direction inverted:
- * the shapes `mountRootFor` refuses are exactly the ones a host-side command
- * must not resolve through. So where this lexical scan says INSIDE and
- * `mountRootFor` says null, the gate fails closed with a refusal of its own —
- * and where the spelling carries no marker at all, the answer costs no
- * syscall, which is what keeps an ordinary checkout off this machinery.
+ * police" and "inside one, but REFUSED — a symlink redirects it, or the root
+ * vanished mid-check" were the same value, and every gate read a refusal as
+ * "nothing to police". That is the fail-open direction inverted: the shapes
+ * `mountRootFor` refuses are exactly the ones a host-side command must not
+ * resolve through. So where this lexical scan says INSIDE and
+ * `mountRootFor` says null, the gate splits the null with `mountNullKind` —
+ * a REFUSAL fails closed, an unmountable spelling stays silent (containment
+ * cannot exist there, so the mount is no trust boundary) — and where the
+ * spelling carries no marker at all, the answer costs no syscall, which is
+ * what keeps an ordinary checkout off this machinery. The launch-dir memo in
+ * `lib/git.ts` uses this scan as the cheap pre-filter that decides what may
+ * never be memoized.
  */
 export function insideReviewTmpLexically(cwd: string): boolean {
   const resolved = resolve(cwd);
@@ -388,14 +454,24 @@ function revParse(cwd: string, ...flags: string[]): RevParse {
  * the location question has already spoken. The realistic case is a git too old
  * for `--path-format`, and this pipeline's scratch and residue routes already
  * require it — so that host has no working review inside a mount either way.
+ *
+ * `expectedOwner` is the tree the entry must OWN: the tree root itself from
+ * `untrustedGitfile`, git's own `--show-toplevel` answer from
+ * `untrustedRepositoryFrom` (whose `dir` may be any subdirectory of the
+ * checkout). `root` is the mount root the caller already observed, threaded
+ * rather than re-asked: a second ask can answer differently than the first —
+ * the outer mount's writer flips it mid-gate — and a re-asked null used to
+ * read as "nothing to police" here, admitting a location the entrance had
+ * just refused (measured: the same state refused when steady, admitted when
+ * the change landed between the two asks).
  */
 function untrustedPointer(
   dir: string,
   gitDir: string,
-  mountRoot: (cwd: string) => string | null,
+  expectedOwner: string,
+  root: string,
 ): string | null {
-  if (mountRoot(dir) === null) return null;
-  if (adminEntryInsideReviewTmp(gitDir, mountRoot, dir)) {
+  if (adminEntryInsideReviewTmp(gitDir, root, dir)) {
     return 'resolves to an admin entry inside the review temp dir, where the reviewed code can rewrite it';
   }
   const common = resolvedCommonDir(dir);
@@ -408,24 +484,31 @@ function untrustedPointer(
   }
   // The backpointer round-trip the write paths already carry
   // (scratch-tree.ts), because a rewritten gitfile has a THIRD shape the two
-  // questions above cannot see: a SIBLING worktree's legitimate admin entry.
-  // That entry is outside the mount (question 1 passes) and is not the common
-  // dir (question 2 passes — a linked worktree's common dir differs from its
-  // git dir), while every host-side command through it measures and mutates
-  // the SIBLING tree. The entry's `gitdir` file names the `.git` of the tree
-  // it belongs to; a borrowed entry names the sibling's. `isSubpath`, because
-  // `dir` here may be any directory inside the tree (the launch-directory
-  // form of this question) — the entry must own the tree `dir` stands in,
-  // not `dir` itself.
+  // questions above cannot see: ANOTHER tree's legitimate admin entry. That
+  // entry is outside the mount (question 1 passes) and is not the common dir
+  // (question 2 passes — a linked worktree's common dir differs from its git
+  // dir), while every host-side command through it measures and mutates the
+  // tree it actually belongs to. The entry's `gitdir` file names the `.git`
+  // of the tree it belongs to; a borrowed entry names that tree's.
   //
-  // Only a definitive MISMATCH is this arm's to name. A backpointer that
-  // cannot be read or resolved — a moved tree, a dangling `gitdir` file —
-  // redirects nothing (the tree still resolves through its own gitfile), and
-  // the downstream identity checks refuse that shape with their own reasons;
-  // refusing it here too would shadow exactly those witnesses. And the one
-  // writer who could corrupt a backpointer to duck the mismatch — reviewed
-  // code — cannot reach an entry outside the mount at all, which question 1
-  // has already established about this one.
+  // The comparison is EXACT — the owner IS the expected tree, not an ancestor
+  // of it: `dir` may be a subdirectory of its checkout, so the callers name
+  // the tree rather than `dir`, and the older ancestor-tolerant comparison
+  // admitted a gitfile borrowing the ENCLOSING review worktree's entry in the
+  // nested geometry (the outer tree IS an ancestor of the inner one), after
+  // which every read answered out of the outer tree's index — measured, a
+  // `status` through the borrowed entry reported the outer tree's staged
+  // file. And it cannot be canonicalised blind: the owner path lives inside
+  // the read-write mount for every tree this pipeline builds, so a link
+  // planted at the owner's spelling makes a naive realpath comparison agree
+  // with whatever the link points at — measured, a sibling's spelling
+  // replaced by a link to THIS tree round-tripped clean while commands
+  // through the entry wrote the sibling's index. So a redirect between the
+  // mount root and the owner is refused BEFORE anything resolves through it,
+  // and an owner that cannot be resolved at all — the borrowed sibling's
+  // tree deleted, a symlink loop; git keeps answering through the entry
+  // regardless (measured) — does not point back at this tree, the same
+  // decision `worktreeResidue` makes for the same shape.
   let backpointer: string;
   try {
     // `\n` only, never `.trim()`: the same divergence `resolvedGitDir`
@@ -438,15 +521,59 @@ function untrustedPointer(
   } catch {
     return null;
   }
-  let ownerTree: string;
-  let here: string;
+  const ownerSpelled = dirname(resolve(gitDir, backpointer));
+  let ownerTree: string | null;
   try {
-    ownerTree = realpathSync(dirname(resolve(gitDir, backpointer)));
-    here = realpathSync(dir);
+    ownerTree = realpathSync(ownerSpelled);
   } catch {
-    return null;
+    ownerTree = null;
   }
-  if (ownerTree !== here && !isSubpath(ownerTree, here)) {
+  // The containment question is asked of the owner AS SPELLED, and the mount
+  // root is the boundary, because that spelling is what makes the link
+  // plantable: reviewed code holds the mount read-write, so a symlink on the
+  // owner's path is its to plant exactly when the owner's path runs through
+  // the root. A link anywhere else is the user's own layout — a backpointer
+  // spelled through one that RESOLVES at this tree names the right tree, and
+  // refusing it failed closed on a shape that redirects nothing (the alias
+  // case the residue probe pins). Under the root, the link is the plant:
+  // replacing the borrowed sibling's tree with a link to THIS one makes a
+  // canonicalising comparison agree with itself — measured, the admitted
+  // pointer then wrote the sibling's index — so the redirect is refused
+  // before anything resolves through it.
+  if (ownerSpelled === root || isSubpath(root, ownerSpelled)) {
+    const redirect = redirectedAncestor(ownerSpelled, root);
+    if (redirect !== null) {
+      return (
+        "resolves to a different tree's admin entry — the owner its gitdir " +
+        `backpointer names resolves through a symlink inside the review ` +
+        `temp dir (${redirect}), so the round trip would agree with ` +
+        'whatever the link points at'
+      );
+    }
+  }
+  let expectedReal: string;
+  try {
+    expectedReal = realpathSync(expectedOwner);
+  } catch {
+    // The expected tree not resolving is the caller's own absent-path case,
+    // answered before the pointer question was ever asked; reaching it here
+    // means the ground moved mid-gate, which is the refusal direction.
+    return 'could not resolve the tree the entry must belong to';
+  }
+  if (ownerTree === null) {
+    // An owner that cannot be resolved — the borrowed sibling's tree
+    // deleted, a symlink loop — does not point back at this tree: git keeps
+    // answering through the entry regardless (its index, its HEAD), so a
+    // swallow here admitted the borrow with the owner gone (measured). The
+    // same shape the residue probe's round trip refuses with the same
+    // words; failing open was the outlier.
+    return (
+      'resolves to an admin entry that does not point back at this tree — ' +
+      'the owner its backpointer names cannot be resolved, so the commands ' +
+      'this gates would measure whichever repository it does name'
+    );
+  }
+  if (ownerTree !== expectedReal) {
     return (
       "resolves to a different tree's admin entry — its gitdir " +
       'backpointer names that tree, not this one, so every command ' +
@@ -475,19 +602,21 @@ export function untrustedRepositoryFrom(
   cwd: string,
   mountRoot: (dir: string) => string | null = mountRootFor,
 ): string | null {
-  // INSIDE-by-spelling and mount-null together are a refusal, not "nothing to
-  // police": `mountRootFor`'s null is overloaded (see
-  // `insideReviewTmpLexically`), and a launch directory it REFUSED — a
-  // symlinked `.qwen/tmp`, an unspellable root — is precisely one no host-side
-  // command may resolve through. Reading that null as "outside any temp dir"
-  // inverted the gate's fail direction, measured end-to-end with a symlinked
-  // `.qwen/tmp`.
-  if (mountRoot(cwd) === null) {
-    if (!insideReviewTmpLexically(cwd)) return null;
+  // INSIDE-by-spelling and mount-null together need the null's KIND (see
+  // `mountNullKind`): an UNMOUNTABLE spelling stays silent — where
+  // containment cannot exist the mount is no trust boundary — while a
+  // REFUSAL (a symlinked `.qwen/tmp`, a root that vanished mid-check) names
+  // precisely a directory no host-side command may resolve through. Reading
+  // the refusal as "outside any temp dir" inverted the gate's fail
+  // direction, measured end-to-end with a symlinked `.qwen/tmp`.
+  const root = mountRoot(cwd);
+  if (root === null) {
+    if (mountNullKind(cwd) !== 'refused') return null;
     return (
       `${cwd}: the path is inside the review temp dir by spelling, but no ` +
-      `mount root answered for it — a redirect or an unmountable shape ` +
-      `refused it, so where a command run from here would land is unmeasured`
+      `mount root answered for it — a redirect or a root that vanished ` +
+      `mid-check refused it, so where a command run from here would land ` +
+      `is unmeasured`
     );
   }
   if (!existsSync(cwd)) {
@@ -514,7 +643,22 @@ export function untrustedRepositoryFrom(
       ? null
       : `${cwd}: git could not resolve its own git dir, so where a command run from here would land is unmeasured`;
   }
-  const why = untrustedPointer(cwd, target.value, mountRoot);
+  // The tree the resolved entry must OWN, as git itself answers it. `cwd`
+  // may be any subdirectory of the checkout, so the owner cannot be compared
+  // against `cwd` — and comparing loosely (the owner an ANCESTOR of `cwd`)
+  // admitted a gitfile borrowing the ENCLOSING review worktree's admin entry
+  // in the nested geometry, after which every command here measured the
+  // outer tree's index. `--show-toplevel` prints the tree the gitfile sits
+  // in even through a borrowed entry (measured), which is the one answer the
+  // borrow cannot bring into agreement with the entry's own backpointer.
+  const toplevel = revParse(cwd, '--show-toplevel');
+  if (toplevel.value === null) {
+    // The repository answered --absolute-git-dir but not this — a bare repo,
+    // a cwd inside `.git`. No tree owns those, so no tree's pointer is
+    // certified either: fail closed, as with the git-dir question above.
+    return `${cwd}: git could not resolve its own top-level directory, so where a command run from here would land is unmeasured`;
+  }
+  const why = untrustedPointer(cwd, target.value, toplevel.value, root);
   return why === null ? null : `${cwd} ${why}`;
 }
 
@@ -542,8 +686,9 @@ export function untrustedRepositoryFrom(
  * call site at a time, and a class closed call site by call site re-opens at
  * the next call site somebody adds:
  *
- * - writes: `scratch-tree`'s reuse and rebuild, `base-tree`, `test-efficacy`'s
- *   probe-tree restore and worktree creation;
+ * - writes: `scratch-tree`'s reuse, rebuild and standalone build (the last
+ *   certifies the head it read through the review worktree's own gitfile),
+ *   `base-tree`, `test-efficacy`'s probe-tree restore and worktree creation;
  * - reads that the pipeline later TREATS as fact: `worktreeResidue` (below,
  *   inline, because `status` refreshes the index and a refresh runs the clean
  *   filter), `comment-status`'s code probes, `repo-context`'s merge-base
@@ -575,15 +720,20 @@ export function untrustedGitfile(
   const root = mountRoot(tree);
   if (root === null) {
     // The tree IS there and its spelling is inside the review temp dir, yet
-    // no mount root answered: `mountRootFor` REFUSED the path (a redirect, an
-    // unspellable root), and a refusal is not "nothing to police" — see
-    // `insideReviewTmpLexically`. Outside the spelling, null really does mean
-    // there is no writable surface for this question to be about.
-    if (!insideReviewTmpLexically(tree)) return null;
+    // no mount root answered: which null that is decides the answer (see
+    // `mountNullKind`). An UNMOUNTABLE spelling — Windows, a colon-bearing
+    // checkout — stays silent: containment cannot exist there, so the mount
+    // is no trust boundary and there is nothing to police. A REFUSAL — a
+    // redirect, a root that vanished mid-check — is not "nothing to police":
+    // those are exactly the shapes a host-side command must not resolve
+    // through. Outside the spelling, null really does mean there is no
+    // writable surface for this question to be about.
+    if (mountNullKind(tree) !== 'refused') return null;
     return (
       `${tree}: the path is inside the review temp dir by spelling, but no ` +
-      `mount root answered for it — a redirect or an unmountable shape ` +
-      `refused it, so where a command through its .git would land is unmeasured`
+      `mount root answered for it — a redirect or a root that vanished ` +
+      `mid-check refused it, so where a command through its .git would land ` +
+      `is unmeasured`
     );
   }
   const dotGit = join(tree, '.git');
@@ -602,7 +752,7 @@ export function untrustedGitfile(
   if (target.value === null) {
     return `${tree}: git could not resolve its own git dir`;
   }
-  const why = untrustedPointer(tree, target.value, mountRoot);
+  const why = untrustedPointer(tree, target.value, tree, root);
   return why === null ? null : `${tree} ${why}`;
 }
 
@@ -630,14 +780,22 @@ export function untrustedGitfile(
  * one has to be inside it, because that is the only place the writer can
  * reach. So refuse an admin entry that resolves inside the review temp dir,
  * and let every other check stand as it is.
+ *
+ * `root` is the caller's ONE observation of the mount root, threaded through
+ * rather than re-asked: a re-ask can answer differently than the entrance's
+ * ask — the outer mount's writer flips it mid-gate — and a re-asked null read
+ * as "nothing to police" here admitted a location the entrance had just
+ * refused. A null threaded in means the entrance saw no root: outside any
+ * temp dir, or where containment cannot exist, there is nothing to police —
+ * but a REFUSED root (`mountNullKind`) is the redirect the entrance failed
+ * closed on, and this question fails closed with it.
  */
 export function adminEntryInsideReviewTmp(
   gitDir: string,
-  mountRoot: (cwd: string) => string | null,
+  root: string | null,
   tree: string,
 ): boolean {
-  const root = mountRoot(tree);
-  if (root === null) return false;
+  if (root === null) return mountNullKind(tree) === 'refused';
   let real: string;
   let realRoot: string;
   try {
@@ -1781,24 +1939,29 @@ export function worktreeResidue(
   // pointer cannot be trusted is precisely what the `unmeasured` channel
   // exists to report — every caller already treats it as "not clean".
   //
-  // The mount's null is overloaded (see `insideReviewTmpLexically`): outside
-  // any review temp dir it means the question does not arise and an ordinary
-  // checkout never pays for the extra spawn — but INSIDE the spelling it is a
-  // REFUSAL (a redirect, an unspellable root), and reading it as "nothing to
-  // police" ran the measurement through exactly the redirect `mountRootFor`
-  // had just declined to mount. Distinguish lexically, fail closed.
-  if (mountRootFor(cwd) === null && insideReviewTmpLexically(cwd)) {
-    return {
-      paths: [],
-      total: 0,
-      unmeasured:
-        'the path is inside the review temp dir by spelling, but no mount ' +
-        'root answered for it — a redirect or an unmountable shape refused ' +
-        'it, and the status below would measure whichever repository the ' +
-        'pointer here names',
-    };
-  }
-  if (mountRootFor(cwd) !== null) {
+  // The mount's null is three answers wearing one value (see
+  // `mountNullKind`): outside any review temp dir the question does not arise
+  // and an ordinary checkout never pays for the extra spawn, and an
+  // UNMOUNTABLE spelling stays silent — where containment cannot exist the
+  // mount is no trust boundary — but a REFUSAL (a redirect, a root that
+  // vanished mid-check) read as "nothing to police" ran the measurement
+  // through exactly the redirect `mountRootFor` had just declined to mount.
+  // One observation, threaded through: re-asking below could answer
+  // differently than the ask above, mid-gate.
+  const root = mountRootFor(cwd);
+  if (root === null) {
+    if (mountNullKind(cwd) === 'refused') {
+      return {
+        paths: [],
+        total: 0,
+        unmeasured:
+          'the path is inside the review temp dir by spelling, but no mount ' +
+          'root answered for it — a redirect or a root that vanished ' +
+          'mid-check refused it, and the status below would measure ' +
+          'whichever repository the pointer here names',
+      };
+    }
+  } else {
     const target = resolvedGitDir(cwd);
     // git not answering is not "no objection", and widening this gate's budget
     // cannot make it so: the spawns below carry none at all, so a config sized
@@ -1808,7 +1971,7 @@ export function worktreeResidue(
     // reason.
     let why: string | null;
     if (target.value !== null) {
-      why = untrustedPointer(cwd, target.value, mountRootFor);
+      why = untrustedPointer(cwd, target.value, cwd, root);
     } else {
       why = target.notARepository
         ? null

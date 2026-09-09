@@ -46,6 +46,7 @@ import {
   filterCommandsIn,
   insideReviewTmpLexically,
   localFilterCommands,
+  mountNullKind,
   mountRootFor,
   sanitizedGitEnv,
   unmountableRootSpelling,
@@ -54,6 +55,17 @@ import {
   worktreeCreateFailureDetail,
   worktreeResidue,
 } from './worktree.js';
+
+// On Windows `mountRootFor` refuses every absolute path (a drive letter is a
+// colon), so containment cannot exist there and the gates stay silent by
+// design — a case asserting a REFUSAL has no answer to assert on that lane.
+const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
+
+// One case below plants a name holding a raw invalid-UTF-8 byte, which only a
+// filesystem that stores such names allows — NTFS is UTF-16 and APFS rejects
+// invalid UTF-8 with EILSEQ, so the shape the case pins cannot exist there
+// (and neither can the attack: the plant itself is uncreateable).
+const itWhereRawByteNamesExist = it.skipIf(process.platform !== 'linux');
 
 // Replaces a gitfile that `git worktree add` created. On Windows git marks
 // the linked worktree's `.git` hidden, and opening a hidden file for truncate
@@ -660,11 +672,19 @@ describe('worktreeResidue', () => {
       // Move the worktree out and re-hang it one level deeper, behind a link
       // planted INSIDE the mount. The moved tree keeps naming its original
       // admin entry — spelled absolutely, because its old relative spelling
-      // no longer resolves from outside the repo.
+      // no longer resolves from outside the repo — and the entry's own
+      // backpointer is updated to the moved tree, so the location gate's
+      // round trip agrees and only the walk can see the link. (Without that
+      // update the gate refuses first — an owner it cannot resolve does not
+      // point back — and the walk's arm loses its witness.)
       renameSync(tree, join(outside, 'review-wt'));
       overwriteGitfile(
         join(outside, 'review-wt', '.git'),
         `gitdir: ${join(repo, '.git', 'worktrees', 'review-wt')}\n`,
+      );
+      writeFileSync(
+        join(repo, '.git', 'worktrees', 'review-wt', 'gitdir'),
+        `${join(outside, 'review-wt', '.git')}\n`,
       );
       symlinkSync(outside, join(dirname(tree), 'link'));
       const spelled = join(dirname(tree), 'link', 'review-wt');
@@ -2431,14 +2451,6 @@ describe('worktreeCreateFailureDetail', () => {
   });
 });
 
-const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
-
-// One case below plants a name holding a raw invalid-UTF-8 byte, which only a
-// filesystem that stores such names allows — NTFS is UTF-16 and APFS rejects
-// invalid UTF-8 with EILSEQ, so the shape the case pins cannot exist there
-// (and neither can the attack: the plant itself is uncreateable).
-const itWhereRawByteNamesExist = it.skipIf(process.platform !== 'linux');
-
 // Every case in this block builds a layout under `.qwen/tmp` and asks a
 // question that only has an answer where containment can exist. On Windows
 // `mountRootFor` refuses every absolute path (a drive letter is a colon), so
@@ -2472,10 +2484,12 @@ describe('untrustedGitfile', () => {
    * A REAL repository with a real linked worktree under `.qwen/tmp` — the
    * pipeline's own geometry. Real, because the gate asks git to resolve the
    * pointer rather than parsing it, so a fixture git cannot read proves
-   * nothing about either answer.
+   * nothing about either answer. `repo` is parameterised so one case can
+   * build the same layout under a colon-bearing checkout (the POSIX spelling
+   * of the Windows shape).
    */
-  const pipelineTree = () => {
-    const repo = tmp();
+  const pipelineTree = (repo: string = tmp()) => {
+    mkdirSync(repo, { recursive: true });
     const g = (cwd: string, ...args: string[]) =>
       execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
     g(repo, 'init', '-q', '-b', 'main');
@@ -2799,6 +2813,7 @@ describe('untrustedGitfile', () => {
       // The tree still resolves — through the link the mount refuses.
       expect(existsSync(tree)).toBe(true);
       expect(mountRootFor(tree)).toBeNull();
+      expect(mountNullKind(tree)).toBe('refused');
 
       expect(untrustedGitfile(tree)).toContain('review temp dir');
       expect(untrustedRepositoryFrom(tree)).toContain('review temp dir');
@@ -2827,6 +2842,211 @@ describe('untrustedGitfile', () => {
       ).toBeNull();
     },
   );
+
+  itWhereContainmentExists(
+    'stays SILENT where containment cannot exist — an unmountable spelling is not a refusal (R26-3)',
+    () => {
+      // A colon in a POSIX path is legal and rare; on Windows EVERY absolute
+      // path carries one (a drive letter), which is why this fixture is the
+      // Windows shape on a filesystem that can build it. The mount cannot be
+      // spelled either way, so containment never existed there and the mount
+      // is not a trust boundary: the review's phases ran as the host user all
+      // along. The gates promise "nothing at all where containment cannot
+      // exist" — reading this null as a refusal made every location gate
+      // refuse unconditionally on Windows (measured: 43 red tests in the
+      // scratch-tree and revert-hunk suites under the Windows model), with a
+      // message byte-identical for honest and planted trees.
+      const { tree } = pipelineTree(join(tmp(), 'my:checkout', 'repo'));
+      expect(mountRootFor(tree)).toBeNull();
+      expect(mountNullKind(tree)).toBe('unmountable');
+      expect(mountNullKind(join(tmp(), 'nowhere'))).toBe('outside');
+
+      // Silent from the real provider, and silent from an injected provider
+      // answering null for the same unmountable spelling — the finding's own
+      // acceptance shape.
+      expect(untrustedGitfile(tree)).toBeNull();
+      expect(untrustedGitfile(tree, () => null)).toBeNull();
+      expect(untrustedRepositoryFrom(tree)).toBeNull();
+      // And the probe measures the honest tree rather than reporting it
+      // unmeasured forever.
+      const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: tree,
+        encoding: 'utf8',
+      }).trim();
+      expect(worktreeResidue(tree, 12, head)).toEqual({ paths: [], total: 0 });
+    },
+  );
+
+  itWhereContainmentExists(
+    'judges the mount root the entrance observed — asked once, not re-asked mid-gate (R19-2)',
+    () => {
+      // `untrustedPointer` used to re-ask the mount question and read the
+      // second null as "nothing to police": the identical filesystem state
+      // was refused when steady and ADMITTED when the answer changed between
+      // the two asks (measured: a mount that stops answering mid-gate turned
+      // the refusal into an admission). The root the entrance observed is
+      // threaded through now, so the flip is invisible to the gate — and the
+      // single evaluation is asserted, because the re-ask was also a second
+      // lstat walk per gate call.
+      const { repo, tree, mount } = pipelineTree();
+      plantAdminEntry(
+        join(repo, '.qwen', 'tmp', '.evil-git'),
+        adminEntryOf(tree),
+        tree,
+        join(repo, '.git'),
+      );
+      let calls = 0;
+      const stopsAnswering = (_d: string) => {
+        calls++;
+        return calls === 1 ? mount() : null;
+      };
+      expect(untrustedGitfile(tree, stopsAnswering)).toContain(
+        'review temp dir',
+      );
+      expect(calls).toBe(1);
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses when the mount is flipped to a redirect between the observation and the pointer check (R30-49)',
+    () => {
+      // The TOCTOU the threading closes: the entrance observes a healthy
+      // root, and before the pointer check runs the outer mount's writer
+      // renames `.qwen/tmp` away and stands a link up at its spelling. A
+      // re-asked mount question answers null there, and a null read as
+      // "nothing to police" admitted the planted entry the entrance had just
+      // refused (measured: `status` through it ran the plant's clean
+      // filter).
+      const { repo, tree } = pipelineTree();
+      plantAdminEntry(
+        join(repo, '.qwen', 'tmp', '.evil-git'),
+        adminEntryOf(tree),
+        tree,
+        join(repo, '.git'),
+      );
+      let flipped = false;
+      const flippingMidCall = (d: string) => {
+        const answer = mountRootFor(d);
+        if (!flipped) {
+          flipped = true;
+          renameSync(
+            join(repo, '.qwen', 'tmp'),
+            join(repo, '.qwen', 'tmp-real'),
+          );
+          symlinkSync(
+            join(repo, '.qwen', 'tmp-real'),
+            join(repo, '.qwen', 'tmp'),
+          );
+        }
+        return answer;
+      };
+      expect(untrustedGitfile(tree, flippingMidCall)).toContain(
+        'review temp dir',
+      );
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses a borrowed entry whose owner path resolves through a link planted inside the mount (R28-14)',
+    () => {
+      // The round trip canonicalised BOTH sides, so replacing the borrowed
+      // sibling's tree with a link to THIS tree made the two agree — the
+      // entry passed while every command through it wrote the sibling's
+      // index (measured). The owner path lives inside the mount for every
+      // tree this pipeline builds, so a symlink on the way to it is the
+      // plant; it is refused before anything resolves through it.
+      const { repo, tree, mount } = pipelineTree();
+      const sibling = join(repo, '.qwen', 'tmp', 'review-pr-2');
+      execFileSync(
+        'git',
+        ['worktree', 'add', '-q', '--detach', sibling, 'HEAD'],
+        {
+          cwd: repo,
+        },
+      );
+      const admin = adminEntryOf(sibling);
+      rmSync(sibling, { recursive: true, force: true });
+      symlinkSync(tree, sibling);
+      overwriteGitfile(join(tree, '.git'), `gitdir: ${admin}\n`);
+      // The fixture is the shape the finding measured: git still resolves
+      // through the borrowed entry, so the gate — not git — is what refuses.
+      expect(untrustedGitfile(tree, mount)).toContain(
+        "a different tree's admin entry",
+      );
+      expect(untrustedRepositoryFrom(tree, mount)).toContain(
+        "a different tree's admin entry",
+      );
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses a borrowed entry whose owner tree is gone — an unresolvable backpointer fails closed (R30-48)',
+    () => {
+      // The round trip's other fail-open outcome: the borrowed sibling's
+      // tree DELETED, so the owner the backpointer names cannot be resolved,
+      // and the swallow returned "no objection" — while git keeps answering
+      // through the entry (its index, its HEAD) with the owner gone
+      // (measured). An owner that cannot be resolved does not point back at
+      // this tree, the same decision the residue probe makes for the shape.
+      const { repo, tree, mount } = pipelineTree();
+      const sibling = join(repo, '.qwen', 'tmp', 'review-pr-2');
+      execFileSync(
+        'git',
+        ['worktree', 'add', '-q', '--detach', sibling, 'HEAD'],
+        {
+          cwd: repo,
+        },
+      );
+      const admin = adminEntryOf(sibling);
+      rmSync(sibling, { recursive: true, force: true });
+      overwriteGitfile(join(tree, '.git'), `gitdir: ${admin}\n`);
+      expect(untrustedGitfile(tree, mount)).toContain('does not point back');
+      expect(untrustedRepositoryFrom(tree, mount)).toContain(
+        'does not point back',
+      );
+    },
+  );
+
+  itWhereContainmentExists(
+    "refuses a gitfile borrowing the ENCLOSING review worktree's admin entry (R30-5)",
+    () => {
+      // The nested/dogfood geometry: the outer review worktree is an
+      // ANCESTOR of the inner one, and the round trip's ancestor-tolerant
+      // comparison admitted the inner tree's gitfile rewritten to the
+      // outer's entry — after which every read answered out of the OUTER
+      // tree's index (measured: a staged-only-in-outer file reported as the
+      // inner tree's status). The comparison is exact now, against the tree
+      // root `untrustedGitfile` knows and against git's own
+      // `--show-toplevel` for a launch directory — which prints the tree the
+      // gitfile sits in even through the borrow (measured), the one answer
+      // the borrow cannot bring into agreement.
+      const { tree: outer } = pipelineTree();
+      const inner = join(outer, '.qwen', 'tmp', 'review-pr-2');
+      mkdirSync(dirname(inner), { recursive: true });
+      execFileSync(
+        'git',
+        ['worktree', 'add', '-q', '--detach', inner, 'HEAD'],
+        {
+          cwd: outer,
+        },
+      );
+      // Injected roots, so the case is about the GATE and not the platform's
+      // mount arithmetic — the nested real-root admit is the canary's.
+      const outerMount = () => join(outer, '.qwen', 'tmp');
+      // The honest nested layout admits — the control without which a
+      // refuse-everything gate passes this test too.
+      expect(untrustedGitfile(inner, outerMount)).toBeNull();
+      expect(untrustedRepositoryFrom(inner, outerMount)).toBeNull();
+
+      overwriteGitfile(join(inner, '.git'), `gitdir: ${adminEntryOf(outer)}\n`);
+      expect(untrustedGitfile(inner, outerMount)).toContain(
+        "a different tree's admin entry",
+      );
+      expect(untrustedRepositoryFrom(inner, outerMount)).toContain(
+        "a different tree's admin entry",
+      );
+    },
+  );
 });
 
 describe('adminEntryInsideReviewTmp', () => {
@@ -2852,11 +3072,7 @@ describe('adminEntryInsideReviewTmp', () => {
     mkdirSync(tree, { recursive: true });
     mkdirSync(planted, { recursive: true });
     expect(
-      adminEntryInsideReviewTmp(
-        planted,
-        () => join(repo, '.qwen', 'tmp'),
-        tree,
-      ),
+      adminEntryInsideReviewTmp(planted, join(repo, '.qwen', 'tmp'), tree),
     ).toBe(true);
   });
 
@@ -2871,12 +3087,12 @@ describe('adminEntryInsideReviewTmp', () => {
     const oddly = join(mount, '..evil-git');
     mkdirSync(tree, { recursive: true });
     mkdirSync(oddly, { recursive: true });
-    expect(adminEntryInsideReviewTmp(mount, () => mount, tree)).toBe(true);
-    expect(adminEntryInsideReviewTmp(oddly, () => mount, tree)).toBe(true);
+    expect(adminEntryInsideReviewTmp(mount, mount, tree)).toBe(true);
+    expect(adminEntryInsideReviewTmp(oddly, mount, tree)).toBe(true);
     // ...while a genuine sibling of the mount is still outside.
     const outside = join(repo, '.qwen', 'review-leases');
     mkdirSync(outside, { recursive: true });
-    expect(adminEntryInsideReviewTmp(outside, () => mount, tree)).toBe(false);
+    expect(adminEntryInsideReviewTmp(outside, mount, tree)).toBe(false);
   });
 
   it('admits the real admin entry, which lives under the repository git dir', () => {
@@ -2886,7 +3102,7 @@ describe('adminEntryInsideReviewTmp', () => {
     mkdirSync(tree, { recursive: true });
     mkdirSync(real, { recursive: true });
     expect(
-      adminEntryInsideReviewTmp(real, () => join(repo, '.qwen', 'tmp'), tree),
+      adminEntryInsideReviewTmp(real, join(repo, '.qwen', 'tmp'), tree),
     ).toBe(false);
   });
 
@@ -2899,7 +3115,7 @@ describe('adminEntryInsideReviewTmp', () => {
     expect(
       adminEntryInsideReviewTmp(
         join(repo, 'gone'),
-        () => join(repo, '.qwen', 'tmp'),
+        join(repo, '.qwen', 'tmp'),
         tree,
       ),
     ).toBe(true);
@@ -2910,8 +3126,35 @@ describe('adminEntryInsideReviewTmp', () => {
     // this question to be about — and answering `true` there would refuse
     // every ordinary repository.
     const repo = tmp();
-    expect(adminEntryInsideReviewTmp(repo, () => null, repo)).toBe(false);
+    expect(adminEntryInsideReviewTmp(repo, null, repo)).toBe(false);
   });
+
+  itWhereContainmentExists(
+    'fails closed on a REFUSED mount root, and stays silent on an unmountable one',
+    () => {
+      // The threaded null is the entrance's observation, and its kind decides
+      // (R19-2): a redirect the entrance failed closed on is not "nothing to
+      // police" here either — but where containment cannot exist (the
+      // colon-bearing spelling standing in for Windows, which NTFS could not
+      // even create — hence the block gate) the mount is no trust boundary,
+      // and the question stays silent. The refused arm is a REAL refused
+      // mount — a link stood up at `.qwen/tmp` — because the kind is
+      // re-derived from the filesystem, not from the null alone.
+      const repo = tmp();
+      const tree = join(repo, '.qwen', 'tmp', 'review-pr-1-probe');
+      mkdirSync(tree, { recursive: true });
+      // A REAL refused mount: `.qwen/tmp` renamed aside and re-stood-up as a
+      // link — the refusal kind survives a colon-bearing TMPDIR, where a
+      // plain fixture would read as unmountable instead.
+      renameSync(join(repo, '.qwen', 'tmp'), join(repo, '.qwen', 'tmp-real'));
+      symlinkSync(join(repo, '.qwen', 'tmp-real'), join(repo, '.qwen', 'tmp'));
+      expect(adminEntryInsideReviewTmp(repo, null, tree)).toBe(true);
+      const colon = join(tmp(), 'my:checkout');
+      const colonTree = join(colon, '.qwen', 'tmp', 'review-pr-1');
+      mkdirSync(colonTree, { recursive: true });
+      expect(adminEntryInsideReviewTmp(repo, null, colonTree)).toBe(false);
+    },
+  );
 });
 
 describe('unmountableRootSpelling', () => {
@@ -2967,8 +3210,8 @@ describe('mountRootFor — the walk bound is geometry-aware', () => {
       // fires — so a link at the checkout's direct parent (a checkout one
       // hop below a linked directory) was read as a redirect in a path the
       // pipeline owns, and `--sandbox=auto` silently degraded to unsandboxed
-      // execution over the false refusal. Bounded at the repository root,
-      // the walk never looks at the user's own layout above the checkout.
+      // execution over the false refusal. Bounded at `.qwen`, the walk never
+      // looks at the checkout's own spelling or the user's layout above it.
       const anchor = tmp();
       const realParent = tmp();
       symlinkSync(realParent, join(anchor, 'link'));
@@ -2976,6 +3219,41 @@ describe('mountRootFor — the walk bound is geometry-aware', () => {
       const tree = join(repo, '.qwen', 'tmp', 'review-pr-1');
       mkdirSync(tree, { recursive: true });
       expect(mountRootFor(tree)).toBe(realpathSync(join(repo, '.qwen', 'tmp')));
+    },
+  );
+
+  itWhereContainmentExists(
+    'mounts a checkout whose OWN directory is a symlink — the link-spelled --tree',
+    () => {
+      // One component closer than the case above: the checkout ITSELF is the
+      // link (a `current -> release-N` layout, a shell's logical $PWD), and a
+      // `--tree` argument typed through it keeps the spelling — `resolve` is
+      // purely lexical, so nothing canonicalises it away. `redirectedAncestor`
+      // lstats the stop directory before the stop test fires, so a bound AT
+      // the repository root read the checkout's own link as a redirect and
+      // refused every healthy tree addressed through it (measured: the same
+      // input applied on the base and refused on the PR). The mount answer is
+      // canonicalised by `realpathSync`, so the link redirects nothing the
+      // mount trusts — the bound stops one component below the checkout, and
+      // `.qwen` stays inside the walk.
+      const anchor = tmp();
+      const real = join(anchor, 'repo');
+      const tree = join(real, '.qwen', 'tmp', 'review-pr-1');
+      mkdirSync(tree, { recursive: true });
+      symlinkSync(real, join(anchor, 'qwen-link'));
+      const spelled = join(anchor, 'qwen-link', '.qwen', 'tmp', 'review-pr-1');
+      expect(mountRootFor(spelled)).toBe(
+        realpathSync(join(real, '.qwen', 'tmp')),
+      );
+      // ...and a link AT `.qwen` through the same spelling still refuses:
+      // the narrowing stops at the checkout, not below it.
+      const second = join(anchor, 'repo2');
+      mkdirSync(join(second, '.qwen'), { recursive: true });
+      const elsewhere = tmp();
+      symlinkSync(elsewhere, join(second, '.qwen', 'tmp'));
+      expect(
+        mountRootFor(join(second, '.qwen', 'tmp', 'review-pr-1')),
+      ).toBeNull();
     },
   );
 

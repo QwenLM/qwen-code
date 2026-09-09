@@ -449,16 +449,19 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
   const refusal = removed?.refusal ?? pruned.refusal;
   // `{status: null, refusal: null}` is the third shape a probe answers: git
   // could not be run AT ALL (spawn ENOENT, the timeout kill, a cwd deleted
-  // underneath). Keying "not freed" on the refusal alone read that as "no
-  // objection", while the `rmSync` above had already cleared the DIRECTORY —
-  // so the result certified `freed: true` over a registration under
-  // `<repo>/.git/worktrees/` and a branch that both survived, and the next
-  // `worktree add` met "missing but already registered": the wedge this
-  // function's docstring exists to prevent. `status === 128` stays on the
-  // rmSync-fallback path above (git answered, the answer was "not a working
-  // tree", and the fallback owns it); a null status means nobody answered.
-  const couldNotRun =
-    (removed !== null && removed.status === null) || pruned.status === null;
+  // underneath). The registration survives only when NEITHER arm cleared it:
+  // a `remove` that answered 0 cleared it itself, and a `prune` that answered
+  // at all ran over the already-rmSync'd path and cleared whatever stale
+  // registration remained. So the alarm keys on the prune alone, gated on the
+  // remove NOT having succeeded — keying it on the remove's null published
+  // `freed: false` over a release the follow-up prune had actually completed
+  // (measured: registration gone, branch deletable, the next `worktree add`
+  // succeeding), with a reason text asserting the opposite of the ground
+  // truth; keying it on the prune's null alone negated a release the remove
+  // had already completed. `status === 128` stays on the rmSync-fallback path
+  // above (git answered, the answer was "not a working tree", and the
+  // fallback owns it); a null prune means nobody answered.
+  const couldNotRun = removed?.status !== 0 && pruned.status === null;
   const stillThere = existsSync(worktreePath);
   // A path that IS gone but a release that did not happen: git never ran, so
   // the registration and the branch survive. `stillThere` is how the result
@@ -474,16 +477,20 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
 }
 
 /**
- * The `reason` for a release git was never even asked to make: the spawn
- * failed or the timeout killed it, so the prune that clears the registration
- * and frees the branch did not happen — however the directory itself fared.
+ * The `reason` for a release whose prune git was never even asked to make: a
+ * spawn failure or the timeout kill, so the registration and the branch
+ * survive — however the directory itself fared. Keys on the PRUNE because
+ * that is the arm whose absence leaves no proof the registration is gone: a
+ * `worktree remove` that answered 0 cleared it without the prune, and a
+ * `remove` that never ran is cleared by the prune over the rmSync'd path.
  */
 function couldNotRunError(): Error {
   return new Error(
-    'git could not be run at all (a spawn failure or the timeout kill), so ' +
-      "this worktree's registration and branch were not pruned — the next " +
-      '`git worktree add` over the path will still fail with "missing but ' +
-      'already registered". Re-run `qwen review cleanup`.',
+    'the `git worktree prune` that frees the registration and the branch ' +
+      'could not be run at all (a spawn failure or the timeout kill), so ' +
+      'both survive — the next `git worktree add` over the path will still ' +
+      'fail with "missing but already registered". Re-run `qwen review ' +
+      'cleanup`.',
   );
 }
 

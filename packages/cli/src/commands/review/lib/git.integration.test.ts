@@ -301,6 +301,80 @@ describe('releaseWorktree', () => {
     ).not.toThrow();
   });
 
+  // The two arms below steer ONE probe each to a null status with a shim
+  // `git` that kills itself for the chosen subcommand — the same
+  // `{status: null}` shape the timeout kill leaves. `sh` is the fixture's
+  // interpreter, so neither arm exists on Windows.
+  const itWhereShExists = it.skipIf(process.platform === 'win32');
+  const shimKilling = (sub: string, arg: string): string => {
+    const dir = join(repo, `git-shim-${sub}`);
+    mkdirSync(dir, { recursive: true });
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+      encoding: 'utf8',
+    }).trim();
+    writeFileSync(
+      join(dir, 'git'),
+      `#!/bin/sh\nif [ "$1" = ${sub} ] && [ "$2" = ${arg} ]; then kill -TERM $$; fi\nexec ${realGit} "$@"\n`,
+      { mode: 0o755 },
+    );
+    return dir;
+  };
+
+  itWhereShExists(
+    'reports freed when the remove never answered but the prune after it ran (R31-1)',
+    () => {
+      // The alarm used to OR the REMOVE probe's null status into a verdict
+      // whose reason text is about the PRUNE — so a killed `worktree remove`
+      // followed by a healthy prune reported `freed: false`, "not pruned",
+      // over a release that had actually completed, and cleanup withheld the
+      // lease on it. The registration is cleared by EITHER arm — a
+      // successful remove, or a prune over the rmSync'd path — so only a
+      // prune that never answered is "not freed".
+      git('worktree', 'add', '-q', 'wt', '-b', 'topic');
+      const shim = shimKilling('worktree', 'remove');
+      const savedPath = process.env['PATH'];
+      let got: ReturnType<typeof releaseWorktree> | undefined;
+      try {
+        process.env['PATH'] = `${shim}:${savedPath}`;
+        got = releaseWorktree(join(repo, 'wt'));
+      } finally {
+        process.env['PATH'] = savedPath;
+      }
+
+      expect(got).toEqual({ existed: true, freed: true, reason: undefined });
+      // Ground truth, not the verdict's word: the registration is gone and
+      // the branch deletable — the release the old disjunction misreported.
+      expect(fwd(git('worktree', 'list'))).not.toContain(fwd(join(repo, 'wt')));
+      expect(() => git('branch', '-D', 'topic')).not.toThrow();
+    },
+  );
+
+  itWhereShExists(
+    'reports freed when the remove succeeded and only the follow-up prune never answered (R28-11)',
+    () => {
+      // The mirror arm of the same miskeying: `worktree remove --force`
+      // SUCCEEDED — directory and registration both cleared — and only the
+      // trailing prune (a no-op in that state) could not be spawned, yet the
+      // verdict read `freed: false` with a reason asserting the registration
+      // and branch survived; cleanup turned that into failedDestruction and
+      // skipped the lease release, wedging the PR for every later review.
+      git('worktree', 'add', '-q', 'wt', '-b', 'topic');
+      const shim = shimKilling('worktree', 'prune');
+      const savedPath = process.env['PATH'];
+      let got: ReturnType<typeof releaseWorktree> | undefined;
+      try {
+        process.env['PATH'] = `${shim}:${savedPath}`;
+        got = releaseWorktree(join(repo, 'wt'));
+      } finally {
+        process.env['PATH'] = savedPath;
+      }
+
+      expect(got).toEqual({ existed: true, freed: true, reason: undefined });
+      expect(fwd(git('worktree', 'list'))).not.toContain(fwd(join(repo, 'wt')));
+      expect(() => git('branch', '-D', 'topic')).not.toThrow();
+    },
+  );
+
   it('degrades through the result — never throws — when the cwd is deleted mid-release', () => {
     // The never-throws contract starts before the first git call: `resolve`
     // of the RELATIVE path production callers pass reads the cwd, and so does
