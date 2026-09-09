@@ -185,6 +185,7 @@ function toolBlock(
     details: overrides.details,
     parentToolCallId: overrides.parentToolCallId,
     subagentType: overrides.subagentType,
+    subagentSessionReady: overrides.subagentSessionReady,
     serverTimestamp: overrides.serverTimestamp,
     clientReceivedAt: createdAt,
     createdAt,
@@ -3099,51 +3100,23 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
-  it('uses AskUserQuestion permission title for the completed tool block', () => {
-    const messages = transcriptBlocksToDaemonMessages([
-      {
-        id: 'perm-ask-1',
-        kind: 'permission',
-        requestId: 'req-ask-1',
-        sessionId: 'sess-1',
-        title: 'Ask user 4 questions',
-        options: [{ optionId: 'proceed_once', label: 'Submit', raw: {} }],
-        toolCall: {
-          toolCallId: 'ask-call-1',
-          kind: 'think',
-          status: 'pending',
+  it.each([false, true])(
+    'uses AskUserQuestion permission details regardless of block order (tool first=%s)',
+    (toolFirst) => {
+      const blocks: DaemonTranscriptBlock[] = [
+        {
+          id: 'perm-ask-1',
+          kind: 'permission',
+          requestId: 'req-ask-1',
+          sessionId: 'sess-1',
           title: 'Ask user 4 questions',
-          rawInput: {
-            questions: [
-              {
-                header: '姓名',
-                question: '请输入学生的姓名：',
-                options: [{ label: '张三', description: '示例姓名' }],
-              },
-            ],
-          },
-        },
-        preview: { kind: 'generic' as const },
-        clientReceivedAt: 1,
-        createdAt: 1,
-        updatedAt: 2,
-        resolved: 'selected:proceed_once',
-      },
-      toolBlock('ask-tool-1', 'ask-call-1', 'completed', 3, {
-        toolName: 'ask_user_question',
-        title: 'ask_user_question',
-        rawOutput: 'User has provided the following answers:\n\n**姓名**: 张三',
-      }),
-    ]);
-
-    expect(messages).toMatchObject([
-      {
-        role: 'tool_group',
-        tools: [
-          {
-            callId: 'ask-call-1',
+          options: [{ optionId: 'proceed_once', label: 'Submit', raw: {} }],
+          toolCall: {
+            toolCallId: 'ask-call-1',
+            kind: 'think',
+            status: 'pending',
             title: 'Ask user 4 questions',
-            args: {
+            rawInput: {
               questions: [
                 {
                   header: '姓名',
@@ -3152,13 +3125,49 @@ describe('transcriptBlocksToDaemonMessages', () => {
                 },
               ],
             },
-            rawOutput:
-              'User has provided the following answers:\n\n**姓名**: 张三',
           },
-        ],
-      },
-    ]);
-  });
+          preview: { kind: 'generic' as const },
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 2,
+          resolved: 'selected:proceed_once',
+        },
+        toolBlock('ask-tool-1', 'ask-call-1', 'completed', 3, {
+          toolName: 'ask_user_question',
+          title: 'ask_user_question',
+          rawInput: {},
+          rawOutput:
+            'User has provided the following answers:\n\n**姓名**: 张三',
+        }),
+      ];
+      const messages = transcriptBlocksToDaemonMessages(
+        toolFirst ? blocks.reverse() : blocks,
+      );
+
+      expect(messages).toMatchObject([
+        {
+          role: 'tool_group',
+          tools: [
+            {
+              callId: 'ask-call-1',
+              title: 'Ask user 4 questions',
+              args: {
+                questions: [
+                  {
+                    header: '姓名',
+                    question: '请输入学生的姓名：',
+                    options: [{ label: '张三', description: '示例姓名' }],
+                  },
+                ],
+              },
+              rawOutput:
+                'User has provided the following answers:\n\n**姓名**: 张三',
+            },
+          ],
+        },
+      ]);
+    },
+  );
 
   it('uses text content as raw output when a tool has no raw output', () => {
     const messages = transcriptBlocksToDaemonMessages([
@@ -4414,6 +4423,29 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it.each([false, undefined])(
+    'keeps merged readiness true when a later block supplies %s',
+    (subagentSessionReady) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('ready', 'agent-1', 'in_progress', 10, {
+          toolName: 'agent',
+          subagentSessionReady: true,
+        }),
+        toolBlock('later', 'agent-1', 'in_progress', 20, {
+          toolName: 'agent',
+          subagentSessionReady,
+        }),
+      ]);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ callId: 'agent-1', subagentSessionReady: true }],
+      });
+      if (messages[0].role === 'tool_group')
+        expect(messages[0].tools).toHaveLength(1);
+    },
+  );
+
   it('mergeToolCall updates fields from completion block', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
@@ -5013,6 +5045,26 @@ it.each(['selected:allow', 'selected:cancel'])(
       } else {
         expect(tool?.startTime).toBe(blocks.includes(real) ? 2_000 : 1_000);
       }
+    }
+  },
+);
+
+it.each([true, false])(
+  'preserves subagent readiness with safeToolProjection=%s',
+  (safeToolProjection) => {
+    for (const subagentSessionReady of [false, true, undefined]) {
+      const messages = transcriptBlocksToDaemonMessages(
+        [
+          toolBlock('agent', 'agent-1', 'running', 1, {
+            toolName: 'agent',
+            subagentSessionReady,
+          }),
+        ],
+        { safeToolProjection },
+      );
+      expect(messages).toMatchObject([
+        { role: 'tool_group', tools: [{ subagentSessionReady }] },
+      ]);
     }
   },
 );
