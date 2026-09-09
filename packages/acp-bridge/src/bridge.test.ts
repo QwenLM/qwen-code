@@ -6699,10 +6699,17 @@ describe('createAcpSessionBridge', () => {
     const requestId = bridge.getSessionSummary(loaded.sessionId)
       ?.pendingInteractions?.[0]?.requestId;
     expect(requestId).toBeDefined();
-    bridge.respondToPermission(requestId!, {
+    // Delivery alone is not enough — the re-presented card must stay
+    // answerable: the vote must be accepted by the mediator and resolve the
+    // parked call with the user's selection.
+    expect(
+      bridge.respondToPermission(requestId!, {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      }),
+    ).toBe(true);
+    await expect(pendingAnswer).resolves.toEqual({
       outcome: { outcome: 'selected', optionId: 'proceed_once' },
     });
-    await pendingAnswer;
     await bridge.shutdown();
   });
 
@@ -6804,10 +6811,16 @@ describe('createAcpSessionBridge', () => {
     const requestId = bridge.getSessionSummary(loaded.sessionId)
       ?.pendingInteractions?.[0]?.requestId;
     expect(requestId).toBeDefined();
-    bridge.respondToPermission(requestId!, {
+    // The card delivered by the guarded load must stay answerable: the vote
+    // is accepted and resolves the parked call with the user's selection.
+    expect(
+      bridge.respondToPermission(requestId!, {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      }),
+    ).toBe(true);
+    await expect(pendingAnswer).resolves.toEqual({
       outcome: { outcome: 'selected', optionId: 'proceed_once' },
     });
-    await pendingAnswer;
     await bridge.shutdown();
   });
 
