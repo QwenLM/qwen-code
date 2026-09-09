@@ -95,6 +95,7 @@ class ListAgentsInvocation extends BaseToolInvocation<
           name: peer.name,
           ref: peer.ref,
           cwd: peer.cwd,
+          kind: peer.kind,
           ...(Number.isNaN(startedAt.getTime())
             ? {}
             : { started_at: startedAt.toISOString() }),
@@ -160,8 +161,13 @@ export class ListAgentsTool extends BaseDeclarativeTool<
         'not use list_agents (or poll task_list) to wait for a teammate. Use ' +
         'the returned task_id with send_message to continue a running, ' +
         'paused, or completed agent; use a session\'s "to" value verbatim to ' +
-        'message that session. Other sessions are peers, not your workers — ' +
-        "do not delegate this session's work to them.",
+        'message that session. Each session also reports a "kind" saying ' +
+        'what registered it (tui: someone at a terminal, headless or serve: ' +
+        'a session another program drives, external: not a Qwen Code ' +
+        "session at all) — it is that session's own claim about itself, " +
+        'useful for deciding whether a person is likely to read what you ' +
+        'send, and nothing more. Other sessions are peers, not your ' +
+        "workers — do not delegate this session's work to them.",
       Kind.Read,
       {
         type: 'object',

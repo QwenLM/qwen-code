@@ -1089,6 +1089,8 @@ describe('AskUserQuestion multiple questions', () => {
       '[aria-label="Collapse"]',
     )!;
 
+    expect(collapse.textContent).toBe('Collapse');
+    expect(collapse.getAttribute('aria-expanded')).toBe('true');
     act(() => collapse.click());
 
     expect(panel.getAttribute('aria-labelledby')).toBeNull();
@@ -1096,6 +1098,8 @@ describe('AskUserQuestion multiple questions', () => {
     const expand = container!.querySelector<HTMLButtonElement>(
       '[aria-label="Expand"]',
     )!;
+    expect(expand.textContent).toBe('Expand');
+    expect(expand.getAttribute('aria-expanded')).toBe('false');
     act(() => expand.click());
     expect(container!.textContent).toContain('Enter submit');
   });
