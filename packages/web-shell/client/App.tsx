@@ -114,7 +114,7 @@ import {
 import { useVoiceWorkspaceSettings } from './voice/use-voice-workspace-settings';
 import {
   useSessionCatalogController,
-  useDaemonActivePromptBridge,
+  useDaemonSessionActivityBridge,
 } from './session-catalog/session-catalog-hooks';
 import {
   loadSessionCatalogOnce,
@@ -242,6 +242,7 @@ import {
 } from './shadowDom';
 import {
   WebShellSidebar,
+  DEFAULT_SESSION_ACTION_ITEMS,
   type WebShellSidebarBranding,
   type WebShellSidebarFooterOptions,
   type WebShellSidebarWorkspaceOverviewOptions,
@@ -1188,12 +1189,17 @@ export interface WebShellProps {
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   /**
    * Controls whether the composer's file-upload entry points (drag-and-drop
-   * and the @ panel upload item) are enabled. Works alongside the daemon's
+   * and the @ panel upload item) are enabled. Does not disable attachments.
+   * Works alongside the daemon's
    * `workspace_file_upload` capability, not instead of it: `false` force-
    * disables upload even when the daemon advertises the capability, while
    * `true`/omitted still requires the capability to be satisfied.
    */
   fileUploadEnabled?: boolean;
+  /** Preferred file-drop destination. Omitted: ask only when both are available.
+   * If the preference is unavailable, use the sole available destination.
+   */
+  fileDropAction?: 'upload' | 'attach';
   /**
    * Directory that drag-and-dropped files upload into, **relative to the
    * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
@@ -2892,6 +2898,7 @@ export function App({
   fileUploadEnabled,
   fileUploadDirectory,
   artifact,
+  fileDropAction,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -3174,6 +3181,7 @@ export function App({
       loadingPhrases,
       fileUploadEnabled,
       fileUploadDirectory,
+      fileDropAction,
     }),
     [
       artifact,
@@ -3203,6 +3211,7 @@ export function App({
       loadingPhrases,
       fileUploadEnabled,
       fileUploadDirectory,
+      fileDropAction,
     ],
   );
   const mainChatCustomization = useMemo(
@@ -3265,6 +3274,7 @@ export function App({
       .map((entry) => entry.cwd);
   }, [sidebarOptions.enabled, workspaces]);
   useWorkspaceSessionLiveState(workspace.client, {
+    pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
     enabled: Boolean(
       sidebarlessLiveStateWorkspaceCwds.length > 0 &&
         connection.capabilities?.features?.includes(
@@ -3288,7 +3298,10 @@ export function App({
         ? trustedLiveWorkspaces[0]?.cwd
         : undefined
       : connection.workspaceCwd;
-  const sessionHasActivePrompt = useDaemonActivePromptBridge(
+  const {
+    hasActivePrompt: sessionHasActivePrompt,
+    activeWorkState: sessionActiveWorkState,
+  } = useDaemonSessionActivityBridge(
     workspace.client,
     activePromptWorkspaceCwd,
     connection.sessionId,
@@ -8048,6 +8061,12 @@ export function App({
   }, [artifactPanelOpen, useFloatingArtifactPanel]);
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
+  const [outerSplitPanePending, setOuterSplitPanePending] = useState(false);
+  const handleSplitPendingPanesChange = useCallback(
+    (ids: string[]) =>
+      setOuterSplitPanePending(ids.includes(connection.sessionId ?? '')),
+    [connection.sessionId],
+  );
   // False until the split bootstrap has decided whether a split view is
   // coming (URL deep link, per-tab sessionStorage, or controlled prop). The
   // pane-tab reclaim below must wait for it: at restore-commit time
@@ -17622,9 +17641,10 @@ export function App({
                 <div className={styles.fullPage} data-testid="split-view-page">
                   {/* The outer session's approval overlay is suppressed under the
                       split (it would own ghost keyboard shortcuts). If that
-                      session isn't one of the panes, the approval would be
-                      invisible — surface a notice with a way back to it. */}
-                  {approvalOverlayActive && (
+                      session's pane hasn't surfaced its approval (including
+                      failed or still-attaching panes), show a way back to it. */}
+                  {approvalOverlayActive &&
+                    !outerSplitPanePending && (
                     <div
                       className={styles.splitApprovalNotice}
                       role="status"
@@ -17643,11 +17663,16 @@ export function App({
                   <WebShellCustomizationProvider value={customization}>
                       <SplitView
                         sessionIds={splitSessionIds}
+                        showSessionDetails={
+                          (sidebarOptions.sessionActions?.items ??
+                            DEFAULT_SESSION_ACTION_ITEMS).includes('details')
+                        }
                         // Mirror live pane add/remove back up so switching away
                         // and re-entering restores the same panes. Keep this
                         // callback stable to avoid looping SplitView's reporting
                         // effect.
                         onPanesChange={handleSplitPanesChange}
+                        onPendingPanesChange={handleSplitPendingPanesChange}
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
                         // Back returns to the Session Overview (the hub the split
@@ -17980,8 +18005,13 @@ export function App({
                           <TodoPanel
                             todos={showFloatingTodos ? floatingTodos : []}
                             statusItems={floatingBottomStatusItems}
+                            hasLiveActivity={
+                              streamingState !== 'idle' ||
+                              sessionHasActivePrompt ||
+                              sessionActiveWorkState === 'active'
+                            }
                             onOpen={
-                              showFloatingTodos
+                              sessionWorkflowEnabled && showFloatingTodos
                                 ? floatingTodosUseSessionWorkflow
                                   ? openWorkflowInspector
                                   : openTasksPanel

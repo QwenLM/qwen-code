@@ -18,13 +18,17 @@ Creating, editing, or resuming a Goal requires a trusted workspace (`/trust`). H
 
 Once a Goal has billed a turn, the footer pill and every status card show what it has spent against the window it is allowed, as `1.2k/30.0m`. The figure counts the model calls the Goal makes in its own turns; subagents and the verifier's own checks are not included. The window is set by [`model.goalTokenBudget`](../configuration/settings.md); resuming a Goal that has spent its window grants another one on top of what it has already spent, so the figure reads `30.0m/60.0m` rather than starting over. A Goal with no budget shows only what it has spent. A Goal that has not billed a turn yet shows no figures at all.
 
+Each turn the session takes on its own reports what the Goal has spent so far, how many turns are behind it, and — unless the Goal runs unbounded — the window it is allowed. Every such turn except the final wind-down hand-off also carries standing instructions to re-check the workspace rather than trust earlier turns' reports, to work toward the end state the objective asks for, to do something different when the previous turn changed nothing (from the second turn on, once there is a previous turn to judge), and to check every requirement against citable evidence before proposing that the Goal is done.
+
+A long Goal periodically compresses the evidence it has recorded into checkpoint claims with a side model call, so later turns and the verifier still have it to cite. That call is bounded by [`model.goalCheckpointTimeoutSeconds`](../configuration/settings.md), 180 seconds by default; a checkpoint that does not finish in time is abandoned as an inconclusive check — the checkpoint stall streak is preserved rather than incremented — and a later turn retries it. The call is streamed, so the per-request transport timeout bounds only connect and first response, and the ceiling itself stops at the stream guards' 15-minute lifetime cap because past that the guard, not the setting, ends the call. That 15-minute limit on the setting is fixed, and raising the stream guard's own cap does not lift it.
+
 ## Interrupting a Goal
 
 Cancelling a Goal turn pauses the Goal. Press Esc while the model is answering or while its tools are still running, and the turn stops, the Goal moves to `paused`, and the card and `/goal` both say why it stopped. Nothing continues until you run `/goal resume`.
 
 Typing a message while a Goal is active does not pause it. Your message runs as the next Goal turn, so use it to steer the work; use `/goal pause` or `/goal clear` to stop it.
 
-Every pause states its reason: that you interrupted it, that you ran `/goal pause`, that the session token limit blocked the next model request, or that the turn failed. A Goal stopped by a limit keeps the reason for that limit instead.
+Every pause states its reason: that you interrupted it, that you ran `/goal pause`, that the session token limit blocked the next model request, that the turn failed, or that three turns in a row recorded nothing the verifier could judge and no proposal — Goal bookkeeping reads (`get_goal`, `update_goal`) do not count as progress. A Goal stopped by a limit keeps the reason for that limit instead.
 
 ## How a Goal is judged
 
