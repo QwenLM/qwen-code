@@ -36053,7 +36053,12 @@ describe('GET /session/:id/events (SSE)', () => {
     release.resolve();
     const res = await responsePromise;
     expect(res).toBeInstanceOf(Error);
-    expect(getActiveSseCount()).toBe(beforeActive);
+    // `res.destroy()` tears the client socket down before the server-side
+    // 'close' listener runs, so the active-stream counter settles a tick
+    // after the request promise rejects.
+    await vi.waitFor(() => {
+      expect(getActiveSseCount()).toBe(beforeActive);
+    });
   });
 
   it('starts live lag measurement only after replay_complete settles', async () => {
