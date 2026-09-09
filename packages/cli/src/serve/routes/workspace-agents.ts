@@ -1222,6 +1222,7 @@ export function registerWorkspaceAgentRoutes(
           model?: unknown;
           instructions?: unknown;
           maxConcurrentRuns?: unknown;
+          execution?: unknown;
         };
         const name = String(payload.name ?? '').trim();
         if (!name) {
@@ -1239,6 +1240,20 @@ export function registerWorkspaceAgentRoutes(
         if (config.error) {
           res.status(400).json({ error: config.error });
           return;
+        }
+        const execution = readAgentExecution(payload.execution);
+        if (execution === 'invalid') {
+          res.status(400).json({ error: 'execution_invalid' });
+          return;
+        }
+        if (execution?.mode === 'managed-host') {
+          const knownHosts = new Set(
+            (await readAgentHosts(root)).map((host) => host.id),
+          );
+          if (execution.hostIds.some((hostId) => !knownHosts.has(hostId))) {
+            res.status(400).json({ error: 'agent_host_not_found' });
+            return;
+          }
         }
         // Narrowed on `apply` rather than on `error`: the success branch types
         // `error` as an optional undefined, which never discriminated the
@@ -1268,6 +1283,7 @@ export function registerWorkspaceAgentRoutes(
             id: generateAgentId(),
             name,
             createdAt: Date.now(),
+            ...(execution ? { execution } : {}),
           });
           return [...agents, created];
         });

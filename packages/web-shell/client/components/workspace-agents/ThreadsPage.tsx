@@ -118,6 +118,7 @@ export interface NewWorkspaceAgent {
   model?: string;
   instructions?: string;
   maxConcurrentRuns?: number;
+  execution?: AgentConfigPatch['execution'];
 }
 
 export type ThreadPriorityChoice = 'urgent' | 'high' | 'normal' | 'low';

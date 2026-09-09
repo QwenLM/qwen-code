@@ -50,12 +50,18 @@ interface AgentCreatePageProps {
   agent?: DaemonWorkspaceAgentDetail;
   onCancel: () => void;
   onCreated: (name: string) => void;
+  executionHosts?: readonly {
+    id: string;
+    label: string;
+    status: 'online' | 'offline';
+  }[];
   onSaveWorkspaceAgent?: (input: {
     name: string;
     description: string;
     instructions: string;
     model?: string;
     maxConcurrentRuns: number;
+    execution?: { mode: 'local' } | { mode: 'managed-host'; hostIds: string[] };
   }) => Promise<void>;
 }
 
@@ -101,6 +107,7 @@ export function AgentCreatePage({
   agent,
   onCancel,
   onCreated,
+  executionHosts = [],
   onSaveWorkspaceAgent,
 }: AgentCreatePageProps) {
   const { t } = useI18n();
@@ -140,6 +147,9 @@ export function AgentCreatePage({
     approvalMode === 'bubble' ? [...approvalModes, 'bubble'] : approvalModes;
   const [maxTurns, setMaxTurns] = useState(agent?.maxTurns?.toString() ?? '');
   const [maxConcurrentRuns, setMaxConcurrentRuns] = useState('1');
+  const [executionHostIds, setExecutionHostIds] = useState(
+    () => new Set<string>(),
+  );
   const [color, setColor] = useState(agent?.color ?? 'inherit');
   const [selectedMcpServers, setSelectedMcpServers] = useState(
     () => new Set(Object.keys(agent?.mcpServers ?? {})),
@@ -488,6 +498,14 @@ export function AgentCreatePage({
           instructions: systemPrompt.trim(),
           ...(model.trim() ? { model: model.trim() } : {}),
           maxConcurrentRuns: concurrency,
+          ...(executionHostIds.size > 0
+            ? {
+                execution: {
+                  mode: 'managed-host' as const,
+                  hostIds: [...executionHostIds],
+                },
+              }
+            : {}),
         });
         onCreated(trimmedName);
         return;
@@ -742,10 +760,44 @@ export function AgentCreatePage({
                     }
                   />
                 </Field>
+                {executionHosts.length > 0 ? (
+                  <Field className="lg:col-span-2">
+                    <FieldLabel>Run on</FieldLabel>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {executionHosts.map((host) => (
+                        <div
+                          key={host.id}
+                          className="flex items-center gap-2 text-sm"
+                        >
+                          <Checkbox
+                            id={`agent-host-${host.id}`}
+                            checked={executionHostIds.has(host.id)}
+                            onCheckedChange={(checked) =>
+                              setExecutionHostIds((current) =>
+                                toggleSelection(
+                                  current,
+                                  host.id,
+                                  checked === true,
+                                ),
+                              )
+                            }
+                          />
+                          <label htmlFor={`agent-host-${host.id}`}>
+                            {host.label} · {host.status}
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                    <FieldDescription>
+                      Select every Host allowed to run this Agent. Select none
+                      to use this daemon.
+                    </FieldDescription>
+                  </Field>
+                ) : null}
                 <Field className="lg:col-span-2">
                   <FieldDescription>
-                    Runtime: this local daemon. Tools are limited to the
-                    workspace-agent read-only boundary.
+                    Tools are limited to the workspace-agent read-only boundary
+                    on every selected runtime.
                   </FieldDescription>
                 </Field>
               </>

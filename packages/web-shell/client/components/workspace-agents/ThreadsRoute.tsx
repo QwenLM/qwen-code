@@ -220,8 +220,7 @@ export function ThreadsRoute({
       setAgents(nextAgents.agents);
       setRuntime(nextAgents.runtime);
       setRuntimes(
-        nextAgents.runtimes ??
-          (nextAgents.runtime ? [nextAgents.runtime] : []),
+        nextAgents.runtimes ?? (nextAgents.runtime ? [nextAgents.runtime] : []),
       );
       if (nextAgents.capabilities) setCapabilities(nextAgents.capabilities);
       setThreads(nextThreads.threads);
@@ -322,6 +321,7 @@ export function ThreadsRoute({
     return (
       <AgentCreatePage
         initialScope="workspace"
+        executionHosts={runtimes.filter((entry) => entry.kind === 'external')}
         onCancel={() => setCreatingAgent(false)}
         onCreated={() => setCreatingAgent(false)}
         onSaveWorkspaceAgent={async (input) => {
