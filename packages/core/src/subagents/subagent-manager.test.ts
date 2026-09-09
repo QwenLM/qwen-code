@@ -483,11 +483,16 @@ You are a helpful assistant.
       expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
     });
 
-    it('does not refuse a definition whose only "executor" token is nested, when the YAML is malformed (R7-1 over-refusal leg)', async () => {
-      // An indented `executor:` under another key declares no top-level
-      // executor. With the column-0 anchor it is not matched, so a pre-existing
-      // definition that merely mentions executor in a nested position (and has
-      // an unrelated YAML quirk) still loads instead of being hard-refused.
+    it('refuses a malformed file whose only "executor" token is nested, fail-closed (R10-1 re-scopes the R7-1 over-refusal leg)', async () => {
+      // R10-1 widened the claim probe to indentation-tolerant so an executor key
+      // the real AST dropped cannot slip through to a silent in-process run (a
+      // TAB- or space-indented top-level `executor:` that the column-0 anchor
+      // missed). The accepted cost: an `executor:` token nested under another
+      // key, in a file that ALSO has a YAML error, is now treated as a claim the
+      // AST lost and refused — a visible, user-fixable over-refusal that beats an
+      // invisible substitution. Reverting the probe to column-0 anchoring turns
+      // this red (the definition loads again). A nested executor token in a file
+      // with NO YAML error still loads: the guard is gated on errors.length > 0.
       const yaml = await vi.importActual<
         typeof import('../utils/yaml-parser.js')
       >('../utils/yaml-parser.js');
@@ -495,12 +500,10 @@ You are a helpful assistant.
       const content =
         '---\nname: reviewer\ndescription: Reviews code: fast\nmetadata:\n  executor: legacy-note\n---\nPrompt';
       vi.mocked(fs.readFile).mockResolvedValue(content);
-      const config = await manager.parseSubagentFile(
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.name).toBe('reviewer');
-      expect(config.executor).toBeUndefined();
+      await expect(
+        manager.parseSubagentFile(validConfig.filePath!, 'project'),
+      ).rejects.toThrow(/invalid executor block/);
+      expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
     });
 
     it('loads a valid executor whose frontmatter has an unrelated tolerated YAML error before it (R7-1 over-refusal, narrowed)', async () => {
@@ -577,6 +580,31 @@ You are a helpful assistant.
         manager.parseSubagentFile(validConfig.filePath!, 'project'),
       ).rejects.toThrow(/invalid executor block/);
       expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+    });
+
+    it('loads a block-scalar prose "executor:" as no executor, not a hoisted command (R10-1)', async () => {
+      // A `description: |` block scalar whose prose contains an `executor:` line,
+      // plus an unresolved alias elsewhere so the strict parse fails and the
+      // lenient parseSimple fallback runs. parseSimple hoists the prose
+      // `executor:` into a top-level key ({kind:acp, command:npx}); the old code
+      // used that value as executorRaw and loaded the definition as EXTERNAL,
+      // dispatching `npx` — a command that exists only as prose. parseDocument
+      // correctly sees no top-level executor (hasExecutor false) and, with no
+      // document error, the guard does not fire, so the fix loads with executor
+      // undefined. Restoring the parseSimple fallback for executorRaw turns this
+      // red (config.executor becomes {kind:'acp', command:'npx'}).
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      const content =
+        '---\nname: x\ndescription: |\n  executor:\n    kind: acp\n    command: npx\nother: *undefined_anchor\n---\nPrompt';
+      vi.mocked(fs.readFile).mockResolvedValue(content);
+      const config = await manager.parseSubagentFile(
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.executor).toBeUndefined();
     });
 
     it('visibly reports invalid executors while continuing discovery', async () => {
@@ -1816,6 +1844,30 @@ You are a helpful assistant.`;
       expect(config!.name).toBe('specific-agent');
       expect(config!.filePath).toBe(
         path.normalize('/test/project/.qwen/agents/misnamed-file.md'),
+      );
+    });
+
+    it('refuses a by-name dispatch matching a skipped invalid-executor file instead of falling through to a builtin (R10-2)', async () => {
+      // A project file declares the builtin name 'Explore' with an invalid
+      // executor (typo'd `kind: ACP`), so discovery skips it with a warning.
+      // Without R10-2, loadSubagent('Explore') falls through
+      // session>project>user>extension>builtin and resolves the BUILTIN Explore
+      // — an in-process agent under a Qwen model — silently substituting it for
+      // the external agent the file asked for, with only a console.warn as the
+      // trace. loadSubagent must instead refuse with the recorded executor error.
+      // Reverting to skip-and-continue (no recorded refusal) turns this red: the
+      // call resolves the builtin instead of rejecting.
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue(['explore.md'] as any);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: Explore\ndescription: Test\nexecutor:\n  kind: ACP\n  command: npx\n---\nPrompt',
+      );
+      await expect(manager.loadSubagent('Explore')).rejects.toThrow(
+        /invalid executor block/,
       );
     });
   });

@@ -19,6 +19,7 @@ import {
   acpExternalAgentExecutor,
   externalModelLabel,
   isExpectedExternalAgentCleanupExit,
+  isUnprovenExternalAgentTreeExit,
   optionKindForOutcome,
   resolvePermissionMode,
   selectPermissionOption,
@@ -241,20 +242,11 @@ describe('permission mapping', () => {
 });
 
 describe('cleanup-exit classification', () => {
-  it('treats a foreign root that died during disposal as expected', () => {
-    // The Linux race: the prompt rejects on stdout EOF, dispose() enters the
-    // registry's initial tree snapshot, and the root exits mid-snapshot.
-    expect(
-      isExpectedExternalAgentCleanupExit(
-        new Error(
-          'ACP child pid=2628870 exited before its initial process-tree snapshot completed',
-        ),
-      ),
-    ).toBe(true);
+  it("tolerates the peer's own unclean exit but not the unproven-tree race", () => {
     // The peer's own exit status, for ANY code/signal: acp-bridge raises this
-    // only after the tree is proven gone, so it reports the foreign agent's
-    // exit, not a cleanup failure (R7-2). Letting dispose() reject on it would
-    // override the turn's classified terminal state.
+    // only after the tree is proven gone, so dispose() tolerates it silently
+    // (R7-2). Letting dispose() reject on it would override the turn's
+    // classified terminal state.
     for (const status of [
       'code=none, signal=SIGTERM',
       'code=none, signal=SIGKILL',
@@ -263,14 +255,22 @@ describe('cleanup-exit classification', () => {
       'code=none, signal=SIGHUP',
       'code=143, signal=none',
     ]) {
-      expect(
-        isExpectedExternalAgentCleanupExit(
-          new Error(
-            `ACP child pid=4242 exited uncleanly during shutdown (${status})`,
-          ),
-        ),
-      ).toBe(true);
+      const error = new Error(
+        `ACP child pid=4242 exited uncleanly during shutdown (${status})`,
+      );
+      expect(isExpectedExternalAgentCleanupExit(error)).toBe(true);
+      expect(isUnprovenExternalAgentTreeExit(error)).toBe(false);
     }
+    // The snapshot-race shape means the tree was NEVER enumerated (a detached
+    // descendant may survive), so it is reported, not silently swallowed
+    // (R10-3). isExpectedExternalAgentCleanupExit must be false so dispose()
+    // does not treat it as a clean exit; isUnprovenExternalAgentTreeExit routes
+    // it to the report-and-resolve path.
+    const snapshot = new Error(
+      'ACP child pid=2628870 exited before its initial process-tree snapshot completed',
+    );
+    expect(isExpectedExternalAgentCleanupExit(snapshot)).toBe(false);
+    expect(isUnprovenExternalAgentTreeExit(snapshot)).toBe(true);
   });
   it('propagates every genuine cleanup-proof failure', () => {
     const mustThrow = [
@@ -285,31 +285,35 @@ describe('cleanup-exit classification', () => {
       'ACP child pid=4242 did not exit within 5000ms',
     ];
     for (const message of mustThrow) {
+      // Neither silently tolerated nor report-and-resolved: these must rethrow.
       expect(isExpectedExternalAgentCleanupExit(new Error(message))).toBe(
         false,
       );
+      expect(isUnprovenExternalAgentTreeExit(new Error(message))).toBe(false);
     }
   });
   it('rejects non-Error and near-miss values', () => {
-    expect(isExpectedExternalAgentCleanupExit(undefined)).toBe(false);
-    expect(isExpectedExternalAgentCleanupExit(null)).toBe(false);
+    for (const predicate of [
+      isExpectedExternalAgentCleanupExit,
+      isUnprovenExternalAgentTreeExit,
+    ]) {
+      expect(predicate(undefined)).toBe(false);
+      expect(predicate(null)).toBe(false);
+    }
+    // The snapshot shape's anchoring and pid validation now live in
+    // isUnprovenExternalAgentTreeExit (R10-3).
+    const tail = 'exited before its initial process-tree snapshot completed';
+    expect(isUnprovenExternalAgentTreeExit(`ACP child pid=1 ${tail}`)).toBe(
+      false,
+    );
     expect(
-      isExpectedExternalAgentCleanupExit(
-        'ACP child pid=1 exited before its initial process-tree snapshot completed',
+      isUnprovenExternalAgentTreeExit(
+        new Error(`prefix ACP child pid=1 ${tail}`),
       ),
     ).toBe(false);
     expect(
-      isExpectedExternalAgentCleanupExit(
-        new Error(
-          'prefix ACP child pid=1 exited before its initial process-tree snapshot completed',
-        ),
-      ),
-    ).toBe(false);
-    expect(
-      isExpectedExternalAgentCleanupExit(
-        new Error(
-          'ACP child pid=notanumber exited before its initial process-tree snapshot completed',
-        ),
+      isUnprovenExternalAgentTreeExit(
+        new Error(`ACP child pid=notanumber ${tail}`),
       ),
     ).toBe(false);
   });
@@ -491,7 +495,11 @@ describe.skipIf(process.platform === 'win32')('real ACP subprocess', () => {
     expect(executor.getExecutionSummary().rounds).toBe(2);
   });
   it('does not dispatch a continuation prompt once the wall-time budget is spent (R9-1)', async () => {
-    const executor = await create(params());
+    const options = params();
+    // An explicit cap: an absent max_time_minutes now means "no cap" (R10-5), so
+    // the budget logic this test exercises needs a real value.
+    options.runConfig.max_time_minutes = 10;
+    const executor = await create(options);
     // Stub the connection so prompt() is countable and resolves end_turn
     // immediately; the first prompt also advances the mocked clock past the
     // 10-minute budget, simulating a peer that consumed the whole wall time on
@@ -520,6 +528,45 @@ describe.skipIf(process.platform === 'win32')('real ACP subprocess', () => {
     // called twice) and resolves end_turn against the empty queue, so the turn
     // ends GOAL instead of TIMEOUT.
     expect(prompt).toHaveBeenCalledTimes(1);
+    expect(executor.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+    nowSpy.mockRestore();
+  });
+  it('does not drain or record a queued message it has no budget to dispatch (R10-4)', async () => {
+    const options = params();
+    options.runConfig.max_time_minutes = 10;
+    const delivered: unknown[] = [];
+    options.eventEmitter!.on(AgentEventType.EXTERNAL_MESSAGE, (event) =>
+      delivered.push(event),
+    );
+    const executor = await create(options);
+    // Spend the budget during round 1 (the R9-1 construction) and back the
+    // provider with a mutable queue that drains destructively, like
+    // registry.drainMessages. Round 1 returns end_turn with a message waiting.
+    const realNow = Date.now();
+    let mockNow = realNow;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => mockNow);
+    const prompt = vi.fn().mockImplementation(() => {
+      mockNow = realNow + 11 * 60_000;
+      return Promise.resolve({ stopReason: 'end_turn' });
+    });
+    (
+      executor as unknown as {
+        connection: { prompt: typeof prompt; cancel: () => Promise<void> };
+      }
+    ).connection = { prompt, cancel: async () => {} };
+    const queue = ['USER MESSAGE FROM PARENT'];
+    const provider = vi.fn().mockImplementation(() => queue.splice(0));
+    executor.setExternalMessageProvider(provider);
+    await executor.execute(context('first'));
+    // The budget is spent before round 2, so the loop must break BEFORE the
+    // destructive drain: the queue still holds the message, the provider was
+    // never called, and no EXTERNAL_MESSAGE certified a delivery that never
+    // reached the peer. Removing the pre-drain budget/abort check turns these
+    // red — the queue empties, the provider runs, and the message is recorded as
+    // delivered while `next` is dropped at the round-top guard.
+    expect(queue).toEqual(['USER MESSAGE FROM PARENT']);
+    expect(provider).not.toHaveBeenCalled();
+    expect(delivered).toEqual([]);
     expect(executor.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
     nowSpy.mockRestore();
   });
@@ -560,17 +607,55 @@ describe.skipIf(process.platform === 'win32')('real ACP subprocess', () => {
     expect(executor.getExecutionSummary().totalToolCalls).toBe(0);
     expect(executor.getExecutionSummary().successfulToolCalls).toBe(0);
   }, 15000);
-  it('installs a ten-minute default deadline and clears it after the real prompt', async () => {
+  it('installs no wall-time deadline when max_time_minutes is absent (R10-5)', async () => {
+    // An absent max_time_minutes means "no cap" everywhere else in the codebase
+    // (agent-core installs no timer when maxTimeMinutes is falsy), so the
+    // external executor must not borrow a 10-minute default: that would make the
+    // same definition behave differently based only on whether it declares an
+    // executor, and would make a TIMEOUT turn — handed to the parent as the
+    // answer with no truncation marker — reachable by default. wait() already
+    // treats an undefined budget as "no timer". Reinstating `?? 10` turns this
+    // red (a ~600000ms timer is installed).
     const executor = await create(params());
     const timers = vi.spyOn(globalThis, 'setTimeout');
-    const cleared = vi.spyOn(globalThis, 'clearTimeout');
     await executor.execute(context());
-    const index = timers.mock.calls.findIndex(
+    const tenMinute = timers.mock.calls.find(
       ([, delay]) =>
         typeof delay === 'number' && delay > 599_000 && delay <= 600_000,
     );
-    expect(index).toBeGreaterThanOrEqual(0);
-    expect(cleared).toHaveBeenCalledWith(timers.mock.results[index]!.value);
+    expect(tenMinute).toBeUndefined();
+  });
+  it('reports an unproven process tree on disposal instead of swallowing it (R10-3)', async () => {
+    const options = params();
+    const errors: string[] = [];
+    options.eventEmitter!.on(AgentEventType.ERROR, (event) =>
+      errors.push(String((event as { error?: unknown }).error)),
+    );
+    const executor = await create(options);
+    // Stub the tracked child so terminate() reaps the real peer first (no leaked
+    // subprocess) and then rejects with the snapshot-race proof error — the shape
+    // acp-bridge raises when the root exited before the tree was enumerated, so a
+    // detached descendant may survive. dispose() must report it (not swallow it
+    // silently) and must NOT rethrow: it is awaited between the turn's
+    // terminal-state classification and the return, so rethrowing would replace a
+    // classified TIMEOUT/CANCELLED with a thrown ERROR.
+    const real = (
+      executor as unknown as { child: { terminate: () => Promise<void> } }
+    ).child;
+    (
+      executor as unknown as { child: { terminate: () => Promise<void> } }
+    ).child = {
+      terminate: async () => {
+        await real.terminate().catch(() => {});
+        throw new Error(
+          'ACP child pid=4242 exited before its initial process-tree snapshot completed',
+        );
+      },
+    };
+    await expect(executor.dispose!()).resolves.toBeUndefined();
+    expect(errors.some((message) => message.includes('not proven gone'))).toBe(
+      true,
+    );
   });
   it('refuses an unenforceable internal turn limit', async () => {
     const options = params();

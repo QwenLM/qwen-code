@@ -39,8 +39,10 @@ import {
   ProcessRegistry,
   type TrackedChildProcess,
 } from '@qwen-code/acp-bridge/processRegistry';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 
 const INIT_TIMEOUT_MS = 10_000;
+const debugLogger = createDebugLogger('EXTERNAL_AGENT');
 
 export function externalModelLabel(command: string): string {
   return `external-acp:${command.split(/[\\/]/).pop() ?? command}`;
@@ -146,37 +148,57 @@ export function selectRejectOption(
 }
 
 /**
- * Errors the ACP process registry raises when disposing a foreign child whose
- * process tree is already gone. acp-bridge raises both shapes only AFTER it has
- * driven every owned process group to empty, so neither is a cleanup failure —
- * they report that a foreign agent we do not own exited, which `terminateMode`
- * has already classified. Two shapes are expected here:
+ * The peer's own exit status, raised by acp-bridge as `exited uncleanly during
+ * shutdown (code=…, signal=…)` ONLY after it has driven every owned process
+ * group to empty (`survivingGroups` empty). So it reports that a foreign agent
+ * we do not own exited — a non-zero code from an uncaught exception, an OOM
+ * kill, a wrapper turning SIGTERM into 143, or the signal we sent — which
+ * `terminateMode` has already classified, not a cleanup failure. `dispose()`
+ * tolerates it silently for any code/signal.
  *
- *  - the root exited on its own during the initial tree snapshot, invalidating
- *    the snapshot that would enumerate descendants (a Linux-only race where the
- *    prompt rejects on stdout EOF before the process `exit` event); and
- *  - `exited uncleanly during shutdown (code=…, signal=…)` for ANY code/signal —
- *    the peer's own exit status (a non-zero code from an uncaught exception, an
- *    OOM kill, a wrapper turning SIGTERM into 143, or the signal we sent). This
- *    is thrown only once `survivingGroups` is empty, i.e. cleanup succeeded.
+ * Tolerating it matters: `dispose()` is awaited inside `runTurn`'s catch between
+ * error classification and the return, so letting it reject here would replace
+ * the turn's declared terminal state — a turn the user CANCELLED would surface
+ * to the parent as `failed` with the registry's text.
  *
- * Tolerating the peer's exit status matters: `dispose()` is awaited inside
- * `runTurn`'s catch between error classification and the return, so letting it
- * reject here would replace the turn's declared terminal state — a turn the user
- * CANCELLED would surface to the parent as `failed` with the registry's text.
- *
- * Every genuine cleanup-PROOF error still propagates — a truncated snapshot, a
- * root that was absent or was not an isolated process-group leader, a failed
- * snapshot/signal/inspect, or an exit deadline exceeded — so a descendant we were
- * responsible for cannot survive disposal silently.
+ * This deliberately does NOT cover the snapshot-race shape (see
+ * `isUnprovenExternalAgentTreeExit`): that one means the tree was never
+ * enumerated, so it is reported rather than silently swallowed. Every other
+ * genuine cleanup-PROOF error still propagates from `dispose()` — a truncated
+ * snapshot, a root that was absent or was not an isolated process-group leader,
+ * a failed snapshot/signal/inspect, or an exit deadline exceeded — so a
+ * descendant we were responsible for cannot survive disposal silently.
  */
 export function isExpectedExternalAgentCleanupExit(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
   return (
-    /^ACP child pid=\d+ exited before its initial process-tree snapshot completed$/.test(
-      error.message,
-    ) ||
+    error instanceof Error &&
     /^ACP child pid=\d+ exited uncleanly during shutdown \(code=[^,]+, signal=[^)]+\)$/.test(
+      error.message,
+    )
+  );
+}
+
+/**
+ * acp-bridge raises `exited before its initial process-tree snapshot completed`
+ * when the peer's root exited while the initial snapshot was in flight:
+ * `mergeAsynchronousSnapshot` records this proof error and returns BEFORE
+ * `collectOwnership`, so `knownGroups` holds only the root pgid and a detached
+ * (`setsid`) descendant the peer started — an MCP or dev server in its own
+ * process group — was never enumerated, signalled or reaped. The tree was
+ * therefore NOT proven gone, and acp-bridge ranks this proof error above the
+ * unclean-exit (process-registry.ts:416 before :417).
+ *
+ * It is not a hard cleanup failure (the root and its own group are settled), so
+ * `dispose()` must not rethrow it — rethrowing would convert an already
+ * classified TIMEOUT/CANCELLED turn into a thrown ERROR — but it must not be
+ * swallowed silently either, or the parent is told a clean teardown happened
+ * while a descendant may survive. `dispose()` reports it (debug log + an ERROR
+ * event) and resolves.
+ */
+export function isUnprovenExternalAgentTreeExit(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /^ACP child pid=\d+ exited before its initial process-tree snapshot completed$/.test(
       error.message,
     )
   );
@@ -475,8 +497,20 @@ class AcpSubagentExecutor implements SubagentExecutor {
     this.toolNames.clear();
     this.finishedTools.clear();
     this.turnStartedAt = Date.now();
-    // Match DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES without importing the workflow runtime.
-    const timeoutMs = (this.params.runConfig.max_time_minutes ?? 10) * 60_000;
+    // An absent max_time_minutes means "no wall-time cap", matching the
+    // in-process sibling (agent-core installs no timer when maxTimeMinutes is
+    // falsy) and the rest of the codebase. Do NOT borrow a default from
+    // DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES: workflow agent() hard-rejects
+    // external-executor definitions upstream, so that constant provably never
+    // reaches this path — the only route here is the Agent tool, which sets no
+    // default. A borrowed 10-minute cap would make the same definition behave
+    // differently based only on whether it declares an executor, and would make
+    // a TIMEOUT turn (presented to the parent as the answer) reachable by
+    // default. `wait` already treats an undefined budget as "no timer".
+    const timeoutMs =
+      this.params.runConfig.max_time_minutes === undefined
+        ? undefined
+        : this.params.runConfig.max_time_minutes * 60_000;
     const cancel = () => {
       this.cancelled = true;
       this.drainPermissions();
@@ -528,6 +562,28 @@ class AcpSubagentExecutor implements SubagentExecutor {
         );
         this.terminateMode = this.stopMode(result.stopReason);
         if (this.terminateMode !== AgentTerminateMode.GOAL) break;
+        // Gate the destructive drain on the budget and the abort signal BEFORE
+        // recording anything as delivered — mirroring the in-process sibling,
+        // which checks the wall-time budget before drainExternalInputs. The
+        // provider splices the queued messages out of the registry and
+        // emitInputs writes them to the transcript as delivered; if the budget
+        // is already spent (the round-top guard would break the next round) or
+        // the signal aborted (the loop-bottom condition), `next` is discarded
+        // without ever reaching connection.prompt — the transcript would
+        // certify delivery of a message that was never sent, and the registry
+        // has already lost it. Only drain once committed to dispatching.
+        if (signal?.aborted) {
+          this.terminateMode = AgentTerminateMode.CANCELLED;
+          break;
+        }
+        const remainingNext =
+          timeoutMs === undefined
+            ? undefined
+            : Math.max(0, timeoutMs - (Date.now() - this.turnStartedAt));
+        if (remainingNext !== undefined && remainingNext <= 0) {
+          this.terminateMode = AgentTerminateMode.TIMEOUT;
+          break;
+        }
         const queued = this.provider?.() ?? [];
         if (queued.length === 0) break;
         this.emitter.emit(AgentEventType.ROUND_TEXT, {
@@ -657,6 +713,25 @@ class AcpSubagentExecutor implements SubagentExecutor {
     return (this.disposePromise ??= this.child
       .terminate()
       .catch((error: unknown) => {
+        if (isUnprovenExternalAgentTreeExit(error)) {
+          // The peer's root exited before its process tree was enumerated, so a
+          // detached descendant may survive. Report it — do NOT rethrow:
+          // dispose() is awaited between the turn's terminal-state classification
+          // and its return, so rethrowing would replace a classified
+          // TIMEOUT/CANCELLED with a thrown ERROR.
+          const detail = error instanceof Error ? error.message : String(error);
+          debugLogger.warn(
+            `External ACP agent process tree was not proven gone after disposal: ${detail}`,
+          );
+          if (this.emitter.rawListeners(AgentEventType.ERROR).length > 0) {
+            this.emitter.emit(AgentEventType.ERROR, {
+              subagentId: this.id,
+              error: `External agent process tree not proven gone after disposal: ${detail}`,
+              timestamp: Date.now(),
+            });
+          }
+          return;
+        }
         if (!isExpectedExternalAgentCleanupExit(error)) throw error;
       }));
   }
