@@ -361,6 +361,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     return config.getReasoningEffort() === effort;
   },
   REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
+  // The real parser: `model-configuration` gates every reasoning control on it,
+  // and a stand-in would decide capability validity differently from the wire.
+  parseModelReasoningCapabilities: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).parseModelReasoningCapabilities,
   // The real enum: the reload approval-mode fold reaches beyond YOLO
   // (ApprovalMode.AUTO), and a partial shape leaves the other members
   // undefined at runtime.
@@ -7373,6 +7378,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         taskId: 'worker-1',
         status: 'completed',
         kind: 'agent',
+        label: 'research worker',
       }),
     ).resolves.toEqual({ sessionId, accepted: true });
     expect(lastSessionMock!.enqueueBackgroundNotification).toHaveBeenCalledWith(
@@ -7382,8 +7388,23 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         taskId: 'worker-1',
         status: 'completed',
         kind: 'agent',
+        label: 'research worker',
       },
     );
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification, {
+        sessionId,
+        displayText: 'Worker completed.',
+        modelText: '<task-notification />',
+        taskId: 'worker-2',
+        status: 'completed',
+        kind: 'agent',
+        label: '   ',
+      }),
+    ).rejects.toThrowError(/Invalid background notification label/);
+    expect(
+      lastSessionMock!.enqueueBackgroundNotification,
+    ).toHaveBeenCalledTimes(1);
 
     mockConnectionState.resolve();
     await agentPromise;

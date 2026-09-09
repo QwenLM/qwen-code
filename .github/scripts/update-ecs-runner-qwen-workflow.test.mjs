@@ -61,9 +61,9 @@ const updateJobName =
   workflow.match(/\n {2}update:\n {4}name: '([^']*)'/)?.[1] ?? '';
 const poolPrefix = updateJobName.replace(/\$\{\{.*\}\}$/, '');
 
-// Both layouts, because CI runs `prettier --write .` before this suite and
-// prettier reflows the inline matrix array onto its own lines. A parser that
-// reads only the checked-in layout passes locally and finds zero pools there.
+// Both layouts, because the checked-in workflow carries the reflowed form
+// prettier produces for an inline matrix array, and older branches still
+// carry the single-line one. A parser that reads only one finds zero pools.
 function parsePools(text) {
   return (text.match(/\n\s+runner:\s*\[([^\]]*)\]/)?.[1] ?? '')
     .split(',')

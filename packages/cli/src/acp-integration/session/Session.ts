@@ -41,6 +41,7 @@ import type {
   GoalSnapshotV2,
   GoalStateCause,
   GoalTurnHost,
+  GoalContinuationTurn,
   GoalTurnPermit,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
@@ -348,7 +349,7 @@ import { recordDaemonSessionModel } from '../session-model-persistence.js';
 import {
   applyReasoningSelection,
   clearReasoningRequestOverrides,
-  getModelConfiguration,
+  getConfiguredModelReasoning,
   isReasoningSelectionSupported,
   parseReasoningSelection,
   REASONING_EFFORT_DEFAULT,
@@ -615,15 +616,11 @@ type BeforeModelSendContext = {
   compressionFailed: boolean;
 };
 
-interface AcpGoalTurn {
+interface AcpGoalTurn extends GoalContinuationTurn {
   permit: GoalTurnPermit;
   turnKey: string;
   controller: AbortController;
   origin: 'runtime' | 'user';
-  continuationContext: string;
-  objectiveUpdated?: boolean;
-  windDown?: boolean;
-  verifierFeedback?: string;
   modelStarted: boolean;
 }
 
@@ -1035,6 +1032,13 @@ const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
 // into an unrelated turn's context.
 const MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS = 30_000;
 const MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS = 10_000;
+// `waitForActiveTurnsToSettle` polls at this interval when the active turn
+// publishes no completion promise to await — `goalProcessing` and
+// `historyMutationActive` both block `#hasActiveTurn()` without one. Yielding
+// on `setImmediate` alone would cycle the event loop as fast as it can turn and
+// burn a core for the whole wait, which on the conditional-close path is the
+// full drain budget.
+const ACTIVE_TURN_POLL_INTERVAL_MS = 10;
 const MAX_MID_TURN_DRAIN_ITEMS = 10;
 const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
   '[Attachment could not be processed]';
@@ -1454,6 +1458,7 @@ export interface BackgroundNotificationQueueItem {
   kind: 'agent' | 'monitor' | 'shell' | 'workflow';
   toolUseId?: string;
   todoWorkChainId?: string;
+  label?: string;
   /** Structured fields for i18n rendering on the frontend. */
   structured?: {
     description?: string;
@@ -2297,19 +2302,13 @@ export class Session implements SessionContext {
           ) {
             return;
           }
+          const { permit, ...continuation } = input;
           this.goalQueue.push({
-            permit: { ...input.permit },
-            turnKey: `goal-runtime:${input.permit.turnId}`,
+            permit: { ...permit },
+            turnKey: `goal-runtime:${permit.turnId}`,
             controller: new AbortController(),
             origin: 'runtime',
-            continuationContext: input.continuationContext,
-            ...(input.objectiveUpdated
-              ? { objectiveUpdated: input.objectiveUpdated }
-              : {}),
-            ...(input.windDown ? { windDown: true } : {}),
-            ...(input.verifierFeedback
-              ? { verifierFeedback: input.verifierFeedback }
-              : {}),
+            ...continuation,
             modelStarted: false,
           });
           void this.#drainGoalQueue();
@@ -2525,6 +2524,7 @@ export class Session implements SessionContext {
     if (!turn) return;
 
     this.goalProcessing = true;
+    this.#activeWorkChanged();
     this.activeGoalTurn = turn;
     const parts = buildGoalContinuationParts(turn);
     let result: PromptResponse | undefined;
@@ -2567,6 +2567,7 @@ export class Session implements SessionContext {
       await this.#emitGoalEndTurn(result);
       if (this.activeGoalTurn === turn) this.activeGoalTurn = undefined;
       this.goalProcessing = false;
+      this.#activeWorkChanged();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
       void this.#drainGoalQueue();
@@ -4047,6 +4048,20 @@ export class Session implements SessionContext {
         holds.push({ category: 'workflow', id: task.runId });
       }
     }
+    if (
+      this.historyMutationActive ||
+      this.goalProcessing ||
+      this.cronProcessing ||
+      this.cronAbortController ||
+      this.cronCompletion ||
+      this.notificationQueue.some((item) => item.kind === 'monitor') ||
+      (this.notificationCompletion &&
+        this.currentAgentNotificationTaskId === null &&
+        this.currentWorkflowNotificationTaskId === null &&
+        !this.currentShellNotificationActive)
+    ) {
+      holds.push({ category: 'session', id: 'session:active-turn' });
+    }
     return holds;
   }
 
@@ -4089,12 +4104,14 @@ export class Session implements SessionContext {
       });
     }
     this.historyMutationActive = true;
+    this.#activeWorkChanged();
     let released = false;
     return () => {
       if (released) return;
       released = true;
       this.historyMutationActive = false;
       if (this.disposed) return;
+      this.#activeWorkChanged();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
     };
@@ -4153,8 +4170,15 @@ export class Session implements SessionContext {
       );
       if (pending.length > 0) {
         await Promise.allSettled(pending);
+        // Yield a macrotask, not just microtasks: these flags can be cleared by
+        // work queued behind this loop, and re-reading them before that runs
+        // would miss the settle.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      } else {
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, ACTIVE_TURN_POLL_INTERVAL_MS),
+        );
       }
-      await new Promise<void>((resolve) => setImmediate(resolve));
     }
   }
 
@@ -8894,6 +8918,7 @@ export class Session implements SessionContext {
     }
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     this.cronProcessing = true;
+    this.#activeWorkChanged();
 
     let resolveCompletion!: () => void;
     this.cronCompletion = new Promise<void>((resolve) => {
@@ -8912,6 +8937,7 @@ export class Session implements SessionContext {
       this.cronProcessing = false;
       resolveCompletion();
       this.cronCompletion = null;
+      this.#activeWorkChanged();
 
       void this.#drainGoalQueue();
       void this.#drainNotificationQueue();
@@ -9465,6 +9491,11 @@ export class Session implements SessionContext {
     backgroundRegistry.setNotificationCallback(
       (displayText, modelText, meta) => {
         const entry = backgroundRegistry.get(meta.agentId);
+        const label =
+          meta.label ??
+          (entry
+            ? buildBackgroundEntryLabel(entry, { includePrefix: false })
+            : undefined);
         this.#enqueueBackgroundNotification({
           displayText,
           modelText,
@@ -9475,6 +9506,7 @@ export class Session implements SessionContext {
             this.#agentContinuesTodoStopGuardWorkChain(meta.agentId),
           toolUseId: meta.toolUseId,
           todoWorkChainId: meta.todoWorkChainId,
+          label: label ? truncateNotificationLabel(label) : undefined,
           structured: entry
             ? {
                 description: truncateNotificationLabel(
@@ -9879,12 +9911,38 @@ export class Session implements SessionContext {
       this.config.getWorkingDir(),
       async () => {
         const ac = new AbortController();
+        const promptId =
+          this.config.getSessionId() + '########notification' + Date.now();
+        let responseSegmentEmitted = false;
+        let responseTurnComplete = false;
+        const finishBackgroundNotificationTurn = async (
+          reason: PromptResponse['stopReason'],
+          partial = false,
+        ): Promise<void> => {
+          if (responseSegmentEmitted && !responseTurnComplete) {
+            try {
+              await this.#emitBackgroundNotificationResponse(
+                item,
+                '',
+                ac.signal,
+                promptId,
+                true,
+                partial,
+              );
+              responseTurnComplete = true;
+              await this.messageRewriter?.flushTurn(ac.signal);
+            } catch (error) {
+              debugLogger.warn(
+                `Failed to complete background notification response: ${this.#formatError(error)}`,
+              );
+            }
+          }
+          await this.#emitBackgroundNotificationEndTurn(reason);
+        };
         this.notificationAbortController = ac;
         const continuesCurrentWorkChain =
           this.#notificationContinuesTodoStopGuardWorkChain(item);
         this.#prepareTodoStopGuardForAutomaticTurn(continuesCurrentWorkChain);
-        const promptId =
-          this.config.getSessionId() + '########notification' + Date.now();
         try {
           await this.assertCanStartTurn();
           if (ac.signal.aborted) return;
@@ -9926,7 +9984,7 @@ export class Session implements SessionContext {
           while (nextMessage !== null) {
             if (ac.signal.aborted) {
               this.todoStopGuard.suspend();
-              await this.#emitBackgroundNotificationEndTurn('cancelled');
+              await finishBackgroundNotificationTurn('cancelled', true);
               return;
             }
 
@@ -9950,8 +10008,9 @@ export class Session implements SessionContext {
                 nextMessage,
                 sendResult.stopReason === 'cancelled',
               );
-              await this.#emitBackgroundNotificationEndTurn(
+              await finishBackgroundNotificationTurn(
                 sendResult.stopReason,
+                true,
               );
               return;
             }
@@ -9968,7 +10027,7 @@ export class Session implements SessionContext {
               for await (const resp of responseStream) {
                 if (ac.signal.aborted) {
                   this.todoStopGuard.suspend();
-                  await this.#emitBackgroundNotificationEndTurn('cancelled');
+                  await finishBackgroundNotificationTurn('cancelled', true);
                   return;
                 }
 
@@ -10042,12 +10101,20 @@ export class Session implements SessionContext {
               }
             }
 
-            if (responseText.length > 0) {
+            const turnComplete = functionCalls.length === 0;
+            if (
+              responseText.length > 0 ||
+              (turnComplete && responseSegmentEmitted)
+            ) {
               await this.#emitBackgroundNotificationResponse(
                 item,
                 responseText,
                 ac.signal,
+                promptId,
+                turnComplete,
               );
+              if (responseText.length > 0) responseSegmentEmitted = true;
+              if (turnComplete) responseTurnComplete = true;
             }
 
             if (this.messageRewriter) {
@@ -10074,8 +10141,9 @@ export class Session implements SessionContext {
               if (toolRun.stopAfterPermissionCancel || ac.signal.aborted) {
                 this.todoStopGuard.suspend();
                 await this.#preserveStoppedToolRun(toolRun, ac.signal);
-                await this.#emitBackgroundNotificationEndTurn(
+                await finishBackgroundNotificationTurn(
                   getAbortAwareEndTurnStopReason(ac.signal),
+                  true,
                 );
                 return;
               }
@@ -10089,8 +10157,9 @@ export class Session implements SessionContext {
               if (toolRun.loopDetected) {
                 this.todoStopGuard.suspend();
                 await this.#preserveStoppedToolRun(toolRun, ac.signal);
-                await this.#emitBackgroundNotificationEndTurn(
+                await finishBackgroundNotificationTurn(
                   getAbortAwareEndTurnStopReason(ac.signal),
+                  true,
                 );
                 return;
               }
@@ -10113,13 +10182,14 @@ export class Session implements SessionContext {
               )
             ).stopReason;
           }
-          await this.#emitBackgroundNotificationEndTurn(
+          await finishBackgroundNotificationTurn(
             ac.signal.aborted ? 'cancelled' : stopReason,
+            ac.signal.aborted,
           );
         } catch (error) {
           if (ac.signal.aborted) {
             this.todoStopGuard.suspend();
-            await this.#emitBackgroundNotificationEndTurn('cancelled');
+            await finishBackgroundNotificationTurn('cancelled', true);
             return;
           }
           this.todoStopGuard.pauseForTrustedRetry();
@@ -10135,7 +10205,7 @@ export class Session implements SessionContext {
               emitError,
             );
           } finally {
-            await this.#emitBackgroundNotificationEndTurn('end_turn');
+            await finishBackgroundNotificationTurn('end_turn', true);
           }
         } finally {
           this.config.endAutomaticActiveTodoWorkChain(promptId);
@@ -10171,7 +10241,16 @@ export class Session implements SessionContext {
     item: BackgroundNotificationQueueItem,
     text: string,
     signal: AbortSignal,
+    turnId: string,
+    turnComplete: boolean,
+    partial = false,
   ): Promise<void> {
+    const rawLabel =
+      item.label ??
+      (item.kind === 'agent'
+        ? undefined
+        : (item.structured?.description ?? item.structured?.commandLabel));
+    const label = rawLabel ? truncateNotificationLabel(rawLabel) : undefined;
     const update: SessionUpdate = {
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
@@ -10183,6 +10262,10 @@ export class Session implements SessionContext {
           status: item.status,
           kind: item.kind,
           toolUseId: item.toolUseId,
+          ...(label ? { label } : {}),
+          turnId,
+          turnComplete,
+          ...(partial ? { partial: true } : {}),
         },
       },
     };
@@ -10675,10 +10758,16 @@ export class Session implements SessionContext {
       : parseReasoningSelection(rawSelection);
     const generation = this.config.getContentGeneratorConfig?.();
     const thinkingMandatory = generation?.thinkingMandatory === true;
+    const modelReasoning = getConfiguredModelReasoning(this.config, modelId);
     let supported =
       selection !== undefined &&
       selection !== REASONING_EFFORT_DEFAULT &&
-      isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
+      isReasoningSelectionSupported(
+        modelId,
+        selection,
+        thinkingMandatory,
+        modelReasoning,
+      );
 
     const appliesSessionDefault =
       hasSessionSelection && selection === REASONING_EFFORT_DEFAULT;
@@ -10689,7 +10778,12 @@ export class Session implements SessionContext {
       supported =
         selection !== undefined &&
         selection !== REASONING_EFFORT_DEFAULT &&
-        isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
+        isReasoningSelectionSupported(
+          modelId,
+          selection,
+          thinkingMandatory,
+          modelReasoning,
+        );
     }
     if (
       !hasSessionSelection &&
@@ -10707,7 +10801,6 @@ export class Session implements SessionContext {
         );
       }
     }
-    const modelReasoning = getModelConfiguration(modelId)?.reasoning;
     if (
       supported &&
       generation &&
