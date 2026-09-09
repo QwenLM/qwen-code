@@ -157,6 +157,10 @@ describe('package scripts', () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('Lockfile check passed.');
     expect(result.stdout).toContain('pnpm lockfile check passed.');
+    // Pins the Playwright parity block's existence and happy path: deleting it,
+    // or returning before it, goes red here. Its drift arms live in
+    // check-lockfile.test.js, which runs the script against perturbed fixtures.
+    expect(result.stdout).toContain('Playwright parity check passed.');
   });
 
   it('keeps the internal release-age exception independent of the version', () => {

@@ -120,15 +120,26 @@ console.log('Checking Playwright parity...');
 // regeneration resolve the pair apart and re-nest a second tree, which leaves
 // the installed browser one the harness cannot launch.
 //
-// Two other Playwright declarations are deliberately outside this invariant:
-//   - `packages/mobile-mcp` depends on `mobilewright`, which pins `playwright`
-//     and `playwright-core` to an exact older revision no manifest edit here
-//     can dedupe. That tree hoists the older `playwright-core` to the root, so
-//     the root `playwright-core` bin is NOT part of this parity — only the two
-//     `playwright` CLIs are.
+// Three other Playwright declarations are deliberately outside this invariant:
+//   - `packages/mobile-mcp` declares `@playwright/test` as a range directly.
+//     npm satisfies it from the single hoisted copy at the pinned version
+//     today, and the harness never resolves into that workspace, so it stays
+//     out of scope here — but it is the only in-workspace range on a name this
+//     check pins, which makes it the first manifest to look at when the
+//     resolved-version assertion below fires. Do NOT append it to
+//     `playwrightManifests` as it stands: the exactness check rejects its range
+//     and would turn `check:lockfile` red immediately.
+//   - `packages/mobile-mcp` also depends on `mobilewright`, which pins
+//     `playwright` and `playwright-core` to an exact older revision no manifest
+//     edit here can dedupe. That tree hoists the older `playwright-core` to the
+//     root, so the root `playwright-core` bin is NOT part of this parity — only
+//     the `playwright` CLIs are.
 //   - `integration-tests/terminal-capture` declares a `playwright` range but is
-//     not an npm or pnpm workspace, so it enters neither lockfile. Add it below
-//     if it is ever listed under `workspaces`.
+//     not a workspace member, so it enters neither lockfile. Bringing it inside
+//     the invariant takes three steps, not one: pin it exact, list the directory
+//     in BOTH the root `workspaces` and `pnpm-workspace.yaml`'s `packages:`
+//     (scripts/tests/package-scripts.test.js asserts the two lists are equal),
+//     then append it below and regenerate both lockfiles.
 const EXACT_VERSION = /^\d+\.\d+\.\d+(-[\w.-]+)?$/;
 const playwrightManifests = [
   { manifest: 'package.json', name: 'playwright' },
@@ -150,31 +161,32 @@ for (const { manifest, name, spec, exact } of playwrightSpecs) {
     parityErrors.push(`${manifest} does not declare ${name}`);
   } else if (!exact) {
     parityErrors.push(
-      `${manifest} declares ${name} as "${spec}"; expected an exact version so it cannot resolve apart from its twin`,
+      `${manifest} declares ${name} as "${spec}"; expected an exact version so it cannot resolve apart from the others`,
     );
   }
 }
 
-const [rootPlaywright, webShellPlaywright] = playwrightSpecs;
-if (
-  rootPlaywright.exact &&
-  webShellPlaywright.exact &&
-  rootPlaywright.spec !== webShellPlaywright.spec
-) {
-  parityErrors.push(
-    `${rootPlaywright.name} ${rootPlaywright.spec} and ${webShellPlaywright.name} ${webShellPlaywright.spec} must declare the same version`,
-  );
+// Every entry is compared against the first rather than the second against the
+// first: `playwrightManifests` is a list a maintainer extends, and a positional
+// destructure hands a third entry the exactness check while silently skipping
+// the agreement check this block exists for.
+const [pinEntry, ...restEntries] = playwrightSpecs;
+const pinned = pinEntry.spec;
+for (const { manifest, name, spec, exact } of restEntries) {
+  if (exact && pinEntry.exact && spec !== pinned) {
+    parityErrors.push(
+      `${pinEntry.name} ${pinned} (${pinEntry.manifest}) and ${name} ${spec} (${manifest}) must declare the same version`,
+    );
+  }
 }
 
 // Manifest agreement is not enough on its own: a stale or hand-edited lockfile
-// can still resolve the pair apart. Assert the resolved outcome for those two
-// packages, scoped as above.
-const pinned = rootPlaywright.spec;
-if (rootPlaywright.exact) {
-  for (const location of [
-    'node_modules/playwright',
-    'node_modules/@playwright/test',
-  ]) {
+// can still resolve the set apart. Assert the resolved outcome too, deriving
+// each location from the manifest list so an entry added above is covered by
+// both halves rather than only by the exactness check.
+if (pinEntry.exact) {
+  for (const { name } of playwrightSpecs) {
+    const location = `node_modules/${name}`;
     const actual = packages[location]?.version;
     if (actual === undefined) {
       parityErrors.push(
@@ -182,7 +194,7 @@ if (rootPlaywright.exact) {
       );
     } else if (actual !== pinned) {
       parityErrors.push(
-        `package-lock.json resolves ${location} to ${actual} instead of ${pinned}; regenerate the lockfile, and if that does not settle it, look for another manifest declaring a Playwright range`,
+        `package-lock.json resolves ${location} to ${actual} instead of ${pinned}; regenerate the lockfile, and if that does not settle it then a manifest range is resolving above the pin — packages/mobile-mcp's @playwright/test is the only in-workspace one`,
       );
     }
   }
@@ -191,7 +203,7 @@ if (rootPlaywright.exact) {
   const nested = 'node_modules/@playwright/test/node_modules/playwright';
   if (packages[nested] && packages[nested].version !== pinned) {
     parityErrors.push(
-      `package-lock.json nests ${nested} at ${packages[nested].version}, splitting the chromium revision; regenerate it`,
+      `package-lock.json nests ${nested} at ${packages[nested].version}, splitting the chromium revision; regenerate the lockfile`,
     );
   }
 }
@@ -199,6 +211,12 @@ if (rootPlaywright.exact) {
 // Both lockfiles are committed together, so a specifier or a resolved version
 // that lands in one and not the other is the same drift. pnpm's
 // --frozen-lockfile validates specifiers only, so the version is asserted too.
+// The recorded value is not always the manifest string: pnpm-workspace.yaml's
+// `overrides:` and .pnpmfile.mjs's readPackage hook both rewrite it — web-shell
+// declares `typescript: ^5.3.3` while the lockfile records `5.8.3`, because
+// `overrides:` pins it. Neither layer touches Playwright today, so a divergence
+// here is drift, but the messages name those layers because "regenerate it" is
+// a no-op when one of them is what decides the value.
 const pnpmImporters = pnpmLockfile?.importers ?? {};
 for (const { manifest, name, spec, exact } of playwrightSpecs) {
   const importer = dirname(manifest);
@@ -208,18 +226,18 @@ for (const { manifest, name, spec, exact } of playwrightSpecs) {
     null;
   if (entry === null) {
     parityErrors.push(
-      `pnpm-lock.yaml has no ${name} entry for importer "${importer}"; regenerate it`,
+      `pnpm-lock.yaml has no ${name} entry for importer "${importer}"; importers come from pnpm-workspace.yaml's packages:, so check that ${importer} is listed there, then regenerate`,
     );
     continue;
   }
   if (entry.specifier !== spec) {
     parityErrors.push(
-      `pnpm-lock.yaml records ${name} in "${importer}" as "${entry.specifier}" but ${manifest} declares "${spec}"; regenerate it`,
+      `pnpm-lock.yaml records ${name} in "${importer}" as "${entry.specifier}" but ${manifest} declares "${spec}"; regenerate it — unless pnpm-workspace.yaml's overrides: or .pnpmfile.mjs rewrites this package, in which case that layer decides the value and the manifest is not the source of truth`,
     );
   }
   if (exact && entry.version !== spec) {
     parityErrors.push(
-      `pnpm-lock.yaml resolves ${name} in "${importer}" to ${entry.version} instead of ${spec}; regenerate it`,
+      `pnpm-lock.yaml resolves ${name} in "${importer}" to ${entry.version} instead of ${spec}; regenerate it — unless an overrides: entry pins a different version`,
     );
   }
 }
