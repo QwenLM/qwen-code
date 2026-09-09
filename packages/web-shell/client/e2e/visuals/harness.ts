@@ -20,11 +20,11 @@ import {
   type MockDaemonController,
   type WebShellDaemonScenario,
 } from '../utils/mockDaemon';
-import { VISUAL_VIEWPORT } from './constants';
+import { FIXED_CAPTURE_TIME, VISUAL_VIEWPORT } from './constants';
 
 export type VisualTheme = 'dark' | 'light';
 
-export { VISUAL_VIEWPORT };
+export { FIXED_CAPTURE_TIME, VISUAL_VIEWPORT };
 
 /** localStorage key the web-shell reads for its persisted theme (see index.html). */
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';
@@ -65,42 +65,35 @@ async function primeTheme(page: Page, theme: VisualTheme): Promise<void> {
 }
 
 /**
- * Wall-clock instant every capture renders at.
- *
- * It is deliberately in the FUTURE relative to every date a fixture hardcodes.
- * Relative formatters measure `Date.now() - value` (`formatRelativeTime`), so a
- * fixture date on the far side of this instant yields a negative age and
- * collapses to "just now": with an earlier constant the channel editor's
- * pairing requests, dated 2026-07-28, rendered as "just now" instead of the
- * "7/28/2026" the real clock produced. Future-dating is the safe direction --
- * a fixture then reads as older than now, which is what every one of them
- * means.
- *
- * Two rules follow for anyone adding a fixture. An absolute date must be
- * earlier than this instant. A value meant to be "now" must be derived from
- * this constant rather than from `Date.now()`, which in a spec runs on Node's
- * real clock and would land months away from the page's frozen one.
- */
-export const FIXED_CAPTURE_TIME = new Date('2027-01-01T09:00:00.000Z');
-
-/**
- * Pin `Date.now()` / `new Date()` so anything rendering a wall-clock time is
- * byte-identical across the base and head capture passes.
+ * Pin the page clock so anything rendering a wall-clock time is byte-identical
+ * across the base and head capture passes.
  *
  * Those two passes run minutes apart inside the SAME job -- the base render
  * waits on its own `npm install` first -- so every timestamped view differed on
  * every run purely because of when it was photographed. On PR #11267 that was
  * the entire preview: the one view the compose step flagged as CHANGED,
  * `terminal-turn-error-copy-narrow-dark`, scored exactly 0.02% (the threshold)
- * and the whole diff was a `09:09:28` tip against a `09:18:16` one. The narrow
- * viewport is half the pixels of the wide one, which is why the same ~100
- * timestamp pixels cleared the threshold there and were skipped at 0.01%
- * everywhere else.
+ * and the whole diff was a `09:09:28` tip against a `09:18:16` one.
  *
- * `setFixedTime` fakes only clock READINGS, not timers, so replay, streaming,
- * transitions and `freezeLoopingAnimations` all still behave normally. Anything
- * rendering an elapsed duration settles on a constant instead of drifting,
- * which is the point.
+ * What `setFixedTime` actually installs is Playwright's FULL fake clock, not a
+ * `Date`-only shim: `setTimeout`, `setInterval`, `requestAnimationFrame`,
+ * `requestIdleCallback`, `performance` and `Intl` are all replaced. Timers and
+ * rAF keep firing, so replay, streaming and `freezeLoopingAnimations` behave
+ * normally in outcome -- but two things do change and will cost a debugging
+ * session if they are not written down:
+ *
+ * - `performance.mark`/`measure` return throwaway entries and `getEntries()`
+ *   comes back empty, so a capture can never observe a measure-storm.
+ * - Every `Date.now()`-delta window in the app is pinned permanently shut:
+ *   background-agent grace misses, catalog staleness, retry backoff, live-state
+ *   reconcile throttling. Nothing seeds those states today, so nothing fails --
+ *   but a scenario that needs one to elapse will hang inside `gotoSession` and
+ *   surface as a bare expect timeout. Such a scenario must seed already-expired
+ *   timestamps or drive `page.clock.fastForward` / `runFor` itself.
+ *
+ * `visual-capture-contracts.test.ts` pins that both navigation helpers still
+ * call this before `page.goto`; nothing in the visuals suite reads the clock,
+ * so a dropped call would otherwise stay green.
  */
 export async function freezeWallClock(page: Page): Promise<void> {
   await page.clock.setFixedTime(FIXED_CAPTURE_TIME);

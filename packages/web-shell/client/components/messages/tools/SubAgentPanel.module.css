@@ -203,12 +203,25 @@
   position: relative;
 }
 
+/*
+ * Mirrors MessageTimestamp's `.tip`, and inherits its fix for the same reason:
+ * at `top: 2px` the chip's lower edge cut through the sub-tool line's only row
+ * of text, clipping ascenders while the bowls stayed visible below. This one
+ * was worse -- it declared no `background`, so the two texts composited
+ * directly. `.lineArg` reaches the row's right edge and `.lineElapsed` sits
+ * there for every running sub-tool, so the collision is structural, not
+ * incidental.
+ */
 .toolTimeRow > .toolTimeTip {
   position: absolute;
-  top: 2px;
+  bottom: 2px;
   right: 4px;
   z-index: 5;
   color: var(--muted-foreground);
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 4px;
   font-size: 11px;
   line-height: 1.4;
   white-space: nowrap;

@@ -52,10 +52,14 @@ test('branch picker, commit dialog, create PR form', async ({
       behind: 0,
       stashCount: 0,
       operation: null,
-      // Node's real clock here would sit months from the page's frozen one
-      // (harness `freezeWallClock`), making the status look newer than the
-      // branch listing and triggering a reconcile re-fetch that never happens
-      // in a real session.
+      // Derived from the frozen capture instant per the harness rule: a value
+      // meant to be "now" must not come from Node's real clock. No behaviour
+      // rides on it either way -- BranchPickerPopover stamps
+      // `listingFetchedAt` from the frozen clock and returns early on
+      // `at <= listingFetchedAt`, which a real-clock value (months BELOW the
+      // future-dated constant) and this value (exact equality) both satisfy.
+      // Exercising the reconcile path would need an explicit
+      // `FIXED_CAPTURE_TIME.getTime() + 1`.
       computedAt: FIXED_CAPTURE_TIME.getTime(),
     },
     events: [

@@ -8,11 +8,11 @@
 }
 
 /*
- * Anchored inside the message's top-right corner rather than floating above
- * it: the message list (`.list`) is `overflow-y: auto`, so a tooltip spilling
- * outside the row box would be clipped or trigger a scrollbar. Staying within
- * the row keeps it visible at the scroll edges. `pointer-events: none` lets
- * clicks and inner hover interactions (tool expand, links) pass through.
+ * Anchored inside the message row rather than floating above it: the message
+ * list (`.list`) is `overflow-y: auto`, so a tooltip spilling outside the row
+ * box would be clipped or trigger a scrollbar. Staying within the row keeps it
+ * visible at the scroll edges. `pointer-events: none` lets clicks and inner
+ * hover interactions (tool expand, links) pass through.
  *
  * Anchored at the BOTTOM-right, and fully opaque. Both halves matter, and the
  * position is the load-bearing one.
@@ -32,7 +32,10 @@
  * Opacity still matters on its own: at 92% a glyph beneath any overlay bleeds
  * through it, which reads as broken text rather than as a chip. `.chatTip` and
  * `.copyButton` sit over content too (`.chatActions` pulls itself up by -24px)
- * and carry the same fix.
+ * and carry the same fix, as does `.toolTimeTip` in SubAgentPanel.module.css,
+ * which mirrors this chip over a sub-tool line and had no `background` at all.
+ * `visual-capture-contracts.test.ts` pins all four, because no test reads this
+ * geometry: reverting the anchor or the background keeps every suite green.
  *
  * Overlap is now rare, not impossible -- a message whose last block is a
  * full-width code block or table still gets the chip in its corner. Reserving
