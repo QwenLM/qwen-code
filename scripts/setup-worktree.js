@@ -28,10 +28,14 @@ const env = {
 // A spread of process.env is an ordinary object: on Windows the path
 // variable canonically arrives as `Path`, so a case-sensitive `env.PATH`
 // read misses it and corepack is never found.
+function envValue(name) {
+  if (process.platform !== 'win32') return env[name];
+  const key = Object.keys(env).find((key) => key.toUpperCase() === name);
+  return key === undefined ? undefined : env[key];
+}
+
 function pathValue() {
-  if (process.platform !== 'win32') return env.PATH ?? '';
-  const key = Object.keys(env).find((name) => name.toUpperCase() === 'PATH');
-  return (key !== undefined ? env[key] : env.PATH) ?? '';
+  return envValue('PATH') ?? '';
 }
 
 function findOnPath(command) {
@@ -61,8 +65,33 @@ function runPnpm(args) {
   });
 }
 
+function getHooksPath() {
+  const result = spawnSync('git', ['config', '--get', 'core.hooksPath'], {
+    cwd: rootDir,
+    env,
+    encoding: 'utf8',
+  });
+  return result.status === 0 ? result.stdout.trim() : undefined;
+}
+
 function install(cacheMode) {
-  return runPnpm(['install', '--frozen-lockfile', cacheMode]);
+  const result = runPnpm(['install', '--frozen-lockfile', cacheMode]);
+  if (result.status === 0) {
+    const hooksPath = getHooksPath();
+    if (
+      envValue('HUSKY') === '0' ||
+      (hooksPath !== undefined && hooksPath !== '.husky/_')
+    ) {
+      exitWithResult(result);
+    }
+    const husky = runPnpm(['exec', 'husky']);
+    if (husky.status === 0 && getHooksPath() !== '.husky/_') {
+      console.error('worktree setup failed: Husky did not install hooks');
+      process.exit(1);
+    }
+    exitWithResult(husky);
+  }
+  return result;
 }
 
 function exitWithResult(result) {

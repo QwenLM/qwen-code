@@ -28,6 +28,12 @@ import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '../..');
+const huskyTestEnv = {
+  HUSKY: '1',
+  GIT_CONFIG_COUNT: '1',
+  GIT_CONFIG_KEY_0: 'core.hooksPath',
+  GIT_CONFIG_VALUE_0: '.husky/_',
+};
 
 function readPackageJson() {
   return JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
@@ -210,11 +216,30 @@ describe('package scripts', () => {
     expect(new Set(specifiers)).toEqual(new Set(['workspace:*']));
   });
 
-  it('bootstraps worktrees with frozen pnpm dependencies and skips prepare', () => {
+  it('bootstraps worktrees and preserves explicit hook settings', () => {
     const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-setup-'));
     const commandDir = path.join(binDir, 'runner bin');
     const logFile = path.join(binDir, 'corepack.log');
     mkdirSync(commandDir);
+
+    const runSetup = (envOverride = {}) => {
+      writeFileSync(logFile, '');
+      return spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/setup-worktree.js')],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            ...huskyTestEnv,
+            ...envOverride,
+            PATH: `${commandDir}${path.delimiter}${process.env.PATH ?? ''}`,
+            WORKTREE_SETUP_LOG: logFile,
+          },
+        },
+      );
+    };
 
     try {
       if (process.platform === 'win32') {
@@ -230,21 +255,18 @@ describe('package scripts', () => {
         chmodSync(path.join(commandDir, 'corepack'), 0o755);
       }
 
-      const result = spawnSync(
-        process.execPath,
-        [path.join(root, 'scripts/setup-worktree.js')],
-        {
-          cwd: root,
-          encoding: 'utf8',
-          env: {
-            ...process.env,
-            PATH: `${commandDir}${path.delimiter}${process.env.PATH ?? ''}`,
-            WORKTREE_SETUP_LOG: logFile,
-          },
-        },
-      );
+      const result = runSetup();
 
       expect(result.status).toBe(0);
+      expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
+        '1 1 pnpm install --frozen-lockfile --offline',
+        '1 1 pnpm exec husky',
+      ]);
+      expect(runSetup({ HUSKY: '0' }).status).toBe(0);
+      expect(readFileSync(logFile, 'utf8').trim()).toBe(
+        '1 1 pnpm install --frozen-lockfile --offline',
+      );
+      expect(runSetup({ GIT_CONFIG_VALUE_0: '/custom/hooks' }).status).toBe(0);
       expect(readFileSync(logFile, 'utf8').trim()).toBe(
         '1 1 pnpm install --frozen-lockfile --offline',
       );
@@ -270,10 +292,16 @@ describe('package scripts', () => {
         // Native shells expose the path variable as `Path`; a case-sensitive
         // `env.PATH` read on the spread object would miss it and report
         // Corepack unavailable.
-        const env = { ...process.env, WORKTREE_SETUP_LOG: logFile };
+        const env = {
+          ...process.env,
+          ...huskyTestEnv,
+          WORKTREE_SETUP_LOG: logFile,
+        };
         delete env.PATH;
         delete env.Path;
+        delete env.HUSKY;
         env.Path = `${commandDir}${path.delimiter}${process.env.Path ?? process.env.PATH ?? ''}`;
+        env.Husky = '0';
 
         const result = spawnSync(
           process.execPath,
@@ -344,7 +372,8 @@ describe('package scripts', () => {
           encoding: 'utf8',
           env: {
             ...process.env,
-            PATH: binDir,
+            ...huskyTestEnv,
+            PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
             WORKTREE_SETUP_LOG: logFile,
           },
         },
@@ -354,6 +383,7 @@ describe('package scripts', () => {
       expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
         '1 1 pnpm install --frozen-lockfile --offline',
         '1 1 pnpm install --frozen-lockfile --prefer-offline',
+        '1 1 pnpm exec husky',
       ]);
     } finally {
       rmSync(binDir, { recursive: true, force: true });
