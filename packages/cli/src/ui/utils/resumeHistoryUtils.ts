@@ -194,6 +194,25 @@ function convertToHistoryItems(
   let lastGoalStateSnapshot: GoalSnapshotV2 | undefined;
   let lastGoalStateCause: GoalStateCause | undefined;
 
+  // Two turns in one transcript can share a re-minted promptId — a headless
+  // `-p --resume S` mints `S########0` unconditionally, colliding with the
+  // interactive turn that already wore it. Attaching a shared id to both
+  // resumed items hands the file-rewind consumer a key that resolves the
+  // LAST snapshot wearing it — the wrong turn's — while the conversation
+  // truncates at the selected turn (R34-1). Such ids are withheld below, so
+  // an ambiguous turn keeps the loud 'created before file checkpointing'
+  // refusal it had before ids were persisted. Unique ids stay attached —
+  // /restore-style flagging is not wanted here because the ids are the
+  // rewind identity gate's input.
+  const promptIdRecordCount = new Map<string, number>();
+  for (const record of conversation.messages) {
+    if (record.type !== 'user' || record.subtype) continue;
+    const id = record.promptId;
+    if (typeof id === 'string' && id.length > 0) {
+      promptIdRecordCount.set(id, (promptIdRecordCount.get(id) ?? 0) + 1);
+    }
+  }
+
   // Track pending tool calls for grouping with results
   const pendingToolCalls = new Map<
     string,
@@ -283,7 +302,9 @@ function convertToHistoryItems(
 
   for (const record of conversation.messages) {
     const promptId =
-      typeof record.promptId === 'string' && record.promptId.length > 0
+      typeof record.promptId === 'string' &&
+      record.promptId.length > 0 &&
+      promptIdRecordCount.get(record.promptId) === 1
         ? record.promptId
         : undefined;
     // A detected history gap begins at this record — surface a visible divider

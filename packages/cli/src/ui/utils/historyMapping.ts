@@ -10,9 +10,11 @@ import type { ApiUserPromptOptions } from '@qwen-code/qwen-code-core';
 import {
   CompressionStatus,
   findApiHistoryPromptIndex,
+  getApiHistoryPromptId,
   getStartupContextLength,
   isApiUserPrompt,
   isClearedMediaPlaceholder,
+  isSystemReminderContent,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
 
@@ -89,14 +91,18 @@ function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
  *
  * A `promptId` match alone never proves ownership (twins, cron/duplicate
  * re-sends and re-minted absorbed marks all wear the same id), but a turn's
- * own entry carries exactly that turn's prompt text. Comparing the entry's
- * user text parts against the target's text is therefore the minimal
- * per-entry proof that a matched entry belongs to the rewind target —
- * conclusive only while no other turn sent the same text; callers must
- * establish that uniqueness before trusting the proof (see
- * `computeApiTruncationIndex`). System-reminder parts never equal a
- * genuine prompt, so for ordinary text a plain part comparison is
- * sufficient.
+ * own entry carries exactly that turn's prompt text. The comparison uses
+ * the entry's PROMPT part — its first non-empty, non-system-reminder text
+ * part, mirroring the record-side `modelFacingText` rule in
+ * `resumeHistoryUtils.ts` — never just ANY part: microcompaction rewrites
+ * a single media part in place and leaves the entry's real prompt text
+ * beside it, so a parts-level match would certify an unrelated turn whose
+ * cleared sibling part happens to equal the target's text (R33-3).
+ * Appended parts (hook context, plan-exit notices, mid-turn merges) come
+ * after the prompt part and prepended parts are reminder-wrapped, so the
+ * first non-reminder text part is the prompt. The proof is conclusive only
+ * while no other turn sent the same text; callers must establish that
+ * uniqueness before trusting it (see `computeApiTruncationIndex`).
  *
  * A placeholder-shaped target text is ambiguous on its own — a cleared
  * media-only entry carries exactly that shape and keeps its mark through
@@ -105,7 +111,18 @@ function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
  */
 function isApiEntryOwnedByText(entry: Content, targetText: string): boolean {
   if (entry.role !== 'user' || !entry.parts) return false;
-  return entry.parts.some((part) => 'text' in part && part.text === targetText);
+  const promptPart = entry.parts.find(
+    (part) =>
+      'text' in part &&
+      typeof part.text === 'string' &&
+      part.text.length > 0 &&
+      !isSystemReminderContent({ role: 'user', parts: [part] }),
+  );
+  return (
+    promptPart !== undefined &&
+    'text' in promptPart &&
+    promptPart.text === targetText
+  );
 }
 
 /**
@@ -227,11 +244,6 @@ export function computeApiTruncationIndex(
     // Any other outcome falls back to the walk, whose loud -1 is the safe
     // refusal. `docs/design/rewind-stable-prompt-identity.md` lists every
     // accepted condition and why each exists.
-    const identifiedIndex = findApiHistoryPromptIndex(
-      apiHistory,
-      target.promptId,
-      startIndex,
-    );
     // `text` is DISPLAY text; the entry carries MODEL-FACING text. They are
     // the same string on the live path, but the resume builder substitutes
     // synthetic display strings (notably '[User message with attachments]'),
@@ -239,6 +251,20 @@ export function computeApiTruncationIndex(
     // silently never fired for such turns. Prefer the model-facing text the
     // resume builder records for exactly this comparison.
     const ownerText = target.promptOwnerText ?? target.text;
+    if (target.promptHasModelText === false) {
+      // A resumed attachment-only turn has no model-facing text: the text
+      // ownership proof can never match its entry, and the positional walk
+      // skips text-less entries, so it would land on the NEXT turn's
+      // boundary — silently keeping this turn's prompt+response in model
+      // context while the UI deletes the turn, and rolling files back for
+      // 'both' (R34-2). Refuse loudly instead.
+      return -1;
+    }
+    const identifiedIndex = findApiHistoryPromptIndex(
+      apiHistory,
+      target.promptId,
+      startIndex,
+    );
     const ownershipProofIsUnique = (): boolean => {
       if (
         uiHistory.some(
@@ -254,7 +280,24 @@ export function computeApiTruncationIndex(
       }
       let sameTextEntries = 0;
       for (let i = startIndex; i < apiHistory.length; i++) {
-        if (isApiEntryOwnedByText(apiHistory[i]!, ownerText)) {
+        const entry = apiHistory[i]!;
+        // An entry marked with a DIFFERENT id is provably another turn's
+        // own, not an impostor candidate — the user simply sent the same
+        // text twice (R33-4). Unmarked entries and entries wearing the
+        // target's own id stay counted: those are the impostor shapes the
+        // existing demotion pins cover.
+        const mark = getApiHistoryPromptId(entry);
+        if (mark !== undefined && mark !== target.promptId) continue;
+        // For a placeholder-texted target, count the walk's own filtered
+        // population: a cleared media-only entry carries the same text but
+        // never had a UI turn, so counting it lets a same-mime cleared
+        // sibling veto the proof (R33-2). Placeholder-vs-placeholder
+        // ambiguity is the ordinal check's job — it is exactly what
+        // separates such an entry from a genuine placeholder-texted prompt.
+        if (
+          isApiEntryOwnedByText(entry, ownerText) &&
+          !(isClearedMediaPlaceholder(ownerText) && !isUserTextContent(entry))
+        ) {
           sameTextEntries++;
           if (sameTextEntries > 1) return false;
         }
@@ -299,10 +342,24 @@ export function computeApiTruncationIndex(
         }
       }
       let counted = 0;
+      let absolute = 0;
       for (let i = startIndex; i < matchIndex; i++) {
-        if (isUserTextContent(apiHistory[i]!)) counted++;
+        const entry = apiHistory[i]!;
+        if (isUserTextContent(entry)) counted++;
+        if (
+          entry.role === 'user' &&
+          !entry.parts?.some((part) => 'functionResponse' in part)
+        ) {
+          absolute++;
+        }
       }
-      return counted === expected;
+      // The aligned counts drop TOGETHER when both sides skip an
+      // attachment-only turn, so they can agree trivially at an entry that
+      // is not the target's own (R32-1). Cleared and media-only entries
+      // still occupy positions even though the filtered count skips them,
+      // so the match must also sit behind at least as many user-role,
+      // non-tool-result entries as the target has preceding real UI turns.
+      return counted === expected && absolute >= uiUserTurnCount;
     };
     const ownershipProven = (matchIndex: number): boolean =>
       isApiEntryOwnedByText(apiHistory[matchIndex]!, ownerText) &&
@@ -313,19 +370,46 @@ export function computeApiTruncationIndex(
       ownershipProofIsUnique()
     ) {
       // Even a unique, ownership-proven match is demoted when the
-      // positional walk lands EARLIER than it: an early walk means counted
-      // entries precede the match that the UI turn count does not account
-      // for — entries of turns the UI deleted, or of a claimant-less
-      // re-send. No compressed prefix explains an early walk (startIndex
-      // skips the prefix, and excluded entries desync the walk LATE, never
-      // early). The walk's answer is the exact pre-identity boundary, so
-      // preferring it can never produce a truncation shape the pre-identity
-      // mapping would not have produced. A walk that lands late or cannot
-      // land leaves identity preferred, which is the absorbed-turn
-      // exactness this gate is for.
+      // positional walk lands EARLIER than it for a reason the UI cannot
+      // account for: more counted entries precede the match than UI items
+      // that own a counted entry — entries of turns the UI deleted, or of
+      // a claimant-less re-send. The owning population is real user turns
+      // with a model-facing text plus drained notification items: a
+      // background-agent/cron completion displays as `{type:
+      // 'notification'}` but submits a real user-role entry the walk
+      // counts (R33-1), while a mid-turn steer message owns no counted
+      // entry (its parts merge into a functionResponse entry the walk
+      // excludes) and displays as a `sentToModel: false` user item, so
+      // neither side counts it. No compressed prefix explains an early
+      // walk (startIndex skips the prefix, and excluded entries desync the
+      // walk LATE, never early). The walk's answer is the exact
+      // pre-identity boundary, so preferring it can never produce a
+      // truncation shape the pre-identity mapping would not have produced.
+      // A walk that lands late or cannot land leaves identity preferred,
+      // which is the absorbed-turn exactness this gate is for.
       const positional = positionalTruncationIndex();
       if (positional !== -1 && positional < identifiedIndex) {
-        return positional;
+        let countedBeforeMatch = 0;
+        for (let i = startIndex; i < identifiedIndex; i++) {
+          if (isUserTextContent(apiHistory[i]!)) countedBeforeMatch++;
+        }
+        let ownedBeforeTarget = 0;
+        for (
+          let i = compressionIndex === -1 ? 0 : compressionIndex + 1;
+          i < targetIndex;
+          i++
+        ) {
+          const item = uiHistory[i]!;
+          if (
+            item.type === 'notification' ||
+            (isRealUserTurn(item) && item.promptHasModelText !== false)
+          ) {
+            ownedBeforeTarget++;
+          }
+        }
+        if (countedBeforeMatch > ownedBeforeTarget) {
+          return positional;
+        }
       }
       return identifiedIndex;
     }

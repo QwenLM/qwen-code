@@ -2134,4 +2134,120 @@ describe('resumed identity survives a synthetic display string', () => {
       ]),
     ).toBe(4);
   });
+
+  it('refuses (-1) to rewind to the attachment-only turn itself', () => {
+    // R34-2: the ownership proof is text-based and the positional walk
+    // skips text-less entries, so an attachment-only target can resolve
+    // through NEITHER — left to the walk it lands on the FOLLOWING turn's
+    // boundary, keeping this turn's prompt+response in model context while
+    // the UI deletes the turn, and for 'both' the persisted promptId also
+    // rolls the files back. The gate must give the loud refusal instead.
+    const messages = [
+      leadingTurns()[0]!,
+      model('r0'),
+      rec({
+        type: 'user',
+        promptId: 's########1',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+            } as unknown as Part,
+          ],
+        },
+        systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+      }),
+      model('r1'),
+      rec({
+        type: 'user',
+        promptId: 's########2',
+        message: { role: 'user', parts: [{ text: 'run the tests' }] },
+      }),
+      model('r2'),
+    ];
+    const sessionData = {
+      conversation: { messages },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 1_000);
+    const api = buildApiHistoryFromConversation(
+      sessionData.conversation as never,
+    );
+    const attachmentItem = ui.find(
+      (item) =>
+        item.type === 'user' && item.text === '[User message with attachments]',
+    )!;
+    // The walk cannot count the text-less entry and lands on the NEXT turn's
+    // boundary (4) — the refusal is what keeps that silent wrong index from
+    // truncating a turn the UI still displays.
+    expect(computeApiTruncationIndex(ui, attachmentItem.id, api)).toBe(-1);
+  });
+});
+
+describe('resumed promptId attachment', () => {
+  // Two turns in one transcript CAN share a re-minted promptId: a headless
+  // `-p --resume S` mints `S########0` unconditionally, colliding with the
+  // interactive turn that already wore it. Attaching a shared id to both
+  // resumed items hands the file-rewind consumer a key that resolves the
+  // LAST snapshot wearing it — the wrong turn's — while the conversation
+  // truncates at the selected turn, so files and conversation land on
+  // different turns. The id is attached only when exactly one user record
+  // carries it; an ambiguous turn keeps the loud 'created before file
+  // checkpointing' refusal it had before ids were persisted (R34-1).
+  const rec = (over: Record<string, unknown>) =>
+    ({
+      sessionId: 's',
+      timestamp: new Date().toISOString(),
+      version: '1',
+      ...over,
+    }) as unknown as ChatRecord;
+
+  it('withholds a promptId that two user records share', () => {
+    const sessionData = {
+      conversation: {
+        messages: [
+          rec({
+            type: 'user',
+            promptId: 's########0',
+            message: { role: 'user', parts: [{ text: 'first prompt' }] },
+          }),
+          rec({
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'r0' }] },
+          }),
+          rec({
+            type: 'user',
+            promptId: 's########0',
+            message: { role: 'user', parts: [{ text: 'second prompt' }] },
+          }),
+          rec({
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'r1' }] },
+          }),
+          rec({
+            type: 'user',
+            promptId: 's########2',
+            message: { role: 'user', parts: [{ text: 'third prompt' }] },
+          }),
+          rec({
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'r2' }] },
+          }),
+        ],
+      },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 1_000);
+    const userItems = ui.filter(
+      (item): item is HistoryItem & { promptId?: string } =>
+        item.type === 'user',
+    );
+    expect(userItems).toHaveLength(3);
+    // The shared id is withheld from BOTH turns that carry it; the uniquely
+    // carried id is still attached (no blanket strip).
+    expect(userItems.map((item) => item.promptId)).toEqual([
+      undefined,
+      undefined,
+      's########2',
+    ]);
+  });
 });
