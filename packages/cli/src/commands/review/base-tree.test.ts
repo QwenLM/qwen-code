@@ -18,6 +18,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
+  lstatSync,
   utimesSync,
   mkdtempSync,
   mkdirSync,
@@ -31,9 +33,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runBaseTree, type BaseTreeReport } from './base-tree.js';
 import { baseWorktreePath } from './lib/paths.js';
-import { baseTreeTrustPath, runNonce } from './lib/base-tree-trust.js';
+import { baseTreeTrustPath, builtTreeRecord } from './lib/base-tree-trust.js';
 import { adminEntryOf, plantAdminEntry } from './lib/test-utils.js';
-import { runEpochMs } from './lib/prompt-record.js';
 import type { BuildTestReport } from './build-test.js';
 
 const okBuild = {
@@ -49,10 +50,11 @@ const failedBuild = {
 } as unknown as BuildTestReport;
 
 // Skipped on win32 for the same reason as the sibling suites: `mountRootFor`
-// refuses every absolute Windows path (a drive letter is a colon), so
-// containment is unavailable there by design and this gate never speaks. The
-// assertion would fail for that reason and nothing else — first inside the
-// merge queue, where that lane actually runs.
+// refuses every absolute Windows path (a drive letter is a colon), so no
+// mount boundary exists there for the reuse fence to hold — these cases pin
+// fence behaviour (reuse, decline, settle, rebuild) that only exists where
+// one does. The build-mechanics cases below stay ungated: they are this
+// file's coverage for the lane the fence never speaks on.
 const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
 
 describe('runBaseTree', () => {
@@ -112,6 +114,26 @@ describe('runBaseTree', () => {
     mkdirSync(join(repo, '.qwen', 'tmp'), { recursive: true });
     git(repo, 'worktree', 'add', '--detach', '-q', worktree, headSha);
   });
+
+  // The lease fetch-pr holds for the whole review, at the host-side path —
+  // the run identity the mount cannot touch. Tests that exercise "a touch of
+  // the plan must not rotate the run" need it; the rest run on the plan-mtime
+  // fallback, the same signal the run ledger keys on.
+  const writeLease = (): void => {
+    const dir = join(repo, '.qwen', 'review-leases');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'qwen-review-lease-pr-1.json'),
+      JSON.stringify({
+        sessionId: 's',
+        promptId: 'p',
+        target: 'pr-1',
+        repositoryRoot: repo,
+        worktreePath: worktree,
+        branch: 'qwen-review/pr-1',
+      }),
+    );
+  };
 
   afterEach(() => rmSync(repo, { recursive: true, force: true }));
 
@@ -177,9 +199,9 @@ describe('runBaseTree', () => {
       expect(second.note).toContain('no longer passes a reuse check');
       expect(second.available).toBe(false);
       expect(builds).toEqual([tree]); // declined, not discarded
-      // ...and the cross-run arm is the discard: a re-captured plan keys a
-      // new trust file, the stamp no longer matches, and the rebuild below
-      // it sweeps the plant.
+      // ...and the cross-run arm is the discard: a re-captured plan rotates
+      // the run's trust file (records dropped), the standing tree has no
+      // record this run wrote, and the rebuild below sweeps the plant.
       planPath = writePlan();
       const third = run({}, build);
       expect(builds).toEqual([tree, tree]); // the rebuild fired
@@ -222,6 +244,260 @@ describe('runBaseTree', () => {
   );
 
   itWhereContainmentExists(
+    'declines when an already-recorded ignored file is rewritten IN PLACE',
+    () => {
+      // Membership cannot see this: the path was recorded at build time and
+      // is still the only path there. The recorded stat pair is what an
+      // in-place rewrite cannot forge — size moves here, and where size
+      // cannot move (next case), ctime does and cannot be set back.
+      const tree = baseWorktreePath(worktree);
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        if (builds.length === 1) {
+          // The residue a real build leaves, recorded host-side as legitimate.
+          mkdirSync(join(w, 'dist'), { recursive: true });
+          writeFileSync(join(w, 'dist', 'cli.js'), 'built by round 1');
+        }
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      // The honest arm first: the recorded residue itself still reuses.
+      expect(run({}, build).note).toContain('reusing it');
+
+      writeFileSync(
+        join(tree, 'dist', 'cli.js'),
+        'planted by the reviewed code, in place, at length',
+      );
+      const third = run({}, build);
+      expect(third.note).not.toContain('reusing it');
+      expect(third.note).toContain('no longer passes a reuse check');
+      expect(third.available).toBe(false);
+      expect(builds).toEqual([tree]); // declined, not discarded
+    },
+  );
+
+  itWhereContainmentExists(
+    'declines even when the in-place rewrite preserves the size — ctime carries it',
+    () => {
+      // The half of the in-place arm size cannot see: nine bytes for nine
+      // bytes. `ctimeMs` cannot be set from userland — every write sets it
+      // to now — so the rewrite shows even at the same size.
+      const tree = baseWorktreePath(worktree);
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        if (builds.length === 1) {
+          mkdirSync(join(w, 'dist'), { recursive: true });
+          writeFileSync(join(w, 'dist', 'cli.js'), 'round one');
+        }
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+
+      const target = join(tree, 'dist', 'cli.js');
+      const recordedCtime = lstatSync(target).ctimeMs;
+      writeFileSync(target, 'PLANTED!!'); // 9 bytes, exactly 'round one'
+      // A rewrite inside the filesystem's coarse ctime tick would leave
+      // ctime bit-identical (the trust suite measured 7.7 µs on ext4), so
+      // chmod until it OBSERVABLY moves — the same tick guard, for the same
+      // reason. The mode alternates so no filesystem can skip a same-mode
+      // chmod.
+      const deadline = Date.now() + 10_000;
+      let mode = 0o644;
+      while (lstatSync(target).ctimeMs === recordedCtime) {
+        if (Date.now() >= deadline) {
+          throw new Error(
+            'the filesystem never moved ctime across 10 s — the ctime arm ' +
+              'of the stat check is unobservable here',
+          );
+        }
+        chmodSync(target, mode);
+        mode = mode === 0o644 ? 0o755 : 0o644;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      }
+
+      const second = run({}, build);
+      expect(second.note).not.toContain('reusing it');
+      expect(second.note).toContain('no longer passes a reuse check');
+      expect(second.available).toBe(false);
+      expect(builds).toEqual([tree]);
+    },
+    15_000,
+  );
+
+  itWhereContainmentExists(
+    "declines — does not sweep — when the run's trust file is unreadable",
+    () => {
+      // The record is the fence, so its absence must not read as a verdict
+      // about the tree: a torn write (a crashed process mid-rename, a full
+      // disk) is bookkeeping, and discarding on it sweeps the live tree a
+      // sibling shard may be mid-A/B in — the clobber the fast path exists
+      // to prevent.
+      const tree = baseWorktreePath(worktree);
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+
+      writeFileSync(baseTreeTrustPath(worktree, planPath), 'torn');
+      const second = run({}, build);
+      expect(second.available).toBe(false);
+      expect(second.note).toContain('missing or unreadable');
+      expect(second.note).toContain('declining to reuse or discard');
+      expect(builds).toEqual([tree]); // no sweep, no rebuild
+      expect(readFileSync(join(tree, 'a.txt'), 'utf8')).toBe('before\n');
+    },
+  );
+
+  itWhereContainmentExists(
+    "declines busy when the tree's record is missing from an intact trust file",
+    () => {
+      // The same torn-bookkeeping shape one level down: the file is healthy,
+      // the tree's entry is gone (a lost rename, a partial write). "No
+      // record" is not "a plant" — the pointer and HEAD agree — so the
+      // answer is the decline the dirt arms get, and the tree stands.
+      const tree = baseWorktreePath(worktree);
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+
+      const trustPath = baseTreeTrustPath(worktree, planPath);
+      const trust = JSON.parse(readFileSync(trustPath, 'utf8'));
+      delete trust.trees;
+      writeFileSync(trustPath, JSON.stringify(trust));
+
+      const second = run({}, build);
+      expect(second.available).toBe(false);
+      expect(second.note).toContain('missing or unreadable');
+      expect(builds).toEqual([tree]); // no sweep, no rebuild
+      expect(existsSync(join(tree, 'a.txt'))).toBe(true);
+    },
+  );
+
+  itWhereContainmentExists(
+    'records the residue of a real-size tree — a listing past the default spawn buffer',
+    () => {
+      // spawnSync's default maxBuffer is 1 MiB; a real built tree's
+      // `ls-files --others --ignored` listing is measured at 6+ MB
+      // (node_modules/ plus the packages' dist/). Under the default the record
+      // write threw after the build succeeded, no record ever landed, and
+      // the reuse fast path never fired. ~7k long-named files put this
+      // fixture past the old limit.
+      const tree = baseWorktreePath(worktree);
+      let built = false;
+      const build = (w: string) => {
+        if (!built) {
+          built = true;
+          const dir = join(w, 'dist');
+          mkdirSync(dir, { recursive: true });
+          const padding = 'f'.repeat(170);
+          for (let i = 0; i < 7000; i++) {
+            writeFileSync(join(dir, `${i}${padding}`), 'x');
+          }
+        }
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      expect(
+        builtTreeRecord(baseTreeTrustPath(worktree, planPath), tree),
+      ).not.toBeNull();
+      expect(run({}, build).note).toContain('reusing it');
+    },
+    60_000,
+  );
+
+  itWhereContainmentExists(
+    "the fence's own git reads carry the config neutralization — a planted core.fsmonitor never fires",
+    () => {
+      // The reuse fence's `status`/`ls-files` resolve the base tree's own
+      // repository, whose config the reviewed code could have reached while
+      // it held the mount: a `core.fsmonitor` hook fires on an ordinary
+      // index read, on the host, outside the container. The `-c` pins the
+      // helpers carry make the hook an inert argument.
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+
+      const canary = join(repo, 'fsmonitor-ran');
+      const hook = join(repo, 'fsm.sh');
+      writeFileSync(hook, `#!/bin/sh\necho ran >> ${canary}\nexit 0\n`);
+      chmodSync(hook, 0o755);
+      git(repo, 'config', 'core.fsmonitor', hook);
+
+      const second = run({}, build);
+      expect(second.note).toContain('reusing it');
+      expect(existsSync(canary)).toBe(false);
+    },
+  );
+
+  itWhereContainmentExists(
+    "declines when the plan's mergeBaseSha moves mid-run — the run pinned its base at establishment",
+    () => {
+      // The plan lives inside the read-write mount, and base-tree reads it
+      // after the containerized phases have run: rewriting mergeBaseSha is
+      // how the reviewed code would choose the commit every later A/B
+      // certifies as "the base". The run pins the first-read sha in the
+      // host-side trust file, and a plan that disagrees gets a decline —
+      // never a rebuild at the value named after the fact. (The lease is
+      // what lets the pin see the rewrite at all: under it the plan's mtime
+      // is out of the run identity, so the rewrite cannot rotate the pin
+      // away.)
+      writeLease();
+      const tree = baseWorktreePath(worktree);
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+
+      const moved = run({ plan: { mergeBaseSha: headSha } }, build);
+      expect(moved.available).toBe(false);
+      expect(moved.note).toContain('different merge base');
+      expect(builds).toEqual([tree]); // declined — no rebuild at the new sha
+      // And the tree still holds the base the run pinned.
+      expect(git(tree, 'rev-parse', 'HEAD')).toBe(baseSha);
+    },
+  );
+
+  itWhereContainmentExists(
+    'a mid-run touch of the plan cannot rotate the run while the lease is held',
+    () => {
+      // Reviewed code holding the mount can `utimes` the plan at will; keyed
+      // on the plan's stamps, that touch forked every later shard onto a
+      // fresh trust state whose rebuild's first act — discarding the
+      // standing tree — swept the tree a sibling was mid-A/B in. The lease
+      // is the identity the mount cannot touch: the run goes on, the tree
+      // stands.
+      writeLease();
+      const tree = baseWorktreePath(worktree);
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+
+      const later = new Date(Date.now() + 60_000);
+      utimesSync(planPath, later, later);
+      const second = run({}, build);
+      expect(second.available).toBe(true);
+      expect(second.note).toContain('reusing it');
+      expect(builds).toEqual([tree]); // neither discarded nor re-added
+      expect(existsSync(tree)).toBe(true);
+    },
+  );
+
+  itWhereContainmentExists(
     'rebuilds — does not decline — when a tree THIS RUN built has its pointer rewritten',
     () => {
       // Busy is for the ambiguous arms (dirt, untracked additions). A
@@ -252,14 +528,14 @@ describe('runBaseTree', () => {
   );
 
   itWhereContainmentExists(
-    "does not let a backdated plan re-key this run to an earlier run's trust file",
+    'does not let a touched or backdated plan move the run off its tree',
     () => {
-      // The trust file is keyed by the plan's path and an identity the mount
-      // cannot roll back: mtime is one `utimensat` away from any value the
-      // reviewed code chooses, but `ctimeMs` cannot be set from userland.
-      // Backdate the plan to an earlier run's exact mtime and the key still
-      // moves — the fence sees a new run, and the earlier tree's stamp
-      // matches nothing.
+      // The run's identity is the plan's MTIME (the run ledger's signal),
+      // not its ctime: a bare touch — even `utimensat` to the same value —
+      // moves only ctime and must not fork the run's shards across two trust
+      // states. A backdate to a DIFFERENT value is the attack shape (re-key
+      // to an earlier run's state); rotation answers it — destructive of the
+      // file's records, adoptive of nothing.
       const tree = baseWorktreePath(worktree);
       const builds: string[] = [];
       const build = (w: string) => {
@@ -269,25 +545,30 @@ describe('runBaseTree', () => {
       expect(run({}, build).available).toBe(true);
       expect(run({}, build).note).toContain('reusing it');
 
-      const past = statSync(planPath).mtime;
-      utimesSync(planPath, past, past); // a same-value touch moves ctime
-      const second = run({}, build);
-      expect(second.note).not.toContain('reusing it');
-      expect(builds).toEqual([tree, tree]); // rebuilt under a fresh key
+      const same = statSync(planPath).mtime;
+      utimesSync(planPath, same, same); // a same-value touch
+      const touched = run({}, build);
+      expect(touched.note).toContain('reusing it');
+      expect(builds).toEqual([tree]);
+
+      const earlier = new Date(Date.now() - 3_600_000);
+      utimesSync(planPath, earlier, earlier);
+      const backdated = run({}, build);
+      expect(backdated.note).not.toContain('reusing it');
+      expect(builds).toEqual([tree, tree]); // rotated, then rebuilt
     },
   );
 
   itWhereContainmentExists(
-    'refuses a stamp forged from the mount-visible epoch formula (production geometry)',
+    'certifies nothing from inside the mount — a forged marker and an in-place rewrite both fail the record (production geometry)',
     () => {
       // The plan lives at `.qwen/tmp/qwen-review-pr-<n>-fetch.json`, INSIDE
-      // the directory the sandbox mounts read-write, so reviewed code can
-      // stat it and compute the epoch the stamp used to carry — then rewrite
-      // the marker and overwrite an executable beside the build's own
-      // residue, where the untracked-set fence cannot tell it from what the
-      // build left. The stamp now carries a run secret that never enters the
-      // mount: the forge below produces exactly what the old fence compared
-      // against, and it matches nothing.
+      // the directory the sandbox mounts read-write, and the base tree is
+      // its sibling. The reviewed code's move: rewrite the executable the
+      // A/B will run IN PLACE (no membership change, HEAD unmoved) and
+      // refresh the marker to whatever it likes. A marker-authenticated
+      // fence passed both; under the record the marker is noise and the
+      // rewrite moves the file's ctime, which no syscall can set back.
       const tree = baseWorktreePath(worktree);
       planPath = join(repo, '.qwen', 'tmp', 'qwen-review-pr-1-fetch.json');
       writeFileSync(
@@ -306,45 +587,80 @@ describe('runBaseTree', () => {
       };
       expect(run({}, build).available).toBe(true);
 
-      // The reviewed code's move: plant over the executable the A/B will run,
-      // and refresh the stamp to the epoch formula the mount exposes.
       writeFileSync(
         join(tree, 'dist', 'cli.js'),
-        'planted by the reviewed code',
+        'planted by the reviewed code, in place',
       );
-      writeFileSync(
-        join(tree, '.qwen-review-base-ok'),
-        `${baseSha}\n${runEpochMs(planPath)}\n`,
-      );
+      writeFileSync(join(tree, '.qwen-review-base-ok'), `${baseSha}\nforged\n`);
 
       const second = run({}, build);
       expect(second.note).not.toContain('reusing it');
-      expect(builds).toEqual([tree, tree]); // rebuilt, not reused
-      // The plant went with the tree it was standing in.
+      expect(second.note).toContain('no longer passes a reuse check');
+      expect(builds).toEqual([tree]); // declined, not destroyed
+      // The cross-run sweep is what collects the plant: a re-captured plan
+      // rotates the run's trust state, and the rebuild discards the tree.
+      writeFileSync(
+        planPath,
+        JSON.stringify({ mergeBaseSha: baseSha, files: [] }),
+      );
+      const third = run({}, build);
+      expect(third.available).toBe(true);
+      expect(builds).toEqual([tree, tree]);
       expect(existsSync(join(tree, 'dist', 'cli.js'))).toBe(false);
     },
   );
 
-  it('does not settle on a planted FAILED marker that carries no run secret', () => {
-    // The failed-marker fast path settles the question with NO build at all —
-    // "infrastructure, never a finding against the PR" — and the file lives
-    // inside the mount, so a sha-only marker is one planted line away from
-    // suppressing the A/B lane for the whole round, reading as infrastructure
-    // rather than as an attack. Only a marker stamped with this run's secret
-    // settles it.
-    const tree = baseWorktreePath(worktree);
-    git(repo, 'worktree', 'add', '--detach', '-q', tree, baseSha);
-    writeFileSync(join(tree, '.qwen-review-base-failed'), `${baseSha}\n`);
+  itWhereContainmentExists(
+    'ignores markers planted inside the tree — certification comes from the host-side record',
+    () => {
+      // Both markers, planted with a copied sha, on a tree stood up by hand:
+      // everything a mount-local writer can produce. The failed one settles
+      // nothing (the settled answer is read from the host-side record, which
+      // a plant cannot supply) and the ok one certifies nothing — what a
+      // planted marker on an unrecorded tree gets is the rebuild any
+      // leftover gets.
+      const tree = baseWorktreePath(worktree);
+      git(repo, 'worktree', 'add', '--detach', '-q', tree, baseSha);
+      writeFileSync(join(tree, '.qwen-review-base-ok'), `${baseSha}\n`);
+      writeFileSync(join(tree, '.qwen-review-base-failed'), `${baseSha}\n`);
 
-    const builds: string[] = [];
-    const r = run({}, (w) => {
-      builds.push(w);
-      return okBuild;
-    });
-    expect(r.note).not.toContain('already failed');
-    expect(builds).toEqual([tree]); // the rebuild was attempted
-    expect(r.available).toBe(true);
-  });
+      const builds: string[] = [];
+      const r = run({}, (w) => {
+        builds.push(w);
+        return okBuild;
+      });
+      expect(r.note).not.toContain('already failed');
+      expect(builds).toEqual([tree]); // the rebuild was attempted
+      expect(r.available).toBe(true);
+    },
+  );
+
+  itWhereContainmentExists(
+    'does not settle on a failed marker forged from the ok marker — only the record settles',
+    () => {
+      // The forge the in-tree stamp invited: read the ok marker, write its
+      // bytes over the failed name, delete the original. The settled-failure
+      // fence reads the host-side RECORD — which still says this run's build
+      // succeeded — so the plant changes nothing and the lane stays alive.
+      const tree = baseWorktreePath(worktree);
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+
+      const stamp = readFileSync(join(tree, '.qwen-review-base-ok'), 'utf8');
+      rmSync(join(tree, '.qwen-review-base-ok'));
+      writeFileSync(join(tree, '.qwen-review-base-failed'), stamp);
+
+      const second = run({}, build);
+      expect(second.note).not.toContain('already failed');
+      expect(second.note).toContain('reusing it');
+      expect(second.available).toBe(true);
+      expect(builds).toEqual([tree]);
+    },
+  );
 
   itWhereContainmentExists(
     'does not REUSE a base tree an EARLIER RUN built, whose untracked plants the dirt check cannot see',
@@ -358,8 +674,8 @@ describe('runBaseTree', () => {
       // `--untracked-files=no` cannot see it: a blanket untracked refusal
       // would disable every correctly-built tree's reuse and bring back the
       // concurrent-shard clobber the fast path exists to prevent. So the
-      // marker carries the run that built it, and a stamp from another run is
-      // not a tree this run may certify.
+      // fence certifies only what this run's own trust record holds, and an
+      // earlier run's record is rotated away at this run's first ask.
       const tree = baseWorktreePath(worktree);
       const builds: string[] = [];
       const build = (w: string) => {
@@ -435,32 +751,35 @@ describe('runBaseTree', () => {
     expect(r.build).toBe(okBuild);
   });
 
-  it('REUSES an already-built base tree instead of sweeping it (concurrent shards)', () => {
-    // Reviewed live on this PR: N verifier shards run in parallel and all
-    // resolve the same path; without the fast path, shard B's opening sweep
-    // destroys the tree shard A is mid-A/B in, and A's base side reads as
-    // empty output — a fabricated difference with a deterministic source tag.
-    const builds: string[] = [];
-    const build = (w: string) => {
-      builds.push(w);
-      return okBuild;
-    };
-    const first = run({}, build);
-    expect(first.available).toBe(true);
-    const second = run({}, build);
-    expect(second.available).toBe(true);
-    expect(second.path).toBe(first.path);
-    expect(second.note).toContain('reusing');
-    expect(builds).toHaveLength(1); // one install+build, not two
-    // A marker for a DIFFERENT sha (rebase between runs) does not shortcut —
-    // stamped with this run's secret, so the sha arm is what answers and not
-    // the run fence standing in front of it.
-    writeFileSync(
-      join(first.path!, '.qwen-review-base-ok'),
-      `${'f'.repeat(40)}\n${runNonce(baseTreeTrustPath(worktree, planPath))}\n`,
-    );
-    expect(run({}, build).note).not.toContain('reusing');
-  });
+  itWhereContainmentExists(
+    'REUSES an already-built base tree instead of sweeping it (concurrent shards)',
+    () => {
+      // Reviewed live on this PR: N verifier shards run in parallel and all
+      // resolve the same path; without the fast path, shard B's opening sweep
+      // destroys the tree shard A is mid-A/B in, and A's base side reads as
+      // empty output — a fabricated difference with a deterministic source tag.
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      const first = run({}, build);
+      expect(first.available).toBe(true);
+      const second = run({}, build);
+      expect(second.available).toBe(true);
+      expect(second.path).toBe(first.path);
+      expect(second.note).toContain('reusing');
+      expect(builds).toHaveLength(1); // one install+build, not two
+      // A record naming a DIFFERENT sha (a rebase between runs) does not
+      // shortcut: the one disagreeing state the fence treats as evidence —
+      // it falls through to the rebuild, which sweeps whatever stands there.
+      const trustPath = baseTreeTrustPath(worktree, planPath);
+      const trust = JSON.parse(readFileSync(trustPath, 'utf8'));
+      trust.trees[first.path!].baseSha = 'f'.repeat(40);
+      writeFileSync(trustPath, JSON.stringify(trust));
+      expect(run({}, build).note).not.toContain('reusing');
+    },
+  );
 
   it('returns BUSY instead of sweeping while another probe holds the build lock', () => {
     // Reviewed live: shard B's opening sweep deleted the tree shard A was
@@ -520,18 +839,21 @@ describe('runBaseTree', () => {
     expect(builds).toHaveLength(2);
   });
 
-  it('a FAILED build is a settled answer — later shards do not re-pay it', () => {
-    const builds: string[] = [];
-    const build = (w: string) => {
-      builds.push(w);
-      return failedBuild;
-    };
-    expect(run({}, build).available).toBe(false);
-    const second = run({}, build);
-    expect(second.available).toBe(false);
-    expect(second.note).toContain('already failed');
-    expect(builds).toHaveLength(1);
-  });
+  itWhereContainmentExists(
+    'a FAILED build is a settled answer — later shards do not re-pay it',
+    () => {
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return failedBuild;
+      };
+      expect(run({}, build).available).toBe(false);
+      const second = run({}, build);
+      expect(second.available).toBe(false);
+      expect(second.note).toContain('already failed');
+      expect(builds).toHaveLength(1);
+    },
+  );
 
   it('recovers from a stale base tree left by a crashed run', () => {
     const stale = baseWorktreePath(worktree);
