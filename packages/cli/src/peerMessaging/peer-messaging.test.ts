@@ -23,7 +23,9 @@ import {
   MAX_HELD_MESSAGES,
   MAX_SETTLED_IDS,
   parsePeerFrame,
+  PEER_ADMISSION_LIMITS,
   PeerAdmission,
+  setSendPacerClockForTest,
   removePeerController,
   resetPeerControllerRegistryPathForTest,
   resetSendPacerForTest,
@@ -2262,6 +2264,72 @@ describe.skipIf(isWindows)('PeerMessaging drops', () => {
     expect(tokenRefunded).toEqual([
       { ipcPath: receiverPath, messageIds: ['sent-d'] },
     ]);
+  });
+
+  it('does not empty the mirror for a wall the receiver has refilled past', async () => {
+    // A receipt can wait: when the window's receipt budget is spent, a
+    // drop is parked in a trailing batch and answered later. By then the
+    // bucket it describes may have refilled completely, and emptying the
+    // mirror against it would hold this session back from sends the
+    // receiver would take — the one thing a mirror must never do.
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const receiverPath = path.join(tmpDir, 'socks', 'receiver.sock');
+    const refillMs =
+      (PEER_ADMISSION_LIMITS.bucketCapacity /
+        PEER_ADMISSION_LIMITS.refillPerSecond) *
+      1000;
+    let wall = 0;
+    setSendPacerClockForTest(undefined, () => wall);
+    try {
+      trackSentPeerMessageForTest('sent-old', 'app-ab', receiverPath);
+      wall = refillMs + 1;
+
+      await send(
+        m.socketPath!,
+        buildDeliveryStatusFrame({
+          status: 'dropped',
+          origMsgId: 'sent-old',
+          from: receiverPath,
+          dropReason: 'rate-limited',
+        }),
+      );
+      await settle();
+
+      // The sender still learns the message is gone; only the throttle
+      // computed from a stale level is withheld.
+      expect(forgotten).toEqual([
+        { ipcPath: receiverPath, messageIds: ['sent-old'] },
+      ]);
+      expect(drained).toEqual([]);
+    } finally {
+      setSendPacerClockForTest();
+    }
+  });
+
+  it('empties the mirror for a receipt that still describes the level now', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const receiverPath = path.join(tmpDir, 'socks', 'receiver.sock');
+    let wall = 0;
+    setSendPacerClockForTest(undefined, () => wall);
+    try {
+      trackSentPeerMessageForTest('sent-fresh', 'app-ab', receiverPath);
+      wall = 1_000;
+
+      await send(
+        m.socketPath!,
+        buildDeliveryStatusFrame({
+          status: 'dropped',
+          origMsgId: 'sent-fresh',
+          from: receiverPath,
+          dropReason: 'rate-limited',
+        }),
+      );
+      await settle();
+
+      expect(drained).toEqual([receiverPath]);
+    } finally {
+      setSendPacerClockForTest();
+    }
   });
 
   it('ignores a dropped receipt for messages it never sent', async () => {

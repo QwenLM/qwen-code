@@ -34,10 +34,7 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
-import {
-  PEER_ADMISSION_LIMITS,
-  type PeerDropReason,
-} from './peer-admission.js';
+import type { PeerDropReason } from './peer-admission.js';
 import {
   MAX_SENDER_KEY_CHARS,
   peerSenderKey,
@@ -80,11 +77,6 @@ export const DROP_FLUSH_BOUND_MS = 500;
  * longest an ordinary deferral takes.
  */
 export const MAX_DEFERRED_RECEIPT_AGE_MS = 2 * DROP_REPORT_WINDOW_MS;
-
-const PEER_BUCKET_REFILL_MS =
-  (PEER_ADMISSION_LIMITS.bucketCapacity /
-    PEER_ADMISSION_LIMITS.refillPerSecond) *
-  1000;
 
 /**
  * Receipts `flush` starts at once.
@@ -199,17 +191,8 @@ export class DropReceiptCoalescer {
   }
 
   /** Record a drop. Sends now, or joins the batch already waiting. */
-  note(
-    frame: PeerUserFrame,
-    originOrReason: PeerOrigin | PeerDropReason,
-    maybeReason?: PeerDropReason,
-  ): void {
+  note(frame: PeerUserFrame, origin: PeerOrigin, reason: PeerDropReason): void {
     if (this.disposed) return;
-    const origin =
-      typeof originOrReason === 'string' ? { selfSent: false } : originOrReason;
-    const reason =
-      typeof originOrReason === 'string' ? originOrReason : maybeReason;
-    if (reason === undefined) return;
     // No reply address, no receipt. Nothing is lost that could have been
     // delivered: a sender that gave no `from` cannot be told anything.
     const replyAddress = frame.from?.slice(0, MAX_SENDER_KEY_CHARS);
@@ -343,17 +326,15 @@ export class DropReceiptCoalescer {
     }
     const now = this.now();
     const age = now - batch.firstNotedAt;
-    const staleRateLimit =
-      reason === 'rate-limited' && age >= PEER_BUCKET_REFILL_MS;
-    if (staleRateLimit || (!force && age >= MAX_DEFERRED_RECEIPT_AGE_MS)) {
-      // Too old to be worth sending. A `rate-limited` receipt is a live
-      // instruction on the sending side, and one this late would throttle
-      // a sender against a bucket that refilled long ago — worse than
-      // saying nothing, which is what a best-effort receipt is allowed to
-      // do. Rate-limit receipts use the receiver bucket's full-refill
-      // time even during close; forcing one out later would revive an
-      // expired throttle. Other reasons keep the broader best-effort
-      // bound while the session runs.
+    if (!force && age >= MAX_DEFERRED_RECEIPT_AGE_MS) {
+      // Too old to be worth holding. Nothing here decides how much of a
+      // late receipt still applies: the ids it names are always worth
+      // settling, since a sender left in silence cannot tell a drop from
+      // a delivery that was ignored. The one part that does go stale —
+      // the throttle a `rate-limited` receipt implies — is judged on the
+      // sending side, which knows when it wrote each message. The close
+      // path forces these out regardless, because there the sender is
+      // about to lose its only chance at any answer.
       debugLogger.debug(
         `abandoning a dropped receipt held ${Math.round(age)} ms by a spent budget`,
       );

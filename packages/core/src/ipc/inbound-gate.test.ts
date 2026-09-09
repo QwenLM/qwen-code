@@ -2137,6 +2137,79 @@ describe('a message settled without the far model seeing it', () => {
     expect(h.gate.admit(retry({ msgId: 'again-0004' }))).toBe('held');
   });
 
+  it('lets an honest retry land after its hold expired unread', () => {
+    // The sender is told "retry once it is idle". A record left behind
+    // for a message nobody read answers that retry `duplicate`, whose
+    // whole premise is that the content is already over there.
+    vi.useFakeTimers();
+    try {
+      const h = harness({
+        policy: 'hold',
+        heldExpiryMs: 1_000,
+        admission: new PeerAdmission(),
+      });
+      expect(h.gate.admit(retry())).toBe('held');
+      vi.advanceTimersByTime(1_001);
+      expect(h.statuses.at(-1)?.status).toBe('expired');
+
+      expect(h.gate.admit(retry({ msgId: 'again-0010' }))).toBe('held');
+      expect(h.drops).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets an honest retry land after a policy change denied the backlog', () => {
+    // Nobody read it either: the setting changed while it waited, and
+    // the sender may reasonably send the same thing again once the
+    // setting is put back.
+    const h = harness({ policy: 'hold', admission: new PeerAdmission() });
+    expect(h.gate.admit(retry())).toBe('held');
+
+    h.setPolicy('refuse');
+    h.gate.reevaluate('setting-changed');
+    expect(h.statuses.at(-1)?.status).toBe('denied');
+
+    h.setPolicy('hold');
+    expect(h.gate.admit(retry({ msgId: 'again-0011' }))).toBe('held');
+    expect(h.drops).toHaveLength(0);
+  });
+
+  it('starts a fresh conversation when the session id changes, and only then', () => {
+    // `/clear` mints a new session id in the same process. The meter is
+    // scoped to the conversation: a peer that spent its burst before the
+    // clear must not go on being dropped afterwards, and its message
+    // must not be called a repeat of one this session never saw.
+    let currentSessionId = 'session-a';
+    const drops: PeerDropReason[] = [];
+    const gate = new InboundGate({
+      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => undefined,
+      getSessionId: () => currentSessionId,
+      deliver: () => {},
+      reportStatus: () => {},
+      reportDropped: (_frame, reason) => drops.push(reason),
+    });
+    const arriving = (msgId: string, content: string): PeerUserFrame =>
+      frame({
+        msgId,
+        from: '/tmp/a.sock',
+        fromMode: 'bypass',
+        message: { role: 'user', content },
+      });
+
+    expect(gate.admit(arriving('swap-0001', 'one'))).toBe('accept');
+    expect(gate.admit(arriving('swap-0002', 'two'))).toBe('dropped');
+
+    currentSessionId = 'session-b';
+    expect(gate.admit(arriving('swap-0003', 'three'))).toBe('accept');
+    // And the reset is not firing on every arrival: the new
+    // conversation's own burst is still one message.
+    expect(gate.admit(arriving('swap-0004', 'four'))).toBe('dropped');
+    expect(drops).toEqual(['rate-limited', 'rate-limited']);
+  });
+
   it('keeps the token spent, so a full queue still bounds the attempts', () => {
     const h = harness({
       mode: ApprovalMode.DEFAULT,

@@ -24,7 +24,6 @@ import {
   type PeerUserFrame,
 } from './peer-frames.js';
 import { peerSenderKey, type PeerOrigin } from './inbound-gate.js';
-import { PEER_ADMISSION_LIMITS } from './peer-admission.js';
 
 const PEER: PeerOrigin = { selfSent: false };
 
@@ -71,7 +70,7 @@ describe('DropReceiptCoalescer', () => {
     );
 
     const frame = frameFrom('/tmp/peer.sock');
-    coalescer.note(frame, 'rate-limited');
+    coalescer.note(frame, PEER, 'rate-limited');
 
     expect(sent).toHaveLength(1);
     expect(sent[0]?.frame.msgId).toBe(frame.msgId);
@@ -92,7 +91,7 @@ describe('DropReceiptCoalescer', () => {
     const frames = Array.from({ length: 6 }, (_, index) =>
       frameFrom('/tmp/peer.sock', `message ${index}`),
     );
-    for (const frame of frames) coalescer.note(frame, 'rate-limited');
+    for (const frame of frames) coalescer.note(frame, PEER, 'rate-limited');
 
     // Still only the immediate one until the trail elapses.
     expect(sent).toHaveLength(1);
@@ -120,9 +119,9 @@ describe('DropReceiptCoalescer', () => {
       { now: clock.now },
     );
 
-    coalescer.note(frameFrom('/tmp/peer.sock'), 'rate-limited');
+    coalescer.note(frameFrom('/tmp/peer.sock'), PEER, 'rate-limited');
     clock.advance(DROP_REPORT_WINDOW_MS + 1);
-    coalescer.note(frameFrom('/tmp/peer.sock', 'later'), 'rate-limited');
+    coalescer.note(frameFrom('/tmp/peer.sock', 'later'), PEER, 'rate-limited');
 
     expect(sent).toHaveLength(2);
     expect(sent[1]?.droppedMsgIds).toEqual([]);
@@ -138,8 +137,12 @@ describe('DropReceiptCoalescer', () => {
       { now: clock.now },
     );
 
-    coalescer.note(frameFrom('/tmp/peer.sock'), 'rate-limited');
-    coalescer.note(frameFrom('/tmp/peer.sock', 'same again'), 'duplicate');
+    coalescer.note(frameFrom('/tmp/peer.sock'), PEER, 'rate-limited');
+    coalescer.note(
+      frameFrom('/tmp/peer.sock', 'same again'),
+      PEER,
+      'duplicate',
+    );
 
     expect(sent.map((receipt) => receipt.reason)).toEqual([
       'rate-limited',
@@ -177,6 +180,7 @@ describe('DropReceiptCoalescer', () => {
     for (let index = 0; index < MAX_DROPPED_MSG_IDS + 50; index++) {
       coalescer.note(
         frameFrom('/tmp/peer.sock', `message ${index}`),
+        PEER,
         'rate-limited',
       );
     }
@@ -198,7 +202,11 @@ describe('DropReceiptCoalescer', () => {
     // A distinct sender each time, so every one of these would otherwise
     // earn an immediate receipt.
     for (let index = 0; index < MAX_DROP_RECEIPTS_PER_WINDOW + 5; index++) {
-      coalescer.note(frameFrom(`/tmp/peer-${index}.sock`), 'rate-limited');
+      coalescer.note(
+        frameFrom(`/tmp/peer-${index}.sock`),
+        PEER,
+        'rate-limited',
+      );
     }
 
     expect(sent).toHaveLength(MAX_DROP_RECEIPTS_PER_WINDOW);
@@ -218,13 +226,17 @@ describe('DropReceiptCoalescer', () => {
     );
 
     for (let index = 0; index < MAX_DROP_RECEIPTS_PER_WINDOW; index++) {
-      coalescer.note(frameFrom(`/tmp/peer-${index}.sock`), 'rate-limited');
+      coalescer.note(
+        frameFrom(`/tmp/peer-${index}.sock`),
+        PEER,
+        'rate-limited',
+      );
     }
     expect(sent).toHaveLength(MAX_DROP_RECEIPTS_PER_WINDOW);
 
     // One more drop inside the same window: nothing goes out, but the
     // drop is not discarded either.
-    coalescer.note(frameFrom('/tmp/legit.sock'), 'queue-full');
+    coalescer.note(frameFrom('/tmp/legit.sock'), PEER, 'queue-full');
     clock.advance(DROP_RECEIPT_TRAIL_MS);
     expect(sent).toHaveLength(MAX_DROP_RECEIPTS_PER_WINDOW);
 
@@ -245,8 +257,8 @@ describe('DropReceiptCoalescer', () => {
       { now: clock.now },
     );
 
-    coalescer.note(frameFrom(undefined), 'rate-limited');
-    coalescer.note(frameFrom(''), 'rate-limited');
+    coalescer.note(frameFrom(undefined), PEER, 'rate-limited');
+    coalescer.note(frameFrom(''), PEER, 'rate-limited');
     clock.advance(DROP_RECEIPT_TRAIL_MS);
 
     expect(sent).toHaveLength(0);
@@ -263,8 +275,8 @@ describe('DropReceiptCoalescer', () => {
       { now: clock.now },
     );
 
-    coalescer.note(frameFrom('/tmp/peer.sock', 'first'), 'rate-limited');
-    coalescer.note(frameFrom('/tmp/peer.sock', 'second'), 'rate-limited');
+    coalescer.note(frameFrom('/tmp/peer.sock', 'first'), PEER, 'rate-limited');
+    coalescer.note(frameFrom('/tmp/peer.sock', 'second'), PEER, 'rate-limited');
     expect(sent).toHaveLength(1);
 
     await coalescer.flush();
@@ -278,8 +290,8 @@ describe('DropReceiptCoalescer', () => {
       { now: clock.now },
     );
 
-    coalescer.note(frameFrom('/tmp/peer.sock', 'first'), 'rate-limited');
-    coalescer.note(frameFrom('/tmp/peer.sock', 'second'), 'rate-limited');
+    coalescer.note(frameFrom('/tmp/peer.sock', 'first'), PEER, 'rate-limited');
+    coalescer.note(frameFrom('/tmp/peer.sock', 'second'), PEER, 'rate-limited');
 
     const flushing = coalescer.flush(500);
     vi.advanceTimersByTime(500);
@@ -296,8 +308,8 @@ describe('DropReceiptCoalescer', () => {
       { now: clock.now },
     );
 
-    coalescer.note(frameFrom('/tmp/peer.sock', 'first'), 'rate-limited');
-    coalescer.note(frameFrom('/tmp/peer.sock', 'second'), 'rate-limited');
+    coalescer.note(frameFrom('/tmp/peer.sock', 'first'), PEER, 'rate-limited');
+    coalescer.note(frameFrom('/tmp/peer.sock', 'second'), PEER, 'rate-limited');
     coalescer.dispose();
     clock.advance(DROP_RECEIPT_TRAIL_MS * 2);
 
@@ -404,7 +416,11 @@ describe('DropReceiptCoalescer bounds', () => {
     prefix = 'budget',
   ): void {
     for (let index = 0; index < MAX_DROP_RECEIPTS_PER_WINDOW; index++) {
-      coalescer.note(frameFrom(`/tmp/${prefix}-${index}.sock`), 'rate-limited');
+      coalescer.note(
+        frameFrom(`/tmp/${prefix}-${index}.sock`),
+        PEER,
+        'rate-limited',
+      );
     }
   }
 
@@ -418,7 +434,7 @@ describe('DropReceiptCoalescer bounds', () => {
     );
 
     for (let index = 0; index < MAX_DROP_REPORT_KEYS + 100; index++) {
-      coalescer.note(frameFrom(`${prefix}${index}`), 'rate-limited');
+      coalescer.note(frameFrom(`${prefix}${index}`), PEER, 'rate-limited');
     }
 
     expect(sent[0]?.frame.from).toBe(prefix);
@@ -436,8 +452,8 @@ describe('DropReceiptCoalescer bounds', () => {
       replyToken: 'x'.repeat(500_000),
     };
 
-    coalescer.note(oversized, 'rate-limited');
-    coalescer.note(oversized, 'rate-limited');
+    coalescer.note(oversized, PEER, 'rate-limited');
+    coalescer.note(oversized, PEER, 'rate-limited');
     void coalescer.flush(10);
 
     expect(sent.at(-1)?.frame).not.toHaveProperty('replyToken');
@@ -451,7 +467,7 @@ describe('DropReceiptCoalescer bounds', () => {
     });
     const frame = { ...frameFrom('/tmp/peer.sock'), replyToken: 'secret' };
 
-    coalescer.note(frame, 'rate-limited');
+    coalescer.note(frame, PEER, 'rate-limited');
 
     expect(sent[0]?.frame.replyToken).toBe('secret');
     coalescer.dispose();
@@ -479,8 +495,8 @@ describe('DropReceiptCoalescer bounds', () => {
     spendBudget(coalescer);
     for (let index = 0; index < MAX_DROP_REPORT_KEYS + 100; index++) {
       const from = `/tmp/rotating-${index}.sock`;
-      coalescer.note(frameFrom(from), 'rate-limited');
-      coalescer.note(frameFrom(from, 'again'), 'rate-limited');
+      coalescer.note(frameFrom(from), PEER, 'rate-limited');
+      coalescer.note(frameFrom(from, 'again'), PEER, 'rate-limited');
     }
 
     expect(vi.getTimerCount()).toBeLessThanOrEqual(MAX_DROP_REPORT_KEYS);
@@ -499,14 +515,18 @@ describe('DropReceiptCoalescer bounds', () => {
     );
 
     const owed = frameFrom('/tmp/owed.sock');
-    coalescer.note(owed, 'rate-limited');
-    coalescer.note(frameFrom('/tmp/owed.sock', 'folded'), 'rate-limited');
+    coalescer.note(owed, PEER, 'rate-limited');
+    coalescer.note(frameFrom('/tmp/owed.sock', 'folded'), PEER, 'rate-limited');
     const before = sent.length;
 
     // A fresh window, so the eviction's receipt is not refused for budget.
     clock.advance(DROP_REPORT_WINDOW_MS + 1);
     for (let index = 0; index < MAX_DROP_REPORT_KEYS; index++) {
-      coalescer.note(frameFrom(`/tmp/evictor-${index}.sock`), 'duplicate');
+      coalescer.note(
+        frameFrom(`/tmp/evictor-${index}.sock`),
+        PEER,
+        'duplicate',
+      );
     }
 
     expect(sent.length).toBeGreaterThan(before);
@@ -528,6 +548,7 @@ describe('DropReceiptCoalescer bounds', () => {
 
     coalescer.note(
       frameFrom('/tmp/peer.sock', 'x'.repeat(4096)),
+      PEER,
       'rate-limited',
     );
 
@@ -549,7 +570,7 @@ describe('DropReceiptCoalescer bounds', () => {
     );
 
     spendBudget(coalescer);
-    coalescer.note(frameFrom('/tmp/legit.sock'), 'rate-limited');
+    coalescer.note(frameFrom('/tmp/legit.sock'), PEER, 'rate-limited');
     const beforeFlush = sent.length;
     expect(beforeFlush).toBe(MAX_DROP_RECEIPTS_PER_WINDOW);
 
@@ -574,7 +595,7 @@ describe('DropReceiptCoalescer bounds', () => {
     );
 
     spendBudget(coalescer);
-    coalescer.note(frameFrom('/tmp/stale.sock'), 'rate-limited');
+    coalescer.note(frameFrom('/tmp/stale.sock'), PEER, 'rate-limited');
     const beforeAging = sent.length;
 
     clock.advance(MAX_DEFERRED_RECEIPT_AGE_MS + 10_001);
@@ -585,33 +606,6 @@ describe('DropReceiptCoalescer bounds', () => {
     // And it is gone rather than still re-arming.
     coalescer.dispose();
     expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it('does not dispatch a rate-limit receipt after the bucket refilled', () => {
-    const clock = stubClock();
-    const sent: DroppedReceipt[] = [];
-    const coalescer = new DropReceiptCoalescer(
-      (receipt) => {
-        sent.push(receipt);
-      },
-      { now: clock.now },
-    );
-    spendBudget(coalescer);
-    coalescer.note(frameFrom('/tmp/stale-rate.sock'), 'rate-limited');
-    const beforeAging = sent.length;
-    const refillMs =
-      (PEER_ADMISSION_LIMITS.bucketCapacity /
-        PEER_ADMISSION_LIMITS.refillPerSecond) *
-      1000;
-
-    clock.advance(refillMs + DROP_RECEIPT_TRAIL_MS);
-
-    expect(
-      sent
-        .slice(beforeAging)
-        .some((receipt) => receipt.frame.from === '/tmp/stale-rate.sock'),
-    ).toBe(false);
-    coalescer.dispose();
   });
 
   it('waits for a receipt the immediate path already started', async () => {
@@ -626,7 +620,7 @@ describe('DropReceiptCoalescer bounds', () => {
         }),
       { now: clock.now },
     );
-    coalescer.note(frameFrom('/tmp/peer.sock'), 'rate-limited');
+    coalescer.note(frameFrom('/tmp/peer.sock'), PEER, 'rate-limited');
     expect(release).toBeDefined();
 
     let settled = false;
@@ -661,8 +655,8 @@ describe('DropReceiptCoalescer bounds', () => {
 
     for (let index = 0; index < FLUSH_CONCURRENCY * 3; index++) {
       const from = `/tmp/slow-${index}.sock`;
-      coalescer.note(frameFrom(from), 'rate-limited');
-      coalescer.note(frameFrom(from, 'folded'), 'rate-limited');
+      coalescer.note(frameFrom(from), PEER, 'rate-limited');
+      coalescer.note(frameFrom(from, 'folded'), PEER, 'rate-limited');
     }
     // Let the immediate-path sends settle first: what is under test is
     // how many *flush* starts at once.
@@ -689,9 +683,9 @@ describe('DropReceiptCoalescer bounds', () => {
       { now: clock.now },
     );
     expect(() =>
-      coalescer.note(frameFrom('/tmp/peer.sock'), 'rate-limited'),
+      coalescer.note(frameFrom('/tmp/peer.sock'), PEER, 'rate-limited'),
     ).not.toThrow();
-    coalescer.note(frameFrom('/tmp/peer.sock', 'second'), 'rate-limited');
+    coalescer.note(frameFrom('/tmp/peer.sock', 'second'), PEER, 'rate-limited');
     expect(() => clock.advance(DROP_RECEIPT_TRAIL_MS)).not.toThrow();
   });
 
@@ -705,7 +699,7 @@ describe('DropReceiptCoalescer bounds', () => {
         () => Promise.reject(new Error('boom')),
         { now: clock.now },
       );
-      coalescer.note(frameFrom('/tmp/peer.sock'), 'rate-limited');
+      coalescer.note(frameFrom('/tmp/peer.sock'), PEER, 'rate-limited');
       await Promise.resolve();
       await Promise.resolve();
     } finally {

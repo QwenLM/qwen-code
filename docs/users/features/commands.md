@@ -890,7 +890,9 @@ A session accepts up to 30 messages at once from one sender and then one
 every two seconds, and up to 32 at once from all senders together and
 then one a second. The second limit exists because a sender names itself:
 rotating that name gets a fresh allowance from the first limit but not
-from the second. A message from another session that repeats that
+from the second. It is barely above the first because every accepted
+message draws a receipt, and a session can only have so many of those
+going out at once. A message from another session that repeats that
 sender's previous message word for word within 30 seconds is also turned
 away — a model looping on one sentence mints a fresh message id every
 time, so the text is what catches it. Messages from a script the session

@@ -65,15 +65,19 @@ describe('parsePeerFrame — user frames', () => {
     ).toMatchObject({ toSessionId: 'sess-9' });
   });
 
-  it('rejects a reply token too large to retain', () => {
-    expect(
-      parsePeerFrame(
-        line({
-          ...validUser,
-          replyToken: 'x'.repeat(MAX_RETAINED_REPLY_TOKEN_CHARS + 1),
-        }),
-      ),
-    ).toBeNull();
+  it('delivers a message whose reply token is too large to retain', () => {
+    // The token only routes the receipt, and the bound is applied where
+    // the token is held (`peer-drop-reports.ts`). Refusing the frame here
+    // would lose an ordinary message over a field that says nothing about
+    // it.
+    const frame = parsePeerFrame(
+      line({
+        ...validUser,
+        replyToken: 'x'.repeat(MAX_RETAINED_REPLY_TOKEN_CHARS + 1),
+      }),
+    );
+    expect(frame).not.toBeNull();
+    expect(frame && 'message' in frame && frame.message.content).toBe('hello');
   });
 
   it('treats a non-string toSessionId as unaddressed', () => {

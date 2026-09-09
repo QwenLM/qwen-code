@@ -25,11 +25,13 @@
  *   all senders  32 at once, then one a second
  *   duplicates   the same body from one peer inside 30 seconds
  *
- * The per-sender bucket is the real limit; the global one exists because
- * a sender is self-asserted. `from` is a field in a frame (see the note
+ * The per-sender bucket is what an ordinary conversation meets; the
+ * global one exists because a sender is self-asserted. `from` is a field in a frame (see the note
  * in `uds-inbox.ts`), so a peer that wants a fresh bucket only has to
  * write a different one — the global bucket is what makes rotating it
- * pointless. Neither is a security boundary: a hostile same-uid process
+ * pointless. It sits barely above one sender's burst deliberately: every
+ * admitted message draws a receipt, and those share one outbound ceiling
+ * with everything else this session sends. Neither is a security boundary: a hostile same-uid process
  * has better options than flooding a socket. They bound the damage an
  * ordinary bug does.
  *

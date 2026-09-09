@@ -163,7 +163,17 @@ export type PeerFrame = PeerUserFrame | PeerControlFrame;
  */
 const MSG_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
-/** Largest authentication token retained from an untrusted peer frame. */
+/**
+ * Largest authentication token retained from an untrusted peer frame.
+ *
+ * A real token is 64 hex characters, and a sender's own inbox refuses a
+ * presented token over 256, so a longer one cannot authenticate anything
+ * and holding it would let a peer choose how many bytes a waiting receipt
+ * pins. It is dropped where the token would be *retained* rather than at
+ * the parser: the message itself may be perfectly ordinary, and refusing
+ * to deliver it over a field that only routes the answer would lose a
+ * message in order to bound a buffer.
+ */
 export const MAX_RETAINED_REPLY_TOKEN_CHARS = 256;
 
 /**
@@ -257,12 +267,6 @@ export function parsePeerFrame(line: string): PeerFrame | null {
     const fromMode = parsed['fromMode'];
     const toSessionId = optionalString(parsed['toSessionId']);
     const replyToken = optionalString(parsed['replyToken']);
-    if (
-      replyToken !== undefined &&
-      replyToken.length > MAX_RETAINED_REPLY_TOKEN_CHARS
-    ) {
-      return null;
-    }
     return {
       msgV,
       msgId,

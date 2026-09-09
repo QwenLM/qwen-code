@@ -668,11 +668,13 @@ describe('settleSentPeerMessage', () => {
     const id = await sendOne();
     expect(settleSentPeerMessage(id, 'held')).toEqual({
       address: 'app-ab',
+      ageMs: expect.any(Number),
       ipcPath: '/tmp/s1.sock',
       previous: 'pending',
     });
     expect(settleSentPeerMessage(id, 'delivered')).toEqual({
       address: 'app-ab',
+      ageMs: expect.any(Number),
       ipcPath: '/tmp/s1.sock',
       previous: 'held',
     });
@@ -1018,6 +1020,7 @@ describe('dropped receipts on the send side', () => {
     trackSentPeerMessageForTest('sent-1', 'app-a');
     expect(settleSentPeerMessage('sent-1', 'dropped')).toEqual({
       address: 'app-a',
+      ageMs: expect.any(Number),
       ipcPath: 'app-a',
       previous: 'pending',
     });

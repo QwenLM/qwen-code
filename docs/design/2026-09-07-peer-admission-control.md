@@ -58,7 +58,12 @@ the answer to the first arrives.
 then one every two seconds — plus a global bucket of 32, then one a
 second. A sender is identified by the reply address it puts on the frame,
 which is self-asserted; the global bucket is what makes rotating it
-pointless. Neither is a security boundary. A hostile same-uid process has
+pointless. The global figure is half the session's outbound send ceiling
+of 64, because every admitted message draws its own receipt against that
+ceiling: sized above it, one burst could occupy every slot, and the sends
+it displaced are dropped silently — the starvation this metering exists
+to prevent rather than to cause. It sits below both 50-message buffers
+downstream, so the meter is what a rotating sender reaches first. Neither is a security boundary. A hostile same-uid process has
 better options than flooding a socket; these bound the damage an ordinary
 bug does.
 

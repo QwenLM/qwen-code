@@ -85,6 +85,8 @@ export interface SentPeerMessage {
   address: string;
   /** Exact socket path the send-side mirror reserved against. */
   ipcPath: string;
+  /** When the frame was written, on the pacer's clock. */
+  sentAt: number;
   /** Last receipt applied, or 'pending' before any. */
   state: PeerDeliveryStatus | 'pending';
 }
@@ -94,6 +96,17 @@ export interface SettledPeerReceipt {
   address: string;
   ipcPath: string;
   previous: PeerDeliveryStatus | 'pending';
+  /**
+   * How long ago this session wrote the message the receipt answers.
+   *
+   * A receiver drops a message the moment it arrives, so this is also
+   * the age of the drop — which the receipt itself cannot carry, since a
+   * deferred one is written long after the drop it reports. A throttle
+   * computed from a wall the receiver has already refilled past is worse
+   * than none: it would make the mirror stricter than the session it
+   * models, which is the one thing it must never be.
+   */
+  ageMs: number;
 }
 
 /**
@@ -186,7 +199,12 @@ export function settleSentPeerMessage(
   }
   const previous = entry.state;
   entry.state = status;
-  return { address: entry.address, ipcPath: entry.ipcPath, previous };
+  return {
+    address: entry.address,
+    ipcPath: entry.ipcPath,
+    previous,
+    ageMs: Math.max(0, pacerWallNow() - entry.sentAt),
+  };
 }
 
 /**
@@ -222,7 +240,12 @@ export function trackSentPeerMessageForTest(
   address: string,
   ipcPath = address,
 ): void {
-  trackSent(msgId, { address, ipcPath, state: 'pending' });
+  trackSent(msgId, {
+    address,
+    ipcPath,
+    sentAt: pacerWallNow(),
+    state: 'pending',
+  });
 }
 
 /** Test-only: forget every tracked send. */
@@ -722,6 +745,7 @@ export async function sendToPeer(
   trackSent(frame.msgId, {
     address,
     ipcPath: peer.ipcPath,
+    sentAt: pacerWallNow(),
     state: 'pending',
   });
   try {

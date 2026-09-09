@@ -10,6 +10,7 @@ import {
   PeerAdmission,
   refillBucket,
 } from './peer-admission.js';
+import { MAX_CONCURRENT_SENDS } from './uds-client.js';
 
 /** A clock the test drives, so the minute-wide limits stay instant. */
 function stubClock() {
@@ -33,6 +34,20 @@ describe('refillBucket', () => {
     // Callers pass a monotonic clock, but one that did not must never be
     // handed more than it had.
     expect(refillBucket(5, 10_000, 0, 30, 0.5)).toBe(5);
+  });
+});
+
+describe('the limits themselves', () => {
+  it('leaves room on the outbound ceiling for an admitted burst', () => {
+    // Every admitted message draws its own receipt, and receipts share
+    // one process-wide ceiling with everything else this session sends,
+    // including the burst of expiry receipts a close fires. A global
+    // burst sized above half of it would let one flood occupy the slots
+    // the legitimate traffic needs — the starvation this file exists to
+    // prevent rather than to cause.
+    expect(PEER_ADMISSION_LIMITS.globalBucketCapacity).toBeLessThanOrEqual(
+      MAX_CONCURRENT_SENDS / 2,
+    );
   });
 });
 

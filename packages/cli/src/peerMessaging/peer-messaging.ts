@@ -43,6 +43,7 @@ import {
   getPeerControllerRegistryPath,
   InboundGate,
   MAX_HELD_MESSAGES,
+  PEER_ADMISSION_LIMITS,
   type HeldMessage,
   type InboundPolicy,
   type PeerAdmission,
@@ -118,6 +119,19 @@ const CLOSE_DROP_FLUSH_BOUND_MS = 1_000;
 
 /** Drop notices held for a listener that has not subscribed yet. */
 const MAX_UNHEARD_DROP_NOTICES = 20;
+
+/**
+ * How long the wall a `rate-limited` receipt describes can still stand.
+ *
+ * A receiver refuses at an empty bucket and refills it in this long, so
+ * a receipt older than one refill says nothing about the level now.
+ * Derived from the limits rather than written down, so a retune of
+ * either cannot leave this stale.
+ */
+const RECEIVER_REFILL_MS =
+  (PEER_ADMISSION_LIMITS.bucketCapacity /
+    PEER_ADMISSION_LIMITS.refillPerSecond) *
+  1000;
 
 /**
  * A delivery receipt for a message this session sent, as surfaced to
@@ -725,15 +739,22 @@ export class PeerMessaging {
     const ids = [frame.origMsgId, ...(frame.droppedMsgIds ?? [])];
     let first: SettledPeerReceipt | undefined;
     let settledCount = 0;
-    const settledByPath = new Map<string, string[]>();
+    const settledByPath = new Map<
+      string,
+      { ids: string[]; freshestAgeMs: number }
+    >();
     for (const id of ids) {
       const settled = this.settleSentMessage(id, 'dropped');
       if (!settled) continue;
       first ??= settled;
       settledCount += 1;
-      const pathIds = settledByPath.get(settled.ipcPath) ?? [];
-      pathIds.push(id);
-      settledByPath.set(settled.ipcPath, pathIds);
+      const entry = settledByPath.get(settled.ipcPath) ?? {
+        ids: [],
+        freshestAgeMs: Number.POSITIVE_INFINITY,
+      };
+      entry.ids.push(id);
+      entry.freshestAgeMs = Math.min(entry.freshestAgeMs, settled.ageMs);
+      settledByPath.set(settled.ipcPath, entry);
     }
     if (!first) {
       debugLogger.debug(
@@ -748,21 +769,31 @@ export class PeerMessaging {
     // that receiver's latest-body baseline. Other drops do not leave a
     // baseline, so the mirror forgets those bodies entirely.
     if (frame.dropReason === 'duplicate') {
-      for (const [ipcPath, idsForPath] of settledByPath) {
-        for (const id of idsForPath) this.refundMirrorToken(ipcPath, id);
+      for (const [ipcPath, entry] of settledByPath) {
+        for (const id of entry.ids) this.refundMirrorToken(ipcPath, id);
       }
     } else {
-      for (const [ipcPath, idsForPath] of settledByPath) {
-        this.forgetMirror(ipcPath, idsForPath);
+      for (const [ipcPath, entry] of settledByPath) {
+        this.forgetMirror(ipcPath, entry.ids);
       }
     }
     if (frame.dropReason === 'rate-limited') {
-      // The mirror bucket also said there was room and the receiver
-      // disagreed: empty it so the next send waits for the rate the
-      // receiver actually refills at rather than for the one guessed here.
-      // Keyed by the receipt's `from`, which is the receiver's own socket
-      // path — the same string the mirror reserved against.
-      for (const ipcPath of settledByPath.keys()) this.drainMirror(ipcPath);
+      for (const [ipcPath, entry] of settledByPath) {
+        // The mirror bucket also said there was room and the receiver
+        // disagreed: empty it so the next send waits for the rate the
+        // receiver actually refills at rather than for the one guessed
+        // here. Keyed by the path the ledger recorded, which is the one
+        // the mirror reserved against.
+        //
+        // Only while the wall it describes can still be standing. A
+        // receipt can wait out a spent receipt budget on the far side,
+        // and one that describes a bucket the receiver has since
+        // refilled would hold this session back from sends that session
+        // would take. The ids are settled either way: a sender told
+        // nothing cannot tell a drop from a delivery.
+        if (entry.freshestAgeMs <= RECEIVER_REFILL_MS)
+          this.drainMirror(ipcPath);
+      }
     }
     this.emitReceipt({
       status: 'dropped',
