@@ -322,7 +322,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       maxRetries,
       defaultHeaders,
       ...(runtimeOptions || {}),
-      fetch: buildSessionAwareFetch(runtimeOptions?.fetch, this.cliConfig),
+      fetch: buildSessionAwareFetch(
+        runtimeOptions?.fetch,
+        this.cliConfig,
+        this.contentGeneratorConfig.customHeaders,
+      ),
     });
   }
 
@@ -523,6 +527,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       dropped.add(key);
     }
     this.warnConflictingKnobDrop(model, reasoningEffort, [...dropped]);
+    this.flattenGptReasoningEffort(merged);
     return merged as unknown as OpenAI.Chat.ChatCompletionCreateParams;
   }
 

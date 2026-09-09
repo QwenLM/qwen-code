@@ -66,20 +66,21 @@ export function GlobalTurnNavigation({
     return () => observer.disconnect();
   }, []);
 
-  const initialized = useRef<string | undefined>(undefined);
+  const [initializedSession, setInitializedSession] = useState<string>();
   useLayoutEffect(() => {
-    if (!count || initialized.current === state.sessionId) return;
-    initialized.current = state.sessionId;
+    if (!count || initializedSession === state.sessionId) return;
     const element = viewport.current;
     if (!element) return;
     element.scrollTop = Math.max(0, count * ROW_HEIGHT - height);
     setTop(element.scrollTop);
     setFocus(count - 1);
-  }, [count, state.sessionId, height]);
+    setInitializedSession(state.sessionId);
+  }, [count, state.sessionId, height, initializedSession]);
 
   const missing = new Set<number>();
   for (
     let ordinal = start;
+    initializedSession === state.sessionId &&
     ordinal < Math.min(end, state.totalTurns);
     ordinal++
   ) {
@@ -122,20 +123,21 @@ export function GlobalTurnNavigation({
     <TooltipProvider disableHoverableContent>
       <nav
         aria-label={t('timeline.sessionTimeline')}
-        className="flex h-full min-h-0 w-16 shrink-0 flex-col justify-center px-3 py-4 text-muted-foreground"
+        className="pointer-events-none flex h-full min-h-0 w-full shrink-0 flex-col justify-center px-[min(12px,25%)] py-4 text-muted-foreground"
         data-global-turn-navigation
       >
         <span className="sr-only">
           {t('timeline.sessionTimeline')} · {count}
         </span>
+        {/* Allow hover ticks to expand past the gutter without covering message hit targets. */}
         <div
           ref={viewport}
-          className="min-h-0 overflow-y-auto overscroll-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          className="-mr-8 min-h-0 overflow-y-auto overscroll-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
           style={{ height: Math.min(count * ROW_HEIGHT, 360) }}
           onScroll={(event) => setTop(event.currentTarget.scrollTop)}
         >
           <ol
-            className="relative m-0 list-none p-0"
+            className="relative my-0 mr-8 ml-0 list-none p-0"
             style={{ height: count * ROW_HEIGHT }}
           >
             {Array.from({ length: end - start }, (_, index) => {
@@ -161,7 +163,7 @@ export function GlobalTurnNavigation({
                     <TooltipTrigger asChild>
                       <button
                         type="button"
-                        className={`${timelineStyles.sessionTimelineButton} ${state.selected?.ordinal === ordinal ? timelineStyles.sessionTimelineButtonCurrent : ''}`}
+                        className={`${timelineStyles.sessionTimelineButton} pointer-events-auto ${state.selected?.ordinal === ordinal ? timelineStyles.sessionTimelineButtonCurrent : ''}`}
                         style={{ top: 0, width: '100%' }}
                         aria-label={title}
                         aria-current={
@@ -219,7 +221,7 @@ export function GlobalTurnNavigation({
                       side="right"
                       sideOffset={8}
                       collisionPadding={12}
-                      className="!animate-none grid w-[350px] max-w-[calc(100vw-100px)] gap-1.5 rounded-xl border border-border bg-background px-3.5 py-3 text-foreground shadow-lg [&_[data-slot=tooltip-arrow]]:hidden"
+                      className={`${timelineStyles.sessionTimelinePreview} !animate-none max-w-none ring-0 [&_[data-slot=tooltip-arrow]]:hidden!`}
                     >
                       <span className="line-clamp-2 text-sm font-semibold">
                         {label ??
@@ -241,6 +243,7 @@ export function GlobalTurnNavigation({
           <Button
             variant="ghost"
             size="sm"
+            className="pointer-events-auto"
             onClick={() => setRetry((value) => value + 1)}
           >
             {t('history.retry')}

@@ -2436,14 +2436,23 @@ describe('daemon UI normalizer and transcript reducer', () => {
         data: { reason: 'slow' },
       }),
     ).toMatchObject([{ type: 'error', recoverable: true, text: 'slow' }]);
-    expect(
-      normalizeDaemonEvent({
-        id: 54,
-        v: 1,
-        type: 'slow_client_warning',
-        data: {},
-      }),
-    ).toMatchObject([{ type: 'status', text: 'SSE stream is lagging' }]);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(
+        normalizeDaemonEvent({
+          id: 54,
+          v: 1,
+          type: 'slow_client_warning',
+          data: { queueSize: 200, maxQueued: 256 },
+        }),
+      ).toEqual([]);
+      expect(warn).toHaveBeenCalledWith('[daemon-ui] SSE stream is lagging', {
+        queueSize: 200,
+        maxQueued: 256,
+      });
+    } finally {
+      warn.mockRestore();
+    }
     expect(
       normalizeDaemonEvent({
         id: 55,
@@ -10193,4 +10202,114 @@ describe('parallel subAgent text interleaving fix', () => {
       ]);
     }
   });
+});
+
+describe('subagent session readiness', () => {
+  it.each([true, false])(
+    'updates a started agent from meta-only readiness with compact=%s',
+    (compact) => {
+      let state = createDaemonTranscriptState({
+        retainSubagentBlocks: !compact,
+      });
+      const apply = (sessionUpdate: string, subagentSessionReady: boolean) => {
+        state = reduceDaemonTranscriptEvents(
+          state,
+          normalizeDaemonEvent({
+            id: subagentSessionReady ? 2 : 1,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate,
+                toolCallId: 'agent-1',
+                ...(sessionUpdate === 'tool_call'
+                  ? { title: 'Review changes', status: 'in_progress' }
+                  : {}),
+                _meta: { toolName: 'agent', subagentSessionReady },
+              },
+            },
+          }),
+        );
+      };
+      apply('tool_call', false);
+      expect(state.blocks).toMatchObject([{ subagentSessionReady: false }]);
+      const id = state.blocks[0].id;
+      apply('tool_call_update', true);
+      expect(state.blocks).toHaveLength(1);
+      expect(state.blocks[0]).toMatchObject({
+        id,
+        toolCallId: 'agent-1',
+        title: 'Review changes',
+        status: 'in_progress',
+        subagentSessionReady: true,
+      });
+    },
+  );
+
+  it.each([true, false])(
+    'retains readiness through compact=%s and partial updates',
+    (compact) => {
+      let state = createDaemonTranscriptState({
+        now: 1,
+        retainSubagentBlocks: !compact,
+      });
+      const apply = (update: Record<string, unknown>) => {
+        const events = normalizeDaemonEvent({
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'agent-1',
+              ...update,
+            },
+          },
+        });
+        state = reduceDaemonTranscriptEvents(state, events);
+      };
+      apply({
+        toolName: 'agent',
+        _meta: { subagentSessionReady: false, phase: 'preparing' },
+      });
+      expect(state.blocks[0]).toMatchObject({ subagentSessionReady: false });
+      apply({ rawOutput: { type: 'task_execution', status: 'running' } });
+      expect(state.blocks[0]).toMatchObject({ subagentSessionReady: false });
+      apply({
+        rawOutput: { type: 'task_execution', subagentSessionReady: true },
+      });
+      expect(state.blocks[0]).toMatchObject({ subagentSessionReady: true });
+      apply({ _meta: { subagentSessionReady: false } });
+      apply({ status: 'failed' });
+      expect(state.blocks[0]).toMatchObject({
+        subagentSessionReady: true,
+        status: 'failed',
+      });
+    },
+  );
+
+  it.each([undefined, 'false', 0])(
+    'does not interpret legacy or invalid readiness %s as creating',
+    (value) => {
+      const events = normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'legacy',
+            toolName: 'agent',
+            _meta: { subagentSessionReady: value },
+          },
+        },
+      });
+      expect(events[0]).not.toHaveProperty('subagentSessionReady');
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState(),
+        events,
+      );
+      expect(state.blocks[0]).not.toHaveProperty('subagentSessionReady');
+    },
+  );
 });

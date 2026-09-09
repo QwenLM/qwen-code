@@ -4,7 +4,7 @@ Stage 1 of the [qwen-code daemon design](https://github.com/QwenLM/qwen-code/iss
 
 ## Authentication
 
-When the daemon was started with `--token` or `QWEN_SERVER_TOKEN`, **every normal API route except `/health` on ordinary loopback binds** must carry:
+When the daemon was started with `--token` or `QWEN_SERVER_TOKEN` — or bound non-loopback with neither, which generates an ephemeral bearer and prints it once at startup — **every normal API route except `/health` on ordinary loopback binds** must carry:
 
 ```
 Authorization: Bearer <token>
@@ -12,20 +12,20 @@ Authorization: Bearer <token>
 
 Without a configured token on the loopback default, the header is optional and requests arriving through the primary listener have full operator API authority. Workspace trust, session ownership, `X-Qwen-Client-Id`, permission, feature, validation, and resource checks still apply. Token comparison is constant-time. 401 responses are uniform across `missing header` / `wrong scheme` / `wrong token`.
 
-**`--open-with-auth`.** This default-off CLI mode requires a loopback bind and an available Web Shell. It reuses the normal `--token`-over-`QWEN_SERVER_TOKEN` selection, or generates 32 random bytes encoded as base64url before daemon startup when that selection is empty. The browser receives the selected bearer through `#token=` and stores it per tab; the protocol and middleware see an ordinary configured token. Bare `--open`, direct embedded callers, non-loopback binds, and other clients do not receive automatic credentials. Browser-ineligible environments print the secret-bearing fragment URL for manual opening. Loopback `/health` and static Web Shell assets retain the exemptions described below; `--require-auth` still gates `/health`.
+**`--open-with-auth`.** This default-off CLI mode requires a loopback bind and an available Web Shell. It reuses the normal `--token`-over-`QWEN_SERVER_TOKEN` selection, or generates 32 random bytes encoded as base64url before daemon startup when that selection is empty. The browser receives the selected bearer through `#token=` and stores it per tab; the protocol and middleware see an ordinary configured token. Fragment delivery keys on the resolved token, not on this flag: any `--open` launch attaches the resolved bearer — configured or generated — to the launched URL's `#token=` fragment (visible to local users via `ps` / `/proc`, as the launcher warns), so a non-loopback bind with bare `--open` hands its generated bearer to the browser the same way; this flag's distinct contributions are token _generation_ on loopback and the browser-ineligible manual-URL fallback. Only direct embedded callers that ignore `RunHandle.resolvedToken`, and clients that never launch a browser, receive no automatic credential. Browser-ineligible environments print the secret-bearing fragment URL for manual opening. Loopback `/health` and static Web Shell assets retain the exemptions described below; `--require-auth` still gates `/health`.
 
 Channel webhook ingress (`POST /channels/:channelName/webhooks/:source`) is separate from this bearer contract in every mode. When mounted, it is registered before `bearerAuth` and authenticates with its configured `x-qwen-webhook-secret`; rotating the daemon bearer does not rotate webhook source secrets.
 
 **`/health` exemption** (Bctum): on loopback binds (`127.0.0.0/8` / `localhost` / `::1` / `[::1]`) `/health` is registered BEFORE the bearer middleware, so liveness probes inside the pod don't need to carry the token even when the daemon was started with `--token`. Non-loopback binds (`--hostname 0.0.0.0` etc.) gate `/health` with the other normal API routes — see the [`GET /health`](#get-health) section for the rationale.
 
-**`--require-auth` (#4175 PR 15).** Pass this flag at boot to extend the "must have a token" rule to loopback as well. Boot fails without a token; the `/health` exemption is dropped (so `/health` also requires `Authorization: Bearer …`).
+**`--require-auth` (#4175 PR 15).** Pass this flag at boot to extend the "must have a token" rule to loopback as well. Boot fails when no token source resolves — on loopback that means `--token`, `QWEN_SERVER_TOKEN`, or `--open-with-auth` (which installs its own generated token before boot, so `--require-auth --open-with-auth` starts). The fail-fast is loopback-only: a non-loopback bind resolves the ephemeral bearer it generates when neither configured source is present, and that satisfies the flag. The `/health` exemption is dropped either way, so `/health` also requires `Authorization: Bearer …`.
 
 When the flag is on, the global `bearerAuth` middleware gates **every normal API route** — including `/health` and `/capabilities`. Channel webhook ingress remains independently shared-secret-authenticated, and Web Shell document and asset routes remain pre-auth. An **unauthenticated** client therefore cannot pre-flight `caps.features` to discover that auth is required: the discovery surface for that case is the **401 response body** itself (uniform across bearer-gated routes per the [Authentication](#authentication) section). The `require_auth` capability tag is a **post-authentication confirmation** — once a client successfully authenticates and reads `/capabilities`, the tag's presence confirms the daemon was started with `--require-auth` (useful for audit / compliance UIs and for SDK clients to surface "this deployment is hardened" in a settings panel). Strict mutation routes accept trusted-loopback primary-listener requests, bearer-authenticated requests, or paired Local Control requests. Non-trusted token-less embeds still receive `401 { code: "token_required", error: "…" }`; with `--require-auth`, global bearer middleware rejects first with the legacy `Unauthorized` body.
 
-**`--allow-origin <pattern>` (T2.4 [#4514](https://github.com/QwenLM/qwen-code/issues/4514)).** Browser clients hitting the daemon cross-origin are blocked by default — any request carrying an `Origin` header returns `403 {"error":"Request denied by CORS policy"}` because CLI/SDK clients never send `Origin` and the daemon treats its presence as a sign the request came from a browser context the operator has not opted into. Pass `--allow-origin <pattern>` (repeatable) at boot to install an allowlist instead of the wall. Each pattern is either:
+**`--allow-origin <pattern>` (T2.4 [#4514](https://github.com/QwenLM/qwen-code/issues/4514)).** Browser clients hitting the daemon cross-origin are blocked by default — a request carrying an `Origin` header returns `403 {"error":"Request denied by CORS policy"}` because CLI/SDK clients never send `Origin` and the daemon treats its presence as a sign the request came from a browser context the operator has not opted into. One exception precedes the wall on a non-loopback bind with a token: a same-origin request (`Origin` equal to the direct socket scheme plus the normalized `Host` authority) is bearer-authenticated and its `Origin` stripped **on the primary listener** — with a valid bearer the route's own status follows, with a missing or invalid bearer a `401`, **except the pre-auth Web Shell document, `/assets/*` and `/mcp-app-sandbox` routes, which are served without a credential as in every other mode** — and only cross-origin or non-matching `Origin` values keep the `403` envelope. Pass `--allow-origin <pattern>` (repeatable) at boot to install an allowlist instead of the wall. Each pattern is either:
 
-- The literal `*` — admit any origin. **Risky**: boot refuses when `*` is configured but no bearer token is set (any source: `--token`, `QWEN_SERVER_TOKEN`, or `--require-auth` which mandates a token at boot). The boot breadcrumb emits a stderr warning when `*` is in the list. **Recommendation**: pair with `--require-auth` on loopback binds so `/health` is also gated by the bearer — it's registered before the bearer middleware on loopback by default (so k8s/Compose probes can reach it without a token), and a `*` allowlist makes it reachable from any cross-origin browser. `--require-auth` still leaves the Web Shell static assets (`/`, `/assets/*`, and `/session/:id` document navigations) pre-auth on loopback by design — they are mounted before the bearer middleware — so under a `*` allowlist they remain readable from any cross-origin browser; `--no-web` removes that surface. On non-loopback binds the bearer is already mandatory at boot and `/health` is registered behind it. Normal API routes are bearer-gated, channel webhook ingress retains its own shared-secret gate, and Web Shell static assets (`/`, `/assets/*`, and `/session/:id` document navigations) remain pre-auth unless `--no-web` removes them.
-- A canonical URL origin — `<scheme>://<host>[:<port>]`. **No trailing slash, no path, no userinfo, no query.** Boot refuses with `InvalidAllowOriginPatternError` if the entry fails the round-trip `new URL(pattern).origin === pattern`; the error message names the bad pattern and the canonical form. Strict-by-intent: silent normalization (e.g. trimming a trailing `/`) would let typos slip through and accept ambiguous input. Without a token, HTTP(S) entries are limited to loopback hosts; a non-loopback browser origin requires a token because it can otherwise drive the full operator API, including code execution as the daemon user. Explicit browser-extension origins keep their existing tokenless local-automation path. Startup logs the authority granted to any tokenless allowed browser origin.
+- The literal `*` — admit any origin. **Risky**: boot refuses when `*` is configured but no bearer token resolves. The guard reads the _resolved_ token — `--token`, `QWEN_SERVER_TOKEN`, `--open-with-auth`'s generated loopback token, or the ephemeral bearer a non-loopback bind generates when neither configured source is present — so this refusal is loopback-only. The boot breadcrumb emits a stderr warning when `*` is in the list. **Recommendation**: pair with `--require-auth` on loopback binds so `/health` is also gated by the bearer — it's registered before the bearer middleware on loopback by default (so k8s/Compose probes can reach it without a token), and a `*` allowlist makes it reachable from any cross-origin browser. `--require-auth` still leaves the Web Shell static assets (`/`, `/assets/*`, and `/session/:id` document navigations) pre-auth on loopback by design — they are mounted before the bearer middleware — so under a `*` allowlist they remain readable from any cross-origin browser; `--no-web` removes that surface. On non-loopback binds the bearer is already mandatory at boot and `/health` is registered behind it. Normal API routes are bearer-gated, channel webhook ingress retains its own shared-secret gate, and Web Shell static assets (`/`, `/assets/*`, and `/session/:id` document navigations) remain pre-auth unless `--no-web` removes them.
+- A canonical URL origin — `<scheme>://<host>[:<port>]`. **No trailing slash, no path, no userinfo, no query.** Boot refuses with `InvalidAllowOriginPatternError` if the entry fails the round-trip `new URL(pattern).origin === pattern`; the error message names the bad pattern and the canonical form. Strict-by-intent: silent normalization (e.g. trimming a trailing `/`) would let typos slip through and accept ambiguous input. Without a resolved token — which after generation means a loopback bind — HTTP(S) entries are limited to loopback hosts; a non-loopback browser origin requires a token because it can otherwise drive the full operator API, including code execution as the daemon user. Explicit browser-extension origins keep their existing tokenless local-automation path. Startup logs the authority granted to any tokenless allowed browser origin.
 
 Matched origins receive the standard CORS response headers on every request:
 
@@ -221,7 +221,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_file_upload',
  'session_approval_mode_control', 'workspace_tool_toggle',
  'workspace_skill_settings_toggle', 'workspace_skill_settings_batch_toggle',
- 'extension_batch_activation_v2', 'extension_state',
+ 'extension_batch_activation_v2', 'extension_activation_explicit_refresh',
+ 'extension_state',
  'workspace_settings', 'workspace_init', 'workspace_mcp_restart',
  'session_recap', 'session_generation', 'session_btw', 'session_shell_command',
  'standalone_sessions_v1', 'standalone_session_options_v1',
@@ -294,6 +295,8 @@ Runtime status and ensure responses use this shape:
 
 `workspace_session_live_state` advertises `GET /workspaces/:workspace/sessions/live-state`, a trusted-only, memory-only snapshot of the selected workspace runtime's live sessions plus an in-memory catalog version that tells clients when a full persisted-catalog reload is warranted. It is independent of `workspace_qualified_rest_core`: released daemons can advertise the broader workspace REST capability without implementing this route, so clients must pre-flight this tag directly. The tag is unconditional because a trusted single-workspace primary can use the route by id or cwd; per-workspace trust checks still apply on every request, and the route does not extend the permissive untrusted-secondary persisted-catalog read policy to live bridge state. The tag means the endpoint exists; it does not promise that every live item carries the optional `updatedAt` activity watermark, which is lifecycle-dependent.
 
+The optional top-level `/capabilities` field `sessionLiveStatePollIntervalMs` advertises the daemon-wide live-state polling interval in milliseconds. It is resolved once from the startup environment variable `QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS`, independently of workspace environment overlays. Integer values from `1000` to `2147483647` are accepted; missing or invalid values use `5000`. Web Shell consumes this hint for all workspace live-state polling and also falls back to `5000` for an absent or invalid field from an older or incompatible daemon. This field does not change the route's snapshot semantics, immediate local/visibility refreshes, or full-catalog polling. SDK clients remain responsible for their own timers.
+
 `slow_client_warning` covers SSE backpressure behavior: (a) the daemon emits a `slow_client_warning` synthetic event-stream frame when a subscriber's live frame backlog or live serialized-byte backlog crosses 75% full, once per overflow episode (rearmed after both measurements drain below 37.5%); (b) `GET /session/:id/events` accepts a `?maxQueued=N` query param (range `[16, 2048]`) to pre-size the per-subscriber frame backlog for cold reconnects against a large replay ring. The serialized-byte cap is daemon-owned (default **2 MiB** per subscriber), live-only, and intentionally has no query parameter. The daemon-wide ring size is controlled by `--event-ring-size` (default **8000**, per #3803 §02). Old daemons silently lack the warning/query behavior — pre-flight this tag before opting in.
 
 `typed_event_schema` advertises daemon event payloads that match the SDK's `KnownDaemonEvent` schema. Older daemons may still stream compatible frames, but SDK clients should pre-flight this tag before assuming typed event coverage.
@@ -350,7 +353,9 @@ The same tag also exposes workspace-qualified project-agent CRUD at `/workspaces
 
 `extension_local_path_install` advertises daemon-local Extension sources on both `POST /workspace/extensions/install` and `POST /extensions/install`. The `source` must be an absolute path that exists on the daemon host. Relative paths remain unsupported so daemon process cwd cannot change source identity or shadow a GitHub `owner/repo` shorthand. The existing install operation copies the Extension into managed storage; it does not link the source. Clients must preflight this tag because older daemons reject local sources.
 
-`extension_batch_activation_v2` adds `PUT /extensions/activation` and `PUT /workspaces/:workspace/extensions/activation`. Both accept 1–100 names in `extensionNames`, deduplicate them case-insensitively while preserving first-seen order, persist changed targets in one generation, and return one `202` operation handle. A target does not need to be installed when setting `enabled` or `disabled`: its name creates a desired-state declaration that is preserved when an Extension with that name is installed. The global route accepts `state: "enabled" | "disabled"`, writes V2 `defaultActivation`, and reconciles every registered runtime. The workspace route also accepts `"inherit"`, applies or clears exact overrides for the selected trusted runtime, and reconciles only that runtime. `inherit` does not declare an unknown name; an all-unknown clear reports `updated: false` and skips reconciliation. Singular activation routes remain installed-only and id-addressed.
+`extension_batch_activation_v2` adds `PUT /extensions/activation` and `PUT /workspaces/:workspace/extensions/activation`. Both accept 1–100 names in `extensionNames`, deduplicate them case-insensitively while preserving first-seen order, persist changed targets in one generation, and return one `202` operation handle. A target does not need to be installed when setting `enabled` or `disabled`: its name creates a desired-state declaration that is preserved when an Extension with that name is installed. The global route accepts `state: "enabled" | "disabled"` and writes V2 `defaultActivation`; the workspace route also accepts `"inherit"` and applies or clears exact overrides for the selected trusted runtime. `inherit` does not declare an unknown name, and an all-unknown clear reports `updated: false`.
+
+`extension_activation_explicit_refresh` means singular and batch activation operations finish after the durable policy commit without directly refreshing active sessions. Callers that need immediate application should wait for activation success and then submit either the synchronous primary-workspace `POST /workspace/extensions/refresh`, which returns refresh counts directly, or the selected workspace's asynchronous `POST /workspaces/:workspace/extensions/refresh`, which returns a separate operation handle. The two forms are not interchangeable: the asynchronous operation records the applied generation when its runtime reconciliation completes, while the synchronous route records nothing, so the generation reconciler still treats that workspace as pending and refreshes its sessions again on its next pass. Callers that can address a specific workspace should prefer the asynchronous form. A refresh failure does not roll back or downgrade the activation result. Daemons without this capability already include runtime refresh in activation, so compatibility clients must not submit a second refresh. The independent 30-second generation reconciler remains enabled and normally applies the committed policy by its next pass; failed reconciliation is retried by later passes.
 
 ### Extension Management V2 wire contract
 
@@ -518,15 +523,15 @@ A durable commit followed by incomplete cleanup or runtime reconciliation is not
 {
   "v": 1,
   "operationId": "<operation-id>",
-  "operation": "activation",
+  "operation": "uninstall",
   "status": "succeeded_with_warnings",
   "createdAt": 1750000000000,
   "updatedAt": 1750000000200,
   "result": {
-    "status": "disabled",
+    "status": "uninstalled",
     "name": "demo",
-    "refreshed": 1,
-    "failed": 1
+    "refreshed": 2,
+    "failed": 0
   },
   "warnings": [
     {
@@ -945,15 +950,19 @@ presence metadata, startup state, and runtime state; literal secrets are never
 returned. Channel snapshots use `Cache-Control: no-store`.
 
 Field descriptors can expose nested object metadata through `properties`.
-Numeric descriptors can use `exclusiveMinimum` for open lower bounds. Clients
-that do not render an advertised field kind must preserve its existing config
-value instead of coercing or deleting it. Object fields cannot be required,
-and nested properties cannot be secrets or environment-resolvable fields;
-those management protocols remain top-level only. A nested `required` property
-is enforced only while its parent object is present in the write; omitting the
-parent object leaves its nested requirements unchecked. Writes replace each
-field's stored value wholesale, so preserving an object means resending the
-stored object; the daemon does not merge partial objects.
+Numeric descriptors can use `exclusiveMinimum` for open lower bounds. String
+and secret descriptors can use `multiline` to ask clients for a multi-line text
+area; the descriptor types allow it only on top-level fields. Clients that do
+not render an advertised field kind must preserve its existing config value
+instead of coercing or deleting it, and a client that renders a `multiline`
+field in a single-line control must preserve the stored value verbatim instead
+of writing back its newline-stripped input value. Object fields cannot be
+required, and nested properties cannot be secrets or environment-resolvable
+fields; those management protocols remain top-level only. A nested `required`
+property is enforced only while its parent object is present in the write;
+omitting the parent object leaves its nested requirements unchecked. Writes
+replace each field's stored value wholesale, so preserving an object means
+resending the stored object; the daemon does not merge partial objects.
 
 Configuration writes use optimistic concurrency and the strict operator-authority
 gate:
@@ -2532,7 +2541,7 @@ Additional fields may appear on each session when `view=organized`:
 }
 ```
 
-Trusted active lists include live daemon overlay fields such as `clientCount` and `hasActivePrompt`. Untrusted-secondary and archived lists are storage-only: live overlay fields remain absent or false, and archived entries set `isArchived` to `true`. Empty array (not 404) when no sessions exist — a session-picker UI shouldn't error just because the workspace is idle.
+Trusted active lists include live daemon overlay fields such as `clientCount`, `hasActivePrompt`, and `activeWorkState`. Untrusted-secondary and archived lists are storage-only: live overlay fields remain absent or false, and archived entries set `isArchived` to `true`. Empty array (not 404) when no sessions exist — a session-picker UI shouldn't error just because the workspace is idle.
 
 ### `GET /workspaces/:workspace/sessions/live-state`
 
@@ -2552,6 +2561,7 @@ Response:
       "sessionId": "session-123",
       "clientCount": 1,
       "hasActivePrompt": true,
+      "activeWorkState": "active",
       "isWaitingForPermission": false,
       "isWaitingForUserQuestion": false,
       "updatedAt": "2026-08-18T08:12:30.123Z"
@@ -2560,7 +2570,7 @@ Response:
 }
 ```
 
-`v` is the response schema version. Every successful response includes `Cache-Control: no-store`. `sessions` is the complete, unpaginated, unordered set of sessions currently live in the selected runtime; an empty live runtime returns `200` with `sessions: []`. `clientCount`, `hasActivePrompt`, `isWaitingForPermission`, and `isWaitingForUserQuestion` are required wire fields, and missing optional bridge values project to `0` or `false`. Static catalog fields such as display name, creation time, organization, and source metadata are deliberately excluded and remain owned by the full catalog. An absent live-state row only clears a known catalog row's volatile fields; it never deletes a persisted catalog row.
+`v` is the response schema version. Every successful response includes `Cache-Control: no-store`. `sessions` is the complete, unpaginated, unordered set of sessions currently live in the selected runtime; an empty live runtime returns `200` with `sessions: []`. `clientCount`, `hasActivePrompt`, `isWaitingForPermission`, and `isWaitingForUserQuestion` are required wire fields, and missing optional bridge values project to `0` or `false`. `activeWorkState` is wire-additive and absent on older daemons: `active` means the daemon owns unsettled work or the child sent a fresh non-empty hold snapshot; `idle` is emitted only for a fresh empty snapshot covering every required category; `unknown` means negotiated reporting is stale or incomplete; and `unsupported` means the child did not negotiate reporting. It does not change `hasActivePrompt`: a background shell, cron turn, or pending terminal notification is active work without becoming a foreground prompt. Static catalog fields such as display name, creation time, organization, and source metadata are deliberately excluded and remain owned by the full catalog. An absent live-state row only clears a known catalog row's volatile fields; it never deletes a persisted catalog row.
 
 `updatedAt` is an optional daemon-observed activity watermark, present when a prompt that reached the running state has published a formal terminal in the current bridge. It advances exactly once per such terminal — success, error, cancellation, and deadline alike — is written before the terminal event is published, and is strictly increasing per live session even when two terminals land in one wall-clock millisecond or the wall clock moves backward; a forward clock jump therefore persists until wall time catches up. It is never earlier than the session's `createdAt`: the first advance floors at creation time, so a wall-clock rollback between creation and the first terminal cannot key a row behind the `createdAt` it was already listed at. Prompt admission, queue waits, streamed updates, queue-only cancellation, heartbeats, and interaction waits never advance it. Clients use it to refresh the recency of a catalog row they already hold instead of reloading the full catalog after a completed turn. It is not a persistence acknowledgement: the recorder writes turn results asynchronously, so the value proves only that the daemon observed a running attempt settle. It is absent before the first running terminal in a bridge generation — including for a session restored from disk — so absence is not a support probe, and it disappears when a daemon restart or workspace runtime replacement installs a new bridge. When both a live and a persisted summary exist for one session, full catalog responses report the later valid timestamp, so `GET /session/:id/status`, which returns the bridge summary directly without that merge, may report an earlier value than a list response.
 

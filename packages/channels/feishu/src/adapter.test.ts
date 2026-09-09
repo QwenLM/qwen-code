@@ -110,7 +110,6 @@ function createObservedContactChannel(
   const channel = new ObservedContactFeishuChannel(
     'test',
     createConfig({
-      blockStreaming: 'on',
       groupPolicy: 'open',
       groups: { '*': { requireMention: false } },
     }),

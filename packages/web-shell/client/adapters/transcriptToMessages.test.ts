@@ -185,6 +185,8 @@ function toolBlock(
     details: overrides.details,
     parentToolCallId: overrides.parentToolCallId,
     subagentType: overrides.subagentType,
+    subagentSessionReady: overrides.subagentSessionReady,
+    serverTimestamp: overrides.serverTimestamp,
     clientReceivedAt: createdAt,
     createdAt,
     updatedAt: overrides.updatedAt ?? createdAt,
@@ -4413,6 +4415,29 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it.each([false, undefined])(
+    'keeps merged readiness true when a later block supplies %s',
+    (subagentSessionReady) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('ready', 'agent-1', 'in_progress', 10, {
+          toolName: 'agent',
+          subagentSessionReady: true,
+        }),
+        toolBlock('later', 'agent-1', 'in_progress', 20, {
+          toolName: 'agent',
+          subagentSessionReady,
+        }),
+      ]);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ callId: 'agent-1', subagentSessionReady: true }],
+      });
+      if (messages[0].role === 'tool_group')
+        expect(messages[0].tools).toHaveLength(1);
+    },
+  );
+
   it('mergeToolCall updates fields from completion block', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
@@ -4933,3 +4958,105 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(agentB!.subContent).toBeUndefined();
   });
 });
+
+describe('running subagent replay start time', () => {
+  function firstTool(blocks: DaemonTranscriptBlock[]) {
+    return transcriptBlocksToDaemonMessages(blocks).find(
+      (message) => message.role === 'tool_group',
+    )?.tools[0];
+  }
+
+  it.each([10_000, 20_000])(
+    'keeps the server start when reopened at %s',
+    (receivedAt) => {
+      const tool = firstTool([
+        toolBlock('agent', 'agent-1', 'in_progress', receivedAt, {
+          toolName: 'Agent',
+          serverTimestamp: 1_000,
+        }),
+      ]);
+      expect(tool?.startTime).toBe(1_000);
+    },
+  );
+
+  it.each([
+    ['Agent', 'completed', 1_000],
+    ['Agent', 'failed', 1_000],
+    ['Read', 'in_progress', 1_000],
+    ['Agent', 'in_progress', undefined],
+  ])(
+    'preserves existing timing for %s/%s/%s',
+    (toolName, status, serverTimestamp) => {
+      const tool = firstTool([
+        toolBlock('tool', 'tool-1', status, 10_000, {
+          toolName,
+          serverTimestamp,
+        }),
+      ]);
+      expect(tool?.startTime).toBe(10_000);
+    },
+  );
+});
+
+it.each(['selected:allow', 'selected:cancel'])(
+  'keeps permission merging compatible with the running clock (%s)',
+  (resolved) => {
+    const permission: DaemonTranscriptBlock = {
+      id: 'permission',
+      kind: 'permission',
+      requestId: 'req',
+      sessionId: 'session',
+      title: 'Agent',
+      options: [],
+      preview: { kind: 'generic' },
+      resolved,
+      toolCall: {
+        toolCallId: 'agent-1',
+        rawInput: { subagent_type: 'general-purpose' },
+      },
+      serverTimestamp: 1_000,
+      clientReceivedAt: 10_000,
+      createdAt: 10_000,
+      updatedAt: 11_000,
+    };
+    const real = toolBlock('real', 'agent-1', 'in_progress', 12_000, {
+      toolName: 'Agent',
+      serverTimestamp: 2_000,
+    });
+    for (const blocks of [
+      [permission],
+      [permission, real],
+      [real, permission],
+    ]) {
+      const tool = transcriptBlocksToDaemonMessages(blocks).find(
+        (message) => message.role === 'tool_group',
+      )?.tools[0];
+      if (tool?.endTime !== undefined) {
+        expect(tool.endTime).toBe(11_000);
+        expect(tool.startTime).toBe(blocks[0].createdAt);
+      } else {
+        expect(tool?.startTime).toBe(blocks.includes(real) ? 2_000 : 1_000);
+      }
+    }
+  },
+);
+
+it.each([true, false])(
+  'preserves subagent readiness with safeToolProjection=%s',
+  (safeToolProjection) => {
+    for (const subagentSessionReady of [false, true, undefined]) {
+      const messages = transcriptBlocksToDaemonMessages(
+        [
+          toolBlock('agent', 'agent-1', 'running', 1, {
+            toolName: 'agent',
+            subagentSessionReady,
+          }),
+        ],
+        { safeToolProjection },
+      );
+      expect(messages).toMatchObject([
+        { role: 'tool_group', tools: [{ subagentSessionReady }] },
+      ]);
+    }
+  },
+);

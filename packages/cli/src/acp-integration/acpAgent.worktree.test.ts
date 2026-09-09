@@ -137,6 +137,23 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     return config.getReasoningEffort() === effort;
   },
   REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
+  clampReasoningEffort: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).clampReasoningEffort,
+  getGptReasoningCapabilities: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).getGptReasoningCapabilities,
+  isReasoningEffortPlaceholder: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isReasoningEffortPlaceholder,
+  isOpenRouterHostname: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isOpenRouterHostname,
+  // The real parser: `model-configuration` gates every reasoning control on it,
+  // and a stand-in would decide capability validity differently from the wire.
+  parseModelReasoningCapabilities: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).parseModelReasoningCapabilities,
   DEFAULT_STOP_HOOK_BLOCK_CAP: 8,
   DEFAULT_MAX_SUBAGENT_DEPTH: 5,
   DEFAULT_MAX_TOOL_CALLS_PER_TURN: 100,
@@ -145,6 +162,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD: 500_000,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES: 1000,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD: 25_000,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP: 900,
   PRIVATE_ACP_CAPABILITY_ENV: 'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
   ApprovalMode: {
     DEFAULT: 'default',

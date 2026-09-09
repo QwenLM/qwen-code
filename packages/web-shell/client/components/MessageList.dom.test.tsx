@@ -571,6 +571,87 @@ const simpleTurns = (count: number): Message[] =>
     return [userMsg(`u${turn}`), asstMsg(`a${turn}`)] as Message[];
   }).flat();
 
+describe('MessageList — locate scroll timer lifecycle', () => {
+  it('does not schedule scroll work after unmounting before locate settles', () => {
+    vi.useFakeTimers();
+    const ref = createRef<MessageListHandle>();
+    const container = mount(simpleTurns(2), ref);
+    act(() => vi.advanceTimersByTime(32));
+
+    act(() => {
+      expect(ref.current?.scrollToMessage('u1')).toBe(true);
+    });
+    act(() => vi.advanceTimersByTime(149));
+
+    const index = mounted.findIndex((entry) => entry.container === container);
+    const [{ root }] = mounted.splice(index, 1);
+    act(() => root.unmount());
+    container.remove();
+    const requestFrame = vi.spyOn(globalThis, 'requestAnimationFrame');
+
+    act(() => vi.advanceTimersByTime(200));
+
+    expect(requestFrame).not.toHaveBeenCalled();
+  });
+
+  it('keeps normal and repeated locate scrolling and highlighting working', () => {
+    vi.useFakeTimers();
+    const scrollIntoView = vi.spyOn(Element.prototype, 'scrollIntoView');
+    const ref = createRef<MessageListHandle>();
+    const container = mount(simpleTurns(2), ref);
+    act(() => vi.advanceTimersByTime(32));
+
+    act(() => {
+      expect(ref.current?.scrollToMessage('u1')).toBe(true);
+    });
+    act(() => vi.advanceTimersByTime(32));
+    expect(
+      container
+        .querySelector('[data-testid="msg-u1"]')
+        ?.getAttribute('data-locate-flashing'),
+    ).toBe('true');
+
+    act(() => {
+      expect(ref.current?.scrollToMessage('u2')).toBe(true);
+    });
+    act(() => vi.advanceTimersByTime(32));
+    expect(
+      container
+        .querySelector('[data-testid="msg-u2"]')
+        ?.getAttribute('data-locate-flashing'),
+    ).toBe('true');
+    expect(
+      container
+        .querySelector('[data-testid="msg-u1"]')
+        ?.getAttribute('data-locate-flashing'),
+    ).toBeNull();
+    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+    expect(scrollIntoView).toHaveBeenLastCalledWith({ block: 'center' });
+    act(() => vi.advanceTimersByTime(150));
+  });
+
+  it('clears every pending locate timer after repeated navigation and unmount', () => {
+    vi.useFakeTimers();
+    const ref = createRef<MessageListHandle>();
+    const container = mount(simpleTurns(2), ref);
+    act(() => vi.advanceTimersByTime(32));
+
+    for (const id of ['u1', 'u2']) {
+      act(() => {
+        expect(ref.current?.scrollToMessage(id)).toBe(true);
+      });
+      act(() => vi.advanceTimersByTime(32));
+    }
+
+    const index = mounted.findIndex((entry) => entry.container === container);
+    const [{ root }] = mounted.splice(index, 1);
+    act(() => root.unmount());
+    container.remove();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe('MessageList — failed prompt retry', () => {
   it('marks only the matching user message and forwards retry', () => {
     const onRetry = vi.fn();
@@ -5034,8 +5115,8 @@ describe('MessageList — turn collapse (DOM)', () => {
     scrollIntoView.mockRestore();
   });
 
-  it('hides the session timeline when the message list is narrow', async () => {
-    const rectSpy = mockMessageListWidth(1000);
+  it('hides the session timeline below the default content width', async () => {
+    const rectSpy = mockMessageListWidth(999);
 
     const c = mount(simpleTurns(4));
     await nextFrame();

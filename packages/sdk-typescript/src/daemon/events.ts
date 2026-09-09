@@ -653,6 +653,7 @@ export interface DaemonAuthDeviceFlowCancelledData {
  */
 export interface DaemonApprovalModeChangedData {
   sessionId: string;
+  planExecutionMode?: string;
   previous: string;
   next: string;
   persisted: boolean;
@@ -928,6 +929,9 @@ export type DaemonMcpServerChangedEvent = DaemonEventEnvelope<
 export interface DaemonExtensionsChangedData {
   readonly refreshed: number;
   readonly failed: number;
+  // Daemons advertising `extension_activation_explicit_refresh` commit
+  // activation without broadcasting it; `enabled`/`disabled` statuses arrive
+  // only from older daemons, newer ones converge via a status-less broadcast.
   readonly status?:
     | 'installed'
     | 'enabled'
@@ -951,6 +955,7 @@ export interface DaemonSessionSnapshotData {
   sessionId: string;
   currentModelId: string | null;
   currentApprovalMode: string | null;
+  planExecutionMode?: string;
   recordingDegraded?: boolean;
   [key: string]: unknown;
 }
@@ -1369,6 +1374,7 @@ export interface DaemonSessionViewState {
    * toggled N times this session". Non-terminal.
    */
   approvalMode?: string;
+  planExecutionMode?: string;
   approvalModeChangedCount: number;
   lastApprovalModeChange?: DaemonApprovalModeChangedData;
   /**
@@ -1553,6 +1559,7 @@ export function createDaemonSessionViewState(
     lastWorkspaceMutation: seed.lastWorkspaceMutation,
     lastWorkspaceMutationType: seed.lastWorkspaceMutationType,
     approvalMode: seed.approvalMode,
+    planExecutionMode: seed.planExecutionMode,
     approvalModeChangedCount: seed.approvalModeChangedCount ?? 0,
     lastApprovalModeChange: seed.lastApprovalModeChange,
     toolToggleCount: seed.toolToggleCount ?? 0,
@@ -2152,6 +2159,8 @@ export function reduceDaemonSessionEvent(
       return {
         ...base,
         approvalMode: event.data.next,
+        planExecutionMode:
+          event.data.next === 'plan' ? event.data.planExecutionMode : undefined,
         approvalModeChangedCount: base.approvalModeChangedCount + 1,
         lastApprovalModeChange: mergeOriginator(event.data, event),
       };
@@ -2236,7 +2245,13 @@ export function reduceDaemonSessionEvent(
           ? { currentModelId: event.data.currentModelId }
           : {}),
         ...(event.data.currentApprovalMode != null
-          ? { approvalMode: event.data.currentApprovalMode }
+          ? {
+              approvalMode: event.data.currentApprovalMode,
+              planExecutionMode:
+                event.data.currentApprovalMode === 'plan'
+                  ? event.data.planExecutionMode
+                  : undefined,
+            }
           : {}),
         ...(event.data.recordingDegraded !== undefined
           ? { recordingDegraded: event.data.recordingDegraded }
@@ -3015,6 +3030,8 @@ function isApprovalModeChangedData(
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['previous']) &&
     isNonEmptyString(value['next']) &&
+    (value['planExecutionMode'] === undefined ||
+      isNonEmptyString(value['planExecutionMode'])) &&
     typeof value['persisted'] === 'boolean'
   );
 }
@@ -3352,6 +3369,8 @@ function isSessionSnapshotData(
   return (
     (model === null || typeof model === 'string') &&
     (mode === null || typeof mode === 'string') &&
+    (value['planExecutionMode'] === undefined ||
+      isNonEmptyString(value['planExecutionMode'])) &&
     (recordingDegraded === undefined || typeof recordingDegraded === 'boolean')
   );
 }

@@ -3,6 +3,7 @@ import type { ACPToolCall } from '../../adapters/types';
 import {
   formatToolDisplayName,
   getAgentCurrentToolHint,
+  getSubagentDetailsUnavailableReason,
   getToolDescription,
   getToolResultSummary,
   getToolSummaryDescription,
@@ -433,4 +434,79 @@ describe('toolFormatting', () => {
       );
     });
   });
+});
+
+describe('subagent detail availability', () => {
+  it.each([
+    [false, 'pending', false, 'subagent.creating'],
+    [false, 'in_progress', false, 'subagent.creating'],
+    [false, 'failed', false, 'subagent.failed'],
+    [false, 'failed', true, 'subagent.cancelled'],
+    [false, 'completed', true, 'subagent.cancelled'],
+    [false, 'completed', false, undefined],
+    [true, 'failed', false, undefined],
+    [true, 'in_progress', false, undefined],
+    [undefined, 'in_progress', false, undefined],
+  ] as const)(
+    'readiness=%s status=%s cancelled=%s gives %s',
+    (subagentSessionReady, status, wasCancelled, expected) => {
+      expect(
+        getSubagentDetailsUnavailableReason(
+          tool({
+            toolName: 'agent',
+            status,
+            subagentSessionReady,
+            wasCancelled,
+          }),
+        ),
+      ).toBe(expected);
+    },
+  );
+
+  it.each([
+    [
+      'failed',
+      { reason: 'Cancel handler registration failed' },
+      'subagent.failed',
+    ],
+    [
+      'pending',
+      {
+        type: 'task_execution',
+        status: 'failed',
+        terminateReason: 'Cancelled during registration',
+      },
+      'subagent.failed',
+    ],
+    ['failed', { status: 'cancelled' }, 'subagent.cancelled'],
+    ['failed', { status: 'CANCELED' }, 'subagent.cancelled'],
+    ['completed', { reason: 'Cancelled by user' }, 'subagent.cancelled'],
+  ] as const)(
+    'resolves %s with output %j as %s',
+    (status, rawOutput, expected) => {
+      expect(
+        getSubagentDetailsUnavailableReason(
+          tool({
+            toolName: 'agent',
+            status,
+            subagentSessionReady: false,
+            rawOutput,
+          }),
+        ),
+      ).toBe(expected);
+    },
+  );
+});
+
+it('reports launch failure before the tool status catches up', () => {
+  expect(
+    getSubagentDetailsUnavailableReason(
+      tool({
+        toolName: 'agent',
+        status: 'pending',
+        subagentSessionReady: false,
+        rawOutput: { type: 'task_execution', status: 'failed' },
+      }),
+    ),
+  ).toBe('subagent.failed');
 });

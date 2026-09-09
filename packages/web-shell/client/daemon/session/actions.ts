@@ -43,6 +43,7 @@ import {
 } from '@qwen-code/sdk/daemon';
 import { extractHttpStatus, isInvalidClientIdError } from './httpErrors.js';
 import {
+  getPlanExecutionMode,
   mapProviderStatus,
   mapReasoningControls,
   mapSessionContextReasoning,
@@ -61,6 +62,7 @@ import {
   withActionTimeout,
   type TimerRef,
 } from '../timing.js';
+import { isTransientSessionReadError } from '../../utils/sessionErrors.js';
 import {
   getPersistedClientId,
   persistStableClientId,
@@ -343,6 +345,7 @@ export function getConnectionAfterSessionClear(
       delete next.models;
       delete next.currentModel;
       delete next.currentMode;
+      delete next.planExecutionMode;
       delete next.contextWindow;
       delete next.providers;
       delete next.gitBranch;
@@ -1509,16 +1512,24 @@ export function createDaemonSessionActions({
       );
       try {
         const result = await withActionTimeout(
-          session.client.setSessionApprovalMode(session.sessionId, mode, {
-            persist: opts?.persist,
-            clientId: session.clientId,
-          }),
+          trackSessionConfigMutation(
+            session,
+            session.client.setSessionApprovalMode(session.sessionId, mode, {
+              persist: opts?.persist,
+              clientId: session.clientId,
+              ...(opts?.planMode !== undefined
+                ? { planMode: opts.planMode }
+                : {}),
+            }),
+          ),
           'Set approval mode timed out',
         );
         if (sessionRef.current === session) {
           setConnection((current) => ({
             ...current,
             currentMode: result.mode || mode,
+            planExecutionMode:
+              result.mode === 'plan' ? result.planExecutionMode : undefined,
           }));
         }
         return result;
@@ -2052,11 +2063,15 @@ export function createDaemonSessionActions({
           ) {
             return current;
           }
+          const currentMode = getModeFromSessionContext(context);
           return {
             ...current,
             context,
-            currentMode:
-              getModeFromSessionContext(context) ?? current.currentMode,
+            currentMode: currentMode ?? current.currentMode,
+            planExecutionMode:
+              currentMode !== undefined
+                ? getPlanExecutionMode(context)
+                : current.planExecutionMode,
             currentModel:
               getModelFromSessionContext(context) ?? current.currentModel,
             reasoning: mapSessionContextReasoning(context),
@@ -2074,23 +2089,41 @@ export function createDaemonSessionActions({
     },
 
     async getContextUsage(opts) {
-      const session = requireSessionForAction(
-        addNotice,
-        sessionRef.current,
-        'Load context usage failed',
-        'load_context_usage',
-      );
+      // Mirrors getStats: a missing session rethrows raw without a notice.
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
       try {
         return await withActionTimeout(
           session.contextUsage(opts),
           'Load context usage timed out',
         );
       } catch (error) {
+        // Opt-in silence for surfaces that re-collect automatically (the
+        // context panel): notifying there would stack identical notices for
+        // as long as the session is down. User-initiated callers keep the
+        // attributed notice and the suppressed duplicate toast.
+        if (opts?.silent && isTransientSessionReadError(error)) {
+          throw error;
+        }
+        // Route through noticeForSession so the dedupe registry stays
+        // session-scoped, and only register dedupe keys while this session is
+        // still live, so a stale in-flight failure neither toasts for a
+        // session the user left nor suppresses the current session's notice.
+        const live = sessionRef.current === session;
         throw dispatchActionError(
-          addNotice,
+          noticeForSession(session),
           'Load context usage failed',
           error,
           'load_context_usage',
+          opts?.silent && live
+            ? {
+                dispatchedNoticeKeys: silentHardFailureNoticeKeys,
+                noticeOnceKey: getActionErrorNoticeKey(
+                  'load_context_usage',
+                  error,
+                ),
+              }
+            : undefined,
         );
       }
     },
