@@ -1486,7 +1486,14 @@ export class WorkflowRunEvent implements BaseTelemetryEvent {
   'event.timestamp': string;
   status: string;
   agents_dispatched: number;
+  /** All settled dispatches; failed and cached are contained in this count. */
   agents_completed: number;
+  /** Settled dispatch traces whose terminal status is failed. */
+  agents_failed: number;
+  /** Settled dispatches served from a prior run's journal. */
+  agents_cached: number;
+  /** Dispatched calls re-run from a prior failed or interrupted attempt. */
+  agents_respawned: number;
   phase_count: number;
   tokens_spent: number;
   duration_ms: number;
@@ -1495,6 +1502,9 @@ export class WorkflowRunEvent implements BaseTelemetryEvent {
     status: string;
     agents_dispatched: number;
     agents_completed: number;
+    agents_failed?: number;
+    agents_cached?: number;
+    agents_respawned?: number;
     phase_count: number;
     tokens_spent: number;
     duration_ms: number;
@@ -1504,6 +1514,9 @@ export class WorkflowRunEvent implements BaseTelemetryEvent {
     this.status = params.status;
     this.agents_dispatched = params.agents_dispatched;
     this.agents_completed = params.agents_completed;
+    this.agents_failed = params.agents_failed ?? 0;
+    this.agents_cached = params.agents_cached ?? 0;
+    this.agents_respawned = params.agents_respawned ?? 0;
     this.phase_count = params.phase_count;
     this.tokens_spent = params.tokens_spent;
     this.duration_ms = params.duration_ms;
