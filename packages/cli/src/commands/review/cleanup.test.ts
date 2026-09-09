@@ -328,6 +328,22 @@ describe('runCleanup', () => {
     }
   });
 
+  it('reads process.cwd() ONCE per run — the entry capture — and never downstream (R30-6)', () => {
+    // The mid-run half of the deleted-cwd class: the entry guard covers a cwd
+    // already gone, but `scratchWorktreesOf` used to read the cwd again later
+    // (`resolve(worktree)` against it, `redirectedAncestor`'s default stop),
+    // so a deletion AFTER the capture still threw uv_cwd out of the sweep.
+    // Both now anchor at the captured root. The call-count is the pin: any
+    // downstream cwd read returns this to red.
+    const cwdSpy = vi.spyOn(process, 'cwd');
+    try {
+      runCleanup('pr-123');
+      expect(cwdSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      cwdSpy.mockRestore();
+    }
+  });
+
   it('keeps the lease when branch deletion fails', () => {
     // Once, because this suite's mocks keep their implementations across tests
     // and each one sets what it needs: a standing throw here would fail every

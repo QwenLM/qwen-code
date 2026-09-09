@@ -639,12 +639,19 @@ function auditAoneMrWrites(target: string, window: AuditWindow): void {
  * review's own `<worktree>-scratch-` prefix is a much narrower thing than any
  * string that matches a glob.
  */
-function scratchWorktreesOf(worktree: string): {
+function scratchWorktreesOf(
+  worktree: string,
+  stopAt: string,
+): {
   paths: string[];
   failed: boolean;
 } {
   const prefix = scratchWorktreePrefix(worktree);
-  const parent = dirname(resolve(worktree));
+  // Anchored at the captured root, never at the live cwd: `resolve(worktree)`
+  // against the process cwd and `redirectedAncestor`'s default stop both read
+  // it, and a cwd deleted mid-run threw uv_cwd out of the sweep here — past
+  // the entry guard that exists to catch exactly that.
+  const parent = dirname(resolve(stopAt, worktree));
   let entries: string[];
   try {
     entries = readdirSync(parent);
@@ -669,7 +676,7 @@ function scratchWorktreesOf(worktree: string): {
   // probes, `git worktree remove`, `releaseWorktree`'s recursive `rmSync` —
   // would run inside wherever that link points. Refusing the whole family is the
   // only answer that scopes: one entry cannot be trusted more than its parent.
-  if (redirectedAncestor(parent) !== null) {
+  if (redirectedAncestor(parent, stopAt) !== null) {
     return { paths: [], failed: true };
   }
   return {
@@ -936,7 +943,7 @@ export function runCleanup(target: string): void {
     // `<wt>-scratch-*` is matched against real entries, never expanded into a
     // path that does not exist, and nothing outside the review's own temp dir
     // can match the prefix.
-    const scratch = scratchWorktreesOf(wt);
+    const scratch = scratchWorktreesOf(wt, repositoryRoot);
     if (scratch.failed) {
       failedAny = true;
       // A family that could not even be LISTED means whole checkouts may still
