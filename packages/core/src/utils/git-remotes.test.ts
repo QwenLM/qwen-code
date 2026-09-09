@@ -1084,6 +1084,28 @@ describe('fetchGitRemotes repository scope', () => {
     expect(git(wt, 'config', '--list')).not.toContain('branch.feat.merge');
   });
 
+  it('attributes a branch by its worktree-scope remote over a divergent local one', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(wt, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(wt, 'branch', 'feat');
+    // git resolves worktree-over-local: feat points at origin through
+    // the WORKTREE record. git's rm then unsets the local copy too (its
+    // effective-value match), so the removal must sweep the WORKTREE
+    // record — a local-first fold would leave it dangling.
+    git(wt, 'remote', 'add', 'other', 'https://example.com/other/r.git');
+    git(wt, 'config', '--local', 'branch.feat.remote', 'other');
+    git(wt, 'config', '--worktree', 'branch.feat.remote', 'origin');
+    const remotes = await gitRemoteRemove(wt, 'origin', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['other']);
+    // No copy survives: the local one went with git's rm (effective
+    // match), the worktree one with the sweep (correct attribution).
+    expect(git(wt, 'config', '--list')).not.toContain('branch.feat.remote');
+  });
+
   it('clears a worktree merge key whose remote key lives at local scope', async () => {
     const dir = makeRepo();
     git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
