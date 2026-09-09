@@ -249,8 +249,12 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   // QWEN_CDP_MCP_COMMAND is spawned by the daemon as the browser-automation
   // MCP adapter and QWEN_SERVE_CDP_TUNNEL_OVER_WS switches that tunnel
   // surface on — the same daemon-hijack class as QWEN_CLI_ENTRY.
+  // QWEN_DAEMON_URL steers the shared-chrome-bridge reroute at a daemon; a
+  // project .env fixing it points the user's chrome-devtools MCP at an
+  // attacker host.
   it('excludes the serve CDP adapter command and tunnel switch', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CDP_MCP_COMMAND');
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_DAEMON_URL');
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
     );

@@ -59,6 +59,7 @@ import {
   registerMcpHotReload,
   registerModelProvidersHotReload,
 } from './config/hot-reload.js';
+import { maybeRouteChromeDevToolsViaDaemonBridge } from './config/shared-chrome-bridge.js';
 import { LspConfigWatcher } from './config/lsp-config-watcher.js';
 import { ExtensionFileWatcher } from './config/extension-file-watcher.js';
 import { ExtensionRefreshState } from './config/extension-refresh-state.js';
@@ -936,6 +937,13 @@ export async function main() {
         nonInteractiveHousekeeping.stopNonInteractiveOpenAILogHousekeeping(),
       );
     }
+
+    // Issue #8737: when the local daemon hosts a usable shared Chrome bridge
+    // (extension connected, multi-client `/cdp` tunnel), reroute
+    // `--autoConnect` chrome-devtools MCP servers to dial it instead of
+    // Chrome — one consent per daemon/extension lifetime, not per session.
+    // Strictly fail-open: absent/unusable bridge keeps the user's config.
+    await maybeRouteChromeDevToolsViaDaemonBridge(config);
 
     // Subscribe the running Config to settings changes so MCP servers
     // reconnect / disconnect / restart without a session restart (#3696,
