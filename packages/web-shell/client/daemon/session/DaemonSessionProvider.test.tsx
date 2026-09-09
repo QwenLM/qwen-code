@@ -58,6 +58,11 @@ import {
   clearSidechannelMidTurnInjected,
   getSidechannelMidTurnInjected,
 } from '../midTurnInjectedSidechannel.js';
+import {
+  createTurnNotificationObserver,
+  TurnNotificationContext,
+  type TurnNotificationObserver,
+} from './turn-notification-context.js';
 import { persistStableClientId } from './clientLifecycle.js';
 
 interface MockSession {
@@ -19443,9 +19448,150 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('keeps initial history quiet and notifies once after a live terminal is projected', async () => {
+    const terminal: DaemonEvent = {
+      id: 2,
+      v: 1,
+      type: 'turn_complete',
+      data: {
+        sessionId: 'session-1',
+        promptId: 'live',
+        stopReason: 'end_turn',
+      },
+    };
+    const go = createDeferred<void>();
+    let store: DaemonTranscriptStore | undefined;
+    let snapshotAtNotification: unknown;
+    const notify = vi.fn(() => {
+      snapshotAtNotification = store?.getSnapshot();
+    });
+    const observer = createTurnNotificationObserver(notify);
+    sdkMocks.sessions.push(
+      createMockSession({
+        replaySnapshot: {
+          compactedReplay: [
+            {
+              ...terminal,
+              data: { ...(terminal.data as object), promptId: 'history' },
+            },
+          ],
+          liveJournal: [],
+        },
+        async *events(opts) {
+          await go.promise;
+          yield {
+            id: 3,
+            v: 1,
+            type: 'session_update',
+            promptId: 'live',
+            data: {
+              sessionId: 'session-1',
+              promptId: 'live',
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'final answer' },
+              },
+            },
+          };
+          yield { ...terminal, id: 4 };
+          yield { ...terminal, id: 5 };
+          yield* createIdleEvents()(opts);
+        },
+      }),
+    );
+    function Harness() {
+      store = useDaemonTranscriptStore();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true }, observer);
+    expect(notify).not.toHaveBeenCalled();
+    await act(async () => {
+      go.resolve();
+      await flushPromises();
+    });
+    expect(notify).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'completed' }),
+    );
+    expect(JSON.stringify(snapshotAtNotification)).toContain('final answer');
+  });
+
+  it('retains a live admitted prompt across epoch reset and settles it from replay', async () => {
+    const reloaded = createDeferred<void>();
+    const notify = vi.fn();
+    const observer = createTurnNotificationObserver(notify);
+    sdkMocks.sessions.push(
+      createMockSession({
+        hasActivePrompt: true,
+        async *events() {
+          yield {
+            id: 1,
+            v: 1,
+            type: 'pending_prompt_started',
+            data: {
+              sessionId: 'session-1',
+              promptId: 'known',
+              text: 'request',
+            },
+          };
+          yield {
+            id: 2,
+            v: 1,
+            type: 'state_resync_required',
+            data: { reason: 'epoch_reset' },
+          };
+        },
+      }),
+      createMockSession({
+        replaySnapshot: {
+          compactedReplay: [
+            {
+              id: 3,
+              v: 1,
+              type: 'turn_complete',
+              data: {
+                sessionId: 'session-1',
+                promptId: 'unknown',
+                stopReason: 'end_turn',
+              },
+            },
+            {
+              id: 4,
+              v: 1,
+              type: 'turn_complete',
+              data: {
+                sessionId: 'session-1',
+                promptId: 'known',
+                stopReason: 'end_turn',
+              },
+            },
+          ],
+          liveJournal: [],
+        },
+        events: createPendingEvents(reloaded),
+      }),
+    );
+    await renderWithProvider(
+      null,
+      { autoConnect: true, reconnectDelayMs: 1, maxReconnectDelayMs: 1 },
+      observer,
+    );
+    await act(async () => {
+      await reloaded.promise;
+      await flushPromises();
+    });
+    expect(notify).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'completed' }),
+    );
+    expect(notify.mock.calls[0]?.[0].key).toContain('known');
+    expect(notify.mock.calls[0]?.[0].key).not.toContain('unknown');
+  });
+
   async function renderWithProvider(
     children: ReactNode,
     props: Partial<DaemonSessionProviderProps> = {},
+    notifications?: TurnNotificationObserver,
   ) {
     const defaultSessionId =
       props.autoConnect === true &&
@@ -19458,16 +19604,25 @@ describe('DaemonSessionProvider', () => {
     document.body.appendChild(container);
     root = createRoot(container);
 
+    const provider = (
+      <DaemonSessionProvider
+        baseUrl="http://127.0.0.1:4170"
+        autoConnect={false}
+        {...(defaultSessionId ? { sessionId: defaultSessionId } : {})}
+        {...props}
+      >
+        {children}
+      </DaemonSessionProvider>
+    );
     act(() => {
       root?.render(
-        <DaemonSessionProvider
-          baseUrl="http://127.0.0.1:4170"
-          autoConnect={false}
-          {...(defaultSessionId ? { sessionId: defaultSessionId } : {})}
-          {...props}
-        >
-          {children}
-        </DaemonSessionProvider>,
+        notifications ? (
+          <TurnNotificationContext.Provider value={notifications}>
+            {provider}
+          </TurnNotificationContext.Provider>
+        ) : (
+          provider
+        ),
       );
     });
     await act(async () => {

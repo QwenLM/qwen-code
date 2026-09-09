@@ -3191,6 +3191,8 @@ const EN: Messages = {
   'splitView.outerApprovalPending':
     'Your main session is waiting for approval.',
   'splitView.goToApproval': 'Go to it',
+  'splitView.pendingCount': (v) => `${v?.count ?? 0} awaiting input`,
+  'splitView.nextPending': 'Go to the next session awaiting input',
   'splitView.empty': 'No sessions in the split. Add one to get started.',
   'splitView.composerPlaceholder': 'Message this session…',
   'settings.title': 'Settings',
@@ -3539,6 +3541,27 @@ const EN: Messages = {
     `Maximum of ${v?.max ?? 3} fallback models selected; deselect one to choose another.`,
   'settings.corrupted': (v) =>
     `Settings file was corrupted${v?.recovered === 'true' ? ' (recovered from backup)' : ''}`,
+  'browserNotifications.label': 'Browser task notifications',
+  'browserNotifications.description':
+    'Notify when the current chat or a split-view chat finishes or fails while this page is in the background or unfocused. Saved for this browser site only; the page must remain open.',
+  'browserNotifications.completed': 'This turn has completed.',
+  'browserNotifications.failed':
+    'This turn failed. Return to view the details.',
+  'browserNotifications.ended':
+    'This turn has ended. Return to check the result.',
+  'browserNotifications.allow': 'Allow notifications',
+  'browserNotifications.enabled': 'Enabled.',
+  'browserNotifications.disabled': 'Disabled.',
+  'browserNotifications.waiting': 'Waiting for browser permission.',
+  'browserNotifications.denied':
+    'Notifications are blocked. Allow them in your browser site settings.',
+  'browserNotifications.unavailable':
+    'Notifications are unavailable in this browser or page context.',
+  'browserNotifications.requesting': 'Waiting for your permission…',
+  'browserNotifications.error':
+    'Unable to enable or show notifications. Check your browser and system settings.',
+  'browserNotifications.temporary':
+    'This setting is saved for the current page only.',
   'settings.label.ui.chatWidth': 'Chat width',
   'settings.description.ui.chatWidth':
     'Frontend-only chat content width. Stored in this browser.',
@@ -6582,6 +6605,8 @@ const ZH: Messages = {
   'splitView.paneConnectionError': '连接已断开',
   'splitView.outerApprovalPending': '主会话正在等待审批。',
   'splitView.goToApproval': '前往处理',
+  'splitView.pendingCount': (v) => `${v?.count ?? 0} 个会话待处理`,
+  'splitView.nextPending': '前往下一个待处理会话',
   'splitView.empty': '分屏中还没有会话，添加一个开始。',
   'splitView.composerPlaceholder': '给这个会话发消息…',
   'settings.title': '设置',
@@ -6911,6 +6936,21 @@ const ZH: Messages = {
     `最多可选 ${v?.max ?? 3} 个回退模型；请先取消一个再选择其他。`,
   'settings.corrupted': (v) =>
     `设置文件已损坏${v?.recovered === 'true' ? '（已从备份恢复）' : ''}`,
+  'browserNotifications.label': '浏览器任务通知',
+  'browserNotifications.description':
+    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。仅保存在此浏览器站点；网页需保持打开。',
+  'browserNotifications.completed': '本轮已完成。',
+  'browserNotifications.failed': '本轮执行失败，请返回查看。',
+  'browserNotifications.ended': '本轮已结束，请返回查看结果。',
+  'browserNotifications.allow': '允许通知',
+  'browserNotifications.enabled': '已开启。',
+  'browserNotifications.disabled': '未开启。',
+  'browserNotifications.waiting': '等待浏览器授权。',
+  'browserNotifications.denied': '浏览器已阻止通知，请在浏览器站点设置中允许。',
+  'browserNotifications.unavailable': '当前浏览器或页面环境无法使用通知。',
+  'browserNotifications.requesting': '等待你的授权…',
+  'browserNotifications.error': '无法启用或显示通知，请检查浏览器及系统设置。',
+  'browserNotifications.temporary': '设置仅在当前页面有效。',
   'settings.label.ui.chatWidth': '屏宽',
   'settings.description.ui.chatWidth':
     '纯前端的聊天内容宽度设置，保存在当前浏览器中。',

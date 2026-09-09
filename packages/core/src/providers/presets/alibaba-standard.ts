@@ -57,6 +57,10 @@ export const alibabaStandardProvider: ProviderConfig = {
   ],
   modelsEditable: true,
   modelNamePrefix: 'ModelStudio Standard',
+  // The Responses API on these endpoints serves the server-side `web_search`
+  // / `web_extractor` tools with the same key, so the built-in tool needs no
+  // extra configuration.
+  webSearch: { backend: 'dashscope' },
   uiGroup: 'alibaba',
   uiLabels: { flowTitle: 'Alibaba ModelStudio', baseUrlStepTitle: 'Region' },
 };
