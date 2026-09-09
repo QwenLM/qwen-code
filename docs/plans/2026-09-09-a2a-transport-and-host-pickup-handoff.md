@@ -1,8 +1,8 @@
 # 交接：A2A 传输层与 Host 出站取件
 
-状态：任务 1 已完成并通过独立 Python SDK 互通；任务 2 在写代码前发现 Host 授权/放置语义缺失，等待人决定。上游状态见[实施计划 §3b](./2026-09-09-agent-service-collaboration-plan.md)。基线 `c976e5e2a0`（分支 `codex/multi-agent-mesh-foundation`，PR #11206）。
+状态：任务 1 已完成并通过独立 Python SDK 互通；任务 2 的协调端授权放置、长轮询取件、结果回传与租约接管已实现并完成双 Host 行为演示，执行端 model worker 尚未接入。上游状态见[实施计划 §3b](./2026-09-09-agent-service-collaboration-plan.md)。交付分支仍为 `codex/multi-agent-mesh-foundation`（PR #11206）。
 
-A2A 的语义、存储与授权已落地，任务 1 只需接传输。任务 2 的租约语义已落地，但 Host 凭证目前只按 workspace 鉴权，没有 Host→Agent/任务授权或远程放置关系；直接接取件会违反“Host 凭证不能领取他人的任务”。不要用 `WorkspaceAgent.runtimeId` 代替 Host id：架构明确两者不是同一职责。先决定最小授权/放置模型，再接传输。既有断言可用 `node scripts/audit/run-workspace-agents.mjs`（335 passed）复跑。
+A2A 的语义、存储与授权已落地。Host 放置采用操作者确认的最小模型：Agent 仍由 workspace store 拥有，`execution` 只区分本地与一组获准领取它的 managed Host；Host 注册本身不获得任何 Agent。没有引入 Host pool，也没有复用 `runtimeId` 承载授权。
 
 任务 1 实测（Python `a2a-sdk==1.1.2`）：公开 card 的 skills 为 0，认证 card 为 1；接单返回一个 Task，同 `messageId` 重发仍为同一 Task，列举为 1；第二调用方读取失败；同键异内容错误携带原 Task id；取消返回 `TASK_STATE_CANCELED`。`SendStreamingMessage` 返回 `-32004`，未宣传且未支持。关闭协作开关的真实 daemon app 中，公开 card 为 404，普通 `/health` 为 200。
 
@@ -106,6 +106,12 @@ type LeaseRefusal = 'no_such_run' | 'not_leasable' | 'held_by_other_host'
 3. 同一 Host 在 run 重启后拿旧 `leaseId` 回传,被拒且理由是 `attempt_moved_on`。
 4. Host 凭证 X 领不到属于 Host Y 的任务。
 5. 断线重连后能找回原任务,不产生第二次副作用执行。
+
+### 本轮观测
+
+一次独立行为脚本实际观察到：Host X 无法领取未授权 Agent；本地 dispatcher 不接触 managed-host Agent；Host A 重连取得同一 `leaseId`；租约过期后 Host B 取得新 `leaseId`，Host A 的晚结果以 `stale_lease` 拒绝；旧 attempt 以 `attempt_moved_on` 拒绝；Host B 的结果先持久化并把线程推进 `in_review`，同一结果重发返回 `alreadyApplied=true`。
+
+这证明了协调端传输和状态机，不证明执行端已能跑模型。当前 `agent-host-client.ts` 仍只注册和心跳，没有消费取件、调用本机 runtime、再回传结果的 worker loop；完整 persona/tool ceiling 也尚未通过取件协议装入远端 runtime。把这一段补齐前，产品只能称为「远端取件通道可用」，不能称为「远端 Agent 执行完成」。
 
 ---
 

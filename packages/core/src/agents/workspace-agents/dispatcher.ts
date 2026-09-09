@@ -22,6 +22,7 @@ import { assembleAgentPrompt } from './prompt.js';
 import {
   generateRunId,
   isAgentAddressable,
+  isAgentLocal,
   listThreads,
   maxConcurrentRunsFor,
   readWorkspaceAgents,
@@ -404,7 +405,9 @@ export function selectCandidates(
       const agent = agents.find((candidate) => candidate.id === run.agentId);
       // A retired or disabled agent keeps its history and its name but takes
       // no new work; the roster entry survives so its old posts still read.
-      if (!agent || !isAgentAddressable(agent)) continue;
+      if (!agent || !isAgentAddressable(agent) || !isAgentLocal(agent)) {
+        continue;
+      }
       queued.push({ agent, thread, run });
     }
   }
@@ -763,6 +766,7 @@ export async function dispatchOnce(
   const now = options.now ?? Date.now();
   const workspace = await readAgentWorkspace(projectRoot);
   const agents = await readWorkspaceAgents(projectRoot);
+  const localAgents = agents.filter(isAgentLocal);
   let { threads } = await listThreads(projectRoot);
   const records: DispatchRecord[] = [];
 
@@ -770,7 +774,7 @@ export async function dispatchOnce(
     ...(await reconcileInterruptedRuns(
       projectRoot,
       port,
-      agents,
+      localAgents,
       threads,
       now,
     )),
@@ -781,14 +785,14 @@ export async function dispatchOnce(
       projectRoot,
       port,
       workspace.workspaceId,
-      agents,
+      localAgents,
       threads,
       now,
     )),
   );
   ({ threads } = await listThreads(projectRoot));
 
-  for (const candidate of selectCandidates(agents, threads)) {
+  for (const candidate of selectCandidates(localAgents, threads)) {
     const { agent, thread, run } = candidate;
     const base = { agentId: agent.id, threadId: thread.id, runId: run.id };
     const sessionId = priorSessionId(thread, run);
@@ -815,7 +819,7 @@ export async function dispatchOnce(
           ? { detail: state.threadId }
           : state.kind === 'unavailable'
             ? { detail: state.error }
-          : {}),
+            : {}),
       });
       continue;
     }
@@ -833,7 +837,7 @@ export async function dispatchOnce(
       agent,
       run: claimed.run,
       thread: claimed.thread,
-      roster: agents,
+      roster: localAgents,
       ...(definitionVersion ? { definitionVersion } : {}),
     });
 

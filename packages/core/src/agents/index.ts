@@ -33,6 +33,7 @@ export type { AgentTrace, AgentTraceNode } from './agent-transcript.js';
 export {
   claimAgentHostSession,
   enrollAgentHost,
+  authenticateAgentHost,
   heartbeatAgentHost,
   issueAgentHostEnrollment,
   createThread,
@@ -47,8 +48,11 @@ export {
   releaseAgentHostSession,
   retireWorkspaceAgent,
   isAgentAddressable,
+  isAgentExecutableByHost,
+  isAgentLocal,
   maxConcurrentRunsFor,
   setWorkspaceAgentEnabled,
+  setWorkspaceAgentExecution,
   updateWorkspaceAgents,
   updateThread,
   withAgentStoreTransaction,
@@ -66,7 +70,10 @@ export {
   postMessage,
 } from './workspace-agents/thread-actions.js';
 export { resolveThreadStatus } from './workspace-agents/thread-status.js';
-export { isThreadTerminal, TERMINAL_THREAD_STATUSES } from './workspace-agents/types.js';
+export {
+  isThreadTerminal,
+  TERMINAL_THREAD_STATUSES,
+} from './workspace-agents/types.js';
 export {
   AGENT_TOOL_CLASSIFICATION,
   THREAD_TOOL_NAMES,
@@ -101,12 +108,20 @@ export {
 } from './workspace-agents/a2a-grants.js';
 export {
   acquireRunLease,
+  applyHostRunResult,
   renewRunLease,
   checkRunLease,
+  checkRunLeaseInTransaction,
+  pickupRunForHost,
   releaseRunLease,
   DEFAULT_RUN_LEASE_MS,
 } from './workspace-agents/host-lease.js';
-export type { LeaseRefusal, LeaseResult } from './workspace-agents/host-lease.js';
+export type {
+  HostRunAssignment,
+  HostRunResult,
+  LeaseRefusal,
+  LeaseResult,
+} from './workspace-agents/host-lease.js';
 export type { RunLease } from './workspace-agents/types.js';
 export {
   classifyCodexTurn,
@@ -133,9 +148,7 @@ export type {
   A2AFailure,
 } from './workspace-agents/a2a-server.js';
 export type { A2AGrant, A2AGrantScope } from './workspace-agents/types.js';
-export {
-  ExternalIntakeConflictError,
-} from './workspace-agents/external-intake.js';
+export { ExternalIntakeConflictError } from './workspace-agents/external-intake.js';
 export type {
   ExternalSubmission,
   ExternalAcceptance,
@@ -195,6 +208,7 @@ export {
 } from './workspace-agents/types.js';
 export type {
   WorkspaceAgent,
+  WorkspaceAgentExecution,
   AgentHostView,
   AgentWorkspaceState,
   Thread,

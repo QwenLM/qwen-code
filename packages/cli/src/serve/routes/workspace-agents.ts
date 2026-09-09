@@ -49,11 +49,13 @@ import {
   releaseAgentHostSession,
   retireWorkspaceAgent,
   isAgentAddressable,
+  isAgentLocal,
   maxConcurrentRunsFor,
   THREAD_TOOL_NAMES,
   AGENT_TOOL_CLASSIFICATION,
   resolveThreadStatus,
   setWorkspaceAgentEnabled,
+  setWorkspaceAgentExecution,
   updateWorkspaceAgents,
   withAgentStoreTransaction,
   resolveTargets,
@@ -62,6 +64,7 @@ import {
   DEFAULT_THREAD_AUTO_TURN_BUDGET,
   DEFAULT_THREAD_TOKEN_BUDGET,
   type WorkspaceAgent,
+  type WorkspaceAgentExecution,
   type Thread,
   type ThreadRun,
   deliverNotifications,
@@ -194,6 +197,25 @@ function readAgentConfigPatch(payload: {
     touched: steps.length > 0,
     apply: (agent) => steps.reduce((current, step) => step(current), agent),
   };
+}
+
+function readAgentExecution(
+  value: unknown,
+): WorkspaceAgentExecution | undefined | 'invalid' {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'object' || value === null) return 'invalid';
+  const input = value as Record<string, unknown>;
+  if (input['mode'] === 'local') return { mode: 'local' };
+  const hostIds = input['hostIds'];
+  if (
+    input['mode'] !== 'managed-host' ||
+    !Array.isArray(hostIds) ||
+    hostIds.length === 0 ||
+    !hostIds.every((hostId) => typeof hostId === 'string' && hostId.length > 0)
+  ) {
+    return 'invalid';
+  }
+  return { mode: 'managed-host', hostIds: [...new Set(hostIds)] };
 }
 
 /**
@@ -467,6 +489,13 @@ export function registerWorkspaceAgentRoutes(
         ? runtime.bridge.getHeartbeatState(workspace.hostSessionId)
             ?.sessionLastSeenAt
         : undefined;
+      const localAgentIds = new Set(
+        agents
+          .filter(
+            (agent) => agent.retiredAt === undefined && isAgentLocal(agent),
+          )
+          .map((agent) => agent.id),
+      );
       const localRuntime = {
         id: LOCAL_AGENT_RUNTIME_ID,
         kind: 'local' as const,
@@ -479,39 +508,72 @@ export function registerWorkspaceAgentRoutes(
           ? { hostSessionId: workspace.hostSessionId }
           : {}),
         ...(lastSeenAt !== undefined ? { lastSeenAt } : {}),
-        agentCount: agents.filter((agent) => agent.retiredAt === undefined)
-          .length,
+        agentCount: localAgentIds.size,
         sessionCount: agentSessions.length,
         runningTaskCount: threads.filter((thread) =>
-          thread.runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status)),
+          thread.runs.some(
+            (run) =>
+              localAgentIds.has(run.agentId) &&
+              ACTIVE_RUN_STATUSES.has(run.status),
+          ),
         ).length,
         queuedTaskCount: threads.reduce(
           (count, thread) =>
-            count + thread.runs.filter((run) => run.status === 'queued').length,
+            count +
+            thread.runs.filter(
+              (run) =>
+                localAgentIds.has(run.agentId) && run.status === 'queued',
+            ).length,
           0,
         ),
       };
       const now = Date.now();
-      const hostRuntimes = hosts.map((host) => ({
-        id: host.id,
-        kind: 'external' as const,
-        label: host.name,
-        provider: host.providers.join(', '),
-        status:
-          host.lastSeenAt !== undefined &&
-          now - host.lastSeenAt <= AGENT_HOST_ONLINE_WINDOW_MS
-            ? ('online' as const)
-            : ('offline' as const),
-        workspaceId: runtime.workspaceId,
-        workspaceCwd: host.workspaceCwd,
-        ...(host.lastSeenAt !== undefined
-          ? { lastSeenAt: host.lastSeenAt }
-          : {}),
-        agentCount: 0,
-        sessionCount: 0,
-        runningTaskCount: 0,
-        queuedTaskCount: 0,
-      }));
+      const hostRuntimes = hosts.map((host) => {
+        const agentIds = new Set(
+          agents
+            .filter(
+              (agent) =>
+                agent.retiredAt === undefined &&
+                agent.execution?.mode === 'managed-host' &&
+                agent.execution.hostIds.includes(host.id),
+            )
+            .map((agent) => agent.id),
+        );
+        return {
+          id: host.id,
+          kind: 'external' as const,
+          label: host.name,
+          provider: host.providers.join(', '),
+          status:
+            host.lastSeenAt !== undefined &&
+            now - host.lastSeenAt <= AGENT_HOST_ONLINE_WINDOW_MS
+              ? ('online' as const)
+              : ('offline' as const),
+          workspaceId: runtime.workspaceId,
+          workspaceCwd: host.workspaceCwd,
+          ...(host.lastSeenAt !== undefined
+            ? { lastSeenAt: host.lastSeenAt }
+            : {}),
+          agentCount: agentIds.size,
+          sessionCount: 0,
+          runningTaskCount: threads.filter((thread) =>
+            thread.runs.some(
+              (run) =>
+                agentIds.has(run.agentId) &&
+                run.lease?.hostId === host.id &&
+                ACTIVE_RUN_STATUSES.has(run.status),
+            ),
+          ).length,
+          queuedTaskCount: threads.reduce(
+            (count, thread) =>
+              count +
+              thread.runs.filter(
+                (run) => agentIds.has(run.agentId) && run.status === 'queued',
+              ).length,
+            0,
+          ),
+        };
+      });
       res.json({
         agents: agents.map((agent) => {
           const active = threads.find((thread) =>
@@ -535,8 +597,21 @@ export function registerWorkspaceAgentRoutes(
           const sessionsForAgent = agentSessions.filter(
             (candidate) => candidate.sourceId === agent.id,
           );
-          const runtimeId = agent.runtimeId ?? LOCAL_AGENT_RUNTIME_ID;
-          const runtimeAvailable = runtimeId === LOCAL_AGENT_RUNTIME_ID;
+          const execution = agent.execution ?? { mode: 'local' as const };
+          const selectedHostId =
+            activeRun?.lease?.hostId ??
+            (execution.mode === 'managed-host'
+              ? execution.hostIds[0]
+              : undefined);
+          const selectedHost = hostRuntimes.find(
+            (host) => host.id === selectedHostId,
+          );
+          const runtimeAvailable =
+            execution.mode === 'local' ||
+            hostRuntimes.some(
+              (host) =>
+                execution.hostIds.includes(host.id) && host.status === 'online',
+            );
           const blocked = threads.some(
             (thread) =>
               resolve(thread, threads).status === 'blocked' &&
@@ -578,17 +653,19 @@ export function registerWorkspaceAgentRoutes(
             ...(agent.model ? { model: agent.model } : {}),
             ...(agent.instructions ? { instructions: agent.instructions } : {}),
             maxConcurrentRuns: maxConcurrentRunsFor(agent),
+            execution,
             enabled: agent.enabled !== false,
             status,
-            runtime: runtimeAvailable
-              ? localRuntime
-              : {
-                  id: runtimeId,
-                  kind: 'external' as const,
-                  label: runtimeId,
-                  provider: 'Unregistered',
-                  status: 'offline' as const,
-                },
+            runtime:
+              execution.mode === 'local'
+                ? localRuntime
+                : (selectedHost ?? {
+                    id: selectedHostId ?? 'managed-host',
+                    kind: 'external' as const,
+                    label: 'Managed Host',
+                    provider: 'Unregistered',
+                    status: 'offline' as const,
+                  }),
             // A retired agent is listed, not hidden. Its posts are still on
             // the threads, and a reader who meets its name needs somewhere to
             // look it up. `enabled` stays a separate answer: a retired agent
@@ -1190,7 +1267,6 @@ export function registerWorkspaceAgentRoutes(
           created = applyConfig({
             id: generateAgentId(),
             name,
-            runtimeId: LOCAL_AGENT_RUNTIME_ID,
             createdAt: Date.now(),
           });
           return [...agents, created];
@@ -1298,6 +1374,7 @@ export function registerWorkspaceAgentRoutes(
         instructions?: unknown;
         agentType?: unknown;
         maxConcurrentRuns?: unknown;
+        execution?: unknown;
       };
       const enabled = payload.enabled;
       if (enabled !== undefined && typeof enabled !== 'boolean') {
@@ -1312,7 +1389,12 @@ export function registerWorkspaceAgentRoutes(
         res.status(400).json({ error: config.error });
         return;
       }
-      if (enabled === undefined && !config.touched) {
+      const execution = readAgentExecution(payload.execution);
+      if (execution === 'invalid') {
+        res.status(400).json({ error: 'execution_invalid' });
+        return;
+      }
+      if (enabled === undefined && !config.touched && execution === undefined) {
         res.status(400).json({ error: 'nothing_to_update' });
         return;
       }
@@ -1320,6 +1402,25 @@ export function registerWorkspaceAgentRoutes(
         const agentId = String(req.params['id']);
         let missing = false;
         let retired = false;
+        if (execution !== undefined) {
+          const result = await setWorkspaceAgentExecution(
+            runtime.workspaceCwd,
+            agentId,
+            execution,
+          );
+          if (result !== 'updated') {
+            const [status, error] =
+              result === 'not_found'
+                ? ([404, 'agent_not_found'] as const)
+                : result === 'retired'
+                  ? ([409, 'agent_retired'] as const)
+                  : result === 'host_not_found'
+                    ? ([400, 'agent_host_not_found'] as const)
+                    : ([409, 'agent_has_live_work'] as const);
+            res.status(status).json({ error });
+            return;
+          }
+        }
         if (config.touched) {
           await updateWorkspaceAgents(runtime.workspaceCwd, (agents) => {
             const existing = agents.find((agent) => agent.id === agentId);

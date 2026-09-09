@@ -182,8 +182,7 @@ registration or placement.
 **Verified through registered-Host H1 (2026-09-08).** The primary daemon now
 owns a workspace-scoped Host registry. A ten-minute one-time credential was
 exchanged by a second `qwen serve` process for Host
-`host_d43cad67-c491-4915-9186-481732a0458e`; replaying the enrollment returned
-401. Its provider and workspace advertisement appeared beside the local daemon
+`host_d43cad67-c491-4915-9186-481732a0458e`; replaying the enrollment returned 401. Its provider and workspace advertisement appeared beside the local daemon
 in the Runtime view. Stopping it for more than the 15-second liveness window
 changed the stored Host to offline. Restarting it without the enrollment token
 restored the same Host id, and restarting the primary daemon while it was alive
@@ -413,7 +412,8 @@ AgentHost            id, name, secretHash, workspaceCwd, providers[],
 WorkspaceAgent           id, name, description, color, agentType, model,
                     instructions, queueLimit, maxConcurrentRuns,
                     enabled, createdAt, retiredAt,
-                    runtimeId                                ← execution binding
+                    execution: local | managed-host(hostIds[])
+                    runtimeId                                ← legacy field
 
 Thread              schemaVersion, id, title, body, acceptanceCriteria,
                     status, priority, assigneeAgentId, createdAt,
@@ -449,10 +449,10 @@ V1 declares and validates this whole shape in one storage version. The owner
 chose one migration rather than serial schema bumps for fields already designed
 for steps 5-8. Fields whose producers do not exist yet remain optional and do
 not claim that delivery, provenance, recovery, or transcript slicing is
-implemented. `hostSessionId` is a workspace singleton. `runtimeId` is the
-generic execution binding. New local Agents store `runtimeId: "local"`; v1
-records written before that producer existed read an absent field as the same
-local binding. A task session id is derived from `(agent id, thread id)` and is
+implemented. `hostSessionId` is a workspace singleton. An absent `execution`
+is local; `managed-host` contains the exact registered Host ids allowed to
+claim that Agent's work. Registration alone grants no work and `runtimeId` is
+not reused as authorization. A task session id is derived from `(agent id, thread id)` and is
 stored on each run, so there is no ambiguous Agent-wide conversation handle.
 
 `authorKind` is `human | agent | system`. Until the ambient producer lands in
@@ -745,26 +745,27 @@ action on the child caused it.
 
 Implemented on the single #11206 delivery branch:
 
-| File                                                      | Responsibility                                         |
-| --------------------------------------------------------- | ------------------------------------------------------ |
-| `core/src/agents/workspace-agents/types.ts`               | Entities and limits                                    |
-| `core/src/agents/workspace-agents/store.ts`               | Paths, validation, locking, CRUD and Host registry     |
-| `core/src/agents/workspace-agents/mentions.ts`            | `@name` → agent ids                                    |
-| `core/src/agents/workspace-agents/dispatch-policy.ts`     | `decideDispatch` — pure                                |
-| `core/src/agents/workspace-agents/thread-actions.ts`      | `postMessage` — append and book under one lock         |
-| `core/src/agents/workspace-agents/thread-status.ts`       | Aggregate status over every run's close obligation     |
-| `core/src/agents/workspace-agents/run-lifecycle.ts`       | Run close, terminal state, status application, outbox  |
-| `core/src/agents/workspace-agents/run-context.ts`         | Per-turn ambient `(agent, run, thread)` binding        |
-| `core/src/agents/workspace-agents/prompt.ts`              | Turn envelope: thread frame, delta, gap, peers         |
-| `core/src/agents/workspace-agents/capability.ts`          | Read-only name and invocation boundary                 |
-| `core/src/agents/workspace-agents/persona.ts`             | Resolves an agent's persona for its own session        |
-| `core/src/tools/thread-tools.ts`                          | The six thread tools; ambient identity only            |
-| `core/src/agents/workspace-agents/dispatcher.ts`          | FIFO selection, runtime entry point, parent reports    |
-| `cli/src/serve/workspace-agents/session-dispatch-port.ts` | The one binding to the local agent session runtime     |
-| `cli/src/serve/workspace-agents/agent-host-session.ts`    | Hidden ACP host ownership, keepalive, reload           |
-| `cli/src/serve/routes/agent-hosts.ts`                     | Scoped Host enrollment and heartbeat transport         |
-| `cli/src/serve/agent-host-client.ts`                      | Remote daemon credential and heartbeat client          |
-| `cli/src/acp-integration/acpAgent.ts`                     | Applies the persona when an agent session spawns       |
+| File                                                      | Responsibility                                          |
+| --------------------------------------------------------- | ------------------------------------------------------- |
+| `core/src/agents/workspace-agents/types.ts`               | Entities and limits                                     |
+| `core/src/agents/workspace-agents/store.ts`               | Paths, validation, locking, CRUD and Host registry      |
+| `core/src/agents/workspace-agents/mentions.ts`            | `@name` → agent ids                                     |
+| `core/src/agents/workspace-agents/dispatch-policy.ts`     | `decideDispatch` — pure                                 |
+| `core/src/agents/workspace-agents/thread-actions.ts`      | `postMessage` — append and book under one lock          |
+| `core/src/agents/workspace-agents/thread-status.ts`       | Aggregate status over every run's close obligation      |
+| `core/src/agents/workspace-agents/run-lifecycle.ts`       | Run close, terminal state, status application, outbox   |
+| `core/src/agents/workspace-agents/run-context.ts`         | Per-turn ambient `(agent, run, thread)` binding         |
+| `core/src/agents/workspace-agents/prompt.ts`              | Turn envelope: thread frame, delta, gap, peers          |
+| `core/src/agents/workspace-agents/capability.ts`          | Read-only name and invocation boundary                  |
+| `core/src/agents/workspace-agents/persona.ts`             | Resolves an agent's persona for its own session         |
+| `core/src/tools/thread-tools.ts`                          | The six thread tools; ambient identity only             |
+| `core/src/agents/workspace-agents/dispatcher.ts`          | FIFO selection, runtime entry point, parent reports     |
+| `cli/src/serve/workspace-agents/session-dispatch-port.ts` | The one binding to the local agent session runtime      |
+| `cli/src/serve/workspace-agents/agent-host-session.ts`    | Hidden ACP host ownership, keepalive, reload            |
+| `core/src/agents/workspace-agents/host-lease.ts`          | Atomic Host pickup, lease validation and result commit  |
+| `cli/src/serve/routes/agent-hosts.ts`                     | Host enrollment, heartbeat, pickup and result transport |
+| `cli/src/serve/agent-host-client.ts`                      | Remote daemon credential and heartbeat client           |
+| `cli/src/acp-integration/acpAgent.ts`                     | Applies the persona when an agent session spawns        |
 
 ### 5.1 Local review correction — committed and verified
 
@@ -945,11 +946,11 @@ queued and running work.
 
 Production surface status:
 
-| State                                          | Piece                                                                                                                        |
-| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| State                                          | Piece                                                                                                                                       |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | Implemented and exercised on the happy path    | run envelope, ambient binding, thread tools, dispatcher, parent reports, REST, Agent/task navigation, task-scoped sessions, cancellation UI |
-| Implemented but not failure-injection verified | delivery reconciliation, restart/stall recovery, host replacement, startup outbox replay                                     |
-| Not implemented pending product decision       | channel delivery for the four notification events (§9.12)                                                                    |
+| Implemented but not failure-injection verified | delivery reconciliation, restart/stall recovery, host replacement, startup outbox replay                                                    |
+| Not implemented pending product decision       | channel delivery for the four notification events (§9.12)                                                                                   |
 
 The daemon owner is scoped to one workspace runtime generation, not merely its
 bridge object. Once that generation drains or is replaced, its keepalive stops
@@ -1105,18 +1106,20 @@ source-task attribution at every hop (`ReasonInvocationNotAllowed`,
 `ReasonAttributionBlocked`). V1 here permits any agent to mention any enabled
 workspace peer, but still records non-spoofable source-run provenance.
 
-**Missing and worth having.** Runtime placement and execution — agents that run
-on a registered Host or in the cloud, and agents that are not Qwen Code — is the
-one hard gap. Host registration and liveness are implemented but intentionally
-cannot claim work. Scheduled and external-event triggers are absent but the cron scheduler and
+**Partially implemented.** An Agent can now be placed on an explicit set of
+registered Hosts. Only those Hosts can claim its queued run; lease takeover,
+late-result refusal and idempotent result commit are implemented. The execution
+machine's client still has no model worker loop, so placement and transport do
+not yet equal remote model execution. Cloud and non-Qwen runtimes remain the
+hard gap. Scheduled and external-event triggers are absent but the cron scheduler and
 channel workers already exist to carry them. Board views, labels, search and
 cross-issue references have no equivalent.
 
 Percentages were removed because they hid incompatible denominators. Current
 evidence supports a narrower statement: local persistent identities can be
 assigned work, collaborate through mentions and child threads, accept human
-input, and return work for review in the Web Shell. Remote execution,
-placement, process isolation, the full Multica agent builder, labels,
+input, and return work for review in the Web Shell. Remote model execution,
+process isolation, the full Multica agent builder, labels,
 projects, inbox and the complete failure-injection matrix are not complete.
 The product must not describe the former as percentage completion of the latter.
 
@@ -1129,7 +1132,7 @@ layers, and the difference is structural, not cosmetic:
 
 |                                                                | Agent Board (#9402)                                                                        | Workspace agents threads (this design)                                           |
 | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
-| Who participates                                               | any process that can run `qwen board` — Codex, shell scripts, cron                         | persistent workspace identities executed in task-scoped top-level ACP sessions  |
+| Who participates                                               | any process that can run `qwen board` — Codex, shell scripts, cron                         | persistent workspace identities executed in task-scoped top-level ACP sessions   |
 | Actor identity                                                 | `--as <label>`, recorded, not authenticated (`board-lock.ts`, user doc)                    | derived from the ambient run; never model- or caller-supplied (§6)               |
 | Delivery                                                       | pull: a participant sees work only when it reads the board                                 | push: admission books a run, the dispatcher wakes the body (§4)                  |
 | Storage scope                                                  | global named boards, `~/.qwen/boards/<board>/`                                             | one workspace, `~/.qwen/tmp/<project-hash>/workspace agents/` (§3)               |
@@ -1273,21 +1276,21 @@ remain genuinely open:
 
 ### Resolved during step 3
 
-Runtime shape is settled: an Agent carries a runtime binding rather than being
-the runtime. V1 still permits only the local binding. Qwen Code's existing
+Runtime shape is settled: an Agent carries execution placement rather than being
+the runtime. V1 permits local execution or an explicit list of registered Host
+ids. Qwen Code's existing
 `WorkspaceRuntime`, durable host-session claim and ACP bridge heartbeat are its
-local implementation. H1 adds a separate durable registry for remote Qwen Host
-daemons, but deliberately does not expose them as an Agent binding until H2 can
-authenticate claims and route thread mutations back through the primary. This
-settles the former schema dependency without pretending registration already
-means placement or deciding whether #9402 seeds a later adapter.
+local implementation. H1's separate registry authenticates remote Qwen Host
+daemons; H2 now lets only explicitly selected Hosts claim runs and routes result
+mutations through the primary's lease-checked store. Registration still does
+not mean placement, and the Host-side model worker remains unimplemented.
 
 ## 10. Out of scope
 
-Cross-machine Agent execution and non-Qwen agents (#10078's session-boundary decision and
+Cross-machine model execution and non-Qwen agents (#10078's session-boundary decision and
 #10247 §5's stalled wiring choice); local per-agent OS-process isolation (task
 session isolation is §1); durable history after a thread
-is deleted; remote placement and cloud runtimes; multi-user permissions; and agents that
+is deleted; cloud runtimes; multi-user permissions; and agents that
 write code, which decision 1 defers until isolation is settled.
 
 <details>

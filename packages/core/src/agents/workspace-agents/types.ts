@@ -100,6 +100,10 @@ export interface WorkspaceAgentsFile {
   agents: WorkspaceAgent[];
 }
 
+export type WorkspaceAgentExecution =
+  | { mode: 'local' }
+  | { mode: 'managed-host'; hostIds: string[] };
+
 /**
  * A durable agent identity, scoped to one workspace.
  *
@@ -164,9 +168,11 @@ export interface WorkspaceAgent {
    * Distinct from {@link queueLimit}, which bounds how much may wait.
    */
   maxConcurrentRuns?: number;
+  /** Where this workspace-scoped identity may execute. Absent means local. */
+  execution?: WorkspaceAgentExecution;
   /**
-   * Runtime carrying this identity. Existing v1 records without the field use
-   * {@link LOCAL_AGENT_RUNTIME_ID}.
+   * Legacy execution field retained for reading older v1 records. New writes
+   * use `execution` and remove this field.
    */
   runtimeId?: string;
 }

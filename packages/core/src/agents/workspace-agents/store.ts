@@ -181,6 +181,16 @@ export function isValidAgentName(value: unknown): value is string {
 
 function isValidAgent(value: unknown): value is WorkspaceAgent {
   if (!isRecord(value)) return false;
+  const execution = value['execution'];
+  const validExecution =
+    execution === undefined ||
+    (isRecord(execution) &&
+      (execution['mode'] === 'local' ||
+        (execution['mode'] === 'managed-host' &&
+          Array.isArray(execution['hostIds']) &&
+          execution['hostIds'].length > 0 &&
+          execution['hostIds'].every(isValidId) &&
+          new Set(execution['hostIds']).size === execution['hostIds'].length)));
   return (
     isValidId(value['id']) &&
     isValidAgentName(value['name']) &&
@@ -205,6 +215,7 @@ function isValidAgent(value: unknown): value is WorkspaceAgent {
       isFiniteTimestamp(value['retiredAt'])) &&
     (value['maxConcurrentRuns'] === undefined ||
       isPositiveInteger(value['maxConcurrentRuns'])) &&
+    validExecution &&
     (value['runtimeId'] === undefined || isNonEmptyString(value['runtimeId']))
   );
 }
@@ -1342,6 +1353,22 @@ export async function heartbeatAgentHost(
   });
 }
 
+export async function authenticateAgentHost(
+  projectRoot: string,
+  hostId: string,
+  secret: string,
+): Promise<AgentHostView | undefined> {
+  return withWorkspaceLock(projectRoot, async () => {
+    await ensureMigratedUnlocked(projectRoot);
+    const host = (await readAgentHostsUnlocked(projectRoot)).hosts.find(
+      (candidate) => candidate.id === hostId,
+    );
+    return host && matchesAgentHostSecret(secret, host.secretHash)
+      ? publicAgentHost(host)
+      : undefined;
+  });
+}
+
 /**
  * Sets, or clears, where this workspace's notifications go.
  *
@@ -1460,7 +1487,8 @@ type WorkspaceAgentRosterChange =
   | 'updated'
   | 'not_found'
   | 'has_live_work'
-  | 'retired';
+  | 'retired'
+  | 'host_not_found';
 
 async function agentHasLiveWork(
   transaction: AgentStoreTransaction,
@@ -1502,6 +1530,38 @@ export async function setWorkspaceAgentEnabled(
       agents.map((candidate) =>
         candidate.id === agentId ? { ...candidate, enabled } : candidate,
       ),
+    );
+    return 'updated';
+  });
+}
+
+export async function setWorkspaceAgentExecution(
+  projectRoot: string,
+  agentId: string,
+  execution: WorkspaceAgent['execution'],
+): Promise<WorkspaceAgentRosterChange> {
+  return withAgentStoreTransaction(projectRoot, async (transaction) => {
+    const agents = await transaction.readAgents();
+    const agent = agents.find((candidate) => candidate.id === agentId);
+    if (!agent) return 'not_found';
+    if (agent.retiredAt !== undefined) return 'retired';
+    if (await agentHasLiveWork(transaction, agentId)) return 'has_live_work';
+    if (execution?.mode === 'managed-host') {
+      const known = new Set(
+        (await readAgentHostsUnlocked(projectRoot)).hosts.map(
+          (host) => host.id,
+        ),
+      );
+      if (execution.hostIds.some((hostId) => !known.has(hostId))) {
+        return 'host_not_found';
+      }
+    }
+    await transaction.writeAgents(
+      agents.map((candidate) => {
+        if (candidate.id !== agentId) return candidate;
+        const { runtimeId: _legacyRuntime, ...rest } = candidate;
+        return { ...rest, execution };
+      }),
     );
     return 'updated';
   });
@@ -1554,6 +1614,20 @@ export function findAgentByName(
 
 export function isAgentEnabled(agent: WorkspaceAgent): boolean {
   return agent.enabled !== false;
+}
+
+export function isAgentLocal(agent: WorkspaceAgent): boolean {
+  return agent.execution === undefined || agent.execution.mode === 'local';
+}
+
+export function isAgentExecutableByHost(
+  agent: WorkspaceAgent,
+  hostId: string,
+): boolean {
+  return (
+    agent.execution?.mode === 'managed-host' &&
+    agent.execution.hostIds.includes(hostId)
+  );
 }
 
 /** How many threads this agent may work at once. Absent means one. */

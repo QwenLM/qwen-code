@@ -30,6 +30,7 @@ export interface AgentConfigPatch {
   instructions?: string | null;
   agentType?: string | null;
   maxConcurrentRuns?: number | null;
+  execution?: { mode: 'local' } | { mode: 'managed-host'; hostIds: string[] };
 }
 
 /** What every agent in this workspace may do. A property of the subsystem. */
@@ -73,6 +74,7 @@ export interface WorkspaceAgentSummaryView {
   /** What this identity is told on top of its definition's prompt. */
   instructions?: string;
   maxConcurrentRuns?: number;
+  execution?: AgentConfigPatch['execution'];
   enabled: boolean;
   status: 'offline' | 'idle' | 'working' | 'blocked' | 'error';
   runtime: WorkspaceAgentRuntimeView;
@@ -238,12 +240,31 @@ export function ThreadsPage({
         return value === '' ? null : value;
       };
       const runs = String(data.get('maxConcurrentRuns') ?? '').trim();
+      const hostIds = data
+        .getAll('executionHostId')
+        .map((value) => String(value));
+      const current = agents.find((agent) => agent.id === agentId);
+      const currentHostIds =
+        current?.execution?.mode === 'managed-host'
+          ? current.execution.hostIds
+          : [];
+      const placementChanged =
+        hostIds.length !== currentHostIds.length ||
+        hostIds.some((hostId) => !currentHostIds.includes(hostId));
       onUpdateAgent(agentId, {
         description: field('description'),
         model: field('model'),
         agentType: field('agentType'),
         instructions: field('instructions'),
         maxConcurrentRuns: runs === '' ? null : Number(runs),
+        ...(placementChanged
+          ? {
+              execution:
+                hostIds.length > 0
+                  ? ({ mode: 'managed-host', hostIds } as const)
+                  : ({ mode: 'local' } as const),
+            }
+          : {}),
       });
       setConfiguring(undefined);
     };
@@ -313,11 +334,7 @@ export function ThreadsPage({
             </Button>
           ) : null}
           {view === 'agents' && onOpenAgentBuilder ? (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onOpenAgentBuilder}
-            >
+            <Button variant="outline" size="sm" onClick={onOpenAgentBuilder}>
               <PlusIcon data-icon="inline-start" />
               Agent
             </Button>
@@ -592,6 +609,32 @@ export function ThreadsPage({
                         defaultValue={agent.maxConcurrentRuns ?? 1}
                       />
                     </label>
+                    {runtimeEntries.some(
+                      (entry) => entry.kind === 'external',
+                    ) ? (
+                      <fieldset className={styles.configLabel}>
+                        <legend>Run on</legend>
+                        {runtimeEntries
+                          .filter((entry) => entry.kind === 'external')
+                          .map((entry) => (
+                            <label key={entry.id}>
+                              <input
+                                name="executionHostId"
+                                type="checkbox"
+                                value={entry.id}
+                                defaultChecked={
+                                  agent.execution?.mode === 'managed-host' &&
+                                  agent.execution.hostIds.includes(entry.id)
+                                }
+                              />{' '}
+                              {entry.label} · {entry.status}
+                            </label>
+                          ))}
+                        <span className={styles.configNote}>
+                          No Host selected means this daemon.
+                        </span>
+                      </fieldset>
+                    ) : null}
                     <p className={styles.configNote}>
                       Emptying a field returns it to what the definition says.
                     </p>
@@ -622,9 +665,7 @@ export function ThreadsPage({
                       (thread) => thread.assigneeName === agent.name,
                     ) ? (
                       threads
-                        .filter(
-                          (thread) => thread.assigneeName === agent.name,
-                        )
+                        .filter((thread) => thread.assigneeName === agent.name)
                         .sort((a, b) => b.updatedAt - a.updatedAt)
                         .map((thread) => (
                           <ThreadRow
@@ -689,74 +730,72 @@ export function ThreadsPage({
         {view === 'runtime' && runtimeEntries.length > 0 ? (
           runtimeEntries.map((runtimeEntry) => (
             <section className={styles.runtimeCard} key={runtimeEntry.id}>
-            <div className={styles.runtimeHeader}>
-              <h2 className={styles.runtimeTitle}>
-                {runtimeEntry.label}
-              </h2>
-              <p className={styles.configNote}>
-                {runtimeEntry.kind === 'local'
-                  ? 'Hosts top-level Agent sessions for this workspace.'
-                  : 'Registered Host. Agent execution is not enabled in H1.'}
-              </p>
-            </div>
-            <strong
-              className={styles.runtimeStatus}
-              data-runtime-status={runtimeEntry.status}
-            >
-              {runtimeEntry.status}
-            </strong>
-            <dl className={styles.runtimeFacts}>
-              <div>
-                <dt>Runtime</dt>
-                <dd>
-                  <code>{runtimeEntry.id}</code>
-                </dd>
+              <div className={styles.runtimeHeader}>
+                <h2 className={styles.runtimeTitle}>{runtimeEntry.label}</h2>
+                <p className={styles.configNote}>
+                  {runtimeEntry.kind === 'local'
+                    ? 'Hosts top-level Agent sessions for this workspace.'
+                    : 'Runs only Agents explicitly assigned to this Host.'}
+                </p>
               </div>
-              <div>
-                <dt>Provider</dt>
-                <dd>{runtimeEntry.provider}</dd>
-              </div>
-              {runtimeEntry.workspaceCwd ? (
+              <strong
+                className={styles.runtimeStatus}
+                data-runtime-status={runtimeEntry.status}
+              >
+                {runtimeEntry.status}
+              </strong>
+              <dl className={styles.runtimeFacts}>
                 <div>
-                  <dt>Workspace</dt>
+                  <dt>Runtime</dt>
                   <dd>
-                    <code>{runtimeEntry.workspaceCwd}</code>
+                    <code>{runtimeEntry.id}</code>
                   </dd>
                 </div>
-              ) : null}
-              {runtimeEntry.hostSessionId ? (
                 <div>
-                  <dt>Host session</dt>
-                  <dd>
-                    <code>{runtimeEntry.hostSessionId}</code>
-                  </dd>
+                  <dt>Provider</dt>
+                  <dd>{runtimeEntry.provider}</dd>
                 </div>
-              ) : null}
-              {runtimeEntry.lastSeenAt ? (
+                {runtimeEntry.workspaceCwd ? (
+                  <div>
+                    <dt>Workspace</dt>
+                    <dd>
+                      <code>{runtimeEntry.workspaceCwd}</code>
+                    </dd>
+                  </div>
+                ) : null}
+                {runtimeEntry.hostSessionId ? (
+                  <div>
+                    <dt>Host session</dt>
+                    <dd>
+                      <code>{runtimeEntry.hostSessionId}</code>
+                    </dd>
+                  </div>
+                ) : null}
+                {runtimeEntry.lastSeenAt ? (
+                  <div>
+                    <dt>Last heartbeat</dt>
+                    <dd>
+                      {new Date(runtimeEntry.lastSeenAt).toLocaleTimeString()}
+                    </dd>
+                  </div>
+                ) : null}
                 <div>
-                  <dt>Last heartbeat</dt>
-                  <dd>
-                    {new Date(runtimeEntry.lastSeenAt).toLocaleTimeString()}
-                  </dd>
+                  <dt>Agents</dt>
+                  <dd>{runtimeEntry.agentCount ?? 0}</dd>
                 </div>
-              ) : null}
-              <div>
-                <dt>Agents</dt>
-                <dd>{runtimeEntry.agentCount ?? 0}</dd>
-              </div>
-              <div>
-                <dt>Sessions</dt>
-                <dd>{runtimeEntry.sessionCount ?? 0}</dd>
-              </div>
-              <div>
-                <dt>Running tasks</dt>
-                <dd>{runtimeEntry.runningTaskCount ?? 0}</dd>
-              </div>
-              <div>
-                <dt>Queued tasks</dt>
-                <dd>{runtimeEntry.queuedTaskCount ?? 0}</dd>
-              </div>
-            </dl>
+                <div>
+                  <dt>Sessions</dt>
+                  <dd>{runtimeEntry.sessionCount ?? 0}</dd>
+                </div>
+                <div>
+                  <dt>Running tasks</dt>
+                  <dd>{runtimeEntry.runningTaskCount ?? 0}</dd>
+                </div>
+                <div>
+                  <dt>Queued tasks</dt>
+                  <dd>{runtimeEntry.queuedTaskCount ?? 0}</dd>
+                </div>
+              </dl>
             </section>
           ))
         ) : view === 'runtime' ? (
