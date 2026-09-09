@@ -810,6 +810,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       throw new Error('DWS channel connection was cancelled.');
     }
     this.connectionStartedAt = Date.now();
+    if (this.alignSourcePolicyState(this.connectionStartedAt)) {
+      this.saveCursor();
+    }
     await this.client.assertCompatible?.(this.pollAbortController.signal);
     if (generation !== this.lifecycleGeneration) {
       throw new Error('DWS channel connection was cancelled.');
@@ -1793,6 +1796,23 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     if (this.markSelfMessageProcessed(message)) {
       return { completion: Promise.resolve(), remembered: true };
     }
+    const historyFloor =
+      source.kind === 'direct'
+        ? this.cursor.notificationHistoryFloor
+        : this.cursor.mentionHistoryFloor;
+    if (
+      historyFloor !== undefined &&
+      message.eventTime !== undefined &&
+      message.eventTime < historyFloor
+    ) {
+      if (source.kind === 'direct') {
+        this.parkStaleDirectMessage(message);
+      } else {
+        this.markProcessedMessage(key);
+        this.saveCursor();
+      }
+      return { completion: Promise.resolve(), remembered: true };
+    }
     if (
       this.isStaleLiveMessage(
         message,
@@ -2647,8 +2667,14 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       keysToMark.push(key);
     }
     this.cursor.processedMessages.push(...keysToMark.reverse());
-    for (const item of disabled) {
-      this.clearInboundFailure(messageKey(item.message));
+    const disabledKeys = new Set(
+      disabled.map((item) => messageKey(item.message)),
+    );
+    const failures = this.cursor.inboundFailures;
+    if (failures?.some((failure) => disabledKeys.has(failure.key))) {
+      this.cursor.inboundFailures = failures.filter(
+        (failure) => !disabledKeys.has(failure.key),
+      );
     }
     this.cursor.pendingMessages = pending.filter((item) =>
       this.isImSourceEnabled(item.source),
