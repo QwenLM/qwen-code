@@ -116,6 +116,8 @@ describe('session sources', () => {
     { ...file(), extra: true },
     { ...file(), title: ' ' },
     { ...file(), title: 'a\nb' },
+    { ...file(), title: 'a\u200bb' },
+    file('docs\u202esecret.md'),
     file('/absolute'),
     file('C:\\absolute'),
     file('../../outside'),

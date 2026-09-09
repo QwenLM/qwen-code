@@ -12082,6 +12082,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     async getSessionSources(sessionId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      if (
+        isReservedStandaloneSessionSourceType(entry.sourceType) &&
+        entry.managedConversationBinding?.released !== true
+      ) {
+        throw standaloneWorkingDirectoryMissingError();
+      }
       resolveTrustedClientId(entry, context?.clientId);
       return requestSessionSources(sessionId, 'qwen/session/sources/list');
     },
@@ -12089,6 +12095,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     async upsertSessionSource(sessionId, input, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      if (
+        isReservedStandaloneSessionSourceType(entry.sourceType) &&
+        entry.managedConversationBinding?.released !== true
+      ) {
+        throw standaloneWorkingDirectoryMissingError();
+      }
       const clientId = resolveTrustedClientId(entry, context.clientId);
       if (!clientId) {
         throw new RequestError(
@@ -12121,6 +12133,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     async removeSessionSource(sessionId, sourceId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      if (
+        isReservedStandaloneSessionSourceType(entry.sourceType) &&
+        entry.managedConversationBinding?.released !== true
+      ) {
+        throw standaloneWorkingDirectoryMissingError();
+      }
       const clientId = resolveTrustedClientId(entry, context.clientId);
       if (!clientId) {
         throw new RequestError(

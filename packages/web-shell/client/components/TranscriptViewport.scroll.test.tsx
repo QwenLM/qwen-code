@@ -375,13 +375,11 @@ describe('TranscriptViewport scroll restoration and fallback', () => {
   );
 
   it('captures rows materialized after a boundary request starts before admitting the page', async () => {
-    const { click, row, getTranscriptPage, settleFrames, render } =
+    const { click, list, row, getTranscriptPage, settleFrames, render } =
       await setup();
     await click('history.openEarlier');
     settleFrames();
     const targetKey = `msg:${observed.props!.messages[0]!.id}`;
-    observed.hideRows = true;
-    render();
     let resolve!: (value: DaemonSessionTranscriptPage) => void;
     getTranscriptPage.mockImplementation(
       () =>
@@ -391,8 +389,11 @@ describe('TranscriptViewport scroll restoration and fallback', () => {
     );
     await click('history.loadEarlier');
     expect(getTranscriptPage).toHaveBeenCalledTimes(2);
+    observed.hideRows = true;
+    render();
     observed.hideRows = false;
     render();
+    list().scrollTop += 20;
     const before = row(targetKey).getBoundingClientRect().top;
     await act(async () => resolve(page(['old1', 'old2'])));
     settleFrames();

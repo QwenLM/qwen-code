@@ -82,8 +82,7 @@ function text(
   empty = false,
   trim = true,
 ): string {
-  // eslint-disable-next-line no-control-regex -- Source metadata forbids control characters.
-  if (typeof value !== 'string' || /[\x00-\x1f\x7f-\x9f]/u.test(value)) {
+  if (typeof value !== 'string' || /[\p{Cc}\p{Cf}]/u.test(value)) {
     return invalid(`Invalid ${field}`);
   }
   const normalized = trim ? value.trim() : value;

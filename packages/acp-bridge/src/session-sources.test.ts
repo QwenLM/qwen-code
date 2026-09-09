@@ -18,6 +18,36 @@ const link = {
 };
 
 describe('session source bridge', () => {
+  it('blocks all source operations before standalone workspace activation', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const sessionId = 'standalone-sources';
+    try {
+      await bridge.restoreStandaloneSession('resume', {
+        sessionId,
+        workspaceCwd: WS_A,
+      });
+      const results = await Promise.allSettled([
+        bridge.getSessionSources(sessionId),
+        bridge.upsertSessionSource(sessionId, link, {}),
+        bridge.removeSessionSource(sessionId, 'source-id', {}),
+      ]);
+      for (const result of results) {
+        expect(result).toMatchObject({
+          status: 'rejected',
+          reason: { data: { errorKind: 'working_directory_missing' } },
+        });
+      }
+      expect(
+        handle.agent.extMethodCalls.filter(({ method }) =>
+          method.startsWith('qwen/session/sources/'),
+        ),
+      ).toEqual([]);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it.each([
     { persistedOnly: false, attachmentRoot: false },
     { persistedOnly: false, attachmentRoot: true },

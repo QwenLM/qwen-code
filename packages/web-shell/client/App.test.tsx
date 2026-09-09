@@ -2654,13 +2654,14 @@ describe('task activity key', () => {
       );
       await flush();
       const openSource = async () => {
-        await act(async () =>
-          container
-            .querySelector<HTMLButtonElement>(
-              '[data-testid="sources-section"] button[title="page.html"]',
-            )
-            ?.click(),
+        await act(async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        });
+        const button = container.querySelector<HTMLButtonElement>(
+          '[data-testid="sources-section"] button[title="page.html"]',
         );
+        expect(button).not.toBeNull();
+        await act(async () => button!.click());
         await flush();
         expect(
           container.querySelector('button[aria-label="Preview"]'),
@@ -29304,11 +29305,11 @@ describe('App session callbacks', () => {
       await act(async () => report(ownerIds));
       rerender();
       expect(testState.latestSplitViewProps!.onPendingPanesChange).toBe(report);
-      expect(mockUseDaemonActivePromptBridge).toHaveBeenCalled();
-      mockUseDaemonActivePromptBridge.mockClear();
+      expect(mockUseDaemonSessionActivityBridge).toHaveBeenCalled();
+      mockUseDaemonSessionActivityBridge.mockClear();
       for (const ids of [['foreign-session'], ['another-session'], []]) {
         await act(async () => report([...ownerIds, ...ids]));
-        expect(mockUseDaemonActivePromptBridge).not.toHaveBeenCalled();
+        expect(mockUseDaemonSessionActivityBridge).not.toHaveBeenCalled();
       }
     },
   );
