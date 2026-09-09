@@ -13,6 +13,7 @@ import type {
   GoalRuntime,
   GoalSnapshotV2,
   GoalTurnHost,
+  GoalContinuationTurn,
   GoalTurnPermit,
   ActiveGoal,
   ToolCallRequestInfo,
@@ -223,15 +224,11 @@ function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
   return `Loop detection halted the run${detail}.${hint}`;
 }
 
-interface HeadlessGoalTurn {
+interface HeadlessGoalTurn extends GoalContinuationTurn {
   permit: GoalTurnPermit;
   turnKey: string;
   controller: AbortController;
   origin: 'runtime' | 'user';
-  continuationContext: string;
-  objectiveUpdated?: boolean;
-  windDown?: boolean;
-  verifierFeedback?: string;
 }
 
 function sameGoalPermit(
@@ -658,19 +655,13 @@ export async function runNonInteractive(
         ) {
           return;
         }
+        const { permit, ...continuation } = input;
         queuedGoalTurns.push({
-          permit: { ...input.permit },
-          turnKey: `goal-runtime:${input.permit.turnId}`,
+          permit: { ...permit },
+          turnKey: `goal-runtime:${permit.turnId}`,
           controller: new AbortController(),
           origin: 'runtime',
-          continuationContext: input.continuationContext,
-          ...(input.objectiveUpdated
-            ? { objectiveUpdated: input.objectiveUpdated }
-            : {}),
-          ...(input.windDown ? { windDown: true } : {}),
-          ...(input.verifierFeedback
-            ? { verifierFeedback: input.verifierFeedback }
-            : {}),
+          ...continuation,
         });
       },
       preemptGoalTurn: (reason) => {
