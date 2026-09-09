@@ -331,6 +331,80 @@ describe('PlanExecutionView', () => {
     ]);
   });
 
+  it.each([false, true])(
+    'gates parent and nested detail buttons with live child task=%s',
+    (hasChildTask) => {
+      const onOpen = vi.fn();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      const render = (subagentSessionReady: boolean) => {
+        const child = {
+          ...agentTool('build'),
+          callId: 'call-child',
+          title: 'Child agent',
+          parentToolCallId: 'call-build',
+          subagentSessionReady,
+        };
+        const parent = {
+          ...agentTool('build'),
+          subTools: [child],
+          subagentSessionReady,
+        };
+        const rootTask = task('running');
+        const childTask = task('running', {
+          id: 'agent-child',
+          label: 'Child agent',
+          toolUseId: child.callId,
+          parentAgentId: rootTask.id,
+        });
+        act(() =>
+          root.render(
+            <I18nProvider language="zh-CN">
+              <PlanExecutionView
+                todos={todos}
+                tools={[parent]}
+                tasks={hasChildTask ? [rootTask, childTask] : [rootTask]}
+                onOpenSubagent={onOpen}
+              />
+            </I18nProvider>,
+          ),
+        );
+      };
+      try {
+        render(false);
+        const buttons = [
+          ...container.querySelectorAll<HTMLButtonElement>(
+            'button[data-plan-interactive][title="创建中"]',
+          ),
+        ];
+        expect(buttons).toHaveLength(2);
+        for (const button of buttons) {
+          expect(button.getAttribute('aria-disabled')).toBe('true');
+          button.focus();
+          expect(document.activeElement).toBe(button);
+          act(() => button.click());
+        }
+        expect(onOpen).not.toHaveBeenCalled();
+        render(true);
+        for (const button of buttons) {
+          expect(button.hasAttribute('aria-disabled')).toBe(false);
+          expect(button.title).not.toBe('创建中');
+          act(() => button.click());
+        }
+        expect(onOpen).toHaveBeenCalledTimes(2);
+        for (const callId of ['call-build', 'call-child']) {
+          expect(onOpen).toHaveBeenCalledWith(
+            expect.objectContaining({ callId, subagentSessionReady: true }),
+          );
+        }
+      } finally {
+        act(() => root.unmount());
+        container.remove();
+      }
+    },
+  );
+
   it('opens a live nested agent through its transcript tool call', () => {
     const onOpen = vi.fn();
     const childTool = {

@@ -649,6 +649,8 @@ export interface AgentResultDisplay {
   taskDescription: string;
   taskPrompt: string;
   executionMode?: 'foreground' | 'background';
+  /** Whether the registered subagent session is available for inspection. */
+  subagentSessionReady?: boolean;
   status: 'running' | 'completed' | 'failed' | 'cancelled' | 'background';
   terminateReason?: string;
   result?: string;
