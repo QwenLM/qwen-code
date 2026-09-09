@@ -813,6 +813,26 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     if (this.alignSourcePolicyState(this.connectionStartedAt)) {
       this.saveCursor();
     }
+    const initialProfileMentionBoundary =
+      this.cursor.selfProfile === undefined &&
+      this.cursor.groupMessagesEnabled === true &&
+      this.cursor.mentionHistoryFloor !== undefined &&
+      this.cursor.mentionWatermark !== undefined
+        ? {
+            floor: this.cursor.mentionHistoryFloor,
+            watermark: this.cursor.mentionWatermark,
+          }
+        : undefined;
+    const initialProfileNotificationBoundary =
+      this.cursor.selfProfile === undefined &&
+      this.cursor.directMessagesEnabled === true &&
+      this.cursor.notificationHistoryFloor !== undefined &&
+      this.cursor.notificationWatermark !== undefined
+        ? {
+            floor: this.cursor.notificationHistoryFloor,
+            watermark: this.cursor.notificationWatermark,
+          }
+        : undefined;
     await this.client.assertCompatible?.(this.pollAbortController.signal);
     if (generation !== this.lifecycleGeneration) {
       throw new Error('DWS channel connection was cancelled.');
@@ -852,6 +872,18 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.directMessagesEnabled = undefined;
       this.cursor.notificationCheckpoint = undefined;
       this.cursor.mentionCheckpoint = undefined;
+      if (initialProfileMentionBoundary) {
+        this.cursor.mentionHistoryFloor = initialProfileMentionBoundary.floor;
+        this.cursor.mentionWatermark = initialProfileMentionBoundary.watermark;
+        this.cursor.groupMessagesEnabled = true;
+      }
+      if (initialProfileNotificationBoundary) {
+        this.cursor.notificationHistoryFloor =
+          initialProfileNotificationBoundary.floor;
+        this.cursor.notificationWatermark =
+          initialProfileNotificationBoundary.watermark;
+        this.cursor.directMessagesEnabled = true;
+      }
     }
     this.documentSet.clear();
     for (const documentId of this.cursor.documentIds ?? []) {

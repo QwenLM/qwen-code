@@ -7465,6 +7465,186 @@ describe('DwsChannel', () => {
     }
   });
 
+  it('does not replay disabled direct history after initial authentication fails', async () => {
+    const name = 'fresh-disabled-direct-failed-connect-dws';
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      const disabledClient = new FakeDwsClient();
+      disabledClient.assertAuthenticated.mockRejectedValueOnce(
+        new Error('DWS credential expired'),
+      );
+      const disabled = new PolicyDwsChannel(
+        name,
+        makeConfig({ groupPolicy: 'disabled', dmPolicy: 'disabled' }),
+        makeBridge(),
+        undefined,
+        disabledClient,
+      );
+      channels.push(disabled);
+      await expect(disabled.connect()).rejects.toThrow(
+        'DWS credential expired',
+      );
+
+      now.mockReturnValue(20_000);
+      const reEnablingClient = new FakeDwsClient();
+      reEnablingClient.assertAuthenticated.mockRejectedValueOnce(
+        new Error('DWS credential still expired'),
+      );
+      const reEnabling = new PolicyDwsChannel(
+        name,
+        makeConfig({ groupPolicy: 'disabled' }),
+        makeBridge(),
+        undefined,
+        reEnablingClient,
+      );
+      channels.push(reEnabling);
+      await expect(reEnabling.connect()).rejects.toThrow(
+        'DWS credential still expired',
+      );
+
+      now.mockReturnValue(30_000);
+      const restartedClient = new FakeDwsClient();
+      restartedClient.directMessages = [
+        message(
+          'user_im_message_receive_o2o_all',
+          'fresh-disabled-direct-window',
+          'do not replay this disabled-era message',
+          { eventTime: 19_999 },
+        ),
+        message(
+          'user_im_message_receive_o2o_all',
+          'fresh-enabled-direct-window',
+          'dispatch this enabled-era message',
+          { eventTime: 25_000 },
+        ),
+      ];
+      const { channel: restarted, bridge } = await readyPolicyChannel(
+        restartedClient,
+        makeConfig({ groupPolicy: 'disabled' }),
+        name,
+      );
+
+      await restarted.poll();
+
+      expect(restartedClient.listDirectMessages).toHaveBeenCalledWith(
+        20_000,
+        30_000,
+        expect.any(AbortSignal),
+        '0',
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('does not replay disabled group history after initial authentication fails', async () => {
+    const name = 'fresh-disabled-group-failed-connect-dws';
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      const disabledClient = new FakeDwsClient();
+      disabledClient.assertAuthenticated.mockRejectedValueOnce(
+        new Error('DWS credential expired'),
+      );
+      const disabled = new PolicyDwsChannel(
+        name,
+        makeConfig({ groupPolicy: 'disabled', dmPolicy: 'disabled' }),
+        makeBridge(),
+        undefined,
+        disabledClient,
+      );
+      channels.push(disabled);
+      await expect(disabled.connect()).rejects.toThrow(
+        'DWS credential expired',
+      );
+
+      now.mockReturnValue(30_000);
+      const restartedClient = new FakeDwsClient();
+      restartedClient.mentionedMessages = [
+        message(
+          'user_im_message_receive_at',
+          'fresh-disabled-group-window',
+          'do not replay this disabled-era mention',
+          { eventTime: 29_999 },
+        ),
+      ];
+      const { channel: restarted, bridge } = await readyPolicyChannel(
+        restartedClient,
+        makeConfig({ dmPolicy: 'disabled' }),
+        name,
+      );
+
+      await restarted.poll();
+
+      expect(restartedClient.listMentionedMessages).toHaveBeenCalledWith(
+        30_000,
+        30_000,
+        expect.any(AbortSignal),
+        '0',
+      );
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('drops disabled direct startup delivery after initial authentication fails', async () => {
+    const name = 'fresh-disabled-direct-startup-dws';
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      const disabledClient = new FakeDwsClient();
+      disabledClient.assertAuthenticated.mockRejectedValueOnce(
+        new Error('DWS credential expired'),
+      );
+      const disabled = new PolicyDwsChannel(
+        name,
+        makeConfig({ groupPolicy: 'disabled', dmPolicy: 'disabled' }),
+        makeBridge(),
+        undefined,
+        disabledClient,
+      );
+      channels.push(disabled);
+      await expect(disabled.connect()).rejects.toThrow(
+        'DWS credential expired',
+      );
+
+      now.mockReturnValue(30_000);
+      const restartedClient = new FakeDwsClient();
+      const subscribeToIm = restartedClient.subscribeToIm.bind(restartedClient);
+      restartedClient.subscribeToIm = vi.fn(
+        async (source, onMessage, onError) => {
+          const subscription = await subscribeToIm(source, onMessage, onError);
+          if (source.kind === 'direct') {
+            const result = onMessage(
+              message(
+                'user_im_message_receive_o2o_all',
+                'fresh-disabled-direct-startup',
+                'do not dispatch this disabled-era message',
+                { eventTime: 29_999 },
+              ),
+            );
+            if (result && 'admitted' in result) await result.admitted;
+            else await result;
+          }
+          return subscription;
+        },
+      );
+
+      const { channel: restarted, bridge } = await readyPolicyChannel(
+        restartedClient,
+        makeConfig({ groupPolicy: 'disabled' }),
+        name,
+      );
+
+      expect(restarted.processedMessageIds()).toContain(
+        'cid-1\0fresh-disabled-direct-startup',
+      );
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('does not replay the disabled direct-message window after re-enable', async () => {
     const name = 'disabled-direct-window-dws';
     const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
