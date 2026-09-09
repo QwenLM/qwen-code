@@ -1158,27 +1158,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     },
     [],
   );
-  // Publish a `failed` settlement for a still-bound prompt whose terminal was
-  // destroyed without ever being observed (session died, auth/terminal error,
-  // missing session). Stays inside the public outcome union and carries the
-  // same (sessionId, promptId) key so a late real terminal is deduped.
-  const retireAbandonedPrompts = useCallback(
-    (sessionId: string, code: string) => {
-      const promptIds = locallyBoundPromptIdsRef.current.get(sessionId);
-      for (const promptId of [...(promptIds ?? [])]) {
-        publishPromptSettlement({
-          sessionId,
-          promptId,
-          outcome: 'failed',
-          error: {
-            message: 'Prompt terminal lost before delivery',
-            code,
-          },
-        });
-      }
-    },
-    [publishPromptSettlement],
-  );
   const pendingSessionLoadRef = useRef<PendingSessionLoad | undefined>(
     undefined,
   );
@@ -2943,7 +2922,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           if (epochResetSessionIdRef.current === activeSession.sessionId) {
             epochResetSessionIdRef.current = undefined;
             if (!hasSessionActivePrompt()) {
-              retireAbandonedPrompts(activeSession.sessionId, 'epoch_reset');
+              locallyBoundPromptIdsRef.current.delete(activeSession.sessionId);
             }
           }
           setConnection((current) => ({
@@ -3445,6 +3424,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // settle (and the restored-prompt / observer branches below)
               // dispatch. Guarded to turn terminals so steady streaming keeps
               // batching.
+              const pendingRepair = liveJournalRepairRef.current;
+              const repairTargetsTerminal =
+                pendingRepair?.sessionId === activeSession.sessionId &&
+                (event.type === 'turn_complete' ||
+                  event.type === 'turn_error') &&
+                eventPromptId(event) === pendingRepair.target.promptId;
               if (
                 event.type === 'turn_complete' ||
                 event.type === 'turn_error'
@@ -3631,15 +3616,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   activeSession.sessionId,
                   event,
                 );
-                if (settlement) publishPromptSettlement(settlement);
+                if (settlement && !repairTargetsTerminal) {
+                  publishPromptSettlement(settlement);
+                }
               }
-              const pendingRepair = liveJournalRepairRef.current;
-              if (
-                pendingRepair?.sessionId === activeSession.sessionId &&
-                (event.type === 'turn_complete' ||
-                  event.type === 'turn_error') &&
-                eventPromptId(event) === pendingRepair.target.promptId
-              ) {
+              if (repairTargetsTerminal && pendingRepair) {
                 pendingRepair.terminalSeen = true;
                 queueMicrotask(tryLiveJournalRepair);
               } else if (pendingRepair?.terminalSeen) {
@@ -3950,7 +3931,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const isAuthFailure = isAuthFailureHttpError(error);
           const isTerminal = isTerminalSessionHttpError(error);
           if (failedSessionId && (isAuthFailure || isTerminal)) {
-            retireAbandonedPrompts(failedSessionId, 'session_error');
+            locallyBoundPromptIdsRef.current.delete(failedSessionId);
             if (epochResetSessionIdRef.current === failedSessionId) {
               epochResetSessionIdRef.current = undefined;
             }
@@ -4283,7 +4264,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     addNotice,
     dismissNotice,
     publishPromptSettlement,
-    retireAbandonedPrompts,
     setConnectionSynchronous,
   ]);
 
@@ -4387,7 +4367,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 errorStatus,
               );
             }
-            retireAbandonedPrompts(deadSessionId, 'session_missing');
+            locallyBoundPromptIdsRef.current.delete(deadSessionId);
             const active = activePromptsRef.current.get(deadSessionId);
             active?.controller.abort();
             activePromptsRef.current.delete(deadSessionId);
@@ -4438,7 +4418,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     connection.status,
     heartbeatFailureThreshold,
     heartbeatIntervalMs,
-    retireAbandonedPrompts,
   ]);
 
   const actions = useMemo<DaemonSessionActions>(
@@ -4597,7 +4576,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             sessionId ?? owner.sessionId,
             promptId,
           );
-          if (sessionRef.current === owner)
+          if (sessionId === undefined && sessionRef.current === owner)
             turnNotifications.remove(owner, promptId);
           if (
             sessionId === undefined &&

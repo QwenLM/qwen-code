@@ -29,19 +29,9 @@ when this provider previously admitted that prompt. That admission gate keeps
 ordinary persisted-history loading silent while surviving session switches and
 epoch-reset reloads that discard the active request controller.
 
-A prompt whose terminal is _destroyed_ rather than delivered never produces a
-terminal frame, so neither the live nor the replay publish path can fire. Three
-abandonment paths retire such a prompt with a synthesized `failed` settlement
-rather than leaving a host keyed on the idempotency key waiting forever: an
-epoch-reset reload whose fresh snapshot carries no terminal (a cold restore
-replays only `session_update` chunks), a session-load auth/terminal error, and
-a heartbeat-detected missing session. The `error.code` discriminates the path
-(`epoch_reset`, `session_error`, `session_missing`). The daemon also persists an
-authoritative verdict for exactly this case in the load response's
-`promptTerminals` field; this PR does not read it, so the retirement verdict is
-a client inference and its silence here is a recorded choice rather than an
-accident. The synthesized settlement carries the same `(sessionId, promptId)`
-key, so a late real terminal is still deduplicated.
+A lost connection or missing terminal does not publish a settlement: neither
+condition proves how the prompt ended. Hosts receive only daemon terminal
+events observed live or through reconnect replay.
 
 The provider suppresses duplicate terminals for its mounted lifetime. A host
 can mount the same session in more than one provider, such as the main chat and

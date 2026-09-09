@@ -10593,68 +10593,6 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
-  it('publishes a failed retirement when an epoch reset destroys the terminal', async () => {
-    // A cold restore emits only `session_update` chunks, never terminal
-    // events. The admitted prompt's terminal is gone; the host must still hear
-    // a `failed` settlement instead of waiting forever.
-    const { sessions, resyncGate, reloaded } = createResyncReplayFixture({
-      sessionId: 'session-retire-epoch',
-      reason: 'epoch_reset',
-    });
-    sdkMocks.sessions.push(...sessions);
-    const settlements: DaemonPromptSettledEvent[] = [];
-    let actions: DaemonUiSessionActions | undefined;
-
-    function Harness() {
-      actions = useDaemonActions();
-      useDaemonPromptSettled((event) => {
-        settlements.push(event);
-      });
-      return null;
-    }
-
-    await renderWithProvider(<Harness />, {
-      autoConnect: true,
-      reconnectDelayMs: 1,
-      maxReconnectDelayMs: 1,
-    });
-
-    let prompt: Promise<unknown> | undefined;
-    await act(async () => {
-      prompt = requireActions(actions).sendPrompt('hello');
-      await flushPromises();
-    });
-    expect(settlements).toEqual([]);
-
-    await act(async () => {
-      resyncGate.resolve();
-      await reloaded.promise;
-      await flushPromises();
-    });
-
-    // The epoch reset aborts the local binding (promise resolves `cancelled`)
-    // while the destroyed terminal publishes a `failed` settlement. Observe
-    // the cancelled resolution so the two verdicts can't drift out of view.
-    const pending = prompt;
-    if (!pending) throw new Error('prompt was not started');
-    await act(async () => {
-      await expect(pending).resolves.toEqual({ stopReason: 'cancelled' });
-      await flushPromises();
-    });
-
-    expect(settlements).toEqual([
-      {
-        sessionId: 'session-retire-epoch',
-        promptId: 'prompt-1',
-        outcome: 'failed',
-        error: {
-          message: 'Prompt terminal lost across daemon epoch reset',
-          code: 'epoch_reset',
-        },
-      },
-    ]);
-  });
-
   it('publishes a replayed cancelled terminal after the prompt was cancelled', async () => {
     // `cancel()` removes the ActivePrompt (deletes it in `finally`) but the
     // admission key survives; a `turn_complete{stopReason:'cancelled'}` that
@@ -20488,15 +20426,14 @@ function createPendingEvents(
 
 // Shared fixture for the resync-then-replay settlement tests: one submit
 // bound to `prompt-1`, a live stream that reports `state_resync_required`
-// once `resyncGate` resolves, and a reload whose snapshot either carries the
-// replayed terminal or (cold restore) leaves the turn terminal-less so the
-// epoch-reset retirement fires. Returning the sessions and gates together
-// keeps the three settlement tests from re-inlining the snapshot literal, and
-// the submitter promise stays in the caller where it must be awaited.
+// once `resyncGate` resolves, and a reload whose snapshot carries the replayed
+// terminal. Returning the sessions and gates together keeps the two settlement
+// tests from re-inlining the snapshot literal; the submitter promise stays in
+// the caller where it must be awaited.
 function createResyncReplayFixture(opts: {
   sessionId: string;
   reason: string;
-  terminalStopReason?: 'end_turn' | 'cancelled';
+  terminalStopReason: 'end_turn' | 'cancelled';
 }): {
   sessions: MockSession[];
   resyncGate: ReturnType<typeof createDeferred<void>>;
@@ -20543,14 +20480,12 @@ function createResyncReplayFixture(opts: {
       },
     },
   ];
-  if (opts.terminalStopReason) {
-    compactedReplay.push({
-      id: 12,
-      v: 1,
-      type: 'turn_complete',
-      data: { promptId: 'prompt-1', stopReason: opts.terminalStopReason },
-    });
-  }
+  compactedReplay.push({
+    id: 12,
+    v: 1,
+    type: 'turn_complete',
+    data: { promptId: 'prompt-1', stopReason: opts.terminalStopReason },
+  });
   const reloadedSession = createMockSession({
     sessionId: opts.sessionId,
     events: createPendingEvents(reloaded),
