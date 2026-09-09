@@ -147,16 +147,19 @@ Three trust boundaries matter: the HTTP edge (`serve/auth.ts` middleware chain),
 sequenceDiagram
     autonumber
     participant C as Client (SDK)
-    participant MW as Middleware<br/>(CORS→host→log→bearer→rate-limit→JSON→telemetry→mutationGate)
+    participant MW as Middleware<br/>(origin-strip→log→trace-id→host→same-origin→CORS→bearer→rate-limit→JSON→telemetry→mutationGate)
     participant R as Route handler
     participant BR as AcpBridge
     participant BC as BridgeClient
     participant CH as ACP child
 
     C->>MW: POST /session/:id/prompt<br/>Authorization: Bearer …<br/>X-Qwen-Client-Id: …
-    MW->>MW: allowOriginCors (mutable allowlist; unmatched Origin -> 403)
+    MW->>MW: loopback same-origin Origin strip
+    MW->>MW: access-log hook (skips GET /health and POST */heartbeat)
+    MW->>MW: inbound trace-id capture
     MW->>MW: hostAllowlist (DNS rebinding guard)
-    MW->>MW: access-log hook
+    MW->>MW: remote same-origin Origin strip + bearer check (non-loopback with a token)
+    MW->>MW: allowOriginCors (mutable allowlist; unmatched Origin -> 403)
     MW->>MW: bearerAuth (constant-time compare)
     MW->>MW: rateLimit (when enabled)
     MW->>MW: express.json body parser
