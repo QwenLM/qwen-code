@@ -1,0 +1,99 @@
+# Clickable URLs in Web Shell User Messages
+
+[English](web-shell-user-message-links.md) | [简体中文](web-shell-user-message-links.zh-CN.md)
+
+## Problem statement
+
+In the Web Shell conversation history, assistant messages already render bare
+URLs as clickable links (remark-gfm autolink literals → `MarkdownLink`), but
+user messages render as raw plain text. A URL the user typed or pasted into
+the composer is not clickable in the transcript, forcing copy-paste to open it.
+
+## Current state
+
+- `packages/web-shell/client/components/messages/UserMessage.tsx` renders user
+  text without any link detection:
+  - `DefaultUserMessageContent` renders annotated text segments as raw
+    `{segment.text}`.
+  - The `renderedContent` memo's parsed-parts path returns `part.text` raw
+    (and returns the whole `content` string when parsing fails).
+- Assistant output goes through `Markdown.tsx`; `MarkdownLink`
+  (`Markdown.tsx:765`) validates hrefs with `isSafeHref` (`Markdown.tsx:167`)
+  and routes clicks through `useExternalLinkOpener`
+  (`client/hooks/useExternalLinkOpener.ts`), which intercepts navigation in
+  the packaged desktop shell and is a no-op in plain browsers (native
+  `target="_blank"` applies).
+
+## Proposed changes
+
+1. **New util `client/utils/linkify.ts`** exporting
+   `splitTextByUrls(text): Array<{ type: 'text' | 'url'; value: string }>`:
+   - Matches `http://` and `https://` URLs only (explicit scheme required).
+   - CJK characters terminate a match (sentence punctuation, full-width
+     brackets, and the ideograph / kana / hangul ranges) — such characters are
+     always percent-encoded in real URLs, and CJK prose commonly follows a URL
+     with no space.
+   - Trims trailing ASCII sentence punctuation (`, . ; : ! ? ' " \``) and
+closing brackets `) ] }`with no matching opener inside the URL (a`)`is
+kept when the URL contains a matching`(` — e.g. Wikipedia-style URLs).
+   - A match that trims down to the bare scheme (`https://`) is not a URL and
+     stays text.
+2. **New component `client/components/messages/LinkifiedText.tsx`**: renders a
+   string with URL segments as `<a target="_blank" rel="noopener noreferrer">`,
+   validated by `isSafeHref` and clicked through `useExternalLinkOpener`,
+   mirroring `MarkdownLink`. Non-URL segments render as-is. When the text
+   contains no URL it returns the plain string (no extra DOM nodes).
+3. **`UserMessage.tsx`**: wrap text segments with `LinkifiedText` in both
+   default rendering paths (`DefaultUserMessageContent` text segments and the
+   parsed-parts text parts in the `renderedContent` memo).
+4. **`UserMessage.module.css`**: add a `.link` rule mirroring
+   `Markdown.module.css` (`color: var(--agent-blue-500)`, underline on hover).
+
+## Design decisions and rationale
+
+| Decision                                                                       | Rationale                                                                                                                                 |
+| ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Explicit `https?://` scheme only; no bare `www.`/domains/emails                | Minimum surface, near-zero false positives; pasted URLs almost always carry a scheme.                                                     |
+| Reuse `isSafeHref` + `useExternalLinkOpener`                                   | Same safety check and desktop-shell routing as assistant-message links; no second policy to maintain.                                     |
+| Separate tiny util + component instead of routing user text through `Markdown` | User text is intentionally not markdown (composer tags, `white-space: pre-wrap` layout); a regex tokenizer avoids changing that contract. |
+| No linkification inside host-provided `renderUserMessageContent` output        | That output belongs to the embedding host; overriding it would break the customization contract.                                          |
+| Scheduled-task-run prompt is linkified too                                     | Only the header lines are machine-generated; the prompt body is user-authored task instructions, so it gets the same treatment.           |
+
+## Files affected
+
+- `packages/web-shell/client/utils/linkify.ts` (new)
+- `packages/web-shell/client/utils/linkify.test.ts` (new)
+- `packages/web-shell/client/components/messages/LinkifiedText.tsx` (new)
+- `packages/web-shell/client/components/messages/LinkifiedText.test.tsx` (new)
+- `packages/web-shell/client/components/messages/UserMessage.tsx` (wrap text)
+- `packages/web-shell/client/components/messages/UserMessage.module.css` (`.link`)
+- `packages/web-shell/client/components/messages/UserMessage.test.tsx` (integration case)
+
+## Scope boundaries
+
+- User messages in the Web Shell transcript only (this also covers the
+  `mid_turn_message_injected` system messages that reuse `UserMessage`).
+- No changes to assistant/thinking/markdown rendering, the composer input
+  field, or the CLI terminal UI.
+
+## Validation
+
+- Unit tests for `splitTextByUrls`: scheme filtering, trailing punctuation,
+  balanced/unbalanced parentheses, CJK punctuation, multiple URLs, no-match
+  passthrough.
+- Component tests for `LinkifiedText` and a `UserMessage` integration case:
+  URL renders as an anchor with `target="_blank"` / `rel="noopener noreferrer"`;
+  surrounding text and composer-tag chips unchanged.
+- `npm run build && npm run typecheck` and focused vitest runs.
+
+## Acceptance criteria
+
+- A user message containing `https://example.com/foo` shows it as a link that
+  opens in a new tab (browser) or the system browser (desktop shell).
+- Trailing punctuation such as `https://example.com/foo.` links without the
+  final `.`.
+- Messages without URLs render exactly as before.
+
+## Open questions
+
+- None.
