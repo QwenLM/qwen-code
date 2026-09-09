@@ -96,11 +96,12 @@ jobs:
       # deterministic failure (missing archive, via if-no-files-found:
       # error) fails both attempts and keeps the job red. The first
       # attempt's continue-on-error keeps that failure from failing the
-      # job before the retry runs; the retry's overwrite is
-      # delete-then-upload and a no-op when nothing exists: the action
-      # creates the artifact record before any bytes move, so a failed
-      # first attempt can leave the e2e-build name taken and 409 the
-      # retry without it.
+      # job before the retry runs; the retry's overwrite covers the
+      # finalize-then-fail window: v4+ 409s a same-name upload only
+      # against an artifact already finalized in this run attempt, and
+      # a stall aborts before finalize and reserves nothing — but an
+      # attempt that finalized e2e-build and only then reported failure
+      # would 409 the retry without it.
       - name: 'Upload build artifact'
         id: 'upload-build'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1

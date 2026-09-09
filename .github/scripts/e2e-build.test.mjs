@@ -486,10 +486,10 @@ describe('e2e build artifact upload retry (e2e.yml build job)', () => {
     // (its conclusion is success; only its outcome is failure), so the retry
     // would never run while a substring pin still reads green.
     assert.equal(retry.if, "${{ steps.upload-build.outcome == 'failure' }}");
-    // The action creates the artifact record before any bytes move, so a
-    // failed first attempt can leave the e2e-build name taken and 409 a
-    // same-name retry; overwrite is delete-then-upload and a no-op when
-    // nothing exists.
+    // v4+ 409s a same-name upload only against an artifact finalized in
+    // this run attempt — a stall aborts before finalize and reserves
+    // nothing, so overwrite guards the finalize-then-fail window: an
+    // attempt that finalized e2e-build and only then reported failure.
     assert.equal(retry.with.overwrite, true);
     // Both attempts publish the same payload under the same name; the
     // missing-archive guard rides on both so a pack regression fails
@@ -531,6 +531,22 @@ describe('e2e build artifact upload retry (e2e.yml build job)', () => {
         buildSteps.indexOf(first) < buildSteps.indexOf(retry),
       'pack must run before the first attempt, which must run before the retry',
     );
+    // The archive name above is derived from the upload side, so the
+    // consumer side must be pinned against it too: a rename moving the
+    // pack step and both upload paths together re-derives `archive` and
+    // stays green here while every leg still unpacks the old name. The
+    // legs download into runner.temp/e2e-build/ and unpack from there, so
+    // assert the run's trailing argument, not the upload's full path.
+    const unpacks = Object.values(doc.jobs).flatMap((job) =>
+      (job.steps ?? []).filter((s) => s.name === 'Unpack build artifact'),
+    );
+    assert.equal(unpacks.length, downloads.length);
+    for (const unpack of unpacks) {
+      assert.ok(
+        unpack.run.endsWith('/' + archive + '"'),
+        'a leg unpacks a different archive than the build job uploads',
+      );
+    }
   });
 
   it('feeds every download leg a name the workflow actually uploads', () => {
