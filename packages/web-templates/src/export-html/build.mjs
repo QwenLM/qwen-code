@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
+import { TRANSCRIPT_CSS_ENTRY_FILTER } from './transcript-css-entry.mjs';
 
 const assetsDir = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(assetsDir, 'src');
@@ -134,7 +135,10 @@ const extractTranscriptCss = {
   name: 'extract-transcript-css',
   setup(build) {
     build.onLoad(
-      { filter: /web-shell\/dist\/transcript\.js$/ },
+      // Separators and the `transcript\.js$` tail are both load-bearing; see
+      // transcript-css-entry.mjs (extracted so the match is unit-testable
+      // without running this build).
+      { filter: TRANSCRIPT_CSS_ENTRY_FILTER },
       async (args) => {
         const source = await readFile(args.path, 'utf8');
         const cssMatch = source.match(
