@@ -63,6 +63,7 @@ import { OpenTuiBanner } from './opentui-header.js';
 function fakeConfig(overrides: Partial<Config> = {}): Config {
   return {
     getScreenReader: () => false,
+    getCliVersion: () => '9.9.9-test',
     getContentGeneratorConfig: () => ({ contextWindowSize: 1_000_000 }),
     getModelDisplayName: () => 'qwen3-coder-plus',
     getTargetDir: () => '/home/user/projects/qwen-code',
@@ -90,6 +91,39 @@ describe('OpenTuiBanner', () => {
     expect(text).toContain('>_ Qwen Code');
     expect(text).toContain('qwen3-coder-plus');
     expect(text).toContain('qwen-code');
+  });
+
+  it('renders the version reported by the config with a v prefix', () => {
+    const { container } = render(
+      <OpenTuiBanner config={fakeConfig()} settings={fakeSettings()} />,
+    );
+    expect(container.textContent).toContain('(v9.9.9-test)');
+  });
+
+  it('shows a non-semver version as-is instead of prefixing it', () => {
+    const { container } = render(
+      <OpenTuiBanner
+        config={fakeConfig({
+          getCliVersion: () => 'nightly',
+        } as Partial<Config>)}
+        settings={fakeSettings()}
+      />,
+    );
+    expect(container.textContent).toContain('(nightly)');
+  });
+
+  it('falls back to unknown rather than an empty label', () => {
+    const { container } = render(
+      <OpenTuiBanner
+        config={fakeConfig({
+          getCliVersion: () => undefined,
+        } as Partial<Config>)}
+        settings={fakeSettings()}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('(unknown)');
+    expect(text).not.toContain('()');
   });
 
   it('suppresses the banner when ui.hideBanner is set', () => {

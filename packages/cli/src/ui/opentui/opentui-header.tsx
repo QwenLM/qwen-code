@@ -20,8 +20,6 @@
 
 import { useMemo } from 'react';
 import { useTerminalDimensions } from '@opentui/react';
-import { readFileSync } from 'node:fs';
-import nodePath from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   findProviderByCredentials,
@@ -30,6 +28,7 @@ import {
   tildeifyPath,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import { formatVersionLabel } from '../../utils/version.js';
 import { C } from './theme.js';
 import { shortAsciiLogo } from '../components/AsciiArt.js';
 import { getAsciiArtWidth, getCachedStringWidth } from '../utils/textUtils.js';
@@ -89,36 +88,11 @@ function GradientLogo({ logo }: { logo: string }) {
  * narrow. Same data sources as the original, including the AppHeader
  * custom-banner resolution.
  */
-function buildBanner(
-  config: Config | undefined,
-  settings: LoadedSettings,
-  width: number,
-) {
-  let versionLabel = '';
-  try {
-    const cliPkg = nodePath.join(
-      nodePath.dirname(process.argv[1]),
-      '..',
-      'package.json',
-    );
-    const v = (JSON.parse(readFileSync(cliPkg, 'utf8')) as { version?: string })
-      .version;
-    versionLabel = v ? (/^\d/.test(v) ? `v${v}` : v) : '';
-  } catch {
-    versionLabel = '';
-  }
-  const cfg = config as unknown as
-    | {
-        getContentGeneratorConfig?: () =>
-          | { authType?: string; baseUrl?: string; apiKeyEnvKey?: string }
-          | undefined;
-        getModelDisplayName?: () => string;
-        getTargetDir?: () => string;
-      }
-    | undefined;
-  const cg = cfg?.getContentGeneratorConfig?.();
-  const model = cfg?.getModelDisplayName?.() ?? 'qwen';
-  const targetDir = cfg?.getTargetDir?.() ?? process.cwd();
+function buildBanner(config: Config, settings: LoadedSettings, width: number) {
+  const versionLabel = formatVersionLabel(config.getCliVersion() ?? 'unknown');
+  const cg = config.getContentGeneratorConfig();
+  const model = config.getModelDisplayName();
+  const targetDir = config.getTargetDir();
   // auth label (mirrors AppHeader.getAuthDisplayType)
   let authLabel = '';
   try {
@@ -246,8 +220,8 @@ export interface OpenTuiBannerProps {
  */
 export function OpenTuiBanner({ config, settings }: OpenTuiBannerProps) {
   const { width } = useTerminalDimensions();
-  const screenReaderMode = config.getScreenReader?.() ?? false;
-  const showBanner = !screenReaderMode && !settings.merged.ui?.hideBanner;
+  const showBanner =
+    !config.getScreenReader() && !settings.merged.ui?.hideBanner;
   const banner = useMemo(
     () => (showBanner ? buildBanner(config, settings, width) : null),
     [showBanner, config, settings, width],
