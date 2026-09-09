@@ -763,6 +763,9 @@ type AuthDialogProps = {
   onClose: () => void;
   /** Append a command-style message to the chat history (success feedback). */
   notify?: (text: string) => void;
+  /** Startup auth failure surfaced by the auto-open (U-6); null when the
+   * dialog opened because no auth type is configured. */
+  initialError?: string;
 };
 
 export function OpenTuiAuthDialog(props: AuthDialogProps) {
@@ -787,8 +790,11 @@ function AuthDialogFlow({
   settings,
   onClose,
   notify,
+  initialError,
 }: AuthDialogProps & { config: Config }) {
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(
+    initialError ?? null,
+  );
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
   const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
   const [mainIndex, setMainIndex] = useState<number | null>(null);
@@ -992,6 +998,16 @@ function AuthDialogFlow({
         goBack();
         return true;
       }
+      // The swallow is for an error the dialog armed itself; a boot-seeded
+      // initialError must fall through, or the auto-opened dialog could never
+      // be dismissed with Esc.
+      if (initialError && errorMessage === initialError) {
+        // ...and falling through means reaching the unauthenticated arm when
+        // no auth type exists yet, which would overwrite the boot diagnostic
+        // with the must-connect message and wedge the dialog shut (R2-1).
+        onClose();
+        return true;
+      }
       if (errorMessage) return true;
       if (config.getAuthType() === undefined) {
         setErrorMessage(
@@ -1006,7 +1022,15 @@ function AuthDialogFlow({
     };
     renderer.addInputHandler(onRaw);
     return () => renderer.removeInputHandler(onRaw);
-  }, [renderer, viewLevel, goBack, errorMessage, config, onClose]);
+  }, [
+    renderer,
+    viewLevel,
+    goBack,
+    errorMessage,
+    initialError,
+    config,
+    onClose,
+  ]);
 
   // -- View title -------------------------------------------------------------
 
