@@ -44,4 +44,13 @@ describe('TypeScript SDK release workflow', () => {
       );
     }
   });
+
+  it('spaces PR creation out from the release to avoid secondary rate limits', () => {
+    // `gh pr create` runs right after the branch push and release creation,
+    // which can trip GitHub's "was submitted too quickly" GraphQL secondary
+    // rate limit (issue #11402). Pin the gap so a future removal lets the
+    // burst through again.
+    expect(workflow).toContain('was submitted too quickly');
+    expect(workflow).toContain('sleep 30');
+  });
 });
