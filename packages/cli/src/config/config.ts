@@ -2405,8 +2405,12 @@ export async function loadCliConfig(
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
     memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
+    // Bare and safe mode must switch the tool off explicitly: `undefined`
+    // means "derive it" now that WebSearch is opt-out.
     webSearch:
-      bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),
+      bareMode || safeMode
+        ? { enabled: false }
+        : resolveWebSearchSettings(settings),
     visionModel: settings.visionModel || undefined,
     compactionModel: settings.compactionModel || undefined,
     imageModel: settings.imageModel || undefined,
