@@ -162,8 +162,8 @@ class Session {
    */
   private getNextPromptId(): string {
     if (this.promptIdCounter === null) {
-      const records = this.config.getResumedSessionData?.()?.conversation
-        .messages;
+      const records =
+        this.config.getResumedSessionData?.()?.conversation.messages;
       this.promptIdCounter = records
         ? computeInitialTurnFromHistory(records, this.sessionId)
         : 0;

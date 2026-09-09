@@ -424,7 +424,9 @@ describe('runNonInteractiveStreamJson', () => {
 
     await runNonInteractiveStreamJson(config, '');
 
-    expect(runNonInteractiveMock.mock.calls[0][3]).toBe('test-session########1');
+    expect(runNonInteractiveMock.mock.calls[0][3]).toBe(
+      'test-session########1',
+    );
   });
 
   it('seeds the promptId counter past turns the resumed transcript claims', async () => {
@@ -453,7 +455,9 @@ describe('runNonInteractiveStreamJson', () => {
 
     // 5 is the highest turn the transcript claims (a ui_telemetry record from
     // the previous run), not the 2 user turns it happens to contain.
-    expect(runNonInteractiveMock.mock.calls[0][3]).toBe('test-session########6');
+    expect(runNonInteractiveMock.mock.calls[0][3]).toBe(
+      'test-session########6',
+    );
   });
 
   it('falls back to the resumed user-turn count when no promptId is persisted', async () => {
@@ -476,7 +480,9 @@ describe('runNonInteractiveStreamJson', () => {
 
     await runNonInteractiveStreamJson(config, '');
 
-    expect(runNonInteractiveMock.mock.calls[0][3]).toBe('test-session########4');
+    expect(runNonInteractiveMock.mock.calls[0][3]).toBe(
+      'test-session########4',
+    );
   });
 
   it('processes multiple user messages sequentially', async () => {
