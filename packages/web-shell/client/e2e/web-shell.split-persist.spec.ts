@@ -168,9 +168,7 @@ test('shows session details without moving focus and preserves drafts across pan
   await expect(details).toBeVisible();
   await expect(details).toHaveAttribute('data-side', 'bottom');
   await expect(details.getByText(SESSION_B, { exact: true })).toBeVisible();
-  await expect(
-    details.getByText('qwen-web-shell-e2e', { exact: true }),
-  ).toBeVisible();
+  await expect(details.getByText(WORKSPACE_CWD, { exact: true })).toBeVisible();
   await expect(editorA).toBeFocused();
   await expect(paneB.getByTestId('chat-pane')).not.toHaveAttribute(
     'data-pane-active',
