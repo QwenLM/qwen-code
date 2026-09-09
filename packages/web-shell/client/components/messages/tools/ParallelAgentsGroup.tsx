@@ -12,6 +12,7 @@ import {
   getAgentType,
   isDefaultAgentType,
   getAgentDescription,
+  getSubagentDetailsUnavailableReason,
   getAgentCurrentToolHint,
   formatTokenCount,
   getAgentCancellationReason,
@@ -448,6 +449,8 @@ export function ParallelAgentsGroup({
                 {agents.map((agent) => {
                   const agentType = getAgentType(agent);
                   const desc = getAgentDescription(agent);
+                  const unavailableReason =
+                    getSubagentDetailsUnavailableReason(agent);
                   const toolHint = getAgentCurrentToolHint(agent, t);
                   const stats = getAgentStats(agent, now);
                   const activity = toolHint || stats.cancellationReason;
@@ -549,15 +552,19 @@ export function ParallelAgentsGroup({
                           data-detail-mode={
                             subagentDetails ? 'panel' : 'inline'
                           }
+                          aria-disabled={!!unavailableReason || undefined}
                           aria-expanded={
                             subagentDetails ? undefined : isExpanded
                           }
                           title={
-                            subagentDetails
-                              ? t('planExecution.openDetails')
-                              : t('subagent.toggleStream')
+                            unavailableReason
+                              ? t(unavailableReason)
+                              : subagentDetails
+                                ? t('planExecution.openDetails')
+                                : t('subagent.toggleStream')
                           }
                           onClick={() => {
+                            if (unavailableReason) return;
                             if (subagentDetails) subagentDetails.onOpen(agent);
                             else
                               setExpandedId(isExpanded ? null : agent.callId);
