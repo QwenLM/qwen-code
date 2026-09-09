@@ -2336,6 +2336,7 @@ export class Config {
   private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
+  private planExecutionMode?: ApprovalMode;
   private approvalModeRevision = 0;
   private manualPlanExitNoticeEventState: ManualPlanExitNoticeEventState = {
     version: 0,
@@ -4355,6 +4356,12 @@ export class Config {
       },
     );
     const newContentGeneratorConfig = config;
+    if (
+      priorReasoning === false &&
+      newContentGeneratorConfig.thinkingMandatory !== true
+    ) {
+      newContentGeneratorConfig.reasoning = false;
+    }
     this.contentGenerator = await createContentGenerator(
       newContentGeneratorConfig,
       this,
@@ -4367,7 +4374,13 @@ export class Config {
     // fires — and the resolved model can differ from the pre-auth one.
     this.publishModelEnv();
 
-    // Re-apply the user's reasoning effort that the provider sync above wiped.
+    // Re-apply the user's reasoning preference that the provider sync wiped.
+    if (
+      priorReasoning === false &&
+      newContentGeneratorConfig.reasoning === false
+    ) {
+      this.modelsConfig.getGenerationConfig().reasoning = false;
+    }
     if (priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
     }
@@ -5257,13 +5270,16 @@ export class Config {
    */
   getReasoningEffortOverride(): ReasoningEffortOverride | undefined {
     const cfg = this.getContentGeneratorConfig();
-    if (
-      !cfg ||
-      !DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg) ||
-      !isTieredEffortWireModel(cfg.model)
-    ) {
+    if (!cfg || !DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg)) {
       return undefined;
     }
+
+    const configuredReasoning = cfg.authType
+      ? this.getResolvedModelConfig(cfg.authType, cfg.model, cfg.baseUrl)
+          ?.capabilities.reasoning
+      : undefined;
+    const tieredModel = isTieredEffortWireModel(cfg.model, configuredReasoning);
+    if (!tieredModel) return undefined;
 
     const currentEffort = this.getReasoningEffort();
     const selected = selectDashScopeThinkingKnob(
@@ -5271,6 +5287,7 @@ export class Config {
       cfg.extra_body,
       cfg.samplingParams,
       currentEffort,
+      tieredModel,
     );
     if (
       !selected ||
@@ -5292,6 +5309,7 @@ export class Config {
         undefined,
         cfg.samplingParams,
         currentEffort,
+        tieredModel,
       );
       if (
         below?.source === 'samplingParams' &&
@@ -7185,6 +7203,28 @@ export class Config {
     return this.prePlanMode ?? ApprovalMode.DEFAULT;
   }
 
+  getPlanExecutionMode(): ApprovalMode | undefined {
+    return Object.hasOwn(this, 'planExecutionMode')
+      ? this.planExecutionMode
+      : undefined;
+  }
+
+  setPlanMode(enabled: boolean, executionMode: ApprovalMode): void {
+    if (isDerivedConfig(this)) {
+      throw new Error('Derived Configs cannot change plan workflow mode');
+    }
+    if (executionMode === ApprovalMode.PLAN) {
+      throw new Error('Plan is not an execution approval mode');
+    }
+    if (!this.isTrustedFolder() && executionMode !== ApprovalMode.DEFAULT) {
+      throw new TrustGateError(
+        'Cannot enable privileged approval modes in an untrusted folder.',
+      );
+    }
+    this.setApprovalMode(enabled ? ApprovalMode.PLAN : executionMode);
+    this.planExecutionMode = enabled ? executionMode : undefined;
+  }
+
   getApprovalModeRevision(): number {
     return this.approvalModeRevision;
   }
@@ -7295,6 +7335,7 @@ export class Config {
       this.autoModeDenialState = resetDenialState();
     }
     this.approvalMode = mode;
+    if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
     if (fromMode !== mode) {
       this.approvalModeRevision++;
     }

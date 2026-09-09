@@ -114,6 +114,7 @@ export interface DaemonConnectionState {
   currentModel?: string;
   reasoning?: DaemonReasoningControls;
   currentMode?: string;
+  planExecutionMode?: string;
   displayName?: string;
   titleSource?: 'manual' | 'auto';
   /** Latest main-conversation model usage event. */
@@ -144,6 +145,8 @@ export interface DaemonReasoningControls {
   efforts: Array<Exclude<ReasoningSelection, 'none' | 'default'>>;
   /** The model default when the daemon advertises one. */
   defaultEffort?: Exclude<ReasoningSelection, 'none' | 'default'>;
+  enableValue?: 'default';
+  canEnable?: false;
   /** Defaults to true. False means effort is mutable but thinking is required. */
   canDisable?: boolean;
 }
@@ -450,7 +453,7 @@ export interface DaemonSessionActions {
   ): Promise<void>;
   setApprovalMode(
     mode: DaemonApprovalMode,
-    opts?: { persist?: boolean },
+    opts?: { persist?: boolean; planMode?: boolean },
   ): Promise<DaemonApprovalModeResult>;
   respondToPermission(
     requestId: string,
