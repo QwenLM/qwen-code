@@ -38,16 +38,16 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Re-measure and lower these two constants after any change to the document
 // entry's dependencies:
 //   cd packages/web-templates && node src/export-html/build.mjs
-// (the build prints `Document export runtime is N bytes`.)
+// (the build prints `Document export renderer JS is N bytes`.)
 //
-// Last measured at 4,083,810 bytes by the Lint & Static lane on PR #11167, with
-// the mermaid stub below in place; it was 7,275,173 before that stub (measured
-// by a reviewer on PR #11038) and 8,456,076 before the echarts one. Re-measure
-// and lower these two again after any change to the document entry's
-// dependencies — a cap left far above the measurement is a ratchet with enough
-// slack for a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 4_100_000;
-const MAX_DOCUMENT_RUNTIME_BYTES = 4_200_000;
+// Since #11478 the web-shell component stylesheet is no longer inside the
+// renderer JS: the build lifts the `__qwenWebShellCss` literal out into
+// `export-transcript-document.css` (loaded via a <link>), so these constants
+// budget the JS bundle alone — the asset a browser must download, parse and
+// compile before the transcript renders. The CSS is a separate, parallel,
+// year-cached asset and is logged rather than budgeted.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 1_870_000;
+const MAX_DOCUMENT_RUNTIME_BYTES = 1_930_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
@@ -117,6 +117,55 @@ const stripDocumentDeadModules = {
     }));
   },
 };
+
+// The web-shell transcript entry carries its scoped component stylesheet as a
+// `const __qwenWebShellCss="…"` literal that injectCssModules
+// (packages/web-shell/vite.lib.config.ts) prepends to the chunk, plus a
+// one-line runtime injection that appends a <style> to document.head. The
+// document no longer wants either: it loads the stylesheet through a
+// nonce-bearing <link> in document-index.html, so this plugin lifts the literal
+// into a standalone CSS asset and hands the bundler the rest. The strip is
+// keyed to the generated shape (the CSS-constant line followed by the
+// runtime-injection line); if injectCssModules changes shape, the build fails
+// here rather than shipping a renderer that still injects CSS the document CSP
+// would block.
+const extractedTranscriptCss = { css: undefined };
+const extractTranscriptCss = {
+  name: 'extract-transcript-css',
+  setup(build) {
+    build.onLoad(
+      { filter: /web-shell\/dist\/transcript\.js$/ },
+      async (args) => {
+        const source = await readFile(args.path, 'utf8');
+        const cssMatch = source.match(
+          /^const __qwenWebShellCss=("(?:[^"\\]|\\.)*");\n/,
+        );
+        if (!cssMatch) {
+          throw new Error(
+            'Web Shell transcript entry is missing its injected component CSS ' +
+              'constant; the injectCssModules shape may have changed.',
+          );
+        }
+        const css = JSON.parse(cssMatch[1]);
+        const afterConstant = source.slice(cssMatch[0].length);
+        const injectionEnd = afterConstant.indexOf('\n');
+        if (
+          injectionEnd === -1 ||
+          !afterConstant.startsWith('if(typeof document!=="undefined"')
+        ) {
+          throw new Error(
+            'Web Shell transcript CSS runtime-injection line is missing or moved.',
+          );
+        }
+        extractedTranscriptCss.css = css;
+        return {
+          contents: afterConstant.slice(injectionEnd + 1),
+          loader: 'js',
+        };
+      },
+    );
+  },
+};
 const { version: exportTranscriptRendererPackageVersion } = JSON.parse(
   await readFile(
     join(assetsDir, '..', '..', '..', '..', 'package.json'),
@@ -163,11 +212,22 @@ const rendererDelegateIdentity =
   process.env.QWEN_EXPORT_RENDERER_IDENTITY?.trim() || undefined;
 const rendererDelegateIntegrity =
   process.env.QWEN_EXPORT_RENDERER_INTEGRITY?.trim() || undefined;
+const rendererDelegateCssIntegrity =
+  process.env.QWEN_EXPORT_RENDERER_CSS_INTEGRITY?.trim() || undefined;
 if (Boolean(rendererDelegateIdentity) !== Boolean(rendererDelegateIntegrity)) {
   throw new Error(
     'QWEN_EXPORT_RENDERER_IDENTITY and QWEN_EXPORT_RENDERER_INTEGRITY must be set together: ' +
       'the URL is derived from the identity and the SRI hash pins that same asset, ' +
       'so one without the other produces a document that always fails closed.',
+  );
+}
+if (
+  Boolean(rendererDelegateIdentity) !== Boolean(rendererDelegateCssIntegrity)
+) {
+  throw new Error(
+    'QWEN_EXPORT_RENDERER_CSS_INTEGRITY must be set together with the renderer delegation: ' +
+      'a delegated renderer points the JS and CSS at the same published version, ' +
+      'so the CSS SRI hash must describe that published asset too.',
   );
 }
 if (
@@ -189,6 +249,14 @@ if (
     `QWEN_EXPORT_RENDERER_INTEGRITY must be a sha384- base64 digest; got ${rendererDelegateIntegrity}.`,
   );
 }
+if (
+  rendererDelegateCssIntegrity &&
+  !/^sha384-[A-Za-z0-9+/]{64}={0,2}$/.test(rendererDelegateCssIntegrity)
+) {
+  throw new Error(
+    `QWEN_EXPORT_RENDERER_CSS_INTEGRITY must be a sha384- base64 digest; got ${rendererDelegateCssIntegrity}.`,
+  );
+}
 
 const documentBuildResult = await build({
   entryPoints: [join(srcDir, 'document-main.tsx')],
@@ -196,7 +264,7 @@ const documentBuildResult = await build({
   minify: true,
   write: false,
   metafile: true,
-  plugins: [stripDocumentDeadModules],
+  plugins: [stripDocumentDeadModules, extractTranscriptCss],
   outfile: join(assetsDistDir, 'export-transcript-document.js'),
   platform: 'browser',
   format: 'iife',
@@ -223,6 +291,12 @@ const documentCssBundle = documentBuildResult.outputFiles.find((file) =>
 );
 if (!documentJsBundle || !documentCssBundle) {
   throw new Error('Failed to generate document export bundles.');
+}
+if (!extractedTranscriptCss.css) {
+  throw new Error(
+    'Failed to extract the Web Shell transcript stylesheet: the ' +
+      'extract-transcript-css plugin never matched dist/transcript.js.',
+  );
 }
 // Re-measuring the budget should not require editing this file. The size line
 // below says *how much*; this says *what of*, which is the question a
@@ -266,21 +340,23 @@ if (forbiddenInputs.length > 0) {
   );
 }
 
-const documentRuntimeBytes =
-  Buffer.byteLength(documentJsBundle.text) +
-  Buffer.byteLength(documentCssBundle.text);
-console.log(`Document export runtime is ${documentRuntimeBytes} bytes`);
-if (documentRuntimeBytes > MAX_DOCUMENT_RUNTIME_BYTES) {
+const documentRendererJsBytes = Buffer.byteLength(documentJsBundle.text);
+const transcriptCssBytes = Buffer.byteLength(extractedTranscriptCss.css);
+console.log(
+  `Document export renderer JS is ${documentRendererJsBytes} bytes; ` +
+    `component CSS moved to export-transcript-document.css is ${transcriptCssBytes} bytes`,
+);
+if (documentRendererJsBytes > MAX_DOCUMENT_RUNTIME_BYTES) {
   throw new Error(
-    `Document export runtime is ${documentRuntimeBytes} bytes; expected <= ${MAX_DOCUMENT_RUNTIME_BYTES}. ` +
-      'Every reader of an exported file downloads this asset before the ' +
+    `Document export renderer JS is ${documentRendererJsBytes} bytes; expected <= ${MAX_DOCUMENT_RUNTIME_BYTES}. ` +
+      'Every reader of an exported file downloads and compiles this asset before the ' +
       'transcript renders; import only what the transcript needs ' +
       '(see packages/web-shell/client/transcript.ts) or raise the budget deliberately.',
   );
 }
-if (documentRuntimeBytes > DOCUMENT_RUNTIME_WARNING_BYTES) {
+if (documentRendererJsBytes > DOCUMENT_RUNTIME_WARNING_BYTES) {
   console.warn(
-    `Document export runtime exceeds the ${DOCUMENT_RUNTIME_WARNING_BYTES}-byte warning threshold`,
+    `Document export renderer JS exceeds the ${DOCUMENT_RUNTIME_WARNING_BYTES}-byte warning threshold`,
   );
 }
 const rendererBuildId = createHash('sha256')
@@ -303,6 +379,10 @@ const documentRendererUrl = `https://unpkg.com/@qwen-code/qwen-code@${exportTran
 const documentRendererIntegrity =
   rendererDelegateIntegrity ??
   `sha384-${createHash('sha384').update(documentJs).digest('base64')}`;
+const documentRendererCssUrl = `https://unpkg.com/@qwen-code/qwen-code@${exportTranscriptRendererVersion.split('+')[0]}/export-transcript-document.css`;
+const documentRendererCssIntegrity =
+  rendererDelegateCssIntegrity ??
+  `sha384-${createHash('sha384').update(extractedTranscriptCss.css).digest('base64')}`;
 if (rendererDelegateIdentity) {
   console.log(
     `Document export delegates its renderer to ${documentRendererUrl} ` +
@@ -323,12 +403,17 @@ const documentHtmlOutput = documentTemplate
   .replace('__DOCUMENT_INLINE_CSS__', () => documentCssBundle.text.trim())
   .replace('__DOCUMENT_RENDERER_URL__', () => documentRendererUrl)
   .replace('__DOCUMENT_RENDERER_INTEGRITY__', () => documentRendererIntegrity)
+  .replace('__DOCUMENT_RENDERER_CSS_URL__', () => documentRendererCssUrl)
+  .replace(
+    '__DOCUMENT_RENDERER_CSS_INTEGRITY__',
+    () => documentRendererCssIntegrity,
+  )
   .replace('__FAVICON_DATA__', () => faviconData);
 
 // A dropped or renamed .replace() above would otherwise still exit 0 and
 // ship a template that throws at view time.
 const documentResidualPlaceholder =
-  /__(DOCUMENT_INLINE_CSS|DOCUMENT_RENDERER_URL|DOCUMENT_RENDERER_INTEGRITY|FAVICON_DATA)__/.exec(
+  /__(DOCUMENT_INLINE_CSS|DOCUMENT_RENDERER_URL|DOCUMENT_RENDERER_INTEGRITY|DOCUMENT_RENDERER_CSS_URL|DOCUMENT_RENDERER_CSS_INTEGRITY|FAVICON_DATA)__/.exec(
     documentHtmlOutput,
   );
 if (documentResidualPlaceholder) {
@@ -357,5 +442,9 @@ await writeFile(join(assetsDistDir, 'document.html'), documentHtmlOutput);
 await writeFile(
   join(assetsDistDir, 'export-transcript-document.js'),
   documentJs,
+);
+await writeFile(
+  join(assetsDistDir, 'export-transcript-document.css'),
+  extractedTranscriptCss.css,
 );
 await writeFile(documentTemplateModulePath, documentTemplateModule);

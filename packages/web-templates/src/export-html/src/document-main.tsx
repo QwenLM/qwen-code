@@ -242,7 +242,11 @@ function DocumentApp({ value }: { value: ExportTranscriptDocument }) {
   useEffect(() => {
     document.title = value.metadata.title || 'Qwen Code Chat Export';
     requestAnimationFrame(() => {
-      document.body.dataset.renderComplete = 'true';
+      // A stylesheet load failure has already marked the body 'error'; don't
+      // overwrite that with a "successful" render that lacks the component CSS.
+      if (document.body.dataset.renderComplete !== 'error') {
+        document.body.dataset.renderComplete = 'true';
+      }
     });
   }, [value.metadata.title]);
 
@@ -334,13 +338,18 @@ class DocumentErrorBoundary extends Component<
 
 const rootNode = document.getElementById('app');
 if (!rootNode) throw new Error('Transcript document root is missing.');
-const root = createRoot(rootNode);
-try {
-  root.render(
-    <DocumentErrorBoundary>
-      <DocumentApp value={parseDocument()} />
-    </DocumentErrorBoundary>,
-  );
-} catch {
-  root.render(<DocumentError />);
+// The inline showLoadError script marks the body 'error' when the stylesheet
+// or renderer asset fails to load. Leave its alert in place rather than
+// replacing it with an unstyled transcript.
+if (document.body.dataset.renderComplete !== 'error') {
+  const root = createRoot(rootNode);
+  try {
+    root.render(
+      <DocumentErrorBoundary>
+        <DocumentApp value={parseDocument()} />
+      </DocumentErrorBoundary>,
+    );
+  } catch {
+    root.render(<DocumentError />);
+  }
 }

@@ -574,10 +574,23 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
     'dist',
     'export-transcript-document.js',
   );
-  if (existsSync(exportTranscriptRenderer)) {
+  const exportTranscriptCss = join(
+    root,
+    'packages',
+    'web-templates',
+    'src',
+    'export-html',
+    'dist',
+    'export-transcript-document.css',
+  );
+  if (existsSync(exportTranscriptRenderer) && existsSync(exportTranscriptCss)) {
     copyFileSync(
       exportTranscriptRenderer,
       join(distDir, 'export-transcript-document.js'),
+    );
+    copyFileSync(
+      exportTranscriptCss,
+      join(distDir, 'export-transcript-document.css'),
     );
     console.log('Copied HTML export renderer to dist/');
   } else {

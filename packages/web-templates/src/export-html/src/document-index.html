@@ -16,6 +16,14 @@
     <style nonce="__EXPORT_NONCE__">
       __DOCUMENT_INLINE_CSS__
     </style>
+    <link
+      rel="stylesheet"
+      nonce="__EXPORT_NONCE__"
+      id="transcript-stylesheet"
+      integrity="__DOCUMENT_RENDERER_CSS_INTEGRITY__"
+      crossorigin="anonymous"
+      href="__DOCUMENT_RENDERER_CSS_URL__"
+    />
   </head>
   <body>
     <div id="app"></div>
@@ -47,7 +55,9 @@
           function (event) {
             if (
               event.target === window ||
-              (event.target && event.target.id === 'transcript-renderer')
+              (event.target &&
+                (event.target.id === 'transcript-renderer' ||
+                  event.target.id === 'transcript-stylesheet'))
             ) {
               showLoadError();
             }

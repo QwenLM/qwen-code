@@ -569,6 +569,11 @@ describe('package asset scripts', () => {
       'packages/web-templates/src/export-html/dist/export-transcript-document.js',
       'window.QwenExportRenderer = true;',
     );
+    writeFile(
+      rootDir,
+      'packages/web-templates/src/export-html/dist/export-transcript-document.css',
+      'body{color:red}',
+    );
     stubConsole();
 
     copyBundleAssets({ root: rootDir });
@@ -580,10 +585,17 @@ describe('package asset scripts', () => {
         'utf8',
       ),
     ).toBe('window.QwenExportRenderer = true;');
+    expect(
+      readFileSync(
+        path.join(rootDir, 'dist', 'export-transcript-document.css'),
+        'utf8',
+      ),
+    ).toBe('body{color:red}');
     const distPackageJson = JSON.parse(
       readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
     );
     expect(distPackageJson.files).toContain('export-transcript-document.js');
+    expect(distPackageJson.files).toContain('export-transcript-document.css');
   });
 
   it('copies bundled skill scripts and references into the runtime dist', () => {
@@ -1335,6 +1347,11 @@ describe('package asset scripts', () => {
       rootDir,
       'dist/export-transcript-document.js',
       'window.QwenExportRenderer = true;\n',
+    );
+    writeFile(
+      rootDir,
+      'dist/export-transcript-document.css',
+      'body{color:red}\n',
     );
   }
 
