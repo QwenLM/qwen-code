@@ -47,12 +47,12 @@ const GOAL_CHECKPOINT_VERIFIER_SCHEMA = {
   properties: {
     claims: {
       type: 'array',
-      // `description` is the only bound that survives to the model. Strict
-      // normalisation drops `maxLength`/`maxItems` (they are in
+      // `description` is the only schema-level bound that survives to the
+      // model. Strict normalisation drops `maxLength`/`maxItems` (they are in
       // OPENAI_STRICT_UNSUPPORTED_SCHEMA_KEYS), and `response_format` is not
       // sent at all to endpoints that are not official OpenAI -- so the
-      // aggregate budget has to be stated in prose here and in the system
-      // prompt, and enforced on the way back in.
+      // bounds are also stated in the system prompt and enforced on the way
+      // back in.
       description: `Cumulative checkpoint claims. The combined UTF-8 size of every claim string must stay within ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} bytes. A response over that budget is rejected even when each individual claim is within its own length bound.`,
       minItems: 1,
       maxItems: GOAL_CHECKPOINT_CLAIM_LIMIT,
@@ -88,7 +88,7 @@ const GOAL_CHECKPOINT_VERIFIER_SYSTEM_PROMPT = `You are an independent Goal Evid
 
 Each output claim must cite one or more input IDs in sourceRefs. Preserve evidence semantics exactly: never change a source proofKind, and do not combine sources with different proofKind values into one claim. "delivered_output" proves only that content was delivered, "external_fact" supports external facts, and "user_input" supports what the user actually said or authorized.
 
-previousClaims are already verified checkpoint claims; to carry one forward, cite its id in sourceRefs. evidence contains the current bounded transcript evidence. Produce a cumulative checkpoint that retains every still-relevant fact needed to judge the Goal objective or a later terminal proposal. Omission may make the Goal impossible to verify, so preserve material progress, decisions, user constraints, external results, and delivered outputs. The combined UTF-8 size of all output claims must stay within ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} bytes, and every individual claim must stay within ${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS} characters, so compress the sources into dense claims. Do not make a terminal decision.
+previousClaims are already verified checkpoint claims; to carry one forward, cite its id in sourceRefs. evidence contains the current bounded transcript evidence. Produce a cumulative checkpoint that retains every still-relevant fact needed to judge the Goal objective or a later terminal proposal. Omission may make the Goal impossible to verify, so preserve material progress, decisions, user constraints, external results, and delivered outputs. Return at most ${GOAL_CHECKPOINT_CLAIM_LIMIT} claims. The combined UTF-8 size of all output claims must stay within ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} bytes, and every individual claim must stay within ${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS} characters, so compress the sources into dense claims. Do not make a terminal decision.
 
 Return exactly one JSON object with a non-empty claims array. Each claim must contain exactly proofKind, claim, and sourceRefs. Include no markdown fence, preamble, extra key, or commentary.`;
 
@@ -120,11 +120,11 @@ export class GoalCheckpointClaimBudgetError extends InvalidGoalCheckpointError {
  * A well-formed checkpoint carrying a claim longer than the protocol allows.
  *
  * Retryable for the same reason the aggregate overrun is: `maxLength` is
- * stripped from the emitted schema before the request goes out, so the model
- * is never told this bound and cannot honour it unprompted. Naming the
- * measured length on a retry is the only way it reaches the model. The bound
- * itself is re-asked, never relaxed -- `materializeGoalEvidenceCheckpoint`
- * checks the same limit one step later.
+ * stripped from the emitted schema before the request goes out. The system
+ * prompt states the bound, but only a retry can name the measured length that
+ * makes a `temperature: 0` answer differ. The bound itself is re-asked, never
+ * relaxed -- `materializeGoalEvidenceCheckpoint` checks the same limit one
+ * step later.
  */
 export class GoalCheckpointClaimLengthError extends InvalidGoalCheckpointError {
   constructor(
@@ -238,7 +238,7 @@ function claimLengthRetryNote(
   claimIndex: number,
   characterLength: number,
 ): string {
-  return `Your previous answer was rejected: claim ${claimIndex + 1} was ${characterLength} characters, over the ${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS}-character limit for a single claim. Return the same coverage with every individual claim at or under ${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS} characters and all claims together at or under ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} UTF-8 bytes. Split the over-long claim into separate claims, or compress it, rather than dropping facts. Reply with the JSON object only.`;
+  return `Your previous answer was rejected: claim ${claimIndex + 1} was ${characterLength} characters, over the ${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS}-character limit for a single claim. Return the same coverage with every individual claim at or under ${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS} characters and all claims together at or under ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} UTF-8 bytes. Split the over-long claim into as few additional claims as the budget allows, without exceeding ${GOAL_CHECKPOINT_CLAIM_LIMIT} claims in one checkpoint, or compress it, rather than dropping facts. Reply with the JSON object only.`;
 }
 
 interface CorrectiveRetry {
@@ -249,9 +249,10 @@ interface CorrectiveRetry {
 
 /**
  * The unusable results one corrective attempt can fix: exactly the bounds the
- * emitted schema carries but the wire strips, so the model has never been
- * told them. Everything else stays single-shot -- a malformed or unfaithful
- * answer is not something restating the request fixes.
+ * wire strips from the emitted schema. The system prompt states the static
+ * bounds, but the retry supplies the measured overrun needed to change a
+ * deterministic answer. Everything else stays single-shot -- a malformed or
+ * unfaithful answer is not something restating the request fixes.
  */
 function correctiveRetryFor(error: unknown): CorrectiveRetry | undefined {
   if (error instanceof GoalCheckpointClaimBudgetError) {
@@ -400,9 +401,10 @@ function parseClaim(
       `Goal checkpoint verifier claim ${index + 1} is invalid`,
     );
   }
-  // Its own class, so the retry gate can aim a corrective attempt at a bound
-  // the model was never sent. An empty claim stays a plain invalid result:
-  // restating the request does not fix a model that returned nothing.
+  // Its own class, so the retry gate can name the measured overrun that the
+  // static system-prompt bound could not prevent. An empty claim stays a
+  // plain invalid result: restating the request does not fix a model that
+  // returned nothing.
   const characterLength = [...claim].length;
   if (characterLength > GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS) {
     throw new GoalCheckpointClaimLengthError(index, characterLength);

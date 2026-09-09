@@ -12,6 +12,7 @@ import {
   type GoalCheckpointVerifierInput,
 } from './goal-checkpoint.js';
 import {
+  GOAL_CHECKPOINT_CLAIM_LIMIT,
   GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
   GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
 } from './goal-protocol.js';
@@ -236,6 +237,9 @@ describe('createGoalCheckpointVerifier', () => {
       `${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS} characters`,
     );
     expect(request.systemInstruction).toContain(
+      `Return at most ${GOAL_CHECKPOINT_CLAIM_LIMIT} claims.`,
+    );
+    expect(request.systemInstruction).toContain(
       'to carry one forward, cite its id in sourceRefs',
     );
   });
@@ -345,10 +349,11 @@ describe('createGoalCheckpointVerifier', () => {
 
   it('retries a claim over the per-claim limit, naming the measured length', async () => {
     // Both bounds are stripped from the emitted schema before the request
-    // goes out, so a model is told neither. An answer that breaks the
-    // per-claim one earns the same corrective attempt the aggregate does --
-    // `parseClaim` reaches it first, so gating on the budget error alone
-    // spent a stall strike on a bound the model was never sent.
+    // goes out. The system prompt states them, but a retry is what names the
+    // measured overrun that can change a deterministic answer. An answer that
+    // breaks the per-claim bound earns the same corrective attempt the
+    // aggregate does -- `parseClaim` reaches it first, so gating on the budget
+    // error alone spent a stall strike without identifying the bad claim.
     const overLong = GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS + 500;
     const { config, generateText } = configForReplies(
       claimsOfTexts([
@@ -370,10 +375,22 @@ describe('createGoalCheckpointVerifier', () => {
     const note = second.contents[0]?.parts?.[1]?.text ?? '';
     expect(note).toContain(String(overLong));
     expect(note).toContain(String(GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS));
+    expect(note).toContain(
+      `without exceeding ${GOAL_CHECKPOINT_CLAIM_LIMIT} claims`,
+    );
+    expect(note).toContain('claim 1 was');
     // The retry re-asks the shared protocol bound, never relaxes it:
     // `materializeGoalEvidenceCheckpoint` checks the same limit one step
     // later, so a widened answer would only be rejected again.
     expect(note).toContain(String(GOAL_CHECKPOINT_CLAIM_MAX_BYTES));
+    expect(verifierDebug).toHaveBeenCalledWith(
+      'Retrying goal checkpoint verifier after a claim overran the per-claim limit',
+      {
+        claimIndex: 0,
+        characterLength: overLong,
+        limitCharacters: GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
+      },
+    );
   });
 
   it('gives up when the retry overruns the per-claim limit again', async () => {
@@ -738,6 +755,9 @@ describe('createGoalCheckpointVerifier', () => {
     expect((thrown as GoalCheckpointClaimLengthError).claimIndex).toBe(0);
     expect((thrown as GoalCheckpointClaimLengthError).characterLength).toBe(
       GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS + 1,
+    );
+    expect((thrown as Error).message).toContain(
+      `claim 1 is ${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS + 1} characters`,
     );
   });
 
