@@ -4138,10 +4138,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const byId = new Map<string, SessionEntry>();
   // Last mode explicitly supplied by a daemon caller
   // (`setSessionApprovalMode`, or an explicit `approvalMode` on
-  // load/resume/attach). Survives ACP child reaping; an agent-side or
-  // workspace-wide mode change retires it, a rejected replay drops it, and a
-  // deliberate kill clears it. Sessions without an explicit owner still use
-  // cold-load settings.
+  // load/resume, including their live-attach paths — never a `POST
+  // /session` create/attach, which may be a client's echo of settings).
+  // Survives ACP child reaping; an agent-side or workspace-wide mode change
+  // retires it, a rejected replay drops it, and a deliberate kill clears it.
+  // Sessions without an explicit owner still use cold-load settings.
   const sessionApprovalModeOverrides = new Map<string, ApprovalMode>();
   const rememberApprovalModeOverride = (
     sessionId: string,
@@ -6086,10 +6087,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             }
             peer.currentApprovalMode = response.current;
             peer.planExecutionMode = undefined;
-            // A workspace-wide persisted write supersedes every parked
-            // per-session override.
-            sessionApprovalModeOverrides.delete(peer.sessionId);
           }
+          // A workspace-wide persisted write supersedes every parked
+          // override this bridge holds — including sessions already reaped
+          // out of `byId`, which is the whole reason they are parked.
+          sessionApprovalModeOverrides.clear();
         }
         succeeded = true;
         return {
@@ -6139,10 +6141,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     entry: SessionEntry,
     mode: ApprovalMode,
     clientId: string,
-  ): Promise<ApprovalMode> {
+  ): Promise<{ previous: ApprovalMode; current: ApprovalMode }> {
     try {
       const result = await applyApprovalMode(entry, mode, false, clientId);
-      return result.previous;
+      return { previous: result.previous, current: result.mode };
     } catch (err) {
       await rollbackAttachRegistration(entry, clientId);
       throw err;
@@ -7083,6 +7085,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           writeStderrLine(
             `[reconcile] session=${entry.sessionId} target=approvalMode action=corrected cached=${entry.currentApprovalMode ?? '<unset>'} actual=${actual}`,
           );
+          // The corrective observes a mode change the demux suppressed
+          // (e.g. an approved plan exit during a bridge round trip): the
+          // session left the remembered mode, so retire the parked
+          // override with it. Confined to the corrective branch — this
+          // reconcile also runs after a successful replay, which must not
+          // drop its own override.
+          sessionApprovalModeOverrides.delete(entry.sessionId);
           publishApprovalModeChanged(
             entry,
             {
@@ -8052,11 +8061,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       recordAttachRef(existing, clientId);
       let previousApprovalMode: ApprovalMode | undefined;
       if (req.approvalMode) {
-        previousApprovalMode = await applyApprovalModeForAttach(
+        const applied = await applyApprovalModeForAttach(
           existing,
           req.approvalMode,
           clientId,
         );
+        previousApprovalMode = applied.previous;
+        // Remember at apply time, not after the restore's remaining
+        // awaits: a concurrent `setSessionApprovalMode` landing in that
+        // window is the newer selection and must not be overwritten.
+        rememberApprovalModeOverride(existing.sessionId, applied.current);
         try {
           assertAttachableSessionEntry(req.sessionId, existing);
         } catch (error) {
@@ -8237,11 +8251,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       recordAttachRef(entry, clientId);
       let previousApprovalMode: ApprovalMode | undefined;
       if (req.approvalMode) {
-        previousApprovalMode = await applyApprovalModeForAttach(
+        const applied = await applyApprovalModeForAttach(
           entry,
           req.approvalMode,
           clientId,
         );
+        previousApprovalMode = applied.previous;
+        // Remember at apply time, not after the restore's remaining
+        // awaits: a concurrent `setSessionApprovalMode` landing in that
+        // window is the newer selection and must not be overwritten.
+        rememberApprovalModeOverride(entry.sessionId, applied.current);
         try {
           assertAttachableSessionEntry(restored.sessionId, entry);
         } catch (error) {
@@ -8737,6 +8756,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               clientId,
             );
             previousApprovalMode = result.previous;
+            // Remember at apply time, not after the restore's remaining
+            // awaits: a concurrent `setSessionApprovalMode` landing in
+            // that window is the newer selection and must not be
+            // overwritten.
+            rememberApprovalModeOverride(racedEntry.sessionId, result.mode);
           } catch (err) {
             await rollbackAttachRegistration(
               racedEntry,
@@ -8925,12 +8949,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           restoreApprovalMode !== entry.currentApprovalMode)
       ) {
         if (req.approvalMode !== undefined) {
-          previousApprovalMode = await applyApprovalModeForAttach(
+          const applied = await applyApprovalModeForAttach(
             entry,
             restoreApprovalMode,
             clientId,
           );
-        } else {
+          previousApprovalMode = applied.previous;
+          // Remember at apply time, not after the restore's remaining
+          // awaits: a concurrent `setSessionApprovalMode` landing in that
+          // window is the newer selection and must not be overwritten.
+          rememberApprovalModeOverride(entry.sessionId, applied.current);
+        } else if (!entry.approvalModeRoundtripInFlight) {
           // A remembered mode replays best-effort: this request never asked
           // for it, so a rejecting child (trust gate, timeout, transport
           // close) must not fail the restore — a hard failure here
@@ -8948,11 +8977,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               undefined,
             );
           } catch (err) {
-            sessionApprovalModeOverrides.delete(req.sessionId);
+            // A concurrent explicit change may have parked a newer mode
+            // while this replay's round trip was in flight — forget only
+            // the value this replay actually attempted.
+            if (
+              sessionApprovalModeOverrides.get(req.sessionId) ===
+              restoreApprovalMode
+            ) {
+              sessionApprovalModeOverrides.delete(req.sessionId);
+            }
             writeStderrLine(
               `qwen serve: replaying the remembered approval mode for session ${JSON.stringify(req.sessionId)} failed; dropping it and restoring on the cold-load mode: ${err instanceof Error ? err.message : String(err)}`,
             );
           }
+        } else {
+          // An explicit `setSessionApprovalMode` is mid-round-trip on this
+          // entry and parks its own child-confirmed mode when it resolves.
+          // Replaying the value captured before its round trip would revert
+          // the newer selection in the live child.
+          writeStderrLine(
+            `qwen serve: skipping the remembered approval mode replay for session ${JSON.stringify(req.sessionId)}: an explicit approval-mode change is already in flight`,
+          );
         }
         assertAttachableSessionEntry(req.sessionId, entry);
         if (publicState.modes && entry.currentApprovalMode) {
@@ -9708,23 +9753,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
 
     async loadSession(req) {
-      const restored = await restoreSession('load', req, {
+      return restoreSession('load', req, {
         ...(req.deferRestoreAskUserQuestionPrompt
           ? { deferRestorePrompt: true }
           : {}),
       });
-      rememberApprovalModeOverride(restored.sessionId, req.approvalMode);
-      return restored;
     },
 
     async resumeSession(req) {
-      const restored = await restoreSession('resume', req, {
+      return restoreSession('resume', req, {
         ...(req.deferRestoreAskUserQuestionPrompt
           ? { deferRestorePrompt: true }
           : {}),
       });
-      rememberApprovalModeOverride(restored.sessionId, req.approvalMode);
-      return restored;
     },
 
     async spawnStandaloneSession(req) {
@@ -9753,7 +9794,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
 
     async restoreStandaloneSession(action, req) {
-      const restored = await restoreSession(
+      return restoreSession(
         action,
         {
           ...req,
@@ -9761,8 +9802,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         },
         { daemonOwnedStandaloneRestore: true },
       );
-      rememberApprovalModeOverride(restored.sessionId, req.approvalMode);
-      return restored;
     },
 
     async spawnOrAttach(req) {
@@ -9876,11 +9915,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           }
           let previousApprovalMode: ApprovalMode | undefined;
           if (req.approvalMode) {
-            previousApprovalMode = await applyApprovalModeForAttach(
-              existing,
-              req.approvalMode,
-              clientId,
-            );
+            previousApprovalMode = (
+              await applyApprovalModeForAttach(
+                existing,
+                req.approvalMode,
+                clientId,
+              )
+            ).previous;
           }
           try {
             assertAttachableSessionEntry(existing.sessionId, existing);
@@ -9895,7 +9936,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             await rollbackAttachRegistration(existing, clientId);
             throw error;
           }
-          rememberApprovalModeOverride(existing.sessionId, req.approvalMode);
+          // A mode arriving on a `POST /session` attach is not remembered:
+          // the daemon cannot distinguish a deliberate choice from a
+          // client's echo of the settings-derived mode. Remembering stays
+          // on load/resume attaches and `setSessionApprovalMode`.
           return {
             sessionId: existing.sessionId,
             workspaceCwd: existing.workspaceCwd,
@@ -9963,11 +10007,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           }
           let previousApprovalMode: ApprovalMode | undefined;
           if (req.approvalMode) {
-            previousApprovalMode = await applyApprovalModeForAttach(
-              attachedEntry,
-              req.approvalMode,
-              clientId,
-            );
+            previousApprovalMode = (
+              await applyApprovalModeForAttach(
+                attachedEntry,
+                req.approvalMode,
+                clientId,
+              )
+            ).previous;
           }
           try {
             assertAttachableSessionEntry(session.sessionId, attachedEntry);
@@ -9982,10 +10028,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             await rollbackAttachRegistration(attachedEntry, clientId);
             throw error;
           }
-          rememberApprovalModeOverride(
-            attachedEntry.sessionId,
-            req.approvalMode,
-          );
           return {
             ...session,
             attached: true,
@@ -10108,6 +10150,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // BEFORE doSpawn registers the entry — after `await promise` this
       // delete could clobber an override a concurrent
       // `setSessionApprovalMode` recorded while the spawn was in flight.
+      const supersededApprovalMode =
+        req.sessionId !== undefined
+          ? sessionApprovalModeOverrides.get(req.sessionId)
+          : undefined;
       if (req.sessionId !== undefined) {
         sessionApprovalModeOverrides.delete(req.sessionId);
       }
@@ -10157,6 +10203,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       inFlightSpawns.set(tracker, promise);
       try {
         return await promise;
+      } catch (error) {
+        // The spawn never produced a session, so nothing superseded the
+        // previous incarnation's parked mode — restore it unless a
+        // concurrent `setSessionApprovalMode` parked a newer one while
+        // the spawn was in flight.
+        if (
+          req.sessionId !== undefined &&
+          supersededApprovalMode !== undefined &&
+          !sessionApprovalModeOverrides.has(req.sessionId)
+        ) {
+          sessionApprovalModeOverrides.set(
+            req.sessionId,
+            supersededApprovalMode,
+          );
+        }
+        throw error;
       } finally {
         if (abandonedSettlement) {
           void abandonedSettlement.then(
@@ -14754,6 +14816,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (entry.closing) {
         const closingChannel = channelInfoForEntry(entry);
         if (!closingChannel) return false;
+        // The kill is committed from here on: a destroyed session's parked
+        // override dies with it (an idle reap or crash keeps it — that
+        // preservation is the feature; deliberate destruction is not one).
+        sessionApprovalModeOverrides.delete(sessionId);
         await killChannelWithLog(
           closingChannel,
           `force kill closing session ${JSON.stringify(sessionId)}`,
@@ -14810,6 +14876,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           return false;
         }
         if (ci) {
+          sessionApprovalModeOverrides.delete(sessionId);
           await killChannelWithLog(
             ci,
             `force kill session ${JSON.stringify(sessionId)}`,
