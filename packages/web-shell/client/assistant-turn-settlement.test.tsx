@@ -74,6 +74,22 @@ function toolBlock(id: string, toolCallId: string): DaemonTranscriptBlock {
   } as unknown as DaemonTranscriptBlock;
 }
 
+function userBlock(
+  id: string,
+  text: string,
+  promptId?: string,
+): DaemonTranscriptBlock {
+  return {
+    id,
+    kind: 'user',
+    text,
+    promptId,
+    clientReceivedAt: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  } as unknown as DaemonTranscriptBlock;
+}
+
 describe('assistant turn settlement projection', () => {
   let published: WebShellAssistantTurnSettledEvent[] = [];
 
@@ -260,6 +276,85 @@ describe('assistant turn settlement projection', () => {
     });
 
     expect(settled).not.toHaveProperty('message');
+  });
+
+  it('does not publish one merged message for two adjacent prompts', () => {
+    // A continuation carries no user prompt to echo (`bridge.ts` skips
+    // `echoPromptToSessionBus` when `isContinue`), so two top-level assistant
+    // blocks with different `promptId`s land adjacent with nothing between
+    // them. The reducer keeps them as two blocks (`transcript.ts` refuses to
+    // merge when both prompt ids are set and differ) and the adapter then
+    // merges them into ONE message that keeps the first block's `id` and
+    // concatenates both texts. An intersection test published that same
+    // message for both prompts: turn B's answer attributed to turn A, under a
+    // message id both settlements share.
+    harness.blocks = [
+      assistantBlock('assistant-1', 'The answer is 42.', {
+        promptId: 'prompt-A',
+      }),
+      assistantBlock('assistant-2', 'next turn text', { promptId: 'prompt-B' }),
+    ];
+
+    const settledA = mountAndSettle({
+      sessionId: 'session-1',
+      promptId: 'prompt-A',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+    });
+    expect(settledA).not.toHaveProperty('message');
+
+    cleanupReact();
+    published = [];
+    const settledB = mountAndSettle({
+      sessionId: 'session-1',
+      promptId: 'prompt-B',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+    });
+    // Not A's message id, and not the glued content: B must never inherit a
+    // message that also carries A's text.
+    expect(settledB).not.toHaveProperty('message');
+  });
+
+  it('still publishes each turn its own message when a user echo separates them', () => {
+    // Guards the fix against over-rejecting: whole-message ownership must not
+    // cost an ordinary turn (user echo between the two assistant blocks) its
+    // settlement, and the two prompts must get two distinct message ids.
+    harness.blocks = [
+      assistantBlock('assistant-1', 'The answer is 42.', {
+        promptId: 'prompt-A',
+      }),
+      userBlock('user-2', 'and next?', 'prompt-B'),
+      assistantBlock('assistant-3', 'next turn text', { promptId: 'prompt-B' }),
+    ];
+
+    const settledA = mountAndSettle({
+      sessionId: 'session-1',
+      promptId: 'prompt-A',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+    });
+    expect(settledA.message).toEqual({
+      id: 'assistant-1',
+      content: 'The answer is 42.',
+      isStreaming: false,
+      timestamp: 1,
+    });
+
+    cleanupReact();
+    published = [];
+    const settledB = mountAndSettle({
+      sessionId: 'session-1',
+      promptId: 'prompt-B',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+    });
+    expect(settledB.message).toEqual({
+      id: 'assistant-3',
+      content: 'next turn text',
+      isStreaming: false,
+      timestamp: 1,
+    });
   });
 
   it('publishes only the fields the host contract declares', () => {

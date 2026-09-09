@@ -49,11 +49,35 @@ function getSettledAssistantMessage(
   const messages = transcriptBlocksToDaemonMessages(blocks, {
     includeSourceIdentity: true,
   });
+  // Ownership for the scan below, deliberately wider than `promptBlockIds`:
+  // the reducer's merge predicate admits deltas when one side omits `promptId`
+  // and backfills it afterwards (sdk-typescript `daemon/ui/transcript.ts`), so
+  // an unstamped block is not evidence of a foreign turn. A block stamped with
+  // a *different* prompt id is.
+  const promptOwnedIds = new Set(
+    blocks
+      .filter(
+        (block) => block.promptId === promptId || block.promptId === undefined,
+      )
+      .map((block) => block.id),
+  );
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
+    // Whole-message ownership, not an intersection. The adapter merges
+    // consecutive top-level assistant blocks without consulting `promptId`,
+    // keeping the first block's `id` and concatenating the text
+    // (`adapters/transcriptToMessages.ts:603-620`), and a continuation carries
+    // no user echo to separate turns (`acp-bridge/src/bridge.ts:10582`). Two
+    // adjacent turns therefore project to one message, and an intersection test
+    // published it for both prompt ids — turn B's answer attributed to turn A,
+    // under a message id both settlements share. Omitting `message` matches the
+    // existing "not attributable" semantics rather than publishing contaminated
+    // text. Missing or empty `sourceBlockIds` is not owned either: `every` is
+    // vacuously true for an empty array.
     if (
       message?.role !== 'assistant' ||
-      !message.sourceBlockIds?.some((id) => promptBlockIds.has(id))
+      !message.sourceBlockIds?.length ||
+      !message.sourceBlockIds.every((id) => promptOwnedIds.has(id))
     ) {
       continue;
     }
