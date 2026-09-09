@@ -60,8 +60,12 @@ import {
   vi,
   beforeEach,
   afterEach,
+  afterAll,
   type Mock,
 } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { render, cleanup } from 'ink-testing-library';
 import { renderHook } from '@testing-library/react';
 import { useContext, useState, useReducer, useEffect, act } from 'react';
@@ -306,6 +310,25 @@ describe('AppContainer State Management', () => {
   // registry; under heavy parallel CI load that can exceed the default
   // timeout without any real hang.
   vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
+  // That same initialize() creates a real ExtensionStore under ~/.qwen; some
+  // runners — including the review-address verification gate's clean child —
+  // inherit a HOME the test process cannot write to. Ordinary CI already
+  // overrides HOME, so point it at a scratch directory for this suite, and
+  // leave that directory alone: the mount effect's initialize() is un-awaited,
+  // so store work can still be in flight at afterAll, and deleting the tree
+  // there fails it with ENOENT — an unhandled rejection that fails the run.
+  const savedHome = process.env['HOME'];
+  const suiteHome = mkdtempSync(join(tmpdir(), 'qwen-appcontainer-home-'));
+  process.env['HOME'] = suiteHome;
+
+  afterAll(() => {
+    if (savedHome === undefined) {
+      delete process.env['HOME'];
+    } else {
+      process.env['HOME'] = savedHome;
+    }
+  });
 
   let mockConfig: Config;
   let mockSettings: LoadedSettings;

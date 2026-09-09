@@ -48,6 +48,7 @@ import {
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
+import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
 import { SettingScope } from '../../config/settings.js';
 import type {
   AgentSideConnection,
@@ -5463,9 +5464,9 @@ describe('Session', () => {
   // `_meta.qwenTodoApproval` binding instead of poking the private
   // `activeTodoPlanRevision` field. Mirrors the it.each harness in the
   // prompt describe block.
-  async function runExitPlanModeApprovalPrompt(): Promise<
-    Parameters<AgentSideConnection['requestPermission']>[0]
-  > {
+  async function runExitPlanModeApprovalPrompt(
+    onConfirm = vi.fn().mockResolvedValue(undefined),
+  ): Promise<Parameters<AgentSideConnection['requestPermission']>[0]> {
     let mode = ApprovalMode.PLAN;
     const hookSpy = vi
       .spyOn(core, 'firePermissionRequestHook')
@@ -5484,7 +5485,7 @@ describe('Session', () => {
         title: 'Approve plan',
         plan: 'Original plan',
         hideAlwaysAllow: true,
-        onConfirm: vi.fn().mockResolvedValue(undefined),
+        onConfirm,
       }),
       getDescription: vi.fn().mockReturnValue('Plan:'),
       toolLocations: vi.fn().mockReturnValue([]),
@@ -5534,6 +5535,156 @@ describe('Session', () => {
     expect(calls.length).toBeGreaterThan(0);
     return calls.at(-1)![0];
   }
+
+  it('forwards the expected Plan execution policy from permission response to confirmation', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+      async () => ({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        expectedPlanExecutionMode: 'yolo',
+      }),
+    );
+
+    await runExitPlanModeApprovalPrompt(onConfirm);
+
+    expect(onConfirm).toHaveBeenCalledWith(
+      core.ToolConfirmationOutcome.ProceedOnce,
+      expect.objectContaining({ expectedPlanExecutionMode: 'yolo' }),
+    );
+  });
+
+  describe('DAC plan approval through Session', () => {
+    let mode: ApprovalMode;
+    let policy: ApprovalMode | undefined;
+    let revision: number;
+
+    beforeEach(() => {
+      mode = ApprovalMode.PLAN;
+      policy = ApprovalMode.YOLO;
+      revision = 1;
+      mockConfig.getApprovalMode = vi.fn(() => mode);
+      mockConfig.getPlanExecutionMode = vi.fn(() => policy);
+      mockConfig.getPrePlanMode = vi.fn(() => ApprovalMode.DEFAULT);
+      mockConfig.getApprovalModeRevision = vi.fn(() => revision);
+      mockConfig.setApprovalMode = vi.fn((next) => {
+        mode = next;
+        policy = undefined;
+        revision++;
+      });
+      mockConfig.getTeamManager = vi.fn();
+      mockConfig.savePlan = vi.fn();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockToolRegistry.getTool.mockReturnValue(
+        new ExitPlanModeTool(mockConfig),
+      );
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-dac-plan',
+                  name: core.ToolNames.EXIT_PLAN_MODE,
+                  args: { plan: 'DAC plan' },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+    });
+
+    it.each([undefined, ApprovalMode.YOLO])(
+      'consumes a missing or stale DAC policy (%s) as a tool error and keeps Plan',
+      async (expectedPlanExecutionMode) => {
+        vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+          async () => {
+            policy = ApprovalMode.AUTO_EDIT;
+            return {
+              outcome: { outcome: 'selected', optionId: 'restore_previous' },
+              ...(expectedPlanExecutionMode
+                ? { expectedPlanExecutionMode }
+                : {}),
+            };
+          },
+        );
+
+        const result = await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'approve the plan' }],
+        });
+
+        expect(result.stopReason).toBe('end_turn');
+        expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'call-dac-plan',
+                response: {
+                  error: expect.stringContaining(
+                    'Execution permission changed',
+                  ),
+                },
+              }),
+            }),
+          ],
+          expect.objectContaining({
+            status: 'error',
+            errorType: core.ToolErrorType.EXECUTION_DENIED,
+            executionStatus: 'not_started',
+          }),
+        );
+        expect(mode).toBe(ApprovalMode.PLAN);
+        expect(policy).toBe(ApprovalMode.AUTO_EDIT);
+        expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+        expect(mockConfig.savePlan).not.toHaveBeenCalled();
+      },
+    );
+
+    it('settles an old approval after manual Plan exit without executing its plan', async () => {
+      let respond!: (response: RequestPermissionResponse) => void;
+      vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            respond = resolve;
+          }),
+      );
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'approve the plan' }],
+      });
+      await vi.waitFor(() =>
+        expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+      );
+
+      await session.setMode({ sessionId: 'test-session-id', modeId: 'yolo' });
+      expect(mode).toBe(ApprovalMode.YOLO);
+      respond({
+        outcome: { outcome: 'selected', optionId: 'restore_previous' },
+      });
+
+      expect((await prompt).stopReason).toBe('end_turn');
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        [
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({
+              id: 'call-dac-plan',
+              response: {
+                output: expect.stringContaining('Plan approval is stale'),
+              },
+            }),
+          }),
+        ],
+        expect.objectContaining({ status: 'success' }),
+      );
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledOnce();
+      expect(mockConfig.savePlan).not.toHaveBeenCalled();
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(mode).toBe(ApprovalMode.YOLO);
+    });
+  });
 
   function enableSessionWorkflowRevisionContext(): void {
     let revision:
@@ -5816,6 +5967,22 @@ describe('Session', () => {
       });
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(expected);
+    });
+
+    it('reports the execution policy when entering Plan', async () => {
+      mockConfig.getPrePlanMode = vi.fn(() => ApprovalMode.YOLO);
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'plan',
+      });
+
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/mode-update',
+        expect.objectContaining({
+          currentModeId: 'plan',
+          planExecutionMode: 'yolo',
+        }),
+      );
     });
 
     it('emits a current_mode_update extNotification after switching (A2)', async () => {
