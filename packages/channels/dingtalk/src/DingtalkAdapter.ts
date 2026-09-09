@@ -39,7 +39,6 @@ import {
   readValidatedFile,
   safeFileName,
   uploadDingTalkFile,
-  withFileUnavailableNotice,
   type ValidatedFile,
 } from './outbound-file.js';
 import {
@@ -66,6 +65,7 @@ import {
   type DingtalkPresentationPhase,
 } from './presentation-phase.js';
 import { QuestionCardController } from './question-card-controller.js';
+import { PermissionCardController } from './permission-card-controller.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 import type {
   BackgroundResponseContext,
@@ -631,9 +631,6 @@ const STATUS_CARD_ACTION_IDS = [
   'btn_stop',
   'btn_new_session',
   'btn_compact',
-  'btn_permission_allow_always',
-  'btn_permission_allow_once',
-  'btn_permission_reject',
 ] as const;
 
 function normalizeStatusCardActionId(actionId: string): string {
@@ -1071,6 +1068,7 @@ export class DingtalkChannel extends ChannelBase {
   protected readonly interactiveCardClient?: DingtalkInteractiveCardClient;
   private statusCardController?: StatusCardController;
   private questionCardController?: QuestionCardController;
+  private permissionCardController?: PermissionCardController;
   private interactionPresenter?: DingtalkInteractionPresenter;
   private readonly inboundCardOwners = new Map<string, CardRunCorrelation>();
   private readonly cardRunBySession = new Map<string, string>();
@@ -1082,17 +1080,6 @@ export class DingtalkChannel extends ChannelBase {
     string,
     { sessionId: string; projector: OutboundFileProjector }
   >();
-  private readonly blockFileProjectors = new Map<
-    string,
-    { projector: OutboundFileProjector; reportedMarkers: number }
-  >();
-  // Sessions armed for block projection by onPromptStart and disarmed when
-  // the turn settles (or the session dies). A block send that finds NO
-  // projector state is only legitimate as a turn's FIRST block, which always
-  // lands while armed: late sends from an evicted (/clear) or dead session
-  // must be dropped, because recreating state would post the tail of a
-  // force-split [FILE: ...] marker verbatim.
-  private readonly blockProjectionArmed = new Set<string>();
   private readonly backgroundResponseAggregations = new Map<
     string,
     BackgroundResponseAggregation
@@ -1127,10 +1114,7 @@ export class DingtalkChannel extends ChannelBase {
     } else if (!this.config.instructions.includes('[IMAGE:')) {
       this.config.instructions += IMAGE_INSTRUCTIONS;
     }
-    if (
-      config.blockStreaming !== 'on' &&
-      !this.config.instructions.includes('[FILE:')
-    ) {
+    if (!this.config.instructions.includes('[FILE:')) {
       this.config.instructions += FILE_INSTRUCTIONS;
     }
     this.interactiveCardConfig = parseDingtalkInteractiveCardConfig(
@@ -1179,10 +1163,7 @@ export class DingtalkChannel extends ChannelBase {
           }
         },
       });
-      if (
-        this.interactiveCardConfig.statusCard.enabled &&
-        config.blockStreaming !== 'on'
-      ) {
+      if (this.interactiveCardConfig.statusCard.enabled) {
         this.statusCardController = new StatusCardController({
           client: this.interactiveCardClient,
           cancelRun: (sessionId, runId) =>
@@ -1240,24 +1221,34 @@ export class DingtalkChannel extends ChannelBase {
           },
         });
       }
-      if (this.statusCardController || this.questionCardController) {
+      if (this.interactiveCardConfig.permissionCard.enabled) {
+        this.permissionCardController = new PermissionCardController({
+          client: this.interactiveCardClient,
+          timeoutMs: this.interactiveCardConfig.permissionCard.timeoutMs,
+          locale: this.locale,
+          reserveRunProjection: (runId) =>
+            this.interactionPresenter?.reserveProjection(runId),
+          onError: (operation, error) => {
+            process.stderr.write(
+              `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,
+            );
+          },
+        });
+      }
+      if (
+        this.statusCardController ||
+        this.questionCardController ||
+        this.permissionCardController
+      ) {
         this.interactionPresenter = new DingtalkInteractionPresenter({
           statusCards: this.statusCardController,
           questionCards: this.questionCardController,
+          permissionCards: this.permissionCardController,
           ...(options?.displayLanguage
             ? { language: options.displayLanguage }
             : {}),
-          ...(config.blockStreaming !== 'on'
-            ? {
-                sendFallback: (
-                  chatId: string,
-                  text: string,
-                  sessionId: string,
-                  sourceLabel?: string,
-                ) =>
-                  this.sendFallbackReply(chatId, text, sessionId, sourceLabel),
-              }
-            : {}),
+          sendFallback: (chatId, text, sessionId, sourceLabel) =>
+            this.sendFallbackReply(chatId, text, sessionId, sourceLabel),
         });
       }
     }
@@ -1382,24 +1373,13 @@ export class DingtalkChannel extends ChannelBase {
         ) ?? { kind: 'ignored', actorId: callback.actorId }
       );
     }
-    const permissionActions = {
-      btn_permission_allow_always: 'allow_always',
-      btn_permission_allow_once: 'allow_once',
-      btn_permission_reject: 'reject_once',
-    } as const;
-    const permissionAction =
-      permissionActions[actionId as keyof typeof permissionActions];
-    if (permissionAction) {
-      return (
-        this.statusCardController?.claimPermission(
-          callback.outTrackId,
-          callback.actorId,
-          permissionAction,
-        ) ?? { kind: 'ignored', actorId: callback.actorId }
-      );
+    const permissionResult = this.permissionCardController?.claim(callback);
+    if (permissionResult && permissionResult.kind !== 'ignored') {
+      return permissionResult;
     }
     return (
-      this.questionCardController?.claim(callback) ?? {
+      this.questionCardController?.claim(callback) ??
+      permissionResult ?? {
         kind: 'ignored',
         actorId: callback.actorId,
       }
@@ -1690,15 +1670,6 @@ export class DingtalkChannel extends ChannelBase {
     if (projection.markerCount > 0 || streamedMarkers > 0) {
       process.stderr.write(
         `[DingTalk:${this.name}] file markers projected (final=${projection.markerCount}, streamed=${streamedMarkers})\n`,
-      );
-    }
-
-    if (
-      this.config.blockStreaming === 'on' &&
-      (projection.markerCount > 0 || streamedMarkers > 0)
-    ) {
-      return this.prepareOutgoingText(
-        withFileUnavailableNotice(projection.text),
       );
     }
 
@@ -2084,6 +2055,20 @@ export class DingtalkChannel extends ChannelBase {
     actorId: string,
     target?: { chatId: string; isGroup: boolean },
   ): Promise<void> {
+    const copy =
+      this.locale === 'zh'
+        ? {
+            title: '卡片操作',
+            group: '仅任务发起人可以操作这张卡片，本次操作未生效。',
+            direct: '你无权操作这张卡片，仅任务发起人可以提交或停止。',
+          }
+        : {
+            title: 'Card interaction',
+            group:
+              'Only the task initiator can operate this card. This action had no effect.',
+            direct:
+              'You cannot operate this card. Only the task initiator can submit or stop it.',
+          };
     if (target?.isGroup) {
       return this.sendProactiveChunk(
         {
@@ -2092,8 +2077,8 @@ export class DingtalkChannel extends ChannelBase {
           chatId: target.chatId,
           isGroup: true,
         },
-        '卡片操作',
-        '仅任务发起人可以操作这张卡片，本次操作未生效。',
+        copy.title,
+        copy.group,
         'card interaction feedback',
       );
     }
@@ -2104,8 +2089,8 @@ export class DingtalkChannel extends ChannelBase {
         chatId: actorId,
         isGroup: false,
       },
-      '卡片操作',
-      '你无权操作这张卡片，仅任务发起人可以提交或停止。',
+      copy.title,
+      copy.direct,
       'card interaction feedback',
     );
   }
@@ -2678,8 +2663,6 @@ export class DingtalkChannel extends ChannelBase {
 
   /** Recall reactions left behind when a session dies without terminal lifecycle events. */
   override onSessionDied(sessionId: string): void {
-    this.blockProjectionArmed.delete(sessionId);
-    this.blockFileProjectors.delete(sessionId);
     for (const [runId, state] of this.fileProjectors) {
       if (state.sessionId === sessionId) this.fileProjectors.delete(runId);
     }
@@ -2860,7 +2843,6 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
-    this.blockProjectionArmed.add(sessionId);
     if (messageId) {
       this.bufferedMentionTargets.delete(messageId);
       this.untrackBufferedMentionTarget(sessionId, messageId);
@@ -2936,43 +2918,8 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
-    this.settleBlockFileProjector(chatId, sessionId);
     this.sessionMentionTargets.delete(sessionId);
     this.stopReaction(chatId, messageId, sessionId);
-  }
-
-  /**
-   * Turn end is the only point where the block projector's held state can be
-   * settled: ChannelBase drains the turn's queued block sends before calling
-   * onPromptEnd, so everything already appended belongs to this turn. Flush
-   * the held candidate bytes (a trailing `[FILE:` prefix the stream never
-   * completed) before deleting the entry — a later delete-without-settle
-   * would silently drop them from the delivered answer. Also disarm the
-   * session: /clear eviction and session death settle WITHOUT draining the
-   * turn's send chain, and any block that lands afterwards must be dropped
-   * rather than recreating projector state.
-   */
-  private settleBlockFileProjector(chatId: string, sessionId: string): void {
-    this.blockProjectionArmed.delete(sessionId);
-    const state = this.blockFileProjectors.get(sessionId);
-    if (!state) return;
-    this.blockFileProjectors.delete(sessionId);
-    const tail = state.projector.complete();
-    if (!tail.trim()) return;
-    // Deliberately fire-and-forget: complete() can only return a strict
-    // prefix of '[FILE:' (at most 5 chars, no path bytes), so the worst case
-    // is a stray fragment landing out of order with the next turn — not a
-    // leak — and blocking settle on a delivery that may hang is worse.
-    void this.sendReply(
-      chatId,
-      tail,
-      undefined,
-      this.getResponseSourceLabel(sessionId),
-    ).catch((err) => {
-      process.stderr.write(
-        `[DingTalk:${this.name}] projector tail delivery failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}\n`,
-      );
-    });
   }
 
   /** Deliver every Agent segment immediately unless aggregation is enabled. */
@@ -3801,9 +3748,12 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   /**
-   * Out-of-turn one-shot sends (background responses) must not flow through
-   * the session's block-streaming projector: a second sender interleaving with
-   * mid-projection state can swallow the send or split a held marker.
+   * Body-identical to the base implementation — this override exists only to
+   * widen the signature, which the base seam does not declare. The background
+   * aggregation flush passes `prepared` so the body it already projected isn't
+   * projected a second time (that would re-upload its files), and
+   * `failOnHttpError` so a failed send throws instead of being swallowed,
+   * letting the flush capture the delivery plan for the next retry.
    */
   protected override async deliverBackgroundReply(
     chatId: string,
@@ -3813,20 +3763,10 @@ export class DingtalkChannel extends ChannelBase {
     prepared = false,
     failOnHttpError = false,
   ): Promise<void> {
-    if (this.config.blockStreaming !== 'on') {
-      return this.sendResponseMessage(
-        chatId,
-        text,
-        sessionId,
-        sourceLabel,
-        prepared,
-        failOnHttpError,
-      );
-    }
-    await this.sendReply(
+    await this.sendResponseMessage(
       chatId,
       text,
-      undefined,
+      sessionId,
       sourceLabel,
       prepared,
       failOnHttpError,
@@ -3841,55 +3781,18 @@ export class DingtalkChannel extends ChannelBase {
     prepared = false,
     failOnHttpError = false,
   ): Promise<void> {
-    let outgoingText = text;
-    let consumesMention = true;
-    if (this.config.blockStreaming === 'on') {
-      const projected = this.projectBlockStreamChunk(text, sessionId);
-      if (!projected.text.trim()) return;
-      outgoingText = projected.text;
-      // A notice-only block must not consume the prompt's mention target:
-      // the @mention belongs to the block carrying the actual answer.
-      consumesMention = projected.hasContent;
-    }
-    const atUserId =
-      consumesMention && this.atSender
-        ? this.sessionMentionTargets.get(sessionId)
-        : undefined;
+    const atUserId = this.atSender
+      ? this.sessionMentionTargets.get(sessionId)
+      : undefined;
     if (atUserId) this.sessionMentionTargets.delete(sessionId);
     await this.sendReply(
       chatId,
-      outgoingText,
+      text,
       atUserId,
       sourceLabel ?? this.getResponseSourceLabel(sessionId),
       prepared,
       failOnHttpError,
     );
-  }
-
-  private projectBlockStreamChunk(
-    text: string,
-    sessionId: string,
-  ): { text: string; hasContent: boolean } {
-    let state = this.blockFileProjectors.get(sessionId);
-    if (!state) {
-      if (!this.blockProjectionArmed.has(sessionId)) {
-        return { text: '', hasContent: false };
-      }
-      state = { projector: new OutboundFileProjector(), reportedMarkers: 0 };
-      this.blockFileProjectors.set(sessionId, state);
-    }
-    const safe = state.projector.append(text);
-    const hasContent = safe.trim().length > 0;
-    const result = state.projector.result(safe);
-    let outgoingText = safe;
-    if (result.markerCount > state.reportedMarkers) {
-      outgoingText = withFileUnavailableNotice(safe);
-      state.reportedMarkers = result.markerCount;
-      process.stderr.write(
-        `[DingTalk:${this.name}] file markers redacted in block stream (session ${sessionId}, markers=${result.markerCount})\n`,
-      );
-    }
-    return { text: outgoingText, hasContent };
   }
 
   private async sendFallbackReply(
@@ -3997,14 +3900,13 @@ export class DingtalkChannel extends ChannelBase {
     context: ChannelPermissionRequestContext,
   ): Promise<UserInputPresentationResult> {
     const run = this.cardRuns.get(context.runId);
-    if (run?.ownerId !== context.owner.id || !this.interactionPresenter) {
+    if (!run || run.ownerId !== context.owner.id) {
+      return { kind: 'unsupported' };
+    }
+    if (!this.permissionCardController || !this.interactionPresenter) {
       return { kind: 'unsupported' };
     }
     return this.interactionPresenter.presentPermission(context);
-  }
-
-  protected override canPresentPermissionRequest(): boolean {
-    return this.statusCardController !== undefined;
   }
 
   /**

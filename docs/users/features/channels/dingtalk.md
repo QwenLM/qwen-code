@@ -105,13 +105,6 @@ are configured through `settings.json` or the management API; the Web Shell
 channel editor does not render them, and it preserves the stored object when
 you edit other fields.
 
-When a running task requests tool permission, DingTalk shows the available
-permission actions in that task's status card. Only the user who started the
-task can use those actions. The selected result replaces the buttons in place
-and the same card continues streaming. If the status card is unavailable or
-cannot be updated, Qwen Code falls back to the text `/approve`,
-`/approve-always`, and `/deny` flow.
-
 ### Connection Recovery
 
 `useConnectionManager` defaults to `true`. The connection manager monitors the Stream WebSocket and replaces the DingTalk SDK client when the connection stops responding. You should normally leave it enabled.
@@ -211,7 +204,7 @@ You can send photos and documents to the bot, not just text.
 
 **Files:** Send a PDF, code file, or any document. The bot downloads it from DingTalk's servers and saves it locally so the agent can read it with its file tools. Audio and video files are also supported. This works with any model.
 
-**Generated files:** Ask the agent explicitly to send a completed local file and it can return the file as a native DingTalk attachment. Files must be non-empty, no larger than 20 MB, and located inside the configured workspace or the system temporary directory. One response can send at most five files. Outbound file attachments are unavailable when `blockStreaming` is set to `"on"`; upload or delivery failures are reported in the final text instead.
+**Generated files:** Ask the agent explicitly to send a completed local file and it can return the file as a native DingTalk attachment. Files must be non-empty, no larger than 20 MB, and located inside the configured workspace or the system temporary directory. One response can send at most five files. Upload or delivery failures are reported in the final text instead.
 
 ## Forwarded Chat Records
 

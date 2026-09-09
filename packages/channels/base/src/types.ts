@@ -40,18 +40,6 @@ export interface GroupConfig {
   groupHistoryLimit?: number;
 }
 
-export interface BlockStreamingChunkConfig {
-  /** Minimum characters before emitting a block. Default: 400. */
-  minChars?: number;
-  /** Force-emit when buffer exceeds this size. Default: 1000. */
-  maxChars?: number;
-}
-
-export interface BlockStreamingCoalesceConfig {
-  /** Emit buffered text after this many ms of inactivity. Default: 1500. */
-  idleMs?: number;
-}
-
 export interface ChannelConfig {
   type: ChannelType;
   token: string;
@@ -82,13 +70,6 @@ export interface ChannelConfig {
 
   /** Poll interval in ms for polling adapters. Default: 60000. */
   pollInterval?: number;
-
-  /** Enable block streaming — emit completed blocks as separate messages. */
-  blockStreaming?: 'on' | 'off';
-  /** Chunk size bounds for block streaming. */
-  blockStreamingChunk?: BlockStreamingChunkConfig;
-  /** Idle coalescing for block streaming. */
-  blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
 }
 
 export interface Attachment {
@@ -274,11 +255,7 @@ export interface ChannelUserInputRequestContext {
   respond(response: ChannelUserInputResponse): Promise<boolean>;
 }
 
-export interface ChannelPermissionOption {
-  optionId: string;
-  kind: 'allow_once' | 'allow_always' | 'reject_once';
-  label: string;
-}
+export type ChannelPermissionDecision = 'allow_once' | 'allow_always' | 'deny';
 
 export interface ChannelPermissionRequestContext {
   requestId: string;
@@ -286,12 +263,14 @@ export interface ChannelPermissionRequestContext {
   runId: string;
   owner: ChannelPromptOwner;
   target: SessionTarget;
-  toolName: string;
-  action: string;
-  parameters?: string;
-  options: ChannelPermissionOption[];
+  precedingSegmentId?: string;
+  title: string;
+  decisions: Array<{
+    kind: ChannelPermissionDecision;
+    label: string;
+  }>;
   onSettled(listener: (reason: UserInputSettlementReason) => void): () => void;
-  respond(response: ChannelUserInputResponse): Promise<boolean>;
+  respond(decision: ChannelPermissionDecision): Promise<boolean>;
 }
 
 export interface ChannelOutputSegmentContext {
@@ -308,7 +287,6 @@ export interface ChannelOutputSegmentContext {
 export type ChannelOutputSegmentEndReason =
   | 'response_boundary'
   | 'input_requested'
-  | 'permission_requested'
   | 'completed'
   | 'failed'
   | 'cancelled';

@@ -11,6 +11,7 @@ import type {
 import { escapeDingTalkMarkdown } from './markdown.js';
 import { stripPartialImageMarker } from './outbound-image.js';
 import type { QuestionCardController } from './question-card-controller.js';
+import type { PermissionCardController } from './permission-card-controller.js';
 import type { DingtalkPresentationPhase } from './presentation-phase.js';
 import { isChinesePresentationLanguage } from './presentation-phase.js';
 import {
@@ -43,6 +44,7 @@ interface SegmentPresentation {
 export interface DingtalkInteractionPresenterOptions {
   statusCards?: StatusCardController;
   questionCards?: QuestionCardController;
+  permissionCards?: PermissionCardController;
   /**
    * Effective Qwen display language. When set to a non-Chinese language the
    * terminal card copy renders in English; unset keeps the historical
@@ -257,27 +259,6 @@ export class DingtalkInteractionPresenter {
         statusCards?.abandon(statusContext.segmentId);
         return true;
       }
-      if (reason === 'permission_requested') {
-        const deliveredViaCard =
-          statusCards !== undefined &&
-          (await statusCards.isCardLive(statusContext.segmentId)) &&
-          (await statusCards.flushPending(statusContext.segmentId));
-        if (deliveredViaCard) return true;
-        const fallbackText = stripPartialImageMarker(
-          text || presentation.content,
-        );
-        if (fallbackText && this.options.sendFallback) {
-          await this.sendFallback(
-            run,
-            presentation.context.target.chatId,
-            fallbackText,
-            presentation.context.sessionId,
-          );
-        }
-        statusCards?.abandon(statusContext.segmentId);
-        run.statusContext = undefined;
-        return Boolean(fallbackText);
-      }
       statusCards?.ensure(statusContext, this.cardTarget(statusContext.target));
       const completed =
         statusCards !== undefined &&
@@ -332,14 +313,9 @@ export class DingtalkInteractionPresenter {
     ) {
       return Promise.resolve({ kind: 'unsupported' });
     }
-    const statusCards = this.options.statusCards;
-    const statusContext = run.statusContext;
-    if (!statusCards || !statusContext) {
-      return Promise.resolve({ kind: 'unsupported' });
-    }
-    return this.enqueue(run, () =>
-      statusCards.presentPermission(statusContext.segmentId, context),
-    );
+    const permissionCards = this.options.permissionCards;
+    if (!permissionCards) return Promise.resolve({ kind: 'unsupported' });
+    return permissionCards.present(context, this.cardTarget(context.target));
   }
 
   private terminalCopy(): {
@@ -378,6 +354,7 @@ export class DingtalkInteractionPresenter {
         ? 'cancelled'
         : 'expired',
     );
+    this.options.permissionCards?.cancelRun(runId);
     run.terminal = true;
     const activeSegmentId = run.activeSegmentId;
     run.activeSegmentId = undefined;

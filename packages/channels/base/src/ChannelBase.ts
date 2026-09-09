@@ -8,6 +8,7 @@ import type {
   ChannelMemoryTarget,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionDecision,
   ChannelPermissionRequestContext,
   ChannelPromptOwner,
   ChannelProactiveTarget,
@@ -28,7 +29,6 @@ import type {
   UserInputPresentationResult,
   UserInputSettlementReason,
 } from './types.js';
-import { BlockStreamer } from './BlockStreamer.js';
 import {
   ChannelProactiveDeliveryError,
   isChannelProactiveDeliveryError,
@@ -230,6 +230,7 @@ interface ChannelMemoryRecallSelection {
 }
 
 export interface ChannelBaseOptions {
+  locale?: 'en' | 'zh';
   router?: SessionRouter;
   proxy?: string;
   /** Qwen UI language used by adapter-owned presentation. */
@@ -258,6 +259,54 @@ export interface ChannelBaseOptions {
     /** Read persisted observations so adapters can hydrate label caches. */
     list?(): ObservedChannelContactGraph;
   };
+}
+
+const PERMISSION_COPY = {
+  en: {
+    toolUse: 'Tool use',
+    allowOnce: 'Allow once',
+    allowAlwaysProject: 'always allow for this project',
+    allowAlwaysUser: 'always allow for this user',
+    allowAlways: 'always allow',
+    deny: 'Deny',
+    required: 'Permission required to run a tool',
+    request: 'Request:',
+    tool: 'Tool:',
+    action: 'Action:',
+    parameters: 'Parameters:',
+    replyWith: 'Reply with:',
+  },
+  zh: {
+    toolUse: '工具调用',
+    allowOnce: '仅允许本次',
+    allowAlwaysProject: '始终允许此项目',
+    allowAlwaysUser: '始终允许此用户',
+    allowAlways: '始终允许',
+    deny: '拒绝',
+    required: '运行工具需要授权',
+    request: '请求：',
+    tool: '工具：',
+    action: '操作：',
+    parameters: '参数：',
+    replyWith: '回复以下命令：',
+  },
+} as const;
+
+/**
+ * Translate the stock prefix of a scoped always-allow label, keeping the
+ * command/tool scope that exec and mcp confirmations append to it.
+ */
+function localizedScopedAlwaysLabel(
+  label: string,
+  stockLabel: string,
+  localizedLabel: string,
+): string | undefined {
+  if (label === stockLabel) return localizedLabel;
+  const scopeSeparator = ': ';
+  if (!label.startsWith(stockLabel + scopeSeparator)) return undefined;
+  return `${localizedLabel}：${label.slice(
+    stockLabel.length + scopeSeparator.length,
+  )}`;
 }
 
 export interface ChannelLoopController {
@@ -290,6 +339,7 @@ type PendingPermission = {
   sourceLabel?: string;
   taskName?: string;
   userInputPresented?: boolean;
+  permissionPresented?: boolean;
   settlementListeners: Set<(reason: UserInputSettlementReason) => void>;
   settled?: UserInputSettlementReason;
   responsePromise?: Promise<boolean>;
@@ -325,7 +375,6 @@ type ActivePrompt = {
   loopPrompt?: boolean;
   done: Promise<void>;
   resolve: () => void;
-  stopStreaming?: () => void;
   /** The originating turn's chat/message, so a clear-time eviction can run this
    * turn's own onPromptEnd (its finally may settle long after — or never). */
   chatId: string;
@@ -423,6 +472,7 @@ export abstract class ChannelBase {
   protected proxy?: string;
   /** Adapter-owned persistent state directory, when supplied by the runtime. */
   protected readonly stateDir?: string;
+  protected readonly locale: 'en' | 'zh';
   private readonly channelMemory?: ChannelMemoryCallbacks;
   private readonly memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   private readonly channelMemoryRecallObserver?: (
@@ -901,9 +951,12 @@ export abstract class ChannelBase {
     requestIds.push(event.requestId);
     this.pendingPermissionsByChat.set(chatKey, requestIds);
     try {
-      const presentation =
-        this.tryPresentUserInput(pending) ?? this.tryPresentPermission(pending);
+      const presentation = this.tryPresentUserInput(pending);
       if (presentation && (await presentation)) {
+        return;
+      }
+      const permissionPresentation = this.tryPresentPermission(pending);
+      if (permissionPresentation && (await permissionPresentation)) {
         return;
       }
       const text = this.formatPermissionRequest(pending);
@@ -1025,17 +1078,25 @@ export abstract class ChannelBase {
     pending: PendingPermission,
   ): Promise<boolean> | undefined {
     const active = this.activePrompts.get(pending.sessionId);
+    const toolCall = pending.request.toolCall as unknown as Record<
+      string,
+      unknown
+    >;
+    const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
+    const isUserQuestion =
+      meta?.['qwenInteractionKind'] === 'user_question' ||
+      meta?.['toolName'] === 'ask_user_question' ||
+      toolCall['kind'] === 'ask_user_question';
+    const decisions = this.permissionPresentationDecisions(pending);
     if (
       !active ||
       active.loopPrompt ||
       !active.owner ||
-      !this.canPresentPermissionRequest() ||
-      this.isUserQuestionPermission(pending)
+      isUserQuestion ||
+      !decisions
     ) {
       return undefined;
     }
-    const options = this.permissionPresentationOptions(pending);
-    if (options.length === 0) return undefined;
 
     const precedingSegment = this.closeOutputSegment(
       pending.sessionId,
@@ -1043,19 +1104,17 @@ export abstract class ChannelBase {
       pending.target,
     );
     let respondInvoked = false;
-    const parameters = this.permissionParameterSummary(
-      pending.request.toolCall,
-    );
     const context: ChannelPermissionRequestContext = {
       requestId: pending.requestId,
       sessionId: pending.sessionId,
       runId: active.runId,
       owner: active.owner,
       target: pending.target,
-      toolName: this.permissionToolName(pending.request.toolCall),
-      action: this.permissionTitle(pending.request.toolCall),
-      ...(parameters ? { parameters } : {}),
-      options,
+      ...(precedingSegment
+        ? { precedingSegmentId: precedingSegment.segmentId }
+        : {}),
+      title: this.permissionTitle(pending.request.toolCall),
+      decisions,
       onSettled: (listener) => {
         if (pending.settled) {
           listener(pending.settled);
@@ -1066,12 +1125,14 @@ export abstract class ChannelBase {
           pending.settlementListeners.delete(listener);
         };
       },
-      respond: (response) => {
+      respond: (decision) => {
+        const response = this.permissionPresentationResponse(pending, decision);
+        if (!response) return Promise.resolve(false);
         respondInvoked = true;
         return this.respondToUserInput(pending, response);
       },
     };
-    pending.userInputPresented = true;
+    pending.permissionPresented = true;
     return (async () => {
       try {
         if (precedingSegment) {
@@ -1079,8 +1140,11 @@ export abstract class ChannelBase {
             pending.target.chatId,
             pending.sessionId,
             precedingSegment,
-            'permission_requested',
+            'input_requested',
           );
+        }
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
         }
         const result = await this.presentPermissionRequest(context);
         if (this.pendingPermissions.get(pending.requestId) !== pending) {
@@ -1092,7 +1156,7 @@ export abstract class ChannelBase {
         ) {
           return true;
         }
-        pending.userInputPresented = false;
+        pending.permissionPresented = false;
         return false;
       } catch (err) {
         process.stderr.write(
@@ -1101,10 +1165,57 @@ export abstract class ChannelBase {
         if (this.pendingPermissions.get(pending.requestId) !== pending) {
           return true;
         }
-        pending.userInputPresented = false;
+        pending.permissionPresented = false;
         return false;
       }
     })();
+  }
+
+  private permissionPresentationDecisions(
+    pending: PendingPermission,
+  ): ChannelPermissionRequestContext['decisions'] | undefined {
+    const allowOnce = this.approvalOption(pending);
+    if (!allowOnce) return undefined;
+    const copy = PERMISSION_COPY[this.locale];
+    const allowAlways = this.approvalAlwaysOption(pending);
+    return [
+      {
+        kind: 'allow_once',
+        label: sanitizeQuotedText(
+          this.permissionOptionLabel(allowOnce, copy.allowOnce),
+          80,
+        ),
+      },
+      ...(allowAlways
+        ? [
+            {
+              kind: 'allow_always' as const,
+              label: sanitizeQuotedText(allowAlways.label, 80),
+            },
+          ]
+        : []),
+      {
+        kind: 'deny',
+        label: sanitizeQuotedText(
+          this.permissionOptionLabel(this.denialOption(pending), copy.deny),
+          80,
+        ),
+      },
+    ];
+  }
+
+  private permissionPresentationResponse(
+    pending: PendingPermission,
+    decision: ChannelPermissionDecision,
+  ): ChannelUserInputResponse | undefined {
+    if (decision === 'deny') return this.denialResponse(pending);
+    const optionId =
+      decision === 'allow_once'
+        ? this.approvalOptionId(pending)
+        : this.approvalAlwaysOption(pending)?.optionId;
+    return optionId
+      ? { outcome: { outcome: 'selected', optionId } }
+      : undefined;
   }
 
   private normalizeUserQuestions(
@@ -1182,25 +1293,13 @@ export abstract class ChannelBase {
     return questions;
   }
 
-  private isUserQuestionPermission(pending: PendingPermission): boolean {
-    const toolCall = pending.request.toolCall as unknown as Record<
-      string,
-      unknown
-    >;
-    const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
-    return (
-      meta?.['qwenInteractionKind'] === 'user_question' ||
-      meta?.['toolName'] === 'ask_user_question' ||
-      toolCall['kind'] === 'ask_user_question'
-    );
-  }
-
   private async respondToUserInput(
     pending: PendingPermission,
     response: ChannelUserInputResponse,
   ): Promise<boolean> {
     if (pending.responsePromise) {
-      return pending.responsePromise;
+      await pending.responsePromise;
+      return false;
     }
     if (
       this.pendingPermissions.get(pending.requestId) !== pending ||
@@ -1284,6 +1383,7 @@ export abstract class ChannelBase {
     this.config = config;
     this.messagePrefix = config.messagePrefix?.trim() || undefined;
     this.bridge = bridge;
+    this.locale = options?.locale ?? 'en';
     this.proxy = options?.proxy;
     this.stateDir = options?.stateDir;
     this.identity = Object.freeze(this.resolveIdentity(name, config));
@@ -1402,10 +1502,6 @@ export abstract class ChannelBase {
     _context: ChannelPermissionRequestContext,
   ): Promise<UserInputPresentationResult> {
     return { kind: 'unsupported' };
-  }
-
-  protected canPresentPermissionRequest(): boolean {
-    return false;
   }
 
   private emitTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
@@ -2719,7 +2815,6 @@ export abstract class ChannelBase {
           return false;
         }
         active.cancelled = true;
-        this.stopActiveStreaming(active, sessionId, reason);
         this.dropCollectBuffer(sessionId);
         this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
         this.emitTaskCancellation(active, sessionId, reason);
@@ -3244,7 +3339,7 @@ export abstract class ChannelBase {
     return (
       pending.target.chatId === envelope.chatId &&
       pending.target.threadId === envelope.threadId &&
-      (!pending.userInputPresented ||
+      ((!pending.userInputPresented && !pending.permissionPresented) ||
         pending.target.senderId === envelope.senderId) &&
       (this.isSharedSessionTarget(pending.target) ||
         pending.target.senderId === envelope.senderId)
@@ -3253,15 +3348,16 @@ export abstract class ChannelBase {
 
   private formatPermissionRequest(pending: PendingPermission): string {
     const { toolCall } = pending.request;
+    const copy = PERMISSION_COPY[this.locale];
     const parameters = this.permissionParameterSummary(toolCall);
     const approveLabel = this.permissionOptionLabel(
       this.approvalOption(pending),
-      'allow once',
+      copy.allowOnce.toLocaleLowerCase(this.locale),
     );
     const alwaysOption = this.approvalAlwaysOption(pending);
     const denyLabel = this.permissionOptionLabel(
       this.denialOption(pending),
-      'deny',
+      copy.deny.toLocaleLowerCase(this.locale),
     );
     const requestSuffix = pending.taskName ? ` ${pending.requestId}` : '';
     const replyPadding = pending.taskName
@@ -3277,14 +3373,14 @@ export abstract class ChannelBase {
       `${this.prefixedCommand(`/deny${requestSuffix}`)}${replyPadding.deny}${denyLabel}`,
     ];
     return [
-      'Permission required to run a tool',
-      ...(pending.taskName ? [`Request: ${pending.requestId}`] : []),
+      copy.required,
+      ...(pending.taskName ? [`${copy.request} ${pending.requestId}`] : []),
       '',
-      `Tool: ${this.permissionToolName(toolCall)}`,
-      `Action: ${this.permissionTitle(toolCall)}`,
-      ...(parameters ? [`Parameters: ${parameters}`] : []),
+      `${copy.tool} ${this.permissionToolName(toolCall)}`,
+      `${copy.action} ${this.permissionTitle(toolCall)}`,
+      ...(parameters ? [`${copy.parameters} ${parameters}`] : []),
       '',
-      'Reply with:',
+      copy.replyWith,
       ...replies,
     ].join('\n');
   }
@@ -3302,7 +3398,10 @@ export abstract class ChannelBase {
   ): string {
     const rawTitle =
       typeof toolCall.title === 'string' ? toolCall.title : undefined;
-    return sanitizeQuotedText(rawTitle || '', 160).trim() || 'Tool use';
+    return (
+      sanitizeQuotedText(rawTitle || '', 160).trim() ||
+      PERMISSION_COPY[this.locale].toolUse
+    );
   }
 
   private permissionToolName(
@@ -3353,44 +3452,39 @@ export abstract class ChannelBase {
   ): string {
     const rawLabel = typeof option?.name === 'string' ? option.name : '';
     const label = sanitizeQuotedText(rawLabel, 160).trim();
-    return label || fallback;
+    if (!label) return fallback;
+    return this.localizedPermissionOptionLabel(option, label) ?? label;
   }
 
-  private permissionPresentationOptions(
-    pending: PendingPermission,
-  ): ChannelPermissionRequestContext['options'] {
-    const once = this.approvalOption(pending);
-    const always = this.approvalAlwaysOption(pending);
-    const deny = this.denialOption(pending);
-    return [
-      ...(always
-        ? [
-            {
-              optionId: always.optionId,
-              kind: 'allow_always' as const,
-              label: '始终允许',
-            },
-          ]
-        : []),
-      ...(once
-        ? [
-            {
-              optionId: once.optionId,
-              kind: 'allow_once' as const,
-              label: '本次允许',
-            },
-          ]
-        : []),
-      ...(deny
-        ? [
-            {
-              optionId: deny.optionId,
-              kind: 'reject_once' as const,
-              label: '拒绝',
-            },
-          ]
-        : []),
-    ];
+  private localizedPermissionOptionLabel(
+    option: PermissionOption | undefined,
+    label: string,
+  ): string | undefined {
+    if (this.locale !== 'zh') return undefined;
+    const copy = PERMISSION_COPY[this.locale];
+    if (option?.kind === 'allow_always') {
+      if (option.optionId === 'proceed_always_project') {
+        return localizedScopedAlwaysLabel(
+          label,
+          'Always Allow in project',
+          copy.allowAlwaysProject,
+        );
+      }
+      if (option.optionId === 'proceed_always_user') {
+        return localizedScopedAlwaysLabel(
+          label,
+          'Always Allow for user',
+          copy.allowAlwaysUser,
+        );
+      }
+      if (option.optionId === 'proceed_always' && label === 'Allow All Edits') {
+        return copy.allowAlways;
+      }
+      return undefined;
+    }
+    if (label === 'Allow' || label === 'Allow once') return copy.allowOnce;
+    if (label === 'Deny' || label === 'Reject') return copy.deny;
+    return undefined;
   }
 
   private approvalOption(
@@ -3443,13 +3537,14 @@ export abstract class ChannelBase {
   }
 
   private approvalAlwaysLabel(option: PermissionOption): string {
+    const copy = PERMISSION_COPY[this.locale];
     if (option.optionId === 'proceed_always_project') {
-      return 'always allow for this project';
+      return copy.allowAlwaysProject;
     }
     if (option.optionId === 'proceed_always_user') {
-      return 'always allow for this user';
+      return copy.allowAlwaysUser;
     }
-    return 'always allow';
+    return copy.allowAlways;
   }
 
   private denialResponse(pending: PendingPermission): {
@@ -3589,9 +3684,10 @@ export abstract class ChannelBase {
 
     let accepted: boolean;
     try {
-      accepted = pending.userInputPresented
-        ? await this.respondToUserInput(pending, response)
-        : await this.bridge.respondToPermission(pending.requestId, response);
+      accepted =
+        pending.userInputPresented || pending.permissionPresented
+          ? await this.respondToUserInput(pending, response)
+          : await this.bridge.respondToPermission(pending.requestId, response);
     } catch (err) {
       this.removePendingPermission(pending.requestId);
       process.stderr.write(
@@ -5816,23 +5912,8 @@ export abstract class ChannelBase {
     return active?.senderName || active?.senderId || target.senderId || 'agent';
   }
 
-  private stopActiveStreaming(
-    active: ActivePrompt,
-    sessionId: string,
-    reason: string,
-  ): void {
-    try {
-      active.stopStreaming?.();
-    } catch (err) {
-      process.stderr.write(
-        `[${this.name}] stopStreaming threw during ${reason} for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
-      );
-    }
-  }
-
   /**
-   * Cancel the active turn and wait (bounded) for it to wind down. Stops the
-   * BlockStreamer so buffered text can't leak via the idle timer, then fires a
+   * Cancel the active turn and wait (bounded) for it to wind down. Fires a
    * best-effort cancelSession (NOT awaited — a wedged child/daemon can leave the
    * request pending forever). Returns true if active.done settled first, false
    * if the CLEAR_CANCEL_TIMEOUT_MS bound won (the turn never wound down). Used by
@@ -5846,7 +5927,6 @@ export abstract class ChannelBase {
     sessionId: string,
   ): Promise<boolean> {
     active.cancelled = true;
-    this.stopActiveStreaming(active, sessionId, 'cancel');
     // Fire-and-forget, but LOG the IPC failure: a swallowed reason leaves a
     // wedged turn undiagnosable (operator sees only the wind-down timeout below
     // with no cause).
@@ -7018,7 +7098,6 @@ export abstract class ChannelBase {
             process.stderr.write(
               `[${this.name}] steer: cancelled active turn for ${envelope.senderId} in session ${sessionId}\n`,
             );
-            this.stopActiveStreaming(active, sessionId, 'steer');
             // Fire-and-forget, but LOG the IPC failure rather than swallow it, so a
             // best-effort cancel that fails isn't silently invisible to operators.
             void this.bridge.cancelSession(sessionId).catch((err) => {
@@ -7078,7 +7157,6 @@ export abstract class ChannelBase {
     // resurrect it while preprocessing runs before this queue.
     const generation =
       namedTurn?.generation ?? this.sessionGenerations.get(sessionId) ?? 0;
-    const useBlockStreaming = this.config.blockStreaming === 'on';
     if (namedTurn) {
       namedTurn.claimed = true;
     } else {
@@ -7227,30 +7305,12 @@ export abstract class ChannelBase {
         );
       }
 
-      const streamer = useBlockStreaming
-        ? new BlockStreamer({
-            minChars: this.config.blockStreamingChunk?.minChars ?? 400,
-            maxChars: this.config.blockStreamingChunk?.maxChars ?? 1000,
-            idleMs: this.config.blockStreamingCoalesce?.idleMs ?? 1500,
-            send: (text) =>
-              this.sendResponseMessage(
-                envelope.chatId,
-                text,
-                sessionId,
-                sourceLabel,
-              ),
-          })
-        : null;
-      promptState.stopStreaming = () => streamer?.stop();
-
       // Chunks arriving while a cancel is PENDING are held here: pushing them
       // to any visible sink could send output the cancel can't recall. On a
       // failed cancel they're replayed; on success, discarded.
       const heldChunks: string[] = [];
-      let hasStreamedText = false;
       const releaseHeldChunks = () => {
         for (const held of heldChunks.splice(0)) {
-          hasStreamedText = true;
           const segment = this.ensureOutputSegment(sessionId, promptState);
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
@@ -7262,7 +7322,6 @@ export abstract class ChannelBase {
             chunk: held,
           });
           this.onResponseChunk(envelope.chatId, held, sessionId, segment);
-          streamer?.push(held);
         }
       };
       const onChunk = (sid: string, chunk: string) => {
@@ -7283,7 +7342,6 @@ export abstract class ChannelBase {
           return;
         }
         heldChunks.length = 0;
-        hasStreamedText = false;
         const segment = this.closeOutputSegment(sessionId, promptState);
         void this.notifyOutputSegmentEnd(
           envelope.chatId,
@@ -7291,7 +7349,6 @@ export abstract class ChannelBase {
           segment,
           'response_boundary',
         );
-        streamer?.stop();
       };
       // Queue wait and memory recall can outlive a bridge crash. Capture the
       // bridge only after the latest recovery has restored session routing.
@@ -7316,22 +7373,15 @@ export abstract class ChannelBase {
         // If cancelled, skip sending the response
         if (!promptState.cancelled && response) {
           promptState.deliveryStarted = true;
-          if (streamer) {
-            if (!hasStreamedText) {
-              streamer.push(response);
-            }
-            await streamer.flush();
-          } else {
-            const segment = this.ensureOutputSegment(sessionId, promptState);
-            await this.onResponseComplete(
-              envelope.chatId,
-              response,
-              sessionId,
-              segment,
-            );
-            if (segment && promptState.activeSegmentId === segment.segmentId) {
-              promptState.activeSegmentId = undefined;
-            }
+          const segment = this.ensureOutputSegment(sessionId, promptState);
+          await this.onResponseComplete(
+            envelope.chatId,
+            response,
+            sessionId,
+            segment,
+          );
+          if (segment && promptState.activeSegmentId === segment.segmentId) {
+            promptState.activeSegmentId = undefined;
           }
         }
         // Once delivery started the turn's outcome is fixed — don't let a
@@ -7400,13 +7450,6 @@ export abstract class ChannelBase {
       } finally {
         promptBridge.off('textChunk', onChunk);
         promptBridge.off('responseBoundary', onResponseBoundary);
-        if (streamer) {
-          streamer.stop();
-          // Queued block sends belong to this turn: let them land before
-          // onPromptEnd settles turn-scoped adapter state, or a send racing
-          // the settle can recreate discarded state and leak unredacted text.
-          await streamer.drain();
-        }
         // Identity guard: a turn that wedged past /clear's bounded wait gets
         // EVICTED — /clear gives up on active.done, deletes activePrompts, and a
         // turn the user starts AFTER the clear can re-seed activePrompts (and own

@@ -19,6 +19,9 @@ describe('interactive card config', () => {
     const statusCard = interactiveCards?.properties?.find(
       (field) => field.key === 'statusCard',
     );
+    const permissionCard = interactiveCards?.properties?.find(
+      (field) => field.key === 'permissionCard',
+    );
     const timeout = questionCard?.properties?.find(
       (field) => field.key === 'timeoutMs',
     );
@@ -32,6 +35,14 @@ describe('interactive card config', () => {
     expect(
       timeout?.kind === 'number' ? timeout.exclusiveMinimum : undefined,
     ).toBe(DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM);
+    const permissionTimeout = permissionCard?.properties?.find(
+      (field) => field.key === 'timeoutMs',
+    );
+    expect(
+      permissionTimeout?.kind === 'number'
+        ? permissionTimeout.exclusiveMinimum
+        : undefined,
+    ).toBe(DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM);
     const descriptorAdmittedSamples = [
       {},
       { enabled: false },
@@ -44,8 +55,15 @@ describe('interactive card config', () => {
         },
       },
       { questionCard: {} },
+      { permissionCard: {} },
       {
         questionCard: {
+          enabled: false,
+          timeoutMs: DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM + 1,
+        },
+      },
+      {
+        permissionCard: {
           enabled: false,
           timeoutMs: DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM + 1,
         },
@@ -65,6 +83,7 @@ describe('interactive card config', () => {
         showReasoningEffort: true,
       },
       questionCard: { enabled: true, timeoutMs: 270_000 },
+      permissionCard: { enabled: true, timeoutMs: 270_000 },
     });
     expect(parseDingtalkInteractiveCardConfig({})).toEqual({
       enabled: true,
@@ -74,6 +93,7 @@ describe('interactive card config', () => {
         showReasoningEffort: true,
       },
       questionCard: { enabled: true, timeoutMs: 270_000 },
+      permissionCard: { enabled: true, timeoutMs: 270_000 },
     });
   });
 
@@ -87,6 +107,7 @@ describe('interactive card config', () => {
           showReasoningEffort: true,
         },
         questionCard: { enabled: true, timeoutMs: 1_000 },
+        permissionCard: { enabled: false, timeoutMs: 2_000 },
       }),
     ).toEqual({
       enabled: true,
@@ -96,6 +117,7 @@ describe('interactive card config', () => {
         showReasoningEffort: true,
       },
       questionCard: { enabled: true, timeoutMs: 1_000 },
+      permissionCard: { enabled: false, timeoutMs: 2_000 },
     });
   });
 
@@ -125,6 +147,14 @@ describe('interactive card config', () => {
         statusCard: { showReasoningEffort: 'yes' },
       }),
     ).toThrow('statusCard.showReasoningEffort');
+    expect(() =>
+      parseDingtalkInteractiveCardConfig({
+        permissionCard: { timeoutMs: 0 },
+      }),
+    ).toThrow('permissionCard.timeoutMs');
+    expect(() =>
+      parseDingtalkInteractiveCardConfig({ permissionCard: 'yes' }),
+    ).toThrow('permissionCard must be an object');
   });
 
   it('clamps question timeouts at the setTimeout maximum delay', () => {
@@ -134,6 +164,16 @@ describe('interactive card config', () => {
           timeoutMs: DINGTALK_INTERACTIVE_CARD_TIMEOUT_MAXIMUM_MS + 1,
         },
       }).questionCard.timeoutMs,
+    ).toBe(DINGTALK_INTERACTIVE_CARD_TIMEOUT_MAXIMUM_MS);
+  });
+
+  it('clamps permission timeouts at the setTimeout maximum delay', () => {
+    expect(
+      parseDingtalkInteractiveCardConfig({
+        permissionCard: {
+          timeoutMs: DINGTALK_INTERACTIVE_CARD_TIMEOUT_MAXIMUM_MS + 1,
+        },
+      }).permissionCard.timeoutMs,
     ).toBe(DINGTALK_INTERACTIVE_CARD_TIMEOUT_MAXIMUM_MS);
   });
 });
@@ -204,14 +244,14 @@ describe('card callback parser', () => {
         outTrackId: 'status-1',
         value: JSON.stringify({
           params: {
-            actionId: 'btn_permission_allow_once',
+            actionId: 'btn_compact',
           },
         }),
       }),
     ).toEqual({
       outTrackId: 'status-1',
-      actionId: 'btn_permission_allow_once',
-      parameterActionId: 'btn_permission_allow_once',
+      actionId: 'btn_compact',
+      parameterActionId: 'btn_compact',
       actorId: 'owner-1',
       formData: {},
       hasBusinessPayload: false,
@@ -228,14 +268,14 @@ describe('card callback parser', () => {
           cardPrivateData: {
             actionIds: ['dynamic-button-component'],
             params: {
-              actionId: 'btn_permission_allow_once',
+              actionId: 'btn_new_session',
             },
           },
         }),
       }),
     ).toMatchObject({
       actionId: 'dynamic-button-component',
-      parameterActionId: 'btn_permission_allow_once',
+      parameterActionId: 'btn_new_session',
     });
   });
 
@@ -246,13 +286,13 @@ describe('card callback parser', () => {
         outTrackId: 'status-1',
         value: JSON.stringify({
           cardPrivateData: {
-            actionIds: ['btn_permission_allow_once1'],
+            actionIds: ['btn_compact1'],
             params: '',
           },
         }),
       }),
     ).toMatchObject({
-      actionId: 'btn_permission_allow_once1',
+      actionId: 'btn_compact1',
     });
   });
 

@@ -1,9 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
   ChannelOutputSegmentContext,
-  ChannelPermissionRequestContext,
   ChannelTaskCancellationReason,
-  UserInputPresentationResult,
 } from '@qwen-code/channel-base';
 import {
   STATUS_CARD_TEMPLATE_ID,
@@ -32,15 +30,6 @@ export const CONTENT_LIMIT = 20_000;
 export const TRUNCATION_MARKER = '[Earlier output truncated]\n';
 
 type StatusState = 'Running' | 'Completed' | 'Failed' | 'Stopped' | 'Cancelled';
-
-type PermissionAction = 'allow_once' | 'allow_always' | 'reject_once';
-
-interface PendingPermission {
-  context: ChannelPermissionRequestContext;
-  optionIds: Map<PermissionAction, string>;
-  claimed: boolean;
-  unsubscribe: () => void;
-}
 
 interface TerminalIntent {
   state: StatusState;
@@ -91,9 +80,6 @@ interface StatusRecord {
   inFlight?: Promise<void>;
   writeChain: Promise<void>;
   terminalIntent?: TerminalIntent;
-  permission?: PendingPermission;
-  permissionControlsVisible?: boolean;
-  permissionResultBlocks?: Array<Record<string, unknown>>;
 }
 
 export interface StatusCardControllerOptions {
@@ -457,194 +443,6 @@ export class StatusCardController {
     };
   }
 
-  async presentPermission(
-    segmentId: string,
-    context: ChannelPermissionRequestContext,
-  ): Promise<UserInputPresentationResult> {
-    if (this.disposed) return { kind: 'unsupported' };
-    const record = this.recordsBySegment.get(segmentId);
-    if (
-      !record ||
-      record.terminal ||
-      record.streamFailed ||
-      record.runId !== context.runId ||
-      record.ownerId !== context.owner.id ||
-      record.permission
-    ) {
-      return { kind: 'unsupported' };
-    }
-    if (!(await this.awaitDelivery(record))) {
-      return { kind: 'unsupported' };
-    }
-    await record.writeChain;
-    const optionIds = new Map(
-      context.options.map((option) => [option.kind, option.optionId]),
-    );
-    const permission: PendingPermission = {
-      context,
-      optionIds,
-      claimed: false,
-      unsubscribe: () => {},
-    };
-    record.permission = permission;
-    record.permissionControlsVisible = true;
-    let presentationFailed = false;
-    let presentationError: unknown;
-    const presentation = record.writeChain.then(async () => {
-      try {
-        await this.options.client.updateInstance({
-          outTrackId: record.outTrackId,
-          cardParamMap: {
-            cardState: 'waiting',
-            headerTitle: '等待确认',
-            headerColor: 'orange',
-            statusLine: this.statusLine(record, 'Waiting').text,
-            blockList: JSON.stringify(this.permissionBlockList(context)),
-            hasAction: 'false',
-            stop_action: 'false',
-          },
-        });
-      } catch (error) {
-        presentationFailed = true;
-        presentationError = error;
-      }
-    });
-    record.writeChain = presentation;
-    await presentation;
-    if (presentationFailed) {
-      record.permission = undefined;
-      record.permissionControlsVisible = false;
-      this.options.onError?.(
-        'status card permission presentation',
-        presentationError,
-      );
-      return { kind: 'unsupported' };
-    }
-    permission.unsubscribe = context.onSettled((reason) => {
-      if (record.permission !== permission || permission.claimed) return;
-      void this.resolvePermission(
-        record,
-        permission,
-        reason === 'cancelled' || reason === 'run_cancelled'
-          ? '授权已取消'
-          : '授权已处理',
-      );
-    });
-    return { kind: 'presented' };
-  }
-
-  claimPermission(
-    outTrackId: string,
-    actorId: string,
-    action: PermissionAction,
-  ): DingtalkCardCallbackResult {
-    if (this.disposed) return { kind: 'ignored', actorId };
-    const record = this.recordsByOutTrack.get(outTrackId);
-    const permission = record?.permission;
-    if (!record || !permission || permission.claimed || record.terminal) {
-      return { kind: 'ignored', actorId };
-    }
-    if (record.ownerId !== actorId) {
-      if (record.forbiddenActors.has(actorId)) {
-        return { kind: 'ignored' };
-      }
-      record.forbiddenActors.add(actorId);
-      return { kind: 'forbidden', actorId, target: record.target };
-    }
-    const optionId = permission.optionIds.get(action);
-    if (!optionId) return { kind: 'ignored', actorId };
-    permission.claimed = true;
-    const selectedResult = {
-      allow_always: '已始终允许',
-      allow_once: '已本次允许',
-      reject_once: '已拒绝',
-    }[action];
-    return {
-      kind: 'accepted',
-      execute: async () => {
-        if (action === 'reject_once') {
-          record.permissionResultBlocks = this.permissionBlockList(
-            permission.context,
-            selectedResult,
-          );
-        }
-        void this.updatePermissionResult(record, permission, selectedResult);
-        let accepted = false;
-        try {
-          accepted = await permission.context.respond({
-            outcome: { outcome: 'selected', optionId },
-          });
-        } catch (error) {
-          this.options.onError?.('status card permission response', error);
-        }
-        if (
-          this.recordsByOutTrack.get(outTrackId) !== record ||
-          record.permission !== permission
-        ) {
-          return;
-        }
-        if (!accepted && action === 'reject_once') {
-          record.permissionResultBlocks = undefined;
-        }
-        await this.resolvePermission(
-          record,
-          permission,
-          accepted ? selectedResult : '授权已失效',
-          accepted && action === 'reject_once',
-        );
-      },
-    };
-  }
-
-  private async resolvePermission(
-    record: StatusRecord,
-    permission: PendingPermission,
-    result: string,
-    retainInTerminal = false,
-  ): Promise<void> {
-    const resultBlocks = this.permissionBlockList(permission.context, result);
-    if (this.disposed || record.permission !== permission) {
-      return;
-    }
-    if (retainInTerminal) {
-      record.permissionResultBlocks = resultBlocks;
-    }
-    permission.unsubscribe();
-    record.permission = undefined;
-    if (record.terminal) return;
-    await this.updatePermissionResult(record, permission, result);
-  }
-
-  private async updatePermissionResult(
-    record: StatusRecord,
-    permission: PendingPermission,
-    result: string,
-  ): Promise<void> {
-    const resultBlocks = this.permissionBlockList(permission.context, result);
-    const update = record.writeChain
-      .then(async () => {
-        if (this.disposed || record.terminal) return;
-        await this.options.client.updateInstance({
-          outTrackId: record.outTrackId,
-          cardParamMap: {
-            cardState: 'running',
-            headerTitle: '处理中',
-            headerColor: 'blue',
-            statusLine: this.statusLine(record).text,
-            blockList: JSON.stringify(resultBlocks),
-            hasAction: 'true',
-            stop_action: 'true',
-          },
-        });
-        record.permissionControlsVisible = false;
-      })
-      .catch((error) => {
-        this.options.onError?.('status card permission resolution', error);
-      });
-    record.writeChain = update;
-    await update;
-  }
-
   private pruneActionCards(): void {
     for (const [id, card] of this.actionCards) {
       if (card.expiresAt <= Date.now()) this.actionCards.delete(id);
@@ -652,60 +450,6 @@ export class StatusCardController {
     while (this.actionCards.size > MAX_ACTION_CARDS) {
       this.actionCards.delete(this.actionCards.keys().next().value!);
     }
-  }
-
-  private permissionBlockList(
-    context: ChannelPermissionRequestContext,
-    result?: string,
-  ): Array<Record<string, unknown>> {
-    const details = [
-      '**需要授权**',
-      `工具：${escapeDingTalkMarkdown(context.toolName)}`,
-      escapeDingTalkMarkdown(context.action),
-      ...(context.parameters
-        ? [`参数：${escapeDingTalkMarkdown(context.parameters)}`]
-        : []),
-    ];
-    const summary = {
-      type: 0,
-      markdown: details.map((line) => `> ${line}`).join('\n'),
-      text: '',
-      mediaId: '',
-    };
-    if (result) {
-      return [
-        summary,
-        {
-          type: 2,
-          text: result,
-          markdown: `> ${escapeDingTalkMarkdown(result)}`,
-          mediaId: '',
-        },
-      ];
-    }
-    const actionIds: Record<PermissionAction, string> = {
-      allow_always: 'btn_permission_allow_always',
-      allow_once: 'btn_permission_allow_once',
-      reject_once: 'btn_permission_reject',
-    };
-    return [
-      summary,
-      {
-        type: 4,
-        btns: context.options.map((option) => ({
-          text: option.label,
-          color: option.kind === 'allow_always' ? 'blue' : 'gray',
-          status: 'normal',
-          event: {
-            type: 'sendCardRequest',
-            params: { actionId: actionIds[option.kind] },
-          },
-        })),
-        text: '',
-        markdown: '',
-        mediaId: '',
-      },
-    ];
   }
 
   private async create(
@@ -910,47 +654,6 @@ export class StatusCardController {
     const intent = record.terminalIntent;
     if (!intent) return false;
 
-    if (record.permissionControlsVisible) {
-      try {
-        await this.options.client.updateInstance({
-          outTrackId: record.outTrackId,
-          cardParamMap: {
-            blockList: JSON.stringify([
-              {
-                type: 0,
-                markdown: intent.content,
-              },
-              ...(record.permissionResultBlocks ?? []),
-            ]),
-            cardState: intent.state.toLowerCase(),
-            headerTitle: {
-              Running: '处理中',
-              Completed: '已完成',
-              Failed: '执行失败',
-              Stopped: '已停止',
-              Cancelled: '已取消',
-            }[intent.state],
-            headerColor:
-              intent.state === 'Completed'
-                ? 'green'
-                : intent.isError
-                  ? 'red'
-                  : 'grey',
-            flowStatus: 3,
-            statusLine: intent.statusLine,
-            hasAction: 'false',
-            stop_action: 'false',
-          },
-        });
-        record.permissionControlsVisible = false;
-      } catch (error) {
-        this.options.onError?.(
-          'status card permission terminal cleanup',
-          error,
-        );
-      }
-    }
-
     if (!intent.streamFinalizeSettled) {
       try {
         await this.options.client.openOrUpdateStream({
@@ -979,7 +682,6 @@ export class StatusCardController {
               type: 0,
               markdown: intent.content,
             },
-            ...(record.permissionResultBlocks ?? []),
           ]),
           content: intent.content,
           markdown: intent.content,
@@ -1085,8 +787,6 @@ export class StatusCardController {
   }
 
   private removeRecord(record: StatusRecord): void {
-    record.permission?.unsubscribe();
-    record.permission = undefined;
     record.abandonCreation?.();
     if (record.flushTimer) clearTimeout(record.flushTimer);
     if (record.streamRetryTimer) clearTimeout(record.streamRetryTimer);
@@ -1123,7 +823,7 @@ export class StatusCardController {
 
   private statusLine(
     record: StatusRecord,
-    state?: Exclude<StatusState, 'Running'> | 'Waiting',
+    state?: Exclude<StatusState, 'Running'>,
   ): { text: string; second: number } {
     const second = Math.max(
       0,
@@ -1156,9 +856,7 @@ export class StatusCardController {
     };
   }
 
-  private statusStateLabel(
-    state: Exclude<StatusState, 'Running'> | 'Waiting',
-  ): string {
+  private statusStateLabel(state: Exclude<StatusState, 'Running'>): string {
     if (!isChinesePresentationLanguage(this.options.language)) return state;
     return (
       {
@@ -1166,17 +864,13 @@ export class StatusCardController {
         Failed: '已失败',
         Stopped: '已终止',
         Cancelled: '已取消',
-        Waiting: '等待确认',
       }[state] ?? state
     );
   }
 
   private async updateRunningStatus(record: StatusRecord): Promise<void> {
     if (this.disposed || record.terminal || record.streamFailed) return;
-    const status = this.statusLine(
-      record,
-      record.permission ? 'Waiting' : undefined,
-    );
+    const status = this.statusLine(record);
     if (status.second === record.lastStatusSecond) return;
     const syncContent =
       status.second - record.lastContentSyncSecond >=

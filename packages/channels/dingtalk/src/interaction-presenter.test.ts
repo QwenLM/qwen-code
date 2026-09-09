@@ -12,6 +12,7 @@ import {
   type DingtalkInteractiveCardClient,
 } from './interactive-card-client.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
+import { PermissionCardController } from './permission-card-controller.js';
 import { QuestionCardController } from './question-card-controller.js';
 import { StatusCardController } from './status-card-controller.js';
 
@@ -113,12 +114,10 @@ function permissionContext(): ChannelPermissionRequestContext {
       senderId: 'owner-1',
       isGroup: true,
     },
-    toolName: 'run_shell_command',
-    action: 'Run tests',
-    parameters: 'command',
-    options: [
-      { optionId: 'once', kind: 'allow_once', label: '本次允许' },
-      { optionId: 'deny', kind: 'reject_once', label: '拒绝' },
+    title: 'Run tests',
+    decisions: [
+      { kind: 'allow_once', label: 'Allow once' },
+      { kind: 'deny', label: 'Deny' },
     ],
     onSettled: () => () => {},
     respond: vi.fn().mockResolvedValue(true),
@@ -162,9 +161,16 @@ function createHarness(options: { language?: string } = {}) {
     reserveRunProjection: (runId) =>
       presenterRef.current?.reserveProjection(runId),
   });
+  const permissionCards = new PermissionCardController({
+    client,
+    timeoutMs: 300_000,
+    reserveRunProjection: (runId) =>
+      presenterRef.current?.reserveProjection(runId),
+  });
   const presenter = new DingtalkInteractionPresenter({
     statusCards,
     questionCards,
+    permissionCards,
     ...(options.language ? { language: options.language } : {}),
     sendFallback,
   });
@@ -175,6 +181,7 @@ function createHarness(options: { language?: string } = {}) {
     presenter,
     projectionOrder,
     questionCards,
+    permissionCards,
     statusCards,
     cancelRun,
     sendFallback,
@@ -474,6 +481,41 @@ describe('DingtalkInteractionPresenter', () => {
     ).toEqual([QUESTION_CARD_TEMPLATE_ID]);
   });
 
+  it('presents a permission card through the matching attended run', async () => {
+    const { client, presenter } = createHarness();
+
+    await expect(
+      presenter.presentPermission(permissionContext()),
+    ).resolves.toEqual({ kind: 'presented' });
+
+    expect(client.createAndDeliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        templateId: QUESTION_CARD_TEMPLATE_ID,
+        outTrackId: expect.stringMatching(/^qwen-permission-/),
+      }),
+    );
+  });
+
+  it('rejects permission presentation outside the owning run target', async () => {
+    const { client, presenter } = createHarness();
+    const context = permissionContext();
+    context.target = { ...context.target, chatId: 'another-chat' };
+
+    await expect(presenter.presentPermission(context)).resolves.toEqual({
+      kind: 'unsupported',
+    });
+    expect(client.createAndDeliver).not.toHaveBeenCalled();
+  });
+
+  it('cancels permission cards when their run terminalizes', () => {
+    const { presenter, permissionCards } = createHarness();
+    const cancelRun = vi.spyOn(permissionCards, 'cancelRun');
+
+    presenter.terminalizeRun('run-1', 'cancelled', 'cancel_command');
+
+    expect(cancelRun).toHaveBeenCalledWith('run-1');
+  });
+
   it('correlates direct runs by conversation and delivers cards to the user', async () => {
     const { client, presenter } = createHarness();
     presenter.registerRun('run-1', 'owner-1', {
@@ -579,32 +621,6 @@ describe('DingtalkInteractionPresenter', () => {
       'finalize:segment-1',
       'create:question',
     ]);
-  });
-
-  it('keeps the existing status card alive while presenting permission inline', async () => {
-    const { client, presenter, sendFallback } = createHarness();
-    presenter.appendOutput(segment('segment-1'), 'Explanation');
-
-    await presenter.closeOutput('segment-1', '', 'permission_requested');
-    await expect(
-      presenter.presentPermission(permissionContext()),
-    ).resolves.toEqual({ kind: 'presented' });
-
-    expect(
-      vi
-        .mocked(client.createAndDeliver)
-        .mock.calls.map(([request]) => request.templateId),
-    ).toEqual([STATUS_CARD_TEMPLATE_ID]);
-    expect(client.updateInstance).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        cardParamMap: expect.objectContaining({
-          cardState: 'waiting',
-          hasAction: 'false',
-          blockList: expect.stringContaining('btn_permission_allow_once'),
-        }),
-      }),
-    );
-    expect(sendFallback).not.toHaveBeenCalled();
   });
 
   it.each(['input_requested', 'completed'] as const)(
