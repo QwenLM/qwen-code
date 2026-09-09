@@ -1374,4 +1374,47 @@ describe('EmbeddedApp message edit rewind', () => {
     // to some other turn would silently discard different work.
     expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
   });
+
+  it('rewinds the session captured before the snapshot fetch, not the one navigated to', async () => {
+    const props = await renderApp();
+
+    // Hold the snapshot fetch open so the session can switch while it is in
+    // flight.
+    let resolveSnapshots!: (value: { snapshots: RewindSnapshotStub[] }) => void;
+    sdkMocks.getRewindSnapshots.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSnapshots = resolve;
+        }),
+    );
+
+    const prepareSubmit = await startEditing(props, 3);
+    const submission = prepareSubmit({
+      sessionId: 'session-1',
+      prompt: 'edited text',
+      inputAnnotations: [],
+    });
+
+    // The user navigates to another session before the fetch resolves; the
+    // rewind must still target the session the submission was captured for.
+    await act(async () => {
+      callback<(sessionId: string | undefined) => void>(
+        props,
+        'onSessionIdChange',
+      )('session-2');
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      resolveSnapshots({ snapshots: [snapshot(2), snapshot(3), snapshot(5)] });
+      await submission;
+    });
+
+    expect(sdkMocks.getRewindSnapshots).toHaveBeenCalledWith('session-1');
+    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
+      'session-1',
+      'prompt-3',
+      expect.objectContaining({ rewindFiles: false }),
+    );
+  });
 });
