@@ -71,7 +71,7 @@ const NO_SEARCH_RETRY_JITTER_MS = 500;
  * guaranteed to serve the Responses API search tools, while this one is the
  * documented recommendation.
  */
-export const DEFAULT_WEB_SEARCH_MODEL = 'qwen3.6-plus';
+export const DEFAULT_WEB_SEARCH_MODEL = 'qwen3.8-flash';
 
 /**
  * Parameters for the WebSearch tool. Deliberately just the query: the
@@ -494,18 +494,18 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
       ok: false,
       notice:
         'WebSearch is enabled but no search model is configured.\n' +
-        'Add a search model to settings.json (recommended: qwen3.6-plus):\n' +
+        'Add a search model to settings.json (recommended: qwen3.8-flash):\n' +
         '  {\n' +
-        '    "tools": { "webSearch": { "enabled": true, "model": "qwen3.6-plus" } },\n' +
+        '    "tools": { "webSearch": { "enabled": true, "model": "qwen3.8-flash" } },\n' +
         '    "modelProviders": {\n' +
-        '      "openai": [{ "id": "qwen3.6-plus",\n' +
+        '      "openai": [{ "id": "qwen3.8-flash",\n' +
         '        "baseUrl": "' +
         DEFAULT_DASHSCOPE_BASE_URL +
         '",\n' +
         '        "envKey": "DASHSCOPE_API_KEY" }]\n' +
         '    }\n' +
         '  }\n' +
-        'Or via env: ENABLE_WEB_SEARCH=true WEB_SEARCH_MODEL=qwen3.6-plus\n' +
+        'Or via env: ENABLE_WEB_SEARCH=true WEB_SEARCH_MODEL=qwen3.8-flash\n' +
         'WEB_SEARCH_BASE_URL=' +
         DEFAULT_DASHSCOPE_BASE_URL +
         ' (plus WEB_SEARCH_API_KEY).',
