@@ -26,14 +26,19 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
 import {
+  checkoutFilterCommands,
   discardWorktree,
   exposeDependencies,
+  filterBlankEnv,
+  filterCommandsIn,
+  localFilterCommands,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
   worktreeResidue,
@@ -128,6 +133,121 @@ describe('worktreeResidue', () => {
     // (#9557) — so a caller without the fetched sha gets unmeasured, never
     // clean.
     expect(worktreeResidue(tree).unmeasured).toContain('brought no record');
+  });
+
+  it('blanks a repo-local content filter on the measurement — the status neither runs it nor loses the measurement', () => {
+    // `status` REFRESHES the index, and a stat-stale tracked file whose
+    // attributes select a filter refreshes THROUGH that filter's `clean`
+    // command — measured live on git 2.43 and 2.47 through the exact residue
+    // invocation, which then reported the tree clean. The `-c` blanks close
+    // the two channels a fixed key names (`core.fsmonitor`, `core.hooksPath`);
+    // a filter's key is the planter's to name, so the names are READ first
+    // (the repo-local config files, includes followed) and every one found
+    // is blanked on the `status` spawn itself (`filterBlankEnv`) — not
+    // refused: a repository whose own config defines a filter (git-lfs
+    // `--local`, git-crypt) keeps its residue measurement, where a refusal
+    // left it unmeasured for good. So the probe file beside the plant is
+    // still NAMED. The plant is two writes into the common dir: the config
+    // key and one attributes line in `info/attributes`.
+    const marker = join(repo, 'PWNED-clean');
+    gitRepo('config', 'filter.evil.clean', `touch ${marker} && cat`);
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    appendFileSync(
+      join(repo, '.git', 'info', 'attributes'),
+      'a.ts filter=evil\n',
+    );
+    const stale = new Date(Date.now() + 60_000);
+    utimesSync(join(tree, 'a.ts'), stale, stale);
+    writeFileSync(join(tree, '__probe__.test.ts'), 'it("x", () => {});');
+
+    const got = worktreeResidue(tree, 12, git('rev-parse', 'HEAD'));
+    expect(existsSync(marker)).toBe(false);
+    expect(got).toEqual({ paths: ['__probe__.test.ts'], total: 1 });
+  });
+
+  it('blanks the `process` filter too — the long-running protocol serves the same refresh', () => {
+    // `filter.<name>.process` is the third command a filter key can carry,
+    // and the one a screen written for `smudge|clean` alone misses: git
+    // spawns it for the refresh exactly as it spawns `clean` (the marker
+    // appears even when the protocol handshake then fails, measured live).
+    // Marked REQUIRED, as git-lfs marks its own: an emptied required filter
+    // fails the command instead of skipping it, so the blank sets
+    // `required=false` beside it, and the measurement still lands.
+    const marker = join(repo, 'PWNED-process');
+    gitRepo('config', 'filter.evil.process', `sh -c 'touch ${marker}; cat'`);
+    gitRepo('config', 'filter.evil.required', 'true');
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    appendFileSync(
+      join(repo, '.git', 'info', 'attributes'),
+      'a.ts filter=evil\n',
+    );
+    const stale = new Date(Date.now() + 60_000);
+    utimesSync(join(tree, 'a.ts'), stale, stale);
+
+    const got = worktreeResidue(tree, 12, git('rev-parse', 'HEAD'));
+    expect(existsSync(marker)).toBe(false);
+    expect(got).toEqual({ paths: [], total: 0 });
+  });
+
+  it('follows include.path — a filter reached only through an include is the same plant', () => {
+    // `git config --file` does not expand `include.path`: a planter commits
+    // `[filter "evil"] clean = …` in an innocuous file and adds ONE include
+    // line to the repo-local config, and a --file read listed the directive
+    // while the `status` refresh ran the command (measured). The screen
+    // follows the include the way git does — relative to the including
+    // FILE (`.git/config`), never to a cwd — and blanks what it delivers.
+    const marker = join(repo, 'PWNED-included');
+    writeFileSync(
+      join(repo, 'innocuous.cfg'),
+      `[filter "evil"]\n\tclean = touch ${marker} && cat\n`,
+    );
+    gitRepo('config', 'include.path', '../innocuous.cfg');
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    appendFileSync(
+      join(repo, '.git', 'info', 'attributes'),
+      'a.ts filter=evil\n',
+    );
+    const stale = new Date(Date.now() + 60_000);
+    utimesSync(join(tree, 'a.ts'), stale, stale);
+
+    const got = worktreeResidue(tree, 12, git('rev-parse', 'HEAD'));
+    expect(existsSync(marker)).toBe(false);
+    expect(got).toEqual({ paths: [], total: 0 });
+  });
+
+  it('refuses a dangling include rather than reading it as "no filters"', () => {
+    // git ignores an include whose target is missing; a screen that did the
+    // same would certify a config whose payload file lands one step later.
+    gitRepo('config', 'include.path', '../not-there.cfg');
+    const got = worktreeResidue(tree, 12, git('rev-parse', 'HEAD'));
+    expect(got.paths).toEqual([]);
+    expect(got.unmeasured).toContain('not-there.cfg');
+  });
+
+  it('screens a config whose filter listing overflows the 1 MiB spawn default', () => {
+    // The screen's stdout is sized by the file the planter writes: past
+    // Node's default `maxBuffer`, `spawnSync` answers ENOBUFS with no stdout,
+    // and a screen that `continue`d on that read the file as filter-free
+    // while the refresh ran the planted command (measured at 1.01 MiB).
+    const marker = join(repo, 'PWNED-overflow');
+    gitRepo('config', 'filter.evil.clean', `touch ${marker} && cat`);
+    const pad = 'x'.repeat(10_000);
+    let padding = '';
+    for (let i = 0; i < 120; i++) {
+      padding += `[filter "pad${i}"]\n\tclean = ${pad}\n`;
+    }
+    appendFileSync(join(repo, '.git', 'config'), padding);
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    appendFileSync(
+      join(repo, '.git', 'info', 'attributes'),
+      'a.ts filter=evil\n',
+    );
+    const stale = new Date(Date.now() + 60_000);
+    utimesSync(join(tree, 'a.ts'), stale, stale);
+
+    const got = worktreeResidue(tree, 12, git('rev-parse', 'HEAD'));
+    expect(existsSync(marker)).toBe(false);
+    expect(got).toEqual({ paths: [], total: 0 });
   });
 
   it('names a modified file and an untracked probe — the live #9207 shape', () => {
@@ -1751,6 +1871,325 @@ describe('discardWorktree', () => {
   });
 });
 
+describe('filterCommandsIn — the include walk', () => {
+  // The screen read directly, on config files git never opens as a
+  // repository: what git refuses outright (a directory or an unparsable
+  // include target is `fatal: bad config line` for EVERY git command in
+  // that repository, measured) cannot reach the screen through a
+  // repository, so the screen's own fail-closed answers for those targets
+  // are pinned here, beside the expansions it must make.
+  let dir: string;
+  let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+  beforeEach(() => {
+    gitIsolation = isolateHostGitConfig();
+    dir = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-filter-screen-')));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    gitIsolation.dispose();
+  });
+
+  it('follows an include relative to the INCLUDING file and reports what it delivers', () => {
+    mkdirSync(join(dir, 'sub'));
+    writeFileSync(
+      join(dir, 'sub', 'payload.cfg'),
+      '[filter "evil"]\n\tprocess = evil-filter\n',
+    );
+    writeFileSync(join(dir, 'config'), '[include]\n\tpath = sub/payload.cfg\n');
+    expect(filterCommandsIn(dir, dir)).toEqual({
+      filters: ['filter.evil.process'],
+      unread: [],
+      dangling: [],
+    });
+  });
+
+  it('resolves a relative include against the path git OPENED, not its realpath', () => {
+    // git resolves a relative include against the including file's spelled
+    // path: a symlinked `.git/config` includes beside the LINK. A walk that
+    // resolved against the realpath read a different (clean) file than the
+    // one git executes — measured with the real function.
+    const elsewhere = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-filter-screen-else-')),
+    );
+    try {
+      writeFileSync(join(elsewhere, 'cfg'), '[include]\n\tpath = inc\n');
+      writeFileSync(
+        join(elsewhere, 'inc'),
+        '[filter "decoy"]\n\tclean = cat\n',
+      );
+      writeFileSync(join(dir, 'inc'), '[filter "evil"]\n\tclean = cat\n');
+      symlinkSync(join(elsewhere, 'cfg'), join(dir, 'config'));
+      expect(filterCommandsIn(dir, dir)).toEqual({
+        filters: ['filter.evil.clean'],
+        unread: [],
+        dangling: [],
+      });
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it('reads with the common dir as cwd, so a target outside the repository never triggers discovery there', () => {
+    // An include target beside a dangling gitfile made `git config --file`
+    // discover a repository in that foreign directory and exit 128 — a
+    // false "could not be read" over a file that defines no filter at all.
+    const elsewhere = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-filter-screen-foreign-')),
+    );
+    try {
+      writeFileSync(join(elsewhere, '.git'), 'gitdir: /nowhere/at/all\n');
+      writeFileSync(join(elsewhere, 'x.cfg'), '[filter "x"]\n\tclean = cat\n');
+      writeFileSync(
+        join(dir, 'config'),
+        `[include]\n\tpath = ${join(elsewhere, 'x.cfg')}\n`,
+      );
+      expect(filterCommandsIn(dir, dir)).toEqual({
+        filters: ['filter.x.clean'],
+        unread: [],
+        dangling: [],
+      });
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it('expands ~/ against the home directory, and follows an includeIf whose condition is false', () => {
+    // The screen answers what the file CAN deliver: an `includeIf` whose
+    // `gitdir:` holds nowhere today is one `git init` away from holding.
+    writeFileSync(
+      join(gitIsolation.home, 'inc.cfg'),
+      '[filter "home"]\n\tclean = cat\n',
+    );
+    writeFileSync(
+      join(dir, 'config'),
+      '[includeIf "gitdir:/nowhere/"]\n\tpath = ~/inc.cfg\n',
+    );
+    expect(filterCommandsIn(dir, dir)).toEqual({
+      filters: ['filter.home.clean'],
+      unread: [],
+      dangling: [],
+    });
+  });
+
+  it('refuses an include target that is not a regular file — git answers exit 1 for it, like "no match"', () => {
+    // `git config --file <dir>` exits 1 with a `warning: unable to access`
+    // (measured, git 2.47): the status alone cannot tell it from an empty
+    // match, so the walk checks what git would open before it reads.
+    mkdirSync(join(dir, 'a-directory.cfg'));
+    writeFileSync(join(dir, 'config'), '[include]\n\tpath = a-directory.cfg\n');
+    const { filters, unread } = filterCommandsIn(dir, dir);
+    expect(filters).toEqual([]);
+    expect(unread).toHaveLength(1);
+    expect(unread[0]).toContain('a-directory.cfg');
+  });
+
+  it('refuses an include target git cannot parse', () => {
+    writeFileSync(join(dir, 'broken.cfg'), 'garbage [[[ = \n');
+    writeFileSync(join(dir, 'config'), '[include]\n\tpath = broken.cfg\n');
+    const { filters, unread } = filterCommandsIn(dir, dir);
+    expect(filters).toEqual([]);
+    expect(unread).toHaveLength(1);
+    expect(unread[0]).toContain('broken.cfg');
+  });
+
+  it("refuses another user's ~user/ target and a nesting past git's own limit", () => {
+    writeFileSync(join(dir, 'config'), '[include]\n\tpath = ~nobody/x.cfg\n');
+    expect(filterCommandsIn(dir, dir).unread.join(' ')).toContain(
+      '~nobody/x.cfg',
+    );
+    // Twelve links deep: git itself dies at eleven (`exceeded maximum
+    // include depth (10)`), so the walk refuses there instead of reading on.
+    for (let i = 0; i <= 12; i++) {
+      writeFileSync(
+        join(dir, i === 0 ? 'config' : `d${i}.cfg`),
+        `[include]\n\tpath = d${i + 1}.cfg\n`,
+      );
+    }
+    writeFileSync(join(dir, 'd13.cfg'), '[filter "deep"]\n\tclean = cat\n');
+    const deep = filterCommandsIn(dir, dir);
+    expect(deep.unread.join(' ')).toContain("past git's include limit");
+    expect(deep.filters).not.toContain('filter.deep.clean');
+  });
+
+  it('refuses an include fan-out past its file cap — the walk is planter-priced', () => {
+    // N includes are N spawns; 2 000 held the walk for 29 s (measured).
+    let lines = '';
+    for (let i = 0; i < 70; i++) {
+      writeFileSync(
+        join(dir, `f${i}.cfg`),
+        i === 0 ? '[filter "first"]\n\tclean = cat\n' : '',
+      );
+      lines += `\tpath = f${i}.cfg\n`;
+    }
+    writeFileSync(join(dir, 'config'), `[include]\n${lines}`);
+    const { filters, unread } = filterCommandsIn(dir, dir);
+    expect(filters).toEqual(['filter.first.clean']);
+    expect(unread.join(' ')).toContain('fan-out past 64 files');
+  });
+
+  it('blanks every name it was handed through the env pair, `=` in a name included', () => {
+    // `-c` splits at the first `=`, so a filter a planter named `a=b` cannot
+    // be blanked by it; GIT_CONFIG_KEY_n/VALUE_n carry any name the config
+    // parser accepts. Four keys per name: the three commands emptied and
+    // `required` false, so an emptied REQUIRED filter (git-lfs's) skips
+    // instead of failing the command.
+    const env = filterBlankEnv(['filter.a=b.clean', 'filter.evil.process']);
+    expect(env['GIT_CONFIG_COUNT']).toBe('8');
+    expect(env['GIT_CONFIG_KEY_0']).toBe('filter.a=b.clean');
+    expect(env['GIT_CONFIG_VALUE_0']).toBe('');
+    expect(env['GIT_CONFIG_KEY_3']).toBe('filter.a=b.required');
+    expect(env['GIT_CONFIG_VALUE_3']).toBe('false');
+    expect(env['GIT_CONFIG_KEY_6']).toBe('filter.evil.process');
+    expect(filterBlankEnv([])).toEqual({});
+  });
+
+  it('localFilterCommands: a discovery that fails is a hit, and a newline in the path does not mis-pair the dirs', () => {
+    // The old wrapper answered `[]` — "no filters" — when rev-parse failed,
+    // and split one newline-delimited answer for two flags, so a directory
+    // named with a newline paired the wrong dirs and screened nothing.
+    expect(localFilterCommands(dir).join(' ')).toContain(
+      'could not be resolved',
+    );
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-filter-nl-')));
+    try {
+      const repo = join(base, 'a\nb', 'repo');
+      mkdirSync(repo, { recursive: true });
+      const g = (...args: string[]) =>
+        execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+      g('init', '-q', '-b', 'main');
+      g('config', 'user.email', 't@t.t');
+      g('config', 'user.name', 't');
+      writeFileSync(join(repo, 'a.ts'), 'x\n');
+      g('add', '-A');
+      g('commit', '-qm', 'head');
+      const wt = join(repo, '.qwen', 'tmp', 'wt');
+      mkdirSync(dirname(wt), { recursive: true });
+      g('worktree', 'add', '--detach', '-q', wt, 'HEAD');
+      g('config', 'filter.evil.smudge', 'touch PWNED');
+      expect(localFilterCommands(wt)).toEqual(['filter.evil.smudge']);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('checkoutFilterCommands: a dangling include is not a hit, and localFilterCommands still reports it', () => {
+    // The two consumers ask different questions and the difference IS the fix.
+    // `actions/checkout` with persisted credentials writes `includeIf
+    // "gitdir:…"` directives into the repository-local config whose target is a
+    // per-job file, gone by the next job; on a persistent runner the directives
+    // accumulate in a reused `.git/config`. git ignores a dangling include, so
+    // a checkout the screen is about to authorise executes nothing from it —
+    // while the residue measurement, which hands back a result the rest of the
+    // review acts on, keeps refusing on it.
+    //
+    // Measured before this split: `localFilterCommands` returned 2 hits on a
+    // repository defining NO content filter, so all four efficacy screens
+    // refused and the phase shipped zero evidence while telling the reader the
+    // repository "defines content filter(s)".
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-dangling-')));
+    try {
+      const repo = join(base, 'repo');
+      mkdirSync(repo, { recursive: true });
+      const g = (...args: string[]) =>
+        execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+      g('init', '-q', '-b', 'main');
+      g('config', 'user.email', 't@t.t');
+      g('config', 'user.name', 't');
+      writeFileSync(join(repo, 'a.ts'), 'x\n');
+      g('add', '-A');
+      g('commit', '-qm', 'head');
+      // The runner's shape, both directives: the plain form and the wildcard
+      // form git writes for linked worktrees. Neither condition can match this
+      // tree, and that is deliberately NOT what the assertion turns on — the
+      // screen does not evaluate includeIf conditions, because a match test
+      // against only the screened tree's own gitdir would re-open the creation
+      // path, where `worktree add` registers a NEW admin entry. What it asks is
+      // whether the target exists.
+      appendFileSync(
+        join(repo, '.git', 'config'),
+        '[includeIf "gitdir:/github/workspace/.git"]\n' +
+          '\tpath = /github/runner_temp/git-credentials.config\n' +
+          '[includeIf "gitdir:/github/workspace/.git/worktrees/*"]\n' +
+          '\tpath = /github/runner_temp/git-credentials.config\n',
+      );
+
+      expect(checkoutFilterCommands(repo)).toEqual([]);
+      // Unchanged for the consumer that refuses on any hit.
+      expect(localFilterCommands(repo)).toHaveLength(2);
+      expect(localFilterCommands(repo).join(' ')).toContain(
+        'git-credentials.config',
+      );
+      // And the structured answer says which half they came from: nothing is
+      // defined and nothing was unreadable, so both are `dangling`.
+      const screen = filterCommandsIn(join(repo, '.git'), join(repo, '.git'));
+      expect(screen.filters).toEqual([]);
+      expect(screen.unread).toEqual([]);
+      expect(screen.dangling).toHaveLength(2);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('follows an include whose `..` the KERNEL resolves through a symlink, not lexically', () => {
+    // `<dir>/link` is a symlink, and `include.path = link/../evil.cfg` names a
+    // payload ONE LEVEL ABOVE the link's target. git concatenates and lets the
+    // kernel resolve, so it reads that payload; a lexical collapse — `resolve()`
+    // or `join()`, and plain `realpathSync` too, which normalizes before
+    // consulting a symlink — looks for `<dir>/evil.cfg` instead, finds nothing,
+    // and files a file git really reads as MISSING. Measured both ways: git's
+    // own merged read lists the payload's `filter.evil.smudge` while the
+    // collapsed walk answered `filters: []` with the payload in `dangling`, and
+    // a restore-shaped checkout then executed it on the host.
+    //
+    // That is the entrance the `dangling` bucket opened. The divergence itself
+    // predates it, but `unread` is refused by every consumer while `dangling`
+    // is the one answer a checkout site may drop — so moving this case between
+    // the two buckets is what turned a refusal into a certification of clean
+    // over a filter nobody read.
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-lexdiv-')));
+    try {
+      mkdirSync(join(outside, 'sub'), { recursive: true });
+      writeFileSync(
+        join(outside, 'evil.cfg'),
+        '[filter "evil"]\n\tsmudge = cat\n',
+      );
+      symlinkSync(join(outside, 'sub'), join(dir, 'link'));
+      writeFileSync(
+        join(dir, 'config'),
+        '[include]\n\tpath = link/../evil.cfg\n',
+      );
+
+      const screen = filterCommandsIn(dir, dir);
+      expect(screen.filters).toEqual(['filter.evil.smudge']);
+      // The point of the fix: this is NOT a missing target, so it must not land
+      // in the one bucket a checkout site is allowed to drop.
+      expect(screen.dangling).toEqual([]);
+      expect(screen.unread).toEqual([]);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('files a resolution failure that is NOT ENOENT as unread, so a checkout site refuses on it', () => {
+    // `dangling` is the only answer a caller may drop, so ENOENT has to be the
+    // only way in. The shape that decides it is `ENAMETOOLONG` — a short
+    // spelled path whose RESOLVED path exceeds PATH_MAX, where `realpathSync`
+    // throws and git still reads the file — but that fixture is PATH_MAX-sized
+    // and so platform-sized (1024 on macOS, 4096 on Linux). This pins the errno
+    // gate with a symlink loop instead: deterministic, and it fails resolution
+    // for a reason that is not "absent". A bare `catch` here filed every errno
+    // as missing, which is how the gate came to be load-bearing.
+    symlinkSync('loop', join(dir, 'loop'));
+    writeFileSync(join(dir, 'config'), '[include]\n\tpath = loop\n');
+
+    const screen = filterCommandsIn(dir, dir);
+    expect(screen.filters).toEqual([]);
+    expect(screen.dangling).toEqual([]);
+    expect(screen.unread).toHaveLength(1);
+    expect(screen.unread[0]).toContain('could not be resolved');
+  });
+});
+
 describe('sanitizedGitEnv', () => {
   it('drops config injection as well as discovery redirects', () => {
     // Dropping `GIT_DIR` and keeping `GIT_CONFIG_*` is a gate on the front door
@@ -1764,6 +2203,11 @@ describe('sanitizedGitEnv', () => {
       process.env['GIT_CONFIG_VALUE_0'] = 'touch /tmp/pwned';
       process.env['GIT_CONFIG_GLOBAL'] = '/tmp/evil-global';
       process.env['GIT_CONFIG_PARAMETERS'] = "'core.pager=cat'";
+      // The one config key with an environment spelling of its own: it
+      // decides what a bare `git init` creates, and a sha256 store beside a
+      // sha1 source cannot read the source's objects through an alternates
+      // pointer.
+      process.env['GIT_DEFAULT_HASH'] = 'sha256';
       process.env['PATH'] = saved['PATH'];
 
       const env = sanitizedGitEnv();
@@ -1775,6 +2219,7 @@ describe('sanitizedGitEnv', () => {
         'GIT_CONFIG_VALUE_0',
         'GIT_CONFIG_GLOBAL',
         'GIT_CONFIG_PARAMETERS',
+        'GIT_DEFAULT_HASH',
       ]) {
         expect(env[key]).toBeUndefined();
       }

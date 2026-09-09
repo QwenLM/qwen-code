@@ -27,6 +27,7 @@ import {
   expandPendingPastePlaceholders,
   freePastePlaceholderId,
   isLargePaste,
+  isPerfectMatchForTarget,
   isPerfectSlashMatch,
   largePastePlaceholder,
   nextLargePastePlaceholder,
@@ -457,6 +458,45 @@ describe('isPerfectSlashMatch (usePerfectMatch port)', () => {
 
   it('is false for a parent without an action (`/curator`)', () => {
     expect(perfect('/curator')).toBe(false);
+  });
+});
+
+describe('isPerfectMatchForTarget (the live verdict Enter reads)', () => {
+  // Single-line ASCII fixtures, so the display column is the code-point index.
+  function perfect(
+    text: string,
+    commands: readonly SlashCommand[] = TEST_COMMANDS,
+  ): boolean {
+    const target = detectCompletionTarget(
+      [text],
+      0,
+      text.length,
+      text,
+      text.length,
+      commands,
+    );
+    return target !== null && isPerfectMatchForTarget(target, commands);
+  }
+
+  it('is true for a line-led exact command (`/help`)', () => {
+    expect(perfect('/help')).toBe(true);
+  });
+
+  it('is false while the name is still partial (`/he`)', () => {
+    expect(perfect('/he')).toBe(false);
+  });
+
+  it('is false for a non-slash target, whatever the buffer says', () => {
+    // The mention deliberately names a runnable command: only the mode guard
+    // keeps an `@` target from being judged as a slash perfect match.
+    expect(perfect('see @help')).toBe(false);
+  });
+
+  it('answers from the target pool, not the whole registry', () => {
+    // `review` is runnable but not model-invocable, so the mid-input pool
+    // excludes it while the line-led registry still sees it.
+    expect(perfect('hello /review', GATING_COMMANDS)).toBe(false);
+    expect(perfect('/review', GATING_COMMANDS)).toBe(true);
   });
 });
 

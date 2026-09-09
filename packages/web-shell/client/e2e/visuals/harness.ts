@@ -20,11 +20,11 @@ import {
   type MockDaemonController,
   type WebShellDaemonScenario,
 } from '../utils/mockDaemon';
-import { VISUAL_VIEWPORT } from './constants';
+import { FIXED_CAPTURE_TIME, VISUAL_VIEWPORT } from './constants';
 
 export type VisualTheme = 'dark' | 'light';
 
-export { VISUAL_VIEWPORT };
+export { FIXED_CAPTURE_TIME, VISUAL_VIEWPORT };
 
 /** localStorage key the web-shell reads for its persisted theme (see index.html). */
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';
@@ -64,6 +64,41 @@ async function primeTheme(page: Page, theme: VisualTheme): Promise<void> {
   );
 }
 
+/**
+ * Pin the page clock so anything rendering a wall-clock time is byte-identical
+ * across the base and head capture passes.
+ *
+ * Those two passes run minutes apart inside the SAME job -- the base render
+ * waits on its own `npm install` first -- so every timestamped view differed on
+ * every run purely because of when it was photographed. On PR #11267 that was
+ * the entire preview: the one view the compose step flagged as CHANGED,
+ * `terminal-turn-error-copy-narrow-dark`, scored exactly 0.02% (the threshold)
+ * and the whole diff was a `09:09:28` tip against a `09:18:16` one.
+ *
+ * What `setFixedTime` actually installs is Playwright's FULL fake clock, not a
+ * `Date`-only shim: `setTimeout`, `setInterval`, `requestAnimationFrame`,
+ * `requestIdleCallback`, `performance` and `Intl` are all replaced. Timers and
+ * rAF keep firing, so replay, streaming and `freezeLoopingAnimations` behave
+ * normally in outcome -- but two things do change and will cost a debugging
+ * session if they are not written down:
+ *
+ * - `performance.mark`/`measure` return throwaway entries and `getEntries()`
+ *   comes back empty, so a capture can never observe a measure-storm.
+ * - Every `Date.now()`-delta window in the app is pinned permanently shut:
+ *   background-agent grace misses, catalog staleness, retry backoff, live-state
+ *   reconcile throttling. Nothing seeds those states today, so nothing fails --
+ *   but a scenario that needs one to elapse will hang inside `gotoSession` and
+ *   surface as a bare expect timeout. Such a scenario must seed already-expired
+ *   timestamps or drive `page.clock.fastForward` / `runFor` itself.
+ *
+ * `visual-capture-contracts.test.ts` pins that both navigation helpers still
+ * call this before `page.goto`; nothing in the visuals suite reads the clock,
+ * so a dropped call would otherwise stay green.
+ */
+export async function freezeWallClock(page: Page): Promise<void> {
+  await page.clock.setFixedTime(FIXED_CAPTURE_TIME);
+}
+
 export function resolveBaseURL(testInfo: TestInfo): string {
   const value = testInfo.project.use.baseURL;
   if (!value)
@@ -89,12 +124,23 @@ export async function gotoSession(
   scenario: WebShellDaemonScenario,
   daemon: MockDaemonController,
   theme: VisualTheme,
+  /**
+   * Extra query parameters for views the app addresses by URL rather than by
+   * click — `{ view: 'cockpit' }` opens the Session Workflow dependency
+   * canvas. Kept here so the URL shape, the theme priming and the theme
+   * assertion stay in one place instead of being re-implemented per spec.
+   */
+  search: Readonly<Record<string, string>> = {},
 ): Promise<void> {
   await primeTheme(page, theme);
+  await freezeWallClock(page);
+  const query = new URLSearchParams({ theme, ...search });
   await page.goto(
-    `/session/${encodeURIComponent(scenario.sessionId)}?theme=${theme}`,
+    `/session/${encodeURIComponent(scenario.sessionId)}?${query.toString()}`,
   );
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   await expect(page.locator('html')).toHaveClass(new RegExp(`theme-${theme}`));
   await completeReplay(
     page,
@@ -117,8 +163,11 @@ export async function gotoNewSession(
   theme: VisualTheme,
 ): Promise<void> {
   await primeTheme(page, theme);
+  await freezeWallClock(page);
   await page.goto(`/?theme=${theme}`);
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   await expect(page.locator('html')).toHaveClass(new RegExp(`theme-${theme}`));
 }
 

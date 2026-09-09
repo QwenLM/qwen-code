@@ -23,6 +23,7 @@ import {
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import { computeInitialTurnFromHistory } from './session-turn-state.js';
 import type { Part } from '@google/genai';
 import type { FileDiff } from '../tools/tools.js';
 import {
@@ -205,7 +206,47 @@ describe('ChatRecordingService', () => {
       expect(record.version).toBe('1.0.0');
       expect(record.gitBranch).toBe('main');
       expect(record.provenance).toBe('real_user');
+      expect(record.daemonPromptId).toBeUndefined();
     });
+
+    it('persists the daemon prompt identity before any turn result', async () => {
+      chatRecordingService.recordUserMessage(
+        [{ text: 'same prompt' }],
+        undefined,
+        undefined,
+        'daemon-prompt-1',
+      );
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(jsonl.writeLine).mock.calls[0][1]).toMatchObject({
+        type: 'user',
+        daemonPromptId: 'daemon-prompt-1',
+        message: { role: 'user', parts: [{ text: 'same prompt' }] },
+      });
+    });
+
+    it.each(['42', '9007199254740992'])(
+      'keeps daemon IDs ending in ########%s out of CLI turn recovery',
+      async (turn) => {
+        const daemonPromptId = `test-session-id########${turn}`;
+        chatRecordingService.recordUserMessage(
+          [{ text: 'same prompt' }],
+          undefined,
+          undefined,
+          daemonPromptId,
+        );
+        await chatRecordingService.flush();
+
+        const record = vi.mocked(jsonl.writeLine).mock
+          .calls[0][1] as ChatRecord;
+        expect(record.daemonPromptId).toBe(daemonPromptId);
+        expect(record).not.toHaveProperty('promptId');
+        expect(computeInitialTurnFromHistory([record], 'test-session-id')).toBe(
+          1,
+        );
+      },
+    );
 
     it('preserves model-bound parts and records clean display text', async () => {
       const modelParts: Part[] = [
@@ -3545,5 +3586,74 @@ describe('Goal turn token ledger', () => {
     accumulate('turn-1', { totalTokenCount: -5 });
 
     expect(service.takeGoalTurnTokens('turn-1')).toBe(0);
+  });
+});
+
+describe('Goal turn tool result ledger', () => {
+  const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+
+  const toolResultMessage = () => [
+    { functionResponse: { id: 'call-1', name: 'run_shell', response: {} } },
+  ];
+
+  function recorderForToolResults() {
+    const service = Object.create(
+      ChatRecordingService.prototype,
+    ) as ChatRecordingService;
+    const appended: unknown[] = [];
+    Object.assign(service, {
+      createBaseRecord: () => ({ type: 'tool_result' }),
+      appendRecord: (record: unknown) => appended.push(record),
+      getSessionId: () => 'session-1',
+    });
+    return { service, appended };
+  }
+
+  it('counts the evidence-bearing tool results a Goal turn recorded', () => {
+    // The wiring that matters: recordToolResult must feed the ledger, or the
+    // no-progress bound reads every turn as idle.
+    const { service, appended } = recorderForToolResults();
+
+    service.recordToolResult(toolResultMessage(), undefined, {
+      goalContext: permit,
+    });
+    service.recordToolResult(toolResultMessage(), undefined, {
+      goalContext: permit,
+    });
+    // A result outside a Goal turn belongs to no turn.
+    service.recordToolResult(toolResultMessage());
+
+    expect(appended).toHaveLength(3);
+    expect(service.takeGoalTurnToolResults('turn-1')).toBe(2);
+    // Consumed: a turn is counted once.
+    expect(service.takeGoalTurnToolResults('turn-1')).toBe(0);
+  });
+
+  it('does not count the Goal runtime talking to itself', () => {
+    // `get_goal` and `update_goal` results are recorded under the permit but
+    // are not evidence: a turn that only reads its own state is exactly the
+    // idling the count exists to notice.
+    const { service } = recorderForToolResults();
+
+    service.recordToolResult(toolResultMessage(), undefined, {
+      goalContext: permit,
+      provenance: 'goal_runtime',
+    });
+
+    expect(service.takeGoalTurnToolResults('turn-1')).toBe(0);
+  });
+
+  it("does not credit one turn with another turn's results", () => {
+    const { service } = recorderForToolResults();
+
+    service.recordToolResult(toolResultMessage(), undefined, {
+      goalContext: permit,
+    });
+    service.recordToolResult(toolResultMessage(), undefined, {
+      goalContext: { ...permit, turnId: 'turn-2' },
+    });
+
+    expect(service.takeGoalTurnToolResults('turn-1')).toBe(0);
+    expect(service.takeGoalTurnToolResults('turn-2')).toBe(1);
   });
 });

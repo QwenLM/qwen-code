@@ -84,6 +84,9 @@ const TRACKED_ENV = [
   'QWEN_CLI_ENTRY',
   'qwen_cli_entry',
   'Qwen_Cli_Entry',
+  'QWEN_UPDATE_BASE_URL',
+  'qwen_update_base_url',
+  'Qwen_Update_Base_Url',
   'QWEN_HOME',
   ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   'QWEN_CODE_PENDING_COMPILE_CACHE',
@@ -143,6 +146,105 @@ afterEach(() => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
   tmpDirs = [];
+});
+
+describe('update download source environment', () => {
+  const updateSourceKeys = [
+    'QWEN_UPDATE_BASE_URL',
+    'qwen_update_base_url',
+    'Qwen_Update_Base_Url',
+  ];
+
+  beforeEach(() => {
+    resetEnvironmentTrackingForTesting();
+  });
+
+  afterEach(() => {
+    resetEnvironmentTrackingForTesting();
+  });
+
+  it.each(['.env', '.qwen/.env', 'settings.env'])(
+    'rejects update sources from %s on load, reload, and runtime snapshots',
+    (source) => {
+      const workspace = makeWorkspace();
+      const values = Object.fromEntries(
+        updateSourceKeys.map((key) => [key, 'https://project.example.com']),
+      );
+      const settings = testSettings({ advanced: { excludedEnvVars: [] } });
+      if (source === 'settings.env') {
+        settings.env = { ...values, RUNTIME_SETTINGS_ONLY: 'allowed' };
+      } else {
+        const envPath = path.join(workspace, source);
+        fs.mkdirSync(path.dirname(envPath), { recursive: true });
+        fs.writeFileSync(
+          envPath,
+          [
+            ...Object.entries(values).map(([key, value]) => `${key}=${value}`),
+            'RUNTIME_DOTENV=allowed',
+          ].join('\n'),
+        );
+      }
+      const allowedKey =
+        source === 'settings.env' ? 'RUNTIME_SETTINGS_ONLY' : 'RUNTIME_DOTENV';
+
+      loadEnvironment(settings, workspace);
+      for (const key of updateSourceKeys) {
+        expect(process.env[key]).toBeUndefined();
+      }
+      expect(process.env[allowedKey]).toBe('allowed');
+
+      reloadEnvironment(settings, workspace);
+      for (const key of updateSourceKeys) {
+        expect(process.env[key]).toBeUndefined();
+      }
+      expect(process.env[allowedKey]).toBe('allowed');
+
+      const snapshot = buildRuntimeEnvironment(settings, workspace, {});
+      for (const key of updateSourceKeys) {
+        expect(snapshot.effectiveEnv[key]).toBeUndefined();
+      }
+      expect(snapshot.effectiveEnv[allowedKey]).toBe('allowed');
+    },
+  );
+
+  it.each(['shell', '.env', '.qwen/.env'])(
+    'preserves the update source from %s against project configuration',
+    (source) => {
+      const workspace = makeWorkspace();
+      const trustedUrl = 'https://downloads.example.com/releases';
+      const homeEnvPath = path.join(os.homedir(), source);
+      if (source === 'shell') {
+        process.env['QWEN_UPDATE_BASE_URL'] = trustedUrl;
+      } else {
+        fs.mkdirSync(path.dirname(homeEnvPath), { recursive: true });
+        fs.writeFileSync(homeEnvPath, `QWEN_UPDATE_BASE_URL=${trustedUrl}\n`);
+      }
+      fs.mkdirSync(path.join(workspace, '.qwen'));
+      fs.writeFileSync(
+        path.join(workspace, '.qwen', '.env'),
+        'QWEN_UPDATE_BASE_URL=https://project.example.com\n',
+      );
+      const settings = testSettings({
+        env: { QWEN_UPDATE_BASE_URL: 'https://settings.example.com' },
+      });
+
+      loadEnvironment(settings, workspace);
+      expect(process.env['QWEN_UPDATE_BASE_URL']).toBe(trustedUrl);
+
+      if (source !== 'shell') {
+        fs.writeFileSync(
+          homeEnvPath,
+          'QWEN_UPDATE_BASE_URL=https://changed.example.com\n',
+        );
+      }
+      reloadEnvironment(settings, workspace);
+      expect(process.env['QWEN_UPDATE_BASE_URL']).toBe(trustedUrl);
+      const snapshot = buildRuntimeEnvironment(settings, workspace, {
+        QWEN_UPDATE_BASE_URL: trustedUrl,
+      });
+      expect(snapshot.effectiveEnv['QWEN_UPDATE_BASE_URL']).toBe(trustedUrl);
+    },
+  );
 });
 
 describe('buildRuntimeEnvironment', () => {
@@ -794,6 +896,35 @@ describe('loadEnvironment', () => {
 
     expect(process.env['NODE_OPTIONS']).toBeUndefined();
     expect(process.env['npm_config_node_options']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
+  // The private Conversations provenance marker is a fixed constant rather
+  // than a per-spawn nonce, so the home-scoped exemption from
+  // PROJECT_ENV_HARDCODED_EXCLUSIONS must not apply to it: a home `.env`
+  // could otherwise forge Conversations provenance onto an ordinary session.
+  it('never applies the private Conversations marker from user-level .env files', () => {
+    const workspace = makeWorkspace();
+    const qwenHome = makeWorkspace();
+    process.env['QWEN_HOME'] = qwenHome;
+    fs.writeFileSync(
+      path.join(qwenHome, '.env'),
+      [
+        'QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME=1',
+        'qwen_code_private_conversations_runtime=1',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+
+    expect(
+      process.env['QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME'],
+    ).toBeUndefined();
+    expect(
+      process.env['qwen_code_private_conversations_runtime'],
+    ).toBeUndefined();
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
   });
 

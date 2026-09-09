@@ -1,7 +1,7 @@
 .list {
   flex: 1;
   overflow-y: auto;
-  padding: 12px 24px calc(8px + var(--web-shell-bottom-panel-inset, 0px));
+  padding: 12px 20px calc(8px + var(--web-shell-bottom-panel-inset, 0px));
   scroll-padding-bottom: calc(8px + var(--web-shell-bottom-panel-inset, 0px));
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
@@ -198,28 +198,33 @@
   position: sticky;
   top: 50vh;
   z-index: 4;
-  width: 0 !important;
+  width: 100% !important;
   height: 0;
   margin-right: 0 !important;
   margin-left: 0 !important;
   transition: none;
-  transform: translateX(-22px);
+  transform: translateX(-20px);
   pointer-events: none;
 }
 
 .sessionTimelinePanel {
   position: absolute;
   top: 0;
-  left: 22px;
-  width: 86px;
+  left: 0;
+  width: clamp(
+    20px,
+    calc((100% + 40px - var(--chat-content-width, 1000px)) / 2),
+    86px
+  );
+  padding-left: 5px;
   overflow: visible;
   color: var(--muted-foreground);
-  pointer-events: auto;
+  pointer-events: none;
   transform: translateY(-50%);
 }
 
 .sessionTimelineViewport {
-  width: 70px;
+  width: calc(100% + 32px);
   max-height: min(640px, max(220px, calc(100vh - 220px)));
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -245,6 +250,13 @@
   );
 }
 
+:global([data-transcript-render-mode='document']) .sessionTimelineViewport {
+  max-height: none;
+  overflow-y: visible;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
 .sessionTimelineViewport.sessionTimelineViewport::-webkit-scrollbar {
   display: none !important;
   width: 0 !important;
@@ -264,7 +276,7 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  margin: 0;
+  margin: 0 32px 0 0;
   padding: 32px 0;
   list-style: none;
 }
@@ -279,7 +291,8 @@
   top: -6.5px;
   display: flex;
   align-items: center;
-  width: 58px;
+  width: 100%;
+  pointer-events: auto;
   height: 16px;
   padding: 0;
   border: 0;
@@ -301,6 +314,7 @@
 
 .sessionTimelineTick {
   display: block;
+  pointer-events: none;
   width: 10px;
   height: 3px;
   border-radius: 1px;
@@ -398,6 +412,13 @@
 .sessionTimelineDetails {
   position: fixed;
   z-index: 999;
+  transform: translate3d(0, -50%, 0) scale(1);
+  transform-origin: left center;
+  animation: sessionTimelineDetailsIn 120ms ease-out;
+}
+
+.sessionTimelineDetails,
+.sessionTimelinePreview.sessionTimelinePreview {
   box-sizing: border-box;
   display: grid;
   gap: 6px;
@@ -412,9 +433,6 @@
   pointer-events: none;
   text-align: left;
   opacity: 1;
-  transform: translate3d(0, -50%, 0) scale(1);
-  transform-origin: left center;
-  animation: sessionTimelineDetailsIn 120ms ease-out;
 }
 
 @keyframes sessionTimelineDetailsIn {
@@ -474,11 +492,5 @@
 
   .sessionTimelineDetails {
     animation: none;
-  }
-}
-
-@media (max-width: 720px) {
-  .sessionTimelinePanel {
-    display: none;
   }
 }

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import nodeFs from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { randomBytes, randomInt } from 'node:crypto';
@@ -19,6 +20,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
 import { loadSimpleGit } from '../utils/load-simple-git.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 
 const debugLogger = createDebugLogger('GIT_WORKTREE_SERVICE');
 
@@ -34,10 +36,67 @@ export function worktreeBranchForSlug(slug: string): string {
  * Filename of the in-worktree session marker. Created at worktree
  * provisioning time and consulted by `exit_worktree` to decide
  * whether the current session is allowed to drop the worktree. The
- * file lives outside the working tree (it is .gitignored as part of
- * `.qwen/worktrees/.gitignore`) so it cannot leak into commits.
+ * file is kept out of commits via the repository's common
+ * `.git/info/exclude` (see `addWorktreeSessionMarkerExclude`).
  */
 export const WORKTREE_SESSION_FILE = '.qwen-session';
+
+const WORKTREE_SESSION_MARKER_MAX_BYTES = 512;
+
+export type StrictWorktreeSessionMarker =
+  | { state: 'missing' }
+  | {
+      state: 'valid';
+      sessionId: string;
+      /**
+       * Owning uid of the marker inode, or null when the process cannot
+       * compare uids (no `geteuid`, e.g. Windows). Ownership-transfer
+       * flows refuse a foreign-uid marker where the identity is available
+       * instead of riding the ownership-preserving in-place write path.
+       */
+      uid: number | null;
+      /** Inode identity pinned across the no-follow read. */
+      dev: number;
+      ino: number;
+    }
+  | { state: 'invalid'; reason: string };
+
+async function addWorktreeSessionMarkerExclude(
+  worktreePath: string,
+): Promise<void> {
+  try {
+    const { simpleGit } = await loadSimpleGit();
+    const wtGit = simpleGit(worktreePath);
+    const commonDir = (await wtGit.revparse(['--git-common-dir'])).trim();
+    const excludePath = path.isAbsolute(commonDir)
+      ? path.join(commonDir, 'info', 'exclude')
+      : path.join(worktreePath, commonDir, 'info', 'exclude');
+    await fs.mkdir(path.dirname(excludePath), { recursive: true });
+    let existing = '';
+    try {
+      existing = await fs.readFile(excludePath, 'utf8');
+    } catch {
+      // File missing — fall through to fresh write.
+    }
+    // The second rule covers the sibling temp file `atomicWriteFile` stages
+    // next to the marker during an ownership transfer
+    // (`<worktree>/.qwen-session.<hex>.tmp`). It lands in the main checkout's
+    // shared exclude too — accepted: the pattern is name-scoped.
+    const rules = [WORKTREE_SESSION_FILE, `${WORKTREE_SESSION_FILE}.*.tmp`];
+    let next = existing;
+    for (const rule of rules) {
+      if (!next.split(/\r?\n/).includes(rule)) {
+        const sep = next.length === 0 || next.endsWith('\n') ? '' : '\n';
+        next = `${next}${sep}${rule}\n`;
+      }
+    }
+    if (next !== existing) {
+      await fs.writeFile(excludePath, next, 'utf8');
+    }
+  } catch {
+    // The marker remains authoritative when the ignore rule cannot be added.
+  }
+}
 
 /** Writes the owning session id into the worktree's session marker. */
 export async function writeWorktreeSessionMarker(
@@ -53,34 +112,413 @@ export async function writeWorktreeSessionMarker(
   // `git add -A` inside it would otherwise add the session id to its
   // first commit. Write a `.git/info/exclude` rule so the marker is
   // ignored without requiring (or modifying) a tracked `.gitignore`.
-  // `.git` inside a worktree is actually a file pointing at
-  // `<repo>/.git/worktrees/<name>/`, so resolve `--git-dir` instead
-  // of joining naively.
-  try {
-    const { simpleGit } = await loadSimpleGit();
-    const wtGit = simpleGit(worktreePath);
-    const gitDir = (await wtGit.revparse(['--git-dir'])).trim();
-    const excludePath = path.isAbsolute(gitDir)
-      ? path.join(gitDir, 'info', 'exclude')
-      : path.join(worktreePath, gitDir, 'info', 'exclude');
-    await fs.mkdir(path.dirname(excludePath), { recursive: true });
-    let existing = '';
-    try {
-      existing = await fs.readFile(excludePath, 'utf8');
-    } catch {
-      // File missing — fall through to fresh write.
-    }
-    const rule = WORKTREE_SESSION_FILE;
-    if (!existing.split(/\r?\n/).includes(rule)) {
-      const sep = existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
-      await fs.writeFile(excludePath, `${existing}${sep}${rule}\n`, 'utf8');
-    }
-  } catch {
-    // Best-effort: if we can't write the exclude rule (read-only fs,
-    // unusual worktree layout), the marker is still functional —
-    // `git add -A` would just stage it. The ownership guard remains
-    // intact either way.
+  // Linked worktrees share ignore rules from the repository's common
+  // `info/exclude`, so resolve `--git-common-dir` instead of the
+  // per-worktree administrative directory returned by `--git-dir`.
+  await addWorktreeSessionMarkerExclude(worktreePath);
+}
+
+/**
+ * The marker is durably committed — staged, fsync'd, identity-verified and
+ * linked into place — but this primitive's own post-commit tail failed. The
+ * commit stands: a caller that compensates on failure must classify this as
+ * "the flip happened" rather than roll back a transfer the marker already
+ * records, and must not clean up a valid marker file. `committedOwner` is the
+ * session id the marker now names.
+ */
+export class WorktreeMarkerCommittedError extends Error {
+  readonly committedOwner: string;
+  constructor(committedOwner: string, options?: { cause?: unknown }) {
+    super(
+      `Worktree session marker committed for ${committedOwner}; the post-commit close failed`,
+      options,
+    );
+    this.name = 'WorktreeMarkerCommittedError';
+    this.committedOwner = committedOwner;
   }
+}
+
+/**
+ * Creates the daemon-owned marker without replacing any existing path.
+ * This is intentionally separate from {@link writeWorktreeSessionMarker},
+ * whose overwrite semantics are required by interactive worktree tools.
+ */
+export async function createWorktreeSessionMarkerExclusive(
+  worktreePath: string,
+  sessionId: string,
+): Promise<void> {
+  assertValidWorktreeSessionMarkerOwner(sessionId);
+  const markerPath = path.join(worktreePath, WORKTREE_SESSION_FILE);
+  // Staged beside the marker so the publishing link stays on one device, and
+  // named for the `.qwen-session.*.tmp` git-exclude rule.
+  const stagedPath = `${markerPath}.${randomBytes(6).toString('hex')}.tmp`;
+  const flags =
+    nodeFs.constants.O_WRONLY |
+    nodeFs.constants.O_CREAT |
+    nodeFs.constants.O_EXCL |
+    (nodeFs.constants.O_NOFOLLOW ?? 0);
+  // `fs.open` with O_EXCL throws before anything is created when a path
+  // already exists, so it stays outside the try: only a failure past this
+  // point has a file of ours to remove.
+  const handle = await fs.open(stagedPath, flags, 0o600);
+  // Captured from the opened handle so the cleanup below can verify the path
+  // still refers to the file this call created before removing it.
+  let stagedDev = 0;
+  let stagedIno = 0;
+  try {
+    const before = await handle.stat();
+    stagedDev = before.dev;
+    stagedIno = before.ino;
+    if (!before.isFile() || before.nlink !== 1 || before.ino === 0) {
+      throw new Error('Worktree session marker has an unsafe identity');
+    }
+    await handle.writeFile(sessionId, 'utf8');
+    await handle.sync();
+    const [after, pathStats] = await Promise.all([
+      handle.stat(),
+      fs.lstat(stagedPath),
+    ]);
+    if (
+      !after.isFile() ||
+      after.nlink !== 1 ||
+      after.size > WORKTREE_SESSION_MARKER_MAX_BYTES ||
+      after.dev !== before.dev ||
+      after.ino !== before.ino ||
+      pathStats.dev !== after.dev ||
+      pathStats.ino !== after.ino
+    ) {
+      throw new Error('Worktree session marker identity changed');
+    }
+    // Publish with a hard link so the marker path first exists once its inode
+    // already holds the owner and is fsync'd. Creating the marker path itself
+    // with O_EXCL and filling it afterwards leaves a crash window holding a
+    // 0-byte marker, which strict reads report as `invalid` — the one state no
+    // recovery path repairs. `link` fails EEXIST when the marker path is
+    // taken, so it is the same compare-and-swap O_EXCL was: a concurrent
+    // create still loses instead of overwriting.
+    await fs.link(stagedPath, markerPath);
+  } catch (error) {
+    await handle.close().catch(() => {});
+    // Remove only the file this call created: on the identity-changed branch
+    // the path already refers to someone else's inode, and unlinking it would
+    // turn a fail-closed detection into a destructive action against the
+    // detected file. Without a captured identity there is nothing to match,
+    // so the rare residue is left for operator cleanup instead. This catch is
+    // reachable only before the publish, so the marker path is never unlinked.
+    if (stagedIno !== 0) {
+      try {
+        const current = await fs.lstat(stagedPath);
+        if (current.dev === stagedDev && current.ino === stagedIno) {
+          await fs.unlink(stagedPath);
+        }
+      } catch {
+        // Path already gone — nothing of ours to remove.
+      }
+    }
+    throw error;
+  }
+  // Post-commit tail: the marker already names `sessionId`, so a failure here
+  // must propagate with the marker intact rather than trigger cleanup of a
+  // valid file. Classified so a caller that compensates on failure cannot read
+  // the committed flip as a pre-flip error and dismantle what the marker now
+  // names. Dropping the staged name belongs to the commit — until it lands the
+  // marker carries nlink 2 and strict reads reject it.
+  try {
+    await fs.unlink(stagedPath);
+    await handle.close();
+  } catch (error) {
+    await handle.close().catch(() => {});
+    throw new WorktreeMarkerCommittedError(sessionId, { cause: error });
+  }
+  await addWorktreeSessionMarkerExclude(worktreePath);
+}
+
+function assertValidWorktreeSessionMarkerOwner(sessionId: string): void {
+  if (
+    sessionId.length === 0 ||
+    Buffer.byteLength(sessionId, 'utf8') > WORKTREE_SESSION_MARKER_MAX_BYTES ||
+    sessionId.trim() !== sessionId
+  ) {
+    throw new Error('Invalid worktree session marker owner');
+  }
+}
+
+/** Strict daemon-only marker read that never collapses corruption into absence. */
+export async function readWorktreeSessionMarkerStrict(
+  worktreePath: string,
+): Promise<StrictWorktreeSessionMarker> {
+  const markerPath = path.join(worktreePath, WORKTREE_SESSION_FILE);
+  let handle: fs.FileHandle | undefined;
+  let observedMarker = false;
+  try {
+    const flags =
+      nodeFs.constants.O_RDONLY |
+      (nodeFs.constants.O_NOFOLLOW ?? 0) |
+      (nodeFs.constants.O_NONBLOCK ?? 0);
+    const before = await fs.lstat(markerPath);
+    observedMarker = true;
+    if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1) {
+      return { state: 'invalid', reason: 'unsafe marker file type' };
+    }
+    if (before.ino === 0 || before.size > WORKTREE_SESSION_MARKER_MAX_BYTES) {
+      return { state: 'invalid', reason: 'unsafe marker size or identity' };
+    }
+    handle = await fs.open(markerPath, flags);
+    const opened = await handle.stat();
+    if (
+      !opened.isFile() ||
+      opened.nlink !== 1 ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino
+    ) {
+      return {
+        state: 'invalid',
+        reason: 'marker identity changed before read',
+      };
+    }
+    const markerBuffer = Buffer.alloc(WORKTREE_SESSION_MARKER_MAX_BYTES + 1);
+    let bytesRead = 0;
+    while (bytesRead < markerBuffer.length) {
+      const chunk = await handle.read(
+        markerBuffer,
+        bytesRead,
+        markerBuffer.length - bytesRead,
+        bytesRead,
+      );
+      if (chunk.bytesRead === 0) break;
+      bytesRead += chunk.bytesRead;
+    }
+    if (bytesRead > WORKTREE_SESSION_MARKER_MAX_BYTES) {
+      return { state: 'invalid', reason: 'unsafe marker size or identity' };
+    }
+    const raw = markerBuffer.subarray(0, bytesRead).toString('utf8');
+    const after = await handle.stat();
+    const pathStats = await fs.lstat(markerPath);
+    if (
+      !after.isFile() ||
+      after.nlink !== 1 ||
+      after.size !== bytesRead ||
+      after.size > WORKTREE_SESSION_MARKER_MAX_BYTES ||
+      after.dev !== opened.dev ||
+      after.ino !== opened.ino ||
+      !pathStats.isFile() ||
+      pathStats.nlink !== 1 ||
+      pathStats.dev !== after.dev ||
+      pathStats.ino !== after.ino
+    ) {
+      return {
+        state: 'invalid',
+        reason: 'marker identity changed during read',
+      };
+    }
+    const sessionId = raw.trim();
+    if (
+      sessionId.length === 0 ||
+      sessionId !== raw ||
+      Buffer.byteLength(sessionId, 'utf8') > WORKTREE_SESSION_MARKER_MAX_BYTES
+    ) {
+      return { state: 'invalid', reason: 'invalid marker owner' };
+    }
+    return {
+      state: 'valid',
+      sessionId,
+      uid: process.geteuid === undefined ? null : after.uid,
+      dev: after.dev,
+      ino: after.ino,
+    };
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return observedMarker
+        ? { state: 'invalid', reason: 'marker disappeared during read' }
+        : { state: 'missing' };
+    }
+    return {
+      state: 'invalid',
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/**
+ * Synchronous twin of {@link readWorktreeSessionMarkerStrict}. Exists for the
+ * `atomicWriteFile` assertCanCommit hook, which must re-verify the marker
+ * synchronously in the same tick as the rename commit.
+ */
+export function readWorktreeSessionMarkerStrictSync(
+  worktreePath: string,
+): StrictWorktreeSessionMarker {
+  const markerPath = path.join(worktreePath, WORKTREE_SESSION_FILE);
+  let fd: number | undefined;
+  let observedMarker = false;
+  try {
+    const flags =
+      nodeFs.constants.O_RDONLY |
+      (nodeFs.constants.O_NOFOLLOW ?? 0) |
+      (nodeFs.constants.O_NONBLOCK ?? 0);
+    const before = nodeFs.lstatSync(markerPath);
+    observedMarker = true;
+    if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1) {
+      return { state: 'invalid', reason: 'unsafe marker file type' };
+    }
+    if (before.ino === 0 || before.size > WORKTREE_SESSION_MARKER_MAX_BYTES) {
+      return { state: 'invalid', reason: 'unsafe marker size or identity' };
+    }
+    fd = nodeFs.openSync(markerPath, flags);
+    const opened = nodeFs.fstatSync(fd);
+    if (
+      !opened.isFile() ||
+      opened.nlink !== 1 ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino
+    ) {
+      return {
+        state: 'invalid',
+        reason: 'marker identity changed before read',
+      };
+    }
+    const markerBuffer = Buffer.alloc(WORKTREE_SESSION_MARKER_MAX_BYTES + 1);
+    let bytesRead = 0;
+    while (bytesRead < markerBuffer.length) {
+      const chunk = nodeFs.readSync(
+        fd,
+        markerBuffer,
+        bytesRead,
+        markerBuffer.length - bytesRead,
+        bytesRead,
+      );
+      if (chunk === 0) break;
+      bytesRead += chunk;
+    }
+    if (bytesRead > WORKTREE_SESSION_MARKER_MAX_BYTES) {
+      return { state: 'invalid', reason: 'unsafe marker size or identity' };
+    }
+    const raw = markerBuffer.subarray(0, bytesRead).toString('utf8');
+    const after = nodeFs.fstatSync(fd);
+    const pathStats = nodeFs.lstatSync(markerPath);
+    if (
+      !after.isFile() ||
+      after.nlink !== 1 ||
+      after.size !== bytesRead ||
+      after.size > WORKTREE_SESSION_MARKER_MAX_BYTES ||
+      after.dev !== opened.dev ||
+      after.ino !== opened.ino ||
+      !pathStats.isFile() ||
+      pathStats.nlink !== 1 ||
+      pathStats.dev !== after.dev ||
+      pathStats.ino !== after.ino
+    ) {
+      return {
+        state: 'invalid',
+        reason: 'marker identity changed during read',
+      };
+    }
+    const sessionId = raw.trim();
+    if (
+      sessionId.length === 0 ||
+      sessionId !== raw ||
+      Buffer.byteLength(sessionId, 'utf8') > WORKTREE_SESSION_MARKER_MAX_BYTES
+    ) {
+      return { state: 'invalid', reason: 'invalid marker owner' };
+    }
+    return {
+      state: 'valid',
+      sessionId,
+      uid: process.geteuid === undefined ? null : after.uid,
+      dev: after.dev,
+      ino: after.ino,
+    };
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return observedMarker
+        ? { state: 'invalid', reason: 'marker disappeared during read' }
+        : { state: 'missing' };
+    }
+    return {
+      state: 'invalid',
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    if (fd !== undefined) {
+      try {
+        nodeFs.closeSync(fd);
+      } catch {
+        // Best-effort close; the read result above stands.
+      }
+    }
+  }
+}
+
+/**
+ * Transfer the worktree marker's ownership to a replacement session.
+ *
+ * `expectedOwner` is the session id the opening strict read must find, or
+ * `null` for the missing-marker hatch (caller already proved the sidecar
+ * valid; the marker is re-created by linking a fully staged file into the
+ * path, which fails when a concurrently created marker already occupies it
+ * instead of overwriting it).
+ *
+ * An owned marker is rewritten through `atomicWriteFile` (sibling temp +
+ * fsync + rename) with an `assertCanCommit` hook that re-reads the marker
+ * synchronously and compares owner, dev/ino, and uid against the opening
+ * read — a marker swapped between the read and the commit aborts the write.
+ * Where uid identity is available, a foreign-owned marker is refused outright
+ * rather than rewritten through the ownership-preserving in-place path.
+ *
+ * The missing-marker hatch delegates to
+ * {@link createWorktreeSessionMarkerExclusive}, so a failure after that
+ * create committed surfaces as {@link WorktreeMarkerCommittedError}: the
+ * marker already names `newOwner` and must not be compensated backwards.
+ */
+export async function transferWorktreeSessionMarkerOwner(
+  worktreePath: string,
+  expectedOwner: string | null,
+  newOwner: string,
+): Promise<void> {
+  assertValidWorktreeSessionMarkerOwner(newOwner);
+  if (expectedOwner !== null) {
+    assertValidWorktreeSessionMarkerOwner(expectedOwner);
+    if (expectedOwner === newOwner) {
+      throw new Error('Worktree marker transfer needs a distinct new owner');
+    }
+  }
+  const opening = await readWorktreeSessionMarkerStrict(worktreePath);
+  if (opening.state === 'invalid') {
+    throw new Error(`Worktree marker is invalid: ${opening.reason}`);
+  }
+  if (opening.state === 'missing') {
+    if (expectedOwner !== null) {
+      throw new Error('Worktree marker owner does not match the expectation');
+    }
+    await createWorktreeSessionMarkerExclusive(worktreePath, newOwner);
+    return;
+  }
+  if (opening.sessionId !== expectedOwner) {
+    throw new Error('Worktree marker owner does not match the expectation');
+  }
+  const euid = process.geteuid?.();
+  if (euid !== undefined && opening.uid !== null && opening.uid !== euid) {
+    throw new Error('Worktree marker is owned by a different uid');
+  }
+  const markerPath = path.join(worktreePath, WORKTREE_SESSION_FILE);
+  await atomicWriteFile(markerPath, newOwner, {
+    mode: 0o600,
+    noFollow: true,
+    assertCanCommit: () => {
+      const current = readWorktreeSessionMarkerStrictSync(worktreePath);
+      if (
+        current.state !== 'valid' ||
+        current.sessionId !== opening.sessionId ||
+        current.dev !== opening.dev ||
+        current.ino !== opening.ino ||
+        current.uid !== opening.uid
+      ) {
+        throw new Error('Worktree marker changed during ownership transfer');
+      }
+    },
+  });
+  await addWorktreeSessionMarkerExclude(worktreePath);
 }
 
 /**

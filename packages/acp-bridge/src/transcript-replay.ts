@@ -14,11 +14,13 @@ import type {
 // does not pull in the full core package barrel.
 import {
   projectUserTranscriptForDisplay,
+  stripGeneratedAttachmentTokens,
   type TranscriptProjectionDiagnostic,
   type TranscriptRecordInput,
   type TranscriptReplayGapInput,
 } from '@qwen-code/qwen-code-core/transcriptRecords';
 import {
+  GOAL_PAUSE_REASON_COMMAND,
   isGoalCheckpointBookkeepingRecord,
   parseGoalSnapshotV2,
   parseGoalStateCause,
@@ -31,6 +33,7 @@ import {
 export const MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
   'before this tool completed.';
+const MAX_RESULT_PREVIEW_TEXT_LENGTH = 100_000;
 
 export interface TranscriptReplayEmission {
   readonly sourceRecordId: string;
@@ -103,6 +106,7 @@ interface UpdateMetaOptions {
   readonly sourceRecordIds?: readonly string[];
   readonly planToolCallId?: string;
   readonly todoPlanId?: string;
+  readonly resultPreviewText?: string;
   readonly extra?: Readonly<Record<string, unknown>>;
 }
 
@@ -207,31 +211,6 @@ function replaceTextPartsForDisplay(
   return projected;
 }
 
-function stripGeneratedAttachmentTokens(
-  displayText: string,
-  payload: Record<string, unknown> | undefined,
-): string {
-  const references = payload?.['attachmentReferences'];
-  if (!Array.isArray(references)) return displayText;
-  const tokens = references.flatMap((reference) => {
-    if (
-      !isObjectRecord(reference) ||
-      reference['type'] !== 'resource' ||
-      typeof reference['attachmentId'] !== 'string'
-    ) {
-      return [];
-    }
-    return [`@attachment:///${encodeURIComponent(reference['attachmentId'])}`];
-  });
-  if (tokens.length === 0) return displayText;
-  const tokenText = tokens.join('\n');
-  if (displayText === tokenText) return '';
-  const suffix = `\n\n${tokenText}`;
-  return displayText.endsWith(suffix)
-    ? displayText.slice(0, -suffix.length)
-    : displayText;
-}
-
 export function toTranscriptEpochMs(
   timestamp?: string | number,
 ): number | undefined {
@@ -252,6 +231,9 @@ function buildUpdateMeta(
     ...(sourceRecordIds.length > 0 ? { sourceRecordIds } : {}),
     ...(options.planToolCallId
       ? { planToolCallId: options.planToolCallId }
+      : {}),
+    ...(options.resultPreviewText
+      ? { resultPreviewText: options.resultPreviewText }
       : {}),
   };
   const meta: Record<string, unknown> = {
@@ -382,6 +364,7 @@ export function createTranscriptToolCallResultUpdate(
     content,
     _meta: buildUpdateMeta({
       ...options,
+      resultPreviewText: getToolContentText(options.contentPrefix),
       extra: {
         toolName: options.toolName,
         provenance: provenance.provenance,
@@ -396,6 +379,24 @@ export function createTranscriptToolCallResultUpdate(
   const rawOutput = getReplayRawOutput(options.resultDisplay);
   if (rawOutput !== undefined) update['rawOutput'] = rawOutput;
   return update as unknown as SessionUpdate;
+}
+
+function getToolContentText(
+  content: readonly ToolCallContent[] | undefined,
+): string | undefined {
+  let text = '';
+  for (const entry of content ?? []) {
+    if (entry.type !== 'content' || entry.content.type !== 'text') continue;
+    const next = entry.content.text;
+    if (
+      text.length + (text ? 1 : 0) + next.length >
+      MAX_RESULT_PREVIEW_TEXT_LENGTH
+    ) {
+      return undefined;
+    }
+    text += `${text ? '\n' : ''}${next}`;
+  }
+  return text || undefined;
 }
 
 function getReplayRawOutput(resultDisplay: unknown): unknown {
@@ -516,12 +517,33 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       );
     }
     let ordinal = 0;
-    const emit = (update: SessionUpdate): TranscriptReplayEmission => ({
-      sourceRecordId: record.uuid,
-      ...(record.timestamp ? { sourceTimestamp: record.timestamp } : {}),
-      emissionOrdinal: ordinal++,
-      update,
-    });
+    let activeSegmentLane: string | undefined;
+    let activeSegmentId: string | undefined;
+    const emit = (update: SessionUpdate): TranscriptReplayEmission => {
+      const emissionOrdinal = ordinal++;
+      const lane = transcriptSegmentLane(update);
+      if (lane && (lane !== activeSegmentLane || !activeSegmentId)) {
+        activeSegmentLane = lane;
+        activeSegmentId = `${record.uuid}:${emissionOrdinal}`;
+      } else if (!lane && isTranscriptSegmentBoundary(update)) {
+        activeSegmentLane = undefined;
+        activeSegmentId = undefined;
+      }
+      const projectedUpdate =
+        lane && activeSegmentId
+          ? withTranscriptSegmentId(update, activeSegmentId)
+          : update;
+      if (isTranscriptDiscreteMessage(update)) {
+        activeSegmentLane = undefined;
+        activeSegmentId = undefined;
+      }
+      return {
+        sourceRecordId: record.uuid,
+        ...(record.timestamp ? { sourceTimestamp: record.timestamp } : {}),
+        emissionOrdinal,
+        update: projectedUpdate,
+      };
+    };
     const meta = {
       timestamp: record.timestamp,
       sourceRecordIds: [record.uuid],
@@ -622,20 +644,25 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
+    const userMeta: UpdateMetaOptions =
+      typeof record.daemonPromptId === 'string' &&
+      record.daemonPromptId.trim().length > 0
+        ? { ...meta, extra: { ...meta.extra, promptId: record.daemonPromptId } }
+        : meta;
     const payload = isObjectRecord(record.systemPayload)
       ? record.systemPayload
       : undefined;
     const replayMeta: UpdateMetaOptions =
       record.subtype === 'mid_turn_user_message'
         ? {
-            ...meta,
+            ...userMeta,
             extra: {
-              ...meta.extra,
+              ...userMeta.extra,
               source: 'mid_turn_message_injected',
               qwenDiscreteMessage: true,
             },
           }
-        : meta;
+        : userMeta;
     if (
       record.subtype === 'goal_runtime' ||
       record.subtype === 'notification' ||
@@ -954,6 +981,45 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
+    if (record.subtype === 'agent_session_ready') {
+      const payload = isObjectRecord(record.systemPayload)
+        ? record.systemPayload
+        : undefined;
+      if (
+        typeof payload?.['callId'] !== 'string' ||
+        payload['callId'].length === 0 ||
+        typeof payload['subagentSessionReady'] !== 'boolean'
+      ) {
+        this.report(
+          'malformed_agent_session_ready',
+          'Skipped a malformed subagent session readiness record.',
+          record.uuid,
+          'systemPayload',
+        );
+        return;
+      }
+      const callId = payload['callId'];
+      if (!this.pendingToolCalls.has(callId)) {
+        this.report(
+          'orphan_agent_session_ready',
+          'Skipped subagent readiness without a matching pending tool call.',
+          record.uuid,
+          'systemPayload.callId',
+        );
+        return;
+      }
+      yield emit({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: callId,
+        _meta: buildUpdateMeta({
+          ...meta,
+          extra: {
+            subagentSessionReady: payload['subagentSessionReady'],
+          },
+        }),
+      });
+      return;
+    }
     if (record.subtype === 'goal_state') {
       const payload = parseGoalStateRecordPayloadV2(record.systemPayload);
       if (!payload) {
@@ -1174,6 +1240,80 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
   }
 }
 
+function withTranscriptSegmentId(
+  update: SessionUpdate,
+  segmentId: string,
+): SessionUpdate {
+  const record = update as unknown as Record<string, unknown>;
+  const meta = isObjectRecord(record['_meta']) ? record['_meta'] : undefined;
+  const transcript =
+    meta && isObjectRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
+  return {
+    ...record,
+    _meta: {
+      ...(meta ?? {}),
+      qwenTranscript: {
+        ...(transcript ?? {}),
+        segmentId,
+      },
+    },
+  } as unknown as SessionUpdate;
+}
+
+function transcriptSegmentLane(update: SessionUpdate): string | undefined {
+  const record = update as unknown as Record<string, unknown>;
+  const kind = record['sessionUpdate'];
+  const meta = isObjectRecord(record['_meta']) ? record['_meta'] : undefined;
+  const parentToolCallId =
+    typeof meta?.['parentToolCallId'] === 'string'
+      ? meta['parentToolCallId']
+      : 'root';
+  if (
+    kind === 'user_message_chunk' ||
+    kind === 'agent_message_chunk' ||
+    kind === 'agent_thought_chunk'
+  ) {
+    const content = isObjectRecord(record['content'])
+      ? record['content']
+      : undefined;
+    const contentType =
+      typeof content?.['type'] === 'string' ? content['type'] : undefined;
+    if (!contentType) return undefined;
+    if (
+      contentType === 'text' &&
+      (typeof content?.['text'] !== 'string' || content['text'].length === 0)
+    ) {
+      return undefined;
+    }
+    return `${String(kind)}:${contentType}:${parentToolCallId}`;
+  }
+  if (kind === 'shell_output' || kind === 'tool_output') {
+    const source = typeof meta?.['source'] === 'string' ? meta['source'] : '';
+    const stream = typeof record['stream'] === 'string' ? record['stream'] : '';
+    return `${String(kind)}:${source}:${stream}`;
+  }
+  return undefined;
+}
+
+function isTranscriptSegmentBoundary(update: SessionUpdate): boolean {
+  const record = update as unknown as Record<string, unknown>;
+  const kind = record['sessionUpdate'];
+  return (
+    typeof kind === 'string' &&
+    kind !== 'agent_message_chunk' &&
+    kind !== 'agent_thought_chunk' &&
+    kind !== 'user_message_chunk'
+  );
+}
+
+function isTranscriptDiscreteMessage(update: SessionUpdate): boolean {
+  const record = update as unknown as Record<string, unknown>;
+  const meta = isObjectRecord(record['_meta']) ? record['_meta'] : undefined;
+  return meta?.['qwenDiscreteMessage'] === true;
+}
+
 function projectGoalControlCommand(
   cause: GoalStateCause,
   snapshot: GoalSnapshotV2,
@@ -1187,6 +1327,17 @@ function projectGoalControlCommand(
         ? `/goal edit ${snapshot.goal.objective}`
         : undefined;
     case 'pause':
+      // Only a pause the user typed replays as the user typing it. The
+      // runtime writes `pause` records of its own -- the no-progress bound
+      // stops an idle Goal with no one at the keyboard -- and attributing
+      // those to the user would assert the opposite of what happened. The
+      // paused card that follows carries `lastReason` either way. A record
+      // written before pauses carried reasons keeps the historical
+      // projection.
+      return snapshot.goal?.lastReason === undefined ||
+        snapshot.goal.lastReason === GOAL_PAUSE_REASON_COMMAND
+        ? `/goal ${cause}`
+        : undefined;
     case 'resume':
     case 'clear':
       return `/goal ${cause}`;
@@ -1467,9 +1618,11 @@ function extractDiffContent(resultDisplay: unknown): ToolCallContent | null {
   return {
     type: 'diff',
     path:
-      typeof resultDisplay['fileName'] === 'string'
-        ? resultDisplay['fileName']
-        : '',
+      typeof resultDisplay['filePath'] === 'string'
+        ? resultDisplay['filePath']
+        : typeof resultDisplay['fileName'] === 'string'
+          ? resultDisplay['fileName']
+          : '',
     oldText:
       typeof resultDisplay['originalContent'] === 'string'
         ? resultDisplay['originalContent']

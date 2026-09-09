@@ -8,7 +8,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import process from 'node:process';
 import type { SessionScope, SessionTarget } from './types.js';
 import type {
@@ -16,11 +16,17 @@ import type {
   ChannelAgentBridgeSessionOptions,
 } from './ChannelAgentBridge.js';
 import { sanitizeLogText } from './sanitize.js';
+import { canonicalizeWorkspacePath } from './paths.js';
 
 interface PersistedEntry {
   sessionId: string;
   target: SessionTarget;
   cwd: string;
+  // Present only for managed worktree routes: the generic restore cannot
+  // resolve a worktree cwd to its workspace, so cold-start restore must
+  // re-attach these through the managed load path with the workspace root.
+  isolation?: 'worktree';
+  workspaceCwd?: string;
 }
 
 interface SessionReservation {
@@ -43,6 +49,68 @@ interface ResolveOptions {
 }
 
 export type SessionRecoveryMode = 'eager' | 'lazy';
+export type ManagedSessionIsolation = 'shared' | 'worktree';
+
+/**
+ * Read the daemon's typed error code off a `DaemonHttpError` (matched by
+ * shape: channels/base keeps no SDK dependency), walking `cause` chains so
+ * callers that wrap errors (the named-session manager) stay transparent.
+ */
+export function readDaemonHttpErrorCode(error: unknown): string | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5; depth++) {
+    if (
+      (typeof current !== 'object' && typeof current !== 'function') ||
+      current === null
+    ) {
+      return undefined;
+    }
+    const record = current as Record<string, unknown>;
+    if (record['name'] === 'DaemonHttpError' && record['status'] === 409) {
+      const body = record['body'];
+      if (typeof body === 'object' && body !== null && !Array.isArray(body)) {
+        const code = (body as Record<string, unknown>)['code'];
+        if (typeof code === 'string' && code.length > 0) return code;
+      }
+    }
+    current = record['cause'];
+  }
+  return undefined;
+}
+
+/**
+ * The replacement session id from a `409 worktree_session_superseded`
+ * daemon response, when the error carries one.
+ */
+export function readSupersededReplacementId(
+  error: unknown,
+): string | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5; depth++) {
+    if (
+      (typeof current !== 'object' && typeof current !== 'function') ||
+      current === null
+    ) {
+      return undefined;
+    }
+    const record = current as Record<string, unknown>;
+    if (record['name'] === 'DaemonHttpError' && record['status'] === 409) {
+      const body = record['body'];
+      if (typeof body === 'object' && body !== null && !Array.isArray(body)) {
+        const typedBody = body as Record<string, unknown>;
+        if (typedBody['code'] !== 'worktree_session_superseded') {
+          return undefined;
+        }
+        const replacement = typedBody['replacementSessionId'];
+        return typeof replacement === 'string' && replacement.length > 0
+          ? replacement
+          : undefined;
+      }
+    }
+    current = record['cause'];
+  }
+  return undefined;
+}
 
 export interface SessionRouterOptions {
   recoveryMode?: SessionRecoveryMode;
@@ -52,9 +120,14 @@ export class SessionRouter {
   private toSession: Map<string, string> = new Map(); // routing key → session ID
   private toTarget: Map<string, SessionTarget> = new Map(); // session ID → target
   private toCwd: Map<string, string> = new Map(); // session ID → cwd
+  private toManagedMeta: Map<
+    string,
+    { isolation: 'worktree'; workspaceCwd: string }
+  > = new Map();
   private creatingSessions: Map<string, SessionOperation> = new Map();
   private sessionLoadWindows: Set<SessionLoadWindow> = new Set();
   private readonly liveSessionIds = new Set<string>();
+  private readonly staleBridgeBindings = new Set<string>();
   private readonly routeTokens = new Map<string, object>();
   private lifecycleGeneration = 0;
 
@@ -85,6 +158,7 @@ export class SessionRouter {
   setBridge(bridge: ChannelAgentBridge): void {
     this.bridge = bridge;
     this.liveSessionIds.clear();
+    this.staleBridgeBindings.clear();
   }
 
   /** Set scope override for a specific channel. */
@@ -431,7 +505,8 @@ export class SessionRouter {
 
   async createManagedSession(
     target: SessionTarget,
-    cwd: string,
+    workspaceCwd: string,
+    isolation: ManagedSessionIsolation = 'shared',
   ): Promise<string> {
     const loadWindow = this.beginSessionLoad();
     const lifecycleGeneration = this.lifecycleGeneration;
@@ -441,10 +516,11 @@ export class SessionRouter {
       let lastDeadSessionId: string | undefined;
       for (let attempt = 0; attempt < 2; attempt++) {
         const sessionId = await bridge.newSession(
-          cwd,
+          workspaceCwd,
           {
             ...this.sessionOptions(target.channelName),
             sourceId: target.channelName,
+            ...(isolation === 'worktree' ? { worktree: {} } : {}),
           },
           bindingToken,
         );
@@ -458,13 +534,28 @@ export class SessionRouter {
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw new Error('Invalid session ID from bridge');
         }
+        let sessionCwd: string;
+        try {
+          sessionCwd = this.validateManagedSessionIdentity(
+            bridge,
+            sessionId,
+            workspaceCwd,
+            undefined,
+            isolation,
+          );
+        } catch (error) {
+          await bridge
+            .discardSession?.(sessionId, bindingToken)
+            .catch(() => undefined);
+          throw error;
+        }
         if (loadWindow.delete(sessionId)) {
           lastDeadSessionId = sessionId;
           await bridge.discardSession?.(sessionId, bindingToken);
           continue;
         }
         this.toTarget.set(sessionId, target);
-        this.toCwd.set(sessionId, cwd);
+        this.toCwd.set(sessionId, sessionCwd);
         this.liveSessionIds.add(sessionId);
         return sessionId;
       }
@@ -479,12 +570,26 @@ export class SessionRouter {
   async loadManagedSession(
     sessionId: string,
     target: SessionTarget,
-    cwd: string,
-  ): Promise<{ loaded: boolean }> {
+    workspaceCwd: string,
+    expectedCwd: string = workspaceCwd,
+    isolation: ManagedSessionIsolation = 'shared',
+    allowSupersededRedirect = true,
+  ): Promise<{
+    loaded: boolean;
+    sessionId: string;
+    redirectedFrom?: string;
+  }> {
     if (this.liveSessionIds.has(sessionId)) {
+      const actualCwd = this.validateManagedSessionIdentity(
+        this.bridge,
+        sessionId,
+        workspaceCwd,
+        expectedCwd,
+        isolation,
+      );
       this.toTarget.set(sessionId, target);
-      this.toCwd.set(sessionId, cwd);
-      return { loaded: false };
+      this.toCwd.set(sessionId, actualCwd);
+      return { loaded: false, sessionId };
     }
 
     const loadWindow = this.beginSessionLoad();
@@ -493,9 +598,16 @@ export class SessionRouter {
     const bindingToken = {};
     let loadedSessionId: string | undefined;
     try {
+      if (this.staleBridgeBindings.delete(sessionId)) {
+        // A failed worktree reset left the bridge holding a client for this id.
+        // Attaching over that binding reports the session as replaced, which
+        // aborts this very load, so release it first. Tokenless: the surviving
+        // binding carries the previous load's token.
+        await bridge.discardSession?.(sessionId).catch(() => undefined);
+      }
       loadedSessionId = await bridge.loadSession(
         sessionId,
-        cwd,
+        workspaceCwd,
         this.sessionOptions(target.channelName),
         bindingToken,
       );
@@ -520,15 +632,48 @@ export class SessionRouter {
           `Managed session ${sessionId} died before loading completed`,
         );
       }
+      const actualCwd = this.validateManagedSessionIdentity(
+        bridge,
+        sessionId,
+        workspaceCwd,
+        expectedCwd,
+        isolation,
+      );
       this.toTarget.set(sessionId, target);
-      this.toCwd.set(sessionId, cwd);
+      this.toCwd.set(sessionId, actualCwd);
       this.liveSessionIds.add(sessionId);
-      return { loaded: true };
+      return { loaded: true, sessionId };
     } catch (error) {
       if (loadedSessionId) {
         await bridge
           .discardSession?.(loadedSessionId, bindingToken)
           .catch(() => undefined);
+        throw error;
+      }
+      // Superseded redirect: a worktree reset moved this session's checkout
+      // ownership to a replacement. Redirect the load once, then heal the
+      // route mappings so the stale id is never consulted again. A redirect
+      // chain (or a self-redirect) fails closed.
+      const replacementId = readSupersededReplacementId(error);
+      if (
+        allowSupersededRedirect &&
+        replacementId !== undefined &&
+        replacementId !== sessionId
+      ) {
+        const redirected = await this.loadManagedSession(
+          replacementId,
+          target,
+          workspaceCwd,
+          expectedCwd,
+          isolation,
+          false,
+        );
+        this.healSupersededRoute(sessionId, redirected.sessionId);
+        return {
+          loaded: redirected.loaded,
+          sessionId: redirected.sessionId,
+          redirectedFrom: sessionId,
+        };
       }
       throw error;
     } finally {
@@ -536,18 +681,187 @@ export class SessionRouter {
     }
   }
 
+  /**
+   * Remap every route that still points at a superseded session to its
+   * replacement, and drop the superseded id's bookkeeping. The manager's
+   * own task registry heals separately (it owns the task-name mapping).
+   */
+  private healSupersededRoute(
+    oldSessionId: string,
+    newSessionId: string,
+  ): void {
+    let changed = false;
+    for (const [key, mappedSessionId] of this.toSession) {
+      if (mappedSessionId !== oldSessionId) continue;
+      this.invalidateRouteOperation(key);
+      this.toSession.set(key, newSessionId);
+      changed = true;
+    }
+    changed = this.toTarget.delete(oldSessionId) || changed;
+    changed = this.toCwd.delete(oldSessionId) || changed;
+    const managedMeta = this.toManagedMeta.get(oldSessionId);
+    if (managedMeta !== undefined) {
+      // The replacement owns the same worktree, so the route's restore
+      // metadata follows it.
+      this.toManagedMeta.set(newSessionId, managedMeta);
+      this.toManagedMeta.delete(oldSessionId);
+      changed = true;
+    }
+    this.liveSessionIds.delete(oldSessionId);
+    this.staleBridgeBindings.delete(oldSessionId);
+    if (changed) this.persist();
+  }
+
+  /**
+   * Worktree reset: transfer the task session's checkout ownership to a
+   * fresh replacement session on the daemon, validate the replacement's
+   * attestation, and route it. The task registry itself is swapped by the
+   * named-session manager (it owns the task-name mapping); this call only
+   * wires the router's session bookkeeping.
+   *
+   * A failure past the daemon's marker flip rolls nothing back: the
+   * registry keeps pointing at the old id, and the next selection's load
+   * heals it through the superseded redirect — the failed reset drops the
+   * old id from the live set so that load consults the daemon again.
+   */
+  async replaceManagedWorktreeSession(
+    sessionId: string,
+    target: SessionTarget,
+    workspaceCwd: string,
+    expectedCwd: string,
+  ): Promise<string> {
+    const bridge = this.bridge;
+    if (!bridge.resetWorktreeSession) {
+      throw new Error('Worktree reset is not supported by this bridge');
+    }
+    const loadWindow = this.beginSessionLoad();
+    const lifecycleGeneration = this.lifecycleGeneration;
+    const bindingToken = {};
+    let replacementId: string | undefined;
+    try {
+      replacementId = await bridge.resetWorktreeSession(
+        sessionId,
+        workspaceCwd,
+        this.sessionOptions(target.channelName),
+        bindingToken,
+      );
+      if (
+        lifecycleGeneration !== this.lifecycleGeneration ||
+        bridge !== this.bridge
+      ) {
+        this.scheduleManagedDiscard(bridge, replacementId, bindingToken);
+        throw new Error('Managed session reset was invalidated');
+      }
+      if (typeof replacementId !== 'string' || replacementId.length === 0) {
+        throw new Error('Invalid session ID from bridge');
+      }
+      if (loadWindow.delete(replacementId)) {
+        await bridge.discardSession?.(replacementId, bindingToken);
+        throw new Error(
+          `Managed session ${replacementId} died before reset completed`,
+        );
+      }
+      const actualCwd = this.validateManagedSessionIdentity(
+        bridge,
+        replacementId,
+        workspaceCwd,
+        expectedCwd,
+        'worktree',
+      );
+      this.toTarget.set(replacementId, target);
+      this.toCwd.set(replacementId, actualCwd);
+      this.liveSessionIds.add(replacementId);
+      this.forgetManagedSession(sessionId);
+      return replacementId;
+    } catch (error) {
+      if (replacementId !== undefined) {
+        await bridge
+          .discardSession?.(replacementId, bindingToken)
+          .catch(() => undefined);
+      }
+      // A failure past the daemon's marker flip leaves this session superseded
+      // server-side with no eviction event to tell us. While the id stays live
+      // the next load short-circuits and never consults the daemon, so the
+      // superseded redirect can never heal it. Drop only the live flag: the
+      // route mappings stay, so a pre-flip failure re-loads this id. The bridge
+      // keeps holding its client either way, so record the id — the re-load has
+      // to release that binding before attaching, and attaching over it would
+      // report the session as replaced and abort the load that recovers it.
+      this.staleBridgeBindings.add(sessionId);
+      this.liveSessionIds.delete(sessionId);
+      throw error;
+    } finally {
+      this.endSessionLoad(loadWindow);
+    }
+  }
+
+  private validateManagedSessionIdentity(
+    bridge: ChannelAgentBridge,
+    sessionId: string,
+    workspaceCwd: string,
+    expectedCwd: string | undefined,
+    isolation: ManagedSessionIsolation,
+  ): string {
+    if (isolation === 'shared') {
+      return workspaceCwd;
+    }
+    const info = bridge
+      .listSessions?.()
+      .find((candidate) => candidate.sessionId === sessionId);
+    const canonicalWorkspace = canonicalizeWorkspacePath(workspaceCwd);
+    const canonicalWorktree = info?.worktree
+      ? canonicalizeWorkspacePath(info.worktree.path)
+      : undefined;
+    if (
+      !info ||
+      canonicalizeWorkspacePath(info.workspaceCwd) !== canonicalWorkspace ||
+      info.worktreeState !== 'persisted-v1' ||
+      !info.worktree ||
+      !isAbsolute(info.worktree.path) ||
+      !canonicalWorktree ||
+      canonicalWorktree === canonicalWorkspace ||
+      (expectedCwd !== undefined &&
+        canonicalWorktree !== canonicalizeWorkspacePath(expectedCwd))
+    ) {
+      throw new Error(
+        `Daemon did not attest the expected worktree for session ${sessionId}`,
+      );
+    }
+    return canonicalWorktree;
+  }
+
   activateManagedSession(
     sessionId: string,
     target: SessionTarget,
     cwd: string,
+    managed?: { isolation: ManagedSessionIsolation; workspaceCwd: string },
   ): void {
+    if (managed?.isolation === 'worktree' && !managed.workspaceCwd) {
+      throw new Error('A worktree managed session requires its workspace cwd.');
+    }
+    const previousMeta = this.toManagedMeta.get(sessionId);
+    if (managed?.isolation === 'worktree') {
+      this.toManagedMeta.set(sessionId, {
+        isolation: 'worktree',
+        workspaceCwd: managed.workspaceCwd,
+      });
+    } else {
+      this.toManagedMeta.delete(sessionId);
+    }
+    const metaChanged =
+      managed?.isolation === 'worktree'
+        ? previousMeta?.workspaceCwd !== managed.workspaceCwd
+        : previousMeta !== undefined;
     const key = this.routingKey(
       target.channelName,
       target.senderId,
       target.chatId,
       target.threadId,
     );
-    if (this.toSession.get(key) === sessionId) return;
+    if (this.toSession.get(key) === sessionId) {
+      if (metaChanged) this.persist();
+      return;
+    }
     this.invalidateRouteOperation(key);
     this.toSession.set(key, sessionId);
     this.toTarget.set(sessionId, target);
@@ -565,17 +879,22 @@ export class SessionRouter {
     }
     changed = this.toTarget.delete(sessionId) || changed;
     changed = this.toCwd.delete(sessionId) || changed;
+    changed = this.toManagedMeta.delete(sessionId) || changed;
     changed = this.liveSessionIds.delete(sessionId) || changed;
+    this.staleBridgeBindings.delete(sessionId);
     if (changed) this.persist();
   }
 
   async detachManagedSession(sessionId: string): Promise<void> {
     try {
-      if (this.liveSessionIds.has(sessionId)) {
-        if (!this.bridge.discardSession) {
-          throw new Error('Managed session detach is not supported');
-        }
+      if (this.bridge.discardSession) {
+        // Release regardless of the live flag: a failed worktree reset drops it
+        // so the superseded redirect can heal the id, while the bridge keeps
+        // holding the client and its event pump. Discarding an id the bridge
+        // has no binding for is a no-op.
         await this.bridge.discardSession(sessionId);
+      } else if (this.liveSessionIds.has(sessionId)) {
+        throw new Error('Managed session detach is not supported');
       }
     } finally {
       this.forgetManagedSession(sessionId);
@@ -642,6 +961,9 @@ export class SessionRouter {
     if (this.toCwd.delete(sessionId)) {
       removed = true;
     }
+    if (this.toManagedMeta.delete(sessionId)) {
+      removed = true;
+    }
     this.liveSessionIds.delete(sessionId);
     if (!removed && this.sessionLoadWindows.size > 0) {
       for (const loadWindow of this.sessionLoadWindows) {
@@ -672,6 +994,7 @@ export class SessionRouter {
     this.toSession.delete(key);
     this.toTarget.delete(sessionId);
     this.toCwd.delete(sessionId);
+    this.toManagedMeta.delete(sessionId);
     this.liveSessionIds.delete(sessionId);
     return sessionId;
   }
@@ -715,6 +1038,12 @@ export class SessionRouter {
       this.toSession.set(key, entry.sessionId);
       this.toTarget.set(entry.sessionId, entry.target);
       this.toCwd.set(entry.sessionId, entry.cwd);
+      if (entry.isolation === 'worktree' && entry.workspaceCwd !== undefined) {
+        this.toManagedMeta.set(entry.sessionId, {
+          isolation: 'worktree',
+          workspaceCwd: entry.workspaceCwd,
+        });
+      }
       restored++;
     }
     if (persisted.dropped > 0) this.persist();
@@ -772,6 +1101,58 @@ export class SessionRouter {
         try {
           this.assertOperationCurrent(operation);
           const options = this.sessionOptions(entry.target.channelName);
+          if (
+            entry.isolation === 'worktree' &&
+            entry.workspaceCwd !== undefined
+          ) {
+            // The generic restore cannot resolve a persisted worktree cwd
+            // (the daemon exact-matches registered workspace roots), so
+            // re-attach through the managed path: load by workspace root and
+            // re-validate the daemon's worktree attestation. A superseded
+            // id redirects to its replacement inside the managed load.
+            // Death-during-restore is deliberately not re-checked here the
+            // way the generic branch does: the managed load's internal
+            // window already covers the load itself, and nothing below
+            // yields between its return and the route set, so a death
+            // notification cannot interleave (run-to-completion). The next
+            // death event lands after routing and is handled normally.
+            const managed = await this.loadManagedSession(
+              entry.sessionId,
+              entry.target,
+              entry.workspaceCwd,
+              entry.cwd,
+              'worktree',
+            );
+            try {
+              this.assertOperationCurrent(operation);
+            } catch (error) {
+              // loadManagedSession binds with its own token, so an
+              // operation-keyed discard can never match here; release
+              // tokenless and roll back the maps the load committed.
+              // No persist — the loop's guarded final write owns the file.
+              if (![...this.toSession.values()].includes(managed.sessionId)) {
+                void this.bridge
+                  .discardSession?.(managed.sessionId)
+                  .catch(() => undefined);
+                this.toTarget.delete(managed.sessionId);
+                this.toCwd.delete(managed.sessionId);
+                this.toManagedMeta.delete(managed.sessionId);
+                this.liveSessionIds.delete(managed.sessionId);
+              }
+              throw error;
+            }
+            this.toSession.set(key, managed.sessionId);
+            this.toManagedMeta.set(managed.sessionId, {
+              isolation: 'worktree',
+              workspaceCwd: entry.workspaceCwd,
+            });
+            reservation.resolve(managed.sessionId);
+            if (managed.sessionId !== entry.sessionId) {
+              changed = true;
+            }
+            restored++;
+            continue;
+          }
           const sessionId = await this.bridge.loadSession(
             entry.sessionId,
             entry.cwd,
@@ -837,9 +1218,11 @@ export class SessionRouter {
     this.toSession.clear();
     this.toTarget.clear();
     this.toCwd.clear();
+    this.toManagedMeta.clear();
     this.creatingSessions.clear();
     this.sessionLoadWindows.clear();
     this.liveSessionIds.clear();
+    this.staleBridgeBindings.clear();
     this.routeTokens.clear();
   }
 
@@ -912,7 +1295,7 @@ export class SessionRouter {
     const target = entry['target'];
     if (typeof target !== 'object' || target === null) return false;
     const typedTarget = target as Record<string, unknown>;
-    return (
+    const wellFormed =
       typeof entry['sessionId'] === 'string' &&
       entry['sessionId'].length > 0 &&
       typeof entry['cwd'] === 'string' &&
@@ -923,7 +1306,13 @@ export class SessionRouter {
       (typedTarget['threadId'] === undefined ||
         typeof typedTarget['threadId'] === 'string') &&
       (typedTarget['isGroup'] === undefined ||
-        typeof typedTarget['isGroup'] === 'boolean')
+        typeof typedTarget['isGroup'] === 'boolean');
+    if (!wellFormed) return false;
+    if (entry['isolation'] === undefined) return true;
+    return (
+      entry['isolation'] === 'worktree' &&
+      typeof entry['workspaceCwd'] === 'string' &&
+      entry['workspaceCwd'].length > 0
     );
   }
 
@@ -938,6 +1327,7 @@ export class SessionRouter {
         sessionId,
         target,
         cwd: this.toCwd.get(sessionId) ?? this.defaultCwd,
+        ...(this.toManagedMeta.get(sessionId) ?? {}),
       };
     }
 
