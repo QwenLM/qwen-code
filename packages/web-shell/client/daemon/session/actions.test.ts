@@ -4661,6 +4661,7 @@ function createMockSession(
       closeSession: vi.fn(),
       sessionWorkflowTaskAction: vi.fn(),
       removeSessionAttachment: vi.fn(async () => true),
+      upsertSessionSource: vi.fn(async () => ({ revision: 1 })),
     },
     savedWorkflow: vi.fn(),
     cancel: vi.fn(async () => undefined),
@@ -4803,3 +4804,193 @@ function contextStatus(sessionId: string) {
     state: {},
   };
 }
+
+describe('accepted attachment sources', () => {
+  const file = {
+    name: 'original.txt',
+    mimeType: 'text/plain',
+    data: new Blob(['reference']),
+  };
+  const connection = {
+    status: 'connected' as const,
+    workspaceCwd: '/workspace',
+    capabilities: {
+      features: ['session_attachments', 'session_sources'],
+    } as DaemonCapabilities,
+  };
+  it('starts metadata registration only after admission without blocking admission or changing the prompt', async () => {
+    const session = createMockSession('session-a');
+    let resolve!: () => void;
+    session.client.upsertSessionSource.mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = () => done({ revision: 1 });
+      }),
+    );
+    const { actions } = createActionsHarness({ session, connection });
+    await actions.submitPrompt('look', { files: [file] });
+    expect(session.client.upsertSessionSource).toHaveBeenCalledWith(
+      'session-a',
+      {
+        title: 'original.txt',
+        locator: { type: 'attachment', attachmentId: 'original.txt' },
+      },
+      'client-session-a',
+    );
+    expect(session.submitPrompt.mock.invocationCallOrder[0]).toBeLessThan(
+      session.client.upsertSessionSource.mock.invocationCallOrder[0]!,
+    );
+    expect(JSON.stringify(session.submitPrompt.mock.calls)).not.toContain(
+      'sources',
+    );
+    resolve();
+  });
+  it('retries failed metadata without uploading or submitting the prompt again', async () => {
+    const session = createMockSession('session-a');
+    session.client.upsertSessionSource.mockRejectedValueOnce(
+      new Error('offline'),
+    );
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({
+      session,
+      connection,
+      addNotice,
+    });
+    await actions.submitPrompt('look', { files: [file] });
+    await vi.waitFor(() => expect(addNotice).toHaveBeenCalled());
+    const retry = addNotice.mock.calls.find(
+      ([notice]) => notice.sourceRetry,
+    )?.[0].sourceRetry;
+    expect(retry).toBeTypeOf('function');
+    await retry();
+    expect(session.client.upsertSessionSource).toHaveBeenCalledTimes(2);
+    expect(session.submitPrompt).toHaveBeenCalledOnce();
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
+  });
+  it('registers nothing when prompt admission is rejected', async () => {
+    const session = createMockSession('session-a');
+    session.submitPrompt.mockRejectedValueOnce(
+      new DaemonHttpError(400, { code: 'invalid_prompt' }, 'rejected'),
+    );
+    const { actions } = createActionsHarness({ session, connection });
+    await expect(
+      actions.submitPrompt('look', { files: [file] }),
+    ).rejects.toThrow('rejected');
+    expect(session.client.upsertSessionSource).not.toHaveBeenCalled();
+    expect(session.removeAttachment).toHaveBeenCalledOnce();
+  });
+  it('does not register attachments removed after queued admission is cancelled', async () => {
+    const session = createMockSession('session-a');
+    const controller = new AbortController();
+    session.submitPrompt.mockImplementationOnce(async () => {
+      controller.abort();
+      return { promptId: 'prompt-1' };
+    });
+    const { actions } = createActionsHarness({ session, connection });
+    await expect(
+      actions.submitPrompt('look', {
+        files: [file],
+        signal: controller.signal,
+      }),
+    ).resolves.toEqual({ promptId: 'prompt-1', removedAfterAbort: true });
+    expect(session.removeAttachment).toHaveBeenCalledWith('original.txt');
+    expect(session.client.upsertSessionSource).not.toHaveBeenCalled();
+  });
+  it.each(['already running', 'cleanup failed'])(
+    'keeps accepted attachment registration when cancelled admission is %s',
+    async (outcome) => {
+      const session = createMockSession('session-a');
+      const controller = new AbortController();
+      session.submitPrompt.mockImplementationOnce(async () => {
+        controller.abort();
+        return { promptId: 'prompt-1' };
+      });
+      if (outcome === 'already running') {
+        session.removePendingPrompt.mockResolvedValueOnce({ removed: false });
+      } else {
+        session.removePendingPrompt.mockRejectedValueOnce(new Error('offline'));
+      }
+      const { actions } = createActionsHarness({ session, connection });
+      await expect(
+        actions.submitPrompt('look', {
+          files: [file],
+          signal: controller.signal,
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(session.removeAttachment).not.toHaveBeenCalled();
+      expect(session.client.upsertSessionSource).toHaveBeenCalledOnce();
+    },
+  );
+  it.each([
+    'source_limit_reached',
+    'invalid_source',
+    'source_attachment_not_found',
+  ])('does not offer retries for terminal metadata error %s', async (code) => {
+    const session = createMockSession('session-a');
+    session.client.upsertSessionSource.mockRejectedValue(
+      new DaemonHttpError(409, { code }, code),
+    );
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({
+      session,
+      connection,
+      addNotice,
+    });
+    await actions.submitPrompt('look', { files: [file] });
+    await actions.submitPrompt('look again', { files: [file] });
+    await Promise.resolve();
+    expect(session.client.upsertSessionSource).toHaveBeenCalledTimes(2);
+    expect(addNotice.mock.calls.some(([notice]) => notice.sourceRetry)).toBe(
+      false,
+    );
+    expect(session.removeAttachment).not.toHaveBeenCalled();
+  });
+  it('uses original file titles alongside the uploaded image identity', async () => {
+    const session = createMockSession('session-a');
+    session.uploadAttachment.mockImplementation(
+      async (data, name, mimeType) => ({
+        type: mimeType.startsWith('image/') ? 'image' : 'resource',
+        attachmentId: `id-${name}`,
+        mimeType,
+        size: data.size,
+      }),
+    );
+    const { actions } = createActionsHarness({ session, connection });
+    await actions.submitPrompt('look', {
+      images: [{ data: btoa('image'), mimeType: 'image/png' }],
+      files: [
+        { ...file, name: 'alpha.txt' },
+        { ...file, name: 'beta.txt' },
+      ],
+    });
+    const calls = session.client.upsertSessionSource.mock
+      .calls as unknown as Array<
+      [string, { title: string; locator: { attachmentId: string } }]
+    >;
+    expect(calls.map(([, input]) => input.title)).toEqual([
+      calls[0]?.[1].locator.attachmentId,
+      'alpha.txt',
+      'beta.txt',
+    ]);
+  });
+  it('suppresses the failed registration notice after switching owners', async () => {
+    const session = createMockSession('session-a');
+    let reject!: (error: Error) => void;
+    session.client.upsertSessionSource.mockReturnValueOnce(
+      new Promise((_, fail) => {
+        reject = fail;
+      }),
+    );
+    const addNotice = vi.fn();
+    const { actions, sessionRef } = createActionsHarness({
+      session,
+      connection,
+      addNotice,
+    });
+    await actions.submitPrompt('look', { files: [file] });
+    sessionRef.current = undefined;
+    reject(new Error('offline'));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+});

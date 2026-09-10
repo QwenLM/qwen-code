@@ -104,7 +104,7 @@ Use this to detect mismatch pre-flight: read `workspaceCwd` off `/capabilities` 
 }
 ```
 
-When `--max-total-sessions` rejects a fresh session, the same response shape is returned with `"scope": "total"`.
+When the effective daemon-wide total cap rejects a fresh session — `--max-total-sessions`, or the default described under `limits.maxTotalSessions` — the same response shape is returned with `"scope": "total"`.
 
 Attaches to existing sessions are NOT counted toward the cap, so an idle daemon's reconnects keep working even when at-capacity.
 
@@ -572,6 +572,7 @@ operator diagnostic snapshot documented below.
 | `standalone_sessions_v1`            | the daemon has installed the complete standalone-session runtime, lifecycle coordinator, durable deletion journal, managed-directory implementation, and `/standalone/sessions` route family. Direct embeds without the complete dependency graph omit both the routes and this tag.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `standalone_session_options_v1`     | the complete standalone-session runtime is installed (same condition as `standalone_sessions_v1`), so the read-only, sessionless `GET /standalone/session-options` route is registered on the internal Conversations runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `session_artifacts_persistence`     | session artifact persistence is wired for the runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `session_sources`                   | session source persistence is wired for the runtime. Registers metadata-only workspace files, uploaded attachments, and HTTP(S) links through the live session owner.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `session_generation`                | session generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `scheduled_task_session_reuse`      | durable scheduled-task session management is active and every managed daemon runtime has installed the callback that lets a task explicitly bind to its current existing session.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `workspace_generation`              | workspace-scoped generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
@@ -702,8 +703,10 @@ Response shape:
     "sessionShellCommandEnabled": false
   },
   "limits": {
+    "maxRegisteredWorkspaces": 256,
+    "maxChannelControlWorkspaces": 25,
     "maxSessions": 32,
-    "maxTotalSessions": null,
+    "maxTotalSessions": 800,
     "maxPendingPromptsPerSession": 5,
     "listenerMaxConnections": 256,
     "eventRingSize": 8000,
@@ -789,7 +792,9 @@ runtime routes return `503`.
 
 `runtime.memory.pressure` is additive within that block and reports the daemon root's own memory pressure: `mode` (`off` / `observe`), `level` (`normal` / `soft` / `hard` / `critical`), `source` (`rss` / `heap` / `unknown`), `ratio`, and the six raw figures the ratios come from — `rssBytes`, `rssRatio`, `availableBytes`, `heapUsedBytes`, `heapRatio`, `heapLimitBytes`. `ratio` is the larger of `rssRatio` and `heapRatio`, and `source` names which one it was; ties are reported as `rss`. `availableBytes` is `limits.memory.availableMemoryMb` in bytes — deliberately the detected cgroup/host figure rather than `effectiveBudgetMb`, because what ends the process is the real limit, not an operator's policy number. `source: "unknown"` means neither denominator was measurable and must not be read as healthy; `level` is `normal` in that case only because there is nothing to classify. The figures cover the daemon **root process only**: they are this process's own `memoryUsage()`, so children growing does not move them. `runtime.memory.children` reports those separately, and neither figure is process-tree memory. Both modes report the whole block; only `observe` additionally raises the path-free `daemon_memory_pressure` warning into the status rollup, so `off` leaves the top-level `status` unchanged. Nothing remediates in either mode. The field is optional in the SDK mirror because daemons that shipped `runtime.memory` before it exists send the block without it.
 
-`limits.maxTotalSessions` is additive. `null` means the effective daemon-wide fresh-session cap is disabled. When several startup/restored workspaces are present, `--max-total-sessions` is omitted, and `maxSessionsPerWorkspace` is finite, the daemon derives the effective total cap once as `maxSessionsPerWorkspace * startupWorkspaceCount`; later dynamic registration does not recompute it. When set, it limits fresh session creation across the daemon and reports total-limit failures with the existing `session_limit_exceeded` error shape plus `scope: "total"`.
+`limits.maxRegisteredWorkspaces` is additive and reports the resolved user registration cap (default 256, configurable from 1 through 256). `limits.maxChannelControlWorkspaces` reports the independent control/recovery owner cap of 25 on the standard daemon, even while channels are disabled. Custom controllers advertise that field only when they enforce it. These fields are present on both bootstrap and ready responses; older daemons may omit them. The channel controller rejects transitional owner unions over its cap with `409 channel_control_workspace_limit_reached` before constructing candidate workers; an initial boot-time union over the cap fails startup before the listener is published, so it has no HTTP surface. Registration capacity does not determine the SDK channel timeout.
+
+`limits.maxTotalSessions` is additive. `null` means the effective daemon-wide fresh-session cap is disabled. When the resolved registration capacity (default 256, configurable through `QWEN_SERVE_MAX_WORKSPACES` or embedded `maxRegisteredWorkspaces`) exceeds 25 and `--max-total-sessions` is omitted, the standard daemon uses a fixed total of 800, even with one startup workspace. At registration capacities of 25 or less, several startup/restored workspaces with a finite `maxSessionsPerWorkspace` derive the effective total once as `maxSessionsPerWorkspace * workspaceCount` over that same startup-plus-restored count; one startup or restored workspace retains an unlimited default. Explicit total limits, including disabled values, take precedence. Later dynamic registration does not recompute the total. Direct `createServeApp` embeds must supply their own shared admission policy. When set, it limits fresh session creation across the daemon and reports total-limit failures with the existing `session_limit_exceeded` error shape plus `scope: "total"`.
 
 `runtime.channel.live` reports the ACP bridge channel inside the daemon. It is
 not the channel-adapter worker. Daemon-managed channels use
@@ -897,7 +902,7 @@ Stable control errors are:
 
 - `400 invalid_channel_selection`, `channel_workspace_mismatch`, or `ambiguous_channel_workspace`
 - `403 untrusted_workspace`
-- `409 channel_service_conflict` or `channel_worker_not_enabled`
+- `409 channel_service_conflict`, `channel_worker_not_enabled`, or `channel_control_workspace_limit_reached`
 - `500 channel_worker_stop_failed`
 - `502 channel_worker_start_failed`, with `rolledBack` and an optional credential-redacted `rollbackError`
 - `503 daemon_draining`
@@ -1107,9 +1112,11 @@ path-free `daemon_log_degraded` warning to the normal status rollup.
     "..."
   ],
   "limits": {
+    "maxRegisteredWorkspaces": 256,
+    "maxChannelControlWorkspaces": 25,
     "maxPendingPromptsPerSession": 5,
     "maxSessionsPerWorkspace": 32,
-    "maxTotalSessions": 64,
+    "maxTotalSessions": 800,
     "sessionRestoreTimeoutMs": 60000
   },
   "modelServices": [],
@@ -1148,6 +1155,27 @@ Stable contract: when `v` increments the frame layout has changed in a backwards
 
 The workspace feature tags and `workspaces[]` are dynamic. Clients that add a workspace must fetch `/capabilities` again after the mutation completes; the daemon does not broadcast capability changes to clients that cached an earlier response. Forgetting persistence does not unload an active runtime, so that runtime remains advertised until restart.
 
+### `GET /brand`
+
+The Web Shell's product branding, for hosts that want to white-label the shell. Resolved from `ui.brand` in the operator settings scopes. Gated by the `web_shell_brand` feature tag; a daemon without the route answers 404.
+
+```json
+{
+  "name": "QiuQiu Code",
+  "logoDataUri": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%2F%3E"
+}
+```
+
+> **Both fields are optional, and `{}` is a normal response.** An absent field means "use the client's built-in brand" — the Web Shell renders its own name and inline logo. Clients must not treat an empty body as an error.
+
+> **The handler always answers 200, even when the configured logo was rejected.** A missing file, a symlink, a hard-linked file, a directory, a non-SVG document, or content over 32 KiB yields a body with no `logoDataUri`, and the reason is written to the daemon's stderr as `qwen serve: GET /brand: ui.brand.logoPath …`. A client therefore cannot distinguish "no brand configured" from "the operator's logo was refused"; the operator-facing channel is the daemon log. One advisory is softer than a rejection, and there are two: a root `<svg>` with no usable `viewBox` and no positive, non-percentage `width`/`height` (a malformed or zero-area viewBox counts as unusable), which the browser may render blank at the sidebar's fixed size; and a prefix-bound root whose unprefixed elements lack a default-namespace binding, which renders them invisible. Middleware in front of the handler answers before it ever runs — `401` when bearer auth is required and absent, `429` when the optional rate limiter is engaged. A draining daemon does not reject this route: the rate limiter is permissive while draining, so the handler keeps answering 200 until the listener closes and the client sees a connection failure instead. Startup is not a 503 on this route: on the default deferred-runtime path the request is _held_ until the runtime is ready and then answered 200, so a short client timeout is what can fire early. A 503 with `code: "daemon_runtime_starting"` reaches this route only on configurations that answer before the runtime is ready (e.g. `--open`) and is retryable; a 503 with `code: "daemon_runtime_failed"` is terminal until the daemon restarts and carries no `Retry-After` — do not retry it.
+
+> **Workspace settings never contribute.** The route loads settings with `skipWorkspaceSettings`, so a repository's `.qwen/settings.json` cannot rename the product or name a file for the daemon to read and inline into every connected browser. Only System Defaults, User and System are read, in that precedence. For the same reason, a brand value is refused with a warning on the daemon's stderr whenever placeholder substitution would change it: substitution draws from the process-wide environment, which a workspace's `.qwen/.env` or `env` block populates first at boot. An unresolvable placeholder (the variable is unset) is kept verbatim, so a typo'd variable shows as literal text rather than silently falling back.
+
+> **`logoDataUri` must be rendered as an image, never injected as markup.** The daemon does not sanitize the SVG it read. SVG loaded through an `img` src or a favicon href cannot execute script; SVG injected into the document can. The Web Shell only ever assigns it to an image context, and that invariant is what makes the absence of a sanitizer safe.
+
+> **Process-global.** The route takes no workspace selector and no session id: the value derives from user-global configuration, so it is the same for every workspace the daemon serves. It is registered after `bearerAuth` and the rate limiter, and before the Web Shell SPA fallback, so it answers JSON for any `Accept` header.
+
 ### `POST /workspaces`
 
 Register an additional workspace runtime. The path must be an existing, accessible, absolute directory that does not duplicate or nest with another registered workspace. Registration is process-local unless the client sends `persist: true`; clients must pre-flight `persistent_workspace_registration` before requesting persistence. When `workspace_display_name` is advertised, the request may also include an optional `displayName`.
@@ -1175,7 +1203,7 @@ A newly created runtime returns `201`; promoting an already-active secondary wor
 
 `displayName` must be a string no longer than 256 characters after surrounding whitespace is trimmed. An empty result is treated as no name, and internal C0 (`U+0000`–`U+001F`) or DEL (`U+007F`) control characters are rejected. JSON `null` is not a creation value and returns `400 invalid_display_name`; omit the field to supply no initial name. Duplicate display names are allowed. A name supplied with a process-local registration lasts only for that daemon process; `persist: true` stores it with the persistent registration so it can be restored after restart. Repeating the request for an already-persistent workspace is idempotent and does not rename it.
 
-Errors include `400 invalid_path` / `invalid_persist_flag` / `invalid_persist_target` / `invalid_display_name`, `409 workspace_exists` / `workspace_nested` / `workspace_limit_reached`, `500 workspace_registration_store_error` / `runtime_creation_failed`, and `501 persistence_not_available` / `not_implemented`.
+Errors include `400 invalid_path` / `invalid_persist_flag` / `invalid_persist_target` / `invalid_display_name`, `409 workspace_exists` / `workspace_nested` / `workspace_limit_reached` / `workspace_registration_store_too_large`, `500 workspace_registration_store_error` / `runtime_creation_failed`, and `501 persistence_not_available` / `not_implemented`.
 
 ### `PATCH /workspaces/:workspace`
 
@@ -2726,7 +2754,7 @@ ACP-over-HTTP uses the same request and response bodies through vendor methods `
 
 ### Multi-workspace live-session routing
 
-When `multi_workspace_sessions` is advertised, live-session operations identify their workspace from the `sessionId`; clients do not add a workspace selector to the URL. In addition to the existing owner-routed lifecycle operations, this applies to `PATCH /session/:id/metadata`, `POST /session/:id/recap`, `POST /session/:id/generate`, `POST /session/:id/btw`, `POST /session/:id/mid-turn-message`, `GET /session/:id/mid-turn-messages`, `DELETE /session/:id/mid-turn-messages/:messageId`, `POST /session/:id/tasks/:taskId/cancel`, `POST /session/:id/goal/clear`, `POST /session/:id/continue`, `POST /session/:id/language`, `POST /session/:id/artifacts`, and `DELETE /session/:id/artifacts/:artifactId`. The daemon routes each request to the trusted runtime that owns the live session. An untrusted non-primary owner returns `403 untrusted_workspace`, a missing live owner returns `404 session_not_found`, and an ambiguous owner fails closed with `500 ambiguous_session_owner`.
+When `multi_workspace_sessions` is advertised, live-session operations identify their workspace from the `sessionId`; clients do not add a workspace selector to the URL. In addition to the existing owner-routed lifecycle operations, this applies to `PATCH /session/:id/metadata`, `POST /session/:id/recap`, `POST /session/:id/generate`, `POST /session/:id/btw`, `POST /session/:id/mid-turn-message`, `GET /session/:id/mid-turn-messages`, `DELETE /session/:id/mid-turn-messages/:messageId`, `POST /session/:id/tasks/:taskId/cancel`, `POST /session/:id/goal/clear`, `POST /session/:id/continue`, `POST /session/:id/language`, `POST /session/:id/artifacts`, `DELETE /session/:id/artifacts/:artifactId`, `GET /session/:id/sources`, `POST /session/:id/sources`, and `DELETE /session/:id/sources/:sourceId`. The daemon routes each request to the trusted runtime that owns the live session. An untrusted non-primary owner returns `403 untrusted_workspace`, a missing live owner returns `404 session_not_found`, and an ambiguous owner fails closed with `500 ambiguous_session_owner`.
 
 This rule is live-session-only and does not make every workspace-less session route multi-workspace-aware. Persisted or archived operations use their documented workspace-qualified routes. `POST /session/:id/branch`, `POST /session/:id/fork`, and `POST /session/:id/cd` intentionally remain primary-only and return `non_primary_session_route_not_supported` for non-primary owners.
 
@@ -2783,17 +2811,43 @@ Response:
 
 The `202` response acknowledges admission, not Agent completion. Observe the
 session SSE stream after `lastEventId` and correlate `turn_complete` or
-`turn_error` by `promptId`. `turn_complete.data.stopReason` may be `end_turn`,
-`cancelled`, `max_tokens`, `error`, or `length`.
+`turn_error` by `promptId`.
+
+`turn_complete.data.stopReason` carries the ACP `StopReason` the agent
+returned — `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` or
+`cancelled`. The daemon can also emit `cancelled` for a prompt aborted without
+the agent running it, including queued-prompt removal, caller disconnect, or
+drain/teardown; that value does not prove the agent ran the prompt. **Treat the
+field as an open string**: it is typed `string` on the wire, the ACP set can
+grow, and a client that exhaustively switches on it will break on the next
+addition.
+
+Two daemon-side outcomes do **not** arrive on this field. A turn that fails
+inside the daemon — deadline expiry, teardown flush, child crash — is published
+as a `turn_error` event, never as a `turn_complete` stopReason. Its `data`
+always carries `message`; `code` is present only when the daemon classified the
+failure (deadline expiry → `prompt_deadline_exceeded`, teardown flush →
+`channel_closed`, `session_closed`, `session_killed` or `daemon_shutdown`), and
+the frame for a prompt rejected because the ACP child died mid-request carries
+neither `code` nor `errorKind`. Treat both as optional and branch on `message`.
+
+A turn recovered from persisted history after a restart is not re-published on
+the stream at all; it surfaces in `promptTerminals[]` in the
+`POST /session/:id/load` response body — as
+`{ terminal: "completed", stopReason: "reconstructed_from_transcript" }` when
+the persisted tail shows the turn finished, or
+`{ terminal: "interrupted", code: "daemon_lost" }` with **no** `stopReason` when
+the daemon died mid-turn. Match the entry by `promptId` and branch on
+`terminal`; `promptTerminals` is omitted from the response entirely when the
+ledger holds no evidence for the session.
 
 If the HTTP client disconnects mid-prompt, the daemon sends an ACP `cancel` notification to the agent, which winds the prompt down with `stopReason: "cancelled"`.
 
 When `prompt_absolute_deadline` is advertised, `deadlineMs` may shorten the
 configured server deadline. Expiry emits a correlated `turn_error` with
-`errorKind: "prompt_deadline_exceeded"`. The deadline releases the caller
-without killing the agent; if the agent later settles, turn-status polls for
-that `promptId` return the settled transcript outcome instead of the deadline
-error.
+`code: "prompt_deadline_exceeded"`. The deadline releases the caller without
+killing the agent; if the agent later settles, turn-status polls for that
+`promptId` return the settled transcript outcome instead of the deadline error.
 
 ### `POST /session/:id/cancel`
 

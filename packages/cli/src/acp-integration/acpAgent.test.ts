@@ -34,8 +34,25 @@ import { getDefaultReasoningConfig } from './model-configuration.js';
 import { getConversationDirectoryName } from '../utils/conversation-directory-identity.js';
 
 // Mock cleanup module before importing anything else
-const { mockRunExitCleanup } = vi.hoisted(() => ({
+const { mockRunExitCleanup, mockRegisterCleanup } = vi.hoisted(() => ({
   mockRunExitCleanup: vi.fn().mockResolvedValue(undefined),
+  mockRegisterCleanup: vi.fn(),
+}));
+const mockRegisterSession = vi.hoisted(() => {
+  let next = 0;
+  return vi.fn().mockImplementation(() => {
+    next += 1;
+    return Promise.resolve({
+      registered: true,
+      slot: next.toString(16).padStart(8, '0'),
+    });
+  });
+});
+const mockPeerMessagingStart = vi.hoisted(() => vi.fn());
+vi.mock('../peerMessaging/peer-messaging.js', () => ({
+  PeerMessaging: {
+    start: (...args: unknown[]) => mockPeerMessagingStart(...args),
+  },
 }));
 const { mockStartNonInteractiveOpenAILogHousekeeping } = vi.hoisted(() => ({
   mockStartNonInteractiveOpenAILogHousekeeping: vi.fn(),
@@ -52,6 +69,7 @@ const { mockMcpPoolDrainAll, mockMcpPoolGetSnapshot } = vi.hoisted(() => ({
 }));
 vi.mock('../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
+  registerCleanup: mockRegisterCleanup,
 }));
 vi.mock('../services/housekeeping/scheduler.js', () => ({
   startNonInteractiveOpenAILogHousekeeping:
@@ -228,12 +246,19 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  SessionSourceService: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).SessionSourceService,
+  SessionSourceError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).SessionSourceError,
   BranchPointInvalidError: class BranchPointInvalidError extends Error {
     constructor(readonly recordId: string) {
       super(`Invalid or inactive branch point: ${recordId}`);
     }
   },
   INVOCATION_CONTEXT_META_KEY: 'qwen-code/invocation',
+  registerSession: mockRegisterSession,
   PRIVATE_ACP_CAPABILITY_ENV: 'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
   PRIVATE_PARENT_CAPABILITY_META_KEY: 'qwen-code/private-parent-capability',
   parseInvocationContext: vi.fn(
@@ -618,13 +643,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   applyProviderInstallPlan: vi.fn().mockResolvedValue({
     updatedModelProviders: {},
   }),
-  unregisterGoalHook: vi.fn(),
-  getActiveGoal: vi.fn(),
-  getLastGoalTerminal: vi.fn(),
-  // Reached through the real `ui/utils/restoreGoal.js` on the resume path.
-  registerGoalHook: vi.fn(),
-  setGoalTerminalObserver: vi.fn(),
-  setLastGoalTerminal: vi.fn(),
   uiTelemetryService: {
     removeSession: vi.fn(),
     getMetricsForSession: vi.fn(),
@@ -1095,9 +1113,6 @@ import {
   SessionTranscriptTooLargeError,
   SessionTranscriptPageTooLargeError,
   encodeSessionTranscriptCursor,
-  unregisterGoalHook,
-  getActiveGoal,
-  registerGoalHook,
   findBoundaryAtOrBefore,
   isReplayTurnStartType,
   startEventLoopLagMonitor,
@@ -3665,7 +3680,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -4379,7 +4393,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
     );
@@ -4455,6 +4468,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       setSessionWriterReclaimPolicy: vi.fn(),
       setSessionWriterTakeoverPolicy: vi.fn(),
       setSessionSource: vi.fn(),
+      setSessionSourceServiceFactory: vi.fn(),
+      registerSessionSourceTool: vi.fn().mockResolvedValue(undefined),
+      getSessionSourceService: vi.fn(),
       getCronScheduler: vi.fn(),
       getSessionSourceType: vi.fn().mockReturnValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -4472,6 +4488,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
       getProjectRoot: vi.fn().mockReturnValue('/tmp'),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      // The session-registry seams. A hosted session registers a record of
+      // its own when cross-session messaging is on; with it off none of
+      // these is called, which is the state most of this suite runs in.
+      getCliVersion: vi.fn().mockReturnValue('9.9.9'),
+      trackSessionRegistration: vi.fn(),
+      updateSessionRegistryIpcPath: vi.fn().mockResolvedValue(undefined),
+      unregisterSessionRegistry: vi.fn().mockResolvedValue(undefined),
+      reassertSessionRegistryRecord: vi.fn().mockResolvedValue(undefined),
       // Per-session folder-trust flag (security.folderTrust.enabled of the
       // admission workspace), bound once at Config construction. Default off;
       // bootRelocatableSession overrides it to reflect the fed workspace.
@@ -4491,6 +4515,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getLlmClient: vi.fn().mockReturnValue({
+        setTools: vi.fn().mockResolvedValue(undefined),
+        refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -4586,7 +4612,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -4786,7 +4811,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           beginClose: vi.fn().mockReturnValue(vi.fn()),
           beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
@@ -4891,6 +4915,406 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     return { agent, agentPromise };
   }
+
+  describe('daemon-managed sessions in the session registry', () => {
+    /** Settings with cross-session messaging on, which is off by default. */
+    function messagingOn() {
+      return makeSessionSettings({
+        mcpServers: {},
+        agents: { crossSessionMessaging: true },
+      });
+    }
+
+    beforeEach(() => {
+      mockRegisterSession.mockClear();
+      mockPeerMessagingStart.mockReset();
+      mockPeerMessagingStart.mockResolvedValue({
+        close: vi.fn().mockResolvedValue(undefined),
+      });
+    });
+
+    it('gives each hosted session a record of its own, and the shared inbox address', async () => {
+      const innerConfig = await setupSessionMocks('hosted-a');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      // The inbox is bound by the first session that needs one, so the
+      // address arrives after that session already has a record — the
+      // ordering production sees, and the one the fan-out exists for.
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      const options = mockPeerMessagingStart.mock.calls[0]![0] as {
+        updateSessionRegistryIpcPath: (
+          path: string,
+          token: string,
+        ) => Promise<void>;
+        getPolicySetting: () => string;
+        ownsSessionId: (id: string) => boolean;
+      };
+      await options.updateSessionRegistryIpcPath('/tmp/acp.sock', 'tok');
+
+      expect(mockRegisterSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'hosted-a',
+          cwd: '/tmp',
+          // One record per session, not one per process: they have their
+          // own ids, names and working directories.
+          slot: 'own',
+          kind: 'headless',
+        }),
+      );
+      expect(innerConfig.trackSessionRegistration).toHaveBeenCalledTimes(1);
+      // Every hosted session advertises the one inbox this process bound.
+      expect(innerConfig.updateSessionRegistryIpcPath).toHaveBeenCalledWith(
+        '/tmp/acp.sock',
+        'tok',
+      );
+      // Inbound is turned away rather than parked: nobody is watching a
+      // hold list on a daemon-managed session's behalf.
+      expect(options.getPolicySetting()).toBe('refuse');
+      expect(options.ownsSessionId('hosted-a')).toBe(true);
+      expect(options.ownsSessionId('someone-else')).toBe(false);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('records the daemon as the registrant when it spawned this process', async () => {
+      const previous = process.env['QWEN_CODE_SERVE'];
+      process.env['QWEN_CODE_SERVE'] = '1';
+      try {
+        await setupSessionMocks('hosted-serve');
+        vi.mocked(loadSettings).mockReturnValue(messagingOn());
+        const { agent, agentPromise } =
+          await bootInitializedAcpAgent(messagingOn());
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        await vi.waitFor(() =>
+          expect(mockPeerMessagingStart).toHaveBeenCalled(),
+        );
+
+        expect(mockRegisterSession).toHaveBeenCalledWith(
+          expect.objectContaining({ kind: 'serve' }),
+        );
+        mockConnectionState.resolve();
+        await agentPromise;
+      } finally {
+        if (previous === undefined) delete process.env['QWEN_CODE_SERVE'];
+        else process.env['QWEN_CODE_SERVE'] = previous;
+      }
+    });
+
+    it('registers nothing while cross-session messaging is off', async () => {
+      // A record with no inbox behind it would advertise an address that
+      // never answers, which is worse than not being listed at all.
+      await setupSessionMocks('hosted-off');
+      const { agent, agentPromise } = await bootInitializedAcpAgent(
+        makeSessionSettings(),
+      );
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      expect(mockPeerMessagingStart).not.toHaveBeenCalled();
+      expect(mockRegisterSession).not.toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it("removes a session's record when the session goes", async () => {
+      const innerConfig = await setupSessionMocks('hosted-gone');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      expect(innerConfig.unregisterSessionRegistry).not.toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+
+      // Left behind, the record would keep advertising a session that is
+      // gone until this process exits.
+      expect(innerConfig.unregisterSessionRegistry).toHaveBeenCalled();
+    });
+
+    it('answers for the id the record advertises after a /clear swap', async () => {
+      // The sessions map is keyed by the id as it was at publication,
+      // while the record a sender reads follows the Config's live id —
+      // /clear swaps it under a running session. Ownership must be
+      // judged against both, or every frame pinned to the advertised id
+      // is answered misaddressed from then on.
+      const innerConfig = await setupSessionMocks('hosted-a');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      const options = mockPeerMessagingStart.mock.calls[0]![0] as {
+        ownsSessionId: (id: string) => boolean;
+      };
+
+      vi.mocked(innerConfig.getSessionId).mockReturnValue('hosted-clear-2');
+
+      expect(options.ownsSessionId('hosted-clear-2')).toBe(true);
+      // The frozen publication key still answers: a skipped /clear patch
+      // leaves the record advertising it.
+      expect(options.ownsSessionId('hosted-a')).toBe(true);
+      expect(options.ownsSessionId('someone-else')).toBe(false);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it("registers nothing when the session's own settings turn messaging off, whatever the process started with", async () => {
+      // Startup settings on, session settings off: the per-setting
+      // contract the docs state is about the session, and a session that
+      // turned messaging off must not appear in any peer's listing.
+      await setupSessionMocks('hosted-off');
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      expect(mockPeerMessagingStart).not.toHaveBeenCalled();
+      expect(mockRegisterSession).not.toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('registers a session whose own settings turn messaging on, whatever the process started with', async () => {
+      // The mirror case: startup settings off, session settings on. The
+      // bind fires for the first session that needs one; it is not
+      // settled once for the process at boot.
+      await setupSessionMocks('hosted-on');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } = await bootInitializedAcpAgent(
+        makeSessionSettings(),
+      );
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      expect(mockRegisterSession).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'hosted-on', slot: 'own' }),
+      );
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('retries the inbox bind for the next session after a failed start', async () => {
+      mockPeerMessagingStart.mockResolvedValue(null);
+      await setupSessionMocks('hosted-retry-a');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() =>
+        expect(mockPeerMessagingStart).toHaveBeenCalledTimes(1),
+      );
+
+      // The failed bind is not "started": the next hosted session tries
+      // again rather than the process staying dark until exit.
+      await setupSessionMocks('hosted-retry-b');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() =>
+        expect(mockPeerMessagingStart).toHaveBeenCalledTimes(2),
+      );
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('does not retry the bind once the inbox has been closed', async () => {
+      mockPeerMessagingStart.mockResolvedValue(null);
+      await setupSessionMocks('hosted-closed-a');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() =>
+        expect(mockPeerMessagingStart).toHaveBeenCalledTimes(1),
+      );
+
+      await (
+        agent as unknown as { closePeerMessaging(): Promise<void> }
+      ).closePeerMessaging();
+
+      await setupSessionMocks('hosted-closed-b');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      // A retry must not resurrect an inbox after teardown ran.
+      expect(mockPeerMessagingStart).toHaveBeenCalledTimes(1);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('gives every hosted session the one inbox, however late it binds', async () => {
+      // The daemon's steady state is many sessions in one process, and
+      // the bind resolves while the first is still booting. Sessions
+      // published before the address arrives depend on the fan-out;
+      // sessions published after it depend on the catch-up. One test
+      // walks both, because in production almost every session is the
+      // second kind.
+      const first = await setupSessionMocks('hosted-1');
+      const second = makeInnerConfig();
+      second.getSessionId = vi.fn().mockReturnValue('hosted-2');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      vi.mocked(loadCliConfig)
+        .mockResolvedValueOnce(first as unknown as Config)
+        .mockResolvedValue(second as unknown as Config);
+
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp/one', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      const options = mockPeerMessagingStart.mock.calls[0]![0] as {
+        updateSessionRegistryIpcPath: (
+          path: string | undefined,
+          token?: string,
+        ) => Promise<void>;
+        ownsSessionId: (id: string) => boolean;
+      };
+
+      // Fan-out: the session already published gets the address.
+      await options.updateSessionRegistryIpcPath('/tmp/acp.sock', 'tok');
+      expect(first.updateSessionRegistryIpcPath).toHaveBeenCalledWith(
+        '/tmp/acp.sock',
+        'tok',
+      );
+
+      // Catch-up: a session published afterwards gets it on registration,
+      // and the bind is not attempted a second time.
+      await agent.newSession({ cwd: '/tmp/two', mcpServers: [] });
+      expect(second.updateSessionRegistryIpcPath).toHaveBeenCalledWith(
+        '/tmp/acp.sock',
+        'tok',
+      );
+      expect(mockPeerMessagingStart).toHaveBeenCalledTimes(1);
+
+      // Two records, one per session, both addressable through the
+      // process's single inbox.
+      expect(mockRegisterSession).toHaveBeenCalledTimes(2);
+      expect(
+        mockRegisterSession.mock.calls.map(([fields]) => fields.sessionId),
+      ).toEqual(['hosted-1', 'hosted-2']);
+      expect(
+        mockRegisterSession.mock.calls.every(
+          ([fields]) => fields.slot === 'own',
+        ),
+      ).toBe(true);
+      expect(options.ownsSessionId('hosted-1')).toBe(true);
+      expect(options.ownsSessionId('hosted-2')).toBe(true);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('closes the inbox and stops advertising it when the sessions go', async () => {
+      const close = vi.fn().mockResolvedValue(undefined);
+      mockPeerMessagingStart.mockResolvedValue({ close });
+      const innerConfig = await setupSessionMocks('hosted-close');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      const options = mockPeerMessagingStart.mock.calls[0]![0] as {
+        updateSessionRegistryIpcPath: (
+          path: string | undefined,
+          token?: string,
+        ) => Promise<void>;
+      };
+      await options.updateSessionRegistryIpcPath('/tmp/acp.sock', 'tok');
+
+      // The clearing half, driven through the callback the agent handed
+      // the transport — which is what `PeerMessaging.close()` calls when
+      // the socket goes. A record still naming a socket that is gone
+      // sends every peer at a dead address until the PID is swept.
+      await options.updateSessionRegistryIpcPath(undefined, undefined);
+      expect(innerConfig.updateSessionRegistryIpcPath).toHaveBeenLastCalledWith(
+        undefined,
+        undefined,
+      );
+
+      mockConnectionState.resolve();
+      await agentPromise;
+
+      // And the socket itself is closed on the way out, rather than left
+      // listening for the life of the process.
+      expect(close).toHaveBeenCalled();
+    });
+
+    it('arms the inbox close as exit cleanup, for the paths teardown never reaches', async () => {
+      // A bare SIGTERM to a `qwen --acp` child reaches neither
+      // disposeSessions nor finishManagedShutdown; runExitCleanup is
+      // what runs there, so the close has to be registered with it.
+      const close = vi.fn().mockResolvedValue(undefined);
+      mockPeerMessagingStart.mockResolvedValue({ close });
+      await setupSessionMocks('hosted-signal');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+
+      expect(mockRegisterCleanup).toHaveBeenCalled();
+      const armed = mockRegisterCleanup.mock.calls.map(
+        ([entry]) => entry as () => Promise<void> | void,
+      );
+      await Promise.all(armed.map((entry) => entry()));
+      expect(close).toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('aborts in-flight generations before waiting on the inbox drain', async () => {
+      // The close can hang on a slow drain; a running turn must not keep
+      // executing tools after the client is gone while it waits.
+      let releaseClose: () => void = () => {};
+      const close = vi.fn().mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseClose = resolve;
+          }),
+      );
+      mockPeerMessagingStart.mockResolvedValue({ close });
+      const innerConfig = await setupSessionMocks('hosted-drain');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+
+      const internals = agent as unknown as {
+        generationControllers: Map<
+          string,
+          { sessionId: string; controller: AbortController }
+        >;
+        disposeSessions: () => Promise<void>;
+      };
+      const controller = new AbortController();
+      internals.generationControllers.set('req-1', {
+        sessionId: 'hosted-drain',
+        controller,
+      });
+
+      const disposed = internals.disposeSessions();
+      await vi.waitFor(() => expect(controller.signal.aborted).toBe(true));
+      expect(close).toHaveBeenCalled();
+      // The record teardown still waits for the drain: the address clear
+      // is a patch the records must still be there for.
+      expect(innerConfig.unregisterSessionRegistry).not.toHaveBeenCalled();
+
+      releaseClose();
+      await disposed;
+      expect(innerConfig.unregisterSessionRegistry).toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+  });
 
   async function withEmptyTrustedFolders<T>(
     run: (directory: string) => Promise<T>,
@@ -6949,6 +7373,291 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  async function setupSourceMocks(sessionId: string) {
+    const innerConfig = await setupSessionMocks(sessionId);
+    const recording = {
+      flush: vi.fn().mockResolvedValue(undefined),
+      recordSessionSourcesSnapshot: vi.fn().mockResolvedValue(undefined),
+    };
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
+    innerConfig.getSessionService = vi
+      .fn()
+      .mockReturnValue({ readSessionSources: vi.fn().mockResolvedValue({}) });
+    let service:
+      | import('@qwen-code/qwen-code-core').SessionSourceService
+      | undefined;
+    innerConfig.setSessionSourceServiceFactory.mockImplementation(
+      (
+        factory: () => import('@qwen-code/qwen-code-core').SessionSourceService,
+      ) => {
+        service = factory();
+      },
+    );
+    innerConfig.getSessionSourceService.mockImplementation(() => service);
+    return { innerConfig, recording };
+  }
+
+  it('source methods require the trusted daemon parent before resolving a session', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await expect(
+        agent.extMethod('qwen/session/sources/list', { sessionId }),
+      ).resolves.toEqual({
+        sourceError: {
+          code: 'source_persistence_unavailable',
+          message: 'Session source operation failed',
+        },
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('binds sources before tool discovery and persists owner-session metadata through internal methods', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const { innerConfig, recording } = await setupSourceMocks(sessionId);
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'trusted-capability',
+    );
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    expect(
+      innerConfig.setSessionSourceServiceFactory.mock.invocationCallOrder[0],
+    ).toBeLessThan(innerConfig.initialize.mock.invocationCallOrder[0]!);
+    await expect(
+      agent.extMethod('qwen/session/sources/list', { sessionId }),
+    ).resolves.toEqual({ revision: 0, sources: [] });
+    const created = await agent.extMethod('qwen/session/sources/upsert', {
+      sessionId,
+      input: {
+        title: 'Docs',
+        locator: { type: 'workspace_file', workspacePath: 'README.md' },
+      },
+    });
+    expect(created).toMatchObject({ revision: 1, change: 'created' });
+    expect(recording.recordSessionSourcesSnapshot).toHaveBeenCalledOnce();
+    await expect(
+      agent.extMethod('qwen/session/sources/upsert', {
+        sessionId,
+        input: {
+          title: 'Docs',
+          locator: { type: 'url', url: 'file:///secret' },
+        },
+      }),
+    ).resolves.toMatchObject({ sourceError: { code: 'invalid_source' } });
+    await expect(
+      agent.extMethod('qwen/session/sources/remove', {
+        sessionId,
+        sourceId: (created['source'] as { id: string }).id,
+      }),
+    ).resolves.toEqual({ revision: 2, removed: true });
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('binds standalone sources only after activation and registers their tool', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const { innerConfig, recording } = await setupSourceMocks(sessionId);
+    innerConfig.getSessionSourceType = vi.fn().mockReturnValue('standalone');
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'trusted-capability',
+    );
+    try {
+      await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        _meta: {
+          [SESSION_SOURCE_META_KEY]: {
+            sourceType: 'standalone',
+            [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
+          },
+        },
+      });
+      expect(innerConfig.setSessionSourceServiceFactory).not.toHaveBeenCalled();
+      await lastSessionMock!.installManagedConversationActivation.mock.calls[0]![0]();
+      expect(
+        innerConfig.setSessionSourceServiceFactory.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(
+        innerConfig.activateProvisionalWorkspace.mock.invocationCallOrder[0]!,
+      );
+      expect(innerConfig.registerSessionSourceTool).toHaveBeenCalledOnce();
+      expect(innerConfig.getLlmClient().setTools).toHaveBeenCalledOnce();
+      expect(
+        innerConfig.getLlmClient().setTools.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(
+        innerConfig.registerSessionSourceTool.mock.invocationCallOrder[0]!,
+      );
+      expect(
+        innerConfig.getLlmClient().refreshStartupContextReminder,
+      ).toHaveBeenCalledOnce();
+      expect(
+        innerConfig.getLlmClient().refreshStartupContextReminder.mock
+          .invocationCallOrder[0],
+      ).toBeGreaterThan(
+        innerConfig.getLlmClient().setTools.mock.invocationCallOrder[0]!,
+      );
+      await expect(
+        agent.extMethod('qwen/session/sources/upsert', {
+          sessionId,
+          input: {
+            title: 'Docs',
+            locator: { type: 'workspace_file', workspacePath: 'README.md' },
+          },
+        }),
+      ).resolves.toMatchObject({ revision: 1, change: 'created' });
+      expect(recording.recordSessionSourcesSnapshot).toHaveBeenCalledOnce();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('keeps source identity on the bound workspace after a live cwd change', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const { innerConfig } = await setupSourceMocks(sessionId);
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'trusted-capability',
+    );
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const input = {
+        title: 'Docs',
+        locator: { type: 'workspace_file', workspacePath: 'README.md' },
+      };
+      const before = await agent.extMethod('qwen/session/sources/upsert', {
+        sessionId,
+        input,
+      });
+      innerConfig.getTargetDir.mockReturnValue('/tmp/subdir');
+      const after = await agent.extMethod('qwen/session/sources/upsert', {
+        sessionId,
+        input,
+      });
+      expect(after).toMatchObject({
+        revision: 1,
+        change: 'unchanged',
+        source: before['source'],
+      });
+      expect(after['source']).toMatchObject({ workspaceCwd: '/tmp' });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('skips source copying only when chat recording is disabled, retaining route errors', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(undefined);
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'trusted-capability',
+    );
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await expect(
+        agent.extMethod('qwen/session/sources/copy', { sessionId }),
+      ).resolves.toEqual({ warnings: [] });
+      await expect(
+        agent.extMethod('qwen/session/sources/list', { sessionId }),
+      ).resolves.toMatchObject({
+        sourceError: { code: 'source_persistence_unavailable' },
+      });
+      innerConfig.getChatRecordingService.mockReturnValue(
+        {} as ReturnType<typeof innerConfig.getChatRecordingService>,
+      );
+      await expect(
+        agent.extMethod('qwen/session/sources/copy', { sessionId }),
+      ).resolves.toMatchObject({
+        sourceError: { code: 'source_persistence_unavailable' },
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('validates fork ownership and preserves durable copy results when temporary cleanup fails', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const targetSessionId = '22222222-2222-4222-8222-222222222222';
+    const { innerConfig } = await setupSourceMocks(sessionId);
+    const loadSession = vi
+      .fn()
+      .mockResolvedValue({ conversation: { messages: [] } });
+    innerConfig.getSessionService.mockReturnValue({
+      loadSession,
+    } as unknown as SessionService);
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'trusted-capability',
+    );
+    const internals = agent as unknown as {
+      newSessionConfig: (...args: unknown[]) => Promise<Config>;
+      cleanupUnstoredConfig: (config: Config) => Promise<void>;
+    };
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const list = vi.fn().mockResolvedValue({ sources: [] });
+      innerConfig.getSessionSourceService.mockReturnValue({ list });
+      const copyFrom = vi
+        .fn()
+        .mockResolvedValue({ warnings: ['Copied with an omission'] });
+      const targetConfig = {
+        getSessionSourceService: () => ({ copyFrom }),
+      } as unknown as Config;
+      const bootstrap = vi
+        .spyOn(internals, 'newSessionConfig')
+        .mockResolvedValue(targetConfig);
+      const cleanup = vi
+        .spyOn(internals, 'cleanupUnstoredConfig')
+        .mockRejectedValue(new Error('cleanup failed'));
+      const request = {
+        sessionId,
+        targetSessionId,
+        targetCwd: '/tmp',
+        attachmentIds: [],
+      };
+      await expect(
+        agent.extMethod('qwen/session/sources/copy', request),
+      ).resolves.toEqual({ warnings: [] });
+      expect(bootstrap).not.toHaveBeenCalled();
+      expect(loadSession).not.toHaveBeenCalled();
+      list.mockResolvedValue({ sources: [{ title: 'Docs' }] });
+      await expect(
+        agent.extMethod('qwen/session/sources/copy', {
+          ...request,
+          targetCwd: '/other',
+        }),
+      ).resolves.toHaveProperty('sourceError');
+      expect(loadSession).not.toHaveBeenCalled();
+      await expect(
+        agent.extMethod('qwen/session/sources/copy', request),
+      ).resolves.toHaveProperty('sourceError');
+      expect(bootstrap).not.toHaveBeenCalled();
+      loadSession.mockResolvedValue({
+        conversation: { messages: [{ forkedFrom: { sessionId } }] },
+      });
+      await expect(
+        agent.extMethod('qwen/session/sources/copy', request),
+      ).resolves.toEqual({ warnings: ['Copied with an omission'] });
+      expect(copyFrom).toHaveBeenCalledOnce();
+      expect(cleanup).toHaveBeenCalledWith(targetConfig);
+      copyFrom.mockRejectedValueOnce(new Error('persistence failed'));
+      await expect(
+        agent.extMethod('qwen/session/sources/copy', request),
+      ).resolves.toHaveProperty('sourceError');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('sessionArtifactsPersist records artifact events and snapshots', async () => {
@@ -16153,7 +16862,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalGet, params),
       ).rejects.toThrow(/sessionId/i);
     }
-    expect(getActiveGoal).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -16181,7 +16889,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sessionId: 'not-a-live-session',
       }),
     ).rejects.toThrow();
-    expect(getActiveGoal).not.toHaveBeenCalledWith('not-a-live-session');
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -20392,7 +21099,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
-        installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
       } as unknown as InstanceType<typeof Session>;
@@ -21937,7 +22643,6 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -23618,7 +24323,6 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           apiTimeMs: number;
         };
         installRewriter: ReturnType<typeof vi.fn>;
-        installGoalTerminalObserver: ReturnType<typeof vi.fn>;
         installManagedConversationActivation: ReturnType<typeof vi.fn>;
         startCronScheduler: ReturnType<typeof vi.fn>;
         enableLiveScreenContext: ReturnType<typeof vi.fn>;
@@ -23713,6 +24417,16 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       resumedConversation?: { messages: unknown[] };
     } = {},
   ) {
+    // Same registry seams `makeInnerConfig` carries: teardown removes a
+    // hosted session's record before its Config shuts down, and a Config
+    // that cannot answer would turn a clean shutdown into a failure.
+    const registrySeams = {
+      getCliVersion: vi.fn().mockReturnValue('9.9.9'),
+      trackSessionRegistration: vi.fn(),
+      updateSessionRegistryIpcPath: vi.fn().mockResolvedValue(undefined),
+      unregisterSessionRegistry: vi.fn().mockResolvedValue(undefined),
+      reassertSessionRegistryRecord: vi.fn().mockResolvedValue(undefined),
+    };
     const recording = {
       rebuildTurnBoundaries: vi.fn(),
       flush: vi.fn().mockResolvedValue(undefined),
@@ -23725,12 +24439,16 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       ),
     };
     return {
+      ...registrySeams,
       initialize: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
       closeSessionWriter: vi.fn().mockResolvedValue(undefined),
       setSessionWriterReclaimPolicy: vi.fn(),
       setSessionWriterTakeoverPolicy: vi.fn(),
       setSessionSource: vi.fn(),
+      setSessionSourceServiceFactory: vi.fn(),
+      registerSessionSourceTool: vi.fn().mockResolvedValue(undefined),
+      getSessionSourceService: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
@@ -23750,6 +24468,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getLlmClient: vi.fn().mockReturnValue({
+        setTools: vi.fn().mockResolvedValue(undefined),
+        refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -24010,7 +24730,6 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           apiTimeMs: 11,
         },
         installRewriter: vi.fn(),
-        installGoalTerminalObserver: vi.fn(),
         installManagedConversationActivation: vi.fn(
           (activate: () => Promise<void>) => {
             lastManagedConversationActivation = activate;
@@ -24221,6 +24940,17 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         vi.mocked(reloadEnvironment).mockClear();
 
         await lastManagedConversationActivation!();
+        expect(
+          innerConfig.getLlmClient().refreshStartupContextReminder,
+        ).toHaveBeenCalledOnce();
+        if (action === 'load') {
+          expect(
+            innerConfig.getLlmClient().refreshStartupContextReminder.mock
+              .invocationCallOrder[0],
+          ).toBeGreaterThan(
+            lastSessionMock!.replayHistory.mock.invocationCallOrder[0]!,
+          );
+        }
 
         expect(reloadScopesFromDiskAtomically).toHaveBeenCalledTimes(2);
         expect(reloadScopesFromDiskAtomically).toHaveBeenLastCalledWith([
@@ -25064,44 +25794,6 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       await agentPromise;
     },
   );
-
-  it('leaves canonical Goal recovery to Config initialization', async () => {
-    bindRestoreMocks({
-      sessionExists: true,
-      resumedConversation: {
-        messages: [
-          {
-            uuid: 'goal-state',
-            parentUuid: null,
-            sessionId: 'persisted-1',
-            timestamp: new Date(0).toISOString(),
-            type: 'system',
-            subtype: 'goal_state',
-            cwd: '/tmp',
-            version: '1.0.0',
-            systemPayload: {
-              v: 2,
-              cause: 'create',
-              snapshot: goalSnapshot(),
-            },
-          },
-        ],
-      },
-    });
-    const { agent, agentPromise } = await spawnAgent();
-
-    await agent.loadSession({
-      cwd: '/tmp',
-      sessionId: 'persisted-1',
-      mcpServers: [],
-    });
-
-    expect(registerGoalHook).not.toHaveBeenCalled();
-    expect(unregisterGoalHook).not.toHaveBeenCalled();
-
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
 
   it('loadSession returns LoadSessionResponse and replays history on the session', async () => {
     const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
@@ -28162,7 +28854,6 @@ describe('sessionLanguage multi-session propagation', () => {
         getConfig: vi.fn().mockReturnValue(cfg),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
-        installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
       };
@@ -28356,7 +29047,6 @@ describe('sessionLanguage multi-session propagation', () => {
         getConfig: vi.fn().mockReturnValue(cfg),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
-        installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
       } as unknown as InstanceType<typeof Session>;
@@ -28468,7 +29158,6 @@ describe('sessionLanguage multi-session propagation', () => {
         reloadModelProvidersFromDisk: index === 0 ? reload1 : reload2,
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
-        installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
       } as unknown as InstanceType<typeof Session>;
@@ -28598,7 +29287,6 @@ describe('sessionLanguage multi-session propagation', () => {
           getSessionReasoningSelection,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -28687,7 +29375,6 @@ describe('sessionLanguage multi-session propagation', () => {
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -28793,7 +29480,6 @@ describe('sessionLanguage multi-session propagation', () => {
           clearTodoStopGuardTrust: vi.fn(),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -28908,7 +29594,6 @@ describe('sessionLanguage multi-session propagation', () => {
           clearTodoStopGuardTrust: vi.fn(),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -29016,7 +29701,6 @@ describe('sessionLanguage multi-session propagation', () => {
           clearTodoStopGuardTrust: vi.fn(),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -29115,7 +29799,6 @@ describe('sessionLanguage multi-session propagation', () => {
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -29230,7 +29913,6 @@ describe('sessionLanguage multi-session propagation', () => {
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -29346,7 +30028,6 @@ describe('sessionLanguage multi-session propagation', () => {
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -29467,7 +30148,6 @@ describe('sessionLanguage multi-session propagation', () => {
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -29582,7 +30262,6 @@ describe('sessionLanguage multi-session propagation', () => {
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -29675,7 +30354,6 @@ describe('sessionLanguage multi-session propagation', () => {
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -29770,7 +30448,6 @@ describe('sessionLanguage multi-session propagation', () => {
         clearTodoStopGuardTrust,
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
-        installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
       } as unknown as InstanceType<typeof Session>;
@@ -29905,7 +30582,6 @@ describe('sessionLanguage multi-session propagation', () => {
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -29990,7 +30666,6 @@ describe('sessionLanguage multi-session propagation', () => {
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -30072,7 +30747,6 @@ describe('sessionLanguage multi-session propagation', () => {
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -30161,7 +30835,6 @@ describe('sessionLanguage multi-session propagation', () => {
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -30211,22 +30884,25 @@ describe('sessionLanguage multi-session propagation', () => {
     let mergedSettings: Record<string, unknown> = {
       tools: { workflowsEnabled: true },
     };
+    let reloadedSettings: Record<string, unknown> = {
+      tools: { workflowsEnabled: false },
+    };
     const settings = {
       get merged() {
         return mergedSettings;
       },
       reloadScopeFromDisk: vi.fn(() => {
-        mergedSettings = { tools: { workflowsEnabled: false } };
+        mergedSettings = reloadedSettings;
       }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
-    let workflowsEnabled = true;
+    let workflowsEnabled: boolean | undefined = true;
     const registryCancel = vi.fn();
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-wf-reload'),
-      isWorkflowsEnabled: vi.fn(() => workflowsEnabled),
-      setWorkflowsEnabled: vi.fn((enabled: boolean) => {
+      isWorkflowsEnabled: vi.fn(() => workflowsEnabled ?? false),
+      setWorkflowsEnabled: vi.fn((enabled: boolean | undefined) => {
         workflowsEnabled = enabled;
       }),
       setDisabledTools: vi.fn(),
@@ -30255,7 +30931,6 @@ describe('sessionLanguage multi-session propagation', () => {
           clearActiveTodoPlanRevision: vi.fn(),
           clearTodoStopGuardTrust: vi.fn(),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -30305,6 +30980,14 @@ describe('sessionLanguage multi-session propagation', () => {
       reason: 'disabled',
     });
     expect(registryCancel).toHaveBeenCalledOnce();
+
+    reloadedSettings = {};
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(
+      (cfg as typeof cfg & { setWorkflowsEnabled: ReturnType<typeof vi.fn> })
+        .setWorkflowsEnabled,
+    ).toHaveBeenLastCalledWith(undefined);
+    expect(workflowsEnabled).toBeUndefined();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -30771,7 +31454,6 @@ describe('sessionLanguage multi-session propagation', () => {
           getConfig: vi.fn().mockReturnValue(cfg),
           sendAvailableCommandsUpdate,
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -30850,7 +31532,6 @@ describe('sessionLanguage multi-session propagation', () => {
           getConfig: vi.fn().mockReturnValue(cfg),
           sendAvailableCommandsUpdate,
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -30999,7 +31680,6 @@ describe('sessionLanguage multi-session propagation', () => {
         getConfig: vi.fn().mockReturnValue(cfg),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
-        installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
       } as unknown as InstanceType<typeof Session>;
@@ -31070,7 +31750,6 @@ describe('sessionLanguage multi-session propagation', () => {
           getConfig: vi.fn().mockReturnValue(cfgA),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
-          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,

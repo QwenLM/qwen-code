@@ -38,6 +38,10 @@ import type {
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionStatsStatus,
   DaemonSessionArtifactsEnvelope,
+  SessionSourceInput,
+  SessionSourcesResult,
+  SessionSourceUpsertResult,
+  SessionSourceRemoveResult,
   DaemonSkillToggleMutation,
   DaemonShellCommandResult,
   DaemonTranscriptBlock,
@@ -173,6 +177,13 @@ export interface DaemonSessionProviderProps {
   sessionId?: string;
   /** Stable client identity to reuse for session-scoped daemon requests. */
   clientId?: string;
+  /**
+   * Creator attribution forwarded on workspace session load/resume. The
+   * daemon applies it only when the restored session has no persisted source,
+   * so a host (e.g. the VS Code companion) reclaims its pre-attribution
+   * sessions on first open without ever overwriting existing attribution.
+   */
+  sessionSourceType?: string;
   /** Extra create-session options, excluding workspaceCwd which is owned by the provider. */
   createSessionRequest?: Omit<CreateSessionRequest, 'workspaceCwd'>;
   /** Maximum queued SSE events requested from the daemon per subscription. */
@@ -289,6 +300,7 @@ export interface DaemonSessionNotice {
   message: string;
   debugMessage?: string;
   recoverable?: boolean;
+  sourceRetry?: () => Promise<void>;
   createdAt: number;
 }
 
@@ -640,6 +652,9 @@ export interface DaemonSessionActions {
   clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
+  listSources(): Promise<SessionSourcesResult>;
+  upsertSource(source: SessionSourceInput): Promise<SessionSourceUpsertResult>;
+  removeSource(sourceId: string): Promise<SessionSourceRemoveResult>;
   branchSession(
     name?: string,
     atRecordId?: string,
@@ -647,6 +662,7 @@ export interface DaemonSessionActions {
     sessionId: string;
     displayName: string;
     switchStarted: boolean;
+    sourceWarnings?: string[];
   }>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
@@ -669,6 +685,7 @@ export interface DaemonWorkspaceEventSignals {
   mcpVersion: number;
   extensionsVersion: number;
   artifactsVersion: number;
+  sourcesVersion?: number;
   lastExtensionChange?: {
     status?:
       | 'installed'
