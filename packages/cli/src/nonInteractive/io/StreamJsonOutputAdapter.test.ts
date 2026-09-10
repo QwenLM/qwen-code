@@ -260,6 +260,81 @@ describe('StreamJsonOutputAdapter', () => {
         expect(messageStartCall).toBeDefined();
       });
 
+      it('emits a retry boundary and starts a fresh message after non-continuation retry', () => {
+        adapter.processEvent({
+          type: LlmEventType.Content,
+          value: 'orphaned payload',
+        });
+        adapter.processEvent({
+          type: LlmEventType.Retry,
+        });
+        adapter.processEvent({
+          type: LlmEventType.Content,
+          value: 'clean response',
+        });
+
+        const messages = stdoutWriteSpy.mock.calls.map((call: unknown[]) =>
+          JSON.parse(call[0] as string),
+        );
+        expect(messages).toContainEqual(
+          expect.objectContaining({
+            type: 'system',
+            subtype: 'retry',
+            data: { is_continuation: false, retry_info: null },
+          }),
+        );
+        expect(
+          messages.filter(
+            (message: { type?: string; event?: { type?: string } }) =>
+              message.type === 'stream_event' &&
+              message.event?.type === 'message_start',
+          ),
+        ).toHaveLength(2);
+
+        const finalMessage = adapter.finalizeAssistantMessage();
+        expect(finalMessage.message.content).toEqual([
+          { type: 'text', text: 'clean response' },
+        ]);
+      });
+
+      it('keeps the current stream message across continuation retry', () => {
+        adapter.processEvent({
+          type: LlmEventType.Content,
+          value: 'partial',
+        });
+        adapter.processEvent({
+          type: LlmEventType.Retry,
+          isContinuation: true,
+        });
+        adapter.processEvent({
+          type: LlmEventType.Content,
+          value: ' continuation',
+        });
+
+        const messages = stdoutWriteSpy.mock.calls.map((call: unknown[]) =>
+          JSON.parse(call[0] as string),
+        );
+        expect(messages).toContainEqual(
+          expect.objectContaining({
+            type: 'system',
+            subtype: 'retry',
+            data: { is_continuation: true, retry_info: null },
+          }),
+        );
+        expect(
+          messages.filter(
+            (message: { type?: string; event?: { type?: string } }) =>
+              message.type === 'stream_event' &&
+              message.event?.type === 'message_start',
+          ),
+        ).toHaveLength(1);
+
+        const finalMessage = adapter.finalizeAssistantMessage();
+        expect(finalMessage.message.content).toEqual([
+          { type: 'text', text: 'partial continuation' },
+        ]);
+      });
+
       it('should emit content_block_start for new blocks', () => {
         adapter.processEvent({
           type: LlmEventType.Content,

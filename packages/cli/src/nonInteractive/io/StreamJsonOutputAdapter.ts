@@ -152,6 +152,10 @@ export class StreamJsonOutputAdapter
   }
 
   override processEvent(event: ServerLlmStreamEvent): void {
+    if (event.type === LlmEventType.Retry && event.isContinuation !== true) {
+      this.mainTurnMessageStartEmitted = false;
+    }
+
     if (event.type === LlmEventType.GoalState) {
       const signature = JSON.stringify(event.value);
       if (signature === this.lastGoalStateSignature) return;

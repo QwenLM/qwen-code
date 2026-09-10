@@ -880,6 +880,61 @@ describe('BaseJsonOutputAdapter', () => {
       });
     });
 
+    it('should reset main assistant state on a non-continuation Retry event', () => {
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'orphaned payload',
+      });
+      adapter.processEvent({
+        type: LlmEventType.Retry,
+      });
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'clean response',
+      });
+
+      const message = adapter.finalizeAssistantMessage();
+
+      expect(message.message.content).toEqual([
+        { type: 'text', text: 'clean response' },
+      ]);
+      expect(adapter.emittedMessages).toContainEqual(
+        expect.objectContaining({
+          type: 'system',
+          subtype: 'retry',
+          data: { is_continuation: false, retry_info: null },
+        }),
+      );
+    });
+
+    it('should keep main assistant state on a continuation Retry event', () => {
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'partial',
+      });
+      adapter.processEvent({
+        type: LlmEventType.Retry,
+        isContinuation: true,
+      });
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: ' continuation',
+      });
+
+      const message = adapter.finalizeAssistantMessage();
+
+      expect(message.message.content).toEqual([
+        { type: 'text', text: 'partial continuation' },
+      ]);
+      expect(adapter.emittedMessages).toContainEqual(
+        expect.objectContaining({
+          type: 'system',
+          subtype: 'retry',
+          data: { is_continuation: true, retry_info: null },
+        }),
+      );
+    });
+
     it('should ignore events after finalization', () => {
       adapter.processEvent({
         type: LlmEventType.Content,

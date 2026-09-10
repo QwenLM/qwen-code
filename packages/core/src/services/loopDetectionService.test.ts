@@ -1665,6 +1665,27 @@ describe('LoopDetectionService', () => {
       expect(service.getLastLoopType()).toBeNull();
     });
 
+    it('does not treat content replay after a non-continuation retry as chanting', () => {
+      service.reset('');
+      const attempt = variedText(1400, 101);
+      expect(streamAsContent(attempt)).toBe(false);
+      service.addAndCheck(createRetryEvent());
+      expect(streamAsContent(attempt)).toBe(false);
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it('keeps content evidence across a continuation retry', () => {
+      service.reset('');
+      const unit = variedText(298, 102);
+      const chant = unit.repeat(6);
+      expect(streamAsContent(chant.slice(0, 1192))).toBe(false);
+      service.addAndCheck(createRetryEvent(true));
+      expect(streamAsContent(chant.slice(1192, 1292))).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+
     it('still halts a genuine chant after a replay restart', () => {
       service.reset('');
       // The reset must not blind the detector: a real chant re-accumulates
