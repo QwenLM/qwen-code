@@ -1,8 +1,15 @@
-import { useEffect, useRef, useState, type ComponentProps } from 'react';
-import type { ExtraProps } from 'react-markdown';
+import {
+  createElement,
+  useEffect,
+  useRef,
+  useState,
+  type ComponentProps,
+} from 'react';
+import type { Components, ExtraProps } from 'react-markdown';
 import { ChevronLeftIcon, ChevronRightIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
+import { cssUrlValue } from '../../utils/cssUrlVar';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
 import knowledgeIcon from '../../assets/icons/knowledge.svg';
@@ -11,22 +18,66 @@ import type { FootnoteElement, FootnotePreview } from './rehype-footnote-cards';
 export function FootnoteSup({
   node,
   children,
+  linkComponent,
   ...props
-}: ComponentProps<'sup'> & ExtraProps) {
+}: ComponentProps<'sup'> & ExtraProps & { linkComponent?: Components['a'] }) {
   const notes = (node as FootnoteElement | undefined)?.data?.footnoteCards;
   return notes ? (
-    <FootnoteCard id={props.id} notes={notes} />
+    <FootnoteCard id={props.id} notes={notes} linkComponent={linkComponent} />
   ) : (
     <sup {...props}>{children}</sup>
+  );
+}
+
+export function FootnoteSection({
+  node,
+  children,
+  linkComponent,
+  sectionComponent,
+  ...props
+}: ComponentProps<'section'> &
+  ExtraProps & {
+    linkComponent?: Components['a'];
+    sectionComponent?: Components['section'];
+  }) {
+  const data = (node as FootnoteElement | undefined)?.data;
+  const notes = data?.footnoteSourcesFooter ? data.footnoteCards : undefined;
+  const section = sectionComponent ? (
+    createElement(
+      sectionComponent,
+      typeof sectionComponent === 'string' ? props : { ...props, node },
+      children,
+    )
+  ) : (
+    <section {...props}>{children}</section>
+  );
+  if (!notes?.length) return section;
+
+  const visibleFootnotes = data?.hasVisibleFootnotes ? section : null;
+  return (
+    <>
+      {visibleFootnotes}
+      <div data-web-shell-footnote-sources="" className="mt-4 flex">
+        <FootnoteCard
+          notes={notes}
+          variant="footer"
+          linkComponent={linkComponent}
+        />
+      </div>
+    </>
   );
 }
 
 function FootnoteCard({
   id,
   notes,
+  variant = 'inline',
+  linkComponent,
 }: {
   id?: string;
   notes: FootnotePreview[];
+  variant?: 'inline' | 'footer';
+  linkComponent?: Components['a'];
 }) {
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
@@ -42,12 +93,13 @@ function FootnoteCard({
   );
   const note = notes[index];
   const title = note.title || t('footnotes.note', { number: note.number });
-  let source: string | undefined;
+  let hostname: string | undefined;
   try {
-    source = note.href ? new URL(note.href).hostname : undefined;
+    hostname = note.href ? new URL(note.href).hostname : undefined;
   } catch {
     // Relative links and anchors have no source hostname.
   }
+  const defaultLink = note.href && hostname !== 'citation.invalid';
 
   function cancelTimer() {
     clearTimeout(timer.current);
@@ -77,8 +129,17 @@ function FootnoteCard({
           ref={trigger}
           id={id}
           type="button"
-          data-web-shell-footnote-trigger=""
-          className="mx-0.5 inline-flex h-5 items-center gap-1 rounded-full bg-muted px-1.5 align-baseline text-xs font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-ring"
+          data-web-shell-footnote-trigger={
+            variant === 'inline' ? '' : undefined
+          }
+          data-web-shell-footnote-sources-trigger={
+            variant === 'footer' ? '' : undefined
+          }
+          className={
+            variant === 'footer'
+              ? 'inline-flex h-7 items-center gap-1.5 rounded-full px-2 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-ring'
+              : 'mx-0.5 inline-flex h-5 items-center gap-1 rounded-full bg-muted px-1.5 align-baseline text-xs font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-ring'
+          }
           aria-label={t('footnotes.references', { count: notes.length })}
           onPointerEnter={(event) => {
             if (event.pointerType === 'touch') return;
@@ -108,12 +169,16 @@ function FootnoteCard({
             aria-hidden="true"
             className="inline-block size-4 shrink-0 bg-current"
             style={{
-              maskImage: `url("${knowledgeIcon}")`,
+              maskImage: cssUrlValue(knowledgeIcon),
               maskSize: 'contain',
               maskRepeat: 'no-repeat',
             }}
           />
-          {notes.length}
+          {variant === 'footer'
+            ? t('footnotes.sources', { count: notes.length })
+            : notes.length > 1
+              ? notes.length
+              : null}
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -139,13 +204,15 @@ function FootnoteCard({
             aria-hidden="true"
             className="size-4 shrink-0 bg-current"
             style={{
-              maskImage: `url("${knowledgeIcon}")`,
+              maskImage: cssUrlValue(knowledgeIcon),
               maskSize: 'contain',
               maskRepeat: 'no-repeat',
             }}
           />
           <span className="truncate">
-            {source || t('footnotes.note', { number: note.number })}
+            {note.source ||
+              hostname ||
+              t('footnotes.note', { number: note.number })}
           </span>
         </div>
         <div
@@ -154,10 +221,27 @@ function FootnoteCard({
           aria-atomic="true"
         >
           <div className="min-w-0 flex-1">
-            {note.href ? (
+            {note.href && linkComponent ? (
+              createElement(
+                linkComponent,
+                {
+                  className:
+                    'line-clamp-2 font-semibold break-words text-popover-foreground hover:underline',
+                  href: note.href,
+                  title: note.source,
+                  target: '_blank',
+                  rel: 'noopener noreferrer',
+                  ...(typeof linkComponent === 'string'
+                    ? {}
+                    : { node: note.linkNode }),
+                },
+                title,
+              )
+            ) : defaultLink ? (
               <a
                 className="line-clamp-2 font-semibold break-words text-popover-foreground hover:underline"
                 href={note.href}
+                title={note.source}
                 target="_blank"
                 rel="noopener noreferrer"
                 onClick={(event) => openExternalLink(event, note.href)}

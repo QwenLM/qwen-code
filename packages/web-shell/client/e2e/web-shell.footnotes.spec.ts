@@ -16,16 +16,19 @@ import {
 
 const fixture = `## Citation preview acceptance
 
-Adjacent sources[^tourism][^ticket] [^tourism][^plain]. Separated sources[^tourism], text[^ticket].
+Adjacent sources[^source-tourism][^source-ticket] [^source-tourism][^source-plain]. Separated sources[^source-tourism], text[^source-ticket].
 
 | Dimension | Conclusion |
 | --- | --- |
-| Official news | Current tour information[^tourism][^ticket][^plain] |
-| Public appearances | Single source[^ticket] |
+| Official news | Current tour information[^source-tourism][^source-ticket][^source-plain] |
+| Public appearances | Single source[^source-ticket] |
 
-[^tourism]: [Macao Government Tourism Office](https://tourism.example.test/event) Official concert details and final show dates. ![Concert poster](https://images.example.test/concert.png)
-[^ticket]: [Official ticket website](https://tickets.example.test/show) Tickets and venue information.
-[^plain]: This is a plain note without a link or image.
+Ordinary explanation[^note].
+
+[^source-tourism]: [Macao Government Tourism Office](https://tourism.example.test/event) Official concert details and final show dates. ![Concert poster](https://images.example.test/concert.png)
+[^source-ticket]: [Official ticket website](https://tickets.example.test/show) Tickets and venue information.
+[^source-plain]: **Plain source** This is a plain note without a link or image.
+[^note]: This ordinary footnote keeps its footer and return link.
 `;
 
 const triggerSelector = '[data-web-shell-footnote-trigger]';
@@ -84,7 +87,7 @@ async function openFixture(
         ? [
             userTextEvent('Another message with the same note ID.', { id: 4 }),
             assistantTextEvent(
-              'Second message source[^tourism].\n\n[^tourism]: Second definition.',
+              'Second message source[^source-tourism].\n\n[^source-tourism]: **Second source** Second definition.',
               { id: 5 },
             ),
             turnCompleteEvent('prompt-footnotes-second', { id: 6 }),
@@ -131,9 +134,9 @@ test('footnote baseline before grouped previews', async ({
   );
   const { errors } = await openFixture(page, testInfo);
   await expect(page.locator('sup a[href^="#user-content-fn-"]')).toHaveCount(
-    10,
+    11,
   );
-  await expect(page.locator('[data-footnotes] li')).toHaveCount(3);
+  await expect(page.locator('[data-footnotes] li')).toHaveCount(4);
   await page.locator('sup a[href^="#user-content-fn-"]').first().hover();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.screenshot({
@@ -156,8 +159,11 @@ test.describe('footnote source previews', () => {
     const { errors } = await openFixture(page, testInfo);
     const triggers = page.locator(triggerSelector);
     await expect(triggers).toHaveCount(5);
-    await expect(triggers).toHaveText(['3', '1', '1', '3', '1']);
-    await expect(page.locator('[data-footnotes] li')).toHaveCount(3);
+    await expect(triggers).toHaveText(['3', '', '', '3', '']);
+    await expect(page.locator('[data-footnotes] li')).toHaveCount(1);
+    await expect(
+      page.locator('[data-web-shell-footnote-sources-trigger]'),
+    ).toHaveText('3 sources');
     await triggers.first().hover();
     const card = page.locator(cardSelector);
     await expect(card).toBeVisible();
@@ -192,6 +198,7 @@ test.describe('footnote source previews', () => {
     await expect(card).not.toContainText('Macao Government Tourism Office');
     await expect(card.locator('img')).toHaveCount(0);
     await card.getByRole('button', { name: /Next/i }).click();
+    await expect(card).toContainText('Plain source');
     await expect(card).toContainText(
       'This is a plain note without a link or image.',
     );
@@ -224,7 +231,7 @@ test.describe('footnote source previews', () => {
     expect(errors).toEqual([]);
   });
 
-  test('keyboard opening, single sources and footer return links stay in their message', async ({
+  test('keyboard opening, source footers and ordinary return links stay isolated', async ({
     page,
   }, testInfo) => {
     const { errors } = await openFixture(page, testInfo, {
@@ -243,30 +250,26 @@ test.describe('footnote source previews', () => {
       card.getByRole('button', { name: /Next|Previous/i }),
     ).toHaveCount(0);
     await page.keyboard.press('Escape');
-    const footers = page.locator('[data-footnotes]');
-    await expect(footers).toHaveCount(2);
+
+    const sourceFooters = page.locator(
+      '[data-web-shell-footnote-sources-trigger]',
+    );
+    await expect(sourceFooters).toHaveText(['3 sources', '1 source']);
     const ids = await triggers.evaluateAll((elements) =>
       elements.map((element) => element.id),
     );
     expect(new Set(ids).size).toBe(ids.length);
-    for (let footerIndex = 0; footerIndex < 2; footerIndex++) {
-      const backlinks = footers.nth(footerIndex).locator('a[href^="#"]');
-      for (let index = 0; index < (await backlinks.count()); index++) {
-        const backlink = backlinks.nth(index);
-        const href = await backlink.getAttribute('href');
-        expect(href).toBeTruthy();
-        const target = page.locator(`[id="${href!.slice(1)}"]`);
-        await expect(target).toHaveCount(1);
-        await backlink.click();
-        await expect(target).toBeFocused();
-        if (footerIndex === 1) {
-          await expect(target).toHaveAttribute('id', ids[5]);
-        } else {
-          expect(await target.getAttribute('id')).not.toBe(ids[5]);
-        }
-        await page.keyboard.press('Escape');
-      }
-    }
+
+    const footer = page.locator('[data-footnotes]');
+    await expect(footer).toHaveCount(1);
+    const backlink = footer.locator('[data-footnote-backref]');
+    await expect(backlink).toHaveCount(1);
+    const href = await backlink.getAttribute('href');
+    expect(href).toBeTruthy();
+    const target = page.locator(`[id="${href!.slice(1)}"]`);
+    await backlink.click();
+    await expect(target).toBeFocused();
+    expect(await target.getAttribute('id')).not.toBe(ids.at(-1));
     expect(errors).toEqual([]);
   });
 
@@ -314,17 +317,20 @@ test.describe('footnote source previews', () => {
     await page.locator('[data-web-shell-composer-submit]').click();
     await expect.poll(() => daemon.promptRequests().length).toBe(1);
     await daemon.sse.split(
-      assistantTextEvent('Streaming citations[^first][^second][^third].', {
-        id: 4,
-      }),
+      assistantTextEvent(
+        'Streaming citations[^source-first][^source-second][^source-third].',
+        {
+          id: 4,
+        },
+      ),
     );
     const list = page.locator('[data-web-shell-message-list]');
     await expect(list).toContainText(
-      'Streaming citations[^first][^second][^third].',
+      'Streaming citations[^source-first][^source-second][^source-third].',
     );
     await daemon.sse.split(
       assistantTextEvent(
-        '\n\n[^first]: [First source](https://first.example.test) First summary.\n[^second]: [Second source](https://second.example.test) Second summary.',
+        '\n\n[^source-first]: [First source](https://first.example.test) First summary.\n[^source-second]: [Second source](https://second.example.test) Second summary.',
         { id: 5 },
       ),
     );
@@ -337,7 +343,7 @@ test.describe('footnote source previews', () => {
     await expect(card).toContainText('Second source');
     await daemon.sse.split(
       assistantTextEvent(
-        '\n[^third]: [Third source](https://third.example.test) Third summary.',
+        '\n[^source-third]: [Third source](https://third.example.test) Third summary.',
         { id: 6 },
       ),
     );
@@ -443,7 +449,7 @@ test.describe('footnote source previews', () => {
     await next.click();
     await expect(card).toContainText('Official ticket website');
     await next.click();
-    await expect(card).toContainText('脚注 3');
+    await expect(card).toContainText('Plain source');
     await expect(card).toContainText(
       'This is a plain note without a link or image.',
     );
@@ -517,3 +523,44 @@ async function expectInsideViewport(page: Page, locator: Locator) {
   expect(bounds!.y).toBeGreaterThanOrEqual(0);
   expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport!.height);
 }
+
+test('source locator demo delegates the card link to its host panel', async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    process.env['FOOTNOTE_BUILT'] === '1',
+    'The interactive host demo is a source-only development entrypoint.',
+  );
+  await page.setViewportSize({ width: 1440, height: 960 });
+  await page.goto('/e2e/footnote-citation-demo.html');
+
+  await expect(
+    page.getByRole('heading', { name: '订单主题分析' }),
+  ).toBeVisible();
+  const triggers = page.locator(triggerSelector);
+  await expect(triggers).toHaveCount(2);
+  await expect(triggers.first()).toHaveText('2');
+  await expect(triggers.nth(1)).toHaveText('');
+  await expect(
+    page.locator('[data-web-shell-footnote-sources-trigger]'),
+  ).toHaveText('3 个来源');
+  await expect(page.locator('[data-footnotes]')).toHaveCount(0);
+
+  await triggers.first().click();
+  const card = page.locator(cardSelector);
+  const sourceLink = card.getByRole('button', { name: '订单业务定义' });
+  await expect(sourceLink).toHaveAttribute('href', '#');
+  await sourceLink.click();
+  const hostPanel = page.locator('[data-demo-source-panel]');
+  await expect(hostPanel).toBeVisible();
+  await expect(hostPanel).toContainText('OpenCode 已接管 locator');
+  await expect(hostPanel).toContainText('semantic');
+  await expect(hostPanel).toContainText('instance-a');
+  await expect(hostPanel).toContainText('kb:order');
+
+  await page.screenshot({
+    path: testInfo.outputPath('source-footnote-host-demo.png'),
+    fullPage: true,
+    animations: 'disabled',
+  });
+});

@@ -83,7 +83,9 @@ export interface WebShellMarkdownCustomization {
   /**
    * Custom markdown components override Web Shell's built-ins. In particular,
    * `components.code` replaces the default code renderer, so `renderCodeBlock`
-   * will not be called for that source.
+   * will not be called for that source. Internal footnote references and
+   * backreferences keep the built-in link behavior. Providing `components.sup`
+   * disables source-footnote grouping.
    */
   components?: Components;
   remarkPlugins?: Options['remarkPlugins'];

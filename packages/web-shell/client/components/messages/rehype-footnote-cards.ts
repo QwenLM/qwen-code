@@ -5,12 +5,18 @@ export interface FootnotePreview {
   number: string;
   title: string;
   summary: string;
+  source?: string;
   href?: string;
   image?: string;
+  linkNode?: Element;
 }
 
 export interface FootnoteElement extends Element {
-  data?: Element['data'] & { footnoteCards?: FootnotePreview[] };
+  data?: Element['data'] & {
+    footnoteCards?: FootnotePreview[];
+    footnoteSourcesFooter?: boolean;
+    hasVisibleFootnotes?: boolean;
+  };
 }
 
 interface FootnoteOptions {
@@ -48,6 +54,10 @@ function reference(node: RootContent): Element | undefined {
     : undefined;
 }
 
+function isSourceDefinition(id: string): boolean {
+  return id.toLowerCase().startsWith('user-content-fn-source-');
+}
+
 export function rehypeFootnoteCards(options: FootnoteOptions) {
   return (tree: Root) => {
     const definitions = new Map<string, FootnotePreview>();
@@ -72,9 +82,17 @@ export function rehypeFootnoteCards(options: FootnoteOptions) {
       (node): node is Element =>
         node.type === 'element' && node.tagName === 'ol',
     );
+    let number = 0;
+    const definitionNumbers = new Map<string, number>();
     for (const node of list?.children ?? []) {
       if (node.type !== 'element' || node.tagName !== 'li') continue;
+      number += 1;
+      const id = String(node.properties.id);
+      definitionNumbers.set(id, number);
+      if (!isSourceDefinition(id)) continue;
       let link: Element | undefined;
+      let strong: Element | undefined;
+      let source: string | undefined;
       let href: string | undefined;
       let image: string | undefined;
       visit(node, (child) => {
@@ -89,23 +107,40 @@ export function rehypeFootnoteCards(options: FootnoteOptions) {
           if (options.safeHref(url)) {
             link = child;
             href = url;
+            const title = child.properties.title;
+            source =
+              typeof title === 'string' ? title.trim() || undefined : undefined;
           }
+        }
+        if (
+          child.tagName === 'strong' &&
+          !strong &&
+          child.properties.dataFootnoteBackref === undefined
+        ) {
+          strong = child;
         }
         if (child.tagName === 'img' && !image && child.properties.src) {
           const url = options.transformUrl(String(child.properties.src));
           if (options.safeImage(url)) image = url;
         }
       });
-      const id = String(node.properties.id);
+      const titleNode = link ?? strong;
+      const title = titleNode ? noteText(titleNode).trim() : '';
+      if (!title) continue;
       definitions.set(`#${id}`, {
         id,
-        number: String(definitions.size + 1),
-        title: link ? noteText(link).trim() || href || '' : '',
-        summary: noteText(node, link).replace(/\s+/g, ' ').trim(),
+        number: String(number),
+        title,
+        summary: noteText(node, titleNode).replace(/\s+/g, ' ').trim(),
+        source,
         href,
         image,
+        linkNode: link,
       });
     }
+
+    const referencedSources = new Map<string, FootnotePreview>();
+    const convertedReferences = new Set<Element>();
 
     function group(parent: Element) {
       if (parent === footer || parent.tagName === 'a') return;
@@ -135,6 +170,8 @@ export function rehypeFootnoteCards(options: FootnoteOptions) {
         for (const item of refs) {
           const preview = definitions.get(String(item.properties.href))!;
           previews.set(preview.id, preview);
+          referencedSources.set(preview.id, preview);
+          convertedReferences.add(item);
           anchors.set(String(item.properties.id), options.prefix + id);
         }
         const element = first as FootnoteElement;
@@ -158,6 +195,51 @@ export function rehypeFootnoteCards(options: FootnoteOptions) {
     if (options.group) {
       for (const child of tree.children) {
         if (child.type === 'element') group(child);
+      }
+      if (referencedSources.size > 0 && list) {
+        const definitionsWithVisibleReferences = new Set<string>();
+        visit(tree, (node) => {
+          if (
+            node.properties.dataFootnoteRef === undefined ||
+            convertedReferences.has(node)
+          ) {
+            return;
+          }
+          const definition = definitions.get(String(node.properties.href));
+          if (definition) definitionsWithVisibleReferences.add(definition.id);
+        });
+        const enhancedIds = new Set(
+          [...referencedSources.values()]
+            .filter(
+              (definition) =>
+                !definitionsWithVisibleReferences.has(definition.id),
+            )
+            .map((definition) => definition.id),
+        );
+        list.children = list.children.filter(
+          (child) =>
+            child.type !== 'element' ||
+            child.tagName !== 'li' ||
+            !enhancedIds.has(String(child.properties.id)),
+        );
+        for (const child of list.children) {
+          if (child.type !== 'element' || child.tagName !== 'li') continue;
+          const originalNumber = definitionNumbers.get(
+            String(child.properties.id),
+          );
+          if (originalNumber !== undefined)
+            child.properties.value = String(originalNumber);
+        }
+        const hasVisibleFootnotes = list.children.some(
+          (child) => child.type === 'element' && child.tagName === 'li',
+        );
+        const element = footer as FootnoteElement;
+        element.data = {
+          ...element.data,
+          footnoteCards: [...referencedSources.values()],
+          footnoteSourcesFooter: true,
+          hasVisibleFootnotes,
+        };
       }
     }
     visit(tree, (node) => {

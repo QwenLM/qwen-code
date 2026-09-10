@@ -1,5 +1,6 @@
 import {
   createContext,
+  createElement,
   memo,
   useCallback,
   useContext,
@@ -40,7 +41,7 @@ import {
 } from '../../customization';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
-import { FootnoteSup } from './FootnoteCard';
+import { FootnoteSection, FootnoteSup } from './FootnoteCard';
 import { rehypeFootnoteCards } from './rehype-footnote-cards';
 import {
   DEFAULT_WEB_SHELL_MARKDOWN_CHART,
@@ -936,6 +937,7 @@ function createComponents(
     a: MarkdownLink,
     img: MarkdownImage,
     sup: FootnoteSup,
+    section: FootnoteSection,
     table({ children }: { children?: ReactNode }) {
       if (tableMode === 'advanced') {
         const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
@@ -1026,11 +1028,35 @@ export const Markdown = memo(function Markdown({
   const sourceComponents = sourceMarkdown?.components;
   const renderedComponents = useMemo(() => {
     if (!sourceComponents) return components;
-    return {
+    const rendered = {
       ...components,
       ...sourceComponents,
       ...(effectiveTableMode === 'advanced' ? { table: components.table } : {}),
     };
+    const SourceLink = sourceComponents.a;
+    rendered.a = (props) => {
+      const footnote =
+        props.node?.properties.dataFootnoteRef !== undefined ||
+        props.node?.properties.dataFootnoteBackref !== undefined;
+      if (footnote || !SourceLink) return <MarkdownLink {...props} />;
+      if (typeof SourceLink !== 'string')
+        return createElement(SourceLink, props);
+      const { node: _node, ...elementProps } = props;
+      return createElement(SourceLink, elementProps);
+    };
+    if (!sourceComponents.sup) {
+      rendered.sup = (props) => (
+        <FootnoteSup {...props} linkComponent={SourceLink} />
+      );
+      rendered.section = (props) => (
+        <FootnoteSection
+          {...props}
+          linkComponent={SourceLink}
+          sectionComponent={sourceComponents.section}
+        />
+      );
+    }
+    return rendered;
   }, [components, effectiveTableMode, sourceComponents]);
   const chart =
     !documentMode &&
