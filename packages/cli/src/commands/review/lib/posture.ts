@@ -91,7 +91,9 @@ export function resolveCriticalPosture(input: {
   if (typeof prev !== 'object' || prev === null) return null;
   const rec = prev as { round?: unknown; flatRounds?: unknown };
   const round =
-    typeof rec.round === 'number' && Number.isInteger(rec.round) && rec.round > 0
+    typeof rec.round === 'number' &&
+    Number.isInteger(rec.round) &&
+    rec.round > 0
       ? rec.round
       : 0;
   if (round === 0) return null;

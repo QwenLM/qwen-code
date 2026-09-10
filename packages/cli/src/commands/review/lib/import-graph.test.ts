@@ -663,8 +663,12 @@ describe('seamLines', () => {
     ].join('\n');
     // Line 4 too: the typedef binds a local ALIAS of the imported type,
     // so a file that types everything through the alias no longer marks
-    // nothing past the typedef line.
-    expect(seamLines('src/imp.js', typed, changed)).toEqual([1, 3, 4]);
+    // nothing past the typedef line. Lines 2 and 5 are the DECLARATIONS
+    // those annotations type (#10136 R18-1): an annotating tag is a seam
+    // on the code below it, which is what a fix commit changes — a
+    // DECLARING tag (`@typedef` on line 3) is not, and its own uses are
+    // marked where they sit.
+    expect(seamLines('src/imp.js', typed, changed)).toEqual([1, 2, 3, 4, 5]);
     // A QUALIFIED alias (`ns.Bar`) binds every identifier of the name —
     // dropping it left the alias's uses unmarked beside a specifier the
     // cross-check had seen: a confident under-read (#10136 R18-1 round 19).
@@ -673,7 +677,7 @@ describe('seamLines', () => {
       '/** @type {ns.Bar} */', // 2
       'const w = make();', // 3
     ].join('\n');
-    expect(seamLines('src/imp.js', qualified, changed)).toEqual([1, 2]);
+    expect(seamLines('src/imp.js', qualified, changed)).toEqual([1, 2, 3]);
     const imported = [
       "/** @import { Foo } from './changed.js' */", // 1
       '', // 2
@@ -681,7 +685,7 @@ describe('seamLines', () => {
       'export let v;', // 4
       'let x = 1;', // 5
     ].join('\n');
-    expect(seamLines('src/imp.js', imported, changed)).toEqual([1, 3]);
+    expect(seamLines('src/imp.js', imported, changed)).toEqual([1, 3, 4]);
     const used = [
       "const changed = require('./changed.js');", // 1
       '/** @type {changed.Foo} */', // 2
@@ -689,7 +693,7 @@ describe('seamLines', () => {
       '/** @param {typeof changed} c */', // 4
       'function g(c) {}', // 5
     ].join('\n');
-    expect(seamLines('src/imp.js', used, changed)).toEqual([1, 2, 4]);
+    expect(seamLines('src/imp.js', used, changed)).toEqual([1, 2, 3, 4, 5]);
   });
 
   it('JSDoc carried by an import or export statement is walked too (round 3)', () => {
@@ -701,7 +705,7 @@ describe('seamLines', () => {
       '/** @param {Foo} f */', // 4
       'export function use(f) {}', // 5
     ].join('\n');
-    expect(seamLines('src/imp.js', aboveImport, jsChanged)).toEqual([1, 4]);
+    expect(seamLines('src/imp.js', aboveImport, jsChanged)).toEqual([1, 4, 5]);
     const aboveReexport = [
       "/** @typedef {import('./changed.js').Options} Options */", // 1
       "export * from './other.js';", // 2
@@ -979,6 +983,100 @@ describe('seamLines', () => {
     ).toEqual([3, 4]);
   });
 
+  it('a JSDoc-bound factory and the bracket spellings of require are require too (#10136 R18-1 round 21)', () => {
+    // Three more entrances of the same class: each returned a CONFIDENT
+    // census — not the doubt state — where the equivalent spelling marks,
+    // so `widenScope` recorded `kept: 0` and shed every hunk of a caller
+    // whose adaptation to the changed API no round then re-reviewed.
+    //
+    // 1. A factory bound by a JSDoc `@import`. `collectFactories` walked
+    //    with `forEachChild`, which never enters a node's `jsDoc`, so the
+    //    rename never reached `factoryNames` — while the ESM control
+    //    beside it reads the same clause correctly.
+    const jsDocFactory = [
+      "/** @import { createRequire as cr } from 'node:module' */", // 1
+      'const req = cr(import.meta.url);', // 2
+      "const moved = req('./changed.js');", // 3
+      'moved.run();', // 4
+    ].join('\n');
+    expect(seamLines('src/imp.js', jsDocFactory, changed)).toEqual([3, 4]);
+    // 2. The element-access spelling of a property read: `a['b']` is the
+    //    grammar's other way of writing `a.b`, and the dotted form of each
+    //    of these is already read.
+    expect(
+      seamLines(
+        'src/imp.js',
+        "const m = globalThis['require']('./changed.js');\nm.run();",
+        changed,
+      ),
+    ).toEqual([1, 2]);
+    expect(
+      seamLines(
+        'src/imp.js',
+        [
+          "const req = mod['createRequire'](import.meta.url);", // 1
+          "const moved = req('./changed.js');", // 2
+          'moved.run();', // 3
+        ].join('\n'),
+        changed,
+      ),
+    ).toEqual([2, 3]);
+    expect(
+      seamLines(
+        'src/imp.js',
+        [
+          "const mkRequire = mod['createRequire'];", // 1
+          'const req = mkRequire(import.meta.url);', // 2
+          "const moved = req('./changed.js');", // 3
+          'moved.run();', // 4
+        ].join('\n'),
+        changed,
+      ),
+    ).toEqual([3, 4]);
+    // A COMPUTED key names nothing the read can see — the same class as
+    // any dynamically dispatched call, which the oracle does not model
+    // and does not refuse over. It marks nothing here, and the file stays
+    // briefed for the seam from the worktree.
+    expect(
+      seamLines(
+        'src/imp.js',
+        "const m = globalThis[key]('./changed.js');\nlet x = 1;",
+        changed,
+      ),
+    ).toEqual([]);
+  });
+
+  it('a JSDoc annotation is a seam on the declaration it types (#10136 R18-1 round 21)', () => {
+    // The TypeScript spelling of a type-position import marks the whole
+    // declaration; the JSDoc spelling marked its own comment line and shed
+    // the code below it — the code a fix commit actually changes.
+    const overLines = [
+      "/** @returns {import('./changed.js').Result} */", // 1
+      'export function build(', // 2
+      '  a,', // 3
+      '  b,', // 4
+      ') {', // 5
+      '  return { a, b };', // 6
+      '}', // 7
+    ].join('\n');
+    expect(seamLines('src/imp.js', overLines, changed)).toEqual([
+      1, 2, 3, 4, 5, 6, 7,
+    ]);
+    // A class field's annotation marks the member, never the class around
+    // it — `statementOf`'s own rule, applied to the declaration the
+    // comment documents.
+    const field = [
+      'export class C {', // 1
+      "  /** @type {import('./changed.js').Cfg} */", // 2
+      '  cfg = {', // 3
+      '    on: true,', // 4
+      '  };', // 5
+      '  other() {}', // 6
+      '}', // 7
+    ].join('\n');
+    expect(seamLines('src/imp.js', field, changed)).toEqual([2, 3, 4, 5]);
+  });
+
   it('a property-named binding reads back through its bracket spelling (#10136 R18-1)', () => {
     // `exports.moved = require(…)` establishes the binding by property
     // name; `exports['moved']` is the same property read back through
@@ -1026,7 +1124,7 @@ describe('seamLines', () => {
         ["/** @type {import('./changed.js').Foo} */", 'let v = 1;'].join('\n'),
         changed,
       ),
-    ).toEqual([1]);
+    ).toEqual([1, 2]);
     expect(
       seamLines(
         'src/imp.js',

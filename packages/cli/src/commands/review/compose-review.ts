@@ -3364,6 +3364,7 @@ function ledgerMarkerFor(
     }
     const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
       fetchedSha?: unknown;
+      mergeBaseSha?: unknown;
       srcDiffLines?: unknown;
       fullSrcDiffLines?: unknown;
       incremental?: { effective?: unknown };
@@ -3483,6 +3484,20 @@ function ledgerMarkerFor(
         // round as a pre-field marker rather than as "nobody certified this".
         ...(shaCandidate && !identityDrifted ? { sha: shaCandidate } : {}),
         ...(model ? { model } : {}),
+        // The base this round's published diff was captured over, for the
+        // next round's seam-bound continuity gate (#10136 R18-3). Written
+        // HERE, at the posting boundary, so the stamp belongs to a round
+        // that actually reviewed the range — a capture that published and
+        // stopped (`upToDate`, `emptyDiff`, a same-round re-capture on the
+        // anchor-recovery path) posts no marker and vouches nothing. Rides
+        // the anchor's rung in the serializer, so a fail-closed or
+        // truncated round withholds it with the pair.
+        ...(shaCandidate &&
+        !identityDrifted &&
+        typeof plan.mergeBaseSha === 'string' &&
+        plan.mergeBaseSha !== ''
+          ? { mb: plan.mergeBaseSha }
+          : {}),
         // Carry the baseline forward unchanged once one exists; only measure a
         // full-range diff when there is none. Re-measuring every round would let
         // a diff that shrinks rewrite its own baseline and erase the growth it

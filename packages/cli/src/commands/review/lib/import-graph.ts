@@ -411,6 +411,19 @@ function isTypeScriptModule(value: unknown): value is TypeScriptModule {
  * question is asked even when no hunk survives. A statement that receives
  * nothing (`require('x');`, `await import('x');`, `require('x').init();`)
  * marks its own lines and binds nothing — the grammar introduces no name.
+ * A seam read inside a JSDoc ANNOTATION (`@type`, `@param`, `@returns`, …)
+ * marks the declaration that comment documents as well as the tag (#10136
+ * R18-1): the JSDoc spelling of a type-position import is the same seam as
+ * the TypeScript one, and a fix commit changes the declaration, not the
+ * comment. A DECLARING tag (`@import`, `@typedef`, `@callback`) introduces
+ * a name instead, so it marks its own lines and its uses are marked where
+ * they sit. `require`/`createRequire` are recognised in either property
+ * spelling — `mod.createRequire` and `mod['createRequire']` are one
+ * grammar's two ways of writing the same read — and a `createRequire`
+ * renamed by a JSDoc `@import` binds the factory exactly as the statement
+ * form does. A COMPUTED key (`mod[k]`) names nothing this read can see: the
+ * same class as any dynamically dispatched call, which the oracle does not
+ * model and does not refuse over.
  * A dynamic import's value is a promise until an `await` unwraps it, so a
  * method chained onto the un-awaited promise (`import('x').then(handler)`)
  * hands the module to a callback the name read cannot follow: an escape.
@@ -510,6 +523,31 @@ function seamLinesWith(
   // destructuring spread over three lines is one statement), and a member
   // rather than its whole class (one typed method must not republish the
   // class around it).
+  // A JSDoc tag that DECLARES a name rather than annotating the code below
+  // it. `@import`, `@typedef` and `@callback` introduce a local name; what
+  // moves with the changed API is that name's USES, which the binding walk
+  // marks where they sit. An annotating tag (`@type`, `@param`,
+  // `@returns`, …) types the declaration the comment sits above, and that
+  // declaration is the seam.
+  const declaresAName = (tag: TSNode): boolean =>
+    (typeof ts.isJSDocImportTag === 'function' && ts.isJSDocImportTag(tag)) ||
+    (typeof ts.isJSDocTypedefTag === 'function' && ts.isJSDocTypedefTag(tag)) ||
+    (typeof ts.isJSDocCallbackTag === 'function' && ts.isJSDocCallbackTag(tag));
+  // The declaration a JSDoc comment documents, when `node` sits in an
+  // annotating tag of one — `statementOf` stops at the tag, and the code a
+  // fix commit actually changes is the declaration below it.
+  const jsDocHost = (node: TSNode): TSNode | null => {
+    let current: TSNode | undefined = node;
+    let tag: TSNode | undefined;
+    while (current !== undefined && !ts.isJSDoc(current)) {
+      tag = current;
+      current = current.parent;
+    }
+    if (current === undefined) return null;
+    if (tag !== undefined && declaresAName(tag)) return null;
+    const host = current.parent;
+    return host !== undefined && !ts.isSourceFile(host) ? host : null;
+  };
   const statementOf = (node: TSNode): TSNode => {
     let current = node;
     while (
@@ -530,6 +568,18 @@ function seamLinesWith(
       current = current.parent;
     }
     return current;
+  };
+  // The seam a node sits on: its own statement, and — when the node is a
+  // JSDoc type annotation — the declaration that JSDoc documents as well
+  // (#10136 R18-1). `/** @type {import('./changed.js').Config} */` above a
+  // `const` marks only its comment line otherwise, while the TypeScript
+  // spelling of the same seam marks the whole declaration: the JavaScript
+  // caller then published a comment line and shed the code the fix commit
+  // changes, with the census certifying the shed.
+  const markSeamAt = (node: TSNode): void => {
+    markSpan(statementOf(node));
+    const host = jsDocHost(node);
+    if (host !== null) markSpan(statementOf(host));
   };
   // A specifier the read can resolve: a string literal, a template with no
   // substitution, either wrapped in parentheses. Anything else — a name, a
@@ -552,6 +602,21 @@ function seamLinesWith(
     const hit = resolveSpecifier(fromFile, spec, changed, packages) !== null;
     if (hit) resolvedSpecs.add(spec);
     return hit;
+  };
+  // The property an access expression names, in either spelling: `a.b` and
+  // `a['b']` are one grammar's two ways of writing the same read (#10136
+  // R18-1), and a reader that knows only the dotted one answers
+  // confidently on `mod['createRequire']` and `globalThis['require']`. A
+  // computed key (`a[k]`) names nothing this read can see — the same class
+  // as any dynamically dispatched call, which the oracle does not model
+  // and does not refuse over.
+  const accessedName = (node: TSNode): string | null => {
+    if (ts.isPropertyAccessExpression(node)) return node.name.text;
+    if (ts.isElementAccessExpression(node)) {
+      const arg = node.argumentExpression;
+      return arg !== undefined && ts.isStringLiteralLike(arg) ? arg.text : null;
+    }
+    return null;
   };
   // The callee of a call, unwrapped past the shapes that hide it from a
   // plain identifier read: parentheses, and the `(0, require)(…)` comma
@@ -837,18 +902,30 @@ function seamLinesWith(
   // hoisted use precedes its declaration in source order), by name — the
   // same fuzz the binding read budgets.
   const factoryNames = new Set<string>(['createRequire']);
-  const collectFactories = (node: TSNode): void => {
-    if (ts.isImportDeclaration(node)) {
-      const named = node.importClause?.namedBindings;
-      if (named !== undefined && ts.isNamedImports(named)) {
-        for (const el of named.elements) {
-          // `import { createRequire as cr }` — `propertyName` is the
-          // ORIGINAL name, `name` the local one.
-          if ((el.propertyName ?? el.name).text === 'createRequire') {
-            factoryNames.add(el.name.text);
-          }
+  // `import { createRequire as cr }` — `propertyName` is the ORIGINAL
+  // name, `name` the local one. Shared by the two clause spellings: a
+  // JSDoc `@import` binds a factory exactly as the statement does, and
+  // reading only the statement left `factoryNames` empty on a JavaScript
+  // caller that writes its imports in comments (#10136 R18-1).
+  const collectFactoryClause = (
+    clause: import('typescript').ImportClause | undefined,
+  ): void => {
+    const named = clause?.namedBindings;
+    if (named !== undefined && ts.isNamedImports(named)) {
+      for (const el of named.elements) {
+        if ((el.propertyName ?? el.name).text === 'createRequire') {
+          factoryNames.add(el.name.text);
         }
       }
+    }
+  };
+  const collectFactories = (node: TSNode): void => {
+    if (ts.isImportDeclaration(node)) {
+      collectFactoryClause(node.importClause);
+    } else if (isJSDocImport(node)) {
+      collectFactoryClause(
+        (node as import('typescript').JSDocImportTag).importClause,
+      );
     } else if (
       ts.isVariableDeclaration(node) &&
       ts.isObjectBindingPattern(node.name)
@@ -868,20 +945,21 @@ function seamLinesWith(
       ts.isVariableDeclaration(node) &&
       node.initializer !== undefined &&
       ts.isIdentifier(node.name) &&
-      ts.isPropertyAccessExpression(node.initializer) &&
-      node.initializer.name.text === 'createRequire'
+      accessedName(node.initializer) === 'createRequire'
     ) {
       // `const cr = module.createRequire` — the property read binds the
-      // local to the same factory.
+      // local to the same factory, in either spelling.
       factoryNames.add(node.name.text);
     }
-    ts.forEachChild(node, collectFactories);
+    // `eachChild`, not `forEachChild`: a factory bound by a JSDoc
+    // `@import` lives in a node's `jsDoc`, which `forEachChild` never
+    // enters (#10136 R18-1).
+    eachChild(node, collectFactories);
   };
   collectFactories(sf);
   const isFactoryCallee = (callee: TSNode): boolean =>
     (ts.isIdentifier(callee) && factoryNames.has(callee.text)) ||
-    (ts.isPropertyAccessExpression(callee) &&
-      callee.name.text === 'createRequire');
+    accessedName(callee) === 'createRequire';
   const requireAliases = new Set<string>();
   const collectAliases = (node: TSNode): void => {
     if (refused) return;
@@ -995,7 +1073,7 @@ function seamLinesWith(
         refused = true;
         return;
       }
-      if (resolves(spec)) markSpan(statementOf(node));
+      if (resolves(spec)) markSeamAt(node);
     } else if (ts.isImportEqualsDeclaration(node)) {
       const ref = node.moduleReference;
       if (ts.isExternalModuleReference(ref)) {
@@ -1019,8 +1097,7 @@ function seamLinesWith(
       const isRequire =
         (ts.isIdentifier(callee) &&
           (callee.text === 'require' || requireAliases.has(callee.text))) ||
-        (ts.isPropertyAccessExpression(callee) &&
-          callee.name.text === 'require');
+        accessedName(callee) === 'require';
       const isDynamicImport = callee.kind === ts.SyntaxKind.ImportKeyword;
       if ((isRequire || isDynamicImport) && node.arguments.length >= 1) {
         const spec = literalSpecifier(node.arguments[0]);
@@ -1029,7 +1106,7 @@ function seamLinesWith(
           return;
         }
         if (resolves(spec)) {
-          markSpan(statementOf(node));
+          markSeamAt(node);
           const received = receiverBindings(node, isDynamicImport);
           if (received === null) {
             refused = true;
@@ -1066,7 +1143,7 @@ function seamLinesWith(
         (ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) &&
         bindings.has(node.text)
       ) {
-        markSpan(statementOf(node));
+        markSeamAt(node);
       } else if (
         ts.isElementAccessExpression(node) &&
         ts.isStringLiteralLike(node.argumentExpression) &&
@@ -1076,7 +1153,7 @@ function seamLinesWith(
         // `exports['moved']` reads back what `exports.moved = require(…)`
         // established; the establishing side of the same spelling is
         // already a doubt state, so the read-back must see it too.
-        markSpan(statementOf(node));
+        markSeamAt(node);
       }
       eachChild(node, mention);
     };

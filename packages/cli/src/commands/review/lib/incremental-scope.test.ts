@@ -696,6 +696,55 @@ describe('widenScope seam bound (#10104)', () => {
     expect(diff).toContain('+  return 1;');
   });
 
+  it('the resolved oracle keeps a clamped pure-deletion hunk too (#10136 R20-5)', () => {
+    // The sibling of the doubt-state case above, on the path an oracle that
+    // ANSWERS takes. The file's only hunk is the top-of-file removal of a use
+    // of the changed module's binding — the caller-side adaptation the bound
+    // most owes a re-read — and `parseDiff` clamps it to new-side [0,0]. No
+    // mark is ever 0, so a post-image match sheds it and the census certifies
+    // the shed as deliberate; `newCount === 0` keeps it instead.
+    const impSection = [
+      'diff --git a/src/imp.ts b/src/imp.ts',
+      '--- a/src/imp.ts',
+      '+++ b/src/imp.ts',
+      '@@ -1,1 +0,0 @@',
+      '-const legacy = moved();',
+      '',
+    ].join('\n');
+    const selection = selectNarrowing(
+      Buffer.from(section('src/changed.ts') + impSection, 'utf8'),
+      Buffer.from(section('src/changed.ts'), 'utf8'),
+    );
+    if (selection === null)
+      throw new Error('the narrowing refused this fixture');
+    // The head source still imports the changed module — that edge is what
+    // admits the file — and the seam marks sit on lines 1 and 2, neither of
+    // which the clamped point can equal.
+    const source = [
+      "import { moved } from './changed.js';",
+      'export const a = moved();',
+      '',
+    ].join('\n');
+    const hunks = parseDiff(impSection).files[0].hunks;
+    expect(hunks.map((h) => [h.newStart, h.newEnd, h.newCount])).toEqual([
+      [0, 0, 0],
+    ]);
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? source : null),
+      seamBound: true,
+    });
+    expect(widened.scope.interaction[0].seam).toEqual({ kept: 1, total: 1 });
+    // Nothing shed: a census that kept every hunk records no keep set.
+    expect(widened.hunkKeep?.get('src/imp.ts')).toBeUndefined();
+    expect(
+      assembleSections(selection, widened.paths, widened.hunkKeep)?.toString(
+        'utf8',
+      ),
+    ).toContain('-const legacy = moved();');
+  });
+
   it('records nothing and drops nothing when the bound is off', () => {
     const selection = seamSelection();
     const widened = widenScope({

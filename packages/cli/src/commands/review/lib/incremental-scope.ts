@@ -225,7 +225,21 @@ export function widenScope(input: WidenInput): WidenedScope {
       if (lines === null) continue;
       const kept = new Set<number>();
       section.hunks.forEach((h, i) => {
-        if (lines.some((ln) => ln >= h.newStart && ln <= h.newEnd)) {
+        // A pure-deletion hunk (`@@ -a,N +b,0 @@`) occupies no post-image
+        // line, and `parseDiff` clamps it to a point `newCount` disowns as a
+        // range — at the top of a file that point is 0, which no mark can
+        // ever equal. A post-image match therefore CANNOT keep such a hunk,
+        // however much seam its removed lines carry, so the one adaptation
+        // the bound most owes a re-read — a caller that answered a changed
+        // API by deleting its import or its call — was structurally
+        // unkeepable (#10136 R20-5). Keep it unconditionally instead:
+        // over-collection is the budgeted direction, and the marks are
+        // post-image line numbers that cannot be compared against old-side
+        // text at all.
+        if (
+          h.newCount === 0 ||
+          lines.some((ln) => ln >= h.newStart && ln <= h.newEnd)
+        ) {
           kept.add(i);
         }
       });

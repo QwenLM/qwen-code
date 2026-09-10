@@ -1717,15 +1717,15 @@ describe('fetch-pr report assembly', () => {
       if (String(path).endsWith('b.ts')) return B_SOURCE;
       if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
         // The previous posted round: round 7, so this round is 8 — past the
-        // auto floor's round schedule. Its merge-base stamp matches this
-        // round's base, so the seam bound's continuity gate (#10136 R18-3)
-        // is satisfied and the bound actually runs.
+        // auto floor's round schedule. The base its POSTED marker carried
+        // matches this round's base, so the seam bound's continuity gate
+        // (#10136 R18-3) is satisfied and the bound actually runs.
         return JSON.stringify({
           round: 7,
           findings: [],
           posted: 1,
           floor: 'c',
-          mergeBaseSha: BASE,
+          mb: BASE,
         });
       }
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -1777,8 +1777,8 @@ describe('fetch-pr report assembly', () => {
           findings: [],
           posted: 1,
           floor: 'c',
-          // The previous round's capture ran over a DIFFERENT base.
-          mergeBaseSha: 'c'.repeat(40),
+          // The previous round POSTED over a DIFFERENT base.
+          mb: 'c'.repeat(40),
         });
       }
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -1875,7 +1875,7 @@ describe('fetch-pr report assembly', () => {
           findings: [],
           posted: 1,
           floor: 'c',
-          mergeBaseSha: BASE,
+          mb: BASE,
         });
       }
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -1898,12 +1898,16 @@ describe('fetch-pr report assembly', () => {
     expect(err).not.toContain('no interaction file needed seam-bounding');
   });
 
-  it("stamps this round's merge base into the side file for the next round's gate (#10136 R18-3)", async () => {
-    // The carry chain: a published round records the base its diff was
-    // captured over, preserving the ledger's own fields, so the NEXT
-    // round's continuity gate has something to compare against. Written
-    // through the same write-temp-then-rename discipline the file's own
-    // writer uses.
+  it('a capture writes no continuity stamp — the base rides the posted marker (#10136 R18-3)', async () => {
+    // A stamp written by the CAPTURE proves only that a diff was published:
+    // the anchor-recovery path runs `fetch-pr` twice in one round, and the
+    // second run read back the first run's stamp, so `prevMergeBase ===
+    // mergeBaseSha` was a tautology about this round's own discarded
+    // capture. An `upToDate` or `emptyDiff` stop published and stamped
+    // without launching an agent at all. The base now rides the marker the
+    // POSTING boundary writes, so a capture vouches nothing and creates no
+    // side file — which is also what kept a contentless `{mergeBaseSha}`
+    // stub from diverting `pr-context`'s ledger recovery (#10136 R20-1).
     anchorIsValid();
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
@@ -1919,110 +1923,11 @@ describe('fetch-pr report assembly', () => {
 
     await reportFor({ since: ANCHOR });
 
-    const stamp = producerMocks.writeFileSync.mock.calls.find(([path]) =>
-      String(path).includes('qwen-review-pr-42-prev-ledger.json'),
-    );
-    expect(stamp).toBeDefined();
-    const written = JSON.parse(String(stamp?.[1])) as Record<string, unknown>;
-    expect(written['mergeBaseSha']).toBe(BASE);
-    // The ledger's own fields survive the stamp.
-    expect(written['round']).toBe(7);
-    expect(written['posted']).toBe(1);
-  });
-
-  it('a retryable refusal does NOT stamp the base its discarded fallback was captured over (#10136 R18-3 round 19)', async () => {
-    // `capture-failed` publishes a fallback full range that the skill's
-    // same-round retry discards before any agent launches — publication
-    // there is not "a round reviewed it". If the stamp landed anyway,
-    // the retry's own continuity gate would pass on hunks no round ever
-    // published. Drive exactly that: the full range captures fine while
-    // the delta read fails, so the plan carries `diffPath !== null`
-    // beside `incremental.reason === 'capture-failed'`, and the side
-    // file's stamp must stay the OLD base.
-    anchorIsValid();
-    producerMocks.resolveMergeBase.mockReturnValue({
-      sha: BASE,
-      baseFetchFailed: false,
-    });
-    producerMocks.gitRaw.mockImplementation((...args: string[]) => {
-      if (args.includes(`${ANCHOR}..f00df00df00d`)) {
-        throw new Error('git diff timed out');
-      }
-      if (args.includes(`${BASE}..f00df00df00d`)) {
-        return Buffer.from(FULL_DIFF);
-      }
-      return Buffer.from('');
-    });
-    const PREV_BASE = 'c'.repeat(40);
-    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
-      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
-        return JSON.stringify({
-          round: 7,
-          findings: [],
-          posted: 1,
-          floor: 'c',
-          mergeBaseSha: PREV_BASE,
-        });
-      }
-      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-    });
-
-    const report = await reportFor({ since: ANCHOR });
-
-    expect(report.incremental.effective).toBe(false);
-    expect(report.incremental.reason).toBe('capture-failed');
-    expect(report.diffPath).not.toBeNull();
-    // No stamp write reached the side file: the previous round's base
-    // survives for the retry's continuity gate. (In this mocked-fs
-    // harness the stamp's temp write is the observable half — the
-    // guarded code path never reaches it at all.)
-    const stamp = producerMocks.writeFileSync.mock.calls.find(([path]) =>
-      String(path).includes('qwen-review-pr-42-prev-ledger.json'),
-    );
-    expect(stamp).toBeUndefined();
-  });
-
-  it('a nothing-to-narrow demotion still stamps — its full range IS reviewed (#10136 R18-3 round 19)', async () => {
-    // The guard keys on the RETRYABLE refusals only: `nothing-to-narrow`
-    // publishes a full range the round's agents DO consume (and SKILL.md
-    // forbids retrying it), so suppressing the stamp there would keep
-    // the bound permanently off on the long-lived PRs it exists for.
-    anchorIsValid();
-    producerMocks.resolveMergeBase.mockReturnValue({
-      sha: BASE,
-      baseFetchFailed: false,
-    });
-    // The delta carries a file the full range does not: the join fails
-    // closed, the anchor is refused `nothing-to-narrow`, and the full
-    // range publishes instead.
-    servesBothRanges(
-      FULL_DIFF,
-      `${FULL_DIFF}${[
-        'diff --git a/ghost.ts b/ghost.ts',
-        '--- a/ghost.ts',
-        '+++ b/ghost.ts',
-        '@@ -1,1 +1,2 @@',
-        ' keep',
-        '+added',
-        '',
-      ].join('\n')}`,
-    );
-    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
-      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
-        return JSON.stringify({ round: 7, findings: [], posted: 1 });
-      }
-      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-    });
-
-    const report = await reportFor({ since: ANCHOR });
-
-    expect(report.incremental.effective).toBe(false);
-    expect(report.incremental.reason).toBe('nothing-to-narrow');
-    const stamp = producerMocks.writeFileSync.mock.calls.find(([path]) =>
-      String(path).includes('qwen-review-pr-42-prev-ledger.json'),
-    );
-    expect(stamp).toBeDefined();
-    expect(JSON.parse(String(stamp?.[1]))['mergeBaseSha']).toBe(BASE);
+    expect(
+      producerMocks.writeFileSync.mock.calls.filter(([path]) =>
+        String(path).includes('qwen-review-pr-42-prev-ledger.json'),
+      ),
+    ).toEqual([]);
   });
 
   // The capture-time recovery of the operator's RECORDED floor (#10136
@@ -2036,7 +1941,7 @@ describe('fetch-pr report assembly', () => {
         findings: [],
         posted: 1,
         floor: 'c',
-        mergeBaseSha: BASE,
+        mb: BASE,
       });
     }
     return null;

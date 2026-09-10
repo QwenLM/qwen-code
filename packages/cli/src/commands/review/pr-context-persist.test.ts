@@ -110,27 +110,19 @@ describe('persistRecoveredLedger', () => {
     }
   });
 
-  it("carries the fetch's merge-base stamp through the identity-known rewrite (#10136 R18-3)", () => {
-    // The stamp is a fact about THIS machine's capture, not a marker
-    // field: `fetch-pr` writes it when a round publishes, and the seam
-    // bound's continuity gate reads it next round. A wholesale rewrite
-    // that dropped it would keep the gate permanently unprovable; a file
-    // with no stamp writes none (the bound simply stays off).
+  it("writes the marker's merge base, and drops it on an anonymous advance (#10136 R18-3)", () => {
+    // The base rides the MARKER — the round that posted it is the round
+    // that vouches it — and the recovery persists it here for the next
+    // round's seam-bound continuity gate. It falls with the anchor: an
+    // anonymous counter-advance can re-vouch neither, and a file that
+    // carries no base simply keeps the next round's bound off.
     const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
     const side = join(dir, 'side.json');
     try {
-      writeFileSync(
-        side,
-        JSON.stringify({
-          round: 1,
-          findings: [],
-          mergeBaseSha: 'b'.repeat(40),
-        }),
-      );
       persistRecoveredLedger(
         side,
         {
-          ledger,
+          ledger: { ...ledger, sha: 'c'.repeat(40), mb: 'b'.repeat(40) },
           commitId: 'a'.repeat(40),
           reviewId: 42,
           foreign: false,
@@ -142,26 +134,61 @@ describe('persistRecoveredLedger', () => {
         string,
         unknown
       >;
-      expect(written['mergeBaseSha']).toBe('b'.repeat(40));
-      // …and a stamp-less predecessor yields a stamp-less file: the field
-      // is never invented, only carried.
-      writeFileSync(side, JSON.stringify({ round: 1, findings: [] }));
+      expect(written['mb']).toBe('b'.repeat(40));
+      // The anonymous counter-advance keeps this machine's own work list
+      // and sheds every fact about the round it advances past — the
+      // anchor, its model, and the base beside them.
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { v: 1, round: 9, findings: [] },
+          commitId: null,
+          reviewId: 44,
+          foreign: true,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: false },
+      );
+      const advanced = JSON.parse(readFileSync(side, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+      expect(advanced['round']).toBe(9);
+      expect('mb' in advanced).toBe(false);
+      expect('sha' in advanced).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a roundless stub does not divert the anonymous recovery (#10136 R20-1)', () => {
+    // The anonymous counter-advance branch protects a work list this
+    // machine already holds. Keyed on the file merely EXISTING, a
+    // contentless object diverted the recovery into it: `exRound` read -1,
+    // the branch advanced a counter over nothing, and the recovered
+    // findings were never written — so the next round had no ledger to
+    // dedup against and re-posted what the previous round already reported.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(side, JSON.stringify({ mergeBaseSha: 'b'.repeat(40) }));
       persistRecoveredLedger(
         side,
         {
           ledger,
           commitId: 'a'.repeat(40),
-          reviewId: 43,
+          reviewId: 42,
           foreign: false,
           merged: false,
         },
-        { noOwnReview: false, identityKnown: true },
+        { noOwnReview: false, identityKnown: false },
       );
-      const unstamped = JSON.parse(readFileSync(side, 'utf8')) as Record<
+      const written = JSON.parse(readFileSync(side, 'utf8')) as Record<
         string,
         unknown
       >;
-      expect('mergeBaseSha' in unstamped).toBe(false);
+      expect(written['findings']).toEqual(ledger.findings);
+      expect(written['anonymousAdoption']).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

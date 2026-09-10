@@ -27,13 +27,7 @@
 
 import type { CommandModule } from 'yargs';
 import { createHash } from 'node:crypto';
-import {
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -1443,7 +1437,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         typeof sideLedger === 'object' &&
         !Array.isArray(sideLedger)
       ) {
-        const carried = (sideLedger as Record<string, unknown>)['mergeBaseSha'];
+        // `mb` — the marker field the previous round POSTED and
+        // `pr-context`'s recovery persisted here (#10136 R18-3). A stamp
+        // written by a capture would prove only that a diff was published;
+        // this one exists exactly when a round posted a marker certifying
+        // the range it reviewed, and it survives the `.qwen/` wipe every
+        // CI run begins with, because it lives on the pull request.
+        const carried = (sideLedger as Record<string, unknown>)['mb'];
         prevMergeBase =
           typeof carried === 'string' && carried !== '' ? carried : null;
       }
@@ -1957,71 +1957,6 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     };
 
     writeFileSync(out, stringifyPlanReport(result), 'utf8');
-
-    // Stamp the merge base this round's published diff was captured over
-    // into the side file, so the NEXT round's seam bound can prove base
-    // continuity (#10136 R18-3): the bound sheds an interaction file's
-    // hunks on the premise a prior round published them, which holds only
-    // while the merge base holds still between rounds. Stamped exactly
-    // when a diff was published AND the round is not a retryable refusal
-    // (#10136 R18-3 round 19): `capture-failed`/`base-untrusted` publish
-    // a fallback full range that SKILL.md's same-round retry discards
-    // before any agent launches, so publication there is not a proxy for
-    // "a round reviewed it" — a stamp off one would let the retry's own
-    // continuity gate pass on hunks no round ever published. The
-    // non-retryable refusals (`nothing-to-narrow`, `partition-failed`,
-    // the deterministic anchor refusals) publish a full range the
-    // round's agents DO consume, so they stamp. Best-effort and
-    // write-temp-then-rename like the file's own writer
-    // (`persistRecoveredLedger`): a torn write must never restart the
-    // round id space the file carries, and a failed stamp simply keeps
-    // the next round's bound off.
-    const retryableRefusal =
-      anchor !== null &&
-      anchor.incremental.effective === false &&
-      (anchor.incremental.reason === 'capture-failed' ||
-        anchor.incremental.reason === 'base-untrusted');
-    if (diffPath !== null && mergeBaseSha !== null && !retryableRefusal) {
-      const sideFile = join(
-        dirname(out),
-        `qwen-review-pr-${prNumber}-prev-ledger.json`,
-      );
-      try {
-        let carried: Record<string, unknown> = {};
-        try {
-          const parsed: unknown = JSON.parse(readFileSync(sideFile, 'utf8'));
-          if (
-            parsed !== null &&
-            typeof parsed === 'object' &&
-            !Array.isArray(parsed)
-          ) {
-            carried = parsed as Record<string, unknown>;
-          }
-        } catch {
-          // No readable file yet — the stamp is the only field written.
-        }
-        if (carried['mergeBaseSha'] !== mergeBaseSha) {
-          const tmp = `${sideFile}.${process.pid}.tmp`;
-          writeFileSync(
-            tmp,
-            JSON.stringify({ ...carried, mergeBaseSha }, null, 2),
-            'utf8',
-          );
-          try {
-            renameSync(tmp, sideFile);
-          } catch (err) {
-            try {
-              rmSync(tmp, { force: true });
-            } catch {
-              // Debris removal is best-effort.
-            }
-            throw err;
-          }
-        }
-      } catch {
-        // Best-effort: the next round's bound stays off, never wrong.
-      }
-    }
 
     // 6. Prebuild the worktree — install and compile it through Agent 7's
     //    own `build-test` — when this run asked for it (CI does; issue

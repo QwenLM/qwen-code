@@ -93,9 +93,14 @@ interface Classification {
   /** Defined exactly when `outcome` is `unknown`. */
   failure: CertificationFailure | null;
   /**
-   * Defined exactly when `outcome` is `yielded`: the first filed finding's
-   * file — the entry a later round's findings list must carry to prove it
-   * was built after the yield merged.
+   * The `file:line` TOKEN of the first finding this return filed — the entry
+   * a later round's findings list must carry to prove it was built after
+   * that finding merged. Set on a `yielded` return, and on the `unknown`
+   * returns that follow a filing this classifier refused as a quotation
+   * (#10136 R21-12): the orchestrator merges what an auditor reports
+   * whatever the ruling here, so the refused line is staleness evidence even
+   * where it is not a certified yield. A token, not the rendered line, so
+   * membership can be asked exactly (#10136 R20-4).
    */
   filedFile?: string;
 }
@@ -207,6 +212,19 @@ export function bakedRanges(
 
 /** A finding's file line — the shape `FINDING_FORMAT` asks every role for. */
 const FILE_LINE_RE = /\*\*File:\*\*\s*([^\n]*)/g;
+
+/**
+ * The same marker where a findings LIST puts it: at the start of its own
+ * line, a bullet allowed before it, and the rest of that line captured
+ * without crossing into the next one. Anchored because `FILE_LINE_RE` is
+ * not (#10136 R20-3), and a list is read as lines, not as text: the
+ * unanchored form matches the marker anywhere — including an entry's own
+ * prose quoting it, which contributes a junk token — and its `\s*` crosses
+ * the newline, so a quoted marker at a line's end captures the NEXT line
+ * whole and the genuine entry there yields no token at all.
+ */
+const ENTRY_FILE_LINE_RE =
+  /^[^\S\r\n]*(?:[-*+][^\S\r\n]*)?\*\*File:\*\*[^\S\r\n]*([^\r\n]*)/gm;
 
 /**
  * The other half of a filed finding. A `**File:**` line alone is not proof
@@ -500,14 +518,51 @@ const UNVERIFIED_FINDING_TAG_RE = /—\s*\[unverified\]/gi;
  */
 function entryTokensOf(list: string): ReadonlySet<string> | null {
   const out = new Set<string>();
-  for (const m of list.matchAll(FILE_LINE_RE)) {
-    const token = (m[1] ?? '')
-      .replace(UNVERIFIED_FINDING_TAG_RE, ' ')
-      .trim()
-      .split(/\s+/)[0];
-    if (token !== undefined && token !== '') out.add(token);
+  for (const rest of entryRestsOf(list)) {
+    const token = fileLineToken(rest);
+    if (token !== '') out.add(token);
   }
   return out.size === 0 && list.trim() !== '' ? null : out;
+}
+
+/** The rest of each entry line of a findings list, in order. */
+function entryRestsOf(list: string): string[] {
+  return [...list.matchAll(ENTRY_FILE_LINE_RE)].map((m) => m[1] ?? '');
+}
+
+/**
+ * The `file:line` an entry line names: its first whitespace-delimited token,
+ * tag state stripped. Empty when the line names nothing.
+ */
+function fileLineToken(rest: string): string {
+  return (
+    rest.replace(UNVERIFIED_FINDING_TAG_RE, ' ').trim().split(/\s+/)[0] ?? ''
+  );
+}
+
+/**
+ * Whether a return's file line quotes this listed entry line. The listed
+ * line is the bar — a quotation reproduces it — and the comparison ends at
+ * a TOKEN boundary, so a shorter `file:line` cannot satisfy a longer one it
+ * merely prefixes (#10136 R21-12, R20-4).
+ */
+function quotesEntryLine(rest: string, file: string): boolean {
+  if (!rest.startsWith(file)) return false;
+  const next = rest.charAt(file.length);
+  return next === '' || /\s/.test(next);
+}
+
+/**
+ * Whether two findings lists carry the same entries, compared as SETS of
+ * `file:line` tokens. Either side unreadable — a non-empty list no entry
+ * extracts from — reads as the same list, the fail-closed direction
+ * everywhere this is asked: "the receipt cannot be proven newer".
+ */
+function sameEntrySet(a: string, b: string): boolean {
+  const ea = entryTokensOf(a);
+  const eb = entryTokensOf(b);
+  if (ea === null || eb === null) return true;
+  return ea.size === eb.size && [...ea].every((x) => eb.has(x));
 }
 
 function findingsListFor(
@@ -602,6 +657,8 @@ function classifyReturn(
     return { outcome: 'unknown', failure: 'auditor never returned' };
   }
   const text = rec.finalText.trim();
+  /** A filing this walk refused as a quotation — see the refusal below. */
+  let refusedFile: string | undefined;
   if (SEVERITY_LINE_RE.test(text)) {
     // The cumulative list is on hand for this agent: since #8597 it rides
     // a digest-named findings file the launch prompt points at (before, it
@@ -612,11 +669,30 @@ function classifyReturn(
     // list cannot be a new finding against it. Skipping costs an audit at
     // most; counting a quotation re-opens the never-retire direction on
     // the loop's most common honest return.
+    const listed = entryRestsOf(findingsList);
     for (const m of text.matchAll(FILE_LINE_RE)) {
       const file = (m[1] ?? '').trim();
       if (file === '' || /^N\/A\b/i.test(file)) continue;
-      if (findingsList.includes(`**File:** ${file}`)) continue;
-      return { outcome: 'yielded', failure: null, filedFile: file };
+      // A quotation reproduces a listed entry's own LINE, so that line is
+      // the bar — matched at a token boundary, never as a raw substring
+      // (#10136 R21-12): a filing at `src/pay.ts:12` is no quotation of a
+      // listed `src/pay.ts:123`, and refusing it as one dropped a live
+      // finding into an `unknown` that named nothing.
+      if (listed.some((rest) => quotesEntryLine(rest, file))) {
+        // The refusal stands — counting a quotation re-opens the
+        // never-retire direction — but the line rides along as staleness
+        // EVIDENCE: the orchestrator merges what an auditor reports
+        // whatever this classifier ruled, so a later dry receipt whose
+        // list does not carry this entry was built before it (#10136
+        // R21-12). Evidence only; the outcome below is unchanged.
+        refusedFile ??= fileLineToken(file);
+        continue;
+      }
+      return {
+        outcome: 'yielded',
+        failure: null,
+        filedFile: fileLineToken(file),
+      };
     }
   }
   // The receipt is judged WITHOUT its budget-gap disclosure lines. Two
@@ -661,6 +737,7 @@ function classifyReturn(
   const unknown = (failure: CertificationFailure): Classification => ({
     outcome: 'unknown',
     failure,
+    ...(refusedFile === undefined ? {} : { filedFile: refusedFile }),
   });
   if (rec.successfulToolCalls === 0) return unknown('no successful tool calls');
   if (rec.diffToolCalls === 0) return unknown('no read of the diff');
@@ -952,6 +1029,22 @@ export function scheduleReverseAuditRound(
         digests: Set<string>;
         fileLists: Set<string>;
         filedFiles: Set<string>;
+        /**
+         * One row per audit MEMBER of the round, each with the list it was
+         * launched against. The round-level fold above hides these —
+         * `mergeOutcomes` folds `['unknown', 'dry']` to `'dry'` — and the
+         * narrowing branch needs them: a dry receipt beside an uncertified
+         * sibling launched against the same list is a receipt that predates
+         * whatever that sibling filed (#10136 R20-2). A record no transcript
+         * certified is a member too — it names no outcome, and the round was
+         * still scheduled for it.
+         */
+        members: Array<{
+          outcome: AuditOutcome;
+          digest: string;
+          /** Its findings list, when read back from the file; else null. */
+          fileList: string | null;
+        }>;
       }
     >
   >();
@@ -967,11 +1060,32 @@ export function scheduleReverseAuditRound(
       digests: new Set<string>(),
       fileLists: new Set<string>(),
       filedFiles: new Set<string>(),
+      members: [] as Array<{
+        outcome: AuditOutcome;
+        digest: string;
+        fileList: string | null;
+      }>,
     };
     entry.outcomes.push(...classificationsByRecord[i].map((c) => c.outcome));
     entry.failures.push(...failuresByRecord[i]);
     for (const c of classificationsByRecord[i]) {
       if (c.filedFile !== undefined) entry.filedFiles.add(c.filedFile);
+    }
+    const fileList = rec.findingsFromFile ? rec.findings : null;
+    if (classificationsByRecord[i].length === 0) {
+      // A record no transcript certified: nothing proves it dry, and the
+      // round was scheduled for it — an uncertified member, not an absent
+      // one. `outcomes` is left alone, so the fold and the ordinary
+      // retirement rule read exactly what they always read.
+      entry.members.push({ outcome: 'unknown', digest: rec.digest, fileList });
+    } else {
+      for (const c of classificationsByRecord[i]) {
+        entry.members.push({
+          outcome: c.outcome,
+          digest: rec.digest,
+          fileList,
+        });
+      }
     }
     entry.digests.add(rec.digest);
     if (rec.findingsFromFile) entry.fileLists.add(rec.findings);
@@ -992,6 +1106,7 @@ export function scheduleReverseAuditRound(
         digests: [...entry.digests],
         fileLists: [...entry.fileLists],
         filedFiles: [...entry.filedFiles],
+        members: entry.members,
       }))
       .sort((a, b) => a.round - b.round);
     // The posture narrowing, ruled before retirement so a non-delta chunk
@@ -1041,31 +1156,58 @@ export function scheduleReverseAuditRound(
             a.fileLists.length > 0 &&
             latest.fileLists.length > 0 &&
             a.fileLists.some((l) =>
-              latest.fileLists.some((ll) => {
-                const ea = entryTokensOf(l);
-                const eb = entryTokensOf(ll);
-                if (ea === null || eb === null) return true;
-                return ea.size === eb.size && [...ea].every((x) => eb.has(x));
-              }),
+              latest.fileLists.some((ll) => sameEntrySet(l, ll)),
             )
           )
             return true;
-          // A yield filed a finding; a receipt whose list carries no
+          // A round filed a finding; a receipt whose list carries no
           // entry for that file was built before the finding merged.
           // Only a list read back from its findings file is evidence here
           // — a prompt fallback names no entries either way (the serial
-          // shape narrows on it exactly as before). File-line
-          // granularity, the same bar the yield scan itself applies to
-          // tell a filing from a quotation.
+          // shape narrows on it exactly as before). Membership of the
+          // `file:line` TOKEN, never a substring of the rendered line
+          // (#10136 R20-4): `**File:** src/other.ts:70` contains
+          // `**File:** src/other.ts:7`, and a raw match let a DIFFERENT
+          // entry certify that the receipt had seen this one. A list that
+          // extracts no entry cannot certify anything, so it reads as not
+          // carrying the token — the same fail-closed direction as the
+          // arms above.
           return (
             latest.fileLists.length > 0 &&
             a.filedFiles.some(
               (f) =>
-                !latest.fileLists.some((l) => l.includes(`**File:** ${f}`)),
+                !latest.fileLists.some((l) => {
+                  const seen = entryTokensOf(l);
+                  return seen !== null && seen.has(f);
+                }),
             )
           );
         });
-        if (!staleAgainstYield) {
+        // The within-round analogue of arms 1 and 2 (#10136 R20-2). Every
+        // arm above iterates ROUND-level folds, and `mergeOutcomes` folds
+        // `['unknown', 'dry']` to `'dry'` — so a round holding one
+        // substantive dry receipt beside an uncertified sibling reads as
+        // wholly dry, passes the bar above, and is skipped by all three
+        // arms. The sibling's own filing merges into the cumulative list
+        // whatever this module ruled about its receipt, so a dry member
+        // launched against the SAME list — same digest, or the same entry
+        // tokens — was built before it, exactly the evidence arms 1 and 2
+        // rule on one round out. Ruled here, in the narrowing branch:
+        // `mergeOutcomes`' contract is load-bearing for the ordinary
+        // retirement rule, which must keep reading what it always read.
+        const dryMembers = latest.members.filter((m) => m.outcome === 'dry');
+        const staleWithinRound = latest.members.some(
+          (m) =>
+            m.outcome !== 'dry' &&
+            dryMembers.some(
+              (d) =>
+                m.digest === d.digest ||
+                (m.fileList !== null &&
+                  d.fileList !== null &&
+                  sameEntrySet(m.fileList, d.fileList)),
+            ),
+        );
+        if (!staleAgainstYield && !staleWithinRound) {
           narrowed.push({ chunkId, dryRound: latest.round });
           continue;
         }

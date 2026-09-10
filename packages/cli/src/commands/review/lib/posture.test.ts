@@ -81,8 +81,6 @@ describe('resolveCriticalPosture', () => {
     expect(
       resolveCriticalPosture({ sideLedger: { round: 0, flatRounds: 9 } }),
     ).toBeNull();
-    expect(
-      resolveCriticalPosture({ sideLedger: { round: '7' } }),
-    ).toBeNull();
+    expect(resolveCriticalPosture({ sideLedger: { round: '7' } })).toBeNull();
   });
 });

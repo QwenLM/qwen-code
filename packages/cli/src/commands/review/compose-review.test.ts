@@ -173,6 +173,8 @@ function plan(
     host?: string;
     /** The head fetch-pr resolved — the ledger marker's incremental anchor. */
     fetchedSha?: string;
+    /** The base the capture ran over — the marker's continuity stamp. */
+    mergeBaseSha?: string;
     incremental?: {
       since: string;
       effective: boolean;
@@ -189,6 +191,9 @@ function plan(
     JSON.stringify({
       diffPathAbsolute: DIFF,
       ...(opts.fetchedSha === undefined ? {} : { fetchedSha: opts.fetchedSha }),
+      ...(opts.mergeBaseSha === undefined
+        ? {}
+        : { mergeBaseSha: opts.mergeBaseSha }),
       ...(opts.reviewModelId === undefined
         ? {}
         : { reviewModelId: opts.reviewModelId }),
@@ -482,6 +487,7 @@ function coveredPlan(
     prNumber?: string | number;
     host?: string;
     fetchedSha?: string;
+    mergeBaseSha?: string;
     incremental?: {
       since: string;
       effective: boolean;
@@ -1662,6 +1668,43 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     // that LET the anchor ride fails here.
     expect(parseLedger(r.body)?.round).toBe(1);
     expect(parseLedger(r.body)?.sha).toBeUndefined();
+  });
+
+  it("the marker carries the round's merge base, and withholds it with the anchor (#10136 R18-3)", () => {
+    // The seam-bounded widening's continuity gate reads the base a PRIOR
+    // round captured over. Written here, at the posting boundary, so the
+    // stamp belongs to a round that actually reviewed the range — and it
+    // survives the `.qwen/` wipe every CI run begins with, because the
+    // marker lives on the pull request. It rides the anchor's rung: a round
+    // that withholds its own sha vouches no base either.
+    const anchored = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+        mergeBaseSha: 'b'.repeat(40),
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+    });
+    expect(parseLedger(anchored.body)?.sha).toBe('deadbeef00112233');
+    expect(parseLedger(anchored.body)?.mb).toBe('b'.repeat(40));
+
+    const withheld = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+        mergeBaseSha: 'b'.repeat(40),
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      unreviewedDimensions: ['security — the relaunch returned no evidence'],
+    });
+    expect(parseLedger(withheld.body)?.sha).toBeUndefined();
+    expect(parseLedger(withheld.body)?.mb).toBeUndefined();
   });
 
   it('the marker does not shadow other reverse-audit scopes the caller disclosed', () => {
