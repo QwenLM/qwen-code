@@ -141,7 +141,12 @@ for (const theme of ['light', 'dark']) {
     await expect(composer).toHaveCSS('border-top-color', restingColor);
     const usage = page.locator('[data-web-shell-context-usage]');
     const percentage = usage.getByText('60.0%', { exact: true });
+    const secondaryColor =
+      theme === 'dark' ? 'rgb(160, 160, 160)' : 'rgb(95, 98, 89)';
+    const errorColor =
+      theme === 'dark' ? 'rgb(252, 129, 129)' : 'rgb(192, 54, 44)';
     await expect(percentage).toBeVisible();
+    await expect(percentage).toHaveCSS('color', secondaryColor);
     for (const width of [520, 521]) {
       await surface.evaluate((element, width) => {
         (element as HTMLElement).style.width = `${width}px`;
@@ -158,6 +163,25 @@ for (const theme of ['light', 'dark']) {
       expect(sendBox!.x + sendBox!.width).toBeLessThanOrEqual(
         surfaceBox!.x + surfaceBox!.width,
       );
+      const left = surface.locator('[class*="toolbarLeft"]');
+      await expect
+        .poll(() =>
+          left.evaluate(
+            (element) => element.scrollWidth <= element.clientWidth + 1,
+          ),
+        )
+        .toBe(true);
+      const model = surface.locator('[data-web-shell-model-button]');
+      await expect
+        .poll(() =>
+          model.evaluate((element) => {
+            const { x, y, width, height } = element.getBoundingClientRect();
+            return element.contains(
+              document.elementFromPoint(x + width / 2, y + height / 2),
+            );
+          }),
+        )
+        .toBe(true);
     }
     await surface.evaluate((element) =>
       (element as HTMLElement).style.removeProperty('width'),
@@ -185,16 +209,25 @@ for (const theme of ['light', 'dark']) {
     await usage.hover();
     await expect(tooltip).toContainText('60,000 tokens');
     await expect(tooltip).toContainText('100,000 tokens');
+    await expect(tooltip.locator('dt')).toHaveCount(2);
+    for (const label of await tooltip.locator('dt').all()) {
+      await expect(label).toHaveCSS('color', secondaryColor);
+    }
     await expect(tooltip).toContainText(
       'Click to view the breakdown in the conversation.',
     );
+    await expect(
+      tooltip.getByText('Click to view the breakdown in the conversation.', {
+        exact: true,
+      }),
+    ).toHaveCSS('color', secondaryColor);
     expect(contextRequests).toEqual([]);
     await page.screenshot({
       path: testInfo.outputPath(`context-hover-${theme}.png`),
     });
     await usage.click();
     const history = page.locator('[data-web-shell-message-list]');
-    const cards = history.getByRole('region', {
+    const cards = history.getByRole('group', {
       name: 'Context Usage',
       exact: true,
     });
@@ -203,9 +236,18 @@ for (const theme of ['light', 'dark']) {
     expect(contextRequests).toEqual([false]);
     await cards.first().getByRole('button', { name: 'View details' }).click();
     await expect(cards).toHaveCount(2);
+    await expect(
+      history.getByRole('region', { name: 'Context Usage', exact: true }),
+    ).toHaveCount(0);
     expect(contextRequests).toEqual([false, true]);
     const detailCard = cards.last();
     await expect(detailCard.locator('details[open]')).toHaveCount(4);
+    await expect(
+      detailCard
+        .locator('summary')
+        .filter({ hasText: 'Built-in tools' })
+        .locator('span'),
+    ).toHaveCSS('color', secondaryColor);
     await expect(detailCard.getByText(longName, { exact: true })).toBeVisible();
     await expect(detailCard.getByText(longName, { exact: true })).toHaveCSS(
       'color',
@@ -241,6 +283,10 @@ for (const theme of ['light', 'dark']) {
       .locator('details')
       .filter({ hasText: 'Built-in tools' });
     await expect(tools.locator('summary')).toHaveText('Built-in tools (2)');
+    await expect(tools.locator('summary span')).toHaveCSS(
+      'color',
+      secondaryColor,
+    );
     await expect(
       panel.getByText('run_shell_command', { exact: true }),
     ).toBeHidden();
@@ -298,15 +344,12 @@ for (const theme of ['light', 'dark']) {
         'warning',
         theme === 'dark' ? 'rgb(236, 201, 75)' : 'rgb(154, 106, 0)',
       ],
-      [
-        81_000,
-        'error',
-        theme === 'dark' ? 'rgb(252, 129, 129)' : 'rgb(192, 54, 44)',
-      ],
+      [81_000, 'error', errorColor],
+      [120_000, 'error', errorColor],
     ] as const) {
       status.usage.totalTokens = tokens;
       status.usage.breakdown.messages = tokens - 40_000;
-      status.usage.breakdown.freeSpace = 90_000 - tokens;
+      status.usage.breakdown.freeSpace = Math.max(0, 90_000 - tokens);
       await page
         .getByRole('button', { name: 'Ultra wide', exact: true })
         .focus();
@@ -342,6 +385,16 @@ for (const theme of ['light', 'dark']) {
         'color',
         color,
       );
+      if (tokens > status.usage.contextWindowSize) {
+        const usedValue = cards
+          .last()
+          .locator('[class*="row"]')
+          .filter({ has: page.getByText('Used', { exact: true }) })
+          .locator('[class*="value"]');
+        await expect(usedValue).toHaveText('120.0k tokens (>100%)');
+        await expect(usedValue).toHaveCSS('color', errorColor);
+        await expect(usedValue).toHaveCSS('text-align', 'right');
+      }
     }
   });
 }

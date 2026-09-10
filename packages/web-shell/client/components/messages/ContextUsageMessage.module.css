@@ -201,6 +201,10 @@
   cursor: pointer;
 }
 
+.detailSummary > .secondary {
+  color: var(--chat-editor-text-secondary);
+}
+
 .detailSummary:hover {
   color: var(--agent-blue-500);
 }

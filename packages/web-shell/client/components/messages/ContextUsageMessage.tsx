@@ -298,6 +298,7 @@ export function ContextUsageMessage({
   return (
     <section
       className={`${styles.panel}${compact ? ` ${styles.compact}` : ''}`}
+      role={compact ? undefined : 'group'}
       aria-label={compact ? undefined : t('contextUsage.title')}
     >
       {!compact && (

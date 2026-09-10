@@ -166,6 +166,7 @@ describe('ContextUsageMessage', () => {
     const compactContainer = render(makeStatus(60, false), true);
     expect(compactContainer.querySelector('[class*="title"]')).toBeNull();
     expect(compactContainer.querySelector('section[aria-label]')).toBeNull();
+    expect(compactContainer.querySelector('section[role]')).toBeNull();
     expect(compactContainer.querySelector('[class*="compact"]')).not.toBeNull();
 
     const normalContainer = render(makeStatus(60, false));
@@ -175,6 +176,17 @@ describe('ContextUsageMessage', () => {
         .querySelector('section[aria-label]')
         ?.getAttribute('aria-label'),
     ).toBe('Context Usage');
+  });
+
+  it('uses named groups for repeated transcript readings without adding landmarks', () => {
+    for (const container of [
+      render(makeStatus(60, false)),
+      render(makeStatus(60, false)),
+    ]) {
+      const card = container.querySelector('section')!;
+      expect(card.getAttribute('role')).toBe('group');
+      expect(card.getAttribute('aria-label')).toBe('Context Usage');
+    }
   });
 
   it('renders full names in sidebar and transcript details', () => {

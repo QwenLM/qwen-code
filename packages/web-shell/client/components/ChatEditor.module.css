@@ -1715,6 +1715,10 @@
   font-variant-numeric: tabular-nums;
 }
 
+.contextUsagePercentage[data-level='normal'] {
+  color: var(--chat-editor-text-secondary);
+}
+
 .contextUsagePercentage[data-level='warning'] {
   color: var(--warning-color);
 }
@@ -1777,7 +1781,7 @@
 
 .contextTooltipStats dt,
 .contextTooltipHint {
-  color: var(--muted-foreground);
+  color: var(--chat-editor-text-secondary);
 }
 
 .contextTooltipStats dd {
