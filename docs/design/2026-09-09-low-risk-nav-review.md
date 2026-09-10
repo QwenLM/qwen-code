@@ -1,5 +1,7 @@
 # Focused automatic review for static documentation navigation
 
+[English](2026-09-09-low-risk-nav-review.md) | [简体中文](2026-09-09-low-risk-nav-review.zh-CN.md)
+
 ## Problem
 
 PR #11426 changed one navigation entry (+1/-3), but the automatic review
