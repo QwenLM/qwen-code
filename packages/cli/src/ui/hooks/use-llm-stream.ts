@@ -3008,6 +3008,22 @@ export const useLlmStream = (
               llmMessageBuffer = '';
               assistantOutputStarted = false;
               break;
+            case ServerLlmEventType.GoalSettlementFailed:
+              flushBufferedStreamEvents();
+              if (pendingHistoryItemRef.current) {
+                commitItemInOrder(
+                  pendingHistoryItemRef.current,
+                  userMessageTimestamp,
+                );
+                setPendingHistoryItem(null);
+              }
+              addItem(
+                { type: 'warning', text: event.value },
+                userMessageTimestamp,
+              );
+              llmMessageBuffer = '';
+              assistantOutputStarted = false;
+              break;
             case ServerLlmEventType.UserPromptSubmitBlocked:
               flushBufferedStreamEvents();
               userPromptBlocked = true;

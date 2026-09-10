@@ -20391,6 +20391,37 @@ describe('useLlmStream', () => {
   });
 
   describe('HookSystemMessage Event', () => {
+    it('shows Goal settlement failures as warnings without Stop attribution', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.GoalSettlementFailed,
+            value: 'The approved Goal could not be started.',
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('set a goal');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'warning',
+            text: 'The approved Goal could not be started.',
+          }),
+          expect.any(Number),
+        );
+      });
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'stop_hook_system_message' }),
+        expect.any(Number),
+      );
+    });
+
     it('commits staged inline content and restarts after a displayed Goal state', async () => {
       const image = {
         data: 'aW1hZ2U=',
