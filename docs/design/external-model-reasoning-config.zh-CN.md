@@ -32,7 +32,9 @@ Profile 复用已有思考请求格式：
 
 省略 profile 时使用已有推断；其余字段省略时继承推断或所选 profile 的行为。显式声明覆盖与思考相关的模型名和域名推断，不选择 SDK、端点或凭证。保留已有 `capabilities.reasoning` 的兼容性；提供新生成配置时，以新配置为准。
 
-档位使用 `low/medium/high/xhigh/max`。仅支持开关的 profile 拒绝档位字段。校验 profile 与协议匹配、档位无重复、默认值属于支持集合。Gemini 使用已有 low/medium/high 映射。无效声明需指出模型与字段。
+`capabilities.reasoning` 继续作为内置清单与客户端使用的模型发现和控件契约。外部 profile 放在 `generationConfig`，因为它还决定提供方请求及历史消息转换，并且需要与精确模型、端点、凭证和暂存的生成配置一起流转。若扩展面向客户端的能力对象，仍需增加传输 profile，还会让提供方序列化与模型发现载荷耦合。解析边界保持单向：显式生成配置优先，省略字段时可继承已有能力。
+
+档位使用 `low/medium/high/xhigh/max`。仅支持开关的 profile 拒绝档位字段。校验 profile 与协议匹配、档位无重复、默认值属于支持集合。Gemini 使用已有 low/medium/high 映射。声明至少包含一个字段，空对象无效。无效声明需指出模型与字段。
 
 ## 解析与生命周期
 

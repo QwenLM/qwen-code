@@ -170,6 +170,8 @@ export function getOpenAIReasoningState(
   generation: ContentGeneratorConfig,
   resolved: ResolvedModelReasoningConfig,
 ): ContentGeneratorConfig['reasoning'] {
+  // Derive the displayed state through the wire serializer so raw override
+  // precedence cannot make the controls claim a different effective effort.
   const body = applyOpenAIReasoningProfile(
     { model: generation.model, messages: [] },
     generation,

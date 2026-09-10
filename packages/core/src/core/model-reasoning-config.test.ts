@@ -129,6 +129,7 @@ describe('external model reasoning configuration', () => {
   });
 
   it.each([
+    {},
     { profile: 'not-a-profile' },
     { profile: null },
     { supportedEfforts: null },

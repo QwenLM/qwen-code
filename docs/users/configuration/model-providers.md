@@ -111,6 +111,8 @@ thinking rules inferred from an existing model name and endpoint:
 
 Omitted fields inherit existing rules. Existing `capabilities.reasoning`
 settings continue to work; an explicit new declaration takes precedence.
+The declaration must contain at least one of the three fields;
+`"reasoningConfig": {}` is invalid.
 `reasoning: false` still disables thinking, and `thinkingMandatory: true`
 prevents disabling it. Fixed budgets continue to use `reasoning.budget_tokens`;
 there is no per-effort budget mapping setting.

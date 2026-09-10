@@ -53,6 +53,7 @@
               "properties": {
                 "reasoningConfig": {
                   "type": "object",
+                  "minProperties": 1,
                   "additionalProperties": false,
                   "properties": {
                     "profile": {
@@ -859,6 +860,7 @@
           "properties": {
             "reasoningConfig": {
               "type": "object",
+              "minProperties": 1,
               "additionalProperties": false,
               "properties": {
                 "profile": {

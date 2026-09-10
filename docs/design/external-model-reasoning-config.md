@@ -45,10 +45,21 @@ thinking-related model-name and hostname inference; they never select an SDK,
 endpoint or credential. Existing `capabilities.reasoning` remains compatible;
 the new generation configuration takes precedence when present.
 
+`capabilities.reasoning` remains the model-discovery and control contract used
+by built-in manifests and clients. The external profile belongs to
+`generationConfig` because it also selects provider request and history
+transformations, and must travel with the exact model, endpoint, credentials and
+staged generation settings. Extending the client-facing capability object would
+still require a transport profile and would couple provider serialization to
+discovery payloads. The resolver keeps the boundary one-way: an explicit
+generation declaration wins, while omitted fields may inherit existing
+capabilities.
+
 Efforts use `low/medium/high/xhigh/max`. Toggle-only profiles reject effort
 fields. Validate profile/protocol compatibility, unique supported efforts and
 membership of the default effort. Gemini accepts its existing low/medium/high
-mapping. Invalid declarations report the model and field.
+mapping. A declaration must contain at least one field; an empty object is
+invalid. Invalid declarations report the model and field.
 
 ## Resolution and lifecycle
 

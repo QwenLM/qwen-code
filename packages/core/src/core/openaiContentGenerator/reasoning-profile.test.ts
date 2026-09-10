@@ -115,7 +115,7 @@ describe('explicit OpenAI thinking profiles', () => {
     const config: ContentGeneratorConfig = {
       model: 'gpt-5.2',
       authType: AuthType.USE_OPENAI,
-      reasoningConfig: {},
+      reasoningConfig: { supportedEfforts: ['low', 'medium', 'high', 'xhigh'] },
       extra_body: { reasoning_effort: 'high' },
     };
     expect(wire(config)).toMatchObject({ reasoning_effort: 'high' });
@@ -125,7 +125,7 @@ describe('explicit OpenAI thinking profiles', () => {
     const config: ContentGeneratorConfig = {
       model: 'gpt-5.2',
       authType: AuthType.USE_OPENAI,
-      reasoningConfig: {},
+      reasoningConfig: { supportedEfforts: ['low', 'medium', 'high', 'xhigh'] },
     };
     const resolved = resolveModelReasoningConfig(config)!;
     expect(getOpenAIReasoningState(config, resolved)).toBe(false);

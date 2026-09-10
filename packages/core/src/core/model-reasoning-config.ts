@@ -119,7 +119,13 @@ export function resolveModelReasoningConfig(
   };
   if (!input || typeof input !== 'object' || Array.isArray(input))
     fail('profile', 'expected an object');
-  for (const key of Object.keys(input)) {
+  const keys = Object.keys(input);
+  if (keys.length === 0)
+    fail(
+      'profile',
+      'expected at least one of profile, supportedEfforts, or defaultEffort',
+    );
+  for (const key of keys) {
     if (!['profile', 'supportedEfforts', 'defaultEffort'].includes(key))
       fail(key, 'unknown field');
   }

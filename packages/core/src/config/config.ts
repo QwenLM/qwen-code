@@ -4322,6 +4322,9 @@ export class Config {
               : {}),
           });
         } else if (authType) {
+          // Keep reload non-interactive. Without isInitialAuth=true, unavailable
+          // cached Qwen OAuth credentials can start device auth mid-session and
+          // stall ACP or headless callers that cannot answer the prompt.
           await this.refreshAuth(authType, true);
         }
         this.baseLlmClient?.clearPerModelGeneratorCache();

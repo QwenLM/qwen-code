@@ -40,6 +40,7 @@ export const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
 
 const MODEL_REASONING_CONFIG_SCHEMA = {
   type: 'object',
+  minProperties: 1,
   additionalProperties: false,
   properties: {
     profile: { type: 'string', enum: [...REASONING_PROFILES] },
