@@ -78,14 +78,14 @@ cd packages/web-templates
 EXPORT_HTML_METAFILE=/tmp/document-metafile.json node src/export-html/build.mjs
 ```
 
-The build prints three lines that matter:
+The build prints the lines that matter:
 
 ```
 Document export top inputs (pre-minify bytes): <pkg> <bytes>, ...
-Document export runtime is <N> bytes
+Document export renderer JS is <N> bytes; component CSS moved to export-transcript-document.css is <M> bytes
 ```
 
-Then measure the generated templates (the actual `/export html` file is the template
+Then measure the generated assets (the actual `/export html` file is the template
 plus a small data envelope):
 
 > **Changed by #9812 (merged 2026-09-05).** The renderer is no longer inlined into
@@ -93,11 +93,20 @@ plus a small data envelope):
 > SRI-protected `export-transcript-document.js` from unpkg, and the legacy
 > `index.html` renderer is gone. **Measure the asset, not the template** — it is the
 > download every reader of an exported file now pays before the transcript renders.
+>
+> **Changed by #11478.** The web-shell component stylesheet is no longer a string
+> literal inside `export-transcript-document.js`. The build lifts it out into a
+> second version-pinned, SRI-protected asset, `export-transcript-document.css`,
+> loaded via a nonce-bearing `<link>`. The JS is the asset a browser must parse and
+> compile before rendering, and is the number the build's byte budget ratchets;
+> the CSS is fetched, parsed and cached separately, in parallel.
 
 ```bash
-wc -c src/export-html/dist/export-transcript-document.js   # the renderer asset — the number that matters
+wc -c src/export-html/dist/export-transcript-document.js    # the renderer JS — the parse/compile-critical number
 gzip -9 -c src/export-html/dist/export-transcript-document.js | wc -c
-wc -c src/export-html/dist/document.html                   # template only; now small
+wc -c src/export-html/dist/export-transcript-document.css   # the split component stylesheet
+gzip -9 -c src/export-html/dist/export-transcript-document.css | wc -c
+wc -c src/export-html/dist/document.html                    # template only; small
 ```
 
 **Record all of these.** Known reference points, all from the PR author's machine:
@@ -256,7 +265,7 @@ const MAX_DOCUMENT_RUNTIME_BYTES = 19_000_000;
 ```
 
 These were set against the `9515e5b78d` baseline of 17,963,937 and are now far above the
-real size. Once you have the measured `Document export runtime is N bytes` from §3:
+real size. Once you have the measured `Document export renderer JS is N bytes` from §3:
 
 - `MAX_DOCUMENT_RUNTIME_BYTES` → roughly `N * 1.05`, rounded up to a readable number
 - `DOCUMENT_RUNTIME_WARNING_BYTES` → roughly `N * 1.02`
