@@ -39,6 +39,10 @@ const mocks = vi.hoisted(() => {
   const state = {
     keyboardHandlers: [] as Array<(key: unknown) => void>,
     dialogProps: {} as Record<string, Record<string, unknown>>,
+    /** Line count the stubbed help-content builders report, to pin the scroll bound. */
+    helpLineCount: 0,
+    /** Terminal height the mocked renderer reports, to pin the help body budget. */
+    terminalHeight: 40,
   };
   // Renders the dialog-name marker but keeps the props the mount passed, so
   // wiring (callbacks, data builders) stays observable from these tests.
@@ -77,9 +81,15 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('@opentui/react', () => ({
   useKeyboard: (handler: (key: unknown) => void) => {
+    // The real hook keeps one live registration; this runs per render, so drop
+    // the previous render's handler instead of replaying keys through it.
+    mocks.state.keyboardHandlers.length = 0;
     mocks.state.keyboardHandlers.push(handler);
   },
-  useTerminalDimensions: () => ({ width: 120, height: 40 }),
+  useTerminalDimensions: () => ({
+    width: 120,
+    height: mocks.state.terminalHeight,
+  }),
   useRenderer: () => ({
     addInputHandler: () => {},
     removeInputHandler: () => {},
@@ -96,16 +106,29 @@ vi.mock('@opentui/core', () => ({
   MouseButton: { LEFT: 0 },
 }));
 vi.mock('./key-map.js', () => ({
-  toOriginalKey: (key: { name?: string }) => ({ name: key?.name ?? '' }),
+  toOriginalKey: (key: { name?: string; shift?: boolean }) => ({
+    name: key?.name ?? '',
+    shift: !!key?.shift,
+  }),
 }));
-vi.mock('./help-content.js', () => ({
-  computeHelpBodyRows: (height: number) => Math.max(1, height - 6),
-  HELP_TABS: [
-    { tab: 'general', label: 'general' },
-    { tab: 'commands', label: 'commands' },
-    { tab: 'custom-commands', label: 'custom-commands' },
-  ],
-}));
+vi.mock('./help-content.js', () => {
+  const lines = () =>
+    new Array(mocks.state.helpLineCount).fill({ type: 'blank' });
+  return {
+    computeHelpBodyRows: (height: number) => Math.max(1, height - 6),
+    HELP_TABS: [
+      { tab: 'general', label: 'general' },
+      { tab: 'commands', label: 'commands' },
+      { tab: 'custom-commands', label: 'custom-commands' },
+    ],
+    buildHelpCommandsLines: lines,
+    buildHelpCustomCommandLines: lines,
+    helpCommandWindowRows: (bodyRows: number) =>
+      Math.max(1, Math.min(18, bodyRows - 4)),
+    helpScrollMax: (built: readonly unknown[], windowRows: number) =>
+      Math.max(0, built.length - windowRows),
+  };
+});
 vi.mock('./dialog-data.js', () => ({
   buildPermissionsData: () => ({
     rules: [],
@@ -134,7 +157,7 @@ vi.mock('./dialog-data.js', () => ({
   applyThemeSelection: () => ({ applied: undefined, error: undefined }),
 }));
 
-vi.mock('./help-overlay.js', () => ({ HelpOverlay: () => 'help' }));
+vi.mock('./help-overlay.js', () => ({ HelpOverlay: mocks.stub('help') }));
 vi.mock('./dialogs-theme.js', () => ({
   OpenTuiThemeDialog: mocks.stub('theme'),
 }));
@@ -217,6 +240,21 @@ function dialogProp(dialog: string, key: string): (...args: unknown[]) => void {
   return value as (...args: unknown[]) => void;
 }
 
+/** What the mount handed the stubbed help overlay on its last render. */
+function helpOverlay(): {
+  tab: string;
+  scroll: number;
+  width: number;
+  bodyRows: number;
+} {
+  return mocks.state.dialogProps['help']! as unknown as {
+    tab: string;
+    scroll: number;
+    width: number;
+    bodyRows: number;
+  };
+}
+
 // Every OpenTuiDialogRequest kind the mount must route, with the exact object a
 // dispatcher would produce.
 const REQUESTS: Array<[string, OpenTuiDialogRequest]> = [
@@ -251,6 +289,8 @@ describe('OpenTuiDialogMount routing', () => {
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.dialogProps = {};
+    mocks.state.helpLineCount = 0;
+    mocks.state.terminalHeight = 40;
     vi.clearAllMocks();
   });
 
@@ -322,22 +362,66 @@ describe('OpenTuiDialogMount routing', () => {
   });
 
   it('drives help tab cycling and scrolling through its own keyboard handler', () => {
+    // 23 lines over the 18-row window leave five offsets that actually move it.
+    mocks.state.helpLineCount = 23;
     mount({ dialog: 'help' });
-    // HelpOverlay renders the initial tab; the mount owns tab/scroll state.
     expect(mocks.state.keyboardHandlers.length).toBeGreaterThan(0);
-    const send = (name: string) => {
+    const send = (name: string, shift = false) => {
       act(() => {
-        for (const handler of mocks.state.keyboardHandlers) handler({ name });
+        for (const handler of mocks.state.keyboardHandlers)
+          handler({ name, shift });
       });
     };
-    // Should not throw on any of the handled keys.
-    expect(() => {
-      send('tab');
-      send('right');
-      send('left');
-      send('down');
-      send('up');
-    }).not.toThrow();
+    const overlay = helpOverlay;
+
+    // The overlay gets the popup area, not the raw terminal: the 120 columns
+    // this renderer reports cap at 100, the width ink hands its Help dialog.
+    expect(overlay().width).toBe(100);
+    expect(overlay().bodyRows).toBe(34);
+    expect(overlay().tab).toBe('general');
+    // The general tab has no scrollable window, so the arrow keys are inert.
+    send('down');
+    expect(overlay().scroll).toBe(0);
+
+    send('tab');
+    expect(overlay().tab).toBe('commands');
+    send('down');
+    expect(overlay().scroll).toBe(1);
+    // Paging clamps to the offsets that still move the window — an unclamped
+    // offset leaves the opposite key inert until it climbs back down to one.
+    send('pagedown');
+    expect(overlay().scroll).toBe(5);
+    send('pageup');
+    expect(overlay().scroll).toBe(0);
+
+    // The hint under the body promises Shift+Tab goes back.
+    send('tab', true);
+    expect(overlay().tab).toBe('general');
+    send('tab', true);
+    expect(overlay().tab).toBe('custom-commands');
+  });
+
+  it('pages the help command list by the window a short terminal leaves', () => {
+    // The same 23 lines, but a 24-row terminal budgets 18 body rows and the tab
+    // chrome claims four of them: the window narrows to 14, so a page covers 14
+    // lines and stops at nine rather than the five offsets a roomy terminal has.
+    mocks.state.helpLineCount = 23;
+    mocks.state.terminalHeight = 24;
+    mount({ dialog: 'help' });
+    const send = (name: string) => {
+      act(() => {
+        for (const handler of mocks.state.keyboardHandlers)
+          handler({ name, shift: false });
+      });
+    };
+
+    expect(helpOverlay().bodyRows).toBe(18);
+    send('tab');
+    expect(helpOverlay().tab).toBe('commands');
+    send('pagedown');
+    expect(helpOverlay().scroll).toBe(9);
+    send('pageup');
+    expect(helpOverlay().scroll).toBe(0);
   });
 
   it('closes the help overlay on escape', () => {

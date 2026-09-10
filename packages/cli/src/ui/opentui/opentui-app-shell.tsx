@@ -86,6 +86,7 @@ import {
   OpenTuiShellConfirmation,
   OpenTuiToolConfirmation,
 } from './dialogs-confirm.js';
+import { dialogAreaWidth } from './dialogs-shared.js';
 
 export interface OpenTuiAppProps {
   config: Config;
@@ -864,20 +865,26 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             />
           )
         ) : dialog ? (
-          <OpenTuiDialogMount
-            key={dialog.dialog}
-            request={dialog}
-            host={host}
-            config={config}
-            settings={settings}
-            commands={commandList}
-            onClose={() => setDialog(null)}
-            notify={notify}
-            fillInput={fillComposer}
-            onSelectSetting={handleSelectSetting}
-            onApprovalModeChanged={adoptApprovalMode}
-            availableTerminalHeight={props.availableTerminalHeight}
-          />
+          // ink's layout wraps every popup in a two-column margin and caps its
+          // width, so a dialog's border runs from column 2 to column 97 instead
+          // of spanning the terminal. The confirmations stay outside: their
+          // body reads the terminal width to estimate line wrapping.
+          <box marginLeft={2} width={dialogAreaWidth(terminalWidth)}>
+            <OpenTuiDialogMount
+              key={dialog.dialog}
+              request={dialog}
+              host={host}
+              config={config}
+              settings={settings}
+              commands={commandList}
+              onClose={() => setDialog(null)}
+              notify={notify}
+              fillInput={fillComposer}
+              onSelectSetting={handleSelectSetting}
+              onApprovalModeChanged={adoptApprovalMode}
+              availableTerminalHeight={props.availableTerminalHeight}
+            />
+          </box>
         ) : (
           <>
             <OpenTuiLoadingIndicator
