@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import { WebShellCustomizationProvider } from '../../customization';
+import { AssistantMessage } from './AssistantMessage';
 import { Markdown } from './Markdown';
 
 const triggerSelector = '[data-web-shell-footnote-trigger]';
@@ -47,7 +48,8 @@ afterEach(() => {
 describe('Markdown footnote cards', () => {
   it('groups adjacent references in order, deduplicates IDs, and stops at text', () => {
     render(
-      <Markdown
+      <AssistantMessage
+        showFooterActions
         content={`Sources[^source-a][^source-b] [^source-a][^source-plain]. Separate[^source-b], text[^source-a].${definitions}`}
       />,
     );
@@ -59,8 +61,9 @@ describe('Markdown footnote cards', () => {
     ]);
     expect(container.querySelector('[data-footnotes]')).toBeNull();
     expect(
-      container.querySelector('[data-web-shell-footnote-sources]')?.textContent,
-    ).toBe('3 sources');
+      container.querySelector('[data-web-shell-footnote-sources-trigger]')
+        ?.textContent,
+    ).toBe('3 citations');
     click(triggers[0]);
     expect(card().textContent).toContain('tourism.example');
     expect(card().textContent).toContain('Tourism office');
@@ -82,6 +85,67 @@ describe('Markdown footnote cards', () => {
     expect(
       card().querySelector('[aria-label="Next reference"]'),
     ).toHaveProperty('disabled', true);
+  });
+
+  it('keeps the card open when pagination races a pending hover dismissal', () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <Markdown content={`Sources[^source-a][^source-b].${definitions}`} />,
+      );
+      const trigger = container.querySelector(triggerSelector)!;
+      act(() => {
+        trigger.dispatchEvent(new MouseEvent('pointerover', { bubbles: true }));
+        vi.advanceTimersByTime(150);
+      });
+      const preview = card();
+      click(preview.querySelector('[aria-label="Next reference"]'));
+      act(() => {
+        preview.dispatchEvent(
+          new MouseEvent('pointerout', {
+            bubbles: true,
+            relatedTarget: document.body,
+          }),
+        );
+      });
+      act(() => vi.advanceTimersByTime(250));
+
+      expect(document.querySelector(cardSelector)).not.toBeNull();
+      expect(card().textContent).toContain('Ticket website');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports citations into the assistant action footer and clears stale totals', () => {
+    render(
+      <AssistantMessage
+        showFooterActions
+        timestamp={Date.now()}
+        content={`Sources[^source-a][^source-b].${definitions}`}
+      />,
+    );
+
+    const citation = container.querySelector(
+      '[data-web-shell-footnote-sources-trigger]',
+    );
+    const copy = container.querySelector('[aria-label="Copy"]');
+    expect(citation?.textContent).toBe('2 citations');
+    expect(citation?.parentElement).toBe(copy?.parentElement);
+    expect(
+      container.querySelector('[data-web-shell-footnote-sources]'),
+    ).toBeNull();
+
+    render(
+      <AssistantMessage
+        showFooterActions
+        timestamp={Date.now()}
+        content="Plain response."
+      />,
+    );
+    expect(
+      container.querySelector('[data-web-shell-footnote-sources-trigger]'),
+    ).toBeNull();
   });
 
   it('does not merge across paragraphs, cells, or inline code', () => {
@@ -237,15 +301,19 @@ describe('Markdown footnote cards', () => {
   it('uses Chinese labels when the shell language is Chinese', () => {
     render(
       <I18nProvider language="zh-CN">
-        <Markdown content={`Sources[^source-a][^source-plain]${definitions}`} />
+        <AssistantMessage
+          showFooterActions
+          content={`Sources[^source-a][^source-plain]${definitions}`}
+        />
       </I18nProvider>,
     );
     expect(
       container.querySelector(triggerSelector)?.getAttribute('aria-label'),
     ).toBe('查看 2 条引用');
     expect(
-      container.querySelector('[data-web-shell-footnote-sources]')?.textContent,
-    ).toBe('2 个来源');
+      container.querySelector('[data-web-shell-footnote-sources-trigger]')
+        ?.textContent,
+    ).toBe('2 个引用');
     click(container.querySelector(triggerSelector));
     click(card().querySelector('[aria-label="下一条引用"]'));
     expect(card().textContent).toContain('脚注 2');
@@ -253,7 +321,8 @@ describe('Markdown footnote cards', () => {
 
   it('enhances only valid source footnotes and keeps ordinary footnotes navigable', () => {
     render(
-      <Markdown
+      <AssistantMessage
+        showFooterActions
         content={`Source[^source-a]. Note[^note]. Invalid[^source-invalid].${definitions}\n\n[^note]: A normal footnote.\n[^source-invalid]: Plain text without a source title.`}
       />,
     );
@@ -318,19 +387,20 @@ describe('Markdown footnote cards', () => {
     expect(
       container.querySelector('[data-web-shell-footnote-sources-trigger]')
         ?.textContent,
-    ).toBe('1 source');
+    ).toBe('1 citation');
   });
 
   it('opens all unique message sources from the footer', () => {
     render(
-      <Markdown
+      <AssistantMessage
+        showFooterActions
         content={`First[^source-b]. Repeat[^source-b]. Then[^source-a].${definitions}`}
       />,
     );
     const footer = container.querySelector(
       '[data-web-shell-footnote-sources-trigger]',
     );
-    expect(footer?.textContent).toBe('2 sources');
+    expect(footer?.textContent).toBe('2 citations');
     click(footer);
     expect(card().textContent).toContain('Ticket website');
     expect(card().textContent).toContain('1 / 2');

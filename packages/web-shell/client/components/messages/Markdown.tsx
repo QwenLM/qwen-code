@@ -41,7 +41,11 @@ import {
 } from '../../customization';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
-import { FootnoteSection, FootnoteSup } from './FootnoteCard';
+import {
+  FootnoteSection,
+  FootnoteSup,
+  type FootnoteSourcesChangeHandler,
+} from './FootnoteCard';
 import { rehypeFootnoteCards } from './rehype-footnote-cards';
 import {
   DEFAULT_WEB_SHELL_MARKDOWN_CHART,
@@ -60,6 +64,7 @@ interface MarkdownProps {
    */
   isStreaming?: boolean;
   tableMode?: MarkdownTableMode;
+  onFootnoteSourcesChange?: FootnoteSourcesChangeHandler;
 }
 
 // Keep the cost of repeatedly parsing a growing stream bounded. Short streams
@@ -994,6 +999,7 @@ export const Markdown = memo(function Markdown({
   source,
   isStreaming,
   tableMode,
+  onFootnoteSourcesChange,
 }: MarkdownProps) {
   const { markdown, markdownTableMode } = useWebShellCustomization();
   const theme = useTheme();
@@ -1027,24 +1033,26 @@ export const Markdown = memo(function Markdown({
 
   const sourceComponents = sourceMarkdown?.components;
   const renderedComponents = useMemo(() => {
-    if (!sourceComponents) return components;
+    if (!sourceComponents && !onFootnoteSourcesChange) return components;
     const rendered = {
       ...components,
       ...sourceComponents,
       ...(effectiveTableMode === 'advanced' ? { table: components.table } : {}),
     };
-    const SourceLink = sourceComponents.a;
-    rendered.a = (props) => {
-      const footnote =
-        props.node?.properties.dataFootnoteRef !== undefined ||
-        props.node?.properties.dataFootnoteBackref !== undefined;
-      if (footnote || !SourceLink) return <MarkdownLink {...props} />;
-      if (typeof SourceLink !== 'string')
-        return createElement(SourceLink, props);
-      const { node: _node, ...elementProps } = props;
-      return createElement(SourceLink, elementProps);
-    };
-    if (!sourceComponents.sup) {
+    const SourceLink = sourceComponents?.a;
+    if (sourceComponents) {
+      rendered.a = (props) => {
+        const footnote =
+          props.node?.properties.dataFootnoteRef !== undefined ||
+          props.node?.properties.dataFootnoteBackref !== undefined;
+        if (footnote || !SourceLink) return <MarkdownLink {...props} />;
+        if (typeof SourceLink !== 'string')
+          return createElement(SourceLink, props);
+        const { node: _node, ...elementProps } = props;
+        return createElement(SourceLink, elementProps);
+      };
+    }
+    if (!sourceComponents?.sup) {
       rendered.sup = (props) => (
         <FootnoteSup {...props} linkComponent={SourceLink} />
       );
@@ -1052,12 +1060,18 @@ export const Markdown = memo(function Markdown({
         <FootnoteSection
           {...props}
           linkComponent={SourceLink}
-          sectionComponent={sourceComponents.section}
+          onSourcesChange={onFootnoteSourcesChange}
+          sectionComponent={sourceComponents?.section}
         />
       );
     }
     return rendered;
-  }, [components, effectiveTableMode, sourceComponents]);
+  }, [
+    components,
+    effectiveTableMode,
+    onFootnoteSourcesChange,
+    sourceComponents,
+  ]);
   const chart =
     !documentMode &&
     source === 'assistant' &&

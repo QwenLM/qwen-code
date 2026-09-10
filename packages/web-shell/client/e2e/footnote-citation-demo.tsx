@@ -32,12 +32,16 @@ function block(
   } as DaemonTranscriptBlock;
 }
 
+const demoTimestamp = Date.now();
 const blocks: DaemonTranscriptBlock[] = [
   block(
     { id: 'demo-user', kind: 'user', text: '生成带知识来源的订单分析。' },
-    1,
+    demoTimestamp,
   ),
-  block({ id: 'demo-assistant', kind: 'assistant', text: report }, 2),
+  block(
+    { id: 'demo-assistant', kind: 'assistant', text: report },
+    demoTimestamp + 1,
+  ),
 ];
 
 interface ResolvedLocator {

@@ -15,6 +15,8 @@ import { Button } from '../ui/button';
 import knowledgeIcon from '../../assets/icons/knowledge.svg';
 import type { FootnoteElement, FootnotePreview } from './rehype-footnote-cards';
 
+export type FootnoteSourcesChangeHandler = (notes: FootnotePreview[]) => void;
+
 export function FootnoteSup({
   node,
   children,
@@ -33,15 +35,22 @@ export function FootnoteSection({
   node,
   children,
   linkComponent,
+  onSourcesChange,
   sectionComponent,
   ...props
 }: ComponentProps<'section'> &
   ExtraProps & {
     linkComponent?: Components['a'];
+    onSourcesChange?: FootnoteSourcesChangeHandler;
     sectionComponent?: Components['section'];
   }) {
   const data = (node as FootnoteElement | undefined)?.data;
   const notes = data?.footnoteSourcesFooter ? data.footnoteCards : undefined;
+  useEffect(() => {
+    if (!onSourcesChange) return;
+    onSourcesChange(notes ?? []);
+    return () => onSourcesChange([]);
+  }, [notes, onSourcesChange]);
   const section = sectionComponent ? (
     createElement(
       sectionComponent,
@@ -52,8 +61,8 @@ export function FootnoteSection({
     <section {...props}>{children}</section>
   );
   if (!notes?.length) return section;
-
   const visibleFootnotes = data?.hasVisibleFootnotes ? section : null;
+  if (onSourcesChange) return visibleFootnotes;
   return (
     <>
       {visibleFootnotes}
@@ -65,6 +74,23 @@ export function FootnoteSection({
         />
       </div>
     </>
+  );
+}
+
+export function FootnoteSources({
+  notes,
+  linkComponent,
+}: {
+  notes: FootnotePreview[];
+  linkComponent?: Components['a'];
+}) {
+  if (!notes.length) return null;
+  return (
+    <FootnoteCard
+      notes={notes}
+      variant="footer"
+      linkComponent={linkComponent}
+    />
   );
 }
 
@@ -87,6 +113,7 @@ function FootnoteCard({
   const trigger = useRef<HTMLButtonElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const pinned = useRef(false);
   const index = Math.max(
     0,
     notes.findIndex((note) => note.id === selectedId),
@@ -106,11 +133,17 @@ function FootnoteCard({
   }
   function changeOpen(next: boolean) {
     cancelTimer();
+    if (!next) pinned.current = false;
     if (next && !open) setSelectedId(undefined);
     setOpen(next);
   }
+  function pinOpen() {
+    pinned.current = true;
+    cancelTimer();
+  }
   function leave() {
     cancelTimer();
+    if (pinned.current) return;
     timer.current = setTimeout(() => {
       if (
         !trigger.current?.matches(':focus-within') &&
@@ -137,7 +170,7 @@ function FootnoteCard({
           }
           className={
             variant === 'footer'
-              ? 'inline-flex h-7 items-center gap-1.5 rounded-full px-2 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-ring'
+              ? 'inline-flex h-5 items-center gap-1 rounded-md px-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-ring'
               : 'mx-0.5 inline-flex h-5 items-center gap-1 rounded-full bg-muted px-1.5 align-baseline text-xs font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-ring'
           }
           aria-label={t('footnotes.references', { count: notes.length })}
@@ -162,6 +195,7 @@ function FootnoteCard({
           }}
           onClick={(event) => {
             event.preventDefault();
+            pinOpen();
             changeOpen(true);
           }}
         >
@@ -175,7 +209,7 @@ function FootnoteCard({
             }}
           />
           {variant === 'footer'
-            ? t('footnotes.sources', { count: notes.length })
+            ? t('footnotes.citations', { count: notes.length })
             : notes.length > 1
               ? notes.length
               : null}
@@ -277,7 +311,10 @@ function FootnoteCard({
               variant="ghost"
               aria-label={t('footnotes.previous')}
               disabled={index === 0}
-              onClick={() => setSelectedId(notes[index - 1].id)}
+              onClick={() => {
+                pinOpen();
+                setSelectedId(notes[index - 1].id);
+              }}
             >
               <ChevronLeftIcon />
             </Button>
@@ -290,7 +327,10 @@ function FootnoteCard({
               variant="ghost"
               aria-label={t('footnotes.next')}
               disabled={index === notes.length - 1}
-              onClick={() => setSelectedId(notes[index + 1].id)}
+              onClick={() => {
+                pinOpen();
+                setSelectedId(notes[index + 1].id);
+              }}
             >
               <ChevronRightIcon />
             </Button>

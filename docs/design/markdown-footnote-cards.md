@@ -29,10 +29,10 @@ This sentence has an ordinary explanatory note.[^note-1]
 - Only resolved `source-*` definitions become source cards. Missing or malformed definitions fall back without removing answer text.
 - Group adjacent source references, including intervening whitespace, within the same inline parent. Text, punctuation, ordinary footnotes, blocks, and table-cell boundaries stop a group.
 - Deduplicate by definition ID in first-reference order. A single-source marker shows only the SVG; a multi-source marker also shows the unique count.
-- Hover, focus, or click opens the card. Each definition is one page. Keyboard, touch, dismissal, boundary controls, streaming updates, themes, narrow viewports, and portal placement follow the existing Web Shell interaction rules.
+- Hover, focus, or click opens the card. A hover-only card closes after the pointer leaves; clicking the trigger or a pagination control keeps it open until Escape or an outside click. Each definition is one page. Keyboard, touch, boundary controls, streaming updates, themes, narrow viewports, and portal placement follow the existing Web Shell interaction rules.
 - A linked definition uses the first safe link text as its title, the optional link title as its source label, and the remaining text as its summary. An unlinked definition uses its first strong text as the title. The first safe image remains an optional thumbnail.
 - Remove a source definition only when every reference to it became a card. Keep definitions still targeted by a standard reference, ordinary footnotes, and their return links. Remove the footer container when none of those remain.
-- Show a message-level `N sources` control derived only from unique source definitions referenced by that assistant message. It opens the same paginated preview over the complete message source set.
+- Show a message-level `N citations` control derived only from unique source definitions referenced by that assistant message. Place it in the assistant action footer beside copy, branch, and time. The footer appears with the existing message hover/focus behavior and remains visible on touch devices; hovering, focusing, or clicking the citation control opens the same paginated preview over the complete message citation set. Standalone Markdown surfaces without an assistant footer keep the inline aggregate fallback.
 - Static document export keeps standard Markdown footnotes. Advanced-table text extraction retains the original reference numbers; the source Markdown remains unchanged.
 
 ## Host link integration

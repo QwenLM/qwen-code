@@ -1,6 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { LightbulbIcon } from 'lucide-react';
 import { Markdown } from './Markdown';
+import { FootnoteSources } from './FootnoteCard';
+import type { FootnotePreview } from './rehype-footnote-cards';
 import {
   useWebShellCustomization,
   type WebShellAssistantTurnFooterRenderInfo,
@@ -45,11 +47,29 @@ export const AssistantMessage = memo(function AssistantMessage({
 }: AssistantMessageProps) {
   const { t } = useI18n();
   const documentMode = useTranscriptRenderMode() === 'document';
-  const { renderAssistantTurnFooter } = useWebShellCustomization();
+  const { markdown, renderAssistantTurnFooter } = useWebShellCustomization();
   const [copied, flashCopied] = useCopiedFlash();
   const [branchPending, setBranchPending] = useState(false);
+  const [reportedFootnoteSources, setReportedFootnoteSources] = useState<{
+    content: string;
+    items: FootnotePreview[];
+  }>();
+  const contentRef = useRef(content);
+  contentRef.current = content;
+  const handleFootnoteSourcesChange = useCallback(
+    (items: FootnotePreview[]) =>
+      setReportedFootnoteSources({ content: contentRef.current, items }),
+    [],
+  );
+  const footnoteSources =
+    reportedFootnoteSources?.content === content
+      ? reportedFootnoteSources.items
+      : [];
   const showFooter =
-    !!content && !isStreaming && showFooterActions && !documentMode;
+    !!content &&
+    !isStreaming &&
+    (showFooterActions || footnoteSources.length > 0) &&
+    !documentMode;
   const customFooter = useMemo(
     () =>
       customFooterInfo
@@ -88,6 +108,7 @@ export const AssistantMessage = memo(function AssistantMessage({
               content={content}
               source="assistant"
               isStreaming={isStreaming}
+              onFootnoteSourcesChange={handleFootnoteSourcesChange}
             />
           </div>
         </div>
@@ -97,16 +118,18 @@ export const AssistantMessage = memo(function AssistantMessage({
       )}
       {showFooter && (
         <div className={styles.messageFooter}>
-          <button
-            type="button"
-            className={styles.copyButton}
-            title={t('assistant.copy')}
-            aria-label={t('assistant.copy')}
-            onClick={handleCopy}
-          >
-            {copied ? <CheckIcon /> : <CopyIcon />}
-          </button>
-          {showBranchAction && onBranchSession && (
+          {showFooterActions && (
+            <button
+              type="button"
+              className={styles.copyButton}
+              title={t('assistant.copy')}
+              aria-label={t('assistant.copy')}
+              onClick={handleCopy}
+            >
+              {copied ? <CheckIcon /> : <CopyIcon />}
+            </button>
+          )}
+          {showFooterActions && showBranchAction && onBranchSession && (
             <button
               type="button"
               className={styles.copyButton}
@@ -118,7 +141,11 @@ export const AssistantMessage = memo(function AssistantMessage({
               <BranchIcon />
             </button>
           )}
-          {timestamp !== undefined && (
+          <FootnoteSources
+            notes={footnoteSources}
+            linkComponent={markdown?.components?.a}
+          />
+          {showFooterActions && timestamp !== undefined && (
             <span className={styles.footerTime} aria-hidden="true">
               {formatTimestamp(timestamp)}
             </span>

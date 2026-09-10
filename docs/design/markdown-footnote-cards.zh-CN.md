@@ -29,10 +29,10 @@
 - 只将 definition 完整的 `source-*` 脚注变成来源卡片。definition 缺失或格式不合法时安全降级，不删除回答正文。
 - 在同一个行内父节点中聚合相邻来源脚注，允许中间只有空白。正文、标点、普通脚注、块和表格单元格都会中断聚合。
 - 按首次引用顺序用 definition ID 去重。单来源 marker 只显示 SVG；多来源 marker 同时显示唯一来源数。
-- Hover、聚焦或点击打开卡片，每个 definition 对应一页。键盘、触屏、关闭、首尾按钮、流式更新、主题、窄屏和 portal 沿用 Web Shell 现有交互规则。
+- Hover、聚焦或点击打开卡片。仅由 Hover 打开的卡片在指针离开后关闭；点击入口或分页器后保持打开，直到按 Escape 或点击外部。每个 definition 对应一页，键盘、触屏、首尾按钮、流式更新、主题、窄屏和 portal 沿用 Web Shell 现有交互规则。
 - 有链接的 definition 取第一个安全链接文字作为标题、可选 link title 作为来源标签，其余文本作为摘要；无链接时取第一个 strong text 作为标题。第一个安全图片仍可作为缩略图。
 - 只有某个来源的全部引用都已转成卡片时，才从文末列表移除该 definition；仍被标准引用指向的来源、普通脚注及其返回链接继续保留。没有这些内容时移除整个 footer。
-- 消息底部显示 `N sources`，只统计该 assistant message 正文实际引用的唯一来源 definition；点击后复用同一个分页卡片查看本条消息全部来源。
+- 消息底部显示 `N 个引用`，只统计该 assistant message 正文实际引用的唯一来源 definition。入口位于复制、分支和时间所在的 assistant 操作栏，沿用整条消息 Hover/聚焦时显示、触屏设备常驻的行为；Hover、聚焦或点击引用入口时复用同一个分页卡片查看本条消息全部引用。没有 assistant 操作栏的独立 Markdown 界面继续使用正文后的聚合入口作为降级。
 - 静态文档导出保留标准 Markdown 脚注；高级表格提取文本时保留原始引用数字，来源 Markdown 本身保持不变。
 
 ## 宿主链接接入

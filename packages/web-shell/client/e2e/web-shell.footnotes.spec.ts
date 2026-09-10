@@ -163,7 +163,7 @@ test.describe('footnote source previews', () => {
     await expect(page.locator('[data-footnotes] li')).toHaveCount(1);
     await expect(
       page.locator('[data-web-shell-footnote-sources-trigger]'),
-    ).toHaveText('3 sources');
+    ).toHaveText('3 citations');
     await triggers.first().hover();
     const card = page.locator(cardSelector);
     await expect(card).toBeVisible();
@@ -250,11 +250,45 @@ test.describe('footnote source previews', () => {
       card.getByRole('button', { name: /Next|Previous/i }),
     ).toHaveCount(0);
     await page.keyboard.press('Escape');
+    await page.locator('body').click({ position: { x: 1, y: 1 } });
 
     const sourceFooters = page.locator(
       '[data-web-shell-footnote-sources-trigger]',
     );
-    await expect(sourceFooters).toHaveText(['3 sources', '1 source']);
+    await expect(sourceFooters).toHaveText(['3 citations', '1 citation']);
+    const assistantFooter = sourceFooters.first().locator('..');
+    await expect(assistantFooter).toHaveCSS('opacity', '0');
+    await sourceFooters.first().hover();
+    await expect(assistantFooter).toHaveCSS('opacity', '1');
+    await expect(card).toBeVisible();
+    await card.evaluate((element) =>
+      element.dispatchEvent(
+        new PointerEvent('pointerout', {
+          bubbles: true,
+          relatedTarget: document.body,
+        }),
+      ),
+    );
+    await card.getByRole('button', { name: /Next/i }).dispatchEvent('click');
+    await card.evaluate((element) =>
+      element.dispatchEvent(
+        new PointerEvent('pointerout', {
+          bubbles: true,
+          relatedTarget: document.body,
+        }),
+      ),
+    );
+    await page.waitForTimeout(350);
+    await expect(card).toBeVisible();
+    await expect(card).toContainText('Official ticket website');
+    await page.keyboard.press('Escape');
+    await expect(card).toHaveCount(0);
+    await page.locator('body').click({ position: { x: 1, y: 1 } });
+    await sourceFooters.first().hover();
+    await expect(card).toBeVisible();
+    await page.mouse.move(0, 0);
+    await page.waitForTimeout(250);
+    await expect(card).toHaveCount(0);
     const ids = await triggers.evaluateAll((elements) =>
       elements.map((element) => element.id),
     );
@@ -541,10 +575,18 @@ test('source locator demo delegates the card link to its host panel', async ({
   await expect(triggers).toHaveCount(2);
   await expect(triggers.first()).toHaveText('2');
   await expect(triggers.nth(1)).toHaveText('');
-  await expect(
-    page.locator('[data-web-shell-footnote-sources-trigger]'),
-  ).toHaveText('3 个来源');
+  const footerTrigger = page.locator(
+    '[data-web-shell-footnote-sources-trigger]',
+  );
+  await expect(footerTrigger).toHaveText('3 个引用');
+  const assistantFooter = footerTrigger.locator('..');
+  await expect(assistantFooter).toHaveCSS('opacity', '0');
   await expect(page.locator('[data-footnotes]')).toHaveCount(0);
+  await page.screenshot({
+    path: testInfo.outputPath('source-footnote-host-demo-idle.png'),
+    fullPage: true,
+    animations: 'disabled',
+  });
 
   await triggers.first().click();
   const card = page.locator(cardSelector);
@@ -557,6 +599,12 @@ test('source locator demo delegates the card link to its host panel', async ({
   await expect(hostPanel).toContainText('semantic');
   await expect(hostPanel).toContainText('instance-a');
   await expect(hostPanel).toContainText('kb:order');
+  await page.keyboard.press('Escape');
+  await expect(card).toHaveCount(0);
+  await footerTrigger.hover();
+  await expect(assistantFooter).toHaveCSS('opacity', '1');
+  await expect(card).toBeVisible();
+  await expect(card).toContainText('1 / 3');
 
   await page.screenshot({
     path: testInfo.outputPath('source-footnote-host-demo.png'),

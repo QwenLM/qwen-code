@@ -21,8 +21,8 @@ const EN: Messages = {
   'footnotes.preview': 'Reference preview',
   'footnotes.previous': 'Previous reference',
   'footnotes.next': 'Next reference',
-  'footnotes.sources': (v) =>
-    `${v?.count ?? 0} ${v?.count === 1 ? 'source' : 'sources'}`,
+  'footnotes.citations': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'citation' : 'citations'}`,
   'git.currentBranch': (v) => `Current Git branch: ${v?.branch ?? ''}`,
   'git.detached': 'Detached HEAD',
   'git.clean': 'Working tree clean',
@@ -3627,7 +3627,7 @@ const ZH: Messages = {
   'footnotes.preview': '引用预览',
   'footnotes.previous': '上一条引用',
   'footnotes.next': '下一条引用',
-  'footnotes.sources': (v) => `${v?.count ?? 0} 个来源`,
+  'footnotes.citations': (v) => `${v?.count ?? 0} 个引用`,
   'git.currentBranch': (v) => `当前 Git 分支：${v?.branch ?? ''}`,
   'git.detached': '游离 HEAD',
   'git.clean': '工作区干净',
