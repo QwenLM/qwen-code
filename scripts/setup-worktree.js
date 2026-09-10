@@ -71,7 +71,16 @@ function getHooksPath() {
     env,
     encoding: 'utf8',
   });
-  return result.status === 0 ? result.stdout.trim() : undefined;
+  if (result.status === 0) return result.stdout.trim();
+  // git exits 1 when the key is absent, and a spawn failure means git itself
+  // is unavailable — the ownership probe below reports that shape as having
+  // no repository. Any other status is a read failure (a refused config on a
+  // shared host, a config error) the hooks decision must not be made from.
+  if (result.status === 1 || result.error) return undefined;
+  console.error(
+    `worktree setup failed: could not read core.hooksPath (${result.stderr.trim()})`,
+  );
+  process.exit(1);
 }
 
 // Husky runs `git config core.hooksPath .husky/_` with no --worktree, so the
@@ -119,7 +128,8 @@ function install(cacheMode) {
               'for it to write.'
           : 'worktree setup: core.hooksPath is unset and this checkout does not ' +
               'own the repository config; skipping Husky so the hooks path is ' +
-              'not rewritten for every other worktree.',
+              'not rewritten for every other worktree. Re-run this script here ' +
+              'once hooks are installed in the primary checkout.',
       );
       exitWithResult(result);
     }

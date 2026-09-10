@@ -275,6 +275,31 @@ describe('package scripts', () => {
       expect(readFileSync(logFile, 'utf8').trim()).toBe(
         '1 1 pnpm install --frozen-lockfile --offline',
       );
+
+      // The pin above proves an explicit HUSKY value is honoured, but the
+      // state every real shell and CI job is in is unset. Deleting the key
+      // must still reach husky, so a gate that treats unset as disabled
+      // (e.g. `!== '1'`) goes red on the missing exec line.
+      const unsetEnv = {
+        ...process.env,
+        ...huskyTestEnv,
+        PATH: `${commandDir}${path.delimiter}${process.env.PATH ?? ''}`,
+        WORKTREE_SETUP_LOG: logFile,
+      };
+      for (const key of Object.keys(unsetEnv)) {
+        if (key.toUpperCase() === 'HUSKY') delete unsetEnv[key];
+      }
+      writeFileSync(logFile, '');
+      const unsetResult = spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/setup-worktree.js')],
+        { cwd: root, encoding: 'utf8', env: unsetEnv },
+      );
+      expect(unsetResult.status).toBe(0);
+      expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
+        '1 1 pnpm install --frozen-lockfile --offline',
+        '1 1 pnpm exec husky',
+      ]);
     } finally {
       if (!hadStubHooksDir) {
         rmSync(stubHooksDir, { recursive: true, force: true });
@@ -422,6 +447,11 @@ describe('package scripts', () => {
       });
       expect(linkedRun.status).toBe(0);
       expect(linkedRun.stdout).toContain('skipping Husky');
+      // The skip leaves the worktree hook-less until it is re-run after the
+      // primary installs, so the notice must carry that recovery path.
+      expect(linkedRun.stdout).toContain(
+        'Re-run this script here once hooks are installed in the primary checkout.',
+      );
       expect(readFileSync(logFile, 'utf8').trim()).toBe(installLine);
       expect(hooksPathIsSet(primary)).toBe(false);
       expect(existsSync(path.join(linked, '.husky'))).toBe(false);
@@ -487,6 +517,22 @@ describe('package scripts', () => {
         installLine,
         huskyLine,
       ]);
+
+      // A git that answers but refuses to read the config (a shared pool's
+      // dubious-ownership exit 128, a config error) is not "key unset": the
+      // read failure must surface rather than land on a skip branch with a
+      // green exit. A script stub cannot shadow git.exe on Windows.
+      if (process.platform !== 'win32') {
+        writeFileSync(path.join(commandDir, 'git'), '#!/bin/sh\nexit 128\n');
+        chmodSync(path.join(commandDir, 'git'), 0o755);
+        const unreadable = runSetup(primary, {
+          setsHooksPath: true,
+          writesHooks: true,
+        });
+        expect(unreadable.status).toBe(1);
+        expect(unreadable.stdout).not.toContain('skipping Husky');
+        expect(unreadable.stderr).toContain('could not read core.hooksPath');
+      }
     } finally {
       rmSync(sandbox, { recursive: true, force: true });
     }
