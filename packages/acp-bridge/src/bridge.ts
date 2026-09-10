@@ -5651,7 +5651,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // lifecycle marker before installing a session from a response that was
       // admitted immediately ahead of the fatal frame.
       await Promise.resolve();
-      if (ci.isDying) {
+      // Same three-state test as the pre-`newSession` twin above, NOT
+      // `ci.isDying`: a recycle landing inside the `newSession` round-trip
+      // leaves the channel `draining` with `isDying === false` (retirement is
+      // deferred while this very spawn is in flight, so nothing kills it), and
+      // installing the session would route fresh work back to the condemned
+      // generation — and pin it open until that session closed.
+      if (ci.state !== 'active') {
         throw new BridgeChannelClosedError('after newSession');
       }
 
