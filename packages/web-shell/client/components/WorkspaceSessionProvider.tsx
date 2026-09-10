@@ -331,6 +331,7 @@ function WorkspaceSessionProviderWorkspace({
     <DaemonSessionProvider
       key="main-session"
       sessionId={effectiveSessionId}
+      sessionSourceType={webShellProps.sessionSourceType}
       sessionContext={
         usePrimaryNewSession
           ? undefined
