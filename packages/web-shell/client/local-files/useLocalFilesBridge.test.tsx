@@ -4041,6 +4041,412 @@ describe('useLocalFilesBridge restore', () => {
     h.unmount();
   });
 
+  it('drops a restore continuation whose identity check answers false late', async () => {
+    const mine = fakeHandle('project', { query: 'granted' });
+    const store = fakeStore(mine);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+    await h.flush();
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+    expect(h.get().status.phase).toBe('connected');
+
+    // The false answer lands after a disconnect: the fall-through exit must
+    // not rebuild the bridge over the peer's record behind the click.
+    let releaseSame!: (value: boolean) => void;
+    const sameGate = new Promise<boolean>((resolve) => {
+      releaseSame = resolve;
+    });
+    mine.isSameEntry = vi.fn(
+      () => sameGate,
+    ) as unknown as typeof mine.isSameEntry;
+    const foreign = fakeHandle('project', { query: 'granted' });
+    await store.save(foreign);
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(h.sockets[0]!.closeCount).toBe(1);
+    await act(async () => {
+      releaseSame(false);
+      await Promise.resolve();
+    });
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+    expect(h.get().status.phase).toBe('idle');
+    h.unmount();
+  });
+
+  it('clears its own record when the permission lapses over a stale latch', async () => {
+    const perms = { query: 'granted' as PermissionState };
+    const mine = fakeHandle('project', perms);
+    const store = fakeStore(mine);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+    await h.flush();
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+    expect(h.get().status.phase).toBe('connected');
+
+    // A peer record latches foreign; the peer then puts this mount's own
+    // entry back, and the browser permission lapses before the next blip —
+    // the rebind's identity proof must clear the latch on the needs-gesture
+    // exit, or the user's own grant can never be released.
+    const foreign = fakeHandle('peer-dir', { query: 'granted' });
+    await store.save(foreign);
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    await h.flush();
+    await store.save(mine);
+    perms.query = 'prompt';
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status).toMatchObject({
+      phase: 'needs-gesture',
+      rootName: 'project',
+    });
+
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    h.unmount();
+  });
+
+  it('drops a restore continuation a concurrent reconnect superseded', async () => {
+    const perms = { query: 'granted' as PermissionState };
+    const mine = fakeHandle('project', perms);
+    const store = fakeStore(mine);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+    await h.flush();
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+    expect(h.get().status.phase).toBe('connected');
+
+    // restore() parks on the identity await over a peer's same-basename
+    // record (call 2: the rebind effect's shorter chain consumes call 1);
+    // inside the window a reconnect picks a new directory, saves it and
+    // rebuilds, superseding the parked load.
+    let calls = 0;
+    let releaseSame!: (value: boolean) => void;
+    const sameGate = new Promise<boolean>((resolve) => {
+      releaseSame = resolve;
+    });
+    mine.isSameEntry = vi.fn((other: unknown) => {
+      calls += 1;
+      if (calls === 2) return sameGate;
+      return Promise.resolve(other === mine);
+    }) as unknown as typeof mine.isSameEntry;
+    const foreign = fakeHandle('project', { query: 'granted' });
+    await store.save(foreign);
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    perms.query = 'denied';
+    const picked = fakeHandle('gamma', { query: 'granted' });
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      win: secureWindow(async () => picked),
+    });
+    await act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    expect(h.sockets).toHaveLength(2);
+    await act(async () => {
+      releaseSame(false);
+      await Promise.resolve();
+    });
+    await h.flush();
+
+    // The superseded continuation must neither latch nor bind: the record is
+    // this mount's own committed save, so Disconnect clears it.
+    expect(h.get().status.rootName).toBe('gamma');
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    h.unmount();
+  });
+
+  it('drops a restore continuation a concurrent same-entry reconnect superseded', async () => {
+    const mine = fakeHandle('project', { query: 'granted' });
+    const store = fakeStore(mine);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+    await h.flush();
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+    expect(h.get().status.phase).toBe('connected');
+
+    // Same shape, but the reconnect takes the same-entry early return: no
+    // bridge build, only the committed save supersedes the parked load.
+    // Call 2 is restore()'s identity await; call 1 belongs to the rebind
+    // effect's shorter chain.
+    let calls = 0;
+    let releaseSame!: (value: boolean) => void;
+    const sameGate = new Promise<boolean>((resolve) => {
+      releaseSame = resolve;
+    });
+    mine.isSameEntry = vi.fn((other: unknown) => {
+      calls += 1;
+      if (calls === 2) return sameGate;
+      return Promise.resolve(other === mine);
+    }) as unknown as typeof mine.isSameEntry;
+    const foreign = fakeHandle('project', { query: 'granted' });
+    await store.save(foreign);
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    await act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+    await act(async () => {
+      releaseSame(false);
+      await Promise.resolve();
+    });
+    await h.flush();
+
+    expect(h.get().status.rootName).toBe('project');
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    h.unmount();
+  });
+
+  it('reconciles the panel when a deferred revoke is declined with its connect still in flight', async () => {
+    const mine = fakeHandle('ai_coding', { query: 'denied' });
+    const store = fakeStore(mine);
+    // Attempt 0 declines on the settling release so the user can click
+    // Connect inside the window; the granted attempt 1 then defers the
+    // revoke onto that connect. Once the deferred closure re-asks, the peer
+    // holds the lock and every attempt declines.
+    const lock = { held: false, settling: 1 };
+    const locks: LockManagerLike = settlingLocks(lock);
+    let delayStep = 0;
+    let releaseDelayA!: () => void;
+    const delayGateA = new Promise<void>((resolve) => {
+      releaseDelayA = resolve;
+    });
+    let releaseDelayB!: () => void;
+    const delayGateB = new Promise<void>((resolve) => {
+      releaseDelayB = resolve;
+    });
+    // Step 0 is the first disconnect's backoff (the window for C2); steps 1+
+    // are the deferred closure's retries, parked until C3 is in flight.
+    const delay = async () => {
+      const step = delayStep++;
+      if (step === 0) {
+        await delayGateA;
+        return;
+      }
+      await delayGateB;
+    };
+    let dismissC2!: (err: Error) => void;
+    const pickerC2 = new Promise<FileSystemDirectoryHandle>((_r, reject) => {
+      dismissC2 = reject;
+    });
+    let dismissC3!: (err: Error) => void;
+    const pickerC3 = new Promise<FileSystemDirectoryHandle>((_r, reject) => {
+      dismissC3 = reject;
+    });
+    let pickCalls = 0;
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => {
+        pickCalls += 1;
+        if (pickCalls === 1) return pickerC2;
+        return pickerC3;
+      }),
+      store,
+      locks,
+      delay,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status).toMatchObject({
+      phase: 'needs-gesture',
+      rootName: 'ai_coding',
+    });
+
+    // D1 declines once, then defers its revoke onto C2, which clicked inside
+    // the backoff window.
+    const disconnectPromise = h.get().disconnect();
+    await h.flush();
+    const connectingC2 = act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    releaseDelayA();
+    await act(async () => {
+      await disconnectPromise;
+    });
+    expect(h.get().status.rootName).toBeUndefined();
+    // The peer tab takes the owner lock while C2's picker stays open.
+    lock.held = true;
+
+    // C2 is dismissed without saving; its finally runs the deferred closure,
+    // whose re-arbitration parks on the peer-held lock. C2's finally resets
+    // the in-flight flag before awaiting the closure, so a third click now
+    // really starts a connect — and it is still in flight when the closure's
+    // guard runs, which is the fact the guard must not trust.
+    await act(async () => {
+      dismissC2(Object.assign(new Error('dismissed'), { name: 'AbortError' }));
+    });
+    await h.flush();
+    const connectingC3 = h.get().connect();
+    await h.flush();
+
+    // Release the closure's retry: every attempt declines (peer holds the
+    // lock), so no successor is parked and the closure must reconcile the
+    // panel itself.
+    await act(async () => {
+      releaseDelayB();
+      await Promise.resolve();
+    });
+    await connectingC2;
+    await h.flush();
+
+    // The declined re-arbitration parked no successor, so the closure must
+    // reconcile the panel itself: the named grant keeps Disconnect reachable.
+    expect(h.get().status.rootName).toBe('ai_coding');
+    expect(store.clears).toBe(0);
+
+    await act(async () => {
+      dismissC3(Object.assign(new Error('dismissed'), { name: 'AbortError' }));
+    });
+    await connectingC3;
+    await h.flush();
+    h.unmount();
+  });
+
   it('keeps a connect that binds a new grant while a rebind is parked', async () => {
     const alpha = fakeHandle('alpha', { query: 'granted' });
     const perms = { query: 'granted' as PermissionState };

@@ -274,6 +274,14 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
    */
   const handleEpochRef = useRef(0);
   /**
+   * Bumped at both connect() save sites: the epoch a parked restore()
+   * continuation compares against, because a connect that commits a save
+   * while restore() is parked has superseded its store.load() — including
+   * on the same-entry early return, which never builds a bridge and so
+   * never bumps handleEpochRef.
+   */
+  const saveEpochRef = useRef(0);
+  /**
    * Bumped only by `disconnect()`: the revoke arbitration's cancellation
    * epoch. Unlike `generationRef` an unmount does not bump it, so a view
    * disappearing mid-arbitration cannot silently cancel a revoke the user
@@ -491,10 +499,19 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     }
     if (!store) return;
     const generation = generationRef.current;
+    const saveEpoch = saveEpochRef.current;
+    // Every await below re-checks all three: a disconnect or unmount must
+    // win over the parked continuation, and a connect that committed a save
+    // while it was parked has superseded this load — every connect exit that
+    // binds or rebuilds saves first, so the save epoch also covers builds.
+    const staleRestore = () =>
+      generationRef.current !== generation ||
+      detachedRef.current ||
+      saveEpochRef.current !== saveEpoch;
     const stored = await store.load();
-    if (!stored || generationRef.current !== generation) return;
+    if (!stored || staleRestore()) return;
     const permission = await ensureReadwritePermission(stored);
-    if (generationRef.current !== generation) return;
+    if (staleRestore()) return;
     if (permission.state !== 'granted') {
       // Deliberately NOT stored in `handleRef`: the session-rebind effect
       // starts a bridge from whatever it holds, and an ungranted handle would
@@ -532,12 +549,13 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     // Identity, not basename: a same-named handle from another directory is
     // a foreign record even while this mount's bridge is live, and binding
     // it would let a later revoke delete a peer's grant.
-    if (await sameBoundEntry(stored)) {
-      // A disconnect or unmount that landed inside the identity await must
-      // win: re-binding here would resurrect the grant behind it.
-      if (generationRef.current !== generation || detachedRef.current) {
-        return;
-      }
+    const sameEntry = await sameBoundEntry(stored);
+    // A disconnect or unmount that landed inside the identity await must
+    // win on BOTH exits: re-binding would resurrect the grant behind it,
+    // and falling through would rebuild the bridge over a record a peer
+    // wrote while this continuation was parked.
+    if (staleRestore()) return;
+    if (sameEntry) {
       // The record holds the very entry the live bridge serves; the rebind
       // effect re-running alongside this restore owns the latch reset.
       handleRef.current = stored;
@@ -638,12 +656,15 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         // A record the bound handle is not the same entry as is foreign:
         // latch it so a later revoke cannot blind-clear the peer's grant.
         // The write waits for the re-check below: a disconnect that landed
-        // inside the identity await must not leave a latch behind.
+        // inside the identity await must not leave a latch behind. The
+        // assignment is two-way at the decision point: an identity proof
+        // that the record IS this mount's own grant must clear a stale
+        // latch even on the exits that never reach startBridge (permission
+        // lapsed, superseded continuation), or the user's own record can
+        // never be released and the panel loses its only clearing button.
         recordIsForeign = !(await sameEntryOrFalse(handle, persisted));
         if (staleRebind()) return;
-        if (recordIsForeign) {
-          foreignRecordRef.current = true;
-        }
+        foreignRecordRef.current = recordIsForeign;
       }
       const permission = await ensureReadwritePermission(handle);
       // A disconnect that landed while these awaits were in flight must win:
@@ -736,6 +757,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         if (permission.state === 'granted') {
           connectBoundHandleRef.current = stored;
           connectSavedRef.current = (await store?.save(stored)) ?? true;
+          saveEpochRef.current += 1;
           // Both latches clear only on the exits that bind a grant: a stale
           // or otherwise non-binding connect (dismissed picker, failed pick,
           // re-armed gesture) must not disarm either guard.
@@ -807,6 +829,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       }
       connectBoundHandleRef.current = result.handle;
       connectSavedRef.current = (await store?.save(result.handle)) ?? true;
+      saveEpochRef.current += 1;
       if (connectSavedRef.current) foreignRecordRef.current = false;
       if (stale()) return;
       detachedRef.current = false;
@@ -921,13 +944,15 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
               return clearedNow;
             }
             // A connect stamped at or after this disconnect that BOUND a
-            // grant owns the status: it saved, it is still in flight so
-            // this revoke re-deferred to it, or it parked a handle or a
+            // grant owns the status: it saved, or it parked a handle or a
             // live bridge in this mount — a soft-failed save still binds
-            // both.
+            // both. An in-flight connect qualifies only when this revoke
+            // actually re-deferred to it: a DECLINED re-arbitration never
+            // runs revoke(), parks nothing, and must fall through to the
+            // reconcile below or the panel loses its only revoke button.
             if (
               connectGenerationRef.current >= generation &&
-              (connectInFlightRef.current ||
+              (pendingRevokeRef.current !== undefined ||
                 connectSavedRef.current ||
                 bridgeRef.current !== undefined ||
                 handleRef.current !== undefined)
