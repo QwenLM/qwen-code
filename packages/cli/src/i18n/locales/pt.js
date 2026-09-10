@@ -486,15 +486,18 @@ export default {
     'O modo foco não é compatível com esta interface.',
   'toggle focus mode (hide reasoning and tool call noise)':
     'alternar modo foco (ocultar raciocínio e ruído de chamadas de ferramentas)',
-  'Focus mode enabled. Ctrl+O shows full details; close that view to apply focus. Run /focus again to disable.':
-    'Modo foco ativado. Ctrl+O mostra todos os detalhes; feche essa visualização para aplicar o foco. Execute /focus novamente para desativar.',
+  'Focus mode enabled. Ctrl+O shows full details. Press Ctrl+O again to re-apply focus. Run /focus again to disable.':
+    'Modo foco ativado. Ctrl+O mostra todos os detalhes. Pressione Ctrl+O novamente para reaplicar o foco. Execute /focus novamente para desativar.',
   'Focus mode disabled.': 'Modo foco desativado.',
-  '1 tool call hidden (Ctrl+O for details)':
-    '1 chamada de ferramenta oculta (Ctrl+O para detalhes)',
-  'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
-    'Ferramentas: {{count}}, falhas: {{failed}} (Ctrl+O para detalhes)',
-  '{{count}} tool calls hidden (Ctrl+O for details)':
-    '{{count}} chamadas de ferramentas ocultas (Ctrl+O para detalhes)',
+  '{{tool}} (Ctrl+O for details)': '{{tool}} (Ctrl+O para detalhes)',
+  '{{tool}} failed (Ctrl+O for details)':
+    '{{tool}} falhou (Ctrl+O para detalhes)',
+  '{{tool}} cancelled (Ctrl+O for details)':
+    '{{tool}} cancelado (Ctrl+O para detalhes)',
+  'Tools: {{count}}': 'Ferramentas: {{count}}',
+  'failed: {{failed}} ({{tools}})': 'falhas: {{failed}} ({{tools}})',
+  'cancelled: {{cancelled}}': 'canceladas: {{cancelled}}',
+  '{{summary}} (Ctrl+O for details)': '{{summary}} (Ctrl+O para detalhes)',
   'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.':
     'O modo foco é controlado pelas configurações do espaço de trabalho ou do sistema. Altere a configuração que tem precedência para alternar o foco.',
   'Memory: {{read}} read, {{written}} written':

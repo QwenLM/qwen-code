@@ -111,21 +111,17 @@ export interface SettingsListItem {
 export function buildSettingsListItems(options?: {
   excludeWorkspaceRestricted?: boolean;
 }): SettingsListItem[] {
-  return getDialogSettingKeys(options)
-    .filter((key) => key !== 'ui.focusMode')
-    .map((key) => {
-      const definition = getSettingDefinition(key);
-      return {
-        key,
-        label: definition?.label
-          ? t(definition.label) || definition.label
-          : key,
-        description: definition?.description
-          ? t(definition.description) || definition.description
-          : undefined,
-        type: definition?.type,
-      };
-    });
+  return getDialogSettingKeys(options).map((key) => {
+    const definition = getSettingDefinition(key);
+    return {
+      key,
+      label: definition?.label ? t(definition.label) || definition.label : key,
+      description: definition?.description
+        ? t(definition.description) || definition.description
+        : undefined,
+      type: definition?.type,
+    };
+  });
 }
 
 /** Parity of the settings-list search filter (label, key, desc, scope msg). */

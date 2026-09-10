@@ -39,6 +39,8 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from 'react';
+import { Command, matchesCommand } from './key-map.js';
+import { useFocusModeActions } from '../contexts/FocusModeContext.js';
 import type { Config, Logger, ApprovalMode } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -55,7 +57,7 @@ import type { OpenTuiSubmitOptions } from './live-turn.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
-import { useTerminalDimensions } from '@opentui/react';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import {
   normalizeQuitSubmission,
   OpenTuiSlashGateway,
@@ -99,6 +101,7 @@ export interface OpenTuiAppProps {
   // --- seams owned by the renderer / entry layer ---------------------------
   /** Renders the transcript + status line (needs the real OpenTUI renderer). */
   renderMain?: () => ReactNode;
+  onToggleFullDetail?: () => void;
   /**
    * Runs a model turn for a plain prompt or a `submit_prompt` outcome. A
    * composer prompt passes its pasted image paths as a second, structured
@@ -185,6 +188,7 @@ interface ActionModal {
 type ConfirmationModal = ShellModal | ActionModal;
 
 export function OpenTuiApp(props: OpenTuiAppProps) {
+  const { toggleFocusMode, syncFocusMode } = useFocusModeActions();
   const {
     config,
     settings,
@@ -360,6 +364,19 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   const activeToolCall = waitingToolCalls?.[0] ?? null;
 
+  useKeyboard((key) => {
+    if (dialog || activeModal || activeToolCall || !props.onToggleFullDetail)
+      return;
+    if (matchesCommand(Command.TOGGLE_THINKING_EXPANDED, key)) {
+      key.preventDefault();
+      props.onToggleFullDetail();
+    }
+  });
+
+  useEffect(() => {
+    syncFocusMode();
+  }, [settings.merged.ui?.focusMode, syncFocusMode]);
+
   const transcript = useMemo(
     () => ({
       reset: (events: OpenTuiStreamEvent[]) => onTranscriptReset?.(events),
@@ -381,6 +398,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         confirmations,
         onChange: () => {},
         toggleVimEnabled: () => onToggleVim?.() ?? Promise.resolve(false),
+        toggleFocusMode,
         reloadCommands: () => reloadRef.current?.() ?? undefined,
         startNewSession: (sessionId: string) => {
           if (onStartNewSession) onStartNewSession(sessionId);
@@ -397,6 +415,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       onStartNewSession,
       notify,
       onToggleVim,
+      toggleFocusMode,
       getSessionStats,
     ],
   );

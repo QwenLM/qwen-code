@@ -36,6 +36,7 @@ import {
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { HandleAtCommandResult } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
+import { getAutoMemoryRoot } from '@qwen-code/qwen-code-core/memory/paths.js';
 
 // `runVisionBridge` is the one bridge collaborator that would reach a real
 // provider, so it is recorded here; every other core export (including the
@@ -162,6 +163,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
             const a = (c.args ?? {}) as {
               __cancelled?: boolean;
               __cancelApproval?: boolean;
+              __error?: boolean;
             };
             return {
               request: {
@@ -174,7 +176,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
               status:
                 a.__cancelled === true || a.__cancelApproval === true
                   ? 'cancelled'
-                  : 'success',
+                  : a.__error
+                    ? 'error'
+                    : 'success',
               response: {
                 responseParts: [
                   {
@@ -257,6 +261,7 @@ function createFakeConfig(
   };
   return {
     initialize: vi.fn(async () => {}),
+    getTargetDir: () => '/tmp/focus-test-project',
     getGeminiClient: () => client,
     getSessionId: () => 'session-1',
     getModel: () => 'test-model',
@@ -301,6 +306,31 @@ async function drain(gen: AsyncGenerator<unknown>): Promise<unknown[]> {
 }
 
 describe('livePromptEvents', () => {
+  it('does not count scheduler memory failures as completed writes', async () => {
+    const projectRoot = '/tmp/focus-test-project';
+    const config = createFakeConfig(
+      oneToolBatchStream({
+        callId: 'memory1',
+        name: 'write_file',
+        args: {
+          file_path: `${getAutoMemoryRoot(projectRoot)}/MEMORY.md`,
+          __error: true,
+        },
+      }),
+    );
+    const events = (await drain(
+      livePromptEvents(config, 'start'),
+    )) as OpenTuiStreamEvent[];
+    const result = events.find((event) => event.type === 'tool-result');
+    expect(result).toBeDefined();
+    expect(result).not.toHaveProperty('isMemoryOp');
+    expect(events).toContainEqual({
+      type: 'tool-end',
+      id: 'memory1',
+      success: false,
+      summary: 'error',
+    });
+  });
   /** A `@path` read as the expander reports it (ink's tool_group entry). */
   const readDisplay = (
     overrides: Partial<IndividualToolCallDisplay> = {},
@@ -412,6 +442,7 @@ describe('livePromptEvents', () => {
       initialize: vi.fn(async () => {
         throw new Error('auth exploded');
       }),
+      getTargetDir: () => '/tmp/focus-test-project',
       getGeminiClient: () => ({
         sendMessageStream,
         isInitialized: () => false,
@@ -433,6 +464,7 @@ describe('livePromptEvents', () => {
       initialize: vi.fn(async () => {
         throw new Error('auth exploded');
       }),
+      getTargetDir: () => '/tmp/focus-test-project',
       getGeminiClient: () => ({
         sendMessageStream,
         isInitialized: () => false,
@@ -462,6 +494,7 @@ describe('livePromptEvents', () => {
     });
     const config = {
       initialize,
+      getTargetDir: () => '/tmp/focus-test-project',
       getGeminiClient: () => ({ isInitialized: () => false }),
     } as unknown as Config;
 
@@ -517,6 +550,7 @@ describe('livePromptEvents', () => {
       initialize: vi.fn(async () => {
         throw new Error('Config was already initialized');
       }),
+      getTargetDir: () => '/tmp/focus-test-project',
       getGeminiClient: () => ({
         sendMessageStream,
         isInitialized: () => chatExists,
@@ -557,6 +591,7 @@ describe('livePromptEvents', () => {
       initialize: vi.fn(async () => {
         throw new Error('Config was already initialized');
       }),
+      getTargetDir: () => '/tmp/focus-test-project',
       getGeminiClient: () => ({
         sendMessageStream,
         isInitialized: () => false,
@@ -629,6 +664,7 @@ describe('livePromptEvents', () => {
       initialize: vi.fn(async () => {
         throw new Error('Config was already initialized');
       }),
+      getTargetDir: () => '/tmp/focus-test-project',
       getGeminiClient: () => ({
         sendMessageStream,
         isInitialized: () => true,
@@ -1092,6 +1128,7 @@ describe('livePromptEvents', () => {
       ...createFakeConfig(sendMessageStream, undefined, undefined, {
         recordMidTurnUserMessage,
       }),
+      getTargetDir: () => '/tmp/focus-test-project',
       getGeminiClient: () => ({
         sendMessageStream,
         addHistory,
@@ -1878,6 +1915,7 @@ describe('livePromptEvents', () => {
     });
     const config = {
       ...createFakeConfig(sendMessageStream),
+      getTargetDir: () => '/tmp/focus-test-project',
       getGeminiClient: () => ({
         sendMessageStream,
         addHistory: vi.fn(),
@@ -1974,6 +2012,7 @@ describe('livePromptEvents', () => {
     const addHistory = vi.fn();
     const config = {
       ...createFakeConfig(sendMessageStream),
+      getTargetDir: () => '/tmp/focus-test-project',
       getGeminiClient: () => ({
         sendMessageStream,
         addHistory,

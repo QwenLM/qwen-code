@@ -23,6 +23,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { useFocusModeActions } from '../contexts/FocusModeContext.js';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import type {
   ApprovalMode,
@@ -126,6 +127,7 @@ export interface OpenTuiDialogMountProps {
 }
 
 export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
+  const { syncFocusMode } = useFocusModeActions();
   const { request, host, config, settings, commands, onClose, notify } = props;
   const isHelp = request.dialog === 'help';
   const dimensions = useTerminalDimensions();
@@ -301,6 +303,9 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       return (
         <OpenTuiSettingsDialog
           settings={settings}
+          onSettingApplied={(key) => {
+            if (key === 'ui.focusMode') syncFocusMode();
+          }}
           config={config}
           availableTerminalHeight={props.availableTerminalHeight}
           onSelect={(name, scope) => {

@@ -787,15 +787,17 @@ export default {
   'Focus mode is not supported by this renderer.': '当前界面不支持专注模式。',
   'toggle focus mode (hide reasoning and tool call noise)':
     '切换专注模式（隐藏推理内容和工具调用噪音）',
-  'Focus mode enabled. Ctrl+O shows full details; close that view to apply focus. Run /focus again to disable.':
-    '专注模式已开启。Ctrl+O 显示完整详情；关闭详情视图后即可应用专注模式。再次运行 /focus 可关闭专注模式。',
+  'Focus mode enabled. Ctrl+O shows full details. Press Ctrl+O again to re-apply focus. Run /focus again to disable.':
+    '专注模式已开启。Ctrl+O 显示完整详情。再次按 Ctrl+O 可重新应用专注模式。再次运行 /focus 可关闭专注模式。',
   'Focus mode disabled.': '专注模式已关闭。',
-  '1 tool call hidden (Ctrl+O for details)':
-    '已隐藏 1 个工具调用（Ctrl+O 查看详情）',
-  'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
-    '工具：{{count}}，失败：{{failed}}（Ctrl+O 查看详情）',
-  '{{count}} tool calls hidden (Ctrl+O for details)':
-    '已隐藏 {{count}} 个工具调用（Ctrl+O 查看详情）',
+  '{{tool}} (Ctrl+O for details)': '{{tool}}（Ctrl+O 查看详情）',
+  '{{tool}} failed (Ctrl+O for details)': '{{tool}} 失败（Ctrl+O 查看详情）',
+  '{{tool}} cancelled (Ctrl+O for details)':
+    '{{tool}} 已取消（Ctrl+O 查看详情）',
+  'Tools: {{count}}': '工具：{{count}}',
+  'failed: {{failed}} ({{tools}})': '失败：{{failed}}（{{tools}}）',
+  'cancelled: {{cancelled}}': '取消：{{cancelled}}',
+  '{{summary}} (Ctrl+O for details)': '{{summary}}（Ctrl+O 查看详情）',
   'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.':
     '专注模式由工作区或系统设置控制。请修改优先级更高的设置以切换专注模式。',
   'Memory: {{read}} read, {{written}} written':

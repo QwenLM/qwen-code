@@ -636,7 +636,7 @@ describe('<HistoryItemDisplay />', () => {
         <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
       );
 
-      expect(lastFrame()).toContain('5 tool calls hidden (Ctrl+O for details)');
+      expect(lastFrame()).toContain('Tools: 5 (Ctrl+O for details)');
       expect(vi.mocked(ToolGroupMessage)).not.toHaveBeenCalled();
     });
 
@@ -651,7 +651,7 @@ describe('<HistoryItemDisplay />', () => {
         <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
       );
 
-      expect(lastFrame()).toContain('1 tool call hidden (Ctrl+O for details)');
+      expect(lastFrame()).toContain('Shell (Ctrl+O for details)');
       expect(ToolGroupMessage).not.toHaveBeenCalled();
     });
 
@@ -677,7 +677,9 @@ describe('<HistoryItemDisplay />', () => {
         );
 
         expect(lastFrame()).toContain(
-          `Tools: ${mixed ? 2 : 1}, failed: 1 (Ctrl+O for details)`,
+          mixed
+            ? 'Tools: 2, failed: 1 (Shell) (Ctrl+O for details)'
+            : 'Shell failed (Ctrl+O for details)',
         );
         expect(vi.mocked(ToolGroupMessage)).not.toHaveBeenCalled();
       },
@@ -687,7 +689,6 @@ describe('<HistoryItemDisplay />', () => {
       ToolCallStatus.Pending,
       ToolCallStatus.Executing,
       ToolCallStatus.Confirming,
-      ToolCallStatus.Canceled,
     ])('keeps a committed group with status %s visible', (status) => {
       vi.mocked(ToolGroupMessage).mockClear();
       const item: HistoryItem = {
@@ -698,8 +699,69 @@ describe('<HistoryItemDisplay />', () => {
       const { lastFrame } = renderInFocusMode(
         <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
       );
-      expect(lastFrame()).not.toContain('hidden (Ctrl+O for details)');
+      expect(lastFrame()).not.toContain('(Ctrl+O for details)');
       expect(ToolGroupMessage).toHaveBeenCalled();
+    });
+
+    it('retains a file identity without arguments or output', () => {
+      vi.mocked(ToolGroupMessage).mockClear();
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay
+          item={{
+            id: 1,
+            type: 'tool_group',
+            tools: [
+              {
+                ...successTool('read'),
+                name: 'ReadFile',
+                args: { absolute_path: '/repo/src/focus.ts' },
+                resultDisplay: 'PRIVATE-OUTPUT',
+              },
+            ],
+          }}
+          terminalWidth={100}
+          isPending={false}
+        />,
+      );
+      expect(lastFrame()).toContain('ReadFile /repo/src/focus.ts');
+      expect(lastFrame()).not.toContain('PRIVATE-OUTPUT');
+      expect(ToolGroupMessage).not.toHaveBeenCalled();
+    });
+
+    it('compacts a terminal cancelled tool without hiding cancellation', () => {
+      vi.mocked(ToolGroupMessage).mockClear();
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay
+          item={{
+            id: 1,
+            type: 'tool_group',
+            tools: [
+              { ...successTool('cancelled'), status: ToolCallStatus.Canceled },
+            ],
+          }}
+          terminalWidth={100}
+          isPending={false}
+        />,
+      );
+      expect(lastFrame()).toContain('Shell cancelled');
+      expect(ToolGroupMessage).not.toHaveBeenCalled();
+    });
+
+    it('bypasses only Focus without forcing tool expansion', () => {
+      vi.mocked(ToolGroupMessage).mockClear();
+      renderInFocusMode(
+        <HistoryItemDisplay
+          item={{ id: 1, type: 'tool_group', tools: [successTool('preview')] }}
+          terminalWidth={80}
+          availableTerminalHeight={12}
+          isPending={false}
+          disableFocus
+        />,
+      );
+      expect(vi.mocked(ToolGroupMessage).mock.calls[0]?.[0]).toMatchObject({
+        fullDetail: false,
+        availableTerminalHeight: 12,
+      });
     });
 
     it('keeps successful subagent executions visible', () => {
@@ -724,7 +786,7 @@ describe('<HistoryItemDisplay />', () => {
       const { lastFrame } = renderInFocusMode(
         <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
       );
-      expect(lastFrame()).not.toContain('hidden (Ctrl+O for details)');
+      expect(lastFrame()).not.toContain('(Ctrl+O for details)');
       expect(ToolGroupMessage).toHaveBeenCalled();
     });
 
@@ -784,8 +846,28 @@ describe('<HistoryItemDisplay />', () => {
         <HistoryItemDisplay item={item} terminalWidth={80} isPending={true} />,
       );
 
-      expect(lastFrame()).not.toContain('hidden (Ctrl+O for details)');
+      expect(lastFrame()).not.toContain('(Ctrl+O for details)');
       expect(vi.mocked(ToolGroupMessage)).toHaveBeenCalled();
+    });
+
+    it('keeps tool identity before memory counts in a narrow terminal', () => {
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay
+          item={{
+            id: 1,
+            type: 'tool_group',
+            tools: [successTool('memory')],
+            memoryReadCount: 20,
+            memoryWriteCount: 10,
+          }}
+          terminalWidth={30}
+          isPending={false}
+        />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('Shell');
+      expect(output.split('\n')).toHaveLength(1);
+      expect(output.length).toBeLessThanOrEqual(30);
     });
 
     it('does NOT collapse a user-initiated tool_group', () => {
@@ -801,37 +883,38 @@ describe('<HistoryItemDisplay />', () => {
         <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
       );
 
-      expect(lastFrame()).not.toContain('hidden (Ctrl+O for details)');
+      expect(lastFrame()).not.toContain('(Ctrl+O for details)');
       expect(vi.mocked(ToolGroupMessage)).toHaveBeenCalled();
     });
 
-    it.each([ToolCallStatus.Success, ToolCallStatus.Error])(
-      'fullDetail restores tool details with status %s',
-      (status) => {
-        vi.mocked(ToolGroupMessage).mockClear();
-        const item: HistoryItem = {
-          id: 1,
-          type: 'tool_group',
-          tools: [{ ...successTool('c1'), status }],
-        };
+    it.each([
+      ToolCallStatus.Success,
+      ToolCallStatus.Error,
+      ToolCallStatus.Canceled,
+    ])('fullDetail restores tool details with status %s', (status) => {
+      vi.mocked(ToolGroupMessage).mockClear();
+      const item: HistoryItem = {
+        id: 1,
+        type: 'tool_group',
+        tools: [{ ...successTool('c1'), status }],
+      };
 
-        const { lastFrame } = renderInFocusMode(
-          <HistoryItemDisplay
-            item={item}
-            terminalWidth={80}
-            isPending={false}
-            fullDetail
-          />,
-        );
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay
+          item={item}
+          terminalWidth={80}
+          isPending={false}
+          fullDetail
+        />,
+      );
 
-        expect(lastFrame()).not.toContain('hidden (Ctrl+O for details)');
-        expect(vi.mocked(ToolGroupMessage)).toHaveBeenCalled();
-        expect(vi.mocked(ToolGroupMessage).mock.calls[0][0]).toMatchObject({
-          fullDetail: true,
-          toolCalls: item.tools,
-        });
-      },
-    );
+      expect(lastFrame()).not.toContain('(Ctrl+O for details)');
+      expect(vi.mocked(ToolGroupMessage)).toHaveBeenCalled();
+      expect(vi.mocked(ToolGroupMessage).mock.calls[0][0]).toMatchObject({
+        fullDetail: true,
+        toolCalls: item.tools,
+      });
+    });
 
     it('hides gemini_thought completely', () => {
       const item: HistoryItem = {

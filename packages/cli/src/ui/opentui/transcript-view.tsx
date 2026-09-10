@@ -56,12 +56,16 @@ import { assistantMarkdownForRender } from './markdown-heal.js';
 import {
   getCachedStringWidth,
   sanitizeTerminalText,
+  truncateToWidth,
 } from '../utils/textUtils.js';
 import { getCompressionStatusText } from '../utils/compression-text.js';
 import { ICON } from '../constants.js';
 import { formatDuration } from '../utils/formatters.js';
 import { getArenaStatusLabel } from '../utils/displayUtils.js';
 import type { ArenaAgentCardData } from '../types.js';
+import { getFocusToolSummary } from '../utils/focus-tool-summary.js';
+import { formatInlineImageOverflow } from '../utils/inline-image-parts.js';
+import { t } from '../../i18n/index.js';
 
 const GOAL_COLOR: Record<GoalCardColor, string> = {
   secondary: C.dim,
@@ -73,6 +77,8 @@ const GOAL_COLOR: Record<GoalCardColor, string> = {
 
 export interface TranscriptViewProps {
   items: readonly LiveHistoryItem[];
+  focusMode?: boolean;
+  fullDetail?: boolean;
   /** Width budget for ANSI grids / wrapping (defaults to a safe 80). */
   availableWidth?: number;
   /** Terminal height; per-item row caps follow ink staticAreaMaxItemHeight. */
@@ -83,14 +89,20 @@ export function OpenTuiTranscriptView({
   items,
   availableWidth = 80,
   availableTerminalHeight = 24,
+  focusMode = false,
+  fullDetail = false,
 }: TranscriptViewProps) {
-  const maxRows = maxHistoryItemRows(availableTerminalHeight);
+  const maxRows = fullDetail
+    ? Number.POSITIVE_INFINITY
+    : maxHistoryItemRows(availableTerminalHeight);
   return (
     <box flexDirection="column">
       {items.map((item) => (
         <TranscriptItem
           key={item.id}
           item={item}
+          focusMode={focusMode && !fullDetail}
+          fullDetail={fullDetail}
           maxRows={maxRows}
           terminalHeight={availableTerminalHeight}
           width={availableWidth}
@@ -105,8 +117,12 @@ function TranscriptItem({
   maxRows,
   terminalHeight,
   width,
+  focusMode,
+  fullDetail,
 }: {
   item: LiveHistoryItem;
+  focusMode: boolean;
+  fullDetail: boolean;
   maxRows: number;
   terminalHeight: number;
   width: number;
@@ -117,11 +133,19 @@ function TranscriptItem({
     case 'assistant':
       return <AssistantRow text={item.text} streaming={item.streaming} />;
     case 'thinking':
-      return <ThinkingRow text={item.text} done={item.done} />;
+      return focusMode ? null : (
+        <ThinkingRow
+          text={item.text}
+          done={item.done}
+          fullDetail={fullDetail}
+        />
+      );
     case 'tool':
       return (
         <ToolCard
           item={item}
+          focusMode={focusMode}
+          fullDetail={fullDetail}
           maxRows={maxRows}
           terminalHeight={terminalHeight}
           width={width}
@@ -222,9 +246,17 @@ function AssistantRow({
   );
 }
 
-function ThinkingRow({ text, done }: { text: string; done: boolean }) {
+function ThinkingRow({
+  text,
+  done,
+  fullDetail,
+}: {
+  text: string;
+  done: boolean;
+  fullDetail: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
-  const meta = thinkingMeta(done, expanded, false);
+  const meta = thinkingMeta(done, fullDetail || expanded, false);
   return (
     <box
       flexDirection="column"
@@ -252,8 +284,12 @@ function ToolCard({
   maxRows,
   terminalHeight,
   width,
+  focusMode,
+  fullDetail,
 }: {
   item: LiveToolItem;
+  focusMode: boolean;
+  fullDetail: boolean;
   maxRows: number;
   terminalHeight: number;
   width: number;
@@ -262,6 +298,63 @@ function ToolCard({
   const name = toolCardName(item.tool);
   const description =
     item.description ?? toolCardDescription(item.tool, item.args);
+  let args: Record<string, unknown> | undefined;
+  try {
+    const parsed: unknown = JSON.parse(item.args ?? '{}');
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+      args = parsed as Record<string, unknown>;
+  } catch {
+    // Legacy replay may have only a display description.
+  }
+  const memory = item.isMemoryOp
+    ? ` · ${t('Memory: {{read}} read, {{written}} written', { read: item.isMemoryOp === 'read' ? '1' : '0', written: item.isMemoryOp === 'write' ? '1' : '0' })}`
+    : '';
+  const compact = focusMode
+    ? getFocusToolSummary(
+        [
+          {
+            name: item.tool,
+            description,
+            args,
+            status:
+              !item.done || item.confirm === 'pending'
+                ? 'pending'
+                : item.summary === 'cancelled' ||
+                    item.summary === 'canceled' ||
+                    item.summary === 'interrupted'
+                  ? 'cancelled'
+                  : item.success === false
+                    ? 'error'
+                    : 'success',
+            isUserInitiated: item.isUserInitiated,
+            isSubagent: item.isSubagent,
+            hasImages: Boolean(
+              item.imageMimeTypes?.length || item.omittedImageCount,
+            ),
+          },
+        ],
+        {
+          maxWidth: Math.max(
+            20,
+            width - STATUS_INDICATOR_WIDTH - getCachedStringWidth(memory),
+          ),
+        },
+      )
+    : undefined;
+  if (compact)
+    return (
+      <box key="focus-summary" flexDirection="row">
+        <box width={STATUS_INDICATOR_WIDTH}>
+          <text fg={status.color}>{status.glyph}</text>
+        </box>
+        <text fg={C.dim} {...selectionProps()}>
+          {truncateToWidth(
+            compact.text + memory,
+            width - STATUS_INDICATOR_WIDTH,
+          )}
+        </text>
+      </box>
+    );
   // Measure on the same basis the render uses: a live description (e.g. a
   // shell command) can carry newlines that each become a physical row while
   // costing zero columns in the cap math, so fold them first like the
@@ -279,13 +372,15 @@ function ToolCard({
     text,
     name,
     width,
-    item.confirm === 'pending' && !item.done
-      ? pendingCardMaxRows(terminalHeight, getCachedStringWidth(text), width)
-      : TOOL_CARD_DESCRIPTION_ROWS,
+    fullDetail && item.confirm !== 'pending'
+      ? Number.POSITIVE_INFINITY
+      : item.confirm === 'pending' && !item.done
+        ? pendingCardMaxRows(terminalHeight, getCachedStringWidth(text), width)
+        : TOOL_CARD_DESCRIPTION_ROWS,
   );
   const suffix = toolCardSummarySuffix(item.done, item.summary);
   return (
-    <box flexDirection="column">
+    <box key="tool-details" flexDirection="column">
       <box flexDirection="row">
         <box width={STATUS_INDICATOR_WIDTH}>
           <text
@@ -311,7 +406,26 @@ function ToolCard({
       {item.confirm === 'pending' && !item.done ? (
         <text fg={C.yellow}> (awaiting approval)</text>
       ) : null}
-      <ToolCardBody item={item} maxRows={maxRows} width={width} />
+      <ToolCardBody
+        item={item}
+        maxRows={maxRows}
+        width={width}
+        fullDetail={fullDetail}
+      />
+      {item.imageMimeTypes?.map((mimeType, index) => (
+        <text
+          key={index}
+          fg={C.dim}
+        >{`[inline image: ${sanitizeTerminalText(mimeType)}]`}</text>
+      ))}
+      {item.omittedImageCount ? (
+        <text fg={C.dim}>
+          {formatInlineImageOverflow(item.omittedImageCount)}
+        </text>
+      ) : null}
+      {item.visionBridgeNotice ? (
+        <text fg={C.dim}>{sanitizeTerminalText(item.visionBridgeNotice)}</text>
+      ) : null}
     </box>
   );
 }
@@ -320,19 +434,21 @@ function ToolCardBody({
   item,
   maxRows,
   width,
+  fullDetail,
 }: {
   item: LiveToolItem;
+  fullDetail: boolean;
   maxRows: number;
   width: number;
 }) {
-  if (item.todos) {
+  if (item.todos && !(fullDetail && item.detailedDisplay)) {
     return (
       <box paddingLeft={STATUS_INDICATOR_WIDTH}>
         <TodoRows todos={item.todos} />
       </box>
     );
   }
-  if (item.ansi) {
+  if (item.ansi && !(fullDetail && item.detailedDisplay)) {
     return (
       <box paddingLeft={STATUS_INDICATOR_WIDTH}>
         <AnsiRows
@@ -340,11 +456,12 @@ function ToolCardBody({
           maxWidth={width - STATUS_INDICATOR_WIDTH}
           totalLines={item.ansi.totalLines}
           totalBytes={item.ansi.totalBytes}
+          fullDetail={fullDetail}
         />
       </box>
     );
   }
-  if (item.diff) {
+  if (item.diff && !(fullDetail && item.detailedDisplay)) {
     const lines = renderDiffBody(item.diff.fileDiff);
     const window = tailWindow(lines, maxRows);
     return (
@@ -364,7 +481,9 @@ function ToolCardBody({
       </box>
     );
   }
-  const output = truncateResultDisplayChars(item.output);
+  const output = fullDetail
+    ? (item.detailedDisplay ?? item.output)
+    : truncateResultDisplayChars(item.output);
   if (!output) return null;
   const lines = sanitizeTerminalText(output).split('\n');
   const window = tailWindow(lines, maxRows);
@@ -378,9 +497,6 @@ function ToolCardBody({
           {line}
         </text>
       ))}
-      {item.visionBridgeNotice ? (
-        <text fg={C.dim}>{sanitizeTerminalText(item.visionBridgeNotice)}</text>
-      ) : null}
     </box>
   );
 }

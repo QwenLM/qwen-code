@@ -369,15 +369,17 @@ export default {
     'このレンダラーはフォーカスモードに対応していません。',
   'toggle focus mode (hide reasoning and tool call noise)':
     'フォーカスモードの切り替え（推論とツール呼び出しのノイズを非表示）',
-  'Focus mode enabled. Ctrl+O shows full details; close that view to apply focus. Run /focus again to disable.':
-    'フォーカスモードが有効になりました。Ctrl+O で全詳細を表示します。フォーカスを適用するには詳細表示を閉じてください。/focus を再実行すると無効になります。',
+  'Focus mode enabled. Ctrl+O shows full details. Press Ctrl+O again to re-apply focus. Run /focus again to disable.':
+    'フォーカスモードが有効になりました。Ctrl+O で全詳細を表示します。もう一度 Ctrl+O を押すとフォーカスが再適用されます。/focus を再実行すると無効になります。',
   'Focus mode disabled.': 'フォーカスモードが無効になりました。',
-  '1 tool call hidden (Ctrl+O for details)':
-    '1 件のツール呼び出しを非表示（Ctrl+O で詳細）',
-  'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
-    'ツール: {{count}}、失敗: {{failed}}（Ctrl+O で詳細）',
-  '{{count}} tool calls hidden (Ctrl+O for details)':
-    '{{count}} 件のツール呼び出しを非表示（Ctrl+O で詳細）',
+  '{{tool}} (Ctrl+O for details)': '{{tool}}（Ctrl+O で詳細）',
+  '{{tool}} failed (Ctrl+O for details)': '{{tool}} 失敗（Ctrl+O で詳細）',
+  '{{tool}} cancelled (Ctrl+O for details)':
+    '{{tool}} キャンセル（Ctrl+O で詳細）',
+  'Tools: {{count}}': 'ツール: {{count}}',
+  'failed: {{failed}} ({{tools}})': '失敗: {{failed}}（{{tools}}）',
+  'cancelled: {{cancelled}}': 'キャンセル: {{cancelled}}',
+  '{{summary}} (Ctrl+O for details)': '{{summary}}（Ctrl+O で詳細）',
   'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.':
     'フォーカスモードはワークスペースまたはシステムの設定で制御されています。切り替えるには、優先されている設定を変更してください。',
   'Memory: {{read}} read, {{written}} written':

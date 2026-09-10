@@ -616,16 +616,19 @@ export function AnsiRows({
   maxWidth,
   totalLines,
   totalBytes,
+  fullDetail = false,
 }: {
   grid: ReadonlyArray<readonly AnsiToken[]>;
   maxWidth: number;
   totalLines?: number;
   totalBytes?: number;
+  fullDetail?: boolean;
 }) {
-  const windowed = tailWindow(grid, ANSI_DEFAULT_HEIGHT);
+  const visibleHeight = fullDetail ? grid.length : ANSI_DEFAULT_HEIGHT;
+  const windowed = tailWindow(grid, visibleHeight);
   const stats: string[] = [];
-  if (totalLines && totalLines > ANSI_DEFAULT_HEIGHT) {
-    stats.push(`+${totalLines - ANSI_DEFAULT_HEIGHT} lines`);
+  if (totalLines && totalLines > visibleHeight) {
+    stats.push(`+${totalLines - visibleHeight} lines`);
   }
   if (totalBytes && totalBytes > 0) {
     stats.push(formatMemoryUsage(totalBytes));
@@ -639,20 +642,22 @@ export function AnsiRows({
       )}
       {windowed.visible.map((line, i) => (
         <box key={`${i}`} flexDirection="row">
-          {truncateTokenLine(line, maxWidth).map((token, j) => {
-            const style = ansiTokenProps(token);
-            return (
-              <text
-                key={`${j}`}
-                fg={style.fg ?? C.text}
-                bg={style.bg}
-                attributes={style.attributes}
-                {...selectionProps()}
-              >
-                {token.text}
-              </text>
-            );
-          })}
+          {(fullDetail ? line : truncateTokenLine(line, maxWidth)).map(
+            (token, j) => {
+              const style = ansiTokenProps(token);
+              return (
+                <text
+                  key={`${j}`}
+                  fg={style.fg ?? C.text}
+                  bg={style.bg}
+                  attributes={style.attributes}
+                  {...selectionProps()}
+                >
+                  {token.text}
+                </text>
+              );
+            },
+          )}
         </box>
       ))}
       {stats.length > 0 && (

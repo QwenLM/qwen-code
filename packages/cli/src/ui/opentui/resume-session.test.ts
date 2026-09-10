@@ -74,7 +74,7 @@ describe('opentui resume mapping', () => {
         tool: 'read_file',
         title: 'read_file',
       },
-      { type: 'tool-output', id: CALL_ID, delta: '# README\nhello' },
+      { type: 'tool-result', id: CALL_ID, display: '# README\nhello' },
       { type: 'tool-end', id: CALL_ID, success: true, summary: 'ok' },
       { type: 'text', delta: 'README 内容已读取。' },
       { type: 'done' },

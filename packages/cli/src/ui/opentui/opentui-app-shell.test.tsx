@@ -303,6 +303,39 @@ describe('OpenTuiApp shell wiring', () => {
     expect(screen.getByText('input-prompt')).toBeTruthy();
   });
 
+  it('Ctrl+O toggles full details without submitting or editing the composer', async () => {
+    const onToggleFullDetail = vi.fn();
+    renderApp({ onToggleFullDetail });
+    await settle();
+    const preventDefault = vi.fn();
+    act(() =>
+      mocks.state.keyboardHandlers.at(-1)!({
+        name: 'o',
+        ctrl: true,
+        preventDefault,
+      }),
+    );
+    expect(onToggleFullDetail).toHaveBeenCalledOnce();
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(mocks.state.handledTexts).toEqual([]);
+  });
+
+  it('does not toggle full details while a dialog owns the keyboard', async () => {
+    const onToggleFullDetail = vi.fn();
+    renderApp({ onToggleFullDetail, initialDialog: { dialog: 'settings' } });
+    await settle();
+    const preventDefault = vi.fn();
+    act(() =>
+      mocks.state.keyboardHandlers.at(-1)!({
+        name: 'o',
+        ctrl: true,
+        preventDefault,
+      }),
+    );
+    expect(onToggleFullDetail).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+  });
+
   it('mounts the restored banner and footer, and feeds them the streaming flag', async () => {
     renderApp({ streaming: true });
     await settle();

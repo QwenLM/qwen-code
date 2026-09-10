@@ -529,15 +529,18 @@ export default {
     'El mode de concentració no és compatible amb aquesta interfície.',
   'toggle focus mode (hide reasoning and tool call noise)':
     'activa/desactiva el mode focus (amaga el raonament i el soroll de crides d’eines)',
-  'Focus mode enabled. Ctrl+O shows full details; close that view to apply focus. Run /focus again to disable.':
-    'Mode focus activat. Ctrl+O mostra tots els detalls; tanqueu aquesta vista per aplicar el focus. Executeu /focus de nou per desactivar-lo.',
+  'Focus mode enabled. Ctrl+O shows full details. Press Ctrl+O again to re-apply focus. Run /focus again to disable.':
+    'Mode focus activat. Ctrl+O mostra tots els detalls. Premeu Ctrl+O de nou per tornar a aplicar el focus. Executeu /focus de nou per desactivar-lo.',
   'Focus mode disabled.': 'Mode focus desactivat.',
-  '1 tool call hidden (Ctrl+O for details)':
-    '1 crida d’eina amagada (Ctrl+O per als detalls)',
-  'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
-    'Eines: {{count}}, errors: {{failed}} (Ctrl+O per als detalls)',
-  '{{count}} tool calls hidden (Ctrl+O for details)':
-    '{{count}} crides d’eines amagades (Ctrl+O per als detalls)',
+  '{{tool}} (Ctrl+O for details)': '{{tool}} (Ctrl+O per als detalls)',
+  '{{tool}} failed (Ctrl+O for details)':
+    '{{tool}} ha fallat (Ctrl+O per als detalls)',
+  '{{tool}} cancelled (Ctrl+O for details)':
+    '{{tool}} cancel·lat (Ctrl+O per als detalls)',
+  'Tools: {{count}}': 'Eines: {{count}}',
+  'failed: {{failed}} ({{tools}})': 'fallides: {{failed}} ({{tools}})',
+  'cancelled: {{cancelled}}': 'cancel·lades: {{cancelled}}',
+  '{{summary}} (Ctrl+O for details)': '{{summary}} (Ctrl+O per als detalls)',
   'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.':
     'El mode focus es controla des de la configuració de l’espai de treball o del sistema. Canvieu la configuració que té prioritat per alternar el focus.',
   'Memory: {{read}} read, {{written}} written':

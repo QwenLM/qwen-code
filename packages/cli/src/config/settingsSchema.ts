@@ -1230,7 +1230,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'Hide reasoning output and summarize completed tool call groups, including failures, in a short line. Pending confirmations stay fully visible. Toggle at runtime with /focus; Ctrl+O opens the full transcript.',
+          'Hide reasoning and compact completed tools, including failures and cancellations, while retaining tool identity. Pending confirmations stay visible. Available in Ink and OpenTUI. Toggle with /focus; Ctrl+O toggles full details.',
         showInDialog: true,
       },
       useTerminalBuffer: {

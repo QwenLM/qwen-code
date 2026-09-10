@@ -43,6 +43,25 @@ const waitingTool = (id = 'tool1'): LiveToolItem => ({
 });
 
 describe('foldLiveEvent segment-end (finished parity)', () => {
+  it('preserves presentation metadata without replacing the stored result', () => {
+    const items = foldLiveEvent([runningTool()], {
+      type: 'tool-result',
+      id: 'tool1',
+      display: 'SUMMARY',
+      detailedDisplay: 'FULL_RESULT',
+      imageMimeTypes: ['image/png'],
+      isSubagent: true,
+      isMemoryOp: 'read',
+    });
+    expect(items[0]).toMatchObject({
+      output: 'SUMMARY',
+      detailedDisplay: 'FULL_RESULT',
+      imageMimeTypes: ['image/png'],
+      isSubagent: true,
+      isMemoryOp: 'read',
+    });
+  });
+
   it('closes the streaming assistant block', () => {
     const items = foldLiveEvent([assistant('hello')], { type: 'segment-end' });
     expect(items).toHaveLength(1);

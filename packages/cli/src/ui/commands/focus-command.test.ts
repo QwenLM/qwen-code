@@ -31,7 +31,7 @@ describe('focusCommand', () => {
       type: 'message',
       messageType: 'info',
       content:
-        'Focus mode enabled. Ctrl+O shows full details; close that view to apply focus. Run /focus again to disable.',
+        'Focus mode enabled. Ctrl+O shows full details. Press Ctrl+O again to re-apply focus. Run /focus again to disable.',
     });
   });
 

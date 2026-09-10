@@ -708,7 +708,7 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
     });
   });
 
-  it('keeps focus unsupported through the real OpenTUI command context', async () => {
+  it('toggles focus through the real OpenTUI command context', async () => {
     const toggleFocusMode = vi.fn(async () => true);
     const hostOverride = { ...createFakeHost(), toggleFocusMode };
     const { outcome, host } = await dispatch(
@@ -721,11 +721,11 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
     expect(host.items).toEqual([
       expect.objectContaining({ type: 'user', text: '/focus' }),
       expect.objectContaining({
-        type: 'error',
-        text: 'Focus mode is not supported by this renderer.',
+        type: 'info',
+        text: expect.stringContaining('Focus mode enabled.'),
       }),
     ]);
-    expect(toggleFocusMode).not.toHaveBeenCalled();
+    expect(toggleFocusMode).toHaveBeenCalledOnce();
   });
 
   it('parent commands without an action list subcommands (info)', async () => {

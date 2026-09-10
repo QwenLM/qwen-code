@@ -20,33 +20,36 @@ import type { ArenaAgentCardData, CompressionProps } from '../types.js';
 import { ICON } from '../constants.js';
 import { formatDuration } from '../utils/formatters.js';
 import { formatTokenCount } from '../statusLinePresets.js';
+import type { ToolResultPresentation } from './tool-result-presentation.js';
 
 export type ToolConfirmState = 'pending' | 'approved' | 'rejected';
 
-export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
-  args?: string;
-  /** Real invocation description (scheduler's getDescription, ink
-   * mapToDisplay parity) — takes precedence over the args-based fallback. */
-  description?: string;
-  confirm?: ToolConfirmState;
-  /** Structured FileDiff result: the card renders colored diff lines inline
-   * (ink DiffResultRenderer parity) instead of the flattened output text. */
-  diff?: { fileDiff: string; fileName: string };
-  /** Structured TodoWrite result: the card renders the status-icon list
-   * (ink TodoDisplay parity) instead of the flattened output text. */
-  todos?: TodoItem[];
-  /** Structured AnsiOutputDisplay result: the card renders the styled token
-   * grid (ink AnsiOutputText parity) instead of the color-stripped output. */
-  ansi?: {
-    grid: AnsiToken[][];
-    totalLines?: number;
-    totalBytes?: number;
+export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> &
+  ToolResultPresentation & {
+    isUserInitiated?: boolean;
+    args?: string;
+    /** Real invocation description (scheduler's getDescription, ink
+     * mapToDisplay parity) — takes precedence over the args-based fallback. */
+    description?: string;
+    confirm?: ToolConfirmState;
+    /** Structured FileDiff result: the card renders colored diff lines inline
+     * (ink DiffResultRenderer parity) instead of the flattened output text. */
+    diff?: { fileDiff: string; fileName: string };
+    /** Structured TodoWrite result: the card renders the status-icon list
+     * (ink TodoDisplay parity) instead of the flattened output text. */
+    todos?: TodoItem[];
+    /** Structured AnsiOutputDisplay result: the card renders the styled token
+     * grid (ink AnsiOutputText parity) instead of the color-stripped output. */
+    ansi?: {
+      grid: AnsiToken[][];
+      totalLines?: number;
+      totalBytes?: number;
+    };
+    /** Vision-bridge egress disclosure (ink ToolMessage renders the notice
+     * under the result): tells the user their image/prompt left the machine
+     * via the vision model. */
+    visionBridgeNotice?: string;
   };
-  /** Vision-bridge egress disclosure (ink ToolMessage renders the notice
-   * under the result): tells the user their image/prompt left the machine
-   * via the vision model. */
-  visionBridgeNotice?: string;
-};
 
 export type LiveThinkingItem = Extract<HistoryItem, { kind: 'thinking' }> & {
   startedAt?: number;
@@ -309,7 +312,11 @@ export function foldLiveEvent(
       const i = findToolIndex(items, ev.id);
       if (i >= 0) {
         const t = items[i] as LiveToolItem;
-        items[i] = { ...t, description: ev.description };
+        items[i] = {
+          ...t,
+          description: ev.description,
+          ...(ev.isUserInitiated ? { isUserInitiated: true } : {}),
+        };
       }
       return items;
     }
@@ -320,6 +327,15 @@ export function foldLiveEvent(
         const t = items[i] as LiveToolItem;
         const delta = ev.type === 'tool-output' ? ev.delta : ev.display;
         const next: LiveToolItem = { ...t, output: t.output + delta };
+        if (ev.type === 'tool-result') {
+          if (ev.detailedDisplay !== undefined)
+            next.detailedDisplay = ev.detailedDisplay;
+          if (ev.imageMimeTypes) next.imageMimeTypes = ev.imageMimeTypes;
+          if (ev.omittedImageCount)
+            next.omittedImageCount = ev.omittedImageCount;
+          if (ev.isSubagent) next.isSubagent = true;
+          if (ev.isMemoryOp) next.isMemoryOp = ev.isMemoryOp;
+        }
         if (ev.type === 'tool-result' && ev.diff) next.diff = ev.diff;
         if (ev.type === 'tool-result' && ev.todos) next.todos = ev.todos;
         if (ev.type === 'tool-result' && ev.ansi) next.ansi = ev.ansi;

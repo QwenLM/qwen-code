@@ -40,7 +40,7 @@ export const focusCommand: SlashCommand = {
       messageType: 'info',
       content: enabled
         ? t(
-            'Focus mode enabled. Ctrl+O shows full details; close that view to apply focus. Run /focus again to disable.',
+            'Focus mode enabled. Ctrl+O shows full details. Press Ctrl+O again to re-apply focus. Run /focus again to disable.',
           )
         : t('Focus mode disabled.'),
     };

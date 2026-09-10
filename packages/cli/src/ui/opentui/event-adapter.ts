@@ -33,6 +33,11 @@ import type { ArenaAgentCardData, CompressionProps } from '../types.js';
 import { sanitizeSensitiveText } from '../utils/textUtils.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
+import type { Part } from '@google/genai';
+import {
+  toolResultPresentation,
+  type ToolResultPresentation,
+} from './tool-result-presentation.js';
 
 /**
  * Neutral-model union extension: tool detail events the backend folds into
@@ -47,8 +52,13 @@ export type OpenTuiStreamEvent =
    * tool's own `getDescription()` (ink mapToDisplay parity) instead of a
    * hand-rolled args guess. Yields after `tool-start` once the scheduler
    * builds the invocation. */
-  | { type: 'tool-description'; id: string; description: string }
   | {
+      type: 'tool-description';
+      id: string;
+      description: string;
+      isUserInitiated?: boolean;
+    }
+  | (ToolResultPresentation & {
       type: 'tool-result';
       id: string;
       display: string;
@@ -71,7 +81,7 @@ export type OpenTuiStreamEvent =
        * under the result): tells the user their image/prompt left the
        * machine via the vision model. */
       visionBridgeNotice?: string;
-    }
+    })
   | { type: 'confirm'; id: string; tool: string; title: string }
   /** The call left awaiting_approval (approved, declined, or bounced):
    * releases the transcript card's pending marker and records how it left
@@ -168,6 +178,7 @@ export type OpenTuiStreamEvent =
  * (scripted streams, tests).
  */
 export interface EventMapperContext {
+  projectRoot?: string;
   /**
    * Formats an `error` event payload for display (ink parity:
    * parseAndFormatApiError + auth-type hints). Falls back to the raw
@@ -401,6 +412,7 @@ export function createEventMapper(
   let sawThought = false;
   let thoughtClosed = false;
   let toolSeq = 0;
+  const requests = new Map<string, { name: string; args?: unknown }>();
 
   return (ev: ServerGeminiStreamEvent): OpenTuiStreamEvent[] => {
     const out: OpenTuiStreamEvent[] = [];
@@ -458,6 +470,7 @@ export function createEventMapper(
           args?: Record<string, unknown>;
         };
         const id = v.callId ?? `tool-${++toolSeq}`;
+        requests.set(id, v);
         out.push({ type: 'tool-start', id, tool: v.name, title: v.name });
         const args = formatToolArgs(v.args);
         if (args) out.push({ type: 'tool-args', id, args });
@@ -474,6 +487,7 @@ export function createEventMapper(
           details: { title?: string };
         };
         const id = v.request.callId ?? `tool-${++toolSeq}`;
+        requests.set(id, v.request);
         out.push({
           type: 'confirm',
           id,
@@ -491,7 +505,17 @@ export function createEventMapper(
           resultDisplay?: unknown;
           executionStatus?: string;
           visionBridgeNotice?: string;
+          responseParts?: Part[];
         };
+        const failed = v.error !== undefined || v.executionStatus === 'error';
+        const presentation = toolResultPresentation(
+          v.resultDisplay,
+          v.responseParts,
+          requests.get(v.callId),
+          context?.projectRoot,
+          failed,
+        );
+        requests.delete(v.callId);
         // ink parity: the egress disclosure rides the tool card whenever a
         // response bridged images (ToolMessage renders it under the result).
         const visionBridgeNotice =
@@ -505,6 +529,7 @@ export function createEventMapper(
             id: v.callId,
             display: '',
             diff,
+            ...presentation,
             ...(visionBridgeNotice ? { visionBridgeNotice } : {}),
           });
         } else {
@@ -515,6 +540,7 @@ export function createEventMapper(
               id: v.callId,
               display: '',
               todos,
+              ...presentation,
               ...(visionBridgeNotice ? { visionBridgeNotice } : {}),
             });
           } else {
@@ -525,22 +551,23 @@ export function createEventMapper(
                 id: v.callId,
                 display: '',
                 ansi,
+                ...presentation,
                 ...(visionBridgeNotice ? { visionBridgeNotice } : {}),
               });
             } else {
               const display = renderResultDisplay(v.resultDisplay);
-              if (display)
+              if (display || Object.keys(presentation).length)
                 out.push({
                   type: 'tool-result',
                   id: v.callId,
                   display,
+                  ...presentation,
                   ...(visionBridgeNotice ? { visionBridgeNotice } : {}),
                 });
             }
           }
         }
         const cancelled = v.executionStatus === 'cancelled';
-        const failed = v.error !== undefined || v.executionStatus === 'error';
         out.push({
           type: 'tool-end',
           id: v.callId,

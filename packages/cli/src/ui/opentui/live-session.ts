@@ -60,6 +60,7 @@ import {
 import { isAtCommand } from '../utils/commandUtils.js';
 import { handleAtCommand } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
+import { toolResultPresentation } from './tool-result-presentation.js';
 
 interface LooseCompletedCall {
   request: { callId: string; name?: string; args?: unknown };
@@ -258,10 +259,29 @@ function atMentionCardEvents(
       tool: display.name,
       title: display.description,
     },
+    {
+      type: 'tool-description',
+      id: display.callId,
+      description: display.description,
+    },
   ];
   const text = renderResultDisplay(display.resultDisplay);
-  if (text)
-    events.push({ type: 'tool-result', id: display.callId, display: text });
+  if (text || display.images?.length || display.omittedImageCount)
+    events.push({
+      type: 'tool-result',
+      id: display.callId,
+      display: text,
+      ...(display.detailedDisplay
+        ? { detailedDisplay: display.detailedDisplay }
+        : {}),
+      ...(display.images?.length
+        ? { imageMimeTypes: display.images.map((image) => image.mimeType) }
+        : {}),
+      ...(display.omittedImageCount
+        ? { omittedImageCount: display.omittedImageCount }
+        : {}),
+      ...(display.isMemoryOp ? { isMemoryOp: display.isMemoryOp } : {}),
+    });
   const failed = display.status === ToolCallStatus.Error;
   events.push({
     type: 'tool-end',
@@ -660,6 +680,7 @@ export async function* livePromptEvents(
     inline: options?.modelOverride !== undefined,
   };
   const map = createEventMapper({
+    projectRoot: config.getTargetDir(),
     // ink handleErrorEvent parity: auth-aware formatting. The Ctrl+Y retry
     // hint travels on the error event's `hint` field (ErrorMessage renders
     // it inline in secondary color).
@@ -951,6 +972,13 @@ export async function* livePromptEvents(
     const responseParts: Part[] = [];
     for (const call of completed) {
       const resp = call.response;
+      const presentation = toolResultPresentation(
+        resp?.resultDisplay,
+        resp?.responseParts,
+        call.request,
+        config.getTargetDir(),
+        call.status === 'error',
+      );
       // FileDiff results ride as structured payloads so the tool card renders
       // colored diff lines (ink DiffResultRenderer parity) instead of the
       // flattened unified-diff text.
@@ -961,11 +989,17 @@ export async function* livePromptEvents(
           id: call.request.callId,
           display: '',
           diff,
+          ...presentation,
         };
       } else {
         const display = renderResultDisplay(resp?.resultDisplay);
-        if (display)
-          yield { type: 'tool-result', id: call.request.callId, display };
+        if (display || Object.keys(presentation).length)
+          yield {
+            type: 'tool-result',
+            id: call.request.callId,
+            display,
+            ...presentation,
+          };
       }
       const failed = call.status === 'error' || call.status === 'cancelled';
       yield {

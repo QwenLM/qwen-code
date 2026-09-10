@@ -71,6 +71,118 @@ const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
 });
 
 describe('OpenTuiTranscriptView', () => {
+  it('retroactively summarizes completed tools and hides reasoning without losing history', () => {
+    const items = [
+      {
+        kind: 'thinking' as const,
+        id: 'thought',
+        text: 'PRIVATE_REASONING',
+        done: true,
+      },
+      toolItem({
+        tool: 'read_file',
+        args: '{"file_path":"src/main.ts"}',
+        output: 'FULL_RESULT',
+        done: true,
+        success: true,
+      }),
+    ];
+    const view = render(<OpenTuiTranscriptView items={items} />);
+    expect(view.container.textContent).toContain('FULL_RESULT');
+    view.rerender(<OpenTuiTranscriptView items={items} focusMode />);
+    expect(view.container.textContent).toContain('Read');
+    expect(view.container.textContent).toContain('main.ts');
+    expect(view.container.textContent).not.toContain('FULL_RESULT');
+    expect(view.container.textContent).not.toContain('Thought');
+    view.rerender(<OpenTuiTranscriptView items={items} focusMode fullDetail />);
+    expect(view.container.textContent).toContain('FULL_RESULT');
+    expect(view.container.textContent).toContain('PRIVATE_REASONING');
+    view.rerender(<OpenTuiTranscriptView items={items} focusMode />);
+    expect(view.container.textContent).not.toContain('FULL_RESULT');
+    expect(items[1]).toMatchObject({ output: 'FULL_RESULT' });
+  });
+
+  it.each(['error', 'cancelled', 'interrupted'])(
+    'summarizes %s tools without dumping raw commands or output',
+    (summary) => {
+      const view = render(
+        <OpenTuiTranscriptView
+          focusMode
+          items={[
+            toolItem({
+              done: true,
+              success: false,
+              summary,
+              description: 'RAW_COMMAND',
+              output: 'LONG_ERROR_OUTPUT',
+            }),
+          ]}
+        />,
+      );
+      expect(view.container.textContent).toContain('Shell');
+      expect(view.container.textContent).not.toContain('RAW_COMMAND');
+      expect(view.container.textContent).not.toContain('LONG_ERROR_OUTPUT');
+      expect(view.container.textContent).toContain(
+        summary === 'error' ? 'failed' : 'cancelled',
+      );
+    },
+  );
+
+  it.each([
+    { done: false },
+    { done: false, confirm: 'pending' as const },
+    { isUserInitiated: true },
+    { isSubagent: true },
+    { imageMimeTypes: ['image/png'] },
+    { omittedImageCount: 2 },
+  ])('keeps exceptional tools visible: %j', (override) => {
+    const view = render(
+      <OpenTuiTranscriptView
+        focusMode
+        items={[
+          toolItem({
+            done: true,
+            success: true,
+            output: 'EXCEPTION_OUTPUT',
+            ...override,
+          }),
+        ]}
+      />,
+    );
+    expect(view.container.textContent).toContain('EXCEPTION_OUTPUT');
+  });
+
+  it('full details lift output character and row caps', () => {
+    const output = `FIRST_RESULT_LINE\n${'x\n'.repeat(150)}${'y'.repeat(35000)}LAST_RESULT_MARKER`;
+    const items = [toolItem({ done: true, success: true, output })];
+    const view = render(<OpenTuiTranscriptView items={items} fullDetail />);
+    expect(view.container.textContent).toContain('FIRST_RESULT_LINE');
+    expect(view.container.textContent).toContain('LAST_RESULT_MARKER');
+  });
+
+  it('shows the saved result body only when full details are enabled', () => {
+    const items = [
+      toolItem({
+        tool: 'read_file',
+        done: true,
+        success: true,
+        output: 'SUMMARY_ONLY',
+        detailedDisplay: 'FULL_BODY_ONLY',
+      }),
+    ];
+    const view = render(<OpenTuiTranscriptView items={items} />);
+    expect(view.container.textContent).toContain('SUMMARY_ONLY');
+    expect(view.container.textContent).not.toContain('FULL_BODY_ONLY');
+    view.rerender(<OpenTuiTranscriptView items={items} focusMode />);
+    expect(view.container.textContent).not.toContain('SUMMARY_ONLY');
+    view.rerender(<OpenTuiTranscriptView items={items} focusMode fullDetail />);
+    expect(view.container.textContent).toContain('FULL_BODY_ONLY');
+    expect(view.container.textContent).not.toContain('SUMMARY_ONLY');
+    view.rerender(<OpenTuiTranscriptView items={items} />);
+    expect(view.container.textContent).toContain('SUMMARY_ONLY');
+    expect(view.container.textContent).not.toContain('FULL_BODY_ONLY');
+  });
+
   it('keeps a pending MCP-shaped card description visible (R1-10)', () => {
     // An MCP confirmation dialog shows only the server and tool names — no
     // args — so the card is the only surface that carries the arguments.

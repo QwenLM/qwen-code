@@ -32,7 +32,10 @@ const interactiveEnv = {
   TERM: 'xterm-256color',
 };
 
-describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
+const bufferModes = pickE2eRenderer() === 'ink' ? [true, false] : [true];
+const readSummary = /Read(?:File)? .*focus-result\.txt.*Ctrl\+O for details/;
+
+describe('Focus mode', () => {
   let rig: TestRig;
   let server: FakeOpenAIServer | undefined;
   let session: InteractiveSession | undefined;
@@ -52,7 +55,7 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
     await rig.cleanup();
   });
 
-  it.each([true, false])(
+  it.each(bufferModes)(
     'summarizes completed failed tools retroactively (terminal buffer: %s)',
     async (useTerminalBuffer) => {
       await rig.setup(`focus-mode-errors-${useTerminalBuffer}`, {
@@ -125,7 +128,7 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
       await session.idle();
       const focused = await session.screen();
       expect(focused).not.toContain('FOCUS_ERROR_DETAILS');
-      expect(focused).toContain('Tools: 1, failed: 1 (Ctrl+O for details)');
+      expect(focused).toContain('Shell failed (Ctrl+O for details)');
       expect(focused).toContain('FOCUS_ERROR_HANDLED');
 
       session.sendKey('\u000f');
@@ -141,7 +144,7 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
     },
   );
 
-  it.each([true, false])(
+  it.each(bufferModes)(
     'reprojects completed history and persists the preference (terminal buffer: %s)',
     async (useTerminalBuffer) => {
       await rig.setup(`focus-mode-${useTerminalBuffer}`, {
@@ -208,9 +211,7 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
       expect(await session.screen()).toContain('FOCUS_REASONING_TRACE');
       session.sendKey('\u000f');
       await session.idle();
-      expect(await session.screen()).toMatch(
-        /Thought briefly|Thought for|Thinking/,
-      );
+      expect(await session.screen()).toMatch(/\bThought\b|\bThinking\b/);
       expect(JSON.stringify(server.requests[1]!.body)).toContain(
         'FOCUS_TOOL_RESULT',
       );
@@ -218,35 +219,27 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
       await session.send('/focus');
       await session.idle();
       const focused = await session.screen();
-      expect(focused).toContain('1 tool call hidden (Ctrl+O for details)');
-      expect(focused).not.toContain('focus-result.txt');
+      expect(focused).toMatch(readSummary);
+      expect(focused).not.toContain('FOCUS_TOOL_RESULT');
       expect(focused).not.toContain('FOCUS_REASONING_TRACE');
-      expect(focused).not.toMatch(/Thought briefly|Thought for|Thinking/);
+      expect(focused).not.toMatch(/\bThought\b|\bThinking\b/);
       expect(focused).toContain('FOCUS_ANSWER');
 
       session.sendKey('\u000f');
       await session.idle();
       expect(await session.screen()).toContain('focus-result.txt');
       expect(await session.screen()).toContain('FOCUS_REASONING_TRACE');
-      expect(await session.screen()).not.toContain(
-        '1 tool call hidden (Ctrl+O for details)',
-      );
+      expect(await session.screen()).not.toMatch(readSummary);
       session.sendKey('\u000f');
       await session.idle();
       expect(await session.screen()).not.toContain('FOCUS_REASONING_TRACE');
-      expect(await session.screen()).toContain(
-        '1 tool call hidden (Ctrl+O for details)',
-      );
+      expect(await session.screen()).toMatch(readSummary);
 
       await session.send('/focus');
       await session.idle();
       expect(await session.screen()).toContain('focus-result.txt');
-      expect(await session.screen()).toMatch(
-        /Thought briefly|Thought for|Thinking/,
-      );
-      expect(await session.screen()).not.toContain(
-        '1 tool call hidden (Ctrl+O for details)',
-      );
+      expect(await session.screen()).toMatch(/\bThought\b|\bThinking\b/);
+      expect(await session.screen()).not.toMatch(readSummary);
       await session.send('/focus');
       await session.idle();
       const persisted = JSON.parse(
@@ -260,10 +253,8 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
       await session.send('Inspect the fixture again.');
       await session.waitFor('FOCUS_ANSWER');
       await session.idle();
-      expect(await session.screen()).toContain(
-        '1 tool call hidden (Ctrl+O for details)',
-      );
-      expect(await session.screen()).not.toContain('focus-result.txt');
+      expect(await session.screen()).toMatch(readSummary);
+      expect(await session.screen()).not.toContain('FOCUS_TOOL_RESULT');
       expect(await session.screen()).not.toContain('FOCUS_REASONING_TRACE');
       expect(server.requests).toHaveLength(4);
 
@@ -279,16 +270,12 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
       session.sendKey('\u001b');
       await session.idle();
       expect(await session.screen()).toContain('focus-result.txt');
-      expect(await session.screen()).not.toContain(
-        '1 tool call hidden (Ctrl+O for details)',
-      );
+      expect(await session.screen()).not.toMatch(readSummary);
       expect(server.requests).toHaveLength(4);
 
       await session.send('/focus');
       await session.idle();
-      expect(await session.screen()).toContain(
-        '1 tool call hidden (Ctrl+O for details)',
-      );
+      expect(await session.screen()).toMatch(readSummary);
       await session.send('/settings');
       await session.idle(200, 5000);
       await session.send('ui.focusMode');
@@ -300,9 +287,7 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
       session.sendKey('\u001b');
       await session.idle();
       expect(await session.screen()).toContain('focus-result.txt');
-      expect(await session.screen()).not.toContain(
-        '1 tool call hidden (Ctrl+O for details)',
-      );
+      expect(await session.screen()).not.toMatch(readSummary);
       const reset = JSON.parse(
         await readFile(join(qwenHome, 'settings.json'), 'utf8'),
       );
@@ -311,19 +296,15 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
 
       await session.send('/config ui.focusMode=true');
       await session.idle();
-      expect(await session.screen()).toContain(
-        '1 tool call hidden (Ctrl+O for details)',
-      );
-      expect(await session.screen()).not.toContain('focus-result.txt');
+      expect(await session.screen()).toMatch(readSummary);
+      expect(await session.screen()).not.toContain('FOCUS_TOOL_RESULT');
       await session.send('/config ui.focusMode');
       await session.idle();
       // The first Enter accepts the setting-key completion.
       session.sendKey('\r');
       await session.idle();
       expect(await session.screen()).toContain('focus-result.txt');
-      expect(await session.screen()).not.toContain(
-        '1 tool call hidden (Ctrl+O for details)',
-      );
+      expect(await session.screen()).not.toMatch(readSummary);
       expect(server.requests).toHaveLength(4);
     },
   );

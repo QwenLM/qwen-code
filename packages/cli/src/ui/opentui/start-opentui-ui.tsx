@@ -76,6 +76,10 @@ import { useFollowupSuggestionGeneration } from './followup-generation.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import { OpenTuiRuntime } from './opentui-runtime.js';
 import { OpenTuiTranscriptView } from './transcript-view.js';
+import {
+  FocusModeProvider,
+  useFocusModeEnabled,
+} from '../contexts/FocusModeContext.js';
 import { useOpenTuiLiveTurn, type OpenTuiSubmitOptions } from './live-turn.js';
 import { ensureConfigInitialized } from './live-session.js';
 import { consumeLastRenderError } from './opentui-error-boundary.js';
@@ -116,6 +120,12 @@ function OpenTuiEntryApp({
   capturedText,
   initialDialog,
 }: OpenTuiEntryAppProps) {
+  const focusMode = useFocusModeEnabled();
+  const [fullDetail, setFullDetail] = useState(false);
+  const toggleFullDetail = useCallback(
+    () => setFullDetail((value) => !value),
+    [],
+  );
   const { width, height } = useTerminalDimensions();
   const { stats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, config.getSessionId());
@@ -229,13 +239,15 @@ function OpenTuiEntryApp({
       <box flexDirection="column" flexGrow={1}>
         <OpenTuiTranscriptView
           items={live.items}
+          focusMode={focusMode}
+          fullDetail={fullDetail}
           availableWidth={width}
           availableTerminalHeight={height}
         />
         {exitHint ? <text>{exitHint}</text> : null}
       </box>
     ),
-    [live.items, width, height, exitHint],
+    [live.items, width, height, exitHint, focusMode, fullDetail],
   );
 
   const handleRenderError = useCallback(
@@ -280,6 +292,7 @@ function OpenTuiEntryApp({
       extensionRefreshState={extensionRefreshState}
       initialDialog={initialDialog}
       renderMain={renderMain}
+      onToggleFullDetail={toggleFullDetail}
       onSubmitPrompt={handleSubmitPrompt}
       onQuit={handleQuit}
       onTranscriptReset={resetTranscript}
@@ -375,15 +388,17 @@ export async function startOpenTuiUI(
       createElement(SessionStatsProvider, {
         sessionId: config.getSessionId(),
         children: (
-          <OpenTuiEntryApp
-            config={config}
-            settings={settings}
-            runtime={runtime}
-            startupWarnings={startupWarnings}
-            extensionRefreshState={options.extensionRefreshState}
-            capturedText={capturedText}
-            initialDialog={initialDialog}
-          />
+          <FocusModeProvider settings={settings}>
+            <OpenTuiEntryApp
+              config={config}
+              settings={settings}
+              runtime={runtime}
+              startupWarnings={startupWarnings}
+              extensionRefreshState={options.extensionRefreshState}
+              capturedText={capturedText}
+              initialDialog={initialDialog}
+            />
+          </FocusModeProvider>
         ),
       }),
     );

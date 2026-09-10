@@ -10,7 +10,10 @@ import type { DOMElement } from 'ink';
 import {
   escapeAnsiCtrlCodes,
   sanitizeSensitiveText,
+  getCachedStringWidth,
+  truncateToWidth,
 } from '../utils/textUtils.js';
+import { getFocusToolSummary } from '../utils/focus-tool-summary.js';
 import type { HistoryItem } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import {
@@ -104,6 +107,8 @@ interface HistoryItemDisplayProps {
    * Default false (main view stays at the #5661 partition baseline).
    */
   fullDetail?: boolean;
+  /** Preserve preview rendering without expanding every tool result. */
+  disableFocus?: boolean;
   /**
    * Head id of the thought group this item belongs to (the `gemini_thought`
    * head id for both the head and its `gemini_thought_content` continuations).
@@ -265,6 +270,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   sourceCopyIndexOffsets,
   thoughtExpanded,
   fullDetail = false,
+  disableFocus = false,
   thoughtHeadId,
 }) => {
   const marginTop = getHistoryItemMarginTop(item);
@@ -289,7 +295,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   const showTimestamps = settings.merged.output?.showTimestamps === true;
   const focusModeEnabled = useFocusModeEnabled();
   // Ctrl+O full-detail always pierces focus mode (escape hatch).
-  const focusActive = focusModeEnabled && !fullDetail;
+  const focusActive = focusModeEnabled && !fullDetail && !disableFocus;
 
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
   const contentWidth = terminalWidth - 4;
@@ -302,24 +308,42 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
     return null;
   }
 
-  // Keep active interactions and subagent summaries visible. Failed tools
-  // retain their status in the summary; Ctrl+O restores their full output.
-  const collapseToolGroup =
-    focusActive &&
+  const memorySummary =
     item.type === 'tool_group' &&
-    !isPending &&
-    !item.isUserInitiated &&
-    item.tools.length > 0 &&
-    item.tools.every(
-      (tool) =>
-        tool.status === ToolCallStatus.Success ||
-        tool.status === ToolCallStatus.Error,
-    ) &&
-    !item.tools.some(isSubagentToolEntry) &&
-    !item.tools.some(hasInlineImageOutput);
-  const failedToolCount = collapseToolGroup
-    ? item.tools.filter((tool) => tool.status === ToolCallStatus.Error).length
-    : 0;
+    ((item.memoryReadCount ?? 0) > 0 || (item.memoryWriteCount ?? 0) > 0)
+      ? ` · ${t('Memory: {{read}} read, {{written}} written', {
+          read: String(item.memoryReadCount ?? 0),
+          written: String(item.memoryWriteCount ?? 0),
+        })}`
+      : '';
+  const focusSummary =
+    focusActive && item.type === 'tool_group'
+      ? getFocusToolSummary(
+          item.tools.map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            args: tool.args,
+            status:
+              tool.status === ToolCallStatus.Success
+                ? 'success'
+                : tool.status === ToolCallStatus.Error
+                  ? 'error'
+                  : tool.status === ToolCallStatus.Canceled
+                    ? 'cancelled'
+                    : 'pending',
+            isSubagent: isSubagentToolEntry(tool),
+            hasImages: hasInlineImageOutput(tool),
+          })),
+          {
+            isPending,
+            isUserInitiated: item.isUserInitiated,
+            maxWidth: Math.max(
+              20,
+              contentWidth - 2 - getCachedStringWidth(memorySummary),
+            ),
+          },
+        )
+      : undefined;
 
   return (
     <Box
@@ -453,33 +477,22 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'tool_group' &&
-        (collapseToolGroup ? (
+        (focusSummary ? (
           <Box flexDirection="row">
             <Box width={2} flexShrink={0}>
               <Text dimColor>
-                {failedToolCount > 0 ? TOOL_STATUS.ERROR : TOOL_STATUS.SUCCESS}
+                {focusSummary.status === 'error'
+                  ? TOOL_STATUS.ERROR
+                  : focusSummary.status === 'cancelled'
+                    ? TOOL_STATUS.CANCELED
+                    : TOOL_STATUS.SUCCESS}
               </Text>
             </Box>
-            <Text dimColor>
-              {failedToolCount > 0
-                ? t(
-                    'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)',
-                    {
-                      count: String(itemForDisplay.tools.length),
-                      failed: String(failedToolCount),
-                    },
-                  )
-                : itemForDisplay.tools.length === 1
-                  ? t('1 tool call hidden (Ctrl+O for details)')
-                  : t('{{count}} tool calls hidden (Ctrl+O for details)', {
-                      count: String(itemForDisplay.tools.length),
-                    })}
-              {((itemForDisplay.memoryReadCount ?? 0) > 0 ||
-                (itemForDisplay.memoryWriteCount ?? 0) > 0) &&
-                ` · ${t('Memory: {{read}} read, {{written}} written', {
-                  read: String(itemForDisplay.memoryReadCount ?? 0),
-                  written: String(itemForDisplay.memoryWriteCount ?? 0),
-                })}`}
+            <Text dimColor wrap="truncate-end">
+              {truncateToWidth(
+                `${focusSummary.text}${memorySummary}`,
+                contentWidth - 2,
+              )}
             </Text>
           </Box>
         ) : (

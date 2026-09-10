@@ -462,15 +462,18 @@ export default {
     'Der Fokusmodus wird von diesem Renderer nicht unterstützt.',
   'toggle focus mode (hide reasoning and tool call noise)':
     'Fokus-Modus ein-/ausschalten (Reasoning und Tool-Aufruf-Rauschen ausblenden)',
-  'Focus mode enabled. Ctrl+O shows full details; close that view to apply focus. Run /focus again to disable.':
-    'Fokus-Modus aktiviert. Strg+O zeigt alle Details; schließen Sie diese Ansicht, um den Fokus anzuwenden. Führen Sie /focus erneut aus, um ihn zu deaktivieren.',
+  'Focus mode enabled. Ctrl+O shows full details. Press Ctrl+O again to re-apply focus. Run /focus again to disable.':
+    'Fokus-Modus aktiviert. Strg+O zeigt alle Details. Drücken Sie erneut Strg+O, um den Fokus wieder anzuwenden. Führen Sie /focus erneut aus, um ihn zu deaktivieren.',
   'Focus mode disabled.': 'Fokus-Modus deaktiviert.',
-  '1 tool call hidden (Ctrl+O for details)':
-    '1 Tool-Aufruf ausgeblendet (Strg+O für Details)',
-  'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
-    'Tools: {{count}}, fehlgeschlagen: {{failed}} (Strg+O für Details)',
-  '{{count}} tool calls hidden (Ctrl+O for details)':
-    '{{count}} Tool-Aufrufe ausgeblendet (Strg+O für Details)',
+  '{{tool}} (Ctrl+O for details)': '{{tool}} (Strg+O für Details)',
+  '{{tool}} failed (Ctrl+O for details)':
+    '{{tool}} fehlgeschlagen (Strg+O für Details)',
+  '{{tool}} cancelled (Ctrl+O for details)':
+    '{{tool}} abgebrochen (Strg+O für Details)',
+  'Tools: {{count}}': 'Werkzeuge: {{count}}',
+  'failed: {{failed}} ({{tools}})': 'fehlgeschlagen: {{failed}} ({{tools}})',
+  'cancelled: {{cancelled}}': 'abgebrochen: {{cancelled}}',
+  '{{summary}} (Ctrl+O for details)': '{{summary}} (Strg+O für Details)',
   'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.':
     'Der Fokus-Modus wird durch Arbeitsbereichs- oder Systemeinstellungen gesteuert. Ändern Sie die vorrangige Einstellung, um den Fokus umzuschalten.',
   'Memory: {{read}} read, {{written}} written':
