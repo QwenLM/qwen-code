@@ -25,6 +25,8 @@ import {
   type DaemonWorkspaceMcpServerStatus,
   type DaemonWorkspaceGitStatus,
   type GoalSnapshotV2,
+  type SessionSource,
+  type SessionSourcesResult,
 } from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
 import { DEFAULT_SESSION_ACTION_ITEMS } from './components/sidebar/WebShellSidebar';
@@ -129,6 +131,12 @@ type ChatEditorTestProps = {
     metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
   ) => boolean | void;
   onCancel?: () => void;
+  onAttachmentPreview?: (file: {
+    name: string;
+    attachmentId?: string;
+    mimeType?: string;
+    text?: string;
+  }) => void;
   onInputTextChange?: (text: string) => void;
   onAttachmentsChange?: (hasAttachments: boolean) => void;
   onStartNewSessionSuggestion?: () => void;
@@ -437,6 +445,9 @@ const {
       mimeType: 'text/plain',
     }),
     listAttachments: vi.fn().mockResolvedValue([]),
+    listSources: vi
+      .fn<() => Promise<SessionSourcesResult>>()
+      .mockResolvedValue({ revision: 0, sources: [] }),
     getTasks: vi.fn().mockResolvedValue({
       v: 1,
       sessionId: 'session-1',
@@ -651,6 +662,7 @@ const {
         | undefined,
       workspaceEventSignals: {
         artifactsVersion: 0,
+        sourcesVersion: 0,
         extensionsVersion: 0,
         skillsVersion: 0,
         lastSkillMutation: undefined as DaemonSkillToggleMutation | undefined,
@@ -2484,36 +2496,376 @@ describe('task activity key', () => {
     ).toBeNull();
   });
 
-  it('lists current-session attachments in the environment panel', async () => {
+  it.each([
+    { items: ['sources'] as const },
+    { items: ['attachments'] as const },
+    { items: ['sources', 'attachments'] as const },
+  ])(
+    'lists current-session attachments under Sources with $items',
+    async ({ items }) => {
+      mockConnection.capabilities.features = ['session_attachment_list'];
+      mockSessionActions.listAttachments.mockResolvedValue([
+        {
+          type: 'resource',
+          attachmentId: 'notes.txt',
+          mimeType: 'text/plain',
+          size: 5,
+        },
+      ]);
+      const { container } = renderApp({ environmentPanel: { items } });
+      await flush();
+
+      act(() => {
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle environment information"]',
+          )
+          ?.click();
+      });
+      await act(async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      });
+      await flush();
+
+      expect(mockSessionActions.listAttachments).toHaveBeenCalled();
+      const panel = container.querySelector(
+        '[data-testid="environment-panel"]:not([hidden])',
+      );
+      expect(panel?.textContent).toContain('Sources');
+      expect(
+        panel?.querySelectorAll('[data-testid="sources-section"]'),
+      ).toHaveLength(1);
+      expect(panel?.textContent).not.toContain('Attachments');
+    },
+  );
+
+  it('refreshes the open source title and detail when its metadata changes', async () => {
+    const { source, container, rerender } = await renderOpenSource();
+    expect(
+      container.querySelector('[role="tab"][title="Old source title"]'),
+    ).not.toBeNull();
+    mockSessionActions.listSources.mockResolvedValue({
+      revision: 2,
+      sources: [
+        {
+          ...source,
+          title: 'New source title',
+          description: 'Updated description',
+        },
+      ],
+    });
+    testState.workspaceEventSignals = {
+      ...testState.workspaceEventSignals,
+      sourcesVersion: 1,
+    };
+    rerender();
+    await flush();
+    expect(
+      container.querySelector('[role="tab"][title="New source title"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]')?.textContent,
+    ).toContain('Updated description');
+    expect(container.textContent).not.toContain('Old source title');
+  });
+
+  it.each([
+    { change: 'trust', background: false },
+    { change: 'removal', background: false },
+    { change: 'trust', background: true },
+    { change: 'removal', background: true },
+  ])(
+    'prunes source tabs after $change and closes only an active source (background=$background)',
+    async ({ change, background }) => {
+      const { container, rerender } = await renderOpenSource();
+      if (background) {
+        await act(async () =>
+          testState.latestChatEditorProps?.onAttachmentPreview?.({
+            name: 'kept.txt',
+            text: 'Keep open',
+          }),
+        );
+      }
+      if (change === 'trust') {
+        mockWorkspace.capabilities = {
+          ...mockWorkspace.capabilities,
+          workspaces: [
+            {
+              id: 'primary',
+              cwd: '/tmp/project',
+              primary: true,
+              trusted: false,
+            },
+          ],
+        };
+      } else {
+        mockSessionActions.listSources.mockResolvedValue({
+          revision: 2,
+          sources: [],
+        });
+        testState.workspaceEventSignals = {
+          ...testState.workspaceEventSignals,
+          sourcesVersion: 1,
+        };
+      }
+      rerender();
+      await flush();
+      expect(
+        container.querySelector('[role="tab"][title="Old source title"]'),
+      ).toBeNull();
+      const panel = container.querySelector('aside[aria-label="Right panel"]');
+      const stored = JSON.parse(
+        localStorage.getItem('qwen-code-web-shell-right-panel-state') ?? '{}',
+      )['/tmp/project\0session-1'];
+      expect(stored.open).toBe(background);
+      if (background) {
+        expect(panel).not.toBeNull();
+        expect(stored.activeTabId).toContain('kept.txt');
+      } else {
+        expect(panel).toBeNull();
+        expect(stored.activeTabId).toBeNull();
+      }
+    },
+  );
+
+  it('opens URL sources without a workspace in a standalone session', async () => {
+    mockConnection.workspaceCwd = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    const { container } = await renderOpenSource();
+    const link = container.querySelector<HTMLAnchorElement>(
+      'aside[aria-label="Right panel"] a[href="https://example.com"]',
+    );
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toBe('Open original');
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('keeps standalone workspace sources unavailable without reading files', async () => {
+    mockConnection.workspaceCwd = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    const { container } = await renderOpenSource({
+      kind: 'file',
+      workspaceCwd: '/tmp/project',
+      locator: { type: 'workspace_file', workspacePath: 'secret.txt' },
+    });
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]')?.textContent,
+    ).toContain('This reference is no longer available in this workspace.');
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.stat).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'does not make an unsafe source URL clickable (standalone=%s)',
+    async (standalone) => {
+      if (standalone) {
+        mockConnection.workspaceCwd = undefined;
+        mockConnection.sessionContext = { kind: 'standalone' };
+      }
+      const { container } = await renderOpenSource({
+        locator: { type: 'url', url: 'javascript:alert(1)' },
+      });
+      const panel = container.querySelector('aside[aria-label="Right panel"]');
+      expect(panel?.textContent).toContain('javascript:alert(1)');
+      expect(panel?.querySelector('a[href]')).toBeNull();
+    },
+  );
+
+  it.each([true, false])(
+    'keeps HTML source and ordinary attachment previews independent (source first=%s)',
+    async (sourceFirst) => {
+      mockConnection.capabilities.features = ['session_attachment_list'];
+      mockSessionActions.listAttachments.mockResolvedValue([
+        {
+          type: 'resource',
+          attachmentId: 'page.html',
+          mimeType: 'text/html',
+          size: 20,
+        },
+      ]);
+      mockSessionActions.readAttachment.mockResolvedValue({
+        data: btoa('<h1>Page</h1>'),
+        mimeType: 'text/html',
+      });
+      const { container, unmount } = renderApp({
+        environmentPanel: { items: ['sources'] },
+      });
+      await flush();
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle environment information"]',
+          )
+          ?.click(),
+      );
+      await flush();
+      const openSource = async () => {
+        await act(async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        });
+        const button = container.querySelector<HTMLButtonElement>(
+          '[data-testid="sources-section"] button[title="page.html"]',
+        );
+        expect(button).not.toBeNull();
+        await act(async () => button!.click());
+        await flush();
+        expect(
+          container.querySelector('button[aria-label="Preview"]'),
+        ).toBeNull();
+      };
+      const openOrdinary = async () => {
+        await act(async () =>
+          testState.latestChatEditorProps?.onAttachmentPreview?.({
+            name: 'page.html',
+            attachmentId: 'page.html',
+            mimeType: 'text/html',
+          }),
+        );
+        await flush();
+        expect(
+          container.querySelector('button[aria-label="Preview"]'),
+        ).not.toBeNull();
+      };
+      if (sourceFirst) {
+        await openSource();
+        await openOrdinary();
+      } else {
+        await openOrdinary();
+        await openSource();
+      }
+      const stored = JSON.parse(
+        localStorage.getItem('qwen-code-web-shell-right-panel-state') ?? '{}',
+      )['/tmp/project\0session-1'];
+      expect(stored.tabs).toHaveLength(2);
+      expect(
+        new Set(stored.tabs.map((tab: { id: string }) => tab.id)).size,
+      ).toBe(2);
+      await openSource();
+      expect(container.querySelector('iframe')).toBeNull();
+      await openOrdinary();
+      expect(
+        container.querySelectorAll('[role="tab"][title="page.html"]'),
+      ).toHaveLength(2);
+      unmount();
+      const restored = renderApp();
+      await flush();
+      const tabs = restored.container.querySelectorAll<HTMLButtonElement>(
+        '[role="tab"][title="page.html"]',
+      );
+      expect(tabs).toHaveLength(2);
+      for (const [index, tab] of Array.from(tabs).entries()) {
+        await act(async () => tab.click());
+        await flush();
+        expect(
+          Boolean(
+            restored.container.querySelector('button[aria-label="Preview"]'),
+          ),
+        ).toBe(!stored.tabs[index].sourcePreview);
+        expect(restored.container.querySelector('iframe')).toBeNull();
+      }
+    },
+  );
+
+  it('opens historical HTML from Sources as text and retains that policy after reload', async () => {
     mockConnection.capabilities.features = ['session_attachment_list'];
     mockSessionActions.listAttachments.mockResolvedValue([
       {
         type: 'resource',
-        attachmentId: 'notes.txt',
-        mimeType: 'text/plain',
-        size: 5,
+        attachmentId: 'historical.html',
+        mimeType: 'text/html',
+        size: 20,
       },
     ]);
-    const { container } = renderApp();
+    mockSessionActions.readAttachment.mockResolvedValue({
+      data: btoa('<h1>Source only</h1>'),
+      mimeType: 'text/html',
+    });
+    const first = renderApp({ environmentPanel: { items: ['sources'] } });
     await flush();
-
-    act(() => {
-      container
+    act(() =>
+      first.container
         .querySelector<HTMLButtonElement>(
           'button[aria-label="Toggle environment information"]',
         )
-        ?.click();
-    });
+        ?.click(),
+    );
     await act(async () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     });
     await flush();
-
-    expect(mockSessionActions.listAttachments).toHaveBeenCalled();
-    const panel = container.querySelector(
-      '[data-testid="environment-panel"]:not([hidden])',
+    const row = first.container.querySelector<HTMLButtonElement>(
+      '[data-testid="sources-section"] button[title="historical.html"]',
     );
-    expect(panel?.textContent).toContain('Attachments');
+    expect(row).not.toBeNull();
+    await act(async () => row?.click());
+    await flush();
+    const stored = JSON.parse(
+      window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+        '{}',
+    )['/tmp/project\0session-1'];
+    expect(stored?.tabs).toEqual([
+      expect.objectContaining({
+        kind: 'file',
+        attachmentId: 'historical.html',
+        sourcePreview: true,
+      }),
+    ]);
+    expect(
+      first.container.querySelector('button[aria-label="Preview"]'),
+    ).toBeNull();
+    expect(first.container.querySelector('iframe')).toBeNull();
+    act(() => first.unmount());
+    const second = renderApp();
+    await flush();
+    expect(mockSessionActions.readAttachment).toHaveBeenCalledTimes(2);
+    expect(
+      second.container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+    expect(
+      second.container.querySelector('button[aria-label="Preview"]'),
+    ).toBeNull();
+    expect(second.container.querySelector('iframe')).toBeNull();
+  });
+
+  it('shows attachment listing failures in Sources with a working retry', async () => {
+    vi.useFakeTimers();
+    mockConnection.capabilities.features = ['session_attachment_list'];
+    mockSessionActions.listAttachments.mockRejectedValue(
+      new Error('Listing unavailable'),
+    );
+    const { container } = renderApp({
+      environmentPanel: { items: ['sources'] },
+    });
+    await flush();
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle environment information"]',
+        )
+        ?.click(),
+    );
+    for (const delay of [0, 1_000, 0, 1_000, 0]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    expect(mockSessionActions.listAttachments).toHaveBeenCalledTimes(3);
+    const alert = container.querySelector(
+      '[data-testid="sources-section"] [role="alert"]',
+    );
+    expect(alert?.textContent).toContain('Listing unavailable');
+    mockSessionActions.listAttachments.mockResolvedValue([
+      {
+        type: 'resource',
+        attachmentId: 'recovered.txt',
+        mimeType: 'text/plain',
+        size: 2,
+      },
+    ]);
+    act(() => alert?.querySelector<HTMLButtonElement>('button')?.click());
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    expect(container.textContent).toContain('recovered.txt');
+    expect(
+      container.querySelector('[data-testid="sources-section"] [role="alert"]'),
+    ).toBeNull();
   });
 
   it('retries a failed first attachment listing without flashing empty', async () => {
@@ -9335,6 +9687,50 @@ describe('environment agent tasks', () => {
   });
 });
 
+async function renderOpenSource(overrides: Partial<SessionSource> = {}) {
+  const source: SessionSource = {
+    id: 'source-1',
+    title: 'Old source title',
+    kind: 'link',
+    locator: { type: 'url', url: 'https://example.com' },
+    createdAt: '2026-09-07T00:00:00Z',
+    updatedAt: '2026-09-07T00:00:00Z',
+    ...overrides,
+  };
+  mockConnection.capabilities.features = ['session_sources'];
+  mockWorkspace.capabilities = {
+    workspaceCwd: '/tmp/project',
+    workspaces: [
+      { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+    ],
+  } as typeof mockWorkspace.capabilities;
+  mockSessionActions.listSources.mockResolvedValue({
+    revision: 1,
+    sources: [source],
+  });
+  const view = renderApp({ environmentPanel: { items: ['sources'] } });
+  await flush();
+  await act(async () =>
+    view.container
+      .querySelector<HTMLButtonElement>(
+        'button[aria-label="Toggle environment information"]',
+      )
+      ?.click(),
+  );
+  await flush();
+  expect(mockSessionActions.listSources).toHaveBeenCalled();
+  const sourceButton = view.container.querySelector<HTMLButtonElement>(
+    '[data-testid="sources-section"] button[aria-label="Open source Old source title"]',
+  );
+  expect(sourceButton).not.toBeNull();
+  await act(async () => sourceButton?.click());
+  await flush();
+  expect(
+    view.container.querySelector('aside[aria-label="Right panel"]'),
+  ).not.toBeNull();
+  return { ...view, source };
+}
+
 function renderApp(props: React.ComponentProps<typeof App> = {}): {
   container: HTMLElement;
   rerender: (nextProps?: React.ComponentProps<typeof App>) => void;
@@ -9598,6 +9994,7 @@ beforeEach(() => {
   testState.ownerVersion = 0;
   testState.workspaceEventSignals = {
     artifactsVersion: 0,
+    sourcesVersion: 0,
     extensionsVersion: 0,
     skillsVersion: 0,
     lastSkillMutation: undefined,
@@ -9859,6 +10256,11 @@ beforeEach(() => {
   mockSessionActions.readAttachment.mockResolvedValue({
     data: 'aGVsbG8=',
     mimeType: 'text/plain',
+  });
+  mockSessionActions.listSources.mockReset();
+  mockSessionActions.listSources.mockResolvedValue({
+    revision: 0,
+    sources: [],
   });
   mockSessionActions.getTasks.mockResolvedValue({
     v: 1,
@@ -22289,6 +22691,237 @@ describe('App session callbacks', () => {
       ).toBeGreaterThan(
         mockSessionActions.setReasoningEffort.mock.invocationCallOrder[0],
       );
+    },
+  );
+
+  it('enables toggle-only Welcome thinking after a saved off preference', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.currentModel = 'qwen3.7-plus';
+    mockConnection.models = [
+      {
+        id: 'qwen3.7-plus',
+        label: 'Qwen',
+        reasoningPreview: {
+          enabled: false,
+          effort: 'default',
+          efforts: [],
+          canDisable: true,
+        },
+      },
+    ];
+    renderApp();
+    await flush();
+    act(() =>
+      testState.latestChatEditorProps?.onSelectReasoningEffort?.(
+        'default',
+        'toggle',
+      ),
+    );
+    await flush();
+    expect(testState.latestChatEditorProps?.reasoning?.enabled).toBe(true);
+  });
+
+  it.each([
+    ['toggle', 'gpt-5.4', false, undefined, undefined],
+    ['toggle', 'gpt-5.5', false, undefined, undefined],
+    ['toggle', 'gpt-5.5', true, undefined, undefined],
+    [undefined, 'gpt-5.4', false, undefined, undefined],
+    [undefined, 'gpt-5.5', false, undefined, undefined],
+    [undefined, 'gpt-5.5', false, false, undefined],
+    [undefined, 'gpt-5.4', true, undefined, 'default'],
+    [undefined, 'gpt-5.5', true, false, undefined],
+  ] as const)(
+    'keeps Welcome on intent tied to its source model (%s, %s, target enabled=%s, canEnable=%s, enableValue=%s)',
+    async (source, targetModel, targetEnabled, canEnable, enableValue) => {
+      const carryTier =
+        source !== 'toggle' && canEnable !== false && enableValue !== 'default';
+      mockConnection.sessionId = undefined;
+      mockConnection.workspaceCwd = '/workspace';
+      mockConnection.currentModel = 'qwen3.8-max';
+      mockConnection.models = [
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen',
+          reasoningPreview: {
+            enabled: false,
+            effort: 'none',
+            efforts: ['low', 'medium', 'xhigh'],
+            defaultEffort: 'xhigh',
+            canDisable: true,
+          },
+        },
+        {
+          id: targetModel,
+          label: 'GPT',
+          reasoningPreview: {
+            enabled: targetEnabled,
+            canEnable,
+            enableValue,
+            effort: 'medium',
+            efforts: ['low', 'medium', 'high', 'xhigh'],
+            defaultEffort: 'medium',
+            canDisable: true,
+          },
+        },
+      ];
+      mockSessionActions.createSession.mockImplementation(async () => {
+        mockConnection.sessionId = 'session-created';
+        return { sessionId: 'session-created' };
+      });
+      renderApp();
+      await flush();
+      act(() =>
+        testState.latestChatEditorProps?.onSelectReasoningEffort?.(
+          'xhigh',
+          source,
+        ),
+      );
+      await flush();
+      expect(testState.latestChatEditorProps?.reasoning).toMatchObject({
+        enabled: true,
+        effort: 'xhigh',
+      });
+      act(() => testState.latestChatEditorProps?.onSelectModel?.(targetModel));
+      await flush();
+      expect(testState.latestChatEditorProps?.reasoning).toMatchObject(
+        carryTier
+          ? { enabled: true, effort: 'xhigh' }
+          : { enabled: targetEnabled, effort: 'medium' },
+      );
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first prompt');
+        await vi.waitFor(() =>
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce(),
+        );
+      });
+      if (!carryTier) {
+        expect(mockSessionActions.setReasoningEffort).not.toHaveBeenCalled();
+      } else {
+        expect(mockSessionActions.setReasoningEffort).toHaveBeenCalledWith(
+          'xhigh',
+          { persist: true },
+        );
+      }
+    },
+  );
+
+  it.each([
+    { enabled: false, canEnable: false },
+    { enabled: true, effort: 'high', enableValue: 'default' },
+  ] as const)(
+    'drops a pending Welcome tier when refreshed metadata blocks it: %j',
+    async (blockedState) => {
+      mockConnection.sessionId = undefined;
+      mockConnection.workspaceCwd = '/workspace';
+      mockConnection.currentModel = 'gpt-5.5';
+      const reasoningPreview = {
+        enabled: false,
+        effort: 'medium',
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        canDisable: true,
+      };
+      mockConnection.models = [
+        { id: 'gpt-5.5', label: 'GPT', reasoningPreview },
+      ];
+      mockSessionActions.createSession.mockImplementation(async () => {
+        mockConnection.sessionId = 'session-created';
+        return { sessionId: 'session-created' };
+      });
+      const { rerender } = renderApp();
+      await flush();
+      act(() =>
+        testState.latestChatEditorProps?.onSelectReasoningEffort?.('xhigh'),
+      );
+      await flush();
+      expect(testState.latestChatEditorProps?.reasoning).toMatchObject({
+        enabled: true,
+        effort: 'xhigh',
+      });
+      mockConnection.models = [
+        {
+          id: 'gpt-5.5',
+          label: 'GPT',
+          reasoningPreview: { ...reasoningPreview, ...blockedState },
+        },
+      ];
+      rerender();
+      await flush();
+      expect(testState.latestChatEditorProps?.reasoning).toEqual({
+        ...reasoningPreview,
+        ...blockedState,
+      });
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first prompt');
+        await vi.waitFor(() =>
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce(),
+        );
+      });
+      expect(mockSessionActions.setReasoningEffort).not.toHaveBeenCalled();
+      expect(mockSessionActions.releaseSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['max', false],
+    ['none', false],
+    ['max', true],
+    ['none', true],
+  ] as const)(
+    'uses the target Welcome preview without resetting %s (pending=%s)',
+    async (selection, pending) => {
+      const sourceModel = selection === 'max' ? 'gpt-6-astra' : 'gpt-5.5';
+      const targetModel = selection === 'max' ? 'gpt-5.4' : 'gpt-6-astra';
+      const targetPreview = {
+        enabled: true,
+        effort: selection === 'max' ? 'xhigh' : 'medium',
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        canDisable: selection === 'max',
+      };
+      mockConnection.sessionId = undefined;
+      mockConnection.workspaceCwd = '/workspace';
+      mockConnection.currentModel = sourceModel;
+      mockConnection.models = [
+        {
+          id: sourceModel,
+          label: sourceModel,
+          reasoningPreview: {
+            enabled: selection !== 'none',
+            effort: selection,
+            efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+            defaultEffort: 'medium',
+            canDisable: selection === 'none',
+          },
+        },
+        {
+          id: targetModel,
+          label: targetModel,
+          reasoningPreview: targetPreview,
+        },
+      ];
+      mockSessionActions.createSession.mockImplementation(async () => {
+        mockConnection.sessionId = 'session-created';
+        return { sessionId: 'session-created' };
+      });
+      renderApp();
+      await flush();
+      if (pending) {
+        act(() =>
+          testState.latestChatEditorProps?.onSelectReasoningEffort?.(selection),
+        );
+        await flush();
+      }
+      act(() => testState.latestChatEditorProps?.onSelectModel?.(targetModel));
+      await flush();
+      expect(testState.latestChatEditorProps?.reasoning).toEqual(targetPreview);
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first prompt');
+        await vi.waitFor(() =>
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce(),
+        );
+      });
+      expect(mockSessionActions.setReasoningEffort).not.toHaveBeenCalled();
     },
   );
 

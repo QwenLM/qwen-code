@@ -1483,6 +1483,11 @@ export class ShellExecutionService {
       // This should not happen, but as a safeguard...
       throw new Error('PTY implementation not found');
     }
+    // Records whether pty.spawn returned. The catch at the end of this method
+    // needs it to tell a spawn-phase failure — no child exists yet, so handing
+    // the command to the child_process fallback cannot run it twice — from
+    // anything raised after the PTY is live.
+    let ptySpawned = false;
     try {
       const cols = shellExecutionConfig.terminalWidth ?? 80;
       const rows = shellExecutionConfig.terminalHeight ?? 30;
@@ -1520,7 +1525,21 @@ export class ShellExecutionService {
           ...getShellContextEnvVars(),
         },
         handleFlowControl: true,
+        // Windows: with the inbox ConPTY backend a natural shell exit orphans
+        // the `conhost.exe --headless` that backend spawned — the native exit
+        // watcher erases the pty baton before JS can reach ClosePseudoConsole
+        // (microsoft/node-pty#965), so hosts accumulate until the CLI exits
+        // (#11303: `+7 conhost for 7 tool commands`). This option makes
+        // node-pty load the conpty.dll shipped with the package instead of the
+        // one built into Windows — that swap is all @lydell/node-pty documents
+        // the option as, and its typings mark it EXPERIMENTAL. #11303 measured
+        // the per-command host growth gone with
+        // @lydell/node-pty-win32-x64 1.2.0-beta.10 on Windows Server 2025 (30
+        // commands: 30 orphaned hosts before, 0 after). Off Windows the option
+        // is inert: `useConptyDll` appears nowhere in the POSIX prebuilds.
+        useConptyDll: os.platform() === 'win32',
       });
+      ptySpawned = true;
 
       const result = new Promise<ShellExecutionResult>((resolve) => {
         const headlessTerminal = new Terminal({
@@ -1532,6 +1551,27 @@ export class ShellExecutionService {
           logLevel: 'off',
         });
         headlessTerminal.scrollToTop();
+
+        // Bundled ConPTY (useConptyDll above) answers no terminal queries
+        // itself, so a shell that probes the terminal — PowerShell's DA query
+        // at startup — stalls for its full ~2s timeout unless the emulated
+        // terminal's auto-generated reply is written back (measured 3.22s →
+        // 0.23s per command). Scoped to Windows to keep the POSIX path
+        // byte-identical; the hook dies with headlessTerminal.dispose() in
+        // both the foreground and background-promote cleanups.
+        const queryResponseDisposable =
+          os.platform() === 'win32'
+            ? headlessTerminal.onData((data) => {
+                try {
+                  ptyProcess.write(data);
+                } catch (e) {
+                  // A reply racing shell exit finds a dead PTY — drop it.
+                  debugLogger.warn(
+                    `writing terminal query reply to PTY threw: ${e instanceof Error ? e.message : String(e)}`,
+                  );
+                }
+              })
+            : null;
 
         this.activePtys.set(ptyProcess.pid, { ptyProcess, headlessTerminal });
 
@@ -1821,6 +1861,13 @@ export class ShellExecutionService {
             );
           }
           try {
+            queryResponseDisposable?.dispose();
+          } catch (e) {
+            debugLogger.warn(
+              `queryResponseDisposable.dispose() threw during PTY cleanup: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          try {
             headlessTerminal.dispose();
           } catch (e) {
             debugLogger.warn(
@@ -1865,9 +1912,9 @@ export class ShellExecutionService {
           // healthy path — shell exited cleanly, so no taskkill — is exactly
           // the one that leaks it, once per tool call (#11303).
           //
-          // It does NOT free the conhost.exe half: by the time we get here
-          // node-pty's native exit watcher has erased the pty baton, so its
-          // ClosePseudoConsole silently no-ops. See releaseConPtyHost.
+          // Bundled ConPTY already released its host reference after spawn,
+          // but node-pty skips worker cleanup on this natural-exit path.
+          // releaseConPtyHost disposes that worker without signalling the pid.
           releaseConPtyHost(ptyProcess);
           this.activePtys.delete(ptyProcess.pid);
         };
@@ -2137,8 +2184,8 @@ export class ShellExecutionService {
             // already dropped this pid from activePtys, so the process-exit
             // cleanup() cannot reach it either — without this a backgrounded
             // command leaks the worker exactly like the foreground path did
-            // (#11303). The conhost.exe half is not freed here either; see
-            // releaseConPtyHost.
+            // (#11303). Bundled ConPTY handles the host lifecycle separately;
+            // releaseConPtyHost is still required for the worker.
             releaseConPtyHost(ptyProcess);
             if (!postPromote?.onSettle) return;
             try {
@@ -2171,8 +2218,7 @@ export class ShellExecutionService {
           }
           // The settle path is attached UNCONDITIONALLY, unlike the onData
           // forwarding above. `firePostSettle` is the only thing that reaps a
-          // promoted shell and releases its conout worker (#11303; the
-          // conhost.exe half is not freed here — see releaseConPtyHost), and
+          // promoted shell and releases its conout worker (#11303), and
           // the promote branch already dropped this pid from `activePtys`, so
           // with no listener a promote that passes no `postPromote` leaks the
           // worker for the life of the CLI and nothing left can reach them.
@@ -2344,6 +2390,13 @@ export class ShellExecutionService {
             });
           } finally {
             try {
+              queryResponseDisposable?.dispose();
+            } catch (e) {
+              debugLogger.warn(
+                `queryResponseDisposable.dispose() threw during background-promote cleanup: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+            try {
               headlessTerminal.dispose();
             } catch (e) {
               debugLogger.warn(
@@ -2476,6 +2529,23 @@ export class ShellExecutionService {
       return { pid: ptyProcess.pid, result };
     } catch (e) {
       const error = e as Error;
+      if (!ptySpawned && os.platform() === 'win32') {
+        // The bundled ConPTY backend (useConptyDll above) adds throw sites
+        // node-pty reaches synchronously out of spawn — the conpty.dll it
+        // ships being missing or unloadable among them — and none of those
+        // messages contain `posix_spawnp failed`. Resolving below would report
+        // exitCode 1 with empty output and skip the child_process fallback
+        // that execute() already has for a PTY that cannot start, so rethrow
+        // into it. Nothing was spawned, so the command cannot run twice. The
+        // sandbox warning below does not apply here: this is not a sandbox
+        // restriction, and it must not be worded as one.
+        debugLogger.warn(
+          `Windows PTY spawn failed, falling back to child_process: ${
+            error instanceof Error ? error.message : String(e)
+          }`,
+        );
+        throw e;
+      }
       if (error.message.includes('posix_spawnp failed')) {
         onOutputEvent({
           type: 'data',

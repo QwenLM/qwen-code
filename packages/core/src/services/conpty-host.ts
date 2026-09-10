@@ -36,13 +36,11 @@ interface WindowsPtyAgentInternals {
  *
  * This guards every path where a `kill()` runs while the shell is still
  * alive — the cancel path (`performCancelKill`) and the web-terminal
- * ready-case live release. There, `PtyKill` finds the baton, calls
- * `ClosePseudoConsole`, and does not erase the entry from its handle list, so a
- * second close for the same pty would be a double-free on an already-closed
- * HPCON — undefined behavior in-process, not a caught exception. `kill()` runs
- * first and records the note; the later `releaseConPtyHost` (the finalizer, or
- * the web-terminal `releaseHost`) then hits this early return instead of
- * closing again.
+ * ready-case live release. There, `PtyKill` finds the baton and closes the
+ * pseudo-console. `kill()` runs first and records the note; the later
+ * `releaseConPtyHost` (the finalizer, or the web-terminal `releaseHost`) then
+ * skips the redundant native close. Bundled ConPTY still needs the worker
+ * fallback because node-pty defers its own worker dispose until more output.
  *
  * It does nothing for the natural-exit path: there the native exit watcher has
  * already erased the baton (see `releaseConPtyHost`), so `PtyKill` no-ops and
@@ -60,8 +58,8 @@ const asPtyObject = (ptyProcess: unknown): object | undefined =>
 /**
  * Record that a `ptyProcess.kill()` on the cancel or process-exit path has
  * already closed this PTY's pseudo-console, so a later `releaseConPtyHost`
- * does not close it a second time. Only meaningful when that `kill()` ran
- * while the shell was still alive — see `releasedHosts`.
+ * does not close it a second time. The later release may still dispose the
+ * bundled backend's conout worker — see `releasedHosts`.
  */
 export const noteConPtyHostReleased = (ptyProcess: unknown): void => {
   const key = asPtyObject(ptyProcess);
@@ -80,10 +78,10 @@ export const noteConPtyHostReleased = (ptyProcess: unknown): void => {
  * `_deferreds` until `_isReady` flips, so a release at that moment must dispose
  * the worker now — the one resource a never-run deferred teardown would strand
  * — while leaving the native close to the queued `kill()`. Closing it here too
- * would double-close the same HPCON (see `releaseConPtyHost`). The worker
- * dispose is idempotent (`ConoutConnection.dispose` guards on `_isDisposed` for
- * the non-`useConptyDll` path), so doing it here and again in the queued
- * teardown is safe. No-op off Windows.
+ * would double-close the same HPCON (see `releaseConPtyHost`). On the inbox
+ * backend the worker dispose is idempotent. On the bundled backend each call
+ * resets the one-second drain timer, so a later data-driven dispose remains
+ * safe. No-op off Windows.
  *
  * Like `releaseConPtyHost`, this never calls `ptyProcess.kill()`; see that
  * function for the #6067 recycled-pid argument and the win32-only rationale.
@@ -109,17 +107,17 @@ export const disposeConoutWorker = (ptyProcess: unknown): void => {
 /**
  * Releases what node-pty leaves behind when a Windows PTY finishes.
  *
- * **What this actually frees today: the conout worker thread, and not the
- * ConPTY host.** Read that before trusting the name.
+ * **What this function itself reliably frees is the conout worker thread.**
+ * Shell PTYs now use node-pty's bundled ConPTY backend, which releases its host
+ * reference immediately after spawn so the host exits with its last client.
+ * Web-terminal PTYs still use the Windows inbox backend, whose natural-exit
+ * host leak is not fixed here.
  *
- * A finished PTY strands two resources for the lifetime of the CLI process:
- * the ConPTY host process (`conhost.exe --headless`, ~8 MB) and the
- * `worker_threads` Worker node-pty runs to read the conout pipe. #11303
- * measured both — 347 orphaned conhosts against 353 threads in the parent, one
- * leaked worker each. node-pty releases neither on a natural shell exit:
- * `_$onProcessExit` only flushes buffered data and destroys its sockets, while
- * `ClosePseudoConsole` and `ConoutConnection.dispose()` are reachable only from
- * `WindowsPtyAgent.kill()`.
+ * With the inbox backend, a finished PTY strands both the ConPTY host and the
+ * `worker_threads` Worker node-pty runs to read the conout pipe. With bundled
+ * ConPTY, the host lifecycle is handled by `ConptyReleasePseudoConsole`, but
+ * node-pty's `_$onProcessExit` deliberately skips cleanup and still strands the
+ * worker. #11303 measured one leaked worker per completed PTY.
  *
  * - `_conoutSocketWorker.dispose()` is pure JS — a 1 s drain, then
  *   `worker.terminate()` — and genuinely frees the worker here.
@@ -135,7 +133,8 @@ export const disposeConoutWorker = (ptyProcess: unknown): void => {
  *   when no note was recorded (a natural exit, or a cancel that landed before
  *   the shell's first output byte), `firePostSettle`'s `'exit'` entry, and the
  *   web-terminal release of an already-exited session (`release()`'s `else`
- *   arm) — the primary web-terminal path for #11303. The remaining sites are
+ *   arm) — the primary web-terminal path for #11303. Bundled ConPTY has already
+ *   released its host reference after spawn. The remaining sites are
  *   the ones where a `kill()` already closed the HPCON while the shell was
  *   alive and recorded the note (the cancel path and the interactive-shell kill
  *   when `_isReady !== false`, plus the web-terminal live release whose wrapper
@@ -144,29 +143,19 @@ export const disposeConoutWorker = (ptyProcess: unknown): void => {
  *   first output byte routes to `disposeConoutWorker` instead of this function
  *   — from the live arm AND from the exited arm alike, because `releaseHost`
  *   branches only on `_isReady` and never on `session.exited` — so its queued
- *   `kill()` stays the single closer. The conhost half of #11303 is therefore
- *   NOT fixed by this function on the natural-exit path.
+ *   `kill()` stays the single closer. The inbox conhost half of #11303 is
+ *   therefore not fixed by this function on the natural-exit path.
  *
- * The call is kept because the call *site* is right: the moment upstream closes
- * the HPCON when the baton is erased (a `ClosePseudoConsole` in
- * `remove_pty_baton`, or a `~pty_baton`), this starts working with no change
- * here. Until then the only mitigation for the host half of the shell-tool
- * path is `tools.shell.enableInteractiveShell: false`, which drops that path
- * to `child_process`. The web-terminal PTY (`web-terminal-registry.ts`) and
- * the agent-view PTY host are not gated by it, so a daemon serving web
- * terminals keeps stranding a host per exited terminal. Do not add a test that
- * asserts the host is released — stubbing
- * `_ptyNative.kill` makes such a test pass on a call that does nothing.
+ * The web-terminal PTY (`web-terminal-registry.ts`) and agent-view PTY host do
+ * not use the bundled backend, so they can still strand an inbox host per
+ * exited terminal. Do not add a test that treats a stubbed `_ptyNative.kill`
+ * call as evidence that the inbox host was released.
  *
- * **Why not just call `ptyProcess.kill()`.** Beyond those two teardowns,
- * `kill()` forks a helper to run `GetConsoleProcessList` on the shell pid and
- * then `process.kill()`s every pid it returns. That is correct while the shell
- * is alive, but after a natural exit `AttachConsole` fails, the helper dies
- * with an uncaught error, node-pty's 5 s timeout falls back to
- * `resolve([shellPid])` — and we `TerminateProcess` a pid that has already been
- * freed for reuse. That is the #6067 collateral-kill mode, and it would fire on
- * every tool call. So the teardowns are invoked directly and the process-list
- * kill is skipped; taskkill (`windowsKillPid`) covers the cases that need it.
+ * **Why not just call `ptyProcess.kill()`.** On the inbox backend it forks a
+ * helper that can fall back after a natural exit to terminating a recycled
+ * shell pid (#6067). On the bundled backend it defers worker disposal until
+ * more output arrives, which may never happen after exit. Direct teardown
+ * avoids both failure modes; taskkill (`windowsKillPid`) covers live children.
  *
  * win32-only: there is no ConPTY host or conout worker elsewhere, and node-pty's
  * `UnixTerminal.kill()` would signal an already-exited, possibly recycled pid.
@@ -177,12 +166,18 @@ export const releaseConPtyHost = (ptyProcess: unknown): void => {
     return;
   }
   const key = asPtyObject(ptyProcess);
-  if (!key || releasedHosts.has(key)) {
+  if (!key) {
+    return;
+  }
+  const agent = (ptyProcess as { _agent?: WindowsPtyAgentInternals } | null)
+    ?._agent;
+  if (releasedHosts.has(key)) {
+    if (agent?._useConptyDll) {
+      disposeConoutWorker(ptyProcess);
+    }
     return;
   }
   releasedHosts.add(key);
-  const agent = (ptyProcess as { _agent?: WindowsPtyAgentInternals } | null)
-    ?._agent;
   const ptyId = agent?._pty;
   const nativeKill = agent?._ptyNative?.kill;
   if (!agent) {

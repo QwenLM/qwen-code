@@ -1664,20 +1664,16 @@
   text-overflow: ellipsis;
 }
 
-.footerCompact,
-.footerTight {
+.footerCompact {
   gap: 4px;
 }
 
 .footerCompact .footerPrimary,
-.footerCompact .footerActions,
-.footerTight .footerPrimary,
-.footerTight .footerActions {
+.footerCompact .footerActions {
   gap: 4px;
 }
 
-.footerCompact .footerButton,
-.footerTight .footerButton {
+.footerCompact .footerButton {
   width: 26px;
   height: 28px;
   flex: 0 0 26px;
@@ -1685,13 +1681,11 @@
   padding: 0;
 }
 
-.footerCompact .footerButtonLabel,
-.footerTight .footerButtonLabel {
+.footerCompact .footerButtonLabel {
   display: none;
 }
 
-.footerCompact .collapseButton,
-.footerTight .collapseButton {
+.footerCompact .collapseButton {
   width: 26px;
   height: 28px;
 }
