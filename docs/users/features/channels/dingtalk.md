@@ -107,7 +107,7 @@ Set `"useConnectionManager": false` to disable Qwen Code's connection manager an
 
 ### Turn Output Mode
 
-Set `outputMode` to opt in to turn-scoped result cards:
+Set the [shared `outputMode` setting](./overview#turn-output-mode) to opt in to turn-scoped result cards. DingTalk is currently the only adapter integrated with the shared output policy:
 
 - `final_only`: the main status card previews the assistant's output and completes with its last reply when the main prompt ends. Each background notification turn keeps its last non-empty assistant reply and sends it as a separate completed card.
 - `process_and_result`: each complete assistant output gets its own completed card. Token chunks update the current card; they do not create new cards. Background assistant outputs also get separate completed cards.

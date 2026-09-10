@@ -13,12 +13,14 @@ vi.mock('./channel-registry.js', () => ({
         requiredConfigFields?: string[];
         envResolvableConfigFields?: string[];
         defaultSessionScope?: string;
+        supportsOutputMode?: boolean;
       }
     > = {
       telegram: { channelType: 'telegram', requiredConfigFields: ['token'] },
       dingtalk: {
         channelType: 'dingtalk',
         requiredConfigFields: ['clientId', 'clientSecret'],
+        supportsOutputMode: true,
       },
       wecom: {
         channelType: 'wecom',
@@ -182,7 +184,55 @@ describe('parseChannelConfig', () => {
     expect(result.groups).toEqual({});
     expect(result.identity).toBeUndefined();
     expect(result.memoryScope).toBeUndefined();
+    expect(result.outputMode).toBeUndefined();
   });
+
+  it.each(['final_only', 'process_and_result'])(
+    'accepts shared outputMode %s for an opted-in adapter',
+    async (outputMode) => {
+      const result = await parseChannelConfig('bot', {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        clientSecret: 'secret',
+        outputMode,
+      });
+      expect(result.outputMode).toBe(outputMode);
+    },
+  );
+
+  it('keeps output mode unset for an opted-in adapter when omitted', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'dingtalk',
+      clientId: 'client-id',
+      clientSecret: 'secret',
+    });
+    expect(result.outputMode).toBeUndefined();
+  });
+
+  it.each(['all', '', null, false, 1, '$OUTPUT_MODE'])(
+    'rejects invalid shared outputMode %j before adapter startup',
+    async (outputMode) => {
+      await expect(
+        parseChannelConfig('bot', {
+          type: 'dingtalk',
+          clientId: 'client-id',
+          clientSecret: 'secret',
+          outputMode,
+        }),
+      ).rejects.toThrow(
+        'Channel "bot" outputMode must be "final_only" or "process_and_result".',
+      );
+    },
+  );
+
+  it.each(['final_only', 'process_and_result'])(
+    'rejects outputMode %s for adapters that have not opted in',
+    async (outputMode) => {
+      await expect(
+        parseChannelConfig('bot', { type: 'bare', outputMode }),
+      ).rejects.toThrow('Channel "bot" does not support outputMode.');
+    },
+  );
 
   it('validates and normalizes the shared message prefix', async () => {
     const result = await parseChannelConfig('bot', {

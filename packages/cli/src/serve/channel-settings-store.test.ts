@@ -752,7 +752,7 @@ describe('WorkspaceChannelSettingsStore', () => {
   });
 
   it.each(['final_only', 'process_and_result'])(
-    'persists DingTalk outputMode %s through management metadata',
+    'persists and removes DingTalk shared outputMode %s',
     async (outputMode) => {
       writeWorkspaceSettings(
         JSON.stringify({
@@ -784,6 +784,53 @@ describe('WorkspaceChannelSettingsStore', () => {
           secrets: { clientSecret: { operation: 'preserve' } },
         }),
       ).rejects.toThrow('outputMode');
+      const cleared = await store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: { type: 'dingtalk', clientId: 'client-id' },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      });
+      expect(cleared.channels['bot']).not.toHaveProperty('outputMode');
+    },
+  );
+
+  it.each([
+    { outputMode: 'final_only', stored: false },
+    { outputMode: 'process_and_result', stored: false },
+    { outputMode: 'final_only', stored: true },
+    { outputMode: 'process_and_result', stored: true },
+  ])(
+    'rejects unsupported outputMode $outputMode even when already stored ($stored)',
+    async ({ outputMode, stored }) => {
+      writeWorkspaceSettings(
+        JSON.stringify({
+          $version: 4,
+          channels: {
+            bot: {
+              type: 'management-validation-test',
+              clientId: 'client-id',
+              clientSecret: 'secret',
+              ...(stored ? { outputMode } : {}),
+            },
+          },
+        }),
+      );
+      const before = readWorkspaceSettings();
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      await expect(
+        store.upsert('bot', {
+          expectedRevision: store.snapshot().revision,
+          config: {
+            type: 'management-validation-test',
+            clientId: 'client-id',
+            outputMode,
+          },
+          secrets: { clientSecret: { operation: 'preserve' } },
+        }),
+      ).rejects.toMatchObject({
+        code: 'channel_settings_invalid_config',
+        message: 'Channel "bot" does not support outputMode.',
+      });
+      expect(readWorkspaceSettings()).toEqual(before);
     },
   );
 

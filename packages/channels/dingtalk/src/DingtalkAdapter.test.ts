@@ -287,6 +287,9 @@ vi.mock('@qwen-code/channel-base', async () => {
     // ship green.
     truncateUtf16Units: real.truncateUtf16Units,
     isTerminalTaskLifecycleType: real.isTerminalTaskLifecycleType,
+    parseChannelOutputMode: real.parseChannelOutputMode,
+    BackgroundOutputCoordinator: real.BackgroundOutputCoordinator,
+    ChannelOutputTurn: real.ChannelOutputTurn,
   };
 });
 
@@ -8899,9 +8902,11 @@ describe('DingtalkChannel outbound file delivery', () => {
     expect(
       (
         channel as unknown as {
-          backgroundResponseAggregations: Map<string, unknown>;
+          backgroundOutputCoordinator: {
+            backgroundResponseAggregations: Map<string, unknown>;
+          };
         }
-      ).backgroundResponseAggregations.size,
+      ).backgroundOutputCoordinator.backgroundResponseAggregations.size,
     ).toBe(0);
   });
 
@@ -8938,16 +8943,18 @@ describe('DingtalkChannel outbound file delivery', () => {
       const aggregation = [
         ...(
           channel as unknown as {
-            backgroundResponseAggregations: Map<
-              string,
-              {
-                delivered?: boolean;
-                retryTimer?: ReturnType<typeof setTimeout>;
-                delivery?: { attempts: number };
-              }
-            >;
+            backgroundOutputCoordinator: {
+              backgroundResponseAggregations: Map<
+                string,
+                {
+                  delivered?: boolean;
+                  retryTimer?: ReturnType<typeof setTimeout>;
+                  delivery?: { attempts: number };
+                }
+              >;
+            };
           }
-        ).backgroundResponseAggregations.values(),
+        ).backgroundOutputCoordinator.backgroundResponseAggregations.values(),
       ][0];
       expect(fetchSpy).not.toHaveBeenCalled();
       expect(aggregation?.delivered).not.toBe(true);
@@ -10269,9 +10276,11 @@ describe('DingtalkChannel outbound file delivery', () => {
       expect(
         (
           channel as unknown as {
-            pendingBackgroundResponseTerminals: Map<string, unknown>;
+            backgroundOutputCoordinator: {
+              pendingBackgroundResponseTerminals: Map<string, unknown>;
+            };
           }
-        ).pendingBackgroundResponseTerminals.size,
+        ).backgroundOutputCoordinator.pendingBackgroundResponseTerminals.size,
       ).toBe(0);
       await channel.dispatchBackgroundResponse(
         'session-1',
@@ -10527,9 +10536,11 @@ describe('DingtalkChannel outbound file delivery', () => {
       expect(
         (
           channel as unknown as {
-            backgroundResponseAggregations: Map<string, unknown>;
+            backgroundOutputCoordinator: {
+              backgroundResponseAggregations: Map<string, unknown>;
+            };
           }
-        ).backgroundResponseAggregations.size,
+        ).backgroundOutputCoordinator.backgroundResponseAggregations.size,
       ).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -10971,9 +10982,11 @@ describe('DingtalkChannel outbound file delivery', () => {
         });
         const pending = (
           channel as unknown as {
-            pendingBackgroundResponseTerminals: Map<string, unknown>;
+            backgroundOutputCoordinator: {
+              pendingBackgroundResponseTerminals: Map<string, unknown>;
+            };
           }
-        ).pendingBackgroundResponseTerminals;
+        ).backgroundOutputCoordinator.pendingBackgroundResponseTerminals;
         expect(pending.size).toBe(1);
 
         if (lifecycle === 'dies') {
@@ -11284,9 +11297,11 @@ describe('DingtalkChannel outbound file delivery', () => {
       expect(
         (
           channel as unknown as {
-            backgroundResponseAggregations: Map<string, unknown>;
+            backgroundOutputCoordinator: {
+              backgroundResponseAggregations: Map<string, unknown>;
+            };
           }
-        ).backgroundResponseAggregations.size,
+        ).backgroundOutputCoordinator.backgroundResponseAggregations.size,
       ).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -11328,9 +11343,11 @@ describe('DingtalkChannel outbound file delivery', () => {
       expect(
         (
           channel as unknown as {
-            backgroundResponseAggregations: Map<string, unknown>;
+            backgroundOutputCoordinator: {
+              backgroundResponseAggregations: Map<string, unknown>;
+            };
           }
-        ).backgroundResponseAggregations.size,
+        ).backgroundOutputCoordinator.backgroundResponseAggregations.size,
       ).toBe(1);
 
       await channel.dispatchBackgroundResponse('session-1', '', {

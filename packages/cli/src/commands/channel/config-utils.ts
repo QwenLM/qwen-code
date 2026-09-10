@@ -4,6 +4,7 @@ import type {
   ChannelWebhookSourceConfig,
   ChannelWebhookTargetConfig,
 } from '@qwen-code/channel-base';
+import { parseChannelOutputMode } from '@qwen-code/channel-base';
 import {
   APPROVAL_MODES,
   isInternalSecretEnvVar,
@@ -481,6 +482,11 @@ export async function parseChannelConfig(
   }
 
   const resolvedRawConfig = { ...rawConfig };
+  const outputMode = parseChannelOutputMode(
+    name,
+    rawConfig['outputMode'],
+    plugin.supportsOutputMode === true,
+  );
   const envResolution = options.resolveEnvVars ?? true;
   const resolvedPluginFields = new Set<string>();
 
@@ -569,6 +575,7 @@ export async function parseChannelConfig(
     ] as const) as ChannelConfig['identity'],
     memoryScope: parseMemoryScopeConfig(name, rawConfig),
     model: rawConfig['model'] as string | undefined,
+    outputMode,
     groupPolicy:
       (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) || 'disabled',
     dmPolicy: (rawConfig['dmPolicy'] as ChannelConfig['dmPolicy']) || 'open',

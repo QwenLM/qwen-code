@@ -9,6 +9,7 @@ export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
 export type DmPolicy = 'disabled' | 'open';
 export type DispatchMode = 'collect' | 'steer' | 'followup';
+export type ChannelOutputMode = 'final_only' | 'process_and_result';
 
 export interface ChannelIdentityConfig {
   id?: string;
@@ -60,6 +61,8 @@ export interface ChannelConfig {
   memoryScope?: ChannelMemoryScopeConfig;
   webhooks?: ChannelWebhookConfig;
   model?: string;
+  /** Output selection within each turn, available on opted-in adapters only. */
+  outputMode?: ChannelOutputMode;
   groupPolicy: GroupPolicy; // default: "disabled"
   dmPolicy: DmPolicy; // default: "open"
   groupHistoryLimit?: number;
@@ -558,6 +561,9 @@ export interface ChannelPlugin {
 
   /** Optional config fields whose string values may reference environment vars. */
   envResolvableConfigFields?: string[];
+
+  /** Opt in to shared per-turn output selection and independent follow-ups. */
+  supportsOutputMode?: boolean;
 
   /** Serializable metadata for safe configuration management. */
   management?: ChannelManagementDescriptor;

@@ -341,6 +341,28 @@ describe('DingtalkInteractionPresenter', () => {
     presenter.terminalizeRun('run-1', 'completed');
   });
 
+  it('does not replay an older final-only preview after an input boundary', async () => {
+    const { client, presenter, sendFallback } = createHarness({
+      outputMode: 'final_only',
+    });
+    vi.mocked(client.createAndDeliver).mockRejectedValue(
+      new DingtalkCardRequestError('unavailable', false),
+    );
+    presenter.appendOutput(segment('segment-1'), 'Older progress');
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+    presenter.appendOutput(segment('segment-2'), 'Please choose an option');
+    await presenter.closeOutput('segment-2', '', 'input_requested');
+    presenter.appendOutput(segment('segment-3'), ' \n');
+    await presenter.closeOutput('segment-3', ' \n', 'completed');
+    presenter.terminalizeRun('run-1', 'completed');
+    await Promise.resolve();
+    expect(sendFallback).toHaveBeenCalledExactlyOnceWith(
+      'cid-1',
+      'Please choose an option',
+      'session-1',
+    );
+  });
+
   it('does not create an empty card after the last process output', async () => {
     const { client, presenter } = createHarness({
       outputMode: 'process_and_result',

@@ -420,6 +420,17 @@ Channels use their normal response delivery path. The shared delivery layer send
 
 The obsolete `blockStreaming`, `blockStreamingChunk`, and `blockStreamingCoalesce` settings are no longer supported and can be removed from channel configuration. They do not affect delivery. Channel settings management rejects newly added or changed values for these fields. An unchanged stored value is retained, or removed, when the edit keeps the channel's `type`; changing a channel's `type` requires removing these fields first.
 
+### Turn output mode
+
+`outputMode` is a shared channel setting with adapter opt-in. Currently only **DingTalk** supports it. Other adapters retain their existing behavior: the channel editor does not offer this field, and configuration parsing or management saves reject an explicit value on unsupported adapters.
+
+- `final_only` selects the last non-empty assistant reply within each turn.
+- `process_and_result` delivers each complete assistant response, not each token chunk.
+
+The main turn completes independently of background work. A later background callback starts a separate output turn and cannot reopen or replace the completed main result. Eleven independent callback turns can therefore produce eleven follow-up results; this setting does not merge separate turns or generate an extra summary. Omitting `outputMode` preserves the adapter's existing delivery.
+
+The shared layer owns output selection and background turn coordination; native rendering, media and fallback delivery remain adapter-specific. See [DingTalk turn output mode](./dingtalk#turn-output-mode) for card requirements, partial-result behavior and the conversation scope. Channel loops and webhook runs are unchanged.
+
 ## Scheduled Channel Loops
 
 Channels have a persistent scheduler for prompts that should run later and push

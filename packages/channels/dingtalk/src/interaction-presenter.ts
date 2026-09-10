@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { sanitizeSenderName } from '@qwen-code/channel-base';
+import { ChannelOutputTurn, sanitizeSenderName } from '@qwen-code/channel-base';
 import type {
+  ChannelOutputMode,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
   ChannelPermissionRequestContext,
@@ -32,6 +33,8 @@ interface RunPresentation {
   senderRawPrefix?: string;
   sourceLabel?: string;
   cardDelivered?: { text: string; chatId: string; sessionId: string };
+  output: ChannelOutputTurn;
+  lastOutputContext?: ChannelOutputSegmentContext;
   terminal: boolean;
 }
 
@@ -42,7 +45,7 @@ interface SegmentPresentation {
 }
 
 export interface DingtalkInteractionPresenterOptions {
-  outputMode?: 'final_only' | 'process_and_result';
+  outputMode?: ChannelOutputMode;
   statusCards?: StatusCardController;
   questionCards?: QuestionCardController;
   permissionCards?: PermissionCardController;
@@ -113,6 +116,7 @@ export class DingtalkInteractionPresenter {
         sourceLabel,
       },
       projectionChain: Promise.resolve(),
+      output: new ChannelOutputTurn(this.options.outputMode),
       ...(target.isGroup && sender ? formatSenderPrefixes(sender) : {}),
       ...(sourceLabel ? { sourceLabel } : {}),
       terminal: false,
@@ -165,7 +169,7 @@ export class DingtalkInteractionPresenter {
     presentation.content = this.boundContent(presentation.content + chunk);
     this.segments.set(segment.segmentId, presentation);
     run.activeSegmentId = segment.segmentId;
-    if (this.options.outputMode && !presentation.content.trim()) return;
+    if (!run.output.shouldPreview(presentation.content)) return;
     void this.enqueue(run, () => {
       const statusContext = this.ensureStatusContext(run, segment);
       this.options.statusCards?.replace(
@@ -196,20 +200,11 @@ export class DingtalkInteractionPresenter {
       run.activeSegmentId = undefined;
     }
     return this.enqueue(run, async () => {
-      const output = text || presentation.content;
-      if (
-        this.options.outputMode &&
-        !output.trim() &&
-        (reason === 'response_boundary' || reason === 'completed')
-      ) {
-        if (reason !== 'completed') return true;
-        if (this.options.outputMode === 'process_and_result') return true;
-        text = run.cardDelivered?.text ?? '';
-        if (!text.trim()) return true;
-      }
+      const decision = run.output.close(text || presentation.content, reason);
+      if (decision.kind === 'skip') return true;
       const statusCards = this.options.statusCards;
       const statusContext = this.ensureStatusContext(run, presentation.context);
-      if (reason === 'failed') {
+      if (decision.kind === 'failed') {
         statusCards?.ensure(
           statusContext,
           this.cardTarget(statusContext.target),
@@ -218,33 +213,30 @@ export class DingtalkInteractionPresenter {
           statusContext.segmentId,
           this.withSenderPrefix(run, '本次处理失败，请稍后重试。'),
         );
-        if (this.options.outputMode !== 'final_only') {
-          await this.redeliverCardDeliveredContent(run);
-        }
+        await this.redeliverCardDeliveredContent(run);
         return statusCards !== undefined;
       }
-      if (reason === 'cancelled') {
+      if (decision.kind === 'cancelled') {
         return statusCards !== undefined;
       }
-      if (
-        reason === 'response_boundary' &&
-        this.options.outputMode !== 'process_and_result'
-      ) {
+      if (decision.kind === 'preview') {
         const deliveredViaCard =
           statusCards !== undefined &&
           (await statusCards.isCardLive(statusContext.segmentId)) &&
           (await statusCards.flushPending(statusContext.segmentId));
-        if (deliveredViaCard || this.options.outputMode === 'final_only') {
+        if (decision.deferFallback) {
+          run.lastOutputContext = presentation.context;
+          return true;
+        }
+        if (deliveredViaCard) {
           run.cardDelivered = {
-            text: stripPartialImageMarker(text || presentation.content),
+            text: stripPartialImageMarker(decision.text),
             chatId: presentation.context.target.chatId,
             sessionId: presentation.context.sessionId,
           };
           return true;
         }
-        const fallbackText = stripPartialImageMarker(
-          text || presentation.content,
-        );
+        const fallbackText = stripPartialImageMarker(decision.text);
         if (!fallbackText || !this.options.sendFallback) return false;
         await this.sendFallback(
           run,
@@ -255,41 +247,21 @@ export class DingtalkInteractionPresenter {
         statusCards?.abandon(statusContext.segmentId);
         return true;
       }
-      if (reason === 'input_requested' || reason === 'response_boundary') {
-        const completed =
-          statusCards !== undefined &&
-          (await statusCards.complete(
-            statusContext.segmentId,
-            this.withSenderPrefix(run, text || presentation.content),
-          ));
-        run.statusContext = undefined;
-        if (completed) return true;
-        const fallbackText = stripPartialImageMarker(
-          text || presentation.content,
+      if (!decision.rotate) {
+        statusCards?.ensure(
+          statusContext,
+          this.cardTarget(statusContext.target),
         );
-        if (!fallbackText || !this.options.sendFallback) return false;
-        await this.sendFallback(
-          run,
-          presentation.context.target.chatId,
-          fallbackText,
-          presentation.context.sessionId,
-        );
-        statusCards?.abandon(statusContext.segmentId);
-        return true;
       }
-      statusCards?.ensure(statusContext, this.cardTarget(statusContext.target));
       const completed =
         statusCards !== undefined &&
         (await statusCards.complete(
           statusContext.segmentId,
-          this.withSenderPrefix(run, text || presentation.content),
+          this.withSenderPrefix(run, decision.text),
         ));
-      if (this.options.outputMode === 'final_only')
-        run.cardDelivered = undefined;
+      if (decision.rotate) run.statusContext = undefined;
       if (completed) return true;
-      const fallbackText = stripPartialImageMarker(
-        text || presentation.content,
-      );
+      const fallbackText = stripPartialImageMarker(decision.text);
       if (!fallbackText || !this.options.sendFallback) return false;
       await this.sendFallback(
         run,
@@ -384,12 +356,7 @@ export class DingtalkInteractionPresenter {
     }
     const copy = this.terminalCopy();
     const finalization = this.enqueue(run, async () => {
-      if (
-        this.options.outputMode === 'final_only' &&
-        terminal !== 'completed'
-      ) {
-        run.cardDelivered = undefined;
-      }
+      const finalOutput = run.output.finish(terminal);
       if (terminal === 'failed') {
         const statusContext = this.ensureStatusContext(run);
         this.options.statusCards?.ensure(
@@ -434,8 +401,14 @@ export class DingtalkInteractionPresenter {
                   )
                 : retained,
           );
-          if (!completed && this.options.outputMode === 'final_only') {
-            await this.redeliverCardDeliveredContent(run);
+          if (!completed && finalOutput) {
+            const context = run.lastOutputContext ?? run.baseContext;
+            await this.sendFallback(
+              run,
+              context.target.chatId,
+              stripPartialImageMarker(finalOutput),
+              context.sessionId,
+            );
           }
         }
       }

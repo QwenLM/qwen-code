@@ -8,6 +8,10 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { ChannelConfigFieldDescriptor } from '@qwen-code/channel-base';
 import {
+  CHANNEL_OUTPUT_MODE_FIELD,
+  parseChannelOutputMode,
+} from '@qwen-code/channel-base';
+import {
   getPlugin,
   UNSAFE_OBJECT_KEYS,
 } from '../commands/channel/channel-registry.js';
@@ -517,7 +521,24 @@ export class WorkspaceChannelSettingsStore {
       const value = applySecretUpdate(previous[key], update);
       if (value !== undefined) nextConfig[key] = value;
     }
-    assertManagedConfig(nextConfig, previous, plugin.management.fields);
+    try {
+      parseChannelOutputMode(
+        name,
+        nextConfig['outputMode'],
+        plugin.supportsOutputMode === true,
+      );
+    } catch (error) {
+      throw invalidConfig(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    assertManagedConfig(
+      nextConfig,
+      previous,
+      plugin.supportsOutputMode === true
+        ? [...plugin.management.fields, CHANNEL_OUTPUT_MODE_FIELD]
+        : plugin.management.fields,
+    );
     const multiSessionError = multiSessionCompatibilityError(name, {
       multiSession: nextConfig['multiSession'] === true,
       sessionScope:

@@ -104,6 +104,19 @@ export {
   truncateUtf16Units,
 } from './sanitize.js';
 export { isTerminalTaskLifecycleType } from './types.js';
+export {
+  CHANNEL_OUTPUT_MODE_FIELD,
+  parseChannelOutputMode,
+} from './output-mode.js';
+export { ChannelOutputTurn } from './output-turn.js';
+export type { ChannelOutputDecision } from './output-turn.js';
+export { BackgroundOutputCoordinator } from './background-output-coordinator.js';
+export type {
+  BackgroundOutputDelivery,
+  BackgroundOutputPacket,
+  BackgroundOutputTarget,
+  BackgroundOutputCoordinatorOptions,
+} from './background-output-coordinator.js';
 export type {
   Attachment,
   ChannelConfig,
@@ -121,6 +134,7 @@ export type {
   ChannelMemoryIntentClassifierResult,
   ChannelMemoryScopeConfig,
   ChannelMemoryScopeMode,
+  ChannelOutputMode,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
   ChannelPermissionDecision,

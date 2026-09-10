@@ -9,6 +9,7 @@ export const plugin: ChannelPlugin = {
   channelType: 'dingtalk',
   displayName: 'DingTalk',
   requiredConfigFields: ['clientId', 'clientSecret'],
+  supportsOutputMode: true,
   management: {
     fields: [
       {
@@ -24,17 +25,6 @@ export const plugin: ChannelPlugin = {
         kind: 'secret',
         required: true,
         envResolvable: true,
-      },
-      {
-        key: 'outputMode',
-        label: 'Output Mode',
-        kind: 'enum',
-        description:
-          'Select card output within each turn. Background follow-ups always finish independently of the main response. Omit outputMode in settings.json to retain legacy delivery.',
-        options: [
-          { value: 'final_only', label: 'Final result only' },
-          { value: 'process_and_result', label: 'Process and results' },
-        ],
       },
       {
         key: 'interactiveCards',
