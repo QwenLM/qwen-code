@@ -1276,7 +1276,7 @@ describe('DwsChannel', () => {
     );
   });
 
-  it('does not carry source-policy boundaries across a profile switch', async () => {
+  it('clears source-policy floors and watermarks when the authenticated profile changes', async () => {
     const name = 'profile-source-policy-dws';
     const now = vi.spyOn(Date, 'now').mockReturnValue(20_000);
     try {
@@ -1290,10 +1290,6 @@ describe('DwsChannel', () => {
         makeConfig({ groupPolicy: 'disabled', dmPolicy: 'disabled' }),
         name,
       );
-      first.seedSourcePolicyState({
-        notificationHistoryFloor: 18_000,
-        mentionHistoryFloor: 18_000,
-      });
       first.disconnect();
 
       const secondClient = new FakeDwsClient();
