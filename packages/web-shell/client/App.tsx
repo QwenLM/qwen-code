@@ -70,6 +70,7 @@ import type {
 
 import { isGoalGateBlocked as isGoalGateBlockedFor } from './utils/goalGate';
 import { keepWorkspaceSplitSessionIds } from './utils/standalone-session-routing';
+import { setBoundedMapEntry } from './utils/bounded-map';
 import { type SessionGitIntent } from './components/GitModePopover';
 import { gitModeIntentMustReset } from './utils/gitModeIntent';
 import { LocalControlQrButton } from './components/LocalControlQrButton';
@@ -1460,20 +1461,6 @@ const SESSION_AGENT_TRACE_FEATURE = 'session_agent_trace';
 const SESSION_ATTACHMENT_LIST_FEATURE = 'session_attachment_list';
 const BOTTOM_PANEL_GAP_PX = 6;
 const BOTTOM_PANEL_FALLBACK_INSET_PX = 40;
-
-function setBoundedMapEntry<V>(
-  map: Map<string, V>,
-  key: string,
-  value: V,
-): void {
-  map.delete(key);
-  map.set(key, value);
-  while (map.size > MAX_ARTIFACT_PANEL_SESSION_STATES) {
-    const oldest = map.keys().next().value;
-    if (!oldest) break;
-    map.delete(oldest);
-  }
-}
 
 // One preview tab per image, keyed by its content, so opening several images
 // keeps a tab each while re-clicking the same image just focuses its tab.
@@ -4414,6 +4401,7 @@ export function App({
         sessionAttachmentsBySessionRef.current,
         logicalSessionKey,
         [],
+        MAX_ARTIFACT_PANEL_SESSION_STATES,
       );
       setSessionAttachments([]);
       setSessionAttachmentsLoading(false);
@@ -4453,6 +4441,7 @@ export function App({
               sessionAttachmentsBySessionRef.current,
               logicalSessionKey,
               attachments,
+              MAX_ARTIFACT_PANEL_SESSION_STATES,
             );
             setSessionAttachments(attachments);
             setSessionAttachmentsLoading(false);
@@ -4469,6 +4458,7 @@ export function App({
                   attachmentRetryCountRef.current,
                   logicalSessionKey,
                   failures,
+                  MAX_ARTIFACT_PANEL_SESSION_STATES,
                 );
                 retryTimer = setTimeout(
                   () => setAttachmentRefreshNonce((nonce) => nonce + 1),
@@ -4481,6 +4471,7 @@ export function App({
                 sessionAttachmentsBySessionRef.current,
                 logicalSessionKey,
                 [],
+                MAX_ARTIFACT_PANEL_SESSION_STATES,
               );
               setSessionAttachments([]);
             }
@@ -5978,6 +5969,7 @@ export function App({
         artifactPanelDeferredPersistedTabsRef.current,
         nextSessionId,
         deferredPersistedTabs,
+        MAX_ARTIFACT_PANEL_SESSION_STATES,
       );
     } else {
       artifactPanelDeferredPersistedTabsRef.current.delete(nextSessionId);
