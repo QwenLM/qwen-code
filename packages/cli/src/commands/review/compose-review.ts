@@ -3694,11 +3694,20 @@ export function escapeTagOpeners(text: string): string {
   // each closing one hole and opening the next; a line is the unit the
   // rule below can decide exactly (#9940 review, round 31 reverse audit).
   //
-  // The channels are folded at four sites, not one: `ingestEntryList` for
-  // the entry channels, the `\s+` normalisation for downgrade reasons,
-  // `collapseEntry` for the `Not reviewed:` disclosures, and
-  // `scriptLintGate`'s own push — that last one joins `bodyCriticals`
-  // after `ingestEntryList` has run, so the shared fold never sees it.
+  // The channels are folded at several sites, not one: `collapseEntry` for
+  // the entry channels and the `Not reviewed:` disclosures (the `\r\n?`
+  // normalisation `ingestEntryList` does first folds nothing on its own),
+  // the `\s+` pass for downgrade reasons, `collapseToLine` for the
+  // duplicate-drop leg and — at `toDeferredEntries` and again through
+  // `boundDeferredLine` — for a Critical deferral's relocation exit, and
+  // `scriptLintGate`'s own push. The
+  // relocation exit and the gate push join `bodyCriticals` AFTER
+  // `ingestEntryList` has run, so the shared fold never sees them. (The
+  // deferral LIST line is folded by `mdField` and posts without coming
+  // here at all.) `every model-written channel reaches the escape as ONE
+  // line` in the tests drives every one of these EXCEPT the gate push,
+  // which needs a report fixture and is pinned by `folds its own entry`;
+  // it also says which legs are held more than once.
   // Per-line is NOT a conservative fallback — it is the model that the
   // fold makes correct. Handed a multi-line string anyway it differs from
   // the renderer in BOTH directions: it pairs backticks the renderer keeps
