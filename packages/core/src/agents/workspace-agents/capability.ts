@@ -70,6 +70,7 @@ export const AGENT_TOOL_CLASSIFICATION = {
   [ToolNames.WORKFLOW]: 'deny',
   [ToolNames.ARTIFACT]: 'deny',
   [ToolNames.RECORD_ARTIFACT]: 'deny',
+  [ToolNames.RECORD_SOURCE]: 'deny',
   [ToolNames.REPORT_FINDINGS]: 'deny',
   [ToolNames.GET_GOAL]: 'allow',
   [ToolNames.UPDATE_GOAL]: 'deny',

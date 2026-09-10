@@ -29,6 +29,7 @@ import type {
 } from './agent-events.js';
 import { AgentEventType } from './agent-events.js';
 import type { AgentStatsSummary } from './agent-statistics.js';
+import type { SubagentExecutor } from './subagent-executor.js';
 import type {
   PromptConfig,
   ModelConfig,
@@ -135,7 +136,7 @@ export function templateString(
  * Each execute() call runs one task through AgentCore's reasoning loop. Calls
  * must be sequential; later calls reuse the same chat and prepared tools.
  */
-export class AgentHeadless {
+export class AgentHeadless implements SubagentExecutor {
   private readonly core: AgentCore;
   private finalText: string = '';
   private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;

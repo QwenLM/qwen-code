@@ -47,6 +47,12 @@ const daemonProxy: ProxyOptions = {
 export const QUALIFIED_VOICE_STREAM_PROXY =
   '^/workspaces/[^/]+/voice/stream/?$';
 
+// Exact-path on purpose. A bare `/brand` prefix would also match
+// `/brandContext.ts` — the client source module `main.tsx` and `App.tsx` import
+// for a value — and proxy it to the daemon, so the module graph never loads and
+// the dev page blanks. Same hazard the `/voice` and `/live` entries document.
+export const BRAND_ROUTE_PROXY = '^/brand/?$';
+
 // The local-files bridge upgrades here for secondary-workspace sessions;
 // without a ws-enabled entry the upgrade is never forwarded in dev and the
 // bridge hangs in `connecting`.
@@ -94,6 +100,11 @@ export default defineConfig(({ command }) => ({
     proxy: {
       '/health': daemonProxy,
       '/capabilities': daemonProxy,
+      // Web Shell brand (`GET /brand`). Without it the SPA fallback answers with
+      // index.html in dev; the client swallows the parse failure and silently
+      // keeps the built-in name and logo, so a locally configured `ui.brand`
+      // would appear to do nothing.
+      [BRAND_ROUTE_PROXY]: daemonProxy,
       '/mcp-app-sandbox': { ...daemonProxy, bypass: undefined },
       // Daemon status report; scoped to the exact route the dashboard uses (a
       // bare `/daemon` prefix would proxy unrelated `/daemon/*` paths). Without

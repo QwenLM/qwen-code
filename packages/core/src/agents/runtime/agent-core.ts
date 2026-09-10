@@ -222,9 +222,10 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // never enter or exit the user's worktree state independently.
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
-  // V1 session artifacts are owned by the parent daemon session.
+  // V1 session artifacts and sources are owned by the parent daemon session.
   ToolNames.ARTIFACT,
   ToolNames.RECORD_ARTIFACT,
+  ToolNames.RECORD_SOURCE,
   // FIX-8 (SEC-I1): WORKFLOW is excluded to prevent unbounded recursive
   // fan-out: a subagent spawned by Workflow that calls Workflow would create
   // O(k^n) subagents.
@@ -290,6 +291,7 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   // Worktree management belongs to the parent session.
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
+  ToolNames.RECORD_SOURCE,
   // Same recursion guard as EXCLUDED_TOOLS_FOR_SUBAGENTS: the teammate
   // identity propagates through AsyncLocalStorage into anything it
   // spawns, so prepareTools() would keep choosing THIS exclusion set
@@ -418,6 +420,37 @@ export interface ExecutionStats {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+}
+
+export function renderSubagentSystemPrompt(
+  promptConfig: PromptConfig,
+  context: ContextState,
+  runtimeContext: Config,
+  interactive?: boolean,
+): string {
+  if (!promptConfig.systemPrompt) {
+    return '';
+  }
+
+  let finalPrompt = templateString(promptConfig.systemPrompt, context);
+
+  // Only add non-interactive instructions when NOT in interactive mode
+  if (!interactive) {
+    finalPrompt += `
+
+Important Rules:
+ - You operate in non-interactive mode: do not ask the user questions; proceed with available context.
+ - Use tools only when necessary to obtain facts or make changes.
+ - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
+  }
+
+  // Context files (QWEN.md + output-language.md) keep the subagent aligned
+  // with project conventions; the volatile auto-memory section stays last.
+  return assembleSystemPrompt({
+    base: finalPrompt,
+    contextFiles: runtimeContext.getUserMemory(),
+    autoMemory: runtimeContext.getAutoMemoryPrompt(),
+  });
 }
 
 /**
@@ -2653,29 +2686,12 @@ export class AgentCore {
     context: ContextState,
     options?: CreateChatOptions,
   ): string {
-    if (!this.promptConfig.systemPrompt) {
-      return '';
-    }
-
-    let finalPrompt = templateString(this.promptConfig.systemPrompt, context);
-
-    // Only add non-interactive instructions when NOT in interactive mode
-    if (!options?.interactive) {
-      finalPrompt += `
-
-Important Rules:
- - You operate in non-interactive mode: do not ask the user questions; proceed with available context.
- - Use tools only when necessary to obtain facts or make changes.
- - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
-    }
-
-    // Context files (QWEN.md + output-language.md) keep the subagent aligned
-    // with project conventions; the volatile auto-memory section stays last.
-    return assembleSystemPrompt({
-      base: finalPrompt,
-      contextFiles: this.runtimeContext.getUserMemory(),
-      autoMemory: this.runtimeContext.getAutoMemoryPrompt(),
-    });
+    return renderSubagentSystemPrompt(
+      this.promptConfig,
+      context,
+      this.runtimeContext,
+      options?.interactive,
+    );
   }
 
   /**

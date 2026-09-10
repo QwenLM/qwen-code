@@ -138,11 +138,6 @@ export function projectFileText(text: string): FileProjection {
   return projector.result(safe);
 }
 
-export function withFileUnavailableNotice(text: string): string {
-  const safe = text.trimEnd();
-  return `${safe}${safe ? '\n' : ''}${FILE_UNAVAILABLE_NOTICE}`;
-}
-
 export function safeFileName(filePath: string): string {
   return (
     basename(filePath)

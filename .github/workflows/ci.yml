@@ -2276,7 +2276,7 @@ jobs:
             # `previous_filename` too: renaming a file out of the crate changes
             # it, and only the old path says so.
             if files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[] | .filename, (.previous_filename // empty)')"; then
-              if grep -Eq '^(packages/desktop-shell/|\.github/scripts/create-desktop-update-manifest\.mjs|\.github/workflows/ci\.yml)' <<<"${files}"; then
+              if grep -Eq '^(packages/desktop-shell/|\.github/scripts/create-desktop-update-manifest\.mjs|\.github/workflows/ci\.yml|\.github/workflows/desktop-release\.yml)' <<<"${files}"; then
                 changed=true
               else
                 changed=false

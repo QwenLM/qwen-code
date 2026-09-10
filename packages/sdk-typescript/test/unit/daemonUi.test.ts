@@ -5375,6 +5375,39 @@ describe('daemon UI tool preview taxonomy (PR-C)', () => {
     ).toBeUndefined();
   });
 
+  it('preserves bounded question answer pairs without unknown raw fields', () => {
+    const output = {
+      type: 'ask_user_question_answers',
+      text: 'Question A: first\n**B**: embedded',
+      answers: [
+        {
+          question: 'Question A?',
+          answer: 'first\n**B**: embedded',
+          secret: 'do not retain',
+        },
+      ],
+      secret: 'do not retain',
+    };
+    expect(createDaemonToolResultPreview(output)).toEqual({
+      kind: 'question_answers',
+      text: output.text,
+      answers: [{ question: 'Question A?', answer: 'first\n**B**: embedded' }],
+    });
+    for (const answers of [
+      [{ question: 'Question A?', answer: 42 }],
+      [{ question: 'Question A?', answer: 'x'.repeat(100_000) }],
+      Array.from({ length: 1_001 }, () => ({ question: '', answer: '' })),
+    ]) {
+      expect(createDaemonToolResultPreview({ ...output, answers })).toEqual({
+        kind: 'text',
+        text: output.text,
+      });
+    }
+    expect(
+      createDaemonToolResultPreview({ ...output, text: 'x'.repeat(100_001) }),
+    ).toBeUndefined();
+  });
+
   it('does not retain a stale result preview when a later result is unsafe to preview', () => {
     let state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
@@ -10202,4 +10235,114 @@ describe('parallel subAgent text interleaving fix', () => {
       ]);
     }
   });
+});
+
+describe('subagent session readiness', () => {
+  it.each([true, false])(
+    'updates a started agent from meta-only readiness with compact=%s',
+    (compact) => {
+      let state = createDaemonTranscriptState({
+        retainSubagentBlocks: !compact,
+      });
+      const apply = (sessionUpdate: string, subagentSessionReady: boolean) => {
+        state = reduceDaemonTranscriptEvents(
+          state,
+          normalizeDaemonEvent({
+            id: subagentSessionReady ? 2 : 1,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate,
+                toolCallId: 'agent-1',
+                ...(sessionUpdate === 'tool_call'
+                  ? { title: 'Review changes', status: 'in_progress' }
+                  : {}),
+                _meta: { toolName: 'agent', subagentSessionReady },
+              },
+            },
+          }),
+        );
+      };
+      apply('tool_call', false);
+      expect(state.blocks).toMatchObject([{ subagentSessionReady: false }]);
+      const id = state.blocks[0].id;
+      apply('tool_call_update', true);
+      expect(state.blocks).toHaveLength(1);
+      expect(state.blocks[0]).toMatchObject({
+        id,
+        toolCallId: 'agent-1',
+        title: 'Review changes',
+        status: 'in_progress',
+        subagentSessionReady: true,
+      });
+    },
+  );
+
+  it.each([true, false])(
+    'retains readiness through compact=%s and partial updates',
+    (compact) => {
+      let state = createDaemonTranscriptState({
+        now: 1,
+        retainSubagentBlocks: !compact,
+      });
+      const apply = (update: Record<string, unknown>) => {
+        const events = normalizeDaemonEvent({
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'agent-1',
+              ...update,
+            },
+          },
+        });
+        state = reduceDaemonTranscriptEvents(state, events);
+      };
+      apply({
+        toolName: 'agent',
+        _meta: { subagentSessionReady: false, phase: 'preparing' },
+      });
+      expect(state.blocks[0]).toMatchObject({ subagentSessionReady: false });
+      apply({ rawOutput: { type: 'task_execution', status: 'running' } });
+      expect(state.blocks[0]).toMatchObject({ subagentSessionReady: false });
+      apply({
+        rawOutput: { type: 'task_execution', subagentSessionReady: true },
+      });
+      expect(state.blocks[0]).toMatchObject({ subagentSessionReady: true });
+      apply({ _meta: { subagentSessionReady: false } });
+      apply({ status: 'failed' });
+      expect(state.blocks[0]).toMatchObject({
+        subagentSessionReady: true,
+        status: 'failed',
+      });
+    },
+  );
+
+  it.each([undefined, 'false', 0])(
+    'does not interpret legacy or invalid readiness %s as creating',
+    (value) => {
+      const events = normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'legacy',
+            toolName: 'agent',
+            _meta: { subagentSessionReady: value },
+          },
+        },
+      });
+      expect(events[0]).not.toHaveProperty('subagentSessionReady');
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState(),
+        events,
+      );
+      expect(state.blocks[0]).not.toHaveProperty('subagentSessionReady');
+    },
+  );
 });

@@ -22,6 +22,7 @@
 
 import { createHash } from 'node:crypto';
 import {
+  describeSessionKind,
   listLiveSessions,
   type SessionRegistryRecord,
 } from '../services/session-registry.js';
@@ -36,6 +37,14 @@ export interface PeerSessionInfo {
   ref: string;
   cwd: string;
   pid: number;
+  /**
+   * What the peer says registered it — see `SessionKind`. A claim, like
+   * `name` and `cwd`: it tells a reader what to expect on the other end
+   * (a person at a terminal, a session a daemon drives), never what the
+   * sender may do. Always a string here; a record without one reads as
+   * `tui`.
+   */
+  kind: string;
   ipcPath: string;
   /**
    * Inbox auth token from the peer's record. Absent for a peer written by
@@ -79,6 +88,10 @@ export function toPeerSessionInfo(
     ref: peerRef(record.sessionId),
     cwd: flattenPeerLabel(record.cwd),
     pid: record.pid,
+    // Not flattened: the registry's own read guard already bounds `kind`
+    // to lowercase ASCII, digits and dashes, which is narrower than
+    // anything flattening would remove.
+    kind: describeSessionKind(record.kind),
     ipcPath: record.ipcPath,
     ...(record.ipcToken !== undefined ? { ipcToken: record.ipcToken } : {}),
     startedAt: record.startedAt,
