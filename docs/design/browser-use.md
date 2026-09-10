@@ -53,6 +53,10 @@ layout. The generic Node REPL MCP server must be configured, and the Qwen
 Chrome extension must be installed in the browser. Bundling does not connect
 to Chrome at CLI startup; the SDK connects when first used.
 
+`npm run dev` builds the Browser Use workspace before staging this runtime on
+each launch, so missing or outdated build outputs do not require a separate
+manual build. Build failures stop startup before stale assets can be loaded.
+
 Browser Use is available to the model by default and is selected according to
 the user's task. Users can disable it through `/skills` or `skills.disabled`,
 using the same controls as Computer Use. Disabled skills are excluded

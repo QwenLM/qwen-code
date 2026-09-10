@@ -62,11 +62,12 @@ npm run bundle     # Bundle dist/ into a single dist/cli.js via esbuild
 ### Development
 
 ```bash
-npm run dev        # Run CLI directly from TypeScript source (no build needed)
+npm run dev        # Run CLI from TypeScript source (no manual build needed)
 ```
 
 Runs the CLI via `tsx` with `DEV=true`. Changes to `packages/core` or
-`packages/cli` are reflected immediately without rebuilding.
+`packages/cli` are reflected immediately without rebuilding. Each launch
+automatically builds and stages the Browser Use runtime from its current source.
 
 ### Unit Testing
 

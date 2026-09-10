@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 const {
   spawnMock,
+  execSyncMock,
   platformMock,
   existsSyncMock,
   readFileSyncMock,
@@ -18,6 +19,7 @@ const {
   copyBrowserUseAssetsMock,
 } = vi.hoisted(() => ({
   spawnMock: vi.fn(() => ({ on: vi.fn() })),
+  execSyncMock: vi.fn(),
   platformMock: vi.fn(() => 'darwin'),
   existsSyncMock: vi.fn(() => false),
   readFileSyncMock: vi.fn(() => JSON.stringify({ version: '0.0.0-test' })),
@@ -31,6 +33,7 @@ vi.mock('../copy-browser-use-assets.js', () => ({
 
 vi.mock('node:child_process', () => ({
   spawn: spawnMock,
+  execSync: execSyncMock,
 }));
 
 vi.mock('node:os', async (importOriginal) => {
@@ -97,9 +100,22 @@ describe('scripts/dev.js launcher', () => {
     expect(options).toEqual(expect.objectContaining({ shell: false }));
   });
 
-  it('stages the browser-use runtime under the source builtin skill', async () => {
+  it('builds and stages current browser-use source before launching the CLI', async () => {
     await import('../dev.js?browser-use');
 
+    expect(execSyncMock).toHaveBeenCalledWith(
+      'npm run build --workspace=@qwen-code/browser-use',
+      {
+        cwd: fileURLToPath(new URL('../../', import.meta.url)).replace(
+          /[/\\]$/,
+          '',
+        ),
+        stdio: ['ignore', 2, 2],
+      },
+    );
+    expect(execSyncMock.mock.invocationCallOrder[0]).toBeLessThan(
+      copyBrowserUseAssetsMock.mock.invocationCallOrder[0],
+    );
     expect(copyBrowserUseAssetsMock).toHaveBeenCalledWith(
       expect.any(String),
       expect.stringMatching(
@@ -109,6 +125,18 @@ describe('scripts/dev.js launcher', () => {
     expect(copyBrowserUseAssetsMock.mock.invocationCallOrder[0]).toBeLessThan(
       spawnMock.mock.invocationCallOrder[0],
     );
+  });
+
+  it('does not stage stale assets or launch when the browser-use build fails', async () => {
+    execSyncMock.mockImplementationOnce(() => {
+      throw new Error('browser-use build failed');
+    });
+
+    await expect(import('../dev.js?browser-use-build-failure')).rejects.toThrow(
+      'browser-use build failed',
+    );
+    expect(copyBrowserUseAssetsMock).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 
   it('does not launch with missing browser-use runtime assets', async () => {
