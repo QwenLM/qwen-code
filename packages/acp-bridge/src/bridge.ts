@@ -7696,6 +7696,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     historyPageSize: number,
     liveReplayMode: 'full' | 'summary',
   ): Promise<ReturnType<typeof replayFieldsFor>> {
+    // A pending permission/question lives only in the in-memory journal — it
+    // is never persisted to the chat transcript — and the turns that park on
+    // one without an RPC prompt (Goal and background-notification turns)
+    // never flip promptActive, so the !promptActive check below does not
+    // cover them. Serving the persisted page with an empty liveJournal here
+    // would strand the interaction: the session summary still advertises it
+    // (input-needed badge) while the re-opening client receives nothing to
+    // answer.
+    if (entry.pendingInteractions.size > 0) {
+      return replayFieldsFor(entry, 'load', liveReplayMode);
+    }
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const lastEventId = entry.events.lastEventId;
@@ -7773,6 +7784,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ...(page.hasMore ? { historyHasMore: true as const } : {}),
           };
         }
+        // Not transient: only a human answer, a cancel or a timeout clears
+        // a pending interaction, so a re-fetched page cannot contain it
+        // either. Keep retrying only the genuinely transient terms.
+        if (entry.pendingInteractions.size > 0) break;
       } catch {
         // A failed bounded read (missing/unreadable persisted transcript or a
         // workspace timeout) must not tear down a healthy live session; fall
