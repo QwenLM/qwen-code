@@ -886,6 +886,8 @@ export class LlmClient {
    * continuations keep the proposal parked until their final boundary. An
    * aborted turn drops the approval instead of starting a loop the user just
    * cancelled; an abort during dispatch pauses the new Goal.
+   * Host-supported sessions settle after classifying their own protective
+   * exits, so core must leave their single-take proposal latch untouched.
    */
   private async settlePendingGoalProposal(
     turnEnded: boolean,
@@ -894,6 +896,7 @@ export class LlmClient {
     turnKey: string,
     reportFailure: (message: string) => void,
   ): Promise<void> {
+    if (this.config.getGoalProposalHostSupported?.()) return;
     const take = this.config.takePendingGoalProposal;
     if (typeof take !== 'function') return;
     if (!turnEnded && !signal.aborted) return;
@@ -905,6 +908,7 @@ export class LlmClient {
       debugLogger.debug(
         'Dropping an approved Goal proposal: the Goal runtime is unavailable',
       );
+      reportFailure(formatProposeGoalRecoveryFailed(proposal.objective));
       return;
     }
     if (signal.aborted) return;

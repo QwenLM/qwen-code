@@ -259,6 +259,7 @@ function setupGoalClient() {
       toolResultsNumToKeep: 5,
     })),
     getApprovalMode: vi.fn(() => ApprovalMode.DEFAULT),
+    getGoalProposalHostSupported: vi.fn(() => false),
     getSystemPrompt: vi.fn(() => undefined),
     getOutputStyle: vi.fn(() => undefined),
     getExperimentalZedIntegration: vi.fn(() => false),
@@ -328,6 +329,64 @@ describe('LlmClient Goal admission', () => {
       action: 'create',
       objective: 'ship it',
     });
+  });
+
+  it('leaves a host-owned approved proposal for Session settlement', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(config.getGoalProposalHostSupported).mockReturnValue(true);
+    const store = pendingGoalProposalStore({
+      objective: 'ship it',
+      turnKey: 'host-owned-key',
+      reviewedGoal: null,
+    });
+    const loadGoalRuntime = vi.fn(async () => runtime);
+    Object.assign(config, { takePendingGoalProposal: store.take });
+
+    await client['settlePendingGoalProposal'](
+      true,
+      new AbortController().signal,
+      loadGoalRuntime,
+      'host-owned-key',
+      vi.fn(),
+    );
+
+    expect(store.get()).toEqual({
+      objective: 'ship it',
+      turnKey: 'host-owned-key',
+      reviewedGoal: null,
+    });
+    expect(store.take).not.toHaveBeenCalled();
+    expect(loadGoalRuntime).not.toHaveBeenCalled();
+    expect(runtime.dispatch).not.toHaveBeenCalled();
+    expect(store.take('host-owned-key')).toEqual({
+      objective: 'ship it',
+      turnKey: 'host-owned-key',
+      reviewedGoal: null,
+    });
+  });
+
+  it('reports recovery when the core-owned proposal runtime is unavailable', async () => {
+    const { client, config } = setupGoalClient();
+    const store = pendingGoalProposalStore({
+      objective: 'ship it',
+      turnKey: 'runtime-unavailable-key',
+      reviewedGoal: null,
+    });
+    const reportFailure = vi.fn();
+    Object.assign(config, { takePendingGoalProposal: store.take });
+
+    await client['settlePendingGoalProposal'](
+      true,
+      new AbortController().signal,
+      async () => undefined,
+      'runtime-unavailable-key',
+      reportFailure,
+    );
+
+    expect(store.get()).toBeUndefined();
+    expect(reportFailure).toHaveBeenCalledWith(
+      'The approved Goal could not be started. Check the Goal status before trying again, or run:\n/goal set ship it',
+    );
   });
 
   it('reports a proposal that could not be applied to the terminal user', async () => {

@@ -33769,11 +33769,35 @@ describe('Session', () => {
       const internals = session as unknown as {
         todoStopGuardQueuedPromptPriority: boolean;
       };
+      const coreSettler = new core.LlmClient(mockConfig) as unknown as {
+        settlePendingGoalProposal: (
+          turnEnded: boolean,
+          signal: AbortSignal,
+          loadGoalRuntime: (
+            required: boolean,
+          ) => Promise<core.GoalRuntime | undefined>,
+          turnKey: string,
+          reportFailure: (message: string) => void,
+        ) => Promise<void>;
+      };
       mockConfig.setPendingGoalProposal = vi.fn((proposal) => {
         pending = proposal;
         internals.todoStopGuardQueuedPromptPriority = true;
         return true;
       });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(proposalStream())
+        .mockImplementationOnce(async () => {
+          await coreSettler.settlePendingGoalProposal(
+            true,
+            new AbortController().signal,
+            async () => mockGoalRuntime as unknown as core.GoalRuntime,
+            'test-session-id########1',
+            vi.fn(),
+          );
+          return createEmptyStream();
+        });
 
       await expect(prompt()).resolves.toEqual({ stopReason: 'end_turn' });
 
