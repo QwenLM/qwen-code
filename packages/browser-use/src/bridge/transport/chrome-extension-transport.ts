@@ -133,7 +133,8 @@ export class ChromeExtensionTransport implements ChromeBridge {
     params: Record<string, unknown> = {},
     timeoutMs = this.requestTimeoutMs,
   ): Promise<unknown> {
-    await this.start();
+    if (this.stopPromise !== undefined || !this.server?.listening)
+      throw disconnectedError();
     await this.waitForConnection(Math.min(this.connectTimeoutMs, timeoutMs));
     const socket = this.socket;
     if (socket === undefined || socket.destroyed) {

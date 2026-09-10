@@ -37,9 +37,10 @@ class FakeBridge implements ChromeBridge {
   private readonly eventListeners = new Set<BridgeEventListener>();
   private readonly connectionListeners = new Set<BridgeConnectionListener>();
 
+  connected = true;
   async start(): Promise<void> {}
   isConnected(): boolean {
-    return true;
+    return this.connected;
   }
   async request(
     method: string,
@@ -73,11 +74,153 @@ class FakeBridge implements ChromeBridge {
     for (const listener of this.eventListeners) listener(event);
   }
   disconnect(): void {
+    this.connected = false;
     for (const listener of this.connectionListeners) listener(false);
   }
 }
 
 describe('QwenPlaywrightTransport', () => {
+  it.each(['throw', 'reject'] as const)(
+    'closes and releases tabs when message delivery %s fails',
+    async (mode) => {
+      const bridge = new FakeBridge();
+      const transport = new QwenPlaywrightTransport(bridge);
+      await transport.registerTab(7);
+      const onclose = vi.fn();
+      transport.onclose = onclose;
+      transport.onmessage = () => {
+        if (mode === 'throw') throw new Error('consumer failed');
+        return Promise.reject(new Error('consumer failed'));
+      };
+      transport.send({ id: 1, method: 'Browser.getVersion' });
+      await vi.waitFor(() =>
+        expect(onclose).toHaveBeenCalledWith('consumer failed'),
+      );
+      await transport.close();
+      expect(
+        bridge.calls.filter((call) => call.method === 'tabs.detach'),
+      ).toEqual([{ method: 'tabs.detach', params: { tabId: 7 } }]);
+      await expect(transport.registerTab(7)).rejects.toThrow('closed');
+    },
+  );
+
+  it('drains a partial attachment before releasing it once on close', async () => {
+    const bridge = new FakeBridge();
+    const request = bridge.request.bind(bridge);
+    const attached = deferred();
+    const releaseAttach = deferred();
+    vi.spyOn(bridge, 'request').mockImplementation(async (method, params) => {
+      const result = await request(method, params);
+      if (method === 'tabs.attach') {
+        attached.resolve();
+        await releaseAttach.promise;
+      }
+      return result;
+    });
+    const transport = new QwenPlaywrightTransport(bridge);
+    const registration = transport.registerTab(7).catch((error) => error);
+    await attached.promise;
+    const closed = vi.fn();
+    const stopping = Promise.resolve(transport.close()).then(closed);
+    const duplicate = transport.unregisterTab(7);
+    await Promise.resolve();
+    expect(closed).not.toHaveBeenCalled();
+    expect(bridge.calls.map((call) => call.method)).toEqual(['tabs.attach']);
+    releaseAttach.resolve();
+    expect(await registration).toMatchObject({
+      message: 'Playwright transport is closed',
+    });
+    await Promise.all([stopping, duplicate]);
+    expect(bridge.calls.map((call) => call.method)).toEqual([
+      'tabs.attach',
+      'tabs.detach',
+    ]);
+    expect(transport.providerTabId('target-7')).toBeUndefined();
+  });
+
+  it('waits for a pending release before reattaching the same tab', async () => {
+    const bridge = new FakeBridge();
+    const transport = new QwenPlaywrightTransport(bridge);
+    await transport.registerTab(7);
+    const request = bridge.request.bind(bridge);
+    const detached = deferred();
+    const releaseDetach = deferred();
+    vi.spyOn(bridge, 'request').mockImplementation(async (method, params) => {
+      const result = await request(method, params);
+      if (method === 'tabs.detach') {
+        detached.resolve();
+        await releaseDetach.promise;
+      }
+      return result;
+    });
+    const releasing = transport.unregisterTab(7);
+    await detached.promise;
+    const registering = transport.registerTab(7);
+    await Promise.resolve();
+    expect(
+      bridge.calls.filter((call) => call.method === 'tabs.attach'),
+    ).toHaveLength(1);
+    releaseDetach.resolve();
+    await Promise.all([releasing, registering]);
+    expect(
+      bridge.calls.filter((call) => call.method === 'tabs.attach'),
+    ).toHaveLength(2);
+    await transport.close();
+  });
+
+  it('does not release old attachments through a replacement bridge connection', async () => {
+    const bridge = new FakeBridge();
+    const transport = new QwenPlaywrightTransport(bridge);
+    await transport.registerTab(7);
+    bridge.disconnect();
+    bridge.connected = true;
+    await transport.close();
+    expect(
+      bridge.calls.filter((call) => call.method === 'tabs.detach'),
+    ).toHaveLength(0);
+  });
+
+  it.each(['context-7', 3, ''])(
+    'validates a supplied browser context id: %s',
+    async (browserContextId) => {
+      const bridge = new FakeBridge();
+      const request = bridge.request.bind(bridge);
+      vi.spyOn(bridge, 'request').mockImplementation(async (method, params) => {
+        const result = await request(method, params);
+        if (method === 'cdp.send' && params?.method === 'Target.getTargetInfo')
+          return {
+            targetInfo: {
+              ...(result as { targetInfo: object }).targetInfo,
+              browserContextId,
+            },
+          };
+        return result;
+      });
+      const transport = new QwenPlaywrightTransport(bridge);
+      const onmessage = vi.fn();
+      transport.onmessage = onmessage;
+      if (browserContextId === 'context-7') {
+        await transport.registerTab(7);
+        expect(onmessage).toHaveBeenCalledWith(
+          expect.objectContaining({
+            params: expect.objectContaining({
+              targetInfo: expect.objectContaining({ browserContextId }),
+            }),
+          }),
+        );
+      } else {
+        await expect(transport.registerTab(7)).rejects.toThrow(
+          'invalid target information',
+        );
+        expect(onmessage).not.toHaveBeenCalled();
+        expect(
+          bridge.calls.filter((call) => call.method === 'tabs.detach'),
+        ).toHaveLength(1);
+      }
+      await transport.close();
+    },
+  );
+
   it('leaves screenshot frames to the runtime without Playwright acknowledgements', async () => {
     const bridge = new FakeBridge();
     const transport = new QwenPlaywrightTransport(bridge);
@@ -261,6 +404,11 @@ describe('QwenPlaywrightTransport', () => {
         result: {},
       }),
     );
+    expect(messages).toContainEqual({
+      sessionId: 'pw-browser-2',
+      method: 'Target.detachedFromTarget',
+      params: { sessionId: 'pw-cdp-3', targetId: 'target-7' },
+    });
   });
 
   it('forwards target attachment from a real tab session', async () => {
@@ -326,6 +474,7 @@ describe('QwenPlaywrightTransport', () => {
           title: 'Example',
           url: 'https://example.com/',
           attached: true,
+          browserContextId: 'qwen-default-context',
         },
         waitingForDebugger: false,
       },
@@ -481,5 +630,17 @@ describe('QwenPlaywrightTransport', () => {
         'Chrome extension returned invalid target information',
       ),
     );
+    await transport.close();
+    expect(
+      bridge.calls.filter((call) => call.method === 'tabs.detach'),
+    ).toEqual([{ method: 'tabs.detach', params: { tabId: 7 } }]);
   });
 });
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}

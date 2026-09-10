@@ -301,3 +301,22 @@ error. The handle is disposed after both successful and failed input.
 Modifier cleanup attempts to release every attempted key even after a failed
 keydown or keyup. Cleanup preserves the original action error; a cleanup
 failure after a successful action is still reported.
+
+## Attachment and session shutdown
+
+BrowserModel owns Chrome debugger attachments, including attachments still in
+flight. Attachment and release are serialized per provider tab; close rejects
+new attachments and waits for admitted work before releasing owned tabs.
+Explicit CDP session detach emits the parent-scoped target-detached event that
+Playwright uses to dispose its session listeners.
+
+Stopping the runtime unsubscribes session listeners, drains tab registration,
+and awaits transport cleanup before stopping the bridge. Page close and crash
+release through the transport that registered the page. Reconnecting waits for
+the previous transport cleanup so old releases cannot detach newly claimed
+tabs. A request cannot implicitly restart a stopped bridge.
+
+The adapter supplies a stable default-context id when CDP omits its optional
+browserContextId, preserving supplied ids and rejecting malformed values
+before Playwright receives the target. Direct message callback failures close
+the transport and release its attachments.

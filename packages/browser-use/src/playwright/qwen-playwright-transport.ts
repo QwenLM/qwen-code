@@ -88,8 +88,8 @@ export class QwenPlaywrightTransport implements ConnectOverCDPTransport {
     );
   }
 
-  close(): void {
-    this.closeWithReason('Browser Use session closed');
+  close(): Promise<void> {
+    return this.closeWithReason('Browser Use session closed');
   }
 
   async registerTab(tabId: number): Promise<string> {
@@ -177,15 +177,28 @@ export class QwenPlaywrightTransport implements ConnectOverCDPTransport {
   }
 
   private emit(message: CdpMessage): void {
-    if (!this.closed) this.onmessage?.(message);
+    if (this.closed) return;
+    const failed = (error: unknown) =>
+      this.closeWithReason(
+        error instanceof Error
+          ? error.message
+          : 'Playwright rejected a CDP message',
+      );
+    try {
+      void Promise.resolve(this.onmessage?.(message)).catch(failed);
+    } catch (error) {
+      void failed(error);
+    }
   }
 
-  private closeWithReason(reason: string): void {
-    if (this.closed) return;
+  private closeWithReason(reason: string): Promise<void> {
+    if (this.closed) return this.model.close();
     this.closed = true;
     this.removeEventListener();
     this.removeConnectionListener();
+    const cleanup = this.model.close();
     this.onclose?.(reason);
+    return cleanup;
   }
 }
 

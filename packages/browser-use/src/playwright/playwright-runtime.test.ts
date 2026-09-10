@@ -119,7 +119,11 @@ describe('PlaywrightRuntime command contracts', () => {
     await expect(createTab(fixture.runtime)).rejects.toThrow(
       'focus setup failed',
     );
-    expect(fixture.request).toHaveBeenCalledWith('tabs.detach', { tabId: 17 });
+    expect(fixture.request).toHaveBeenCalledWith(
+      'tabs.detach',
+      { tabId: 17 },
+      2_000,
+    );
     await expect(
       fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
     ).resolves.toEqual([]);
@@ -1345,6 +1349,150 @@ describe('PlaywrightRuntime command contracts', () => {
     ).rejects.toMatchObject({ code: 'STALE_BROWSER_SESSION' });
   });
 
+  it('drops a late derived-tab response and removes all bridge listeners on stop', async () => {
+    const fixture = await runtimeFixture();
+    await createTab(fixture.runtime);
+    const original = fixture.request.getMockImplementation()!;
+    let finish!: (value: unknown) => void;
+    const response = new Promise<unknown>((resolve) => {
+      finish = resolve;
+    });
+    fixture.request.mockImplementation(
+      async (method: string, params: Record<string, unknown> = {}) => {
+        if (method === 'tabs.get') return await response;
+        return await original(method, params);
+      },
+    );
+    fixture.emitEvent({
+      type: 'event',
+      tabId: 18,
+      method: 'qwenBrowser.derivedTabTracked',
+      params: { openerTabId: 17 },
+    });
+    await fixture.runtime.stop();
+    expect(fixture.listenerCount()).toBe(0);
+    finish({ providerTabId: 18, title: 'Popup', url: 'about:blank' });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(
+      fixture.request.mock.calls.filter(([method]) => method === 'tabs.attach'),
+    ).toEqual([['tabs.attach', { tabId: 17 }]]);
+  });
+
+  it('joins concurrent stops until debugger release finishes', async () => {
+    const fixture = await runtimeFixture();
+    await createTab(fixture.runtime);
+    const original = fixture.request.getMockImplementation()!;
+    let finish!: () => void;
+    const response = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    let detaching = false;
+    fixture.request.mockImplementation(
+      async (method: string, params: Record<string, unknown> = {}) => {
+        if (method === 'tabs.detach') {
+          detaching = true;
+          await response;
+        }
+        return await original(method, params);
+      },
+    );
+    const first = fixture.runtime.stop();
+    await vi.waitFor(() => expect(detaching).toBe(true));
+    const finished = vi.fn();
+    const second = fixture.runtime.stop().then(finished);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(finished).not.toHaveBeenCalled();
+    expect(fixture.stopBridge).not.toHaveBeenCalled();
+    finish();
+    await Promise.all([first, second]);
+    expect(fixture.stopBridge).toHaveBeenCalledTimes(1);
+    expect(
+      fixture.request.mock.calls.filter(([method]) => method === 'tabs.detach'),
+    ).toHaveLength(1);
+  });
+
+  it('releases the old transport before reconnecting after Playwright disconnects', async () => {
+    const fixture = await runtimeFixture();
+    const oldTab = await createTab(fixture.runtime);
+    fixture.browserDisconnect();
+    const newTab = await createTab(fixture.runtime);
+    expect(newTab.id).not.toBe(oldTab.id);
+    expect(playwrightMocks.connectOverCDP).toHaveBeenCalledTimes(2);
+    expect(
+      fixture.request.mock.calls
+        .filter(
+          ([method]) => method === 'tabs.attach' || method === 'tabs.detach',
+        )
+        .map(([method]) => method),
+    ).toEqual(['tabs.attach', 'tabs.detach', 'tabs.attach']);
+    await expect(
+      fixture.runtime.dispatch('tab.url', { tabId: oldTab.id }),
+    ).rejects.toMatchObject({ code: 'STALE_BROWSER_SESSION' });
+  });
+
+  it('drains an attachment admitted before stop without registering it', async () => {
+    const fixture = await runtimeFixture();
+    const original = fixture.request.getMockImplementation()!;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let attached = false;
+    fixture.request.mockImplementation(
+      async (method: string, params: Record<string, unknown> = {}) => {
+        if (method === 'tabs.attach') {
+          attached = true;
+          await gate;
+        }
+        return await original(method, params);
+      },
+    );
+    const pending = createTab(fixture.runtime).then(
+      (value) => value,
+      (error) => error,
+    );
+    await vi.waitFor(() => expect(attached).toBe(true));
+    const stopping = fixture.runtime.stop();
+    release();
+    const result = await pending;
+    await stopping;
+    expect(result).toMatchObject({ code: 'NOT_RUNNING' });
+    expect(
+      fixture.request.mock.calls.filter(([method]) => method === 'tabs.detach'),
+    ).toHaveLength(1);
+    expect(
+      fixture.request.mock.calls.some(
+        ([, params]) => params?.method === 'Emulation.setFocusEmulationEnabled',
+      ),
+    ).toBe(false);
+  });
+
+  it('releases crashed tabs before registering the same provider again', async () => {
+    const fixture = await runtimeFixture();
+    const oldTab = await createTab(fixture.runtime);
+    const crash = fixture.page.on.mock.calls.find(
+      ([event]) => event === 'crash',
+    )?.[1] as () => void;
+    crash();
+    await expect(
+      fixture.runtime.dispatch('tab.url', { tabId: oldTab.id }),
+    ).rejects.toMatchObject({ code: 'STALE_TAB' });
+    const newTab = await createTab(fixture.runtime);
+    expect(newTab.id).not.toBe(oldTab.id);
+    const oldClose = fixture.page.on.mock.calls.find(
+      ([event]) => event === 'close',
+    )?.[1] as () => void;
+    oldClose();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(
+      fixture.request.mock.calls.filter(([method]) => method === 'tabs.attach'),
+    ).toHaveLength(2);
+    expect(
+      fixture.request.mock.calls.filter(([method]) => method === 'tabs.detach'),
+    ).toHaveLength(1);
+  });
+
   it('releases tab and transport state when a page closes', async () => {
     const fixture = await runtimeFixture();
     const oldTab = await createTab(fixture.runtime);
@@ -1384,6 +1532,9 @@ interface RuntimeFixture {
   };
   request: ReturnType<typeof vi.fn>;
   disconnect(): void;
+  browserDisconnect(): void;
+  listenerCount(): number;
+  stopBridge: ReturnType<typeof vi.fn>;
   emitEvent(event: BridgeEvent): void;
 }
 
@@ -1479,13 +1630,15 @@ async function runtimeFixture(
   } as unknown as BrowserContext;
   page.methods.context.mockReturnValue(context);
   unrelatedPage?.methods.context.mockReturnValue(context);
+  const browserOn = vi.fn();
   const browser = {
     contexts: vi.fn(() => [context]),
     isConnected: vi.fn(() => true),
+    on: browserOn,
   } as unknown as Browser;
   playwrightMocks.connectOverCDP.mockResolvedValue(browser);
 
-  const connectionListeners: Array<(connected: boolean) => void> = [];
+  const connectionListeners = new Set<(connected: boolean) => void>();
   const eventListeners = new Set<(event: BridgeEvent) => void>();
   const request = vi.fn(
     async (method: string, params: Record<string, unknown> = {}) => {
@@ -1535,8 +1688,10 @@ async function runtimeFixture(
       };
     },
     onConnectionChange(listener) {
-      connectionListeners.push(listener);
-      return () => undefined;
+      connectionListeners.add(listener);
+      return () => {
+        connectionListeners.delete(listener);
+      };
     },
     stop: vi.fn(async () => undefined),
   };
@@ -1551,6 +1706,13 @@ async function runtimeFixture(
     typingState,
     cdp,
     request,
+    stopBridge: bridge.stop as ReturnType<typeof vi.fn>,
+    browserDisconnect() {
+      browserOn.mock.calls.at(-1)?.[1]();
+    },
+    listenerCount() {
+      return eventListeners.size + connectionListeners.size;
+    },
     emitEvent(event) {
       for (const listener of eventListeners) listener(event);
     },

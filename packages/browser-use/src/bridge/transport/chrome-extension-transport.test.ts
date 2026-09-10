@@ -37,6 +37,22 @@ afterEach(async () => {
 });
 
 describe('ChromeExtensionTransport', () => {
+  it('does not reopen a stopped socket for a late request', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
+    roots.push(root);
+    const transport = new ChromeExtensionTransport({
+      socketPath: path.join(root, 'bridge.sock'),
+      connectTimeoutMs: 20,
+    });
+    transports.push(transport);
+    await transport.start();
+    await transport.stop();
+    await expect(transport.request('ping')).rejects.toMatchObject({
+      code: 'BROWSER_DISCONNECTED',
+    });
+    expect(fs.existsSync(transport.socketPath)).toBe(false);
+  });
+
   it('recognizes address-in-use errors created in another VM realm', () => {
     const error = runInNewContext(
       `Object.assign(new Error('address in use'), { code: 'EADDRINUSE' })`,
