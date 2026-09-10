@@ -3126,6 +3126,263 @@ ok(
   afterDone ? `picked up ${JSON.stringify(afterDone.threadId ?? '')}` : '',
 );
 
+console.log('\n37. Host pickup: who may take what, and how much');
+// `pickupRunForHost` decides what leaves this daemon for another machine. None
+// of it needed a network to be checked, and none of it was covered.
+const hostAgent = async (id, name, hostIds, extra = {}) => {
+  await M.updateWorkspaceAgents(ROOT, (a) => [
+    ...a,
+    {
+      id,
+      name,
+      createdAt: 1,
+      ...(hostIds
+        ? { execution: { mode: 'managed-host', hostIds } }
+        : { execution: { mode: 'local' } }),
+      ...extra,
+    },
+  ]);
+};
+const workFor = async (agentId, title, priority) => {
+  const th = await M.createThread(ROOT, {
+    title,
+    assigneeAgentId: agentId,
+    ...(priority ? { priority } : {}),
+  });
+  const posted = await M.postMessage(ROOT, th.id, {
+    from: M.HUMAN_AUTHOR_ID,
+    text: 'go',
+  });
+  return { threadId: th.id, runId: posted.dispatched[0]?.id };
+};
+
+await hostAgent('ag_hx', 'hostx', ['host-1']);
+await hostAgent('ag_hy', 'hosty', ['host-2']);
+await hostAgent('ag_localonly', 'localonly', undefined);
+const workX = await workFor('ag_hx', 'For host 1');
+const workY = await workFor('ag_hy', 'For host 2');
+const workLocal = await workFor('ag_localonly', 'For nobody remote');
+
+const takenByOne = await M.pickupRunForHost(ROOT, 'host-1', 2_000_000);
+ok(
+  'a Host takes work for an agent placed on it',
+  takenByOne?.runId === workX.runId,
+  JSON.stringify(takenByOne?.runId),
+);
+ok(
+  'the assignment carries what the far side needs to act',
+  Boolean(
+    takenByOne?.workspaceId &&
+      takenByOne.prompt &&
+      takenByOne.rootThreadId &&
+      takenByOne.lease?.leaseId &&
+      takenByOne.attempt === 1,
+  ),
+  JSON.stringify({
+    prompt: Boolean(takenByOne?.prompt),
+    attempt: takenByOne?.attempt,
+  }),
+);
+ok(
+  'and the run is now running, on a fresh attempt',
+  (await M.readThread(ROOT, workX.threadId)).runs.find(
+    (r) => r.id === workX.runId,
+  ).status === 'running',
+);
+// The plan's condition: Host credentials must not reach another Host's work.
+const takenByTwo = await M.pickupRunForHost(ROOT, 'host-2', 2_000_001);
+ok(
+  "a Host is never handed another Host's work",
+  takenByTwo?.runId === workY.runId,
+  JSON.stringify(takenByTwo?.runId),
+);
+const strangerHost = await M.pickupRunForHost(ROOT, 'host-99', 2_000_002);
+ok(
+  'a Host with no agent placed on it gets nothing at all',
+  strangerHost === undefined,
+  JSON.stringify(strangerHost?.runId),
+);
+ok(
+  'a locally-executed agent is never picked up remotely',
+  ![takenByOne, takenByTwo].some((a) => a?.runId === workLocal.runId),
+);
+// The other half of that separation: the local dispatcher must leave
+// managed-host work alone, or both sides run the same task.
+ok(
+  'and the local dispatcher leaves managed-host work alone',
+  !M.selectCandidates(
+    await M.readWorkspaceAgents(ROOT),
+    (await M.listThreads(ROOT)).threads,
+  ).some((c) => c.agent.id === 'ag_hx' || c.agent.id === 'ag_hy'),
+);
+
+// Reconnect. A Host that comes back to a lease it still holds must resume it,
+// not be handed a second copy of its own work under a new id.
+const resumed = await M.pickupRunForHost(ROOT, 'host-1', 2_000_500);
+ok(
+  'a reconnecting Host resumes the run it already holds',
+  resumed?.runId === workX.runId,
+  JSON.stringify(resumed?.runId),
+);
+ok(
+  'keeping the same lease id rather than minting a second hold',
+  resumed?.lease.leaseId === takenByOne?.lease.leaseId,
+);
+ok(
+  'with the window pushed out, so it is a resume and not a no-op',
+  resumed.lease.expiresAt > takenByOne.lease.expiresAt,
+);
+
+// Concurrency is enforced across Hosts, not within one. A single Host asking
+// again resumes the assignment it already holds — it never accumulates two —
+// so the limit only has anything to decide when a second Host is placed on the
+// same agent. Testing it on one Host asserted nothing: the resume branch
+// answered first and the concurrency check was never reached.
+const secondForX = await workFor('ag_hx', 'Second for host 1');
+await M.updateWorkspaceAgents(ROOT, (a) =>
+  a.map((agent) =>
+    agent.id === 'ag_hx'
+      ? { ...agent, execution: { mode: 'managed-host', hostIds: ['host-1', 'host-3'] } }
+      : agent,
+  ),
+);
+const peerAtLimit = await M.pickupRunForHost(ROOT, 'host-3', 2_001_000);
+ok(
+  'a second Host is refused while the agent is at its concurrency limit',
+  peerAtLimit === undefined,
+  JSON.stringify(peerAtLimit?.runId),
+);
+await M.updateWorkspaceAgents(ROOT, (a) =>
+  a.map((agent) =>
+    agent.id === 'ag_hx' ? { ...agent, maxConcurrentRuns: 2 } : agent,
+  ),
+);
+const peerUnderRaisedLimit = await M.pickupRunForHost(ROOT, 'host-3', 2_001_100);
+ok(
+  'and takes the waiting run once the limit allows a second',
+  peerUnderRaisedLimit?.runId === secondForX.runId,
+  JSON.stringify(peerUnderRaisedLimit?.runId),
+);
+ok(
+  'each Host holds its own lease on its own run',
+  peerUnderRaisedLimit?.lease.hostId === 'host-3' &&
+    peerUnderRaisedLimit.lease.leaseId !== takenByOne.lease.leaseId,
+);
+
+console.log('\n38. Host results: the write path a stale worker would abuse');
+await hostAgent('ag_res', 'resulter', ['host-r']);
+const resWork = await workFor('ag_res', 'Work to report on');
+const resTaken = await M.pickupRunForHost(ROOT, 'host-r', 3_000_000);
+ok('the Host holds the run', resTaken?.runId === resWork.runId);
+
+const resultOf = (over = {}) => ({
+  threadId: resWork.threadId,
+  runId: resWork.runId,
+  hostId: 'host-r',
+  leaseId: resTaken.lease.leaseId,
+  attempt: resTaken.attempt,
+  status: 'completed',
+  close: { kind: 'review', summary: 'done', detail: 'see diff' },
+  ...over,
+});
+
+// Every refusal first, so nothing below is passing because the run was already
+// closed by an earlier assertion.
+ok(
+  'a result under a lease id nobody holds is refused',
+  (await M.applyHostRunResult(ROOT, resultOf({ leaseId: 'not-a-lease' }), 3_000_100))
+    .reason === 'stale_lease',
+);
+ok(
+  'a result naming a different Host is refused even with the right lease id',
+  (await M.applyHostRunResult(ROOT, resultOf({ hostId: 'host-other' }), 3_000_100))
+    .reason === 'stale_lease',
+);
+ok(
+  'a result for a previous attempt is refused, and says so distinctly',
+  (await M.applyHostRunResult(ROOT, resultOf({ attempt: resTaken.attempt - 1 }), 3_000_100))
+    .reason === 'attempt_moved_on',
+);
+ok(
+  'a result for a run that does not exist is refused',
+  (await M.applyHostRunResult(ROOT, resultOf({ runId: 'rn_nope' }), 3_000_100))
+    .reason === 'no_such_run',
+);
+ok(
+  'and none of those refusals moved the run',
+  (await M.readThread(ROOT, resWork.threadId)).runs.find(
+    (r) => r.id === resWork.runId,
+  ).status === 'running',
+);
+
+// The legitimate write.
+const applied = await M.applyHostRunResult(ROOT, resultOf(), 3_000_200);
+ok('the holder may report its result', applied.ok === true, JSON.stringify(applied));
+ok('and it is not a replay the first time', applied.value.alreadyApplied === false);
+const afterResult = (await M.readThread(ROOT, resWork.threadId)).runs.find(
+  (r) => r.id === resWork.runId,
+);
+ok('the run reaches a terminal status', afterResult.status === 'completed', afterResult.status);
+ok(
+  'carrying the close kind the Host reported, not an implicit success',
+  afterResult.closeKind === 'review',
+  String(afterResult.closeKind),
+);
+ok(
+  'and the thread moves to where a person picks it up',
+  (await M.readThread(ROOT, resWork.threadId)).status === 'in_review',
+  (await M.readThread(ROOT, resWork.threadId)).status,
+);
+
+// Result persisted, then retried: the plan requires the retry to be harmless.
+const replayed = await M.applyHostRunResult(ROOT, resultOf(), 3_000_300);
+ok(
+  'resending the same result is recognised as a replay',
+  replayed.ok === true && replayed.value.alreadyApplied === true,
+  JSON.stringify(replayed.ok && replayed.value.alreadyApplied),
+);
+ok(
+  'and does not close the run a second time or change how it ended',
+  (() => {
+    const run = replayed.value.thread.runs.find((r) => r.id === resWork.runId);
+    return run.status === 'completed' && run.closeKind === 'review';
+  })(),
+);
+ok(
+  'nor does it add a second run to the thread',
+  (await M.readThread(ROOT, resWork.threadId)).runs.filter(
+    (r) => r.id === resWork.runId,
+  ).length === 1,
+);
+
+// A failure reports as a failure, not as vague completion.
+await hostAgent('ag_fail', 'failer', ['host-f']);
+const failWork = await workFor('ag_fail', 'Work that fails');
+const failTaken = await M.pickupRunForHost(ROOT, 'host-f', 3_001_000);
+const failed = await M.applyHostRunResult(
+  ROOT,
+  {
+    threadId: failWork.threadId,
+    runId: failWork.runId,
+    hostId: 'host-f',
+    leaseId: failTaken.lease.leaseId,
+    attempt: failTaken.attempt,
+    status: 'failed',
+    error: 'the sandbox died',
+  },
+  3_001_100,
+);
+ok('a failed result applies', failed.ok === true, JSON.stringify(failed));
+const failedRun = (await M.readThread(ROOT, failWork.threadId)).runs.find(
+  (r) => r.id === failWork.runId,
+);
+ok('and the run is failed, not completed', failedRun.status === 'failed', failedRun.status);
+ok(
+  'with the reason the Host gave, and no close kind invented for it',
+  failedRun.error === 'the sandbox died' && failedRun.closeKind === undefined,
+  `${failedRun.error} / ${failedRun.closeKind}`,
+);
+
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
