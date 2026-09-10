@@ -518,12 +518,30 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       // register tools whose every call the browser then rejects, while the
       // UI reports a connected bridge. `connect()` re-reads the store instead.
       // Needs a real click; an effect cannot supply the activation.
+      // A live, correctly-routed bridge keeps the panel truthful: the rebind
+      // exemption writes no status of its own, so overwriting `connected`
+      // with `needs-gesture` here would hide the only Disconnect button
+      // while the tools stay registered.
+      if (boundLiveMatch()) return;
+      // The live blocker read matches the sibling exits: a withhold that
+      // landed while this continuation was parked must not be clobbered,
+      // and the phase must follow the blocker or the panel renders the
+      // withheld affordance without its explanation.
+      const blocker = capabilityRef.current.blocker;
       const rootName = recordRootName(stored.name);
-      setStatus({
-        phase: 'needs-gesture',
-        blocker: null,
-        ...(rootName === undefined ? {} : { rootName }),
-      });
+      setStatus(
+        blocker !== null
+          ? {
+              phase: 'unavailable',
+              blocker,
+              ...(rootName === undefined ? {} : { rootName }),
+            }
+          : {
+              phase: 'needs-gesture',
+              blocker: null,
+              ...(rootName === undefined ? {} : { rootName }),
+            },
+      );
       return;
     }
     if (detachedRef.current) {
@@ -788,12 +806,25 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         // call the browser rejects.
         if (permission.requested) {
           connectWroteStatusRef.current = true;
+          // The live blocker read matches the sibling writers: a withhold
+          // that landed while the native prompt was open owns the phase, or
+          // the panel renders the withheld affordance without its
+          // explanation and offers a click the deployment forbade.
+          const blocker = capabilityRef.current.blocker;
           const rootName = recordRootName(stored.name);
-          setStatus({
-            phase: 'needs-gesture',
-            blocker: null,
-            ...(rootName === undefined ? {} : { rootName }),
-          });
+          setStatus(
+            blocker !== null
+              ? {
+                  phase: 'unavailable',
+                  blocker,
+                  ...(rootName === undefined ? {} : { rootName }),
+                }
+              : {
+                  phase: 'needs-gesture',
+                  blocker: null,
+                  ...(rootName === undefined ? {} : { rootName }),
+                },
+          );
           return;
         }
         // The query answered denied without any request: activation survived,
@@ -819,12 +850,23 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         const rootName = recordRootName((await store?.load())?.name);
         if (stale()) return;
         connectWroteStatusRef.current = true;
-        setStatus({
-          phase: 'failed',
-          blocker: null,
-          message: result.message,
-          ...(rootName === undefined ? {} : { rootName }),
-        });
+        // A withhold that landed while the picker was open owns the phase:
+        // the picker error must not replace the deployment's explanation.
+        const blocker = capabilityRef.current.blocker;
+        setStatus(
+          blocker !== null
+            ? {
+                phase: 'unavailable',
+                blocker,
+                ...(rootName === undefined ? {} : { rootName }),
+              }
+            : {
+                phase: 'failed',
+                blocker: null,
+                message: result.message,
+                ...(rootName === undefined ? {} : { rootName }),
+              },
+        );
         return;
       }
       connectBoundHandleRef.current = result.handle;
@@ -1015,6 +1057,21 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         (boundHandle !== undefined
           ? !(await sameEntryOrFalse(current, boundHandle))
           : name !== undefined && current.name !== name);
+      // A fresh entry-identity proof that the record is this mount's own
+      // grant retires a stale latch: without this, a record a peer swapped
+      // back while no effect re-ran can never be released, and
+      // unclearedStatus() blanks the name that renders the only clearing
+      // button. Keyed on the identity path (boundHandle) and on
+      // !foreignRecord, so a rejecting isSameEntry — which sameEntryOrFalse
+      // reports as foreign — keeps failing closed, and the name fallback
+      // (no handle object) never retires anything.
+      if (
+        current !== undefined &&
+        boundHandle !== undefined &&
+        !foreignRecord
+      ) {
+        foreignRecordRef.current = false;
+      }
       if (
         current !== undefined &&
         !ownWrite &&

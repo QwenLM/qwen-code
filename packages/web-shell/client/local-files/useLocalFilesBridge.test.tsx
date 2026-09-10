@@ -4041,6 +4041,118 @@ describe('useLocalFilesBridge restore', () => {
     h.unmount();
   });
 
+  it('clears its own record a peer swapped back without any rerender', async () => {
+    const mine = fakeHandle('project', { query: 'granted' });
+    const store = fakeStore(mine);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+    await h.flush();
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+    expect(h.get().status.phase).toBe('connected');
+
+    // A peer record latches foreign across a blip; the peer then puts this
+    // mount's own entry back with no rerender at all, so nothing re-runs the
+    // rebind effect. The revoke's own identity proof must retire the latch
+    // or the grant outlives every Disconnect.
+    const foreign = fakeHandle('peer-dir', { query: 'granted' });
+    await store.save(foreign);
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    await h.flush();
+    await store.save(mine);
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    h.unmount();
+  });
+
+  it('keeps the connected panel when the record permission lapses mid-blip', async () => {
+    const mine = fakeHandle('project', { query: 'granted' });
+    const store = fakeStore(mine);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+    await h.flush();
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+    expect(h.get().status.phase).toBe('connected');
+
+    // A peer record this tab holds no permission for: restore() takes its
+    // permission-lapsed exit while the rebind exemption keeps the bridge
+    // live. The exit must not overwrite `connected` with `needs-gesture`,
+    // which would hide the only Disconnect button over registered tools.
+    const foreign = fakeHandle('peer-dir', { query: 'prompt' });
+    await store.save(foreign);
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status).toEqual({
+      phase: 'connected',
+      blocker: null,
+      rootName: 'project',
+      toolCount: 4,
+    });
+    expect(h.sockets).toHaveLength(1);
+    expect(socket.closeCount).toBe(0);
+    h.unmount();
+  });
+
   it('drops a restore continuation whose identity check answers false late', async () => {
     const mine = fakeHandle('project', { query: 'granted' });
     const store = fakeStore(mine);
@@ -4444,6 +4556,123 @@ describe('useLocalFilesBridge restore', () => {
     });
     await connectingC3;
     await h.flush();
+    h.unmount();
+  });
+
+  it('keeps a withhold that lands while restore is parked in the query', async () => {
+    const mine = fakeHandle('ai_coding', { query: 'prompt' });
+    const store = fakeStore(mine);
+    let releaseQuery!: (state: PermissionState) => void;
+    const queryGate = new Promise<PermissionState>((resolve) => {
+      releaseQuery = resolve;
+    });
+    vi.mocked(mine.queryPermission).mockImplementation(() => queryGate);
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+    });
+    await h.flush();
+    await h.flush();
+    // The withhold lands while the parked continuation cannot observe it.
+    h.rerender({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+      withheldBlocker: 'workspace-ineligible',
+    });
+    await h.flush();
+    await act(async () => {
+      releaseQuery('prompt');
+      await Promise.resolve();
+    });
+    await h.flush();
+    // The parked continuation must not erase the deployment verdict.
+    expect(h.get().status).toEqual({
+      phase: 'unavailable',
+      blocker: 'workspace-ineligible',
+      rootName: 'ai_coding',
+    });
+    h.unmount();
+  });
+
+  it('keeps a withhold that lands while the permission prompt is open', async () => {
+    const mine = fakeHandle('ai_coding', { query: 'prompt' });
+    const store = fakeStore(mine);
+    let releaseRequest!: (state: PermissionState) => void;
+    const requestGate = new Promise<PermissionState>((resolve) => {
+      releaseRequest = resolve;
+    });
+    vi.mocked(mine.requestPermission).mockImplementation(() => requestGate);
+    const common = {
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+    };
+    const h = render(common);
+    await h.flush();
+    await h.flush();
+    // Raw promise: an open act around the parked connect would defer the
+    // rerender's effects past the exit write and mask the clobber.
+    const connecting = h.get().connect();
+    await h.flush();
+    h.rerender({ ...common, withheldBlocker: 'workspace-ineligible' });
+    await h.flush();
+    await act(async () => {
+      releaseRequest('prompt');
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await connecting;
+    });
+    await h.flush();
+    // The re-armed-gesture exit must not erase the deployment verdict.
+    expect(h.get().status).toEqual({
+      phase: 'unavailable',
+      blocker: 'workspace-ineligible',
+      rootName: 'ai_coding',
+    });
+    h.unmount();
+  });
+
+  it('keeps a withhold that lands while the picker is open', async () => {
+    const mine = fakeHandle('ai_coding', { query: 'denied' });
+    const store = fakeStore(mine);
+    let rejectPicker!: (err: Error) => void;
+    const pickerGate = new Promise<FileSystemDirectoryHandle>((_r, reject) => {
+      rejectPicker = reject;
+    });
+    const common = {
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => pickerGate),
+      store,
+    };
+    const h = render(common);
+    await h.flush();
+    await h.flush();
+    // Raw promise: an open act around the parked connect would defer the
+    // rerender's effects past the exit write and mask the clobber.
+    const connecting = h.get().connect();
+    await h.flush();
+    h.rerender({ ...common, withheldBlocker: 'workspace-ineligible' });
+    await h.flush();
+    await act(async () => {
+      rejectPicker(new DOMException('Blocked by policy', 'SecurityError'));
+    });
+    await act(async () => {
+      await connecting;
+    });
+    await h.flush();
+    // The picker-failure exit must not erase the deployment verdict.
+    expect(h.get().status).toEqual({
+      phase: 'unavailable',
+      blocker: 'workspace-ineligible',
+      rootName: 'ai_coding',
+    });
     h.unmount();
   });
 
