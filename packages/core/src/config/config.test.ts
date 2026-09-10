@@ -109,6 +109,20 @@ import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
+
+/**
+ * A settled registration for the shared record, the shape
+ * `registerSession` reports. Every test here models a process holding one
+ * session; the slot only differs for a process hosting several.
+ */
+function sharedRegistration(
+  registered = true,
+): Promise<sessionRegistry.SessionRegistration> {
+  return Promise.resolve({
+    registered,
+    slot: sessionRegistry.SHARED_RECORD_SLOT,
+  });
+}
 import {
   ExtensionManager,
   type Extension,
@@ -8474,7 +8488,7 @@ describe('Server Config (config.ts)', () => {
   it('relocateWorkingDirectory should refresh runtime status after moving session artifacts', async () => {
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const oldStorage = new Storage(config.getTargetDir());
@@ -8523,10 +8537,13 @@ describe('Server Config (config.ts)', () => {
     // sessions apart; the switch must reach it (and the directory-derived
     // name) or `qwen sessions ps` keeps showing the folder that was left.
     await vi.waitFor(() => {
-      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-        cwd: newDir,
-        name: sessionRegistry.deriveSessionName(newDir, sessionId),
-      });
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+        {
+          cwd: newDir,
+          name: sessionRegistry.deriveSessionName(newDir, sessionId),
+        },
+        sessionRegistry.SHARED_RECORD_SLOT,
+      );
       expect(settled).toContain('patch');
     });
     expect(settled[0]).toBe('relocated');
@@ -8544,7 +8561,7 @@ describe('Server Config (config.ts)', () => {
     // state is reachable and the /cd patch must survive it.
     const config = new Config(baseParams);
     // No markRuntimeStatusEnabled(): models the failed sidecar write.
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
@@ -8565,10 +8582,13 @@ describe('Server Config (config.ts)', () => {
 
     // The patch rides its own fire-and-forget chain; let it settle.
     await vi.waitFor(() =>
-      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-        cwd: newDir,
-        name: sessionRegistry.deriveSessionName(newDir, sessionId),
-      }),
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+        {
+          cwd: newDir,
+          name: sessionRegistry.deriveSessionName(newDir, sessionId),
+        },
+        sessionRegistry.SHARED_RECORD_SLOT,
+      ),
     );
     expect(writeRuntimeStatusSpy).not.toHaveBeenCalled();
 
@@ -8631,7 +8651,7 @@ describe('Server Config (config.ts)', () => {
     // until process exit.
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     const writeRuntimeStatusSpy = vi
       .spyOn(runtimeStatus, 'writeRuntimeStatus')
       .mockRejectedValue(new Error('read-only project fs'));
@@ -8642,10 +8662,13 @@ describe('Server Config (config.ts)', () => {
     const newSessionId = config.startNewSession('replacement-session');
 
     await vi.waitFor(() =>
-      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-        sessionId: newSessionId,
-        cwd: config.getTargetDir(),
-      }),
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+        {
+          sessionId: newSessionId,
+          cwd: config.getTargetDir(),
+        },
+        sessionRegistry.SHARED_RECORD_SLOT,
+      ),
     );
 
     writeRuntimeStatusSpy.mockRestore();
@@ -8655,9 +8678,12 @@ describe('Server Config (config.ts)', () => {
   it('serializes pending registration, transitions, and unregister', async () => {
     const config = new Config(baseParams);
     let finishRegistration!: (registered: boolean) => void;
-    const registration = new Promise<boolean>((resolve) => {
-      finishRegistration = resolve;
-    });
+    const registration = new Promise<sessionRegistry.SessionRegistration>(
+      (resolve) => {
+        finishRegistration = (registered) =>
+          resolve({ registered, slot: sessionRegistry.SHARED_RECORD_SLOT });
+      },
+    );
     let finishPatch!: () => void;
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8680,10 +8706,13 @@ describe('Server Config (config.ts)', () => {
 
     finishRegistration(true);
     await vi.waitFor(() => {
-      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-        sessionId: newSessionId,
-        cwd: config.getTargetDir(),
-      });
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+        {
+          sessionId: newSessionId,
+          cwd: config.getTargetDir(),
+        },
+        sessionRegistry.SHARED_RECORD_SLOT,
+      );
     });
     expect(unregisterSessionSpy).not.toHaveBeenCalled();
 
@@ -8697,7 +8726,7 @@ describe('Server Config (config.ts)', () => {
 
   it('serializes the peer inbox address with session transitions', async () => {
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
 
     let finishIpcPatch!: () => void;
@@ -8737,7 +8766,7 @@ describe('Server Config (config.ts)', () => {
     // ipcPath, so a patch skipped on transient fd pressure must retry
     // itself or the inbox stays undiscoverable until restart.
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8747,10 +8776,54 @@ describe('Server Config (config.ts)', () => {
     await config.updateSessionRegistryIpcPath('/tmp/peer.sock');
 
     expect(patchSessionRecordSpy).toHaveBeenCalledTimes(2);
-    expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-      ipcPath: '/tmp/peer.sock',
-    });
+    expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+      {
+        ipcPath: '/tmp/peer.sock',
+      },
+      sessionRegistry.SHARED_RECORD_SLOT,
+    );
     patchSessionRecordSpy.mockRestore();
+  });
+
+  it('names the minted record a hosted session registered under, on every write', async () => {
+    // A process hosting several sessions owns one record each. Every
+    // patch and the final removal have to name the right one — with the
+    // default slot they would all resolve to a `<pid>.json` that such a
+    // process never wrote, so a hosted session's record would never be
+    // updated and never be removed.
+    const config = new Config(baseParams);
+    config.trackSessionRegistration(
+      Promise.resolve({ registered: true, slot: 'a1b2c3d4' }),
+    );
+    await expect(config.whenSessionRegistered()).resolves.toBe(true);
+    expect(config.getSessionRegistrySlot()).toBe('a1b2c3d4');
+
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValue(true);
+    const unregisterSessionSpy = vi
+      .spyOn(sessionRegistry, 'unregisterSession')
+      .mockResolvedValue(undefined);
+
+    await config.updateSessionRegistryIpcPath('/tmp/acp.sock', 'tok');
+    expect(patchSessionRecordSpy).toHaveBeenLastCalledWith(
+      { ipcPath: '/tmp/acp.sock', ipcToken: 'tok' },
+      'a1b2c3d4',
+    );
+
+    config.startNewSession('replacement-session');
+    await vi.waitFor(() =>
+      expect(patchSessionRecordSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sessionId: 'replacement-session' }),
+        'a1b2c3d4',
+      ),
+    );
+
+    await config.unregisterSessionRegistry();
+    expect(unregisterSessionSpy).toHaveBeenCalledWith('a1b2c3d4');
+
+    patchSessionRecordSpy.mockRestore();
+    unregisterSessionSpy.mockRestore();
   });
 
   it('re-asserts the registry record with the current session id, retrying a skipped patch', async () => {
@@ -8758,7 +8831,7 @@ describe('Server Config (config.ts)', () => {
     // record may be the stale side (a /clear patch skipped under fd
     // pressure); re-asserting is the fix, and it retries like the advertise.
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8768,16 +8841,19 @@ describe('Server Config (config.ts)', () => {
     await config.reassertSessionRegistryRecord();
 
     expect(patchSessionRecordSpy).toHaveBeenCalledTimes(2);
-    expect(patchSessionRecordSpy).toHaveBeenLastCalledWith({
-      sessionId: config.getSessionId(),
-      cwd: config.getTargetDir(),
-    });
+    expect(patchSessionRecordSpy).toHaveBeenLastCalledWith(
+      {
+        sessionId: config.getSessionId(),
+        cwd: config.getTargetDir(),
+      },
+      sessionRegistry.SHARED_RECORD_SLOT,
+    );
     patchSessionRecordSpy.mockRestore();
   });
 
   it('bounds the re-assert retry and is a no-op with no registration', async () => {
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8796,7 +8872,7 @@ describe('Server Config (config.ts)', () => {
 
   it('retries the /clear session-id patch when the registry skips it', async () => {
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8825,7 +8901,7 @@ describe('Server Config (config.ts)', () => {
     // would publish an address peers cannot authenticate to — sends read as
     // 'sent' and are silently dropped — with the whole suite still green.
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8844,7 +8920,7 @@ describe('Server Config (config.ts)', () => {
 
   it('gives up on the peer inbox advertise after a bounded retry', async () => {
     const config = new Config(baseParams);
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     await expect(config.whenSessionRegistered()).resolves.toBe(true);
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -8864,7 +8940,7 @@ describe('Server Config (config.ts)', () => {
       .spyOn(sessionRegistry, 'unregisterSession')
       .mockResolvedValue(undefined);
 
-    config.trackSessionRegistration(Promise.resolve(false));
+    config.trackSessionRegistration(sharedRegistration(false));
     await config.unregisterSessionRegistry();
 
     expect(unregisterSessionSpy).not.toHaveBeenCalled();
@@ -8877,7 +8953,7 @@ describe('Server Config (config.ts)', () => {
     // surface through relocateWorkingDirectory either.
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
-    config.trackSessionRegistration(Promise.resolve(true));
+    config.trackSessionRegistration(sharedRegistration());
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
@@ -8897,10 +8973,13 @@ describe('Server Config (config.ts)', () => {
     await config.relocateWorkingDirectory(newDir);
 
     await vi.waitFor(() =>
-      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-        cwd: newDir,
-        name: sessionRegistry.deriveSessionName(newDir, sessionId),
-      }),
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith(
+        {
+          cwd: newDir,
+          name: sessionRegistry.deriveSessionName(newDir, sessionId),
+        },
+        sessionRegistry.SHARED_RECORD_SLOT,
+      ),
     );
 
     writeRuntimeStatusSpy.mockRestore();
