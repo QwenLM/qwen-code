@@ -596,6 +596,21 @@ export type LspTextDocumentSync =
   | { openClose?: boolean; change?: 0 | 1 | 2 };
 
 /**
+ * Normalize the textDocumentSync capability into the two facts the document
+ * synchronizer needs. Single source of truth shared by the service (deciding
+ * whether to send) and the manager (deciding whether a warmup latched), so the
+ * two coupled decisions cannot drift apart.
+ */
+export function resolveTextDocumentSync(
+  sync: LspTextDocumentSync | undefined,
+): { change: 0 | 1 | 2; openClose: boolean } {
+  const change = typeof sync === 'number' ? sync : (sync?.change ?? 0);
+  const openClose =
+    typeof sync === 'number' ? sync !== 0 : (sync?.openClose ?? false);
+  return { change, openClose };
+}
+
+/**
  * Handle for managing an LSP server instance.
  */
 export interface LspServerHandle {

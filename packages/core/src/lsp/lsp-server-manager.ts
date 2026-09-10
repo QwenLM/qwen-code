@@ -21,6 +21,7 @@ import {
   DEFAULT_LSP_STARTUP_TIMEOUT_MS,
   DEFAULT_LSP_WARMUP_DELAY_MS,
 } from './constants.js';
+import { resolveTextDocumentSync } from './types.js';
 import type {
   LspConnectionResult,
   LspProcessDiagnostics,
@@ -280,13 +281,15 @@ export class LspServerManager {
     if (handle.warmedUp && !force) {
       return;
     }
-    // A failed forced attempt must stay retryable instead of latching warm.
-    if (force) handle.warmedUp = false;
     const connection = handle.connection;
     const tsFile = this.findFirstTypescriptFile();
     if (!tsFile) {
       return;
     }
+    // A failed forced attempt must stay retryable instead of latching warm. Kept
+    // below the discovery guard so a forced attempt that never reaches delivery
+    // (no TypeScript file found) cannot permanently destroy an established latch.
+    if (force) handle.warmedUp = false;
 
     const uri = pathToFileURL(tsFile).toString();
     const languageId = tsFile.endsWith('.tsx')
@@ -298,11 +301,9 @@ export class LspServerManager {
           : 'typescript';
     try {
       const sent = synchronizeDocument(uri, languageId);
-      if (handle.connection !== connection) return;
-      const sync = handle.textDocumentSync;
-      const change = typeof sync === 'number' ? sync : (sync?.change ?? 0);
-      const openClose =
-        typeof sync === 'number' ? sync !== 0 : (sync?.openClose ?? false);
+      const { change, openClose } = resolveTextDocumentSync(
+        handle.textDocumentSync,
+      );
       if (!sent && (!openClose || (force && change !== 1 && change !== 2))) {
         debugLogger.warn(
           `TypeScript server ${handle.config.name} warm-up delivered no notification (textDocumentSync=${JSON.stringify(handle.textDocumentSync)})`,

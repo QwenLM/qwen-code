@@ -36,6 +36,7 @@ import { LspConfigLoader } from './LspConfigLoader.js';
 import { LspResponseNormalizer } from './LspResponseNormalizer.js';
 import { LspServerManager } from './lsp-server-manager.js';
 import { sortJsonValue } from './sort-json-value.js';
+import { resolveTextDocumentSync } from './types.js';
 import type {
   LspConnectionInterface,
   LspServerHandle,
@@ -81,9 +82,11 @@ const DEFAULT_EXCLUDE_PATTERNS = [
 ];
 
 class StaleCallHierarchyItemError extends Error {
-  constructor() {
+  constructor(uri?: string) {
     super(
-      'Call hierarchy item is stale or has unknown provenance; prepare call hierarchy again.',
+      uri
+        ? `Call hierarchy item is stale or has unknown provenance; prepare call hierarchy again at a current location inside ${uri}.`
+        : 'Call hierarchy item is stale or has unknown provenance; prepare call hierarchy again.',
     );
   }
 }
@@ -116,6 +119,10 @@ export class NativeLspService {
   private snapshotDigests = new WeakMap<DocumentSnapshot, string>();
   private callHierarchySecrets = new WeakMap<LspConnectionInterface, Buffer>();
   private lastConnections = new Map<string, LspConnectionInterface>();
+  // URIs to re-deliver after an in-place connection swap. openedDocuments is the
+  // didOpen/didChange selector and must be wiped when the connection changes; this
+  // set survives that wipe so a later workspaceDiagnostics can still replay them.
+  private replayUris = new Map<string, Set<string>>();
   private reinitializeQueue: Promise<unknown> = Promise.resolve();
   private reinitializeAbortController: AbortController | undefined;
   private stopping = false;
@@ -321,6 +328,7 @@ export class NativeLspService {
       this.openedDocuments.delete(name);
       this.documentLifecycles.delete(name);
       this.lastConnections.delete(name);
+      this.replayUris.delete(name);
     }
   }
 
@@ -403,6 +411,7 @@ export class NativeLspService {
     this.openedDocuments.clear();
     this.documentLifecycles.clear();
     this.lastConnections.clear();
+    this.replayUris.clear();
   }
 
   /**
@@ -541,6 +550,15 @@ export class NativeLspService {
       );
     }
     if (this.lastConnections.get(serverName) !== handle.connection) {
+      // Preserve the replay set across the connection change: openedDocuments must
+      // not retain stale entries (the new connection never saw them), but a later
+      // workspaceDiagnostics still needs to know what to re-deliver.
+      const prior = this.openedDocuments.get(serverName);
+      if (prior && prior.size > 0) {
+        const durable = this.replayUris.get(serverName) ?? new Set<string>();
+        for (const tracked of prior.keys()) durable.add(tracked);
+        this.replayUris.set(serverName, durable);
+      }
       this.openedDocuments.delete(serverName);
       this.documentLifecycles.delete(serverName);
     }
@@ -554,13 +572,21 @@ export class NativeLspService {
     this.documentLifecycles.set(serverName, lifecycles);
     const lifecycle = lifecycles.get(uri);
     if (lifecycle?.pendingClose) {
-      this.closeUnsynchronizableDocument(serverName, handle, uri);
+      try {
+        this.closeUnsynchronizableDocument(serverName, handle, uri);
+      } catch (error) {
+        // Name the close that is actually holding the document shut; rethrowing the
+        // retained read error would report a stale ENOENT for a file now present.
+        throw new Error(
+          `LSP server ${serverName} still cannot close ${uri}; refusing to reopen it (${(error as Error).message})`,
+          { cause: error },
+        );
+      }
     }
     const previous = documents.get(uri);
-    const sync = handle.textDocumentSync;
-    const change = typeof sync === 'number' ? sync : (sync?.change ?? 0);
-    const openClose =
-      typeof sync === 'number' ? sync !== 0 : (sync?.openClose ?? false);
+    const { change, openClose } = resolveTextDocumentSync(
+      handle.textDocumentSync,
+    );
     if (!previous && !openClose) {
       return { sent: false, opened: false };
     }
@@ -706,13 +732,9 @@ export class NativeLspService {
 
     const connection = handle.connection;
     let filePath = this.workspaceSymbolFiles.get(connection);
-    if (filePath) {
-      try {
-        fs.accessSync(filePath, fs.constants.R_OK);
-      } catch {
-        this.workspaceSymbolFiles.delete(connection);
-        filePath = undefined;
-      }
+    if (filePath && !this.isUsableWorkspaceSymbolFile(filePath)) {
+      this.workspaceSymbolFiles.delete(connection);
+      filePath = undefined;
     }
     filePath ??= this.findWorkspaceFileForServer(handle);
     if (!filePath) return false;
@@ -732,11 +754,33 @@ export class NativeLspService {
         `LSP workspace symbol warmup skipped for ${uri}:`,
         error,
       );
+      // Drop the failed candidate so the next call re-runs discovery instead of
+      // retrying a path whose read failed after accessSync passed (EISDIR/ESTALE).
+      this.workspaceSymbolFiles.delete(connection);
       return false;
     }
     this.workspaceSymbolFiles.set(connection, filePath);
     await this.delay(DEFAULT_LSP_WORKSPACE_SYMBOL_WARMUP_DELAY_MS);
-    return true;
+    // A connection replaced inside the open or warmup delay received nothing, so
+    // it must not be reported warm (mirrors the manager's post-delay guard).
+    return handle.connection === connection;
+  }
+
+  private isUsableWorkspaceSymbolFile(filePath: string): boolean {
+    try {
+      if (!fs.statSync(filePath).isFile()) return false;
+      fs.accessSync(filePath, fs.constants.R_OK);
+    } catch {
+      return false;
+    }
+    // A cached candidate must still live under a current workspace root: removing
+    // a directory at runtime does not replace the connection, so without this the
+    // stale entry would re-open a file inside a root the user just revoked.
+    return this.workspaceContext
+      .getDirectories()
+      .some((root) =>
+        filePath.startsWith(root.endsWith(path.sep) ? root : root + path.sep),
+      );
   }
 
   /**
@@ -1363,8 +1407,11 @@ export class NativeLspService {
     };
     const assertRoot = () => {
       assertActive();
+      // Name the root file so a cross-file item whose own file was delivered then
+      // closed guides the model to re-prepare there, instead of a generic stale
+      // error that only re-syncs the original root and reproduces the same item.
       if (uri.startsWith('file://') && !isFresh(uri))
-        throw new StaleCallHierarchyItemError();
+        throw new StaleCallHierarchyItemError(uri);
     };
     assertRoot();
     let secret = this.callHierarchySecrets.get(connection);
@@ -1730,6 +1777,15 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       const connection = handle.connection;
+      // Capture the replay set before warmup: for a TypeScript server the warmup's
+      // own connection-change reset would otherwise wipe it first. Union with the
+      // durable set so a swap triggered by an earlier query is still replayed.
+      const trackedUris = [
+        ...new Set([
+          ...(this.openedDocuments.get(name)?.keys() ?? []),
+          ...(this.replayUris.get(name) ?? []),
+        ]),
+      ];
       await this.warmupAndTrack(name, handle);
       // Querying a connection that never received the replayed documents can
       // return empty diagnostics, which the tool would display as clean.
@@ -1740,21 +1796,41 @@ export class NativeLspService {
       ) {
         throw new Error(`LSP server ${name} connection is no longer active`);
       }
-      const trackedUris = [...(this.openedDocuments.get(name)?.keys() ?? [])];
       if (this.lastConnections.get(name) !== connection) {
         this.openedDocuments.delete(name);
         this.documentLifecycles.delete(name);
         this.lastConnections.set(name, connection);
       }
       for (const [uri, lifecycle] of this.documentLifecycles.get(name) ?? []) {
-        if (lifecycle.pendingClose)
-          this.closeUnsynchronizableDocument(name, handle, uri);
+        if (lifecycle.pendingClose) {
+          try {
+            this.closeUnsynchronizableDocument(name, handle, uri);
+          } catch (error) {
+            // Name the close that is actually holding the document shut; rethrowing
+            // the retained read error reports a stale ENOENT for a file now present.
+            throw new Error(
+              `LSP server ${name} still cannot close ${uri}; refusing to reopen it (${(error as Error).message})`,
+              { cause: error },
+            );
+          }
+        }
       }
       let openedAny = false;
+      let syncError: unknown;
       for (const uri of trackedUris) {
-        openedAny =
-          this.synchronizeDocument(name, handle, uri).opened || openedAny;
+        // Isolate per URI so one unreadable tracked file still lets the survivors
+        // re-deliver before the call rejects; a survivor stranded behind a throw
+        // would leave the connection queried with zero documents and report clean.
+        try {
+          openedAny =
+            this.synchronizeDocument(name, handle, uri).opened || openedAny;
+          this.replayUris.get(name)?.delete(uri);
+        } catch (error) {
+          syncError ??= error;
+        }
       }
+      // A sync failure must reject, not report incomplete diagnostics as clean.
+      if (syncError) throw syncError;
       if (openedAny) await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
       if (
         handle.connection !== connection ||

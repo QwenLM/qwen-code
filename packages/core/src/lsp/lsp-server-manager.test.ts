@@ -162,6 +162,59 @@ describe('LspServerManager', () => {
     expect(handle.warmedUp).not.toBe(true);
   });
 
+  it('keeps an established latch when a forced warmup finds no TypeScript file', async () => {
+    const manager = createTrustedManager();
+    const discovery = vi
+      .spyOn(
+        manager as unknown as {
+          findFirstTypescriptFile(): string | undefined;
+        },
+        'findFirstTypescriptFile',
+      )
+      .mockReturnValue(undefined);
+    const handle: LspServerHandle = {
+      config: { ...serverConfig, name: 'typescript' },
+      status: 'READY',
+      warmedUp: true,
+      connection: createMockConnection(),
+    };
+    const synchronize = vi.fn(() => true);
+    // A forced attempt that never reaches delivery (no TypeScript file found)
+    // must not destroy the established latch: the unlock sits below the guard.
+    await manager.warmupTypescriptServer(handle, synchronize, true);
+    expect(handle.warmedUp).toBe(true);
+    expect(synchronize).not.toHaveBeenCalled();
+    // A later ordinary query stays short-circuited by the intact latch, so the
+    // unbounded per-query discovery glob is not re-run.
+    discovery.mockClear();
+    await manager.warmupTypescriptServer(handle, synchronize);
+    expect(discovery).not.toHaveBeenCalled();
+    expect(handle.warmedUp).toBe(true);
+  });
+
+  it('latches a warmup that delivered no notification when textDocumentSync is absent', async () => {
+    vi.useFakeTimers();
+    const manager = createTrustedManager();
+    vi.spyOn(
+      manager as unknown as { findFirstTypescriptFile(): string | undefined },
+      'findFirstTypescriptFile',
+    ).mockReturnValue(path.resolve('main.ts'));
+    const handle: LspServerHandle = {
+      config: { ...serverConfig, name: 'typescript' },
+      status: 'READY',
+      connection: createMockConnection(),
+    };
+    // textDocumentSync omitted: resolveTextDocumentSync must yield openClose:false
+    // so a no-notification delivery latches warm instead of awaiting the delay.
+    const pending = manager.warmupTypescriptServer(handle, () => false);
+    await vi.runAllTimersAsync();
+    await pending;
+    expect(handle.warmedUp).toBe(true);
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      expect.stringContaining('delivered no notification'),
+    );
+  });
+
   it.each<LspTextDocumentSync | undefined>([
     0,
     1,

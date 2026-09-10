@@ -467,6 +467,69 @@ describe('NativeLspService disk document synchronization', () => {
     },
   );
 
+  it('does not certify a prepare response when the target drifts during the warmup await', async () => {
+    useTypescriptManager();
+    const pending = service
+      .prepareCallHierarchy({ uri, range })
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    fs.writeFileSync(file, 'inserted\nold');
+    connection.request.mockClear();
+    await vi.runAllTimersAsync();
+    expect(await pending).toMatchObject({
+      message: expect.stringContaining('prepare call hierarchy again'),
+    });
+    expect(connection.request).not.toHaveBeenCalled();
+  });
+
+  it.each(['empty result', 'request failure'])(
+    'does not certify a prepare %s after a concurrent edit',
+    async (change) => {
+      // Sync the target first so an empty response is not retried: a preceding
+      // hover makes shouldRetryAfterOpen false and reaches the post-response
+      // checkpoint rather than the empty-result retry path.
+      await run(service.hover({ uri, range }));
+      let respond!: (value: unknown) => void;
+      connection.request.mockImplementationOnce(
+        () =>
+          new Promise((resolve, reject) => {
+            respond =
+              change === 'request failure'
+                ? () => reject(new Error('server rejected'))
+                : resolve;
+          }),
+      );
+      const pending = service
+        .prepareCallHierarchy({ uri, range })
+        .catch((error: unknown) => error);
+      await vi.runAllTimersAsync();
+      fs.writeFileSync(file, 'inserted\nold');
+      await run(service.hover({ uri, range }));
+      respond([]);
+      await expect(pending).resolves.toMatchObject({
+        message: expect.stringContaining('prepare call hierarchy again'),
+      });
+    },
+  );
+
+  it('rejects a restored-but-closed root traversed directly with the original token', async () => {
+    const [item] = await run(service.prepareCallHierarchy({ uri, range }));
+    expect(item?.documentRevision).toEqual(expect.any(String));
+    // Close main.ts via a read failure, then restore it byte-identical: the
+    // lifecycle retains version 1 but the document is no longer open.
+    fs.unlinkSync(file);
+    await expect(service.workspaceDiagnostics()).rejects.toThrow('ENOENT');
+    fs.writeFileSync(file, 'old');
+    connection.request.mockClear();
+    // Traversing directly with the original token (no hover, no re-prepare) must
+    // reject: the "must still be open" clause is the sole discriminator that the
+    // buffer the token was signed against no longer exists on this connection.
+    await expect(service.incomingCalls(item!)).rejects.toThrow(
+      'prepare call hierarchy again',
+    );
+    expect(connection.request).not.toHaveBeenCalled();
+  });
+
   it('refreshes hover after a same-size edit with identical restored mtime', async () => {
     const timestamp = new Date('2025-01-01T00:00:00Z');
     fs.utimesSync(file, timestamp, timestamp);
@@ -1498,6 +1561,15 @@ describe('NativeLspService disk document synchronization', () => {
           { textDocument: { uri }, position: range.start },
         ],
       ]);
+      // Certifying a result's own file is read-only: the query target's own open
+      // is the only notification the signing path may produce.
+      expect(
+        connection.send.mock.calls.map(([message]) => [
+          message.method,
+          (message.params as { textDocument: { uri: string } }).textDocument
+            .uri,
+        ]),
+      ).toEqual([['textDocument/didOpen', uri]]);
       await run<unknown>(service[method](JSON.parse(JSON.stringify(item))));
       expect(connection.request).toHaveBeenLastCalledWith(
         `callHierarchy/${method}`,
@@ -1505,6 +1577,42 @@ describe('NativeLspService disk document synchronization', () => {
       );
     },
   );
+
+  it('names the unobserved file for a delivered-then-closed cross-file item', async () => {
+    const decl = path.join(directory, 'decl.ts');
+    fs.writeFileSync(decl, 'declaration');
+    const declUri = pathToFileURL(decl).toString();
+    // Track decl.ts, then make it unreadable so synchronization closes it while
+    // retaining its lifecycle version, then restore it byte-identical.
+    await run(service.hover({ uri: declUri, range }));
+    fs.unlinkSync(decl);
+    await expect(service.workspaceDiagnostics()).rejects.toThrow('ENOENT');
+    fs.writeFileSync(decl, 'declaration');
+    // A prepare rooted at main.ts returns a cross-file item pointing at decl.ts.
+    connection.request.mockImplementation(async (name) =>
+      name === 'textDocument/prepareCallHierarchy'
+        ? [{ name: 'fn', kind: 12, uri: declUri, range, selectionRange: range }]
+        : [],
+    );
+    const [item] = await run(service.prepareCallHierarchy({ uri, range }));
+    expect(item?.documentRevision).toBeUndefined();
+    connection.request.mockClear();
+    // The rejection must name decl.ts (the item's own file) so the model prepares
+    // there; a generic stale error only re-syncs main.ts and reproduces the item.
+    const error = await service.incomingCalls(item!).then(
+      () => undefined,
+      (cause: unknown) => cause as Error,
+    );
+    expect(error?.message).toContain(declUri);
+    expect(error?.message).toContain('prepare call hierarchy again');
+    expect(connection.request).not.toHaveBeenCalled();
+    // Loop exit: preparing inside decl.ts re-opens it, so traversal then succeeds.
+    const [fresh] = await run(
+      service.prepareCallHierarchy({ uri: declUri, range }),
+    );
+    expect(fresh?.documentRevision).toEqual(expect.any(String));
+    await run(service.incomingCalls(fresh!));
+  });
 
   it.each(
     (['incomingCalls', 'outgoingCalls'] as const).flatMap((method) =>
@@ -1638,10 +1746,12 @@ describe('NativeLspService disk document synchronization', () => {
       handle.textDocumentSync = sync as LspTextDocumentSync;
       fs.unlinkSync(file);
       fs.symlinkSync(path.join(directory, 'missing'), file);
-      connection.request.mockResolvedValue([
-        { name: 'fn', kind: 12, location: { uri, range } },
-      ]);
-      expect(await run(service.workspaceSymbols('fn'))).toHaveLength(1);
+      connection.request.mockResolvedValue([]);
+      const before = Date.now();
+      expect(await run(service.workspaceSymbols('fn'))).toHaveLength(0);
+      // A failed warmup must not enable the empty-result retry: one request and no
+      // DEFAULT_LSP_WORKSPACE_SYMBOL_WARMUP_DELAY_MS spent on a document never delivered.
+      expect(Date.now() - before).toBe(0);
       expect(connection.request).toHaveBeenCalledExactlyOnceWith(
         'workspace/symbol',
         { query: 'fn' },
@@ -1707,16 +1817,90 @@ describe('NativeLspService disk document synchronization', () => {
     expect(replacement.request).toHaveBeenCalledTimes(2);
   });
 
-  it('settles already-current TypeScript warmup without unsupported warning', async () => {
-    await run(service.hover({ uri, range }));
-    useTypescriptManager();
-    const before = Date.now();
-    await run(service.workspaceSymbols('fn'));
-    expect(Date.now() - before).toBe(DEFAULT_LSP_WARMUP_DELAY_MS);
-    expect(logger.warn).not.toHaveBeenCalled();
-    expect(handle.warmedUp).toBe(true);
-    expect(connection.send).toHaveBeenCalledOnce();
+  it('reports a connection replaced during the symbol warmup delay as not warmed', async () => {
+    const pending = service.workspaceSymbols('fn');
+    // Advance past the open delay so the warmup delay is the pending await, then
+    // replace the connection inside that window.
+    await vi.advanceTimersByTimeAsync(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
+    const replacement = createConnection();
+    handle.connection = replacement;
+    await vi.runAllTimersAsync();
+    await expect(pending).resolves.toEqual([]);
+    // The replacement received no document, so it must not be reported warm: the
+    // empty-result retry is skipped and workspace/symbol is requested exactly once.
+    expect(
+      replacement.request.mock.calls.filter(
+        ([method]) => method === 'workspace/symbol',
+      ),
+    ).toHaveLength(1);
   });
+
+  it('rediscovers when a cached symbol warmup candidate stops being a file', async () => {
+    // openClose:false leaves the warmup candidate untracked, so the warmed fast
+    // path does not short-circuit and the cache is revalidated on the next call.
+    handle.textDocumentSync = { change: 1 };
+    const discovery = vi.spyOn(
+      service as unknown as {
+        findWorkspaceFileForServer(handle: LspServerHandle): string | undefined;
+      },
+      'findWorkspaceFileForServer',
+    );
+    // Only main.ts exists, so the first discovery caches it deterministically
+    // (readdir order is not alphabetical; a pre-seeded sibling could win).
+    await run(service.workspaceSymbols('fn'));
+    expect(discovery).toHaveBeenCalledTimes(1);
+    // main.ts becomes a directory of the same name: accessSync(R_OK) still passes
+    // for a readable directory, but it is no longer a usable file. other.ts gives
+    // the re-run discovery a readable candidate to settle on.
+    fs.rmSync(file);
+    fs.mkdirSync(file);
+    fs.writeFileSync(path.join(directory, 'other.ts'), 'other');
+    discovery.mockClear();
+    await run(service.workspaceSymbols('fn'));
+    expect(discovery).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a cached symbol warmup candidate outside the current workspace roots', async () => {
+    handle.textDocumentSync = { change: 1 };
+    const discovery = vi.spyOn(
+      service as unknown as {
+        findWorkspaceFileForServer(handle: LspServerHandle): string | undefined;
+      },
+      'findWorkspaceFileForServer',
+    );
+    await run(service.workspaceSymbols('fn'));
+    expect(discovery).toHaveBeenCalledTimes(1);
+    // A runtime directory removal does not replace the connection, so the WeakMap
+    // entry survives and must be revalidated against the current roots.
+    const secondRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-root-'));
+    fs.writeFileSync(path.join(secondRoot, 'other.ts'), 'other');
+    (
+      service as unknown as { workspaceContext: WorkspaceContext }
+    ).workspaceContext = {
+      getDirectories: () => [secondRoot],
+    } as unknown as WorkspaceContext;
+    discovery.mockClear();
+    await run(service.workspaceSymbols('fn'));
+    // main.ts is still a readable file but no longer under a workspace root, so
+    // the stale entry is dropped and discovery re-runs inside the remaining root.
+    expect(discovery).toHaveBeenCalledTimes(1);
+    fs.rmSync(secondRoot, { recursive: true, force: true });
+  });
+
+  it.each([1, { openClose: true, change: 0 }])(
+    'settles already-current TypeScript warmup without unsupported warning %j',
+    async (sync) => {
+      handle.textDocumentSync = sync as LspTextDocumentSync;
+      await run(service.hover({ uri, range }));
+      useTypescriptManager();
+      const before = Date.now();
+      await run(service.workspaceSymbols('fn'));
+      expect(Date.now() - before).toBe(DEFAULT_LSP_WARMUP_DELAY_MS);
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(handle.warmedUp).toBe(true);
+      expect(connection.send).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each([{ openClose: true, change: 0 }, { openClose: true }])(
     'latches unsupported forced unchanged No Project warmup %j',
@@ -1802,7 +1986,9 @@ describe('NativeLspService disk document synchronization', () => {
       });
       await expect(service.workspaceDiagnostics()).rejects.toThrow('ENOENT');
       fs.writeFileSync(file, 'old');
-      await expect(service.workspaceDiagnostics()).rejects.toThrow('ENOENT');
+      await expect(service.workspaceDiagnostics()).rejects.toThrow(
+        /still cannot close/,
+      );
       expect(await run(service.hover({ uri, range }))).toBeNull();
       expect(
         connection.send.mock.calls.filter(
@@ -1861,6 +2047,85 @@ describe('NativeLspService disk document synchronization', () => {
     expect(Date.now() - changed).toBe(0);
     expect(replacement.send).toHaveBeenCalledTimes(4);
     expect(requestedAt[1]! - sentAt[3]!).toBe(0);
+  });
+
+  it('delivers workspace survivors before rejecting an unreadable tracked file', async () => {
+    const other = path.join(directory, 'other.ts');
+    fs.writeFileSync(other, 'other');
+    const otherUri = pathToFileURL(other).toString();
+    // Track main.ts first, then other.ts, so main.ts is the first-tracked URI.
+    await run(service.hover({ uri, range }));
+    await run(service.hover({ uri: otherUri, range }));
+    fs.unlinkSync(file);
+    const replacement = createConnection();
+    handle.connection = replacement;
+    await expect(service.workspaceDiagnostics()).rejects.toThrow('ENOENT');
+    // The survivor must still reach the replacement connection even though the
+    // first-tracked file aborted its own sync; without per-URI isolation the
+    // throw strands every URI queued behind it and the sweep reports clean.
+    expect(
+      replacement.send.mock.calls.map(([message]) => [
+        message.method,
+        (message.params as { textDocument: { uri: string } }).textDocument.uri,
+      ]),
+    ).toEqual([['textDocument/didOpen', otherUri]]);
+    // A second sweep must still track the survivor rather than strand it.
+    await run(service.workspaceDiagnostics());
+    const internals = service as unknown as {
+      openedDocuments: Map<string, Map<string, unknown>>;
+    };
+    expect(internals.openedDocuments.get('test')?.has(otherUri)).toBe(true);
+  });
+
+  it('replays every tracked document after a TypeScript crash restart', async () => {
+    useTypescriptManager();
+    const other = path.join(directory, 'other.ts');
+    fs.writeFileSync(other, 'other');
+    const otherUri = pathToFileURL(other).toString();
+    await run(service.hover({ uri, range }));
+    await run(service.hover({ uri: otherUri, range }));
+    // Simulate an in-place crash restart: a new connection on the same handle and
+    // a cleared warmup latch, without notifying the service.
+    const replacement = createConnection();
+    handle.connection = replacement;
+    handle.warmedUp = false;
+    await run(service.workspaceDiagnostics());
+    // The warmup's own connection-change reset must not wipe the replay set: both
+    // previously tracked URIs are re-opened before workspace/diagnostic is issued.
+    const openedUris = replacement.send.mock.calls
+      .filter(([message]) => message.method === 'textDocument/didOpen')
+      .map(
+        ([message]) =>
+          (message.params as { textDocument: { uri: string } }).textDocument
+            .uri,
+      );
+    expect(new Set(openedUris)).toEqual(new Set([uri, otherUri]));
+    expect(replacement.events.indexOf('workspace/diagnostic')).toBeGreaterThan(
+      replacement.events.lastIndexOf('textDocument/didOpen'),
+    );
+  });
+
+  it('replays tracked documents wiped by an earlier query on a replaced connection', async () => {
+    const other = path.join(directory, 'other.ts');
+    fs.writeFileSync(other, 'other');
+    const otherUri = pathToFileURL(other).toString();
+    await run(service.hover({ uri, range }));
+    await run(service.hover({ uri: otherUri, range }));
+    const replacement = createConnection();
+    handle.connection = replacement;
+    // An ordinary non-TypeScript workspaceSymbol query on the replaced connection
+    // triggers the connection-change reset; the replay set must survive it so a
+    // later workspaceDiagnostics still re-opens both documents.
+    await run(service.workspaceSymbols('fn'));
+    await run(service.workspaceDiagnostics());
+    const openedUris = replacement.send.mock.calls
+      .filter(([message]) => message.method === 'textDocument/didOpen')
+      .map(
+        ([message]) =>
+          (message.params as { textDocument: { uri: string } }).textDocument
+            .uri,
+      );
+    expect(new Set(openedUris)).toEqual(new Set([uri, otherUri]));
   });
 
   it('rejects workspace connection replacement during reopen settling', async () => {
