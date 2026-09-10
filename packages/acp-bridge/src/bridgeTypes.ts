@@ -10,6 +10,10 @@ import type {
   GoalSnapshotV2,
   GoalStateResponse,
   SessionGroupPresetColor,
+  SessionSourceInput,
+  SessionSourcesResult,
+  SessionSourceUpsertResult,
+  SessionSourceRemoveResult,
   TurnResultCode,
   TurnResultErrorPayload,
 } from '@qwen-code/qwen-code-core';
@@ -623,6 +627,7 @@ export interface BridgeBranchSessionRequest {
 }
 
 export interface BridgePersistedBranchedSession {
+  sourceWarnings?: string[];
   sessionId: string;
   displayName: string;
   forkedFrom: { sessionId: string; displayName: string };
@@ -641,6 +646,7 @@ export interface BridgeSideTaskSessionRequest {
 }
 
 export interface BridgeSideTaskSession extends BridgeRestoredSession {
+  sourceWarnings?: string[];
   displayName: string;
   parentSessionId: string;
 }
@@ -1773,6 +1779,23 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * storage-agnostic. Optional so lightweight fakes may omit it.
    */
   setSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
+
+  getSessionSources(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionSourcesResult>;
+
+  upsertSessionSource(
+    sessionId: string,
+    input: SessionSourceInput,
+    context: BridgeClientRequestContext,
+  ): Promise<SessionSourceUpsertResult>;
+
+  removeSessionSource(
+    sessionId: string,
+    sourceId: string,
+    context: BridgeClientRequestContext,
+  ): Promise<SessionSourceRemoveResult>;
 
   /**
    * List the structured artifacts registered for a live session. Throws

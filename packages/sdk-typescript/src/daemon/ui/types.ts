@@ -38,6 +38,7 @@ export type DaemonUiEventType =
   // Session-meta events
   | 'session.metadata.changed'
   | 'session.artifact.changed'
+  | 'session.source.changed'
   | 'session.approval_mode.changed'
   | 'session.available_commands'
   | 'session.state_resync_required'
@@ -424,6 +425,12 @@ export interface DaemonUiSessionMetadataChangedEvent extends DaemonUiEventBase {
   displayName?: string;
 }
 
+export interface DaemonUiSessionSourceChangedEvent extends DaemonUiEventBase {
+  type: 'session.source.changed';
+  sessionId: string;
+  revision: number;
+}
+
 export interface DaemonUiSessionArtifactChangedEvent extends DaemonUiEventBase {
   type: 'session.artifact.changed';
   sessionId: string;
@@ -725,6 +732,7 @@ export type DaemonUiEvent =
   // Session-meta events
   | DaemonUiSessionMetadataChangedEvent
   | DaemonUiSessionArtifactChangedEvent
+  | DaemonUiSessionSourceChangedEvent
   | DaemonUiSessionApprovalModeChangedEvent
   | DaemonUiSessionAvailableCommandsEvent
   | DaemonUiStateResyncRequiredEvent
