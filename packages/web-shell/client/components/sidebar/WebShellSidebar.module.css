@@ -211,10 +211,17 @@
   user-select: none;
 }
 
-.brandLogo svg {
+.brandLogo svg,
+.brandLogo img {
   width: 26px;
   height: 26px;
   display: block;
+}
+
+/* A custom logo arrives as an <img>, which stretches to the box; the built-in
+   inline <svg> keeps its ratio through its viewBox instead. */
+.brandLogo img {
+  object-fit: contain;
 }
 
 .brandName {
