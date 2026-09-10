@@ -99,14 +99,18 @@ env:
   # counting — and so does one whose first line QUOTES a whole ruling and
   # then carries on, which the start anchor alone let through under
   # attribution off, where no severity marker leads the post (#9940
-  # review, round 30). A real note ends at the marker; the end anchor is
-  # what says so. `lib/review-footer.ts` exports the same shape as
+  # review, round 30). The anchor spans the WHOLE body: a comment that
+  # quotes the note in full and then states its own finding underneath was
+  # dropped from the census wholesale, the live Critical with it — a real
+  # note is the note and, under attribution on, its footer, and anything
+  # carrying further prose fails closed toward COUNTING (#9940 review,
+  # round 31). `lib/review-footer.ts` exports the same shape as
   # FIXED_RULING_SHAPE_RE for the TypeScript readers. Defined ONCE and handed to every jq site as `--arg frf`: an
   # `--arg` value is the regex verbatim, so the class is spelled `[^\n]` with
   # ONE backslash here — the `[^\\n]` a jq string literal needs compiled, as a
   # shell value, to "neither backslash nor n" and let a `by` clause with an
   # `n` in it count (#9940 review, round 29).
-  FIXED_RULING_FILTER: '^R[0-9]+-[0-9]+ fixed(?: by [^\n]*)? <!-- qwen-review-fixed-ruling -->[ \t]*\r?(\n|$)'
+  FIXED_RULING_FILTER: '^R[0-9]+-[0-9]+ fixed(?: by [^\r\n\x{2028}\x{2029}]*)? <!-- qwen-review-fixed-ruling -->[ \t]*(\r?\n[ \t\r\n]*_— ((?! via Qwen Code /review)[^\r\n\x{2028}\x{2029}])* via Qwen Code /review( \(v[A-Za-z0-9._+-]{0,200}…?\)?)?_[ \t]*)?([\r\n][ \t\r\n]*)?$'
   # Hard cap on automated review-address rounds per PR. After this the bot stops
   # and leaves the PR for a human. Raised from 5: across the last 40 bot PRs
   # only 3 ever reached the cap and all 3 merged AT it (one having spent two of

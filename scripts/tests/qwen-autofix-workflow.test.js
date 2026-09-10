@@ -9853,10 +9853,26 @@ exit 1
     const shape = fixedRulingShape;
     expect(shape).toBeTruthy();
     expect(shape).toMatch(/^\^R\[0-9\]\+-\[0-9\]\+ fixed/);
-    expect(shape).toContain('[^\\n]');
-    // Anchored at BOTH ends of the note's line: a real ruling ends at the
-    // marker, a quotation carries on past it.
-    expect(shape).toMatch(/\(\\n\|\$\)$/);
+    // The `by` class names every line break BOTH dialects must agree on:
+    // jq's `[^\n]` admits `\r`/U+2028/U+2029 and JS's `.` does not, so the
+    // census dropped comments the TypeScript side counted (#9940 review,
+    // round 31 reverse audit).
+    expect(shape).toContain('(?: by [^\\r\\n\\x{2028}\\x{2029}]*)?');
+    // Anchored over the WHOLE body: a real note is the note and, under
+    // attribution on, its footer — anything carrying further prose fails
+    // closed toward COUNTING (#9940 review, round 31).
+    // Spelled out, not `\s`: Oniguruma's `\s` matches U+0085 and JS's does
+    // not (and JS's matches U+FEFF while Oniguruma's does not), so a note
+    // with either byte on the end was a note to one engine and a finding
+    // to the other (#9940 review, round 31 reverse audit).
+    // The two whitespace runs after the marker must not OVERLAP: a
+    // `[ \t]*` followed by a `[ \t\r\n]*` gives a run of spaces no
+    // unique split, which is quadratic — real jq aborts the scan step with
+    // `retry-limit-in-match` and `set -e` fails the whole job (#9940
+    // review, round 31 reverse audit). The trailing run therefore starts
+    // at a LINE BREAK.
+    expect(shape).toMatch(/\(\[\\r\\n\]\[ \\t\\r\\n\]\*\)\?\$$/);
+    expect(shape).not.toContain('\\s');
     expect(shape).not.toContain('\\\\');
     expect(reviewScanStep).not.toContain("FIXED_RULING_FILTER='");
     const program = reviewScanStep.match(
@@ -9946,6 +9962,64 @@ exit 1
         },
       ]),
     ).toBe('1');
+    // …and a comment that quotes the whole note on its first line and
+    // states its finding underneath is a finding, not a note: anchoring
+    // the LINE dropped that comment wholesale, the live Critical with it
+    // (#9940 review, round 31).
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          body: `R1-2 fixed by x ${marker}\n\n**[Critical]** R3-4: the census drops this whole comment`,
+        },
+      ]),
+    ).toBe('1');
+    // The tail after the marker is the CANONICAL footer, not "any italic
+    // line": a comment whose own second paragraph is italic prose is a
+    // finding, and a permissive tail read it as a note (#9940 review,
+    // round 31 reverse audit).
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          body: `R1-2 fixed by x ${marker}\n\n_— **[Critical]** R3-4: the auth check is still missing_`,
+        },
+      ]),
+    ).toBe('1');
+    // …and the same body under a long run of horizontal whitespace still
+    // COUNTS, in bounded time. jq aborts a quadratic match rather than
+    // returning false, and the scan step runs under `set -e`, so the
+    // overlap cost the whole census, not one row (#9940 review, round 31
+    // reverse audit).
+    for (const pad of [' '.repeat(20000), '\t'.repeat(20000)]) {
+      const t0 = Date.now();
+      expect(
+        run([{ ...after, ...bot, body: `R1-2 fixed by x ${marker}${pad}x` }]),
+      ).toBe('1');
+      expect(Date.now() - t0).toBeLessThan(10000);
+    }
+    // Real jq, real Oniguruma: `\s` is not the same set in the two engines
+    // — it matches U+0085 here and not in JS, and U+00A0/U+FEFF in JS and
+    // not here — so the shape spells its whitespace out. Each of these
+    // must COUNT: dropping a comment the TypeScript side counts is the
+    // direction that loses a finding (#9940 review, round 31 reverse
+    // audit).
+    for (const tail of ['\u0085', '\u00a0', '\ufeff']) {
+      expect(
+        run([{ ...after, ...bot, body: `R1-2 fixed by x ${marker}${tail}` }]),
+      ).toBe('1');
+      expect(
+        run([
+          {
+            ...after,
+            ...bot,
+            body: `R1-2 fixed by x ${marker}\n${tail}_— m via Qwen Code /review (v1)_`,
+          },
+        ]),
+      ).toBe('1');
+    }
     // Every other reply and root keeps counting: a carried re-post, a
     // bot reply in prose, a human reply, a human quoting the shape.
     expect(

@@ -1180,7 +1180,13 @@ export function floorEnforcedReroute(
     // id) — the record says so in front, so the collapsed title cannot
     // lead with an id token the other readers never read (#9940 review,
     // round 28).
-    const quotedCode = claim === '' && first.trim() !== '';
+    // Decided on the same projection the TITLE is built from, not on the
+    // first PHYSICAL line: `collapseToLine` drops trim-empty segments, so
+    // a body whose first line is only an NBSP or a BOM put no prefix in
+    // front and let the NEXT line's ledger id lead the title — a title
+    // claiming an id the claim-line read cannot see, which the repost
+    // join then refuses the whole post over (#9940 review, round 31).
+    const quotedCode = claim === '' && stripped.trim() !== '';
     const record = quotedCode
       ? `(quoted code) ${first.trim()}`
       : critical
@@ -3514,9 +3520,15 @@ function collapseEntry(entry: string): string {
   // Trimmed on the one-line shape too: an entry indented four columns
   // renders as code inside its list item, and every id reader takes the
   // id off the trimmed text (#9940 review, round 28).
-  return entry.includes('\n')
+  // Every line ending, not just LF: `ingestEntryList` normalises `\r\n?`
+  // before calling this, but the disclosure channel does not, and a lone
+  // interior CR that survived the fold reached the per-line escape as TWO
+  // lines — where a backtick on each paired into a span the renderer never
+  // forms and the tag between them went out live (#9940 review, round 31
+  // reverse audit). `trim()` does not touch an interior CR.
+  return /[\r\n]/.test(entry)
     ? entry
-        .split('\n')
+        .split(/\r\n?|\n/)
         .map((seg) => seg.trim())
         .filter((seg) => seg !== '')
         .join(' ')
@@ -3650,129 +3662,770 @@ export const DOWNGRADE_REASONS_TOTAL_MAX_CHARS = 2000;
  * span cap that strip enforces.
  */
 export function escapeTagOpeners(text: string): string {
-  // Code spans by CommonMark 6.1: a MAXIMAL backtick run opens a span that
-  // the next run of exactly the same length closes; a run with no equal
-  // closer is literal text. A regex that let the opener shrink inside its
-  // run paired a 4-run opener with a 3-run closer — a span CommonMark
-  // never forms — and returned the tag openers inside it unescaped (#9940
-  // review, round 28).
-  // Linear: the closer for a run is looked up in the runs OF ITS LENGTH
-  // (one sorted list per length, a cursor per list), and the spans are
-  // walked with one cursor while the text is scanned — a per-run search
-  // from the start and a per-`<` span scan were quadratic (#9940 review,
-  // audit 7).
-  // …and BLOCK-SCOPED: CommonMark parses inlines per block and a blank
-  // line ends one, so a run can never pair with a closer past it. Pairing
-  // over the whole string invented a span across the blank line and left
-  // the tag opener inside that phantom span live — reachable through the
-  // `Not reviewed:` disclosures, the one escaped channel whose entries
-  // are verbatim model prose that no collapse folds to a single line
-  // (#9940 review, round 30). Boundaries are collected in the same single
-  // pass the runs are, and pairing stays per-length with one cursor each.
-  // A FENCED code block is a block, not a span: its `<` is already inert,
-  // its backticks are not span delimiters, and a blank line inside it does
-  // NOT end it. Masked in one line-wise pass before the run scan —
-  // escaping inside a fence corrupted the display (a code block does not
-  // decode entities, so the reader saw a literal `&lt;`) for no safety
-  // gain (#9940 review, round 30 reverse audit).
-  const fenced: Array<[number, number]> = [];
-  {
-    let open: { char: string; len: number; start: number } | null = null;
-    let pos = 0;
-    for (const line of text.split(/(?<=\n)/)) {
-      const m = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-      if (open === null) {
-        // A backtick fence's info string may not contain a backtick.
-        if (m && !(m[1]![0] === '`' && line.slice(m[0].length).includes('`'))) {
-          open = { char: m[1]![0]!, len: m[1]!.length, start: pos };
-        }
-      } else if (
-        m &&
-        m[1]![0] === open.char &&
-        m[1]!.length >= open.len &&
-        line.slice(m[0].length).trim() === ''
-      ) {
-        fenced.push([open.start, pos + line.length]);
-        open = null;
-      }
-      pos += line.length;
-    }
-    if (open !== null) fenced.push([open.start, text.length]);
+  // ONE LINE AT A TIME, and that is the whole model. Every channel that
+  // reaches here is a single line by construction — `ingestEntryList`
+  // folds the entry channels, compose refuses a line break in `by`, the
+  // downgrade reasons are `\s+`-normalised, and the `Not reviewed:`
+  // disclosures are folded at their own call site — so there is no block
+  // structure left to model: no fence, no indented block, no HTML block
+  // interrupting a paragraph, no lazy continuation. Four review rounds
+  // were spent on hand-built and parser-built models of exactly those,
+  // each closing one hole and opening the next; a line is the unit the
+  // rule below can decide exactly (#9940 review, round 31 reverse audit).
+  //
+  // The channels are folded at four sites, not one: `ingestEntryList` for
+  // the entry channels, the `\s+` normalisation for downgrade reasons,
+  // `collapseEntry` for the `Not reviewed:` disclosures, and
+  // `scriptLintGate`'s own push — that last one joins `bodyCriticals`
+  // after `ingestEntryList` has run, so the shared fold never sees it.
+  // Per-line is NOT a conservative fallback — it is the model that the
+  // fold makes correct. Handed a multi-line string anyway it differs from
+  // the renderer in BOTH directions: it pairs backticks the renderer keeps
+  // apart (two paragraphs, a table's cells) and so escapes LESS, and it
+  // refuses to pair across a soft break the renderer honours and so
+  // escapes MORE. The fold at each call site is the invariant; this pass
+  // only relies on it.
+  return text
+    .split(/(\r\n|[\r\n])/)
+    .map((part, i) => (i % 2 === 1 ? part : escapeLine(part)))
+    .join('');
+}
+
+/**
+ * A CommonMark autolink at the start of the slice — URI or e-mail.
+ *
+ * The `{1,31}` is the spec's 2-to-32-character scheme, and it is fidelity
+ * only: an autolink's body admits no `<`, so however this alternative's
+ * end is placed it can never carry a tag opener across. A wrong bound
+ * costs an escape on text that renders as its own characters either way.
+ */
+const AUTOLINK_RE =
+  /^<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>/;
+
+/**
+ * Where a GFM *extended autolink literal* can START — CANDIDATES only. Each
+ * one is then put through the boundary and domain tests cmark-gfm itself
+ * runs, because BOTH directions of a wrong answer leak.
+ *
+ * GFM's "Autolinks (extension)" is not a postprocess — cmark-gfm registers it
+ * as an INLINE construct, so it takes part in the same leftmost-first race as
+ * code spans and raw HTML, and it runs to the next whitespace. Whichever
+ * construct starts EARLIER consumes the other:
+ *
+ *   MEASURED  a `http://x/<details>` b
+ *          -> <p>a <code>http://x/&lt;details&gt;</code> b</p>   (span wins)
+ *   MEASURED  a http://y.test/`<details>` b
+ *          -> <p>a <a href="…%60">http://y.test/`</a><details>` b</p>
+ *             (the URL wins and EATS the opening backtick — the code span
+ *              this pass believed in never forms, and the `<details>` it
+ *              sheltered is a LIVE element)
+ *
+ * …and believing in a link the renderer does NOT form leaks the same way,
+ * because the run then eats a backtick the renderer left as a delimiter and
+ * every later pairing shifts by one:
+ *
+ *   MEASURED  see http://` `<details>` and stop
+ *          -> <p>see http://<code> </code><details>` and stop</p>
+ *             (no domain, so cmark forms no link; the first backtick opens a
+ *              real code span and the `<details>` is a LIVE element)
+ *
+ * The three schemes are cmark's and they are matched case-INSENSITIVELY,
+ * while `www.` is matched case-SENSITIVELY. MEASURED, `z Xy.test/ q`:
+ *   http:// https:// ftp:// HTTP:// FTP:// Http:// fTp://  -> LINK
+ *   www.                                                   -> LINK
+ *   WWW. Www. wWw. ftps:// sftp:// file:// mailto: irc://  -> no link
+ */
+const LINK_CANDIDATE_RE = /(?:[Hh][Tt][Tt][Pp][Ss]?|[Ff][Tt][Pp]):\/\/|www\./g;
+
+/**
+ * What may stand in front of a `www.` literal — cmark-gfm's
+ * `is_valid_www_boundary`, which is a WHITELIST where the scheme form has a
+ * blacklist. MEASURED over 39 preceding characters (`z Xwww.y.test/ q`):
+ * start-of-line, space, tab, `(`, `*`, `_` and `~` allow it; every other
+ * character tested — `)`, `]`, `-`, `.`, `/`, `<`, `>`, a digit and a
+ * non-ASCII letter included — blocks it.
+ */
+const WWW_BOUNDARY = new Set([
+  '',
+  ' ',
+  '\t',
+  '\n',
+  '\v',
+  '\f',
+  '\r',
+  '(',
+  '*',
+  '_',
+  '~',
+]);
+
+/**
+ * Everything CommonMark lets stand in front of a line's CONTENT that the
+ * inline phase never sees — block-quote markers and their indentation.
+ *
+ * Deliberately NOT the whole container grammar: a list marker needs a space
+ * after it, which already puts whitespace in front of the candidate, so
+ * block quotes are the whole of the difference. It also does not model the
+ * four-space indent that makes a line indented CODE, where the inline phase
+ * never runs at all — that direction only escapes MORE, and `trim()` on
+ * every channel puts the shape out of reach anyway.
+ */
+const BLOCKQUOTE_PREFIX_RE = /^ {0,3}(?:>[ \t]?)*$/;
+
+/**
+ * Longest backtick run cmark-gfm will pair — `MAXBACKTICKS` in inlines.c.
+ * MEASURED, `x` + n backticks + `a` + n backticks + `y`: n = 79 and n = 80
+ * form a code span, n = 81 and n = 82 do not.
+ */
+const MAX_BACKTICKS = 80;
+
+/** Every index at which `needle` occurs in `line`, ascending. */
+function occurrences(line: string, needle: string): number[] {
+  const out: number[] = [];
+  for (
+    let k = line.indexOf(needle);
+    k !== -1;
+    k = line.indexOf(needle, k + 1)
+  ) {
+    out.push(k);
   }
-  // One cursor per ascending scan — `fenced` is sorted by construction, and
-  // both callers below walk their positions forward, so a shared `some()`
-  // would have been quadratic in fences × runs.
-  const fenceCursor = (): ((i: number) => boolean) => {
-    let at = 0;
-    return (i: number): boolean => {
-      while (at < fenced.length && fenced[at]![1] <= i) at++;
-      return at < fenced.length && i >= fenced[at]![0];
-    };
-  };
-  const boundaryInFence = fenceCursor();
-  const runInFence = fenceCursor();
-  const runs: Array<{ start: number; end: number; block: number }> = [];
-  const byLength = new Map<number, number[]>();
-  // A lone `\r` is a line ending too — every reader here normalizes them.
-  const boundaries = [...text.matchAll(/(?:\r\n|[\r\n])[ \t]*(?:\r\n|[\r\n])/g)]
-    .map((m) => m.index)
-    .filter((at) => !boundaryInFence(at));
-  let blockAt = 0;
-  for (const m of text.matchAll(/`+/g)) {
-    while (blockAt < boundaries.length && boundaries[blockAt]! < m.index) {
-      blockAt++;
-    }
-    if (runInFence(m.index)) continue;
+  return out;
+}
+
+/**
+ * One line's tag openers made inert, leaving CommonMark code spans, autolinks
+ * and the `<!` constructs that really do hide their content alone.
+ *
+ * Two rules make the model self-consistent, and every arm below is written to
+ * keep them:
+ *
+ *  1. A construct is skipped exactly as far as the RENDERER carries it raw —
+ *     and the part of that raw span the HTML parser stops hiding is RAW TEXT,
+ *     where no backtick is a delimiter and every `<X` is live.
+ *  2. Whether a construct forms is decided by cmark-gfm's own grammar, not by
+ *     an approximation of it. Guessing wrong in EITHER direction leaks: a
+ *     construct wrongly skipped hides a live tag, and a construct wrongly
+ *     REFUSED hands its backticks back to the delimiter pool, where they
+ *     re-pair and shelter one (#9940 round 11 F1/F6).
+ *
+ * Code spans are cmark-gfm's ACTUAL algorithm, not CommonMark 6.1. The spec
+ * says a maximal run opens a span the next run of the same length closes;
+ * cmark's `scan_to_closing_backticks` additionally carries a memo
+ * (`subj->backticks[len]` plus `subj->scanned_for_backticks`) that a
+ * SUCCESSFUL scan overwrites, so a later opener of the same length can
+ * wrongly conclude there is no closer and stay literal. The spans cmark forms
+ * are therefore a strict SUBSET of the spec's, and a span this pass believes
+ * in but the renderer does not shelters a live tag:
+ *
+ *   MEASURED  a ``b` `c`<summary>` here
+ *          -> <p>a ``b<code> </code>c`<summary>` here</p>   LIVE <summary>
+ *   MEASURED  a `b` `c`<summary>` here                      (control)
+ *          -> <p>a <code>b</code> <code>c</code>&lt;summary&gt;` here</p>
+ *
+ * The leading UNMATCHED run is what arms it: its scan runs to end-of-subject,
+ * which sets `scanned_for_backticks`; the next scan succeeds and rewrites
+ * `backticks[1]` to ITS closer; the opener after that sees a memo entry at or
+ * before its own position and returns "no closer" (#9940 round 11 F9).
+ * MEASURED confirmations of each half:
+ *   'a ``b`` `c`d` e' -> two spans  (the len-2 opener SUCCEEDS, so its scan
+ *                                    never reaches EOF and the memo is not
+ *                                    armed)
+ *   'a `` `c`d` e'    -> one span   (armed, then one success, then literal)
+ * The whole model was differentialled against cmark-gfm over 32,800 generated
+ * backtick lines: 0 mismatches in which letters land inside a `<code>`.
+ *
+ * Backslash escapes run BEFORE the code-span rule and take exactly one
+ * backtick, so an opener is the `n - 1` that is left (and opens nothing at
+ * `n = 1`) — but a CLOSER and the memo use the RAW run length, because the
+ * scan is a raw character walk that knows nothing about backslashes.
+ * MEASURED, not assumed:
+ *   'x \``a`` y'  -> '<p>x ``a`` y</p>'            opener shrank 2 -> 1
+ *   'x \``a` y'   -> '<p>x `<code>a</code> y</p>'  …and paired with a len-1
+ *   'x \`a` y'    -> '<p>x `a` y</p>'              n = 1 opens nothing
+ *   'x \\`a` y'   -> '<p>x \<code>a</code> y</p>'  even run: full length
+ *   'x `a\`` y'   -> '<p>x `a`` y</p>'             CLOSER used raw length 2
+ *   'x ``a\`` y'  -> '<p>x <code>a\</code> y</p>'  …and closed a len-2 opener
+ *
+ * ONE left-to-right pass, which IS the precedence rule: code spans, autolinks,
+ * raw HTML and GFM autolink literals are resolved leftmost-first, so at each
+ * step the construct that starts earlier consumes the others.
+ *
+ * Linear: the CDATA scanner and the link-destination regions are one backward
+ * pass each, the comment scanner walks disjoint regions plus at most one
+ * failing scan (the first failure poisons the family), the code-span memo
+ * walks each run O(1) times amortised, `<`/link-start positions are scanned
+ * once, and the remaining terminators are read through monotone cursors.
+ */
+function escapeLine(line: string): string {
+  // A `<!` at the START of a line's CONTENT opens a CommonMark HTML BLOCK —
+  // type 2 (`<!--`), type 4 (`<!` + a letter) and type 5 (`<![CDATA[`) — and a
+  // block is passed through RAW, so the code span and the backslash escape
+  // this pass reads to decide an opener is inert DO NOT EXIST there. Escaping
+  // the `<` makes the line ordinary text and the rest is rescanned as inline.
+  // "Line content" is after the container prefixes, which is why the test is
+  // on the characters before the `<`: block-quote markers, list markers and
+  // whitespace are the only things CommonMark lets stand there. Only the
+  // FIRST `<!` can qualify — a later one has a `<` in front of it — and the
+  // remainder handed to the recursion starts with `!`, which fails this class,
+  // so the recursion is at most two deep (#9940 review, round 31).
+  // UNCHANGED by rounds 10 and 11, and re-verified: 13 container prefixes over
+  // four fuzz corpora leaked nothing through cmark-gfm + parse5.
+  // The BOM is in the allowed prefix set because cmark strips one at
+  // DOCUMENT position 0, which turns a line-leading `<!` behind it into an
+  // HTML block while a raw read sees it mid-line. Everywhere else the BOM
+  // is ordinary text and this only escapes more, which is free (#9940
+  // review, round 31 reverse audit).
+  const bang = line.indexOf('<!');
+  if (bang !== -1 && !/[^\uFEFF \t>*+\-.)0-9]/.test(line.slice(0, bang))) {
+    return `${line.slice(0, bang)}&lt;${escapeLine(line.slice(bang + 1))}`;
+  }
+
+  // ---- one linear pass to collect every scan event -------------------------
+  const runs: Array<{
+    start: number;
+    end: number;
+    len: number;
+    opens: number;
+  }> = [];
+  for (const m of line.matchAll(/`+/g)) {
+    let slashes = 0;
+    while (line[m.index - 1 - slashes] === '\\') slashes += 1;
     const len = m[0].length;
-    const list = byLength.get(len) ?? [];
-    list.push(runs.length);
-    byLength.set(len, list);
-    runs.push({ start: m.index, end: m.index + len, block: blockAt });
+    runs.push({
+      start: m.index,
+      end: m.index + len,
+      len,
+      opens: slashes % 2 === 1 ? len - 1 : len,
+    });
   }
-  const cursor = new Map<number, number>();
-  const spans: Array<[number, number]> = [];
-  for (let i = 0; i < runs.length; i++) {
-    const len = runs[i]!.end - runs[i]!.start;
-    const list = byLength.get(len)!;
-    let at = cursor.get(len) ?? 0;
-    while (at < list.length && list[at]! <= i) at++;
-    cursor.set(len, at);
-    if (at >= list.length) continue;
-    const j = list[at]!;
-    // A closer in a later block is no closer at all — and no later run of
-    // this length can be in an EARLIER block, so the cursor still only
-    // moves forward.
-    if (runs[j]!.block !== runs[i]!.block) continue;
-    spans.push([runs[i]!.start, runs[j]!.end]);
-    i = j;
-  }
-  // Fences join the spans as protected ranges: a run inside one never
-  // paired, so the two lists cannot overlap and merge in order.
-  const protectedRanges = [...spans, ...fenced].sort((a, b) => a[0] - b[0]);
-  let span = 0;
-  const inSpan = (i: number): boolean => {
-    while (span < protectedRanges.length && protectedRanges[span]![1] <= i) {
-      span++;
+  const angles = occurrences(line, '<');
+  const commentEnds = occurrences(line, '-->');
+  const bangCloses = occurrences(line, '--!>');
+  const gts = occurrences(line, '>');
+
+  // A CommonMark inline link's DESTINATION is scanned as RAW characters at the
+  // `]`, so a backtick run inside `](…)` is not a delimiter — the last
+  // backtick-eating construct this walk does not otherwise resolve. MEASURED:
+  //   '[](``)<summary>``' -> <p><a href="%60%60"></a><summary>``</p>
+  //                          the destination ate the first run, the second is
+  //                          literal, and the <summary> is a LIVE element.
+  // Rather than parse link syntax, a span whose OPENER starts inside a
+  // permissive `](` … `)`-or-whitespace region is not allowed to SHELTER a tag
+  // opener: the span is still walked and the code-span memo still advances
+  // exactly as cmark's does, only the openers inside it are escaped. Both
+  // readings are then inert, at the cost of a literal `&lt;` inside a code
+  // span in the rare case the destination did not in fact eat the run.
+  // ONE backward pass gives every region's end, because scanning forward from
+  // each `](` is QUADRATIC on `[x](a[x](a…`, which has neither a `)` nor a
+  // space to stop at.
+  const destish: Array<[number, number]> = [];
+  if (line.includes('](')) {
+    const stopAt = new Int32Array(line.length + 1);
+    stopAt[line.length] = line.length;
+    for (let p = line.length - 1; p >= 0; p -= 1) {
+      // The same four characters, for the same reason: CommonMark ends an
+      // unbracketed destination at an ASCII space or control, and `\s`
+      // cut it short at U+3000 and U+FEFF, so a span opener the
+      // destination really ate was read as a real span.
+      const c = line[p]!;
+      stopAt[p] =
+        c === ')' || c === ' ' || c === '\t' || c === '\n' || c === '\r'
+          ? p
+          : stopAt[p + 1]!;
     }
-    return span < protectedRanges.length && i >= protectedRanges[span]![0];
+    for (let p = line.indexOf(']('); p !== -1; p = line.indexOf('](', p + 1)) {
+      destish.push([p + 2, stopAt[Math.min(p + 2, line.length)]!]);
+    }
+  }
+  // Region starts and ends are both non-decreasing and the walk asks in
+  // ascending order, so one cursor answers in O(1).
+  let destAt = 0;
+  /** End of the `](…)` region holding `k`, or -1 when `k` is in none. */
+  const destishEnd = (k: number): number => {
+    while (destAt < destish.length && destish[destAt]![1] <= k) destAt += 1;
+    return destAt < destish.length && destish[destAt]![0] <= k
+      ? destish[destAt]![1]
+      : -1;
   };
-  const autolink =
-    /^<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>/;
+
+  // Built once per line, and only when a candidate reaches the domain test.
+  // `runEnd[k]` ends the maximal domain-character run at `k`; `prevDot` and
+  // `prevUnderscore` are the nearest such character at or before `k`.
+  let domainIndex: {
+    runEnd: Int32Array;
+    prevDot: Int32Array;
+    prevUnderscore: Int32Array;
+  } | null = null;
+  const buildDomainIndex = () => {
+    const n = line.length;
+    const runEnd = new Int32Array(n + 1);
+    const prevDot = new Int32Array(n + 1).fill(-1);
+    const prevUnderscore = new Int32Array(n + 1).fill(-1);
+    runEnd[n] = n;
+    for (let k = n - 1; k >= 0; k -= 1) {
+      runEnd[k] = /[A-Za-z0-9_.-]/.test(line[k]!) ? runEnd[k + 1]! : k;
+    }
+    let dot = -1;
+    let underscore = -1;
+    for (let k = 0; k < n; k += 1) {
+      if (line[k] === '.') dot = k;
+      else if (line[k] === '_') underscore = k;
+      prevDot[k] = dot;
+      prevUnderscore[k] = underscore;
+    }
+    return { runEnd, prevDot, prevUnderscore };
+  };
+  const linkStarts: number[] = [];
+  for (const m of line.matchAll(LINK_CANDIDATE_RE)) {
+    const www = line[m.index] === 'w';
+    // cmark's boundary test, per entry point. MEASURED over 39 preceding
+    // characters: only an ASCII letter blocks a scheme literal
+    // (`z ahttp://y.test/ q` -> no link); a digit, `]`, `)`, `-`, `.` and a
+    // non-ASCII letter all allow it. An unmatched `[` blocks it too, but that
+    // is a STACK, not a character — see `brackets` in the walk.
+    // …and the character it looks at is the one before the line's CONTENT,
+    // not before the raw line: the block phase strips block-quote markers
+    // before the inline phase runs, so `>www.z.test/p` links while
+    // `-www.z.test/p` does not. MEASURED: `>`, `>>`, `> >`, `   >` and
+    // `>\twww.` all link, and `>-` does not. Four spaces make the line
+    // indented CODE, where cmark runs no inline phase at all and this test
+    // therefore over-escapes — the safe direction, and unreachable once
+    // every channel has trimmed (#9940 review, round 31 reverse audit).
+    const pre = BLOCKQUOTE_PREFIX_RE.test(line.slice(0, m.index))
+      ? ''
+      : (line[m.index - 1] ?? '');
+    if (www ? !WWW_BOUNDARY.has(pre) : /[A-Za-z]/.test(pre)) continue;
+    // cmark-gfm's `check_domain`. MEASURED after `http://`: the first
+    // character must be ALPHANUMERIC (`a` and `1` link; `-`, `_`, `.`, `%`
+    // and every other punctuation do not), the domain then runs over
+    // `[A-Za-z0-9_.-]` to the first character outside it, and it is refused
+    // when a `_` appears in either of the LAST TWO labels — `a_b.c`,
+    // `a.b.c_d`, `a_.b` and `a._b` do not link, `a_b.c.d` does. The `www.`
+    // form runs the same test over `www.` + the tail, which is why `www.`
+    // alone, `www.-a` and `www..` all link while `www._` does not.
+    const domain = www ? m.index : m.index + m[0].length;
+    if (!/[A-Za-z0-9]/.test(line[domain] ?? '')) continue;
+    // Answered from three prefix/suffix arrays rather than by scanning the
+    // domain per candidate: `www.a_www.a_…` puts a candidate every six
+    // characters, `_` is IN the domain class, and each scan then ran to the
+    // end of the line — quadratic, and it did not finish at 75k (#9940
+    // review, round 31 reverse audit). The last two labels are what the
+    // rule needs, and both are one lookup.
+    if (domainIndex === null) domainIndex = buildDomainIndex();
+    const { runEnd, prevDot, prevUnderscore } = domainIndex;
+    const end = runEnd[domain]!;
+    // The last `.` in the domain run, then the one before it: the labels
+    // the rule looks at are `(lastDot, end)` and `(prevDot, lastDot)`.
+    const lastDot = end > domain ? prevDot[end - 1]! : -1;
+    const inLast = lastDot >= domain ? lastDot : domain - 1;
+    if (end > domain && prevUnderscore[end - 1]! > inLast) continue;
+    if (lastDot >= domain) {
+      const before = lastDot > domain ? prevDot[lastDot - 1]! : -1;
+      const inPrev = before >= domain ? before : domain - 1;
+      if (lastDot > domain && prevUnderscore[lastDot - 1]! > inPrev) continue;
+    }
+    linkStarts.push(m.index);
+  }
+
+  // Monotone cursors: `skipsFrom` is only ever called with `i` ascending, and
+  // each `from` derives from `i`, so every cursor advances at most `line`
+  // length times over the whole pass.
+  const cursors = [0, 0, 0];
+  const firstAt = (which: number, list: number[], from: number): number => {
+    let at = cursors[which]!;
+    while (at < list.length && list[at]! < from) at += 1;
+    cursors[which] = at;
+    return at < list.length ? list[at]! : -1;
+  };
+
+  // cmark-gfm's CDATA scanner is
+  //   "<![CDATA[" ( [^\]] | "]" [^\]] | "]]" [^>] )* "]]>"
+  // and it is modelled EXACTLY, as one backward pass: `cdataFrom(k)` is the
+  // index just past the `]]>` the scanner reaches from `k`, or -1. "Is there a
+  // `]]>` anywhere later" is a DIFFERENT predicate — it accepts two thirds of
+  // all trailing-`]` counts cmark refuses, and the escape then skips a section
+  // the renderer never formed. MEASURED, `<![CDATA[a` + k x `]` + `>`:
+  //   k= 2 forms  k= 3 no  k= 4 no  k= 5 forms  k= 6 no  k= 7 no
+  //   k= 8 forms  k= 9 no  k=10 no  k=11 forms               (k ≡ 2 mod 3)
+  //   the fixture <![CDATA[<details>arr[0]]]> is mis-parsed
+  //     -> <p>the fixture &lt;![CDATA[<details>arr[0]]]&gt; …</p>
+  //        a LIVE <details> that folds the rest of the body away
+  //        (#9940 round 11 F1).
+  // Differentialled against cmark over 10,922 generated sections: 0
+  // mismatches.
+  let cdataReach: Int32Array | null = null;
+  const cdataFrom = (k: number): number => {
+    if (cdataReach === null) {
+      const t = new Int32Array(line.length + 1).fill(-1);
+      for (let p = line.length - 1; p >= 0; p -= 1) {
+        if (line.startsWith(']]>', p)) {
+          t[p] = p + 3;
+        } else if (line[p] === ']') {
+          // `]` [^\]] consumes two characters; `]]` [^>] consumes three.
+          const next = line[p + 1] === ']' ? p + 3 : p + 2;
+          t[p] = next <= line.length ? t[next]! : -1;
+        } else {
+          t[p] = t[p + 1]!;
+        }
+      }
+      cdataReach = t;
+    }
+    return k <= line.length ? cdataReach[k]! : -1;
+  };
+
+  /**
+   * Where cmark-gfm's comment scanner stops, or -1 — the SAME arithmetic the
+   * CDATA scanner has, on dashes instead of brackets.
+   *
+   * The scanner was derived, not read off the spec: over the alphabet
+   * {`-`, `>`, other} its residual language has SIX states, and they are
+   * "length of the dash run just passed, mod 3", with `>` closing the comment
+   * only from a run ≡ 2. MEASURED, `x <!--a` + k x `-` + `>`:
+   *   k=0 no  k=1 no  k=2 COMMENT  k=3 no  k=4 no  k=5 COMMENT
+   *   k=6 no  k=7 no  k=8 COMMENT
+   * and the two abrupt closings are their own alternatives at the very start:
+   *   MEASURED  x <!-->z--> y  -> <p>x <!-->z--&gt; y</p>
+   *   MEASURED  x <!--->z--> y -> <p>x <!--->z--&gt; y</p>
+   * Reading it as "the first `-->` whose text does not end with `-`" refuses
+   * eight strings cmark accepts, and a wrong REFUSAL is not safe here (rule 2
+   * in the header). Derived exhaustively over 21,845 strings: 0 mismatches.
+   */
+  const commentEndFrom = (i: number): number => {
+    if (line.startsWith('<!-->', i)) return i + 5;
+    if (line.startsWith('<!--->', i)) return i + 6;
+    let dashes = 0;
+    for (let k = i + 4; k < line.length; k += 1) {
+      const c = line[k]!;
+      if (c === '-') {
+        dashes += 1;
+      } else if (c === '>' && dashes % 3 === 2) {
+        return k + 1;
+      } else {
+        dashes = 0;
+      }
+    }
+    return -1;
+  };
+
+  // ONE line-wide flag, and ONLY a failed COMMENT sets it. MEASURED, the full
+  // 4 x 4 cross-poisoning matrix:
+  //   a failed comment makes cmark read a later COMMENT, a later `<![CDATA[`
+  //   and a later `<!X ` as literal text too —
+  //     z <!--F <![CDATA[c]]> q -> <p>z &lt;!--F &lt;![CDATA[c]]&gt; q</p>
+  //     z <!--F <!D d> q        -> <p>z &lt;!--F &lt;!D d&gt; q</p>
+  //     x <!--a<!--->           -> <p>x &lt;!--a&lt;!---&gt;</p>
+  //   while a failed CDATA, a failed declaration and a failed processing
+  //   instruction poison NOTHING — all twelve of those pairs stay raw:
+  //     z <![CDATA[x <!--c--> q -> <p>z &lt;![CDATA[x <!--c--> q</p>
+  // Setting the flag on a failed CDATA or declaration as well is the shape
+  // that leaks: the refused construct's backticks rejoin the delimiter pool
+  // and re-pair around a tag (#9940 round 11 F6).
+  let noBangConstruct = false;
+
+  /**
+   * Where a `<` construct this escape LEAVES ALONE stops HIDING, or -1; the
+   * renderer's raw span can run FURTHER, and `rawSpanEnd` says how far.
+   */
+  let rawSpanEnd = -1;
+  const skipsFrom = (i: number): number => {
+    rawSpanEnd = -1;
+    // A backslash-escaped `<` is a literal character: it opens no comment, no
+    // CDATA, no declaration and no autolink, and it is already inert.
+    let slashes = 0;
+    while (line[i - 1 - slashes] === '\\') slashes += 1;
+    if (slashes % 2 === 1) return i + 1;
+
+    // `?` is a legal e-mail local-part character, so `<?x@y.test>` matches the
+    // autolink alternative — but CommonMark reads a line opening `<?` as HTML
+    // block type 3 in the BLOCK phase, before autolinks exist, and an inline
+    // `<?…>` is a raw processing instruction either way. Escaping covers both,
+    // and escaping is also what stops the renderer forming the instruction
+    // whose interior this pass would otherwise have to model.
+    if (line[i + 1] === '?') return -1;
+
+    // Autolinks are tried BEFORE the `<!` family because cmark-gfm's
+    // `handle_pointy_brace` tries them first (URI, then e-mail, then the HTML
+    // scanners). `!` and `-` are legal e-mail local-part characters, so a `<!`
+    // sequence carrying an `@` is an AUTOLINK to the renderer and no comment
+    // forms. MEASURED:
+    //   '`<!--@t><div>-->' -> <p>`<a href="mailto:!--@t">!--@t</a><div>--&gt;</p>
+    //                         the <div> behind it is a LIVE element
+    //   '`<!--a><div>-->'  -> <p>`<!--a><div>--></p>       (no `@`: a comment)
+    const link = AUTOLINK_RE.exec(line.slice(i));
+    if (link !== null) return i + link[0].length;
+
+    if (line.startsWith('<!--', i)) {
+      if (noBangConstruct) return -1;
+      const end = commentEndFrom(i);
+      if (end === -1) {
+        noBangConstruct = true;
+        return -1;
+      }
+      // The RENDERER carries the whole comment raw…
+      rawSpanEnd = end;
+      // …but what the HTML PARSER hides stops at the earlier of the comment's
+      // own close and `--!>` (HTML5 comment-end-bang), and the rest of the raw
+      // span is RAW TEXT that no markdown construct lives in:
+      //   MEASURED  x <!-- a --!> <details> --> y
+      //          -> cmark passes the whole span raw; parse5 closes the comment
+      //             at `--!>` and the <details> is a LIVE element
+      //   MEASURED  x <!-- a --!>` --> <details>` here
+      //          -> the backtick this pass read as a delimiter is raw text to
+      //             the renderer, and the phantom span sheltered a LIVE
+      //             <details> (#9940 round 11 F5)
+      // The HTML5 tokenizer's own comment-end is NOT cmark's: it closes at
+      // the FIRST `--`(`-`*)`>` or `--`(`-`*)`!>`, i.e. at the first `-->` or
+      // `--!>` SUBSTRING, with no mod-3 arithmetic anywhere. MEASURED:
+      //   'c<!-----><details>-->'
+      //     -> cmark carries the WHOLE span raw (the closing dash run is 2),
+      //        parse5 closes the comment at the `>` after `----->`, and the
+      //        <details> behind it is a LIVE element.
+      const htmlEnd = firstAt(0, commentEnds, i + 4);
+      const bangClose = firstAt(1, bangCloses, i + 4);
+      let hide = end;
+      if (htmlEnd !== -1 && htmlEnd + 3 < hide) hide = htmlEnd + 3;
+      if (bangClose !== -1 && bangClose + 4 < hide) hide = bangClose + 4;
+      return hide;
+    }
+
+    if (line.startsWith('<![CDATA[', i)) {
+      const cdataEnd = noBangConstruct ? -1 : cdataFrom(i + 9);
+      if (cdataEnd === -1) {
+        // MEASURED  x <![CDATA[ y <details> z
+        //        -> <p>x &lt;![CDATA[ y <details> z</p>   (NOT a construct,
+        //           and the <details> is live, so -1 and escape it)
+        return -1;
+      }
+      rawSpanEnd = cdataEnd;
+      // What it HIDES ends at the FIRST `>`, not at `]]>`: cmark hands the
+      // whole span to the HTML parser, which closes a BOGUS COMMENT there, and
+      // everything after it is live HTML.
+      //   MEASURED  x <![CDATA[ a > b <details> ]]> y
+      //          -> cmark passes it raw; parse5 yields a LIVE <details>
+      //   MEASURED  x <![CDATA[>`]]><details>` here
+      //          -> the tail's backtick is raw text to the renderer, so the
+      //             span this pass believed in never formed (round 11 F5)
+      // `<![CDATA[` holds no `>`, so a formed section always has one.
+      const gt = firstAt(2, gts, i + 2);
+      return gt === -1 ? cdataEnd : gt + 1;
+    }
+
+    if (/^<![A-Za-z]/.test(line.slice(i, i + 3))) {
+      // cmark-gfm's inline declaration is `<!`, one or more UPPERCASE ASCII
+      // letters, WHITESPACE, `[^>]*`, `>`. Derived exhaustively over 11,110
+      // strings: no disagreement. MEASURED:
+      //   x <!A <div> y   -> declaration (raw)
+      //   x <!A<div> y    -> <p>x &lt;!A<div> y</p>   — NOT a declaration,
+      //                      and the <div> inside is LIVE
+      //   x <!a <div> y   -> <p>x &lt;!a <div> y</p>  — lowercase: NOT one
+      //   x <!A1 <div> y  -> NOT one — the name is [A-Z]+ and nothing else
+      //   x <!AB\t<div> y -> declaration (tab counts as whitespace)
+      if (noBangConstruct || !/^<![A-Z]+[ \t\n\v\f\r]/.test(line.slice(i))) {
+        return -1;
+      }
+      const end = firstAt(2, gts, i + 2);
+      // A declaration's raw span and its hidden span end at the same `>`.
+      return end === -1 ? -1 : end + 1;
+    }
+
+    return -1;
+  };
+
+  // ---- cmark-gfm's code-span scanner ---------------------------------------
+  // `backticks[n]` is the START of the last run of length `n` any scan has
+  // walked over (the closer included); `scannedForBackticks` is set only when
+  // a scan reaches end-of-subject. The early return then reads a stale memo,
+  // which is the whole of F9. `escapeTagOpeners` is applied one LINE at a time
+  // and every channel folds to a line before it, so the line IS the subject
+  // the memo lives on.
+  const backticks = new Int32Array(MAX_BACKTICKS + 1);
+  let scannedForBackticks = false;
+  /** cmark-gfm inlines.c `scan_to_closing_backticks`, over the run array. */
+  const closerFor = (openLen: number, fromRun: number, at: number): number => {
+    if (openLen < 1 || openLen > MAX_BACKTICKS) return -1;
+    if (scannedForBackticks && backticks[openLen]! <= at) return -1;
+    for (let k = fromRun; k < runs.length; k += 1) {
+      const r = runs[k]!;
+      if (r.len <= MAX_BACKTICKS) backticks[r.len] = r.start;
+      if (r.len === openLen) return r.end;
+    }
+    scannedForBackticks = true;
+    return -1;
+  };
+
+  // ---- the leftmost-first walk --------------------------------------------
+  let angle = 0;
+  let linkAt = 0;
   let out = '';
   let at = 0;
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] !== '<' || inSpan(i) || !/[A-Za-z/?]/.test(text[i + 1] ?? '')) {
+  let run = 0;
+  let i = 0;
+  // cmark-gfm suppresses a GFM autolink literal while a link opener is still
+  // unmatched — a STACK, not the preceding character. MEASURED:
+  //   'z [http://y.test/ q'    -> no link    'z [x] http://y.test/ q'  -> LINK
+  //   'z [x http://y.test/ q'  -> no link    'z [x](y) http://…'       -> LINK
+  //   'z [[ http://y.test/ q'  -> no link    'z ] http://y.test/ q'    -> LINK
+  //   'z ![x http://y.test/ q' -> no link    'z \\[x http://y.test/ q' -> LINK
+  //   'z [x www.y.test/ q'     -> no link    'z `[`x http://y.test/ q' -> LINK
+  // Believing in a link cmark does not form steals a backtick from the
+  // delimiter pool and shifts every later pairing, which is how it leaks:
+  //   MEASURED  see [http://y.test/` `<details>` and stop
+  //          -> <p>see [http://y.test/<code> </code><details>` and stop</p>
+  //             a LIVE <details> (#9940 round 11 F8).
+  // Only brackets in ORDINARY TEXT count: one inside a code span, a raw span,
+  // a URL run or behind a backslash never opened anything for cmark either.
+  let brackets = 0;
+  /**
+   * Ordinary text and URL runs: `<` before a tag name, `/` or `?` goes inert.
+   * `<!` is NOT escaped here — `skipsFrom` has already decided the construct
+   * with cmark's own grammar, so a `<!` it refused is one the renderer refuses
+   * too, and both sides then read the characters after it the same way.
+   */
+  const escapeAngleAt = (k: number): void => {
+    if (/[A-Za-z/?]/.test(line[k + 1] ?? '')) {
+      out += line.slice(at, k) + '&lt;';
+      at = k + 1;
+    }
+  };
+  /**
+   * A RAW-TEXT tail — the part of a construct's raw span the HTML parser has
+   * stopped hiding. `<!` IS escaped here: the text reaches the HTML parser
+   * directly, where `<!--` opens a comment that runs to the END OF THE
+   * DOCUMENT and takes every later blocker and the footer with it.
+   *   MEASURED  x <![CDATA[a><!--]]>
+   *          -> <p>x <![CDATA[a><!--]]></p>, and parse5 hides everything
+   *             after it — no leaked ELEMENT at all, so an element scan
+   *             misses it (#9940 round 11 F3).
+   */
+  const escapeRawAngleAt = (k: number): void => {
+    if (/[A-Za-z/?!]/.test(line[k + 1] ?? '')) {
+      out += line.slice(at, k) + '&lt;';
+      at = k + 1;
+    }
+  };
+  const escapeRegion = (
+    from: number,
+    to: number,
+    one: (k: number) => void,
+  ): void => {
+    while (angle < angles.length && angles[angle]! < from) angle += 1;
+    while (angle < angles.length && angles[angle]! < to) {
+      one(angles[angle]!);
+      angle += 1;
+    }
+  };
+  while (i < line.length) {
+    while (run < runs.length && runs[run]!.start < i) run += 1;
+    while (angle < angles.length && angles[angle]! < i) angle += 1;
+    while (linkAt < linkStarts.length && linkStarts[linkAt]! < i) linkAt += 1;
+    const nextRun = run < runs.length ? runs[run]!.start : line.length;
+    const nextAngle = angle < angles.length ? angles[angle]! : line.length;
+    const nextLink =
+      linkAt < linkStarts.length ? linkStarts[linkAt]! : line.length;
+    const next = Math.min(nextRun, nextAngle, nextLink);
+    if (i < next) {
+      // Ordinary text up to the next construct that can start — the only
+      // region whose brackets are link openers.
+      for (let k = i; k < next; k += 1) {
+        const c = line[k]!;
+        if (c !== '[' && c !== ']') continue;
+        let slashes = 0;
+        while (line[k - 1 - slashes] === '\\') slashes += 1;
+        if (slashes % 2 === 1) continue;
+        if (c === '[') brackets += 1;
+        else if (brackets > 0) brackets -= 1;
+      }
+      i = next;
       continue;
     }
-    const link = autolink.exec(text.slice(i));
-    if (link !== null) {
-      i += link[0].length - 1;
+    if (i === nextAngle) {
+      const skipTo = skipsFrom(i);
+      if (skipTo !== -1) {
+        // A construct that STARTS inside a link destination may not exist at
+        // all — the destination is raw characters to the renderer. MEASURED:
+        //   '[](><!--)<summary>-->'
+        //     -> <p><a href="%3E%3C!--"></a><summary>--&gt;</p>
+        //        the destination ate the `<!--`, so no comment forms and the
+        //        <summary> behind it is a LIVE element.
+        // Both readings are covered by capping what the skip may HIDE at the
+        // destination's own end and escaping the rest of the span: under the
+        // link reading everything past the `)` is ordinary text, and under the
+        // comment reading the extra escapes land inside a comment, where they
+        // are invisible either way.
+        const span = rawSpanEnd > skipTo ? rawSpanEnd : skipTo;
+        const dest = destishEnd(i);
+        const hide = dest === -1 ? skipTo : Math.min(skipTo, dest);
+        if (hide < span) escapeRegion(hide, span, escapeRawAngleAt);
+        i = span;
+        continue;
+      }
+      escapeAngleAt(i);
+      i += 1;
       continue;
     }
-    out += text.slice(at, i) + '&lt;';
-    at = i + 1;
+    if (i === nextLink) {
+      if (brackets > 0) {
+        // An unmatched link opener is still on the stack: cmark forms no
+        // literal here, so this is ordinary text and its backticks are
+        // delimiters again.
+        linkAt += 1;
+        continue;
+      }
+      // A GFM autolink literal, consumed to the next WHITESPACE — not to the
+      // next `<`, which is where cmark stops it. Escaping a `<` that ended the
+      // URL turns it into `&lt;`, which is not a `<` any more, so on the
+      // POSTED text the run keeps going and swallows whatever followed —
+      // measured as a live element two escapes later. Consuming to whitespace
+      // and making every opener inside the run inert is the fixpoint: a run
+      // with no `<` in it cannot host a tag, and the reader sees the same
+      // characters either way (`&lt;` decodes to `<` in the link text).
+      //   MEASURED  a http://y.test/\<details> b
+      //          -> <p>a <a href="…%5C">http://y.test/\</a><details> b</p>
+      //             (the URL ate the backslash, so it escaped nothing)
+      // A `<` this pass will NOT escape does still end the run, because on the
+      // posted text it still ends the renderer's link; the text after it is
+      // ordinary inline again and its backticks are delimiters again. `<!` is
+      // escaped INSIDE the run, so a `<!--` there never becomes a construct
+      // for either side — which is how F4 (a `<!--` in a URL run that failed
+      // for cmark and poisoned the line, while this pass never saw it) closes.
+      // It must be escaped rather than left to `skipsFrom`: the URL literal
+      // ate the backslash in front of it, so `skipsFrom` would read
+      // `ftp://y\\<!--<!A <select>` as a backslash-escaped `<` and skip the
+      // poison entirely — MEASURED, a LIVE <select>.
+      // The run ends at the four characters cmark stops on, NOT at `\s`:
+      // MEASURED by sweeping every ASCII code point and fourteen Unicode
+      // spaces through `www.z.test/pX<c>ENDZ q`, the literal stops only at
+      // space, tab, LF, CR and `<`. Reading `\s` cut the run short at
+      // U+000B, U+000C, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029,
+      // U+202F, U+205F, U+3000 and U+FEFF — thirteen characters after which
+      // this pass went back to ordinary inline reading of text cmark is
+      // still carrying as a raw URL, so a backslash it thought made a `<`
+      // inert (the URL ate it) or a backtick pair it thought was a span
+      // (the URL ate the opener) let the tag out LIVE (#9940 review, round
+      // 31 reverse audit).
+      let end = i;
+      while (end < line.length) {
+        const c = line[end]!;
+        if (c === ' ' || c === '\t' || c === '\n' || c === '\r') break;
+        if (c === '<' && !/[A-Za-z/?!]/.test(line[end + 1] ?? '')) break;
+        end += 1;
+      }
+      escapeRegion(i, end, escapeRawAngleAt);
+      i = end;
+      continue;
+    }
+    // A backtick run: it opens a span iff cmark's scanner finds a closer.
+    const r = runs[run]!;
+    const closer = closerFor(r.opens, run + 1, r.end);
+    // A span consumes its content; nothing inside it is escaped — unless the
+    // opener sits in a link destination, where the renderer may never have
+    // formed the span at all (see `destish`).
+    if (closer !== -1 && destishEnd(r.start) !== -1) {
+      escapeRegion(r.end, closer - r.opens, escapeAngleAt);
+    }
+    i = closer === -1 ? r.end : closer;
   }
-  return out + text.slice(at);
+  return out + line.slice(at);
 }
 
 /**
@@ -3920,7 +4573,13 @@ export function ingestFixedFindings(value: unknown): FixedFinding[] {
     // severity marker is machine grammar the reply would post verbatim
     // under attribution on, so it is stripped like every posted body
     // strips it (#9940 review, audit).
-    const prose = by === undefined ? undefined : stripSeverityPrefix(by);
+    // Trimmed FIRST: `severityOf` reads no marker off an indented line —
+    // it is code there — but the cut below takes `prose.trim()` and the
+    // reply builder trims again, so the indentation that made it code is
+    // gone by the time it posts and the marker went out live under
+    // attribution on, which is exactly what this strip exists to stop
+    // (#9940 review, round 31 reverse audit).
+    const prose = by === undefined ? undefined : stripSeverityPrefix(by.trim());
     // `by` becomes the visible half of the reply — a clause that renders
     // as nothing (a bare HTML comment, a Cf run `trim` keeps, a bare
     // marker) posts `R<id> fixed by` with no account of what fixed it, on
@@ -3934,7 +4593,7 @@ export function ingestFixedFindings(value: unknown): FixedFinding[] {
     if (
       prose !== undefined &&
       (prose.trim() === '' ||
-        /[\r\n]/.test(prose) ||
+        /[\r\n\u2028\u2029]/.test(prose) ||
         rendersAsNothingAtExit(prose))
     ) {
       throw new Error(
@@ -6912,13 +7571,21 @@ function composeReviewBody(
   // like `<textarea>`/`<style>`/`<script>` whose content model swallows
   // markup wholesale — left the element open over the blockers, the
   // disclosures and the footer, exactly as it did for `bodyCriticals`
-  // before the escape moved there. Escaped per part, which is the render
-  // unit: a code span cannot cross the blank line between two paragraphs
-  // (#9940 review, round 30 reverse audit).
+  // before the escape moved there (#9940 review, round 30 reverse audit).
+  //
+  // FOLDED FIRST, the way `ingestEntryList` folds every sibling channel.
+  // These parts interpolate model-written names and reasons that reach
+  // them through `toStringList` and `stripCommentGrammar`, neither of
+  // which gates a newline — the ONE multi-line string this escape is ever
+  // handed, and the one every block-structure hole four review rounds
+  // found needed: an HTML block interrupting a paragraph, a fence, an
+  // indented block, a lazy continuation. A disclosure sentence has no use
+  // for a line break, and folding it leaves the escape the single-line
+  // problem it can actually decide (#9940 review, round 31 reverse audit).
   const notReviewedForBody: Bi[] = notReviewedParts.map((p) => ({
     ...p,
-    en: escapeTagOpeners(p.en),
-    zh: escapeTagOpeners(p.zh),
+    en: escapeTagOpeners(collapseEntry(p.en)),
+    zh: escapeTagOpeners(collapseEntry(p.zh)),
     trim: 2,
   }));
 
@@ -7921,8 +8588,18 @@ export function scriptLintGate(planPath: string): {
   for (const file of report.checked ?? []) {
     for (const f of file.findings ?? []) {
       if (f.inDiff && f.level !== 'style') {
+        // Folded HERE. This channel joins `bodyCriticals` AFTER
+        // `ingestEntryList` ran, so it is the one entry channel the shared
+        // fold never sees — and `f.line` and `f.code` are interpolated
+        // raw out of a side file the review agent can rewrite, which
+        // `structurallyValidReport` only checks for plain-objectness. A
+        // fenced block in `f.code` reached the per-line escape as several
+        // lines and had its `<` rendered to the reader as a literal
+        // `&amp;lt;` (#9940 review, round 31 reverse audit).
         criticals.push(
-          `${mdField(file.path)}:${f.line} ${f.code} — ${mdField(f.message)} [lint]`,
+          collapseToLine(
+            `${mdField(file.path)}:${f.line} ${f.code} — ${mdField(f.message)} [lint]`,
+          ),
         );
       }
     }

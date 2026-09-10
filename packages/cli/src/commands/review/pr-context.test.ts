@@ -1423,10 +1423,10 @@ describe('classifyInlineThreads', () => {
     );
     expect(ruled.repliedBlockerRoots).toEqual([]);
     expect(ruled.blockerLeads.size).toBe(0);
-    // …matched by the note's posted SHAPE, anchored: the marker string is
-    // public, and a review of the file that defines it quotes it verbatim
-    // — read as a substring, that Critical demoted itself out of the
-    // mandatory section (#9940 review, round 30).
+    // …matched by the note's posted SHAPE over the WHOLE body: the
+    // marker string is public, and a review of the file that defines it
+    // quotes it verbatim — read as a substring, that Critical demoted
+    // itself out of the mandatory section (#9940 review, round 30).
     const quotingMarker = classifyInlineThreads(
       [
         {
@@ -1438,6 +1438,21 @@ describe('classifyInlineThreads', () => {
       'qwen-bot',
     );
     expect(quotingMarker.openBlockerRoots.map((c) => c.id)).toEqual([711]);
+    // …and a comment that quotes a WHOLE ruling line and then states its
+    // own finding underneath is a finding: anchoring the note's line
+    // alone demoted it out of the mandatory section (#9940 review,
+    // round 31).
+    const quotesThenFinds = classifyInlineThreads(
+      [
+        {
+          id: 741,
+          user: { login: 'qwen-bot' },
+          body: `R1-2 fixed by x ${FIXED_RULING_MARKER}\n\n**[Critical]** R3-4: the auth check is still missing`,
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quotesThenFinds.openBlockerRoots.map((c) => c.id)).toEqual([741]);
     // A reply that quotes a whole ruling line and carries on is a claim,
     // not a note: the shape ends at the marker.
     const quotesWholeLine = classifyInlineThreads(

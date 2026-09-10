@@ -623,6 +623,18 @@ export function stripSeverityPrefix(body: string): string {
   ) {
     return '';
   }
+  // A kept block is returned VERBATIM. A marker on an indented line is
+  // that block's own text — an earlier comment quoted as code, the shape
+  // audit 4 pinned on every projection — and the bytes of a quotation and
+  // of a stacked-then-indented marker are identical, so no predicate here
+  // can tell them apart. What the block cannot be is machine text alone:
+  // one of nothing but severity markers strips to the empty string above,
+  // and one of nothing but comment markers is refused by
+  // `rendersAsNothingAtExit`, which reads comments out. A block mixing the
+  // two — a severity marker beside a quoted comment — is kept by both, and
+  // deliberately: that IS the audit-6 quoted-code shape, and it posts as
+  // an indented code block, which `severityOf` reads no marker off
+  // (#9940 review, round 31).
   return current;
 }
 

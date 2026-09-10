@@ -6547,6 +6547,34 @@ describe('composeReview — fixedFindings', () => {
     expect(() =>
       composeReview(base({ fixedFindings: [{ id: 'R1-2', by: 7 as never }] })),
     ).toThrow(/ONE non-empty line/);
+    // U+2028 and U+2029 are line breaks to the reader that matters: jq's
+    // `[^\n]` admits them, so a `by` carrying one made the census read the
+    // posted note as a note while this side read it as a finding (#9940
+    // review, round 31 reverse audit).
+    for (const brk of ['\u2028', '\u2029']) {
+      expect(() =>
+        composeReview(
+          base({ fixedFindings: [{ id: 'R1-2', by: `one${brk}two` }] }),
+        ),
+      ).toThrow(/ONE non-empty line/);
+    }
+  });
+
+  it('strips a severity marker off a `by` the indentation would have hidden (#9940 review, round 31 reverse audit)', () => {
+    // `severityOf` reads no marker off an indented line — it is code
+    // there — but the cap takes `prose.trim()` and the reply builder trims
+    // again, so the indentation is gone by the time it posts and the
+    // marker went out live under attribution on.
+    for (const lead of ['    ', '\t', ' \t ']) {
+      const r = composeReview(
+        base({
+          fixedFindings: [
+            { id: 'R1-2', by: `${lead}**[Critical]** the auth check` },
+          ],
+        }),
+      );
+      expect(r.fixedFindings).toEqual([{ id: 'R1-2', by: 'the auth check' }]);
+    }
   });
 
   it('refuses a `by` that renders as nothing — the reply must say what fixed it (#9940 review, round 14)', () => {
@@ -6738,6 +6766,140 @@ describe('composeReview — fixedFindings', () => {
     }
   });
 
+  it('refuses a body Critical that opens a CDATA block — the one raw opener the escape leaves alone (#9940 review, round 31 reverse audit)', () => {
+    // `escapeTagOpeners` never touches `<!` by design, and the
+    // renders-as-nothing projection named `<!--`, `<?` and `<!DOCTYPE`
+    // but not `<![CDATA[`, which is HTML block type 5 and — absent its
+    // `]]>` — runs to the end of the document. Under attribution off the
+    // entry is line-leading, so it swallowed every later blocker.
+    for (const attribution of [true, false]) {
+      expect(() =>
+        composeReview(
+          base({
+            bodyCriticals: [
+              '<![CDATA[ blocker one: the auth check is still missing',
+              'blocker two: the token is logged',
+            ],
+          }),
+          '0.21.2',
+          attribution,
+        ),
+      ).toThrow(/renders as nothing/);
+    }
+    // A closed CDATA block is still scaffolding, and the siblings still
+    // refuse.
+    for (const opener of [
+      '<![CDATA[ x ]]>',
+      '<!DOCTYPE html>',
+      '<?php echo 1 ?>',
+      '<!-- x -->',
+    ]) {
+      expect(() => composeReview(base({ bodyCriticals: [opener] }))).toThrow(
+        /renders as nothing/,
+      );
+    }
+  });
+
+  it("a construct's own backticks are not span delimiters — leftmost-first, the way CommonMark resolves them (#9940 review, round 31 reverse audit)", () => {
+    // Code spans, autolinks and raw HTML have the SAME precedence and are
+    // resolved leftmost-first, so a construct that starts earlier consumes
+    // the backtick inside it. Scanning for spans first and for `<` second
+    // read that backtick as a delimiter, and the phantom span sheltered a
+    // live RAWTEXT opener over the rest of the body.
+    for (const [text, escaped] of [
+      ['<ht:`> <textarea> `', '<ht:`> &lt;textarea> `'],
+      ['<a`b@x.test> <textarea> `', '<a`b@x.test> &lt;textarea> `'],
+      // The `<!` family carries the same rule — MID-LINE, where the
+      // construct exists at all. At the start of a line's content the
+      // opener is escaped first (the HTML-block cell below), which
+      // dissolves the construct and hands its backticks back to the span
+      // rule; the renderer agrees, so both readings stay safe.
+      // `<!A` + a backtick is NOT a declaration — cmark-gfm forms one only
+      // for `<!` + UPPERCASE letters + whitespace — so the construct does
+      // not exist, the two backticks pair, and the tag between them is
+      // code. Escaping it wrote a literal `&lt;` into a code span, which a
+      // reader sees verbatim (#9940 review, round 10 reverse audit).
+      ['x <!A`> <textarea> `', 'x <!A`> <textarea> `'],
+      ['x <![CDATA[`]]> <textarea> `', 'x <![CDATA[`]]> &lt;textarea> `'],
+      ['x <!-- ` --> <textarea> `', 'x <!-- ` --> &lt;textarea> `'],
+      [
+        'the retry helper at <http://x.test/`> and <textarea> ` never clears it',
+        'the retry helper at <http://x.test/`> and &lt;textarea> ` never clears it',
+      ],
+      // …and the other direction: a span that starts FIRST consumes the
+      // autolink inside it, and the tag after the span is still escaped.
+      ['`<http://x/` and <b>', '`<http://x/` and &lt;b>'],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // End to end: the second blocker and the footer survive.
+    const r = composeReview(
+      base({
+        bodyCriticals: [
+          'the retry helper at <http://x.test/`> and <textarea> ` never clears it',
+          'the auth check is still missing',
+        ],
+      }),
+    );
+    expect(r.body).toContain('&lt;textarea');
+    expect(r.body).toContain('the auth check is still missing');
+    expect(r.body).toContain('via Qwen Code /review');
+  });
+
+  it('never reads `<?` as an autolink — `?` is a legal e-mail local part, the block rule is not (#9940 review, round 31 reverse audit)', () => {
+    expect(escapeTagOpeners('<?x@y.test> the auth check is missing')).toBe(
+      '&lt;?x@y.test> the auth check is missing',
+    );
+    // A real e-mail autolink is still one.
+    expect(escapeTagOpeners('mail <dev@example.com> now')).toBe(
+      'mail <dev@example.com> now',
+    );
+  });
+
+  it('folds a disclosure part before escaping it — a line ending of ANY kind, or the per-line escape invents a span (#9940 review, round 31 reverse audit)', () => {
+    // `collapseEntry` used to fold on LF only, so a lone interior CR
+    // reached the escape as two lines: a backtick on each paired into a
+    // span the renderer never forms, and the `<details>` between them went
+    // out live over the rest of the body.
+    for (const brk of ['\r', '\n', '\r\n']) {
+      for (const field of ['unreviewedDimensions', 'uncoverableChunks']) {
+        const r = composeReview(
+          {
+            planPath: plan(),
+            modelId: 'm',
+            bodyCriticals: ['a real blocker'],
+            [field]: [`a \` b${brk}c \` <details> \` d`],
+          } as unknown as ComposeReviewInput,
+          '0.21.2',
+          true,
+        );
+        expect(r.body).toContain('&lt;details');
+        expect(r.body).not.toContain('<details');
+        expect(r.body).toContain('a real blocker');
+        expect(r.body).toContain('via Qwen Code /review');
+      }
+    }
+    // The Chinese half interpolates the same model text and is escaped and
+    // folded on the same terms — the fold's own `<details>` is the only
+    // raw one the bilingual body may carry.
+    for (const brk of ['\r', '\n']) {
+      const bi = composeReview(
+        {
+          planPath: plan({ han: true }),
+          modelId: 'm',
+          bodyCriticals: ['a real blocker'],
+          unreviewedDimensions: [`a \` b${brk}c \` <textarea> \` d`],
+        } as unknown as ComposeReviewInput,
+        '0.21.2',
+        true,
+      );
+      expect(bi.body).toContain('<details>\n<summary>中文说明</summary>');
+      expect(bi.body).toContain('&lt;textarea');
+      expect(bi.body).not.toContain('<textarea');
+      expect((bi.body.match(/<details>/g) ?? []).length).toBe(1);
+    }
+  });
+
   it('escapeTagOpeners — tag openers go inert; code spans, autolinks, comparisons and comment grammar stay (#9940 review, audit 5 and 6)', () => {
     for (const [text, escaped] of [
       ['see <details>x</details> here', 'see &lt;details>x&lt;/details> here'],
@@ -6772,54 +6934,505 @@ describe('composeReview — fixedFindings', () => {
       '` '.repeat(50000),
       '`<a`x` '.repeat(14000),
       '``'.concat('`x`'.repeat(30000)),
+      // 800k unpaired runs: ~0.2 s scanning the `<` positions once,
+      // ~8 s re-scanning to the end of the line per run (#9940 review,
+      // round 31 reverse audit measured 1.9 s at half this length).
+      '` '.repeat(800000),
+      '<a '.concat('` '.repeat(800000)),
+      // The unterminated-opener shapes the `skipsFrom` memo exists for: a
+      // per-opener search ran to the end of the line each time, and the
+      // backtick corpus above never touches it (measured 4 minutes on the
+      // first of these without the memo, #9940 review, round 31 reverse
+      // audit).
+      '<!--'.repeat(200000),
+      '<![CDATA['.repeat(100000),
+      '<!A'.repeat(200000),
     ]) {
       const t0 = performance.now();
       escapeTagOpeners(text);
-      expect(performance.now() - t0).toBeLessThan(2000);
+      // The duration IS the property here, so it keeps asserting on the
+      // shared pool at a multiple that a quadratic regression still
+      // overruns (measured 0.18 s linear against 7.6 s quadratic).
+      expectWithinLatencyBudget(performance.now() - t0, 2000, {
+        poolMultiplier: 20,
+      });
     }
-    // A code span cannot cross a blank line — CommonMark parses inlines
-    // per block — so the two runs below never pair and the opener between
-    // them is live text the escape owes an `&lt;` (#9940 review, round
-    // 30). Reachable through the `Not reviewed:` disclosures, whose
-    // entries are verbatim model prose no collapse folds to one line.
-    expect(escapeTagOpeners('`<details>\n\nfoo` bar')).toBe(
-      '`&lt;details>\n\nfoo` bar',
+    // The transform is ONE LINE AT A TIME — every channel folds to a line
+    // before it gets here (`ingestEntryList` for the entry channels, the
+    // `\s+` normalisation for downgrade reasons, `collapseEntry` for the
+    // `Not reviewed:` disclosures, compose's refusal of a line break in
+    // `by`), so there is no block structure to model and none is
+    // modelled. Per-line is NOT a safe fallback for a multi-line string —
+    // it PAIRS backticks the renderer keeps apart and so escapes LESS (the
+    // fold cell above is exactly that shape letting a `<details>` out).
+    // The rows below are the shapes where the second line's runs do not
+    // pair, which is why escaping still happens in them (#9940 review,
+    // round 31 reverse audit).
+    for (const [text, escaped] of [
+      ['`<details>\n\nfoo` bar', '`&lt;details>\n\nfoo` bar'],
+      ['`<details>\nfoo` bar', '`&lt;details>\nfoo` bar'],
+      ['`<details>\r\rfoo` bar', '`&lt;details>\r\rfoo` bar'],
+      ['- a ` b\n- c <textarea> ` d', '- a ` b\n- c &lt;textarea> ` d'],
+      ['# h ` x\np <details> ` q', '# h ` x\np &lt;details> ` q'],
+      [
+        'The `foo callback returns early.\n<details> and `bar` too\n\nrest',
+        'The `foo callback returns early.\n&lt;details> and `bar` too\n\nrest',
+      ],
+      ['`\n<details>`', '`\n&lt;details>`'],
+      ['<?x ?>\n\t<details> tail', '&lt;?x ?>\n\t&lt;details> tail'],
+      ['x\n\n    <indented>\n\ny <z>', 'x\n\n    &lt;indented>\n\ny &lt;z>'],
+      // The line terminators themselves are preserved exactly.
+      ['a <b>\r\nc <d>\re <f>\ng', 'a &lt;b>\r\nc &lt;d>\re &lt;f>\ng'],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // Backslash escapes run BEFORE the code-span rule and take exactly one
+    // backtick: the run OPENS as the `n - 1` left over (nothing at n = 1)
+    // and CLOSES at its full `n`, because escapes do not work inside a
+    // span. Skipping such a run outright let an opener reach past it;
+    // treating it as ordinary made a span CommonMark ends earlier — both
+    // sheltered a live element (#9940 review, round 31 reverse audits).
+    for (const [text, escaped] of [
+      ['`foo\\`bar<details>`', '`foo\\`bar&lt;details>`'],
+      [
+        'The literal is `a\\`b<details>` — note the backslash.',
+        'The literal is `a\\`b&lt;details>` — note the backslash.',
+      ],
+      ['\\``x`y``<details>`', '\\``x`y``&lt;details>`'],
+      ['a \\\\`<b>` c', 'a \\\\`<b>` c'],
+      [
+        'write \\` then <textarea> then ` here',
+        'write \\` then &lt;textarea> then ` here',
+      ],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // A `<!` at the START of a line's CONTENT opens a CommonMark HTML
+    // BLOCK — type 2 (`<!--`), type 4 (`<!` + a letter), type 5
+    // (`<![CDATA[`) — and a block is passed through RAW: the inline phase
+    // never runs inside it, so the code span and the backslash escape
+    // this pass reads to decide an opener is inert are not there. A body
+    // Critical posted under `review.attribution: false` IS a top-level
+    // line, and `formatCannotTell`/the duplicate list put their text at a
+    // list item's content start, so all three channels could open one
+    // (#9940 review, round 31 reverse audit). Every other block opener is
+    // a `<` whose next character this pass already escapes.
+    for (const [text, escaped] of [
+      ['<!D> y `<details>` z', '&lt;!D> y `<details>` z'],
+      ['<!D> y \\<details> z', '&lt;!D> y \\<details> z'],
+      ['<!DOCTYPE html> `<details>` x', '&lt;!DOCTYPE html> `<details>` x'],
+      ['<![CDATA[]]>`<details>`', '&lt;![CDATA[]]>`<details>`'],
+      ['<!A`> <textarea> `', '&lt;!A`> <textarea> `'],
+      ['<![CDATA[`]]> <textarea> `', '&lt;![CDATA[`]]> <textarea> `'],
+      ['<!-- ` --> <textarea> `', '&lt;!-- ` --> <textarea> `'],
+      // The rest of the line is RESCANNED — the arm escapes one `<` and
+      // hands the remainder back to the inline pass. Returning the
+      // remainder unscanned left every later opener live, and every other
+      // row here has an already-inert tail, so this is the row that says
+      // the recursion happens (#9940 review, round 31 reverse audit).
+      ['<!D> y <details> z', '&lt;!D> y &lt;details> z'],
+      [
+        '<!DOCTYPE html> and <textarea> then prose',
+        '&lt;!DOCTYPE html> and &lt;textarea> then prose',
+      ],
+      // cmark strips a BOM at DOCUMENT position 0, which turns a `<!`
+      // behind it into a line-leading HTML block while a raw read sees it
+      // mid-line. Escaping it costs nothing anywhere else.
+      [
+        '\ufeff<!ENTITY <details> is open',
+        '\ufeff&lt;!ENTITY &lt;details> is open',
+      ],
+      // Container prefixes are part of the line, not of its content.
+      ['  - <!D> y `<details>` z', '  - &lt;!D> y `<details>` z'],
+      ['> <!D> `<details>` q', '> &lt;!D> `<details>` q'],
+      ['1. <!D> `<details>` q', '1. &lt;!D> `<details>` q'],
+      ['> - <!D> `<details>` q', '> - &lt;!D> `<details>` q'],
+      // …and a prefix drawn from anything else means the `<!` is mid-line
+      // and opens no block, so the construct stands and its own backticks
+      // are not delimiters.
+      ['x <!D> y `<details>` z', 'x <!D> y `<details>` z'],
+      [
+        '**[Critical]** <!D> y `<details>` z',
+        '**[Critical]** <!D> y `<details>` z',
+      ],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // A `<!` construct that never terminates ON THIS LINE is not a
+    // construct: CommonMark leaves the text as text, so what follows it is
+    // LIVE. Skipping to the end of the line on the strength of an opener
+    // alone let a `<details>` out of four channels at once — both Critical
+    // lists, the duplicate-drop list and a ruling note's `by` (#9940
+    // review, round 31 reverse audit).
+    for (const [text, escaped] of [
+      ['x <![CDATA[ y <details> z', 'x <![CDATA[ y &lt;details> z'],
+      ['x <!-- y <details> z', 'x <!-- y &lt;details> z'],
+      ['x <!A y <details z', 'x <!A y &lt;details z'],
+      // Terminated, so the construct really does consume the opener: a
+      // declaration ends at the FIRST `>`, which is `<details>`'s own.
+      ['x <!A y <details> z', 'x <!A y <details> z'],
+      ['x <![CDATA[ y ]]> <details> z', 'x <![CDATA[ y ]]> &lt;details> z'],
+      ['x <!--<details>--> <b>', 'x <!--<details>--> &lt;b>'],
+      // `<!-->` and `<!--->` close on their own dashes, so the search for
+      // the terminator starts at `i + 2` — from `i + 4` it ran past them.
+      ['x <!--> <details> y', 'x <!--> &lt;details> y'],
+      ['x <!---> <details> y', 'x <!---> &lt;details> y'],
+      // The abbreviated comment ends at index 4; a later `-->` on the same
+      // line is a different token, and reaching it swallowed the opener
+      // between the two.
+      ['x <!--> <details> --> y', 'x <!--> &lt;details> --> y'],
+      ['x <!---> <details> --> y', 'x <!---> &lt;details> --> y'],
+      // A backslash-escaped `<` opens nothing — no comment, no
+      // declaration, no autolink — and is inert already. Reading it as a
+      // construct start skipped the rest of the line (same round).
+      ['x \\<!a<details> y', 'x \\<!a&lt;details> y'],
+      // Even backslashes, so the `<` is live — but `<!a` is lowercase and
+      // carries no whitespace, so cmark-gfm forms no declaration and the
+      // `<details>` behind it is a REAL element. This row asserted the
+      // opposite, which is to say it pinned a live `<details>` (#9940
+      // review, round 10 reverse audit).
+      ['x \\\\<!a<details> y', 'x \\\\<!a&lt;details> y'],
+      ['\\<https://x.test/> <b>', '\\<https://x.test/> &lt;b>'],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // The rows round 31 named as its acceptance criterion: a fence that
+    // interrupts a paragraph, and a fenced block between the two halves of
+    // a would-be span. Per line neither pairs, so the opener after them is
+    // escaped.
+    for (const [text, escaped] of [
+      ['a ` x\n~~~\n`\n~~~\n<b> and ` y', 'a ` x\n~~~\n`\n~~~\n&lt;b> and ` y'],
+      [
+        'x `a\n```\ncode\n```\n\ny <details> `b',
+        'x `a\n```\ncode\n```\n\ny &lt;details> `b',
+      ],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // The `<!` family and the GFM autolink literal, decided against
+    // cmark-gfm (GitHub's own renderer) and an HTML5 parser rather than
+    // against the CommonMark prose: what the renderer FORMS and what the
+    // HTML parser HIDES are two different spans, and the escape owes the
+    // INTERSECTION. Eight of these rows post a live `<details>` under the
+    // spec-prose reading — the one container GitHub's tagfilter does not
+    // neutralise, so it folds every later blocker and the footer into
+    // itself (#9940 review, round 10 reverse audit).
+    for (const [text, escaped] of [
+      // A CDATA section is passed through raw, but the HTML parser closes
+      // the bogus comment at the FIRST `>`; everything after it is live.
+      [
+        'the fixture <![CDATA[ if (a > b) <details> ]]> is wrong',
+        'the fixture <![CDATA[ if (a > b) &lt;details> ]]> is wrong',
+      ],
+      // A comment also closes at `--!>`, earlier than its `-->`.
+      [
+        'it writes <!-- open --!> then <details> --> here',
+        'it writes <!-- open --!> then &lt;details> --> here',
+      ],
+      // …but `--!>` alone forms nothing: without a `-->` cmark reads the
+      // text as literal, so the rule is "require `-->`, then end at the
+      // earlier of the two", not "end at `--!>`".
+      [
+        'it writes <!-- open <details> --!> here',
+        'it writes <!-- open &lt;details> --!> here',
+      ],
+      // The comment text may not END with `-`, so `--->` is no terminator
+      // and the construct does not form.
+      [
+        'it writes <!--<details>---> here',
+        'it writes <!--&lt;details>---> here',
+      ],
+      // `<!-->` and `<!--->` close on their own dashes.
+      [
+        'a <!--> <details> b <!---> <div> c',
+        'a <!--> &lt;details> b <!---> &lt;div> c',
+      ],
+      // An inline declaration is `<!`, letters, WHITESPACE, `[^>]*`, `>`.
+      // Without the whitespace cmark forms nothing.
+      [
+        'the DTD line <!ENTITY<details> is open',
+        'the DTD line <!ENTITY&lt;details> is open',
+      ],
+      // …and the letters must be UPPERCASE.
+      [
+        'the DTD line <!entity <details> is open',
+        'the DTD line <!entity &lt;details> is open',
+      ],
+      // ONE line-wide flag: an unterminated `<!--` makes cmark read a
+      // LATER `<![CDATA[` — and a later `<!X ` — as literal text too, so a
+      // memo per construct let the second one be skipped and the tag
+      // inside it went out live. The `>` has to sit BEHIND the tag for the
+      // row to tell the two apart: in front of it, the bogus comment ends
+      // before the tag either way.
+      [
+        'x <!-- open <![CDATA[ a <details> b > c ]]> y',
+        'x <!-- open <![CDATA[ a &lt;details> b > c ]]> y',
+      ],
+      ['z <!---<!A <div> q', 'z <!---<!A &lt;div> q'],
+      // …and with no failed construct in front of it the same CDATA DOES
+      // form, and its bogus comment really does hide the tag. (Guard.)
+      [
+        'x <![CDATA[ a <details> b > c ]]> y',
+        'x <![CDATA[ a <details> b > c ]]> y',
+      ],
+      [
+        'x <!-- open <![CDATA[ a > b <details> ]]> y',
+        'x <!-- open <![CDATA[ a > b &lt;details> ]]> y',
+      ],
+      // A GFM autolink literal is an INLINE construct resolved
+      // leftmost-first, and it runs PAST a backtick: the code span this
+      // pass believed in never forms.
+      [
+        'the spec at https://x.test/api`<details>` is wrong',
+        'the spec at https://x.test/api`&lt;details>` is wrong',
+      ],
+      // The same run swallows a backslash escape.
+      [
+        'the spec at https://x.test/api\\<details> is wrong',
+        'the spec at https://x.test/api\\&lt;details> is wrong',
+      ],
+      // The run is consumed to WHITESPACE, not to the `<` that ends it in
+      // the renderer: escaping that `<` makes it `&lt;`, which is not a
+      // `<` any more, so on the POSTED text the URL keeps going.
+      [
+        'see www.z.test/a<details>b and stop',
+        'see www.z.test/a&lt;details>b and stop',
+      ],
+      // An ASCII letter in front means there is no literal at all, so the
+      // backticks DO pair and the tag is code.
+      [
+        'see xhttp://q.test/`<details>` and stop',
+        'see xhttp://q.test/`<details>` and stop',
+      ],
+      // A code span that OPENS BEFORE the URL still wins the race — which
+      // is why the link start is a scan event and not a mask applied ahead
+      // of the pass.
+      [
+        'see `http://x.test/<details>` and stop',
+        'see `http://x.test/<details>` and stop',
+      ],
+      // A CDATA section with no `]]>` is not a construct at all.
+      ['x <![CDATA[ y <details> z', 'x <![CDATA[ y &lt;details> z'],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // cmark-gfm's own grammars, not approximations of them: what the
+    // renderer FORMS, what the HTML parser HIDES and what the renderer's own
+    // code-span scanner PAIRS are three different questions, and guessing any
+    // of them wrong in EITHER direction posts a live element — believing in a
+    // construct the renderer does not form steals a backtick from the
+    // delimiter pool and shifts every later pairing (#9940 review, round 11
+    // reverse audit).
+    for (const [text, escaped] of [
+      // cmark's CDATA scanner is
+      //   "<![CDATA[" ( [^\]] | "]" [^\]] | "]]" [^>] )* "]]>"
+      // and NOT "is there a `]]>` later". An array index inside the section
+      // puts a third `]` in front of the terminator, so it does not form.
+      [
+        'the fixture <![CDATA[<details>arr[0]]]> is mis-parsed',
+        'the fixture <![CDATA[&lt;details>arr[0]]]> is mis-parsed',
+      ],
+      // …and five brackets DO form one again (k ≡ 2 mod 3). (Guard: reddens
+      // if the grammar is approximated by "the character before `]]>` is not
+      // a `]`".)
+      ['x <![CDATA[<details>]]]]]> y', 'x <![CDATA[<details>]]]]]> y'],
+      // `ftp://` is a GFM autolink literal too, and all three schemes are
+      // matched case-INSENSITIVELY.
+      [
+        'the spec at ftp://x.test/api`<details>` is wrong',
+        'the spec at ftp://x.test/api`&lt;details>` is wrong',
+      ],
+      [
+        'the spec at HTTP://x.test/api\\<details> is wrong',
+        'the spec at HTTP://x.test/api\\&lt;details> is wrong',
+      ],
+      // `www.` is NOT. (Guard: reddens if the schemes are written as one
+      // `/…/i` regex, which would also match `WWW.`.)
+      [
+        'see WWW.z.test/`<details>` and stop',
+        'see WWW.z.test/`<details>` and stop',
+      ],
+      // The block phase strips block-quote markers before the inline phase
+      // runs, so the boundary a `www.` literal is tested against is the one
+      // before the line's CONTENT: `>www.z.test/p` links and eats the
+      // backslash behind it, `-www.z.test/p` does not link at all.
+      ['>www.z.test/p\\<details> here', '>www.z.test/p\\&lt;details> here'],
+      ['>>www.z.test/p\\<details>', '>>www.z.test/p\\&lt;details>'],
+      ['-www.z.test/p\\<details>', '-www.z.test/p\\<details>'],
+      // `http://` with no domain is no link, so the `<!--` inside what this
+      // pass used to treat as a URL run is a real construct again, it fails,
+      // and it poisons the `<!X ` that follows.
+      [
+        'x http://<!--q <!D d<details> is the bug',
+        'x http://<!--q <!D d&lt;details> is the bug',
+      ],
+      // The part of a CDATA section's RAW span the HTML parser has stopped
+      // hiding (first `>` … `]]>`) is RAW TEXT: no backtick in it is a
+      // delimiter, so the code span this pass believed in never formed.
+      [
+        'the fixture <![CDATA[cmd > out `x]]> and the <details> wrapper` is wrong',
+        'the fixture <![CDATA[cmd > out `x]]> and the &lt;details> wrapper` is wrong',
+      ],
+      // The same tail exists on a comment closed at `--!>`.
+      [
+        'it writes <!-- a --!>` --> <details>` there',
+        'it writes <!-- a --!>` --> &lt;details>` there',
+      ],
+      // …and the HTML tokenizer's comment-end is not cmark's: it closes at
+      // the first `-->` SUBSTRING, with no mod-3 arithmetic. (Guard.)
+      ['c<!-----><details>--> here', 'c<!----->&lt;details>--> here'],
+      // Only a failed COMMENT poisons the `<!` family in cmark. Poisoning on
+      // a failed declaration too REFUSED a comment cmark still formed, and
+      // the refused construct's backticks rejoined the delimiter pool.
+      [
+        'the DTD <!A<!--`--> and <details>` is open',
+        'the DTD <!A<!--`--> and &lt;details>` is open',
+      ],
+      [
+        'the DTD <!--`--> and <details>` is open',
+        'the DTD <!--`--> and &lt;details>` is open',
+      ],
+      // cmark validates the domain: the first character after `://` must be
+      // alphanumeric, and a `_` in either of the last two labels refuses it.
+      [
+        'see http://` `<details>` and stop',
+        'see http://` `&lt;details>` and stop',
+      ],
+      [
+        'the host http://a_b.c` `<details>` is wrong',
+        'the host http://a_b.c` `&lt;details>` is wrong',
+      ],
+      // Three labels put the `_` out of reach and the link forms. (Guard:
+      // reddens if the rule is written as "no `_` at all".)
+      [
+        'the host http://a_b.c.d`<details>` is wrong',
+        'the host http://a_b.c.d`&lt;details>` is wrong',
+      ],
+      // An unmatched `[` suppresses the literal — a STACK, not the preceding
+      // character — and a closed `[]` clears it.
+      [
+        'see [http://y.test/` `<details>` and stop',
+        'see [http://y.test/` `&lt;details>` and stop',
+      ],
+      [
+        'see [x] http://y.test/`<details>` and stop',
+        'see [x] http://y.test/`&lt;details>` and stop',
+      ],
+      // cmark's code-span scanner carries a memo a SUCCESSFUL scan
+      // overwrites, so the spans it forms are a strict SUBSET of the spec's.
+      // The leading unmatched run arms it; one backtick instead of two and it
+      // never arms.
+      ['a ``b` `c`<details>` here', 'a ``b` `c`&lt;details>` here'],
+      ['a `b` `c`<details>` here', 'a `b` `c`&lt;details>` here'],
+      // MAXBACKTICKS is 80: cmark refuses to open a span on a longer run,
+      // so the tag between two runs of 81 is NOT in a span and is live,
+      // while at 80 it is code.
+      [
+        `a ${'`'.repeat(81)}<details>${'`'.repeat(81)} here`,
+        `a ${'`'.repeat(81)}&lt;details>${'`'.repeat(81)} here`,
+      ],
+      [
+        `a ${'`'.repeat(80)}<details>${'`'.repeat(80)} here`,
+        `a ${'`'.repeat(80)}<details>${'`'.repeat(80)} here`,
+      ],
+      // Autolinks are tried BEFORE the `<!` family, as cmark does: `!` and
+      // `-` are legal e-mail local-part characters, so `<!--@t>` is a mailto
+      // autolink and the comment never forms.
+      ['`<!--@t><div>--> here', '`<!--@t>&lt;div>--> here'],
+      // An inline link's DESTINATION is raw characters, so a backtick in it
+      // is not a delimiter either.
+      ['see [x](a`b) <details>` here', 'see [x](a`b) &lt;details>` here'],
+      // …and the `_` rule reaches the LAST label too, not only the one
+      // before it: `http://a.b_c` does not link, so the backticks pair and
+      // the tag between them is live.
+      [
+        'the host http://a.b_c` `<details>` is wrong',
+        'the host http://a.b_c` `&lt;details>` is wrong',
+      ],
+      // Only a failed COMMENT poisons the family — a failed CDATA must not,
+      // or the comment behind it is refused and its backticks rejoin the
+      // delimiter pool.
+      [
+        'z <![CDATA[x <!--`--> and <details>` is open',
+        'z <![CDATA[x <!--`--> and &lt;details>` is open',
+      ],
+      // A `<!--` in a construct's RAW TAIL is an HTML comment that runs to
+      // the END OF THE DOCUMENT: it leaks no element at all, so an
+      // element scan misses it, and it takes every later blocker and the
+      // footer with it.
+      [
+        'x <![CDATA[a><!--]]> and the auth check',
+        'x <![CDATA[a>&lt;!--]]> and the auth check',
+      ],
+      // The URL run ends where cmark ends it — space, tab, LF, CR or `<` —
+      // and NOT at `\s`: thirteen further characters (U+00A0, U+3000,
+      // U+2028, U+FEFF, U+000B…) cut the run short while the renderer's ran
+      // on, and the text past the cut was read as ordinary inline while
+      // cmark was still carrying it as a raw URL.
+      [
+        'pre www.z.test/p\u3000\\<select> post',
+        'pre www.z.test/p\u3000\\&lt;select> post',
+      ],
+      [
+        'pre www.z.test/p\v`<select>` post',
+        'pre www.z.test/p\v`&lt;select>` post',
+      ],
+      [
+        'see [](a\u3000``)<summary>`` here',
+        'see [](a\u3000``)&lt;summary>`` here',
+      ],
+      // …and a space really does end it, so the backslash past it is a
+      // real escape and needs none of ours. (Guard.)
+      [
+        'see www.z.test/p q\\<details> and stop',
+        'see www.z.test/p q\\<details> and stop',
+      ],
+      // The `www.` alternative of the link-start regex, in the second-order
+      // shape that pins it: the literal eats the delimiter in front of the
+      // tag, so without it the tag goes out live.
+      [
+        'see www.z.test/`<details>` and stop',
+        'see www.z.test/`&lt;details>` and stop',
+      ],
+      [
+        'see www.z.test/\\<details> and stop',
+        'see www.z.test/\\&lt;details> and stop',
+      ],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // A link reference definition's angle-bracket destination survives —
+    // the autolink skip is context-free.
+    expect(escapeTagOpeners('[a]: <http://x.test/p>')).toBe(
+      '[a]: <http://x.test/p>',
     );
-    // …and a span that stays inside its block still shields its `<`.
-    expect(escapeTagOpeners('`<details>\nfoo` bar')).toBe(
-      '`<details>\nfoo` bar',
+    // One row of a table is not a table: with no delimiter row the pipes
+    // are text, the backticks pair, and the tag between them is code.
+    expect(escapeTagOpeners('| ` c1 | <script>bad()</script> ` |')).toBe(
+      '| ` c1 | <script>bad()</script> ` |',
     );
-    // A lone CR ends a line too.
-    expect(escapeTagOpeners('`<details>\r\rfoo` bar')).toBe(
-      '`&lt;details>\r\rfoo` bar',
-    );
-    // A line of spaces and tabs is blank; one carrying anything else —
-    // a form feed, an NBSP — is a paragraph line, and the span survives.
-    expect(escapeTagOpeners('`<a>\n \t \nfoo` b')).toBe(
-      '`&lt;a>\n \t \nfoo` b',
-    );
-    expect(escapeTagOpeners('`<a>\n\f\nfoo` b')).toBe('`<a>\n\f\nfoo` b');
-    // A FENCED block is a block, not a span: a blank line inside it does
-    // not end it, its `<` is already inert, and escaping there rendered a
-    // literal `&lt;` to the reader for no safety gain (#9940 review,
-    // round 30 reverse audit).
-    const fenced =
-      'it is:\n\n```html\n<div class="w">\n\n  <span>x</span>\n</div>\n```.';
-    expect(escapeTagOpeners(fenced)).toBe(fenced);
-    // …tilde fences and an unclosed fence too, while text outside is
-    // still escaped.
-    expect(escapeTagOpeners('a\n\n~~~\n<div>\n\n<p>\n~~~\nb <div>')).toBe(
-      'a\n\n~~~\n<div>\n\n<p>\n~~~\nb &lt;div>',
-    );
-    expect(escapeTagOpeners('a <div>\n\n```\n<span>\n\n<b>')).toBe(
-      'a &lt;div>\n\n```\n<span>\n\n<b>',
-    );
-    // A fence's INTERIOR backticks are not span delimiters either: paired
-    // with a run outside, they opened a span over live text and suppressed
-    // its escape.
-    expect(escapeTagOpeners('~~~\n`\n~~~\n<b> and ` y')).toBe(
-      '~~~\n`\n~~~\n&lt;b> and ` y',
-    );
+  });
+
+  it('a raw `<![CDATA[ … > … <details> … ]]>` does not fold the rest of the body away (#9940 review, round 10 reverse audit)', () => {
+    // The unit rows pin the escape; this pins what the escape is FOR. The
+    // HTML parser closes the bogus comment at the first `>`, so under the
+    // spec-prose reading the `<details>` was a live element and the second
+    // blocker and the footer rendered INSIDE its fold.
+    for (const attribution of [true, false]) {
+      const r = composeReview(
+        base({
+          bodyCriticals: [
+            'the XML fixture <![CDATA[ if (a > b) <details> ]]> is mis-parsed',
+            'blocker two: the token is logged in plaintext',
+          ],
+        }),
+        '0.21.2',
+        attribution,
+      );
+      expect(r.body).toContain('&lt;details');
+      expect(r.body).not.toContain('<details> ]]>');
+      expect(r.body).toContain('blocker two: the token is logged in plaintext');
+    }
   });
 
   it('opensUnclosedComment — the linear form agrees with the closed-comment-removal reference on generated grammar (#9940 review, audit 4)', () => {
@@ -7481,7 +8094,7 @@ describe('a standing gate Critical enters the posting set exactly once (#9526)',
   // re-derives the same Critical from the report. `buildLedger` keys by
   // claimed id and the regenerated copy claims none, so it minted a second
   // id beside the carried one and the pair compounded every round.
-  function gateFixture() {
+  function gateFixture(code = 'SC2086') {
     const dir = mkdtempSync(join(tmpdir(), 'compose-gate-once-'));
     const diffPath = join(dir, 'the.diff');
     writeFileSync(
@@ -7512,7 +8125,7 @@ describe('a standing gate Critical enters the posting set exactly once (#9526)',
             findings: [
               {
                 line: 1,
-                code: 'SC2086',
+                code,
                 level: 'info',
                 message: 'quote the variable',
                 inDiff: true,
@@ -7531,6 +8144,30 @@ describe('a standing gate Critical enters the posting set exactly once (#9526)',
     );
     return { dir, planPath };
   }
+
+  it('folds its own entry — this channel joins bodyCriticals after the shared fold has run (#9940 review, round 31 reverse audit)', () => {
+    // `f.line` and `f.code` are interpolated RAW out of a side file the
+    // review agent can rewrite, and `structurallyValidReport` only checks
+    // plain-objectness. Unfolded, a fenced block in `code` reached the
+    // per-line escape as several lines and the reader saw a literal
+    // `&amp;lt;` inside the fence.
+    const { dir, planPath } = gateFixture(
+      'SC1\n```\n<div class="w">\n```\nrest',
+    );
+    try {
+      const line = scriptLintGate(planPath).criticals[0]!;
+      expect(line).not.toMatch(/[\r\n\u2028\u2029]/);
+      expect(line).toContain('SC1 ``` <div class="w"> ``` rest');
+      // One line in, one line out — and on one line the two fence runs are
+      // an ordinary code span, which is what makes the `<` between them
+      // inert without an escape. Unfolded they opened a real fenced
+      // block, and the escape inside it rendered a literal `&amp;lt;` to
+      // the reader.
+      expect(escapeTagOpeners(line)).toBe(line);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('does not compound the work-list or the body across rounds', () => {
     const { dir, planPath } = gateFixture();
@@ -18537,6 +19174,32 @@ describe('floor enforcement — the Critical arm (#10291)', () => {
     expect(entries).toHaveLength(1);
     expect(readClaimHead(entries[0]!.title).id).toBeUndefined();
     expect(entries[0]!.title).toContain('R1-2: quoted fixture line');
+
+    // …and when the claim-line sentinel is '' because the code block's
+    // FIRST line is trim-empty — indented, but whitespace only — the guard
+    // must still fire: it used to read that physical line while
+    // `collapseToLine` drops the segment, so the NEXT line's ledger id led
+    // the title. A title claiming an id the claim-line read cannot see is
+    // what the repost join then refuses the whole post over (#9940 review,
+    // round 31).
+    for (const blank of ['    \u00a0', '    \ufeff', '    \u3000', '    \f']) {
+      const blankLed = floorEnforcedReroute('critical', false, 3, [
+        {
+          path: 'a.ts',
+          line: 3,
+          body: `**[Suggestion]**\n\n${blank}\n    R1-2: quoted fixture line`,
+        },
+      ]);
+      expect(blankLed.entries).toHaveLength(1);
+      expect(readClaimHead(blankLed.entries[0]!.title).id).toBeUndefined();
+      expect(blankLed.entries[0]!.title).toContain('R1-2: quoted fixture line');
+    }
+    // A body whose claim line IS readable keeps its id at the front — the
+    // guard fires on the sentinel, not on every rerouted entry.
+    const readable = floorEnforcedReroute('critical', false, 3, [
+      { path: 'a.ts', line: 3, body: '**[Suggestion]** R1-2: a plain claim' },
+    ]);
+    expect(readClaimHead(readable.entries[0]!.title).id).toBe('R1-2');
   });
 
   it('deferrableFindingsInline counts the tagged Critical the floor would move — and only that one', () => {
