@@ -387,6 +387,155 @@ describe('WorkspaceRuntimeCoordinator', () => {
     ).toHaveLength(0);
   });
 
+  it('diffs a recommitted generation against the receipt-recorded hash', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    // The mutation receipt carries the committed store's content identity,
+    // which becomes the baseline later hash-carrying reads diff against.
+    await expect(
+      coordinator.reconcileExtensionGeneration(6, {
+        storeContentHash: 'store-hash-6',
+      }),
+    ).resolves.toMatchObject({ state: 'reconciled' });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      desiredGeneration: 6,
+      appliedGeneration: 6,
+    });
+
+    // A backup recovery plus recommit reuses generation 6 for different
+    // content before the next hash-carrying read.
+    harness.invokeWorkspaceCommand.mockClear();
+    coordinator.observeExtensionGeneration(
+      6,
+      coordinator.status().capabilities!.extensions!.revision,
+      'store-hash-6-recommitted',
+    );
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'stale',
+      desiredGeneration: 6,
+      appliedGeneration: 0,
+    });
+
+    await expect(
+      coordinator.reconcileExtensionGeneration(6),
+    ).resolves.toMatchObject({ state: 'reconciled' });
+    expect(
+      (harness.invokeWorkspaceCommand.mock.calls as unknown[][]).filter(
+        (call) => call[0] === 'qwen/control/workspace/extensions/reconcile',
+      ),
+    ).toHaveLength(1);
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      desiredGeneration: 6,
+      appliedGeneration: 6,
+    });
+  });
+
+  it('marks a drain-queued deferral and replays it on cancelDrain', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    coordinator.beginDrain();
+    await expect(coordinator.reconcileExtensionGeneration(7)).resolves.toEqual({
+      state: 'deferred',
+      refreshed: 0,
+      failed: 0,
+      drainDeferred: true,
+    });
+
+    coordinator.cancelDrain();
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      }),
+    );
+  });
+
+  it('re-certifies Skills/MCP when the initial Extension apply settles past the ensure budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = makeRuntime();
+      harness.setSnapshot({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      });
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+      harness.invokeWorkspaceCommand.mockImplementation(
+        (
+          method?: string,
+          _params?: Record<string, unknown>,
+          options?: { timeoutMs?: number },
+        ) => {
+          if (method !== 'qwen/control/workspace/extensions/reconcile') {
+            return Promise.resolve({
+              sessionsRefreshed: 0,
+              sessionsFailed: 0,
+              configsRefreshed: 1,
+              configsFailed: 0,
+            });
+          }
+          return new Promise((resolve, reject) => {
+            const timeout = setTimeout(
+              () => reject(new Error('command timeout')),
+              options?.timeoutMs,
+            );
+            setTimeout(() => {
+              clearTimeout(timeout);
+              resolve({
+                sessionsRefreshed: 0,
+                sessionsFailed: 0,
+                configsRefreshed: 1,
+                configsFailed: 0,
+              });
+            }, 61_000);
+          });
+        },
+      );
+
+      const ensured = coordinator.ensure();
+      // ensure() abandons the Extensions wait at its 60s budget on this
+      // generation-0 store, and Skills/MCP prepare from a runtime read that
+      // predates the applied catalog.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await expect(ensured).resolves.toMatchObject({ runtimeLive: true });
+      expect(coordinator.status().capabilities).toMatchObject({
+        extensions: { state: 'starting', appliedGeneration: 0 },
+        skills: { state: 'ready', revision: 0 },
+        mcp: { state: 'ready', revision: 0 },
+      });
+
+      // When the initial apply settles at 61s, the pre-catalog Skills/MCP
+      // certification is invalidated and re-driven against the applied
+      // catalog.
+      harness.getWorkspaceSkillsRuntimeStatus.mockClear();
+      await vi.advanceTimersByTimeAsync(2_000);
+      const status = coordinator.status();
+      expect(status.capabilities?.extensions).toMatchObject({
+        state: 'ready',
+        appliedGeneration: 0,
+      });
+      expect(status.capabilities?.skills).toMatchObject({
+        state: 'ready',
+        revision: 1,
+      });
+      expect(status.capabilities?.mcp).toMatchObject({
+        state: 'ready',
+        revision: 1,
+      });
+      expect(harness.getWorkspaceSkillsRuntimeStatus).toHaveBeenCalled();
+      expect(harness.invalidateWorkspaceSkillsStatus).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('preserves the narrow refresh for Extension Skill-state changes', async () => {
     const harness = makeRuntime();
     harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
@@ -1223,6 +1372,53 @@ describe('WorkspaceRuntimeCoordinator', () => {
         },
       },
     });
+  });
+
+  it('sanitizes Skills preparation errors before persisting them', async () => {
+    const harness = makeRuntime();
+    harness.getWorkspaceSkillsRuntimeStatus.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: false,
+      runtimeEpoch: 1,
+      skills: [],
+      errors: [
+        {
+          kind: 'skills',
+          status: 'error',
+          error: `fatal: unable to access 'https://user:tok3n@github.com/org/ext.git/'${'x'.repeat(600)}\x1b[31m`,
+        },
+      ],
+    });
+
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    await expect(coordinator.ensure()).resolves.toMatchObject({
+      capabilities: { skills: { state: 'error' } },
+    });
+    const message = coordinator.status().capabilities?.skills?.error?.message;
+    expect(message).toBeDefined();
+    expect(message).not.toContain('tok3n');
+    expect(message).not.toContain('\x1b');
+    expect(message!.length).toBeLessThanOrEqual(500);
+  });
+
+  it('sanitizes MCP preparation errors before persisting them', async () => {
+    const harness = makeRuntime();
+    harness.getWorkspaceMcpStatus.mockRejectedValue(
+      new Error(
+        `MCP discovery failed: https://user:tok3n@github.com/org/ext.git ${'x'.repeat(600)}\x1b[31m`,
+      ),
+    );
+
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    await expect(coordinator.ensure()).resolves.toMatchObject({
+      capabilities: { mcp: { state: 'error' } },
+    });
+    const message = coordinator.status().capabilities?.mcp?.error?.message;
+    expect(message).toBeDefined();
+    expect(message).not.toContain('tok3n');
+    expect(message).not.toContain('\x1b');
+    expect(message!.length).toBeLessThanOrEqual(500);
   });
 
   it('reports a hard retry failure without failing runtime ensure', async () => {

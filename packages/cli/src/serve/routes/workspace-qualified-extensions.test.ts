@@ -3251,6 +3251,345 @@ describe('extension management v2 REST', () => {
     },
   );
 
+  it('keeps an unrelated interactive install waiting when another extension updates', async () => {
+    const h = await makeHarness();
+    const extension = mockExtensionManager();
+    const other = {
+      ...extension,
+      id: secondExtensionId,
+      name: 'other',
+      installMetadata: { type: 'git', source: 'https://example.com/other.git' },
+    } as Extension;
+    vi.mocked(ExtensionManager.prototype.getLoadedExtensions).mockReturnValue([
+      extension,
+      other,
+    ]);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionInstall',
+    ).mockImplementation(async function (this: ExtensionManager) {
+      await requestApiKey(this);
+      return {} as never;
+    });
+    const commitPrepared = vi
+      .spyOn(ExtensionManager.prototype, 'commitPreparedExtension')
+      .mockResolvedValue({
+        identity: { id: extensionId, name: 'demo' },
+        version: '1.0.0',
+        generation: 7,
+      } as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'disposePreparedExtension',
+    ).mockResolvedValue();
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionUpdate',
+    ).mockResolvedValue({ upToDate: true, extension: other } as never);
+    try {
+      const install = await auth(
+        request(h.app)
+          .post('/extensions/install')
+          .send({
+            source: '@scope/demo',
+            consent: true,
+            activation: { scope: 'user' },
+          }),
+      );
+      expect(install.status).toBe(202);
+      await vi.waitFor(async () => {
+        const waiting = await auth(
+          request(h.app).get(
+            `/extensions/operations/${install.body.operationId}`,
+          ),
+        );
+        expect(waiting.body.status).toBe('waiting_for_input');
+      });
+
+      const update = await auth(
+        request(h.app).post(`/extensions/${secondExtensionId}/update`),
+      );
+      expect(update.status).toBe(202);
+      await expect(
+        pollOperation(h.app, update.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+
+      // The update of another extension must not cancel the parked install.
+      const parked = await auth(
+        request(h.app).get(
+          `/extensions/operations/${install.body.operationId}`,
+        ),
+      );
+      expect(parked.body.status).toBe('waiting_for_input');
+      await answerSettingInteraction(h.app, install.body.operationId);
+      await expect(
+        pollOperation(h.app, install.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      expect(commitPrepared).toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('re-drives the runtime when a mutation receipt observes a reused generation', async () => {
+    const h = await makeHarness();
+    const extension = mockExtensionManager();
+    extension.config.skillStates = { alpha: true };
+    extension.skills = [
+      {
+        name: 'alpha',
+        description: 'alpha',
+        body: 'alpha',
+        level: 'extension',
+        filePath: '/extensions/demo/alpha/SKILL.md',
+        extensionName: 'demo',
+      },
+    ];
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionActivationFromSnapshot,
+    ).mockReturnValue({
+      default: 'enabled',
+      workspace: 'inherit',
+      effective: 'enabled',
+      source: 'default',
+    });
+    vi.spyOn(settingsModule, 'loadSettings').mockReturnValue({
+      merged: { skills: { disabled: [], enabled: [] } },
+      forScope: () => ({ settings: {} }),
+    } as unknown as settingsModule.LoadedSettings);
+    Object.assign(h.secondary.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn(() => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      })),
+      invokeWorkspaceCommand: vi.fn(async () => ({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 1,
+        configsFailed: 0,
+      })),
+      reloadWorkspaceMcp: vi.fn(async () => undefined),
+      initializeWorkspaceMcp: vi.fn(async () => undefined),
+      preheat: vi.fn(async () => undefined),
+    });
+    Object.assign(h.secondary.workspaceService, {
+      getWorkspaceSkillsRuntimeStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        initialized: true,
+        runtimeEpoch: 3,
+        skills: [],
+      })),
+      getWorkspaceMcpStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        source: 'live',
+        runtimeEpoch: 3,
+        discoveryState: 'completed',
+        servers: [],
+      })),
+    });
+    vi.mocked(
+      h.secondary.workspaceService.getWorkspaceExtensionsStatus,
+    ).mockResolvedValue({
+      v: 1,
+      workspaceCwd: h.secondary.workspaceCwd,
+      initialized: true,
+      runtimeEpoch: 3,
+      extensions: [],
+    });
+    const extensionReconcileCalls = () =>
+      (
+        vi.mocked(h.secondary.bridge.invokeWorkspaceCommand!).mock
+          .calls as unknown[][]
+      ).filter(
+        (call) => call[0] === 'qwen/control/workspace/extensions/reconcile',
+      ).length;
+    try {
+      // A full receipt settles the coordinator at generation 7 with the
+      // committed store's content identity recorded.
+      const uninstall = await auth(
+        request(h.app).delete(`/extensions/${extensionId}`),
+      );
+      expect(uninstall.status).toBe(202);
+      await expect(
+        pollOperation(h.app, uninstall.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      expect(
+        getWorkspaceRuntimeCoordinator(h.secondary).status().capabilities
+          ?.extensions,
+      ).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      });
+      const settled = extensionReconcileCalls();
+      expect(settled).toBeGreaterThan(0);
+
+      // Automatic backup recovery plus a recommit both landed before the
+      // next receipt: generation 7 is reused for different content, which
+      // the receipt's content hash must catch without waiting for a poll.
+      const reusedSnapshot: ExtensionStoreSnapshot = {
+        version: 2,
+        generation: 7,
+        legacyProjectionHash: 'reused-content-hash',
+        extensions: {
+          [extensionId]: {
+            name: 'demo',
+            defaultActivation: 'disabled',
+            workspaceOverrides: {},
+          },
+        },
+      };
+      vi.mocked(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).mockResolvedValue(reusedSnapshot);
+      vi.mocked(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).mockResolvedValue(reusedSnapshot);
+      vi.spyOn(
+        ExtensionManager.prototype,
+        'setExtensionSkillStates',
+      ).mockResolvedValue(reusedSnapshot);
+
+      const update = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${h.secondary.workspaceId}/extensions/${extensionId}/state`,
+          )
+          .send({ skills: [{ name: 'alpha', state: 'enabled' }] }),
+      );
+      expect(update.status).toBe(202);
+      await expect(
+        pollOperation(h.app, update.body.operationId),
+      ).resolves.toMatchObject({
+        operation: 'set_extension_state',
+        status: expect.stringMatching(/^succeeded/),
+      });
+      expect(extensionReconcileCalls()).toBeGreaterThan(settled);
+      expect(
+        getWorkspaceRuntimeCoordinator(h.secondary).status().capabilities
+          ?.extensions,
+      ).toMatchObject({
+        state: 'stale',
+        desiredGeneration: 7,
+        appliedGeneration: 0,
+      });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('adopts a recovered lower generation on the projection read', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    Object.assign(h.secondary.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn(() => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      })),
+      invokeWorkspaceCommand: vi.fn(async () => ({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 1,
+        configsFailed: 0,
+      })),
+      reloadWorkspaceMcp: vi.fn(async () => undefined),
+      initializeWorkspaceMcp: vi.fn(async () => undefined),
+      preheat: vi.fn(async () => undefined),
+    });
+    Object.assign(h.secondary.workspaceService, {
+      getWorkspaceSkillsRuntimeStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        initialized: true,
+        runtimeEpoch: 3,
+        skills: [],
+      })),
+      getWorkspaceMcpStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        source: 'live',
+        runtimeEpoch: 3,
+        discoveryState: 'completed',
+        servers: [],
+      })),
+    });
+    vi.mocked(
+      h.secondary.workspaceService.getWorkspaceExtensionsStatus,
+    ).mockResolvedValue({
+      v: 1,
+      workspaceCwd: h.secondary.workspaceCwd,
+      initialized: true,
+      runtimeEpoch: 3,
+      extensions: [],
+    });
+    try {
+      // A full receipt settles the coordinator at generation 7.
+      const uninstall = await auth(
+        request(h.app).delete(`/extensions/${extensionId}`),
+      );
+      expect(uninstall.status).toBe(202);
+      await expect(
+        pollOperation(h.app, uninstall.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      expect(
+        getWorkspaceRuntimeCoordinator(h.secondary).status().capabilities
+          ?.extensions,
+      ).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      });
+
+      // The store recovers to generation 6 from its previous-state backup;
+      // the fresh projection read must adopt the rollback instead of
+      // reporting the impossible desired-6/applied-7 pairing until the 30s
+      // poller repairs it.
+      const rolledBackSnapshot: ExtensionStoreSnapshot = {
+        version: 2,
+        generation: 6,
+        legacyProjectionHash: 'rolled-back-hash',
+        extensions: {
+          [extensionId]: {
+            name: 'demo',
+            defaultActivation: 'disabled',
+            workspaceOverrides: {},
+          },
+        },
+      };
+      vi.mocked(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).mockResolvedValue(rolledBackSnapshot);
+      vi.mocked(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).mockResolvedValue(rolledBackSnapshot);
+
+      const projection = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(projection.status).toBe(200);
+      expect(projection.body).toMatchObject({
+        desiredGeneration: 6,
+        appliedGeneration: 0,
+      });
+      expect(
+        getWorkspaceRuntimeCoordinator(h.secondary).status().capabilities
+          ?.extensions,
+      ).toMatchObject({
+        state: 'stale',
+        desiredGeneration: 6,
+        appliedGeneration: 0,
+      });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('reports an up-to-date V2 update as checked without committing', async () => {
     const h = await makeHarness();
     const extension = mockExtensionManager();

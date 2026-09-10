@@ -571,7 +571,7 @@ export function registerWorkspaceExtensionRoutes(
       timeout: ReturnType<typeof setTimeout>;
     }
   >();
-  const supersededInstallOperations = new Set<string>();
+  const supersededInstallOperations = new Map<string, string>();
   const cancelPendingExtensionInteraction = (
     operationId: string,
     reason: string,
@@ -582,24 +582,35 @@ export function registerWorkspaceExtensionRoutes(
     pendingExtensionInteractions.delete(operationId);
     pending.reject(new Error(reason));
   };
+  // A new install supersedes any parked install regardless of target: the
+  // install's name is only known once preparation resolves, and the sweep is
+  // what breaks the two-interactive-installs deadlock. An update knows its
+  // target up front, so it supersedes only the same extension's parked
+  // operations — cancelling an unrelated extension's install would discard
+  // work and credentials the user already supplied.
   const supersedeActiveInstallOperations = (
     controller: ExtensionsController,
     currentOperationId: string,
+    targetName?: string,
   ): void => {
+    const reason =
+      targetName === undefined
+        ? 'Extension installation cancelled by a new install request'
+        : 'Extension operation cancelled by a new update request';
     for (const operation of controller.getActiveOperations()) {
-      if (
+      if (operation.operationId === currentOperationId) continue;
+      if (targetName === undefined) {
+        if (operation.operation !== 'install') continue;
+      } else if (
+        operation.name?.toLowerCase() !== targetName.toLowerCase() ||
         (operation.operation !== 'install' &&
           (operation.operation !== 'update' ||
-            operation.status !== 'waiting_for_input')) ||
-        operation.operationId === currentOperationId
+            operation.status !== 'waiting_for_input'))
       ) {
         continue;
       }
-      supersededInstallOperations.add(operation.operationId);
-      cancelPendingExtensionInteraction(
-        operation.operationId,
-        'Extension installation cancelled by a new install request',
-      );
+      supersededInstallOperations.set(operation.operationId, reason);
+      cancelPendingExtensionInteraction(operation.operationId, reason);
     }
   };
   const waitForExtensionInteraction = (
@@ -609,10 +620,10 @@ export function registerWorkspaceExtensionRoutes(
     signal?: AbortSignal,
   ): Promise<string> => {
     signal?.throwIfAborted();
-    if (supersededInstallOperations.delete(operationId)) {
-      return Promise.reject(
-        new Error('Extension installation superseded by a new install request'),
-      );
+    const supersedeReason = supersededInstallOperations.get(operationId);
+    if (supersedeReason !== undefined) {
+      supersededInstallOperations.delete(operationId);
+      return Promise.reject(new Error(supersedeReason));
     }
     const operation = controller.getOperation(operationId);
     if (
@@ -1687,7 +1698,11 @@ export function registerWorkspaceExtensionRoutes(
               >;
               try {
                 preparedResult = await context!.prepare(async (signal) => {
-                  supersedeActiveInstallOperations(ctrl, operationId!);
+                  supersedeActiveInstallOperations(
+                    ctrl,
+                    operationId!,
+                    extension.name,
+                  );
                   return await extensionManager.prepareExtensionUpdate({
                     extension,
                     signal,
@@ -2345,7 +2360,11 @@ export function registerWorkspaceExtensionRoutes(
             throw new ExtensionNotUpdatableError(extension.name);
           }
           const preparedResult = await context!.prepare(async (signal) => {
-            supersedeActiveInstallOperations(primaryController, operationId!);
+            supersedeActiveInstallOperations(
+              primaryController,
+              operationId!,
+              extension.name,
+            );
             return await extensionManager.prepareExtensionUpdate({
               extension,
               signal,
@@ -2514,12 +2533,17 @@ export function registerWorkspaceExtensionRoutes(
           runtime.workspaceCwd,
           runtime.trusted,
         );
+        const coordinator = getWorkspaceRuntimeCoordinatorIfSupported(runtime);
+        // Sampled before the store read so a recovery rollback this read
+        // observes can be adopted; a receipt that lands between the sample
+        // and the observe bumps the revision and conservatively refuses it.
+        const storeReadRevision =
+          coordinator?.status().capabilities?.extensions?.revision;
         const snapshot = await manager.refreshCacheWithSnapshot();
         runtime.generationGuard?.assertOpen();
-        const coordinator = getWorkspaceRuntimeCoordinatorIfSupported(runtime);
         coordinator?.observeExtensionGeneration(
           snapshot.generation,
-          undefined,
+          storeReadRevision,
           snapshot.legacyProjectionHash,
         );
         const extensions = manager.getLoadedExtensions().map((extension) => {

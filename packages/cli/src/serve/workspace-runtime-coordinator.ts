@@ -58,13 +58,19 @@ export interface WorkspaceExtensionReconciliationResult {
   refreshed: number;
   failed: number;
   error?: string;
+  /**
+   * The deferral is queued on the coordinator and replays on
+   * `cancelDrain()`: the daemon has already taken the recovery action, so
+   * callers must not ask the user to retry.
+   */
+  drainDeferred?: boolean;
 }
 
-// Extension refresh failures surface in two places — the persisted
+// Capability refresh failures surface in two places — the persisted
 // capabilities status and the `extensions_changed` broadcast — and the raw
 // error can carry git credentials, ANSI/control sequences, or unbounded
 // output. Sanitize once at the producer so both sinks stay safe.
-const sanitizeExtensionsErrorMessage = (message: string): string =>
+const sanitizeRuntimeErrorMessage = (message: string): string =>
   redactUrlCredentials(stripAnsiAndControl(message)).slice(0, 500);
 
 class ExtensionRuntimeRefreshError extends Error {
@@ -156,6 +162,8 @@ export class WorkspaceRuntimeCoordinator {
   private skillsReconcileDeferred = false;
 
   private extensionsReconcileDeferred: { skillsOnly?: boolean } | undefined;
+
+  private extensionsEnsureAbandonedAtEpoch: number | undefined;
 
   private extensionsTail: Promise<void> = Promise.resolve();
 
@@ -342,10 +350,15 @@ export class WorkspaceRuntimeCoordinator {
           // WorkspaceDrainingError cause, which the error response logs —
           // sanitize it like the status/broadcast sinks.
           this.assertAcceptingWork(
-            sanitizeExtensionsErrorMessage(
+            sanitizeRuntimeErrorMessage(
               error instanceof Error ? error.message : String(error),
             ),
           );
+          // The Extensions work outlived the observation budget but stays
+          // queued; the Skills/MCP preparation below then certifies from a
+          // runtime read that predates the applied catalog, so the
+          // late-settling apply must invalidate and re-drive them.
+          this.extensionsEnsureAbandonedAtEpoch = status.runtimeEpoch;
         }
       }
     }
@@ -441,9 +454,10 @@ export class WorkspaceRuntimeCoordinator {
       }
       this.desiredExtensionGeneration = generation;
     }
-    // An operation receipt carries no content identity; clearing it makes the
-    // next store read at the new generation re-record instead of diffing
-    // against content the generation no longer describes.
+    // Record the identity of what this generation now describes: a mutation
+    // receipt carries the committed store's hash, and a hashless observation
+    // clears the baseline so the next store read at the new generation
+    // re-records instead of diffing against content it no longer describes.
     this.observedExtensionStoreHash = storeContentHash;
     this.runtime.workspaceService.invalidateWorkspaceSkillsStatus();
     this.extensionsRevision += 1;
@@ -465,9 +479,13 @@ export class WorkspaceRuntimeCoordinator {
 
   async reconcileExtensionGeneration(
     generation: number,
-    options: { skillsOnly?: boolean } = {},
+    options: { skillsOnly?: boolean; storeContentHash?: string } = {},
   ): Promise<WorkspaceExtensionReconciliationResult> {
-    this.observeExtensionGeneration(generation);
+    this.observeExtensionGeneration(
+      generation,
+      undefined,
+      options.storeContentHash,
+    );
     if (generation < this.desiredExtensionGeneration) {
       return { state: 'superseded', refreshed: 0, failed: 0 };
     }
@@ -476,7 +494,12 @@ export class WorkspaceRuntimeCoordinator {
       if (snapshot.runtimeLive && this.draining && !this.disposed) {
         this.deferExtensionsReconciliation(options);
       }
-      return { state: 'deferred', refreshed: 0, failed: 0 };
+      return {
+        state: 'deferred',
+        refreshed: 0,
+        failed: 0,
+        ...(this.extensionsReconcileDeferred ? { drainDeferred: true } : {}),
+      };
     }
     const current = this.status().capabilities?.extensions;
     if (
@@ -514,7 +537,12 @@ export class WorkspaceRuntimeCoordinator {
     } catch (error) {
       if (this.draining && !this.disposed) {
         this.deferExtensionsReconciliation(options);
-        return { state: 'deferred', refreshed: 0, failed: 0 };
+        return {
+          state: 'deferred',
+          refreshed: 0,
+          failed: 0,
+          drainDeferred: true,
+        };
       }
       if (
         revision !== this.extensionsRevision ||
@@ -533,7 +561,7 @@ export class WorkspaceRuntimeCoordinator {
           (refresh?.configsFailed ?? 0) +
           (refresh?.sessionsFailed ?? 0) +
           (refresh?.sessionsSkipped ?? (refresh ? 0 : 1)),
-        error: sanitizeExtensionsErrorMessage(
+        error: sanitizeRuntimeErrorMessage(
           error instanceof Error ? error.message : String(error),
         ),
       };
@@ -570,6 +598,10 @@ export class WorkspaceRuntimeCoordinator {
       failed: 0,
       ...(extensions?.state === 'error'
         ? { error: extensions.error?.message }
+        : {}),
+      ...(generation === this.desiredExtensionGeneration &&
+      this.extensionsReconcileDeferred
+        ? { drainDeferred: true }
         : {}),
     };
   }
@@ -863,12 +895,18 @@ export class WorkspaceRuntimeCoordinator {
           recoveringFromError ||
           // Initial ensure prepares Skills/MCP itself; a later certification
           // reset (including Store recovery to zero) must invalidate them.
-          (revision > 0 && this.appliedExtensionRuntimeEpoch !== runtimeEpoch));
+          (revision > 0 &&
+            this.appliedExtensionRuntimeEpoch !== runtimeEpoch) ||
+          // ensure() abandoned its Extensions observation budget while this
+          // apply kept running: the Skills/MCP it then prepared read the
+          // runtime before the catalog was applied and must be re-certified.
+          this.extensionsEnsureAbandonedAtEpoch === runtimeEpoch);
       if (certifiesGeneration) {
         this.appliedExtensionGeneration = generation;
         this.appliedExtensionRuntimeEpoch = runtimeEpoch;
       }
       if (refreshesDerivedCapabilities) {
+        this.extensionsEnsureAbandonedAtEpoch = undefined;
         this.afterExtensionApply(options);
       }
       this.extensionsStatus = certifiesGeneration
@@ -1198,7 +1236,9 @@ export class WorkspaceRuntimeCoordinator {
       runtimeEpoch,
       error: {
         code: 'skills_prepare_failed',
-        message: error instanceof Error ? error.message : String(error),
+        message: sanitizeRuntimeErrorMessage(
+          error instanceof Error ? error.message : String(error),
+        ),
       },
     };
   }
@@ -1287,7 +1327,7 @@ export class WorkspaceRuntimeCoordinator {
       appliedGeneration: this.appliedExtensionGeneration,
       error: {
         code: 'extensions_prepare_failed',
-        message: sanitizeExtensionsErrorMessage(
+        message: sanitizeRuntimeErrorMessage(
           error instanceof Error ? error.message : String(error),
         ),
       },
@@ -1334,7 +1374,9 @@ export class WorkspaceRuntimeCoordinator {
           error instanceof WorkspaceRuntimeStillStartingError
             ? 'mcp_prepare_timed_out'
             : 'mcp_prepare_failed',
-        message: error instanceof Error ? error.message : String(error),
+        message: sanitizeRuntimeErrorMessage(
+          error instanceof Error ? error.message : String(error),
+        ),
       },
     };
   }

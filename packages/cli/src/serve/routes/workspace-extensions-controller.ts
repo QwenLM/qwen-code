@@ -705,12 +705,31 @@ export function createExtensionsController(
           });
           return;
         }
+        // The receipt pairs the committed generation with the store content
+        // identity it just committed, so a recovery plus recommit that reuses
+        // the generation number is diffed against what the runtime applied
+        // instead of being re-recorded as the baseline. A store that already
+        // moved past the committed generation belongs to a newer mutation's
+        // own receipt, and a read failure must not fail an operation whose
+        // commit already landed.
+        let committedStoreContentHash: string | undefined;
         if (committedGeneration === undefined) {
-          committedGeneration = (
-            await extensionManager.getExtensionStoreSnapshot()
-          ).generation;
+          const snapshot = await extensionManager.getExtensionStoreSnapshot();
+          committedGeneration = snapshot.generation;
+          committedStoreContentHash = snapshot.legacyProjectionHash;
           reconciliationReservation ??=
             options.reserveRuntimeReconciliation?.();
+        } else {
+          try {
+            const committedSnapshot =
+              await extensionManager.getExtensionStoreSnapshot();
+            if (committedSnapshot.generation === committedGeneration) {
+              committedStoreContentHash =
+                committedSnapshot.legacyProjectionHash;
+            }
+          } catch {
+            committedStoreContentHash = undefined;
+          }
         }
         updateExtensionOperation(operationId, {
           status: 'running',
@@ -732,26 +751,40 @@ export function createExtensionsController(
                       const coordinator =
                         getWorkspaceRuntimeCoordinatorIfSupported(runtime);
                       if (coordinator) {
-                        const runtimeWasLive = coordinator.status().runtimeLive;
                         const reconciliation =
                           await coordinator.reconcileExtensionGeneration(
                             committedGeneration!,
-                            options.skillsOnly
-                              ? { skillsOnly: true }
-                              : undefined,
+                            {
+                              ...(options.skillsOnly
+                                ? { skillsOnly: true }
+                                : {}),
+                              ...(committedStoreContentHash
+                                ? {
+                                    storeContentHash: committedStoreContentHash,
+                                  }
+                                : {}),
+                            },
                           );
                         const result = {
                           refreshed: reconciliation.refreshed,
                           failed: reconciliation.failed,
                         };
+                        // Liveness is sampled after the await: a runtime that
+                        // died mid-reconcile must not be told to retry, and a
+                        // drain-queued deferral must not ask for an action
+                        // the daemon already took.
+                        const runtimeLive = coordinator.status().runtimeLive;
                         const reconciliationError =
                           reconciliation.error ??
                           (reconciliation.state !== 'reconciled' &&
-                          reconciliation.state !== 'superseded' &&
-                          (runtimeWasLive || operation === 'refresh')
-                            ? runtimeWasLive
-                              ? 'Extension runtime has not applied the committed generation. Retry the runtime refresh.'
-                              : 'Workspace runtime is not live; the committed extension generation will be applied when the runtime next starts.'
+                          reconciliation.state !== 'superseded'
+                            ? reconciliation.drainDeferred
+                              ? 'Extension runtime is draining; the committed generation is queued and will be applied when the runtime resumes.'
+                              : runtimeLive || operation === 'refresh'
+                                ? runtimeLive
+                                  ? 'Extension runtime has not applied the committed generation. Retry the runtime refresh.'
+                                  : 'Workspace runtime is not live; the committed extension generation will be applied when the runtime next starts.'
+                                : undefined
                             : undefined);
                         runtime.bridge.broadcastExtensionsChanged({
                           ...bridgeMutationEvent(event),
