@@ -3988,6 +3988,12 @@ describe('loadCliConfig with --mcp-config', () => {
         'cli-server': {
           httpUrl: 'https://${MCPCONFIG_TEST_HOST}/mcp',
           headers: { Authorization: 'Bearer $MCPCONFIG_TEST_TOKEN' },
+          // The distinguishing field. `--mcp-config` resolves the WHOLE object,
+          // so metadata expands here; the project `.mcp.json` loader uses an
+          // allowlist of transport fields and leaves this one byte-identical
+          // (see `mcpJson.test.ts`). Asserting it pins which of the two rules is
+          // in force — without it this test passes under either.
+          description: 'talks to ${MCPCONFIG_TEST_HOST}',
         },
       },
     });
@@ -3999,7 +4005,23 @@ describe('loadCliConfig with --mcp-config', () => {
     expect(mcpServers['cli-server']).toEqual({
       httpUrl: 'https://mcp.example.test/mcp',
       headers: { Authorization: 'Bearer super-secret' },
+      description: 'talks to mcp.example.test',
     });
+  });
+
+  it('rejects an --mcp-config server nested past the depth cap', async () => {
+    // `parseMcpConfig` hands the document to the recursive resolver just as the
+    // `.mcp.json` loader does, so it needs the same bound. The two differ in
+    // what they do about it: a repo-supplied entry is skipped and reported,
+    // while an explicit operator argument fails loudly and whole.
+    const deep = '['.repeat(500) + '"x"' + ']'.repeat(500);
+    const mcpConfig = `{"mcpServers":{"bomb":{"command":"node","args":${deep}}}}`;
+    process.argv = ['node', 'script.js', '--mcp-config', mcpConfig];
+    const argv = await parseArguments();
+
+    await expect(loadCliConfig(baseSettings, argv)).rejects.toThrow(
+      /nests deeper than/,
+    );
   });
 
   it('should parse inline JSON without wrapper', async () => {

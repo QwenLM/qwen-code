@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  exceedsMaxDepth,
   loadProjectMcpServers,
   MAX_MCP_SERVER_CONFIG_DEPTH,
   PROJECT_MCP_FILENAME,
@@ -214,6 +215,30 @@ describe('loadProjectMcpServers', () => {
       expect(result.errors[0]).toContain('nests deeper than');
     });
 
+    // `exceedsMaxDepth` is exported and reused by `parseMcpConfig`, so its
+    // contract has to hold for input that did not come from `JSON.parse`.
+    // A cycle means unbounded depth: it must report "exceeds", not walk the
+    // graph and report "fine" — which is what skipping repeats used to do,
+    // handing the cyclic object straight to the recursive resolver.
+    it('treats a cyclic or shared reference as exceeding the cap', () => {
+      const cyclic: Record<string, unknown> = { command: 'node' };
+      cyclic['self'] = cyclic;
+      expect(exceedsMaxDepth(cyclic, MAX_MCP_SERVER_CONFIG_DEPTH)).toBe(true);
+
+      const shared = { a: 1 };
+      expect(
+        exceedsMaxDepth({ x: shared, y: shared }, MAX_MCP_SERVER_CONFIG_DEPTH),
+      ).toBe(true);
+
+      // A plain tree well inside the cap is still accepted.
+      expect(
+        exceedsMaxDepth(
+          { command: 'node', env: { A: '1' } },
+          MAX_MCP_SERVER_CONFIG_DEPTH,
+        ),
+      ).toBe(false);
+    });
+
     it('still accepts a config at exactly the depth limit', () => {
       write(
         JSON.stringify({
@@ -272,10 +297,14 @@ describe('loadProjectMcpServers', () => {
       vi.unstubAllEnvs();
     });
 
-    it('expands ${VAR} and $VAR in headers, url, command, args and env', () => {
+    it('expands every allowlisted transport field', () => {
       vi.stubEnv('MCPJSON_TEST_TOKEN', 'super-secret');
       vi.stubEnv('MCPJSON_TEST_HOST', 'mcp.example.test');
       vi.stubEnv('MCPJSON_TEST_BIN', '/opt/bin/server');
+      vi.stubEnv('MCPJSON_TEST_WORKDIR', 'work');
+      vi.stubEnv('MCPJSON_TEST_PORT', '8443');
+      vi.stubEnv('MCPJSON_TEST_AUDIENCE', 'aud-123');
+      vi.stubEnv('MCPJSON_TEST_PROJECT', 'proj-42');
       write(
         JSON.stringify({
           mcpServers: {
@@ -287,6 +316,19 @@ describe('loadProjectMcpServers', () => {
               command: '$MCPJSON_TEST_BIN',
               args: ['--token', '${MCPJSON_TEST_TOKEN}'],
               env: { API_KEY: '${MCPJSON_TEST_TOKEN}' },
+              cwd: '/srv/${MCPJSON_TEST_WORKDIR}',
+            },
+            // `url` is the SSE transport and takes a different branch of
+            // `normalizeClaudeMcpServer` than `httpUrl`, so it needs its own
+            // case rather than riding on the `remote` one above.
+            sse: { url: 'https://${MCPJSON_TEST_HOST}/sse' },
+            socket: { tcp: 'ws://${MCPJSON_TEST_HOST}:${MCPJSON_TEST_PORT}' },
+            gcp: {
+              httpUrl: 'https://example.test/mcp',
+              targetAudience:
+                '${MCPJSON_TEST_AUDIENCE}.apps.googleusercontent.com',
+              targetServiceAccount:
+                'svc@${MCPJSON_TEST_PROJECT}.iam.gserviceaccount.com',
             },
           },
         }),
@@ -304,6 +346,23 @@ describe('loadProjectMcpServers', () => {
         command: '/opt/bin/server',
         args: ['--token', 'super-secret'],
         env: { API_KEY: 'super-secret' },
+        cwd: '/srv/work',
+        scope: 'project',
+      });
+      expect(servers['sse']).toMatchObject({
+        url: 'https://mcp.example.test/sse',
+        scope: 'project',
+      });
+      expect(servers['socket']).toMatchObject({
+        tcp: 'ws://mcp.example.test:8443',
+        scope: 'project',
+      });
+      // GCP impersonation: these select which identity is assumed and which
+      // audience the token is minted for, so they are connection-determining
+      // rather than cosmetic.
+      expect(servers['gcp']).toMatchObject({
+        targetAudience: 'aud-123.apps.googleusercontent.com',
+        targetServiceAccount: 'svc@proj-42.iam.gserviceaccount.com',
         scope: 'project',
       });
     });
@@ -334,7 +393,14 @@ describe('loadProjectMcpServers', () => {
     // wiring it in would let a checked-in `.mcp.json` read the values the env
     // loader withholds (the #8653 vector). The comment saying so was untested;
     // this pins it.
-    it('never substitutes a variable that exists only in a user-level .env', () => {
+    // NOT an absolute claim about user-level `.env` files: at a real boot
+    // `loadSettings()` runs `loadEnvironment()` first, which copies those files
+    // into `process.env`, and a key that arrives that way DOES expand here.
+    // What is pinned is narrower and is the thing the code actually decides:
+    // this loader never passes `getHomeEnvFallbackVars()`, so a key that the
+    // env loader refused to apply — and which therefore reached no one via
+    // `process.env` — is not reachable through that side channel either.
+    it('does not consult getHomeEnvFallbackVars, so a key absent from process.env stays a placeholder', () => {
       const qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mcpjson-home-'));
       try {
         vi.stubEnv('QWEN_HOME', qwenHome);

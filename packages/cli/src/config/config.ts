@@ -70,6 +70,7 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import stripJsonComments from 'strip-json-comments';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
+import { exceedsMaxDepth, MAX_MCP_SERVER_CONFIG_DEPTH } from './mcpJson.js';
 
 import { resolvePath } from '../utils/resolvePath.js';
 import {
@@ -1256,25 +1257,46 @@ function parseMcpConfig(
     debugLogger.debug(
       `Loaded ${Object.keys(servers).length} MCP server(s) from --mcp-config`,
     );
+    // Bound nesting before handing the document to the recursive resolver, for
+    // the same reason `loadProjectMcpServers` does: `resolveEnvVarsInObject`
+    // recurses per level and overflows the stack on a deep enough document. The
+    // enclosing `try` would catch that `RangeError` and report a
+    // `FatalConfigError`, so this is not the difference between a crash and an
+    // error — it is the difference between a deterministic message and one that
+    // depends on how much stack happened to be left. Reject explicitly instead.
+    for (const [name, server] of Object.entries(servers)) {
+      if (exceedsMaxDepth(server, MAX_MCP_SERVER_CONFIG_DEPTH)) {
+        throw new Error(
+          `server "${name}" nests deeper than ${MAX_MCP_SERVER_CONFIG_DEPTH} levels`,
+        );
+      }
+    }
+
     // Expand `$VAR` / `${VAR}` like every settings scope does. Without this,
     // `--mcp-config` is the single source that ships the literal placeholder to
     // the server as an auth header and the failure surfaces as an opaque 401
-    // (issue #11499).
+    // (issue #11499). The resolver keeps its internal-secret guard.
     //
     // Note this resolves the WHOLE object, so `--mcp-config` gets full settings
-    // parity — including metadata like `description`. `loadProjectMcpServers`
-    // deliberately expands only transport fields instead, and the asymmetry is
-    // the point: `--mcp-config` is passed by the operator running the command,
-    // exactly like a settings file they own, whereas a `.mcp.json` is supplied
-    // by the repository and untrusted until approved, so it gets the narrower
-    // rule. A value with a `$` in a `description` therefore still differs
-    // between the two sources; that is intended, not an oversight.
+    // parity — including metadata like `description` — whereas
+    // `loadProjectMcpServers` expands only transport fields. The reason for the
+    // asymmetry is the provenance the two arguments normally carry: a
+    // `.mcp.json` is always the file sitting in the repository being opened,
+    // while `--mcp-config` is typed (or scripted) by whoever launches the
+    // command, alongside their own settings files.
     //
-    // The resolver keeps its internal-secret guard, and an
-    // overflow on a pathological document is already caught by the enclosing
-    // `try`, which reports it as a `FatalConfigError` — `--mcp-config` is an
-    // explicit operator argument, so failing loudly here is correct, unlike a
-    // repo-supplied `.mcp.json` where the entry is skipped instead.
+    // That is a statement about typical use, NOT a check: nothing here verifies
+    // authorship, and the value may equally be a path to a file inside the
+    // repository, in which case it is exactly as untrusted as `.mcp.json` while
+    // getting the wider rule. Treat the operator's choice to pass a path as the
+    // trust decision, because that is all this code can observe. Anything that
+    // needs a real trust boundary must gate on the approval flow, which is what
+    // `scope: 'project'` and `isGatedMcpScope` exist for — `--mcp-config`
+    // servers are deliberately not gated, and that predates this change.
+    //
+    // A document deep enough to overflow the resolver is rejected above; unlike
+    // a repo-supplied `.mcp.json`, where one bad entry is skipped and reported
+    // through `errors`, an explicit operator argument fails loudly and whole.
     return resolveEnvVarsInObject(servers) as Record<string, MCPServerConfig>;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
