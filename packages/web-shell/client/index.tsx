@@ -184,6 +184,7 @@ export type {
 } from './components/sidebar/WebShellSidebar';
 export type { WebShellLanguage } from './i18n';
 export type { WebShellTheme } from './themeContext';
+export type { WebShellBrand, WebShellResolvedBrand } from './brandContext';
 export type {
   CommandDisplayCategory,
   CommandDisplayCategoryOrder,

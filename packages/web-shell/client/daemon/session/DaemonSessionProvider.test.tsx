@@ -156,6 +156,7 @@ interface MockSession {
 interface MockClient {
   createOrAttachSession: (req: unknown) => Promise<MockSession>;
   capabilities: () => Promise<unknown>;
+  brand: () => Promise<unknown>;
   workspaceProviders: () => Promise<unknown>;
   listWorkspaceSessions: () => Promise<unknown[]>;
   listStandaloneSessions: () => Promise<unknown[]>;
@@ -225,6 +226,7 @@ const sdkMocks = vi.hoisted(() => {
   const sessions: MockSession[] = [];
   const daemonClientOptions: unknown[] = [];
   const capabilities = vi.fn();
+  const brand = vi.fn();
   const workspaceProviders = vi.fn();
   const listWorkspaceSessions = vi.fn();
   const listStandaloneSessions = vi.fn();
@@ -273,6 +275,7 @@ const sdkMocks = vi.hoisted(() => {
       MockDaemonSessionClient.createOrAttach(this, req),
     );
     capabilities = capabilities;
+    brand = brand;
     workspaceProviders = workspaceProviders;
     listWorkspaceSessions = listWorkspaceSessions;
     listStandaloneSessions = listStandaloneSessions;
@@ -362,6 +365,7 @@ const sdkMocks = vi.hoisted(() => {
     sessions,
     daemonClientOptions,
     capabilities,
+    brand,
     workspaceProviders,
     workspaceSkills,
     workspaceConfigSkills,
@@ -390,6 +394,8 @@ const sdkMocks = vi.hoisted(() => {
         workspaceCwd: '/mock-workspace',
         features: [],
       });
+      brand.mockReset();
+      brand.mockResolvedValue({});
       workspaceProviders.mockReset();
       workspaceProviders.mockResolvedValue({
         v: 1,
