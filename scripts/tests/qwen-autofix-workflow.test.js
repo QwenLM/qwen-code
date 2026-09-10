@@ -327,6 +327,24 @@ function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
 }
 
+// A step's timeout-minutes, per self-review arm (af-156): a plain number
+// applies to both arms; the address step carries the one per-arm expression
+// the workflow uses, `${{ steps.prepare.outputs.self_review_arm == 'on' &&
+// <armed> || <unarmed> }}`.
+function stepCapsOf(step) {
+  const plain = step.match(/\n {8}timeout-minutes: (\d+)\n/)?.[1];
+  if (plain !== undefined) {
+    return { armed: Number(plain), unarmed: Number(plain) };
+  }
+  const perArm = step.match(
+    /\n {8}timeout-minutes: "\$\{\{ steps\.prepare\.outputs\.self_review_arm == 'on' && (\d+) \|\| (\d+) \}\}"\n/,
+  );
+  return {
+    armed: perArm ? Number(perArm[1]) : Number.NaN,
+    unarmed: perArm ? Number(perArm[2]) : Number.NaN,
+  };
+}
+
 function withRunnerDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
   try {
@@ -12316,6 +12334,7 @@ exit 1
       'CI="${CI:-true}"',
       'KISS_AUDIT="${KISS_AUDIT:-false}"',
       'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
+      'SELF_REVIEW_ARM="${SELF_REVIEW_ARM:-off}"',
       'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
     ];
     const gateLaunchPin = new RegExp(
@@ -16967,7 +16986,7 @@ exit 1
       'for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do',
     );
     expect(reviewAddressJob).toContain(
-      'for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout agent-model resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff heartbeat.log; do',
+      'for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout agent-model resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff self-review.json heartbeat.log; do',
     );
     expect(reviewAddressReportStep).toContain(
       'for f in address-summary.md no-action.md failure.md failure.zh.md handoff.md; do',
@@ -20933,20 +20952,40 @@ exit 1
     );
     // Primary + repair agent steps and their two verification gates.
     expect(longSteps).toHaveLength(4);
-    const stepCaps = longSteps.map((b) =>
-      Number(b.match(/\n {8}timeout-minutes: (\d+)/)?.[1]),
-    );
+    const stepCaps = longSteps.map((b) => stepCapsOf(b));
     for (const cap of stepCaps) {
-      expect(Number.isFinite(cap)).toBe(true);
+      expect(Number.isFinite(cap.armed)).toBe(true);
+      expect(Number.isFinite(cap.unarmed)).toBe(true);
     }
     // The setup/report steps (Prepare, Push, Finalize) are NOT bounded at
     // runtime — this reserve is an ASSUMPTION that they stay under 25m
     // (measured 5-7m + 3-4s), not a proven headroom. A hung gh call in any
     // of them can still eat the job timeout.
     const SETUP_AND_REPORT_MIN = 25;
-    const worstCaseMin =
-      stepCaps.reduce((a, b) => a + b, 0) + SETUP_AND_REPORT_MIN;
-    expect(worstCaseMin).toBeLessThanOrEqual(jobCapMin);
+    // Two round shapes (af-156). Unarmed: every long step at its cap.
+    // Armed: the address step at its armed cap, and the repair chain does
+    // not run — its `if:` excludes the arm, and the repair gate only runs
+    // after an attempted repair — so only the first gate follows it.
+    const unarmedWorstMin =
+      stepCaps.reduce((a, b) => a + b.unarmed, 0) + SETUP_AND_REPORT_MIN;
+    expect(unarmedWorstMin).toBeLessThanOrEqual(jobCapMin);
+    const repairStep = longSteps.find((b) =>
+      b.startsWith("'Repair deterministic rejection'"),
+    );
+    const repairGate = longSteps.find((b) =>
+      b.startsWith("'Repair verification gate'"),
+    );
+    expect(repairStep).toBeTruthy();
+    expect(repairGate).toBeTruthy();
+    expect(repairStep).toContain(
+      "steps.prepare.outputs.self_review_arm != 'on'",
+    );
+    expect(repairGate).toContain("steps.repair.outputs.attempted == 'true'");
+    const armedWorstMin =
+      longSteps
+        .filter((b) => b !== repairStep && b !== repairGate)
+        .reduce((a, b) => a + stepCapsOf(b).armed, 0) + SETUP_AND_REPORT_MIN;
+    expect(armedWorstMin).toBeLessThanOrEqual(jobCapMin);
     expect(jobCapMin).toBeLessThanOrEqual(360);
 
     // The pending-check staleness bound (review-scan) must sit ABOVE this job
@@ -20972,7 +21011,7 @@ exit 1
     // QWEN_TIMEOUT_MS is the budget that actually ends a round; the step
     // timeout is only a backstop. Derive both from the workflow and assert
     // the margin so the pair cannot drift silently.
-    const stepCapMin = Number(addressStep.match(/timeout-minutes: (\d+)/)?.[1]);
+    const stepCapMin = stepCapsOf(addressStep).unarmed;
     const budgetMs = Number(
       addressStep.match(
         /QWEN_TIMEOUT_MS: '\$\{\{[^}]*\|\|\s*(\d+)\s*\}\}'/,
@@ -24172,6 +24211,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
       expect(step).toContain(
         'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
       );
+      expect(step).toContain('SELF_REVIEW_ARM="${SELF_REVIEW_ARM:-off}"');
     }
     // The review stage step records HOME before any branch code runs — the
     // trusted_path doctrine — and only it: the issue job's stage has no
@@ -26006,5 +26046,309 @@ describe('report-step stale-base hold while review-pr is in flight (#10110)', ()
     expect(reviewAddressReportStep).toContain(
       'Command-triggered reviews are invisible to this probe (af-155)',
     );
+  });
+});
+
+describe('in-round self-review A/B (af-156)', () => {
+  const skill = readAutofixSkill();
+  const pushAndReport = readFileSync(pushAndReportScriptPath, 'utf8');
+  // The review lane's step: the issue lane has a 'Verification gate' of its
+  // own earlier in the file, so the end anchor is searched from the start.
+  const prepareStart = workflow.indexOf(
+    "      - name: 'Prepare branch and feedback'",
+  );
+  const addressStart = workflow.indexOf("      - name: 'Triage and address'");
+  const prepareStep = workflow.slice(prepareStart, addressStart);
+  const addressStep = workflow.slice(
+    addressStart,
+    workflow.indexOf("      - name: 'Verification gate'", addressStart),
+  );
+  const gateSection = reviewVerificationRunner.slice(
+    reviewVerificationRunner.indexOf("SELF_REVIEW_RECORD='arm=off'"),
+    reviewVerificationRunner.indexOf(
+      '# A conflict verdict must STOP BLOCKED: completing as fixed',
+    ),
+  );
+
+  it('arms the pass from the repo variable and hands the runner the arm, CLI entry and deadline', () => {
+    expect(workflow).toContain(
+      `SELF_REVIEW: "\${{ vars.QWEN_AUTOFIX_SELF_REVIEW || 'off' }}"`,
+    );
+    // Resolved once in prepare; the address cap, the repair skip and the
+    // gate record all read that one output.
+    expect(prepareStep).toContain(
+      'echo "self_review_arm=${SELF_REVIEW_ARM}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(addressStep).toContain(
+      `SELF_REVIEW_ARM: "\${{ steps.prepare.outputs.self_review_arm || 'off' }}"`,
+    );
+    expect(addressStep).toContain(
+      `timeout-minutes: "\${{ steps.prepare.outputs.self_review_arm == 'on' && 190 || 130 }}"`,
+    );
+    expect(workflow).toContain(
+      "steps.sandbox_image.outcome == 'success' && steps.prepare.outputs.self_review_arm != 'on' }}",
+    );
+    expect(addressStep).toContain('--self-review "${SELF_REVIEW_ARM}"');
+    expect(addressStep).toContain(
+      '--self-review-cli "node ${GITHUB_WORKSPACE}/dist/cli.js"',
+    );
+    expect(addressStep).toContain('--deadline "${ROUND_DEADLINE}"');
+    // An armed round's budget stays under the step backstop with the same
+    // margin rule the unarmed budget follows.
+    const stepCapMin = stepCapsOf(addressStep).armed;
+    expect(addressStep).toContain('BUDGET_CAP_MS=10800000');
+    expect(10800000 / 60000).toBeLessThanOrEqual(stepCapMin - 1);
+    expect(7200000 / 60000).toBeLessThanOrEqual(
+      stepCapsOf(addressStep).unarmed - 1,
+    );
+    expect(workflow).toContain(
+      "SELF_REVIEW_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_SELF_REVIEW_TIMEOUT_MS || 10800000 }}'",
+    );
+    // Replay the arm block: the split runs on the PR number alone.
+    const armBlock = prepareStep.match(
+      /SELF_REVIEW_ARM='off'\n[\s\S]*?esac\n[ \t]*fi\n/,
+    )?.[0];
+    expect(armBlock).toBeTruthy();
+    const armFor = (mode, pr, runnerEnvironment = 'self-hosted') =>
+      execFileSync(
+        'bash',
+        ['-c', `${armBlock}\nprintf '%s' "$SELF_REVIEW_ARM"`],
+        {
+          env: {
+            ...process.env,
+            SELF_REVIEW: mode,
+            PR: pr,
+            RUNNER_ENVIRONMENT: runnerEnvironment,
+          },
+          encoding: 'utf8',
+        },
+      ).trim();
+    // GitHub-hosted jobs are capped at 360 minutes whatever timeout-minutes
+    // says; the armed worst case only fits on the self-hosted pool.
+    expect(armFor('on', '11291', 'github-hosted')).toBe('off');
+    expect(armFor('ab', '11291', 'github-hosted')).toBe('off');
+    expect(armFor('ab', '11291')).toBe('on');
+    expect(armFor('ab', '11290')).toBe('off');
+    expect(armFor('ab', '11291x')).toBe('off');
+    expect(armFor('on', '11290')).toBe('on');
+    expect(armFor('off', '11291')).toBe('off');
+    expect(armFor('', '11291')).toBe('off');
+  });
+
+  it('prints the three self-review lines and refuses values that could carry prose', () => {
+    const prompt = (extra) =>
+      execFileSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--workdir',
+          '/tmp/autofix-review-5678',
+          ...extra,
+          '--print-prompt',
+        ],
+        { encoding: 'utf8' },
+      );
+    const off = prompt([]);
+    expect(off).toContain('\nSelf-review: off\n');
+    expect(off).toContain('\nSelf-review CLI: qwen\n');
+    expect(off).toContain('\nRound deadline (UTC): unknown\n');
+    const on = prompt([
+      '--self-review',
+      'on',
+      '--self-review-cli',
+      'node /work/dist/cli.js',
+      '--deadline',
+      '2026-09-10T12:00:00Z',
+    ]);
+    expect(on).toContain('\nSelf-review: on\n');
+    expect(on).toContain('\nSelf-review CLI: node /work/dist/cli.js\n');
+    expect(on).toContain('\nRound deadline (UTC): 2026-09-10T12:00:00Z\n');
+    const refused = (args) =>
+      runAutofixRunner(['--mode', 'address-review', ...args, '--print-prompt'])
+        .stderr;
+    expect(refused(['--self-review', 'maybe'])).toContain(
+      '--self-review must be on or off',
+    );
+    expect(refused(['--self-review-cli', 'qwen; rm -rf /'])).toContain(
+      '--self-review-cli must be a plain command path',
+    );
+    expect(refused(['--deadline', 'soon'])).toContain(
+      '--deadline must be an ISO-8601 UTC instant',
+    );
+  });
+
+  it('spells the one-pass rule in the skill and carves the CLI exception for it alone', () => {
+    expect(skill).toContain('### In-round self-review');
+    expect(skill).toContain(
+      'Only when the Invocation block says `Self-review: on`.',
+    );
+    expect(skill).toContain(
+      'QWEN_REVIEW_SANDBOX=off <cli> review run --approval-mode auto --effort high --json --quiet',
+    );
+    expect(skill).toContain('No `QWEN_SANDBOX=true` and no `env -u SANDBOX`');
+    expect(skill).toMatch(/and stop: no\s+second pass/);
+    expect(skill).toContain('`skipped-small`');
+    expect(skill).toContain('`skipped-deadline`');
+    expect(skill).toContain('the round is never blocked on its own audit');
+    expect(skill).toContain('write `<workdir>/self-review.json`');
+    expect(skill).toMatch(
+      /The one\s+CLI exception is the in-round self-review command/,
+    );
+    expect(skill).toContain(
+      'run the in-round self-review when the Invocation block arms it',
+    );
+  });
+
+  it('validates the record in the gate, binds it to the pushed delta, and renders it as a marker', () => {
+    expect(gateSection).toContain(
+      'IN("converged", "findings-fixed", "deadline", "review-failed", "skipped-small", "skipped-deadline")',
+    );
+    expect(gateSection).toContain(
+      'ACTUAL_TREE="$(git rev-parse \'HEAD^{tree}\' 2> /dev/null)"',
+    );
+    // Advisory only: no reject_fix on this path, and the record is
+    // published on the fixed path beside the other gate outputs.
+    expect(gateSection).not.toContain('reject_fix');
+    expect(reviewVerificationRunner).toContain(
+      'echo "self_review=${SELF_REVIEW_RECORD}" >> "${GITHUB_OUTPUT}"',
+    );
+    // Every gate launch carries the arm; Finalize selects the record with
+    // the outcome; the report renders the selected record, not the file.
+    const launches =
+      workflow.match(
+        /bash --norc "\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh"/g,
+      ) ?? [];
+    const armed =
+      workflow.match(/SELF_REVIEW_ARM="\$\{SELF_REVIEW_ARM:-off\}" \\/g) ?? [];
+    expect(launches.length).toBeGreaterThan(0);
+    expect(armed.length).toBe(launches.length);
+    expect(workflow).toContain(
+      'SELF_REVIEW="${REPAIR_SELF_REVIEW:-${FIRST_SELF_REVIEW}}"',
+    );
+    expect(workflow).toContain(
+      "SELF_REVIEW: '${{ steps.final_verify.outputs.self_review }}'",
+    );
+    expect(pushAndReport).toContain(
+      'echo "<!-- autofix-self-review ${SELF_REVIEW} -->"',
+    );
+    // Replay the render guard: a forged output cannot close the marker early.
+    const renderBlock = pushAndReport.match(
+      /local SELF_REVIEW_RE='[^\n]*'\n\s*if \[\[ "\$\{SELF_REVIEW:-\}" =~ \$\{SELF_REVIEW_RE\} \]\]; then\n\s*echo "<!-- autofix-self-review \$\{SELF_REVIEW\} -->"\n\s*fi/,
+    )?.[0];
+    // Both acted-report shapes render it.
+    expect(pushAndReport.match(/^\s*emit_self_review_marker$/gm)).toHaveLength(
+      2,
+    );
+    expect(renderBlock).toBeTruthy();
+    const render = (value) =>
+      execFileSync('bash', ['-c', renderBlock.replace(/^\s*local /, '')], {
+        env: { ...process.env, SELF_REVIEW: value },
+        encoding: 'utf8',
+      });
+    expect(
+      render(
+        'arm=on status=converged passes=1 act=0 declined=0 deferred=0 minutes=41 bound=true',
+      ),
+    ).toBe(
+      '<!-- autofix-self-review arm=on status=converged passes=1 act=0 declined=0 deferred=0 minutes=41 bound=true -->\n',
+    );
+    expect(render('arm=on --> <script>')).toBe('');
+    expect(render('')).toBe('');
+  });
+
+  it('runs the gate record section against real files: missing, malformed, skipped, unbound', () => {
+    withRunnerDir((dir) => {
+      const workdir = join(dir, 'work');
+      mkdirSync(workdir, { recursive: true });
+      const gateLog = join(workdir, 'gate-output.log');
+      const run = (arm) =>
+        execFileSync(
+          'bash',
+          [
+            '-c',
+            // The section tees its log line to stdout; only the record is
+            // under test here.
+            `set -eo pipefail\nGATE_LOG=${JSON.stringify(gateLog)}\n: > "$GATE_LOG"\nBRANCH=nope\n{\n${gateSection}\n} > /dev/null\nprintf '%s' "$SELF_REVIEW_RECORD"`,
+          ],
+          {
+            env: { ...process.env, WORKDIR: workdir, SELF_REVIEW_ARM: arm },
+            encoding: 'utf8',
+            cwd: dir,
+          },
+        ).trim();
+      const record = (doc) =>
+        writeFileSync(join(workdir, 'self-review.json'), doc);
+      const findings = { act: 0, declined: 0, deferred: 0 };
+      expect(run('off')).toBe('arm=off');
+      expect(existsSync(join(workdir, 'gate-advisories.md'))).toBe(false);
+      expect(run('on')).toBe('arm=on status=missing');
+      record('not json');
+      expect(run('on')).toBe('arm=on status=invalid');
+      record(
+        JSON.stringify({
+          version: 1,
+          status: 'skipped-small',
+          passes: 0,
+          findings,
+          minutes: 0,
+        }),
+      );
+      expect(run('on')).toBe(
+        'arm=on status=skipped-small passes=0 act=0 declined=0 deferred=0 minutes=0',
+      );
+      // A status that claims a pass needs a tree id; no git repository
+      // answers here, so the binding resolves to bound=false, never a crash.
+      record(
+        JSON.stringify({
+          version: 1,
+          status: 'converged',
+          passes: 1,
+          findings,
+          minutes: 41.9,
+          tree: 'a'.repeat(40),
+        }),
+      );
+      expect(run('on')).toBe(
+        'arm=on status=converged passes=1 act=0 declined=0 deferred=0 minutes=41 bound=false',
+      );
+      // Grammar: a status outside the vocabulary or a field that is not a
+      // non-negative integer is invalid — never rendered.
+      record(
+        JSON.stringify({
+          version: 1,
+          status: 'converged -->',
+          passes: 1,
+          findings,
+          minutes: 1,
+          tree: 'a'.repeat(40),
+        }),
+      );
+      expect(run('on')).toBe('arm=on status=invalid');
+      record(
+        JSON.stringify({
+          version: 1,
+          status: 'converged',
+          passes: -1,
+          findings,
+          minutes: 1,
+          tree: 'a'.repeat(40),
+        }),
+      );
+      expect(run('on')).toBe('arm=on status=invalid');
+      expect(
+        readFileSync(join(workdir, 'gate-advisories.md'), 'utf8'),
+      ).toContain('in-round self-review');
+    });
+  });
+
+  it('documents the arm in the design doc', () => {
+    expect(designDoc).toContain('<a id="af-156"></a>');
+    expect(designDoc).toContain('(#af-156)');
   });
 });
