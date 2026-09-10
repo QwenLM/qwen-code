@@ -162,6 +162,8 @@ function builtInMark(): Element | null {
 
 beforeEach(() => {
   window.localStorage.clear();
+  // The version tooltip is only rendered outside the compact footer.
+  window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '360');
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
