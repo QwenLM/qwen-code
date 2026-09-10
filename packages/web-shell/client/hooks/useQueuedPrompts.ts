@@ -1408,13 +1408,11 @@ export function useQueuedPrompts({
         if (isCurrent()) await refreshPendingPrompts(targetSessionId);
         return undefined;
       }
-      // The pending snapshot must post-date the mid-turn snapshot above:
-      // joining a GET dispatched before the promotion would read a queue
-      // that cannot list the promoted message and drop its row.
-      const pendingResult = await refreshPendingPrompts(
-        targetSessionId,
-        refreshRequestSeqRef.current,
-      );
+      // The pending snapshot must post-date the mid-turn snapshot above: the
+      // fence default refuses to join a GET dispatched before this call,
+      // which would read a queue that cannot list the promoted message and
+      // drop its row.
+      const pendingResult = await refreshPendingPrompts(targetSessionId);
       if (!isCurrent()) return undefined;
       const waitingIds = applyMidTurnSnapshot(
         snapshot,
@@ -1968,14 +1966,12 @@ export function useQueuedPrompts({
               }
             }
             // Refreshes are single-flight per session, but the snapshot must
-            // post-date this body's own admission: joining a GET dispatched
-            // before it would read a queue that cannot list the prompt and
-            // confirm a wrong verdict. The UI-side writes stay behind the
-            // sequence fence inside `refreshPendingPrompts`.
-            const refresh = await refreshPendingPrompts(
-              targetSessionId,
-              refreshRequestSeqRef.current,
-            );
+            // post-date this body's own admission: the fence default refuses
+            // to join a GET dispatched before this call, which would read a
+            // queue that cannot list the prompt and confirm a wrong verdict.
+            // The UI-side writes stay behind the sequence fence inside
+            // `refreshPendingPrompts`.
+            const refresh = await refreshPendingPrompts(targetSessionId);
             // The started handler may have echoed this message while the
             // snapshot was in flight, and a terminal event in the same window
             // clears the displayed-id dedupe, so re-read its flag instead of

@@ -1872,7 +1872,9 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       });
       // Either row could own the started prompt: ambiguity must degrade to
       // no echo, not the first row's images under the wrong id. Each body
-      // echoes its own row once its admission resolves.
+      // echoes its own row once its admission resolves, and a body that
+      // already returned without binding leaves the echo to the settle-time
+      // consume.
       expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
       const echoRows = harness.result().queuedPrompts;
       expect(echoRows).toHaveLength(2);
@@ -2062,8 +2064,10 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       );
       await act(async () => {
         // The daemon renders a text-less prompt with no image block as '',
-        // which collides with the row's own empty text; only matching media
-        // may bind it, and the earlier prompt holds a different file.
+        // which collides with the row's own empty text. Files-bearing rows
+        // never bind through the snapshot route at all — not even against a
+        // server prompt carrying the very same file — so this pins the
+        // categorical refusal.
         sdkMock.actions.getPendingPrompts.mockResolvedValueOnce({
           pendingPrompts: [
             {
@@ -2072,7 +2076,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
               content: [
                 {
                   type: 'resource',
-                  attachmentId: 'older.md',
+                  attachmentId: 'notes.md',
                   mimeType: 'text/markdown',
                 },
               ],
