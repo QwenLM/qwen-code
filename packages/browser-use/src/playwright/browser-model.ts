@@ -51,6 +51,9 @@ export class BrowserModel {
   >();
   private sendToPlaywright: ((message: CdpMessage) => void) | undefined;
   private nextSessionId = 1;
+  private readonly ownedTabs = new Set<number>();
+  private readonly operations = new Map<number, Promise<void>>();
+  private closing: Promise<void> | undefined;
 
   constructor(bridge: ChromeBridge) {
     this.bridge = bridge;
@@ -61,19 +64,70 @@ export class BrowserModel {
   }
 
   async registerTab(tabId: number): Promise<TargetInfo> {
-    return (await this.attachTab(tabId)).targetInfo;
+    return await this.serializeTab(tabId, async () => {
+      this.assertOpen();
+      try {
+        return (await this.attachTab(tabId)).targetInfo;
+      } catch (error) {
+        await this.releaseTab(tabId);
+        throw error;
+      }
+    });
   }
 
   async unregisterTab(tabId: number): Promise<void> {
+    await this.serializeTab(tabId, async () => this.releaseTab(tabId));
+  }
+
+  close(): Promise<void> {
+    if (this.closing !== undefined) return this.closing;
+    // A disconnected bridge no longer owns debugger attachments. Never send
+    // old cleanup to a replacement connection that may claim the same tabs.
+    if (!this.bridge.isConnected()) this.ownedTabs.clear();
+    const tabIds = new Set([...this.ownedTabs, ...this.operations.keys()]);
+    this.closing = Promise.allSettled(
+      [...tabIds].map(async (tabId) => this.unregisterTab(tabId)),
+    ).then(() => undefined);
+    return this.closing;
+  }
+
+  private serializeTab<T>(
+    tabId: number,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.operations.get(tabId) ?? Promise.resolve();
+    const result = previous.then(operation);
+    const settled = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.operations.set(tabId, settled);
+    void settled.then(() => {
+      if (this.operations.get(tabId) === settled) this.operations.delete(tabId);
+    });
+    return result;
+  }
+
+  private assertOpen(): void {
+    if (this.closing !== undefined)
+      throw new Error('Playwright transport is closed');
+  }
+
+  private async releaseTab(tabId: number): Promise<void> {
     this.detachTab(tabId);
+    if (this.ownedTabs.delete(tabId) && this.bridge.isConnected())
+      await this.bridge
+        .request('tabs.detach', { tabId }, 2_000)
+        .catch(() => undefined);
   }
 
   async onBridgeEvent(event: BridgeEvent): Promise<void> {
-    if (event.method === 'qwenBrowser.tabRemoved') {
-      this.detachTab(event.tabId);
-      return;
-    }
-    if (event.method === 'qwenBrowser.detached') {
+    if (this.closing !== undefined) return;
+    if (
+      event.method === 'qwenBrowser.tabRemoved' ||
+      event.method === 'qwenBrowser.detached'
+    ) {
+      this.ownedTabs.delete(event.tabId);
       this.detachTab(event.tabId);
       return;
     }
@@ -106,13 +160,12 @@ export class BrowserModel {
       });
       return;
     }
-    const params = record(event.params);
+    const params = { ...record(event.params) };
     const childSessionId = stringOrUndefined(params.sessionId);
     if (event.method === 'Target.attachedToTarget' && childSessionId) {
-      tabSession.childSessions.set(
-        childSessionId,
-        targetInfo(params.targetInfo),
-      );
+      const info = targetInfo(params.targetInfo);
+      tabSession.childSessions.set(childSessionId, info);
+      params.targetInfo = info;
     }
     if (event.method === 'Target.detachedFromTarget' && childSessionId) {
       tabSession.childSessions.delete(childSessionId);
@@ -190,7 +243,7 @@ export class BrowserModel {
     const session = this.explicitPageSessions.get(sessionId);
     if (session?.parentSessionId !== parentSessionId)
       throw new Error(`Unknown Playwright target session: ${sessionId}`);
-    this.explicitPageSessions.delete(sessionId);
+    this.detachExplicitSessions((candidate) => candidate === session);
   }
 
   async sendCommand(
@@ -232,7 +285,9 @@ export class BrowserModel {
   private async attachTab(tabId: number): Promise<TabSession> {
     const existing = this.tabSessions.get(tabId);
     if (existing !== undefined) return existing;
+    this.ownedTabs.add(tabId);
     await this.bridge.request('tabs.attach', { tabId });
+    this.assertOpen();
     const response = record(
       await this.bridge.request('cdp.send', {
         tabId,
@@ -240,6 +295,7 @@ export class BrowserModel {
         params: {},
       }),
     );
+    this.assertOpen();
     const info = targetInfo(response.targetInfo);
     const session: TabSession = {
       tabId,
@@ -325,10 +381,17 @@ function targetInfo(value: unknown): TargetInfo {
     typeof info.targetId !== 'string' ||
     typeof info.type !== 'string' ||
     typeof info.title !== 'string' ||
-    typeof info.url !== 'string'
+    typeof info.url !== 'string' ||
+    (info.browserContextId !== undefined &&
+      (typeof info.browserContextId !== 'string' ||
+        info.browserContextId === ''))
   )
     throw new Error('Chrome extension returned invalid target information');
-  return info as TargetInfo;
+  // CDP omits this field for the default context; Playwright requires an id.
+  return {
+    ...info,
+    browserContextId: info.browserContextId ?? 'qwen-default-context',
+  } as TargetInfo;
 }
 
 function record(value: unknown): Record<string, unknown> {

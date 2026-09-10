@@ -136,6 +136,16 @@ active tab, and input actions do not bring Chrome to the foreground. Page focus
 emulation keeps background rendering and input active without changing desktop
 focus.
 
+Page and locator evaluation accept functions or strings. Functions are invoked
+with their documented arguments; strings return their JavaScript `eval`
+completion value, including trailing semicolons, comments, and statements.
+String evaluation retains the SDK's lexical `arg`, `element`, and `elements`
+bindings. A function-valued string is not invoked. Use async function arguments
+for `await` and parenthesize object literals in strings. Evaluation deadlines
+cover the whole call, including element lookup, and report `OPERATION_TIMEOUT`;
+`timeoutMs: 0` disables the deadline. A deadline ends the caller's wait without
+terminating JavaScript already running in the page.
+
 Input actions and navigation waits have separate deadlines. Locator clicks,
 locator key presses, and DOM CUA clicks disable Playwright's implicit
 post-action navigation wait. The action deadline covers performing input;
@@ -385,3 +395,56 @@ For the first release:
   macOS and Linux. Windows support and optional APIs such as clipboard, page
   assets, HAR, and read-only evaluate should be introduced independently when
   a product workflow requires them.
+
+## Dialog and navigation lifetimes
+
+A dialog handle identifies the dialog instance returned by `getJsDialog`.
+Accepting or dismissing an expired handle fails with `NOT_FOUND` and must not
+act on a replacement dialog. Dialog ids are internal to the SDK protocol;
+the public handle retains only its supported actions. Before-unload dialogs
+support both accepting the navigation and dismissing it.
+
+Chrome dialog-close events clear the runtime cache, including user actions
+outside the SDK. Their delivery must preserve Playwright's asynchronous
+ordering relative to subsequent dialog openings. An `expectNavigation` waiter
+is released when either its action or its wait fails, including rejection by
+the dialog gate before the wait implementation runs.
+
+## Input completion
+
+Locator fill delegates to Playwright, including its native input/change event
+behavior. The runtime does not add a second change event after a successful
+fill. Text-like inputs therefore commit change on blur; date-like inputs use
+Playwright's existing change dispatch.
+
+The typing diagnostic retains the original DOM element and its value in a
+page-side handle. It reports `INPUT_BLOCKED` only while that editable element
+remains connected and focused with the same value. Navigation, replacement,
+or a non-editable keyboard target cannot turn successful input into this
+error. The handle is disposed after both successful and failed input.
+
+Modifier cleanup attempts to release every attempted key even after a failed
+keydown or keyup. Cleanup preserves the original action error; a cleanup
+failure after a successful action is still reported.
+
+## Attachment and session shutdown
+
+BrowserModel owns Chrome debugger attachments, including attachments still in
+flight. Attachment and release are serialized per provider tab; close rejects
+new attachments and waits for admitted work before releasing owned tabs.
+Explicit CDP session detach emits the parent-scoped target-detached event that
+Playwright uses to dispose its session listeners.
+
+Stopping the runtime unsubscribes session listeners, drains tab registration,
+finalizes controlled tabs, and awaits transport cleanup before stopping the
+bridge. Shutdown closes extension-reported derived tabs without admitting new
+debugger attachments. Page close and crash release through the transport that
+registered the page; a crashed tab retains its ownership until it is closed or
+finalized. Reconnecting waits for the previous transport cleanup so old releases
+cannot detach newly claimed tabs. A request cannot implicitly restart a stopped
+bridge.
+
+The adapter supplies a stable default-context id when CDP omits its optional
+browserContextId, preserving supplied ids and rejecting malformed values
+before Playwright receives the target. Direct message callback failures close
+the transport and release its attachments.

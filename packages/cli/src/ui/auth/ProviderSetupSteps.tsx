@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
 import { DescriptiveRadioButtonSelect } from '../components/shared/DescriptiveRadioButtonSelect.js';
@@ -186,7 +186,7 @@ const MODEL_DESCRIPTION_COLUMN = 28;
 const MODALITY_DISPLAY_ORDER = ['image', 'video', 'audio', 'pdf'] as const;
 const MODEL_CUSTOM_INPUT_FOCUS_INDEX = -2;
 const MODEL_SEARCH_INPUT_FOCUS_INDEX = -1;
-const MAX_RECOMMENDED_MODELS_TO_SHOW = 8;
+const MAX_MODELS_TO_SHOW = 8;
 
 interface ModelOption {
   key: string;
@@ -242,17 +242,32 @@ function mergeModelIds(
   ]);
 }
 
+function orderSelectedModelKeys(
+  selectedKeys: Iterable<string>,
+  modelOptions: ModelOption[],
+  builtInModelIds: string[],
+): string[] {
+  const selected = new Set(selectedKeys);
+  const builtIns = builtInModelIds.filter((id) => selected.has(id));
+  const builtInSet = new Set(builtIns);
+  return [
+    ...builtIns,
+    ...modelOptions
+      .map((item) => item.key)
+      .filter((id) => selected.has(id) && !builtInSet.has(id)),
+  ];
+}
+
 function getRecommendedSelections(
   selectedModelIds: string[],
   modelOptions: ModelOption[],
-  builtInModelIds: Set<string>,
+  builtInModelIds: string[],
 ): string[] {
   const selectedSet = new Set(selectedModelIds);
-  return modelOptions
-    .filter(
-      (item) => selectedSet.has(item.key) && builtInModelIds.has(item.key),
-    )
-    .map((item) => item.key);
+  const servedIds = new Set(modelOptions.map((item) => item.key));
+  return builtInModelIds.filter(
+    (id) => selectedSet.has(id) && servedIds.has(id),
+  );
 }
 
 function getCustomModelIdsText(
@@ -294,7 +309,7 @@ function ModelIdsStep({
     [models],
   );
   const builtInModelIds = useMemo(
-    () => new Set(config.models?.map((model) => model.id) ?? []),
+    () => config.models?.map((model) => model.id) ?? [],
     [config.models],
   );
   const [focusedModelIndex, setFocusedModelIndex] = useState(
@@ -317,26 +332,19 @@ function ModelIdsStep({
       modelOptionSearchText(item).includes(normalizedQuery),
     );
   }, [modelOptions, modelSearchQuery]);
-  // Only the built-in specs are endorsed as recommendations; other served ids
-  // are listed under a separate heading below.
-  const firstOtherModelIndex = useMemo(
-    () =>
-      filteredModelOptions.findIndex((item) => !builtInModelIds.has(item.key)),
-    [filteredModelOptions, builtInModelIds],
-  );
   const recommendedScrollOffset =
     focusedModelIndex < 0
       ? 0
       : Math.max(
           0,
           Math.min(
-            focusedModelIndex - MAX_RECOMMENDED_MODELS_TO_SHOW + 1,
-            filteredModelOptions.length - MAX_RECOMMENDED_MODELS_TO_SHOW,
+            focusedModelIndex - MAX_MODELS_TO_SHOW + 1,
+            filteredModelOptions.length - MAX_MODELS_TO_SHOW,
           ),
         );
   const visibleModelOptions = filteredModelOptions.slice(
     recommendedScrollOffset,
-    recommendedScrollOffset + MAX_RECOMMENDED_MODELS_TO_SHOW,
+    recommendedScrollOffset + MAX_MODELS_TO_SHOW,
   );
 
   const syncModelIds = useCallback(
@@ -381,15 +389,18 @@ function ModelIdsStep({
       } else {
         nextSet.add(item.key);
       }
-      const nextKeys = modelOptions
-        .filter((option) => nextSet.has(option.key))
-        .map((option) => option.key);
+      const nextKeys = orderSelectedModelKeys(
+        nextSet,
+        modelOptions,
+        builtInModelIds,
+      );
       setSelectedRecommendationKeys(nextKeys);
       syncModelIds(customModelIdsText, nextKeys);
     },
     [
       customModelIdsText,
       filteredModelOptions,
+      builtInModelIds,
       modelOptions,
       selectedRecommendationKeys,
       syncModelIds,
@@ -464,20 +475,23 @@ function ModelIdsStep({
         <Box marginTop={0}>
           <Text color={theme.text.secondary}>
             {t(
-              'Checked recommended models are applied on submit but not copied into the input.',
+              recommendationSource === 'provider'
+                ? 'Checked models are applied on submit but not copied into the input.'
+                : 'Checked recommended models are applied on submit but not copied into the input.',
             )}
           </Text>
         </Box>
-        {firstOtherModelIndex !== 0 && (
-          <Box marginTop={1}>
-            <Text color={theme.text.secondary}>
-              {t('Recommended models')}
-              {recommendationSource === 'provider' && t(' · from the provider')}
-              {recommendationSource === 'fallback' &&
-                t(' · provider list unavailable, showing built-ins')}
-            </Text>
-          </Box>
-        )}
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary}>
+            {recommendationSource === 'provider'
+              ? t('Models · from the provider · {{count}} checked', {
+                  count: String(selectedRecommendationKeys.length),
+                })
+              : t('Recommended models')}
+            {recommendationSource === 'fallback' &&
+              t(' · provider list unavailable, showing built-ins')}
+          </Text>
+        </Box>
         <Box marginTop={0} flexDirection="column">
           <Text color={theme.text.secondary}>{t('Search')}</Text>
           <TextInput
@@ -511,35 +525,26 @@ function ModelIdsStep({
                 : isSelected
                   ? theme.text.accent
                   : theme.text.primary;
-              const showOtherModelsHeading =
-                firstOtherModelIndex !== -1 &&
-                modelIndex >= firstOtherModelIndex &&
-                (visibleIndex === 0 || modelIndex === firstOtherModelIndex);
               return (
-                <Fragment key={item.key}>
-                  {showOtherModelsHeading && (
-                    <Box marginTop={1}>
-                      <Text color={theme.text.secondary}>
-                        {t('Other models from the provider')}
-                      </Text>
-                    </Box>
-                  )}
-                  <Box alignItems="flex-start">
-                    <Box minWidth={4} flexShrink={0}>
-                      <Text color={textColor}>
-                        {isSelected ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY}
-                      </Text>
-                    </Box>
-                    <Box flexGrow={1}>
-                      <Text color={textColor}>{item.label}</Text>
-                    </Box>
+                <Box key={item.key} alignItems="flex-start">
+                  <Box minWidth={4} flexShrink={0}>
+                    <Text color={textColor}>
+                      {isSelected ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY}
+                    </Text>
                   </Box>
-                </Fragment>
+                  <Box flexGrow={1}>
+                    <Text color={textColor}>{item.label}</Text>
+                  </Box>
+                </Box>
               );
             })
           ) : (
             <Text color={theme.text.secondary}>
-              {t('No recommended models match.')}
+              {t(
+                recommendationSource === 'provider'
+                  ? 'No models match.'
+                  : 'No recommended models match.',
+              )}
             </Text>
           )}
         </Box>
@@ -551,7 +556,9 @@ function ModelIdsStep({
         <Box marginTop={1}>
           <Text color={theme.text.secondary}>
             {t(
-              'Enter to submit, ↑↓/Tab to switch input, search, and recommendations, Space to toggle recommendations, Esc to go back',
+              recommendationSource === 'provider'
+                ? 'Enter to submit, ↑↓/Tab to switch input, search, and models, Space to toggle models, Esc to go back'
+                : 'Enter to submit, ↑↓/Tab to switch input, search, and recommendations, Space to toggle recommendations, Esc to go back',
             )}
           </Text>
         </Box>

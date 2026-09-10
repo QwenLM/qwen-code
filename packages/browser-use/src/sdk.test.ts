@@ -350,6 +350,7 @@ describe('Browser SDK in the existing Node REPL', () => {
     const tab = await browser.tabs.new();
 
     backend.dispatch.mockResolvedValueOnce({
+      dialogId: 'alert-1',
       type: 'alert',
       message: 'Heads up',
       defaultPrompt: '',
@@ -359,8 +360,13 @@ describe('Browser SDK in the existing Node REPL', () => {
     expect(alert.message).toBe('Heads up');
     expect('accept' in alert).toBe(false);
     await alert.dismiss();
+    expect(backend.calls).toContainEqual({
+      method: 'tab.dialog.dismiss',
+      args: { tabId: 'tab-1', dialogId: 'alert-1' },
+    });
 
     backend.dispatch.mockResolvedValueOnce({
+      dialogId: 'prompt-1',
       type: 'prompt',
       message: 'Name',
       defaultPrompt: 'Qwen',
@@ -375,7 +381,7 @@ describe('Browser SDK in the existing Node REPL', () => {
 
     expect(backend.calls).toContainEqual({
       method: 'tab.dialog.accept',
-      args: { tabId: 'tab-1', promptText: 'Codex' },
+      args: { tabId: 'tab-1', dialogId: 'prompt-1', promptText: 'Codex' },
     });
   });
 

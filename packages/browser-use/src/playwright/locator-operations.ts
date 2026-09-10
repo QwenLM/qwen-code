@@ -109,7 +109,7 @@ export async function executeLocatorOperation(
       );
       return null;
     case 'locator.fill':
-      await fillLocator(locator, stringArg(args, 'value'), options);
+      await locator.fill(stringArg(args, 'value'), options);
       return null;
     case 'locator.type':
       await typeIntoLocator(locator, stringArg(args, 'value'), options);
@@ -174,53 +174,51 @@ function defaultLocatorTimeout(method: SupportedCommand): number {
   }
 }
 
-async function fillLocator(
-  locator: Locator,
-  value: string,
-  options: { timeout: number },
-): Promise<void> {
-  await locator.fill(value, options);
-  await locator.dispatchEvent('change', { bubbles: true }, options);
-}
-
 async function typeIntoLocator(
   locator: Locator,
   value: string,
   options: { timeout: number },
 ): Promise<void> {
-  const before =
-    value === '' ? undefined : await editableValue(locator, options);
-  await locator.pressSequentially(value, options);
-  if (value === '') return;
-  const after = await editableValue(locator, options);
-  if (after === before)
-    throw new BrowserRuntimeError(
-      'INPUT_BLOCKED',
-      'Typing produced no observable change; inspect the target state before continuing',
-    );
-}
-
-async function editableValue(
-  locator: Locator,
-  options: { timeout: number },
-): Promise<string> {
-  return await locator.evaluate(
-    (element) => {
-      if (
-        element instanceof HTMLInputElement ||
-        element instanceof HTMLTextAreaElement ||
-        element instanceof HTMLSelectElement
-      )
-        return element.value;
-      if (element instanceof HTMLElement && element.isContentEditable)
-        return element.textContent ?? '';
-      throw new Error(
-        'type requires an input, textarea, select, or contenteditable element',
+  const unchanged =
+    value === ''
+      ? undefined
+      : await locator.evaluateHandle(
+          (element) => {
+            const hasValue =
+              element instanceof HTMLInputElement ||
+              element instanceof HTMLTextAreaElement ||
+              element instanceof HTMLSelectElement;
+            const before = hasValue
+              ? element.value
+              : element instanceof HTMLElement && element.isContentEditable
+                ? (element.textContent ?? '')
+                : undefined;
+            return () =>
+              before !== undefined &&
+              element.isConnected &&
+              element.matches(':focus-within') &&
+              (hasValue ? element.value : (element.textContent ?? '')) ===
+                before;
+          },
+          undefined,
+          options,
+        );
+  try {
+    await locator.pressSequentially(value, options);
+    if (
+      unchanged !== undefined &&
+      (await withTimeout(
+        unchanged.evaluate((check) => check()),
+        options.timeout,
+      ).catch(() => false))
+    )
+      throw new BrowserRuntimeError(
+        'INPUT_BLOCKED',
+        'Typing produced no observable change; inspect the target state before continuing',
       );
-    },
-    undefined,
-    options,
-  );
+  } finally {
+    await unchanged?.dispose().catch(() => undefined);
+  }
 }
 
 type LocatorScope = Page | Locator | FrameLocator;
@@ -357,16 +355,19 @@ async function evaluateLocator(
       timeout,
     );
   }
-  return await locator.evaluate(
-    async (element, source) => {
-      const AsyncFunction = Object.getPrototypeOf(async () => undefined)
-        .constructor as new (
-        argument: string,
-        body: string,
-      ) => (element: Element) => Promise<unknown>;
-      return await new AsyncFunction('element', source)(element);
-    },
-    script,
-    { timeout },
+  return await withTimeout(
+    locator.evaluate(
+      async (element, source) => {
+        const AsyncFunction = Object.getPrototypeOf(async () => undefined)
+          .constructor as new (
+          argument: string,
+          body: string,
+        ) => (element: Element) => Promise<unknown>;
+        return await new AsyncFunction('element', source)(element);
+      },
+      script,
+      { timeout },
+    ),
+    timeout,
   );
 }

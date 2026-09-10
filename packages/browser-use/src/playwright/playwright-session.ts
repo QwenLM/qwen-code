@@ -53,10 +53,23 @@ export class PlaywrightSession {
   private stopped = false;
   private starting: Promise<void> | undefined;
   private registration = Promise.resolve();
+  private stopping: Promise<void> | undefined;
+  private readonly removeEventListener: () => void;
+  private readonly removeConnectionListener: () => void;
 
   constructor(options: PlaywrightSessionOptions) {
     this.bridge = options.bridge;
-    this.bridge.onEvent((event) => {
+    this.removeEventListener = this.bridge.onEvent((event) => {
+      if (this.stopped) return;
+      if (event.method === 'Page.javascriptDialogClosed') {
+        // Playwright delivers dialog openings in microtasks; preserve CDP order.
+        for (const tab of this.tabs.values()) {
+          if (tab.providerTabId === event.tabId)
+            queueMicrotask(() => {
+              tab.dialog = undefined;
+            });
+        }
+      }
       if (event.method === 'qwenBrowser.derivedTabTracked') {
         const parent = record(event.params).openerTabId;
         if (
@@ -65,9 +78,11 @@ export class PlaywrightSession {
             (tab) => tab.providerTabId === parent && !tab.stale,
           )
         ) {
+          const tabIdPrefix = this.tabIdPrefix;
           void this.bridge
             .request('tabs.get', { tabId: event.tabId })
             .then(async (value) => {
+              if (this.stopped || tabIdPrefix !== this.tabIdPrefix) return;
               const provider = providerTab(value);
               await this.registerTab(provider, 'created', true);
             })
@@ -75,18 +90,11 @@ export class PlaywrightSession {
         }
       }
     });
-    this.bridge.onConnectionChange((connected) => {
-      if (connected) return;
-      for (const tab of this.tabs.values()) tab.stale = 'session';
-      this.tabIdPrefix = newTabIdPrefix();
-      this.tabs.clear();
-      this.discoveredTabs.clear();
-      this.selectedTabId = undefined;
-      this.transport = undefined;
-      this.browser = undefined;
-      this.context = undefined;
-      this.started = false;
-    });
+    this.removeConnectionListener = this.bridge.onConnectionChange(
+      (connected) => {
+        if (!connected && !this.stopped) this.invalidateSession();
+      },
+    );
   }
 
   async start(): Promise<void> {
@@ -105,6 +113,8 @@ export class PlaywrightSession {
   }
 
   private async startInternal(): Promise<void> {
+    await this.transport?.close();
+    this.assertRunning();
     const tabIdPrefix = this.tabIdPrefix;
     await this.bridge.start();
     const transport = new QwenPlaywrightTransport(this.bridge);
@@ -136,32 +146,50 @@ export class PlaywrightSession {
       this.browser = browser;
       this.context = context;
       this.started = true;
+      browser.on('disconnected', () => {
+        if (this.browser === browser) this.invalidateSession();
+      });
     } catch (error) {
-      transport.close();
+      await transport.close();
       throw error;
     }
   }
 
-  async stop(): Promise<void> {
-    if (this.stopped) return;
+  stop(): Promise<void> {
+    return (this.stopping ??= this.stopInternal());
+  }
+
+  private async stopInternal(): Promise<void> {
     this.stopped = true;
+    this.removeEventListener();
+    this.removeConnectionListener();
     await this.starting?.catch(() => undefined);
+    await this.registration;
     if (this.bridge.isConnected()) {
       await this.finalizeTabs([]).catch(() => undefined);
-      await Promise.allSettled(
-        [...this.tabs.values()].map(async (tab) =>
-          this.bridge.request(
-            'tabs.detach',
-            { tabId: tab.providerTabId },
-            2_000,
-          ),
-        ),
-      );
     }
+    await this.transport?.close();
+    this.invalidateSession();
+    await this.bridge.stop();
+  }
+
+  private invalidateSession(): void {
+    for (const tab of this.tabs.values()) tab.stale = 'session';
+    this.tabIdPrefix = newTabIdPrefix();
     this.tabs.clear();
     this.discoveredTabs.clear();
-    this.transport?.close();
-    await this.bridge.stop();
+    this.selectedTabId = undefined;
+    this.browser = undefined;
+    this.context = undefined;
+    this.started = false;
+  }
+
+  private assertRunning(): void {
+    if (this.stopped)
+      throw new BrowserRuntimeError(
+        'NOT_RUNNING',
+        'Browser Use runtime stopped',
+      );
   }
 
   isSessionStale(id: string): boolean {
@@ -258,6 +286,7 @@ export class PlaywrightSession {
     ownership: 'created' | 'claimed',
     select: boolean,
   ): Promise<TabInfo> {
+    this.assertRunning();
     const tabIdPrefix = this.tabIdPrefix;
     const existing = [...this.tabs.values()].find(
       (tab) => tab.providerTabId === provider.providerTabId && !tab.stale,
@@ -266,10 +295,12 @@ export class PlaywrightSession {
       if (ownership === 'created') existing.ownership = 'created';
       if (select) this.selectedTabId = existing.id;
       const info = await this.tabInfo(existing);
+      this.assertRunning();
       if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
       return info;
     }
     return await this.serializeRegistration(async () => {
+      this.assertRunning();
       if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
       const registered = [...this.tabs.values()].find(
         (tab) => tab.providerTabId === provider.providerTabId && !tab.stale,
@@ -278,6 +309,7 @@ export class PlaywrightSession {
         if (ownership === 'created') registered.ownership = 'created';
         if (select) this.selectedTabId = registered.id;
         const info = await this.tabInfo(registered);
+        this.assertRunning();
         if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
         return info;
       }
@@ -292,27 +324,19 @@ export class PlaywrightSession {
       let page: Page;
       try {
         [, page] = await Promise.all([targetIdPromise, pagePromise]);
+        this.assertRunning();
+        if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
         // noDefaults skips Playwright's focus emulation for background pages.
         await this.bridge.request('cdp.send', {
           tabId: provider.providerTabId,
           method: 'Emulation.setFocusEmulationEnabled',
           params: { enabled: true },
         });
+        this.assertRunning();
+        if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
       } catch (error) {
-        await this.bridge
-          .request('tabs.detach', { tabId: provider.providerTabId })
-          .catch(() => undefined);
         await transport.unregisterTab(provider.providerTabId);
         throw error;
-      }
-      if (tabIdPrefix !== this.tabIdPrefix) {
-        await this.bridge
-          .request('tabs.detach', { tabId: provider.providerTabId })
-          .catch(() => undefined);
-        await transport
-          .unregisterTab(provider.providerTabId)
-          .catch(() => undefined);
-        throw staleSessionError();
       }
       const tab: TabState = {
         id: `${tabIdPrefix}${randomUUID()}`,
@@ -324,10 +348,11 @@ export class PlaywrightSession {
         navigationWaiters: new Map(),
         ownership,
       };
-      this.installPageObservers(tab);
+      this.installPageObservers(tab, transport);
       this.tabs.set(tab.id, tab);
       if (select) this.selectedTabId = tab.id;
       const info = await this.tabInfo(tab);
+      this.assertRunning();
       if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
       return info;
     });
@@ -349,25 +374,28 @@ export class PlaywrightSession {
     }
   }
 
-  private installPageObservers(tab: TabState): void {
+  private installPageObservers(
+    tab: TabState,
+    transport: QwenPlaywrightTransport,
+  ): void {
     const { page } = tab;
-    page.on('close', () => {
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
       if (tab.stale === false) tab.stale = 'tab';
       tab.dialog = undefined;
       tab.fileChoosers.clear();
       tab.navigationWaiters.clear();
-      this.tabs.delete(tab.id);
       if (this.selectedTabId === tab.id) this.selectedTabId = undefined;
-      const transport = this.transport;
-      if (transport !== undefined)
-        void transport.unregisterTab(tab.providerTabId).catch(() => undefined);
+      void transport.unregisterTab(tab.providerTabId).catch(() => undefined);
+    };
+    page.on('close', () => {
+      // Detaching a crashed page emits close but must retain cleanup ownership.
+      if (!released) this.tabs.delete(tab.id);
+      release();
     });
-    page.on('crash', () => {
-      if (tab.stale === false) tab.stale = 'tab';
-      tab.dialog = undefined;
-      tab.fileChoosers.clear();
-      tab.navigationWaiters.clear();
-    });
+    page.on('crash', release);
     page.on('dialog', (dialog) => {
       tab.dialog = dialog;
     });
@@ -398,7 +426,21 @@ export class PlaywrightSession {
       await this.bridge.request('tabs.queryDerived'),
     );
     const results = await Promise.allSettled(
-      providers.map((provider) => this.registerTab(provider, 'created', false)),
+      providers.map((provider) => {
+        if (this.stopped && mode === 'finalize') {
+          const tab = [...this.tabs.values()].find(
+            (tab) => tab.providerTabId === provider.providerTabId,
+          );
+          if (tab !== undefined) {
+            tab.ownership = 'created';
+            return;
+          }
+          return this.bridge.request('tabs.close', {
+            tabId: provider.providerTabId,
+          });
+        }
+        return this.registerTab(provider, 'created', false);
+      }),
     );
     const failed = results.find(
       (result): result is PromiseRejectedResult =>
@@ -425,10 +467,11 @@ export class PlaywrightSession {
   }
 
   async closeTab(tab: TabState): Promise<void> {
+    const transport = this.requireTransport();
     await this.bridge.request('tabs.close', { tabId: tab.providerTabId });
     tab.stale = 'tab';
     this.tabs.delete(tab.id);
-    await this.transport?.unregisterTab(tab.providerTabId);
+    await transport.unregisterTab(tab.providerTabId);
     if (this.selectedTabId === tab.id) this.selectedTabId = undefined;
   }
 

@@ -4,9 +4,68 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
-import { commandSchemas } from './schemas.js';
+import { commandSchemas, locatorStepsSchema } from './schemas.js';
+
+describe('recursive locator plans', () => {
+  it('rejects deeply nested invalid plans within a bounded process', () => {
+    const probe = spawnSync(
+      process.execPath,
+      [
+        '--max-old-space-size=256',
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '-e',
+        `
+          import assert from 'node:assert/strict';
+          import { locatorStepsSchema } from ${JSON.stringify(new URL('./schemas.ts', import.meta.url).href)};
+          for (const kind of ['and', 'or']) {
+            let node = { kind: 'locator' };
+            for (let depth = 0; depth < 16; depth++) {
+              node = { kind, steps: [node] };
+            }
+            assert.equal(locatorStepsSchema.safeParse([node]).success, false);
+          }
+          console.log('rejected');
+        `,
+      ],
+      { encoding: 'utf8', timeout: 15_000 },
+    );
+    expect(probe.error).toBeUndefined();
+    expect(probe.status).toBe(0);
+    expect(probe.stdout.trim()).toBe('rejected');
+  }, 20_000);
+
+  it('preserves nested combinations and strict leaf validation', () => {
+    const steps = [
+      { kind: 'locator', selector: 'button' },
+      {
+        kind: 'and',
+        steps: [
+          { kind: 'getByRole', role: 'button' },
+          { kind: 'or', steps: [{ kind: 'getByText', text: 'Save' }] },
+        ],
+      },
+      {
+        kind: 'filter',
+        has: [{ kind: 'locator', selector: 'span' }],
+        hasNot: [{ kind: 'getByText', text: 'Disabled' }],
+      },
+    ];
+    expect(locatorStepsSchema.parse(steps)).toEqual(steps);
+    expect(
+      locatorStepsSchema.safeParse([
+        {
+          kind: 'or',
+          steps: [{ kind: 'locator', selector: 'button', extra: true }],
+        },
+      ]).success,
+    ).toBe(false);
+  });
+});
 
 describe('browser command schemas', () => {
   it('accepts the five coordinate CUA mouse buttons from Codex', () => {

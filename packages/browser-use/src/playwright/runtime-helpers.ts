@@ -156,12 +156,21 @@ export async function withModifiers(
   action: () => Promise<void>,
 ): Promise<void> {
   const keys = modifiers(value);
-  for (const key of keys) await page.keyboard.down(key);
+  const pressed: string[] = [];
+  let releaseFailure: PromiseRejectedResult | undefined;
   try {
+    for (const key of keys) {
+      pressed.push(key);
+      await page.keyboard.down(key);
+    }
     await action();
   } finally {
-    for (const key of [...keys].reverse()) await page.keyboard.up(key);
+    const releases = await Promise.allSettled(
+      pressed.reverse().map((key) => page.keyboard.up(key)),
+    );
+    releaseFailure = releases.find((release) => release.status === 'rejected');
   }
+  if (releaseFailure) throw releaseFailure.reason;
 }
 
 export function keyChord(value: unknown): string {
@@ -334,7 +343,13 @@ export async function withTimeout<T>(
       promise,
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(
-          () => reject(new Error(`Operation timed out after ${timeout}ms`)),
+          () =>
+            reject(
+              new BrowserRuntimeError(
+                'OPERATION_TIMEOUT',
+                `Operation timed out after ${timeout}ms`,
+              ),
+            ),
           timeout,
         );
       }),
