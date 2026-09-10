@@ -623,6 +623,93 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(false);
   });
 
+  it('a file line that names nothing is neither a filing nor evidence (#10136 R20-4)', () => {
+    // `filedFile` is a `file:line` TOKEN, and a line whose whole content is
+    // verification tag state yields none. Carried as the empty string it
+    // would ask arm 3 whether a list "carries" `''` — no list does — and
+    // the chunk would stay in the wave for the rest of the loop over a
+    // filing that named nothing.
+    const TAG_ONLY =
+      'Found one gap the prior rounds missed.\n\n' +
+      '- **File:** — [unverified]\n' +
+      '- **Anchor:** const a = 1\n' +
+      '- **Issue:** the inverted guard\n' +
+      '- **Severity:** Suggestion\n';
+    const L1 =
+      '- **File:** src/pay.ts:42 — the double charge — [unverified]\n' +
+      '- **Severity:** Suggestion\n';
+    const L2 =
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+      '- **Severity:** Suggestion\n' +
+      '- **File:** src/other.ts:7 — an unrelated finding\n' +
+      '- **Severity:** Suggestion\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', L1);
+    const f2 = writeFindingsFile(plan, 'reverse-audit--round-2--d2', L2);
+    transcript(
+      record(
+        1,
+        14,
+        'chunk 14 round 1 territory walk\n' +
+          `read_file(file_path="${f1 ?? ''}")`,
+        'd1',
+      ),
+      TAG_ONLY,
+    );
+    transcript(
+      record(
+        2,
+        14,
+        'chunk 14 round 2 territory walk\n' +
+          `read_file(file_path="${f2 ?? ''}")`,
+        'd2',
+      ),
+      DRY,
+    );
+
+    // Round 1 is a yield either way — the chunk was hot for round 2. What
+    // the token guard decides is round 3: with nothing filed, arm 3 has
+    // nothing to look for and the non-delta chunk narrows out.
+    const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([]);
+    expect(r3.narrowed).toEqual([{ chunkId: 14, dryRound: 2 }]);
+  });
+
+  it('an unparseable findings list keeps the raw quotation bar (#10136 R20-3)', () => {
+    // The anchored reader is a NARROWER bar than the containment test it
+    // replaced. On a list it cannot parse at all — prose, some future
+    // rendering — narrowing it would read a genuine quotation as a filing,
+    // which is the never-retire direction the module refuses. Read through
+    // the round's diagnostics: a yielded round owes none, an uncertified
+    // one names its bar.
+    const listing =
+      'Carried findings (prose rendering): the double charge at ' +
+      '**File:** src/pay.ts:42 is still open.\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', listing);
+    const QUOTATION =
+      'Already covered by the confirmed list, not re-reporting:\n\n' +
+      '- **File:** src/pay.ts:42 is still open.\n' +
+      '- **Severity:** Suggestion\n';
+    transcript(
+      record(
+        1,
+        13,
+        'chunk 13 round 1 territory walk\n' +
+          `read_file(file_path="${f1 ?? ''}")`,
+        'd1',
+      ),
+      QUOTATION,
+    );
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk', 'd2'), WHIFF);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt not matched; round 2: receipt clause names no walk',
+    ]);
+  });
+
   it('a numbered entry is an entry — the reader sees both bullet spellings (#10136 R20-3)', () => {
     // The list is model-edited markdown, and an entry this reader cannot
     // see costs recall rather than safety: every consumer fails closed on
