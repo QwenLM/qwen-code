@@ -116,7 +116,10 @@ export function attachAgentProgressWatchdog(
             MODEL_CONTROL_PROGRESS_TIMEOUT_MS,
           ),
         ),
-      armModel,
+      // Re-arm through a closure so the granted extension survives the
+      // clock-drift re-arm: passing the bare reference would drop the
+      // argument and collapse the deadline back to the base timeout.
+      () => armModel(retryDelayMs),
     );
   };
   const armTool = (callId: string) => {

@@ -147,4 +147,41 @@ describe('attachAgentProgressWatchdog', () => {
     vi.advanceTimersByTime(MODEL_TIMEOUT_MS);
     expect(abortPhase()).toBe('model/control');
   });
+
+  it('keeps a provider-backoff deadline extension across a clock-drift re-arm', () => {
+    // performance.now() drives the drift guard. Couple it to the fake clock
+    // and add a constant offset to stand in for a timer that lands late
+    // (laptop resume / loaded host).
+    let clock = 0;
+    let drift = 0;
+    const nowSpy = vi
+      .spyOn(performance, 'now')
+      .mockImplementation(() => clock + drift);
+    const advance = (ms: number) => {
+      clock += ms;
+      vi.advanceTimersByTime(ms);
+    };
+    try {
+      attach();
+      const retryDelayMs = 60 * 60_000;
+      const extendedMs = MODEL_TIMEOUT_MS + retryDelayMs;
+      emitter.emit(AgentEventType.MODEL_RETRY, {
+        retryDelayMs,
+      } as AgentRoundEvent);
+
+      // The extended deadline fires 2s late, so the drift branch re-arms it.
+      drift = 2_000;
+      advance(extendedMs);
+
+      // The re-arm must keep the extension: the base deadline alone has now
+      // elapsed, and the extension has not.
+      advance(MODEL_TIMEOUT_MS + 1);
+      expect(abortPhase()).toBeUndefined();
+
+      advance(retryDelayMs);
+      expect(abortPhase()).toBe('model/control');
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
 });
