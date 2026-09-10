@@ -410,12 +410,17 @@ export function computeApiTruncationIndex(
       //
       // Known unpaired kinds this census cannot see (R36-2; the structural
       // fix — one owner pairing both sides derive from — is deferred to a
-      // follow-up): UI items owning NO counted entry inflate the UI side
-      // and can suppress the demotion — a model-fallback notice, items
-      // 2..N of a drained batch (one submitQuery serves the whole batch), a
-      // dropped-summary notice; API entries no UI item owns inflate the API
-      // side and can fire it spuriously — a Goal continuation, a standalone
-      // steer pushed via the history.push fallback.
+      // follow-up carrying the removal condition): UI items owning NO
+      // counted entry inflate the UI side and can suppress the demotion —
+      // a model-fallback notice, items 2..N of a drained batch (one
+      // submitQuery serves the whole batch), a dropped-summary notice, a
+      // tool-round-boundary notification whose envelope merged into a
+      // functionResponse entry, a realtime_message (session-api-history
+      // builds it no entry); API entries no UI item owns inflate the API
+      // side and can fire it spuriously — a Goal continuation, a
+      // standalone steer pushed via the history.push fallback, an
+      // attachment-only turn's text-less entry (the absolute backstop
+      // counts it; no census item does).
       const positional = positionalTruncationIndex();
       if (positional !== -1 && positional < identifiedIndex) {
         let countedBeforeMatch = 0;

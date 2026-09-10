@@ -7642,6 +7642,58 @@ describe('AppContainer State Management', () => {
       expect(announcementCalls(addItem)).toHaveLength(1);
     });
 
+    it('seeds the prompt counter past ACP-minted promptIds on resume (R37-31)', async () => {
+      // ACP and headless mint `sessionId########<n>` 1-based and skip
+      // turns that write no record, while the TUI mint is pre-increment.
+      // Seeding the resume from a bare user-message count therefore
+      // re-mints the id the last resumed turn wears; the seed must come
+      // from the highest claimed turn (+1 for the pre-increment mint).
+      const sessionId = mockConfig.getSessionId();
+      const seedPromptCount = vi.fn();
+      mockedUseSessionStats.mockReturnValue({
+        stats: {},
+        seedPromptCount,
+      });
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+        conversation: {
+          sessionId,
+          projectHash: 'test-project-hash',
+          startTime: '2024-01-01T00:00:00Z',
+          lastUpdated: '2024-01-01T00:00:03Z',
+          messages: [1, 2, 3].map((turn) => ({
+            uuid: `u${turn}`,
+            parentUuid: null,
+            sessionId,
+            timestamp: `2024-01-01T00:00:0${turn}Z`,
+            type: 'user',
+            message: { role: 'user', parts: [{ text: `turn ${turn}` }] },
+            cwd: '/test/workspace',
+            version: '1.0.0',
+            promptId: `${sessionId}########${turn}`,
+          })),
+        },
+        filePath: '/tmp/session.jsonl',
+        lastCompletedUuid: 'u3',
+      } as ReturnType<typeof mockConfig.getResumedSessionData>);
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockResolvedValue([]);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // Seed 4, not the record count 3: the next pre-increment mint is
+      // then `${sessionId}########4`, above every id the transcript wears.
+      await vi.waitFor(() => {
+        expect(seedPromptCount).toHaveBeenCalledWith(4);
+      });
+    });
+
     it('does not consume the latch on a whitespace-only prompt', () => {
       const { addItem } = renderAnnouncementHarness(['QWEN.md']);
 

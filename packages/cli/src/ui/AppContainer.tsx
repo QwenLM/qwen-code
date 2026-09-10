@@ -78,6 +78,7 @@ import {
   type WaitingToolCall,
   ToolNames,
   SendMessageType,
+  computeInitialTurnFromHistory,
   clearWorktreeSession,
   restoreWorktreeContext,
   GitWorktreeService,
@@ -1198,14 +1199,29 @@ export const AppContainer = (props: AppContainerProps) => {
 
         // Seed the prompt counter from the resumed conversation so new
         // promptIds don't collide with restored file history snapshots.
-        const userTurnCount = resumedSessionData.conversation.messages.filter(
+        // A bare record count re-mints an id a resumed turn still wears:
+        // ACP and headless mint `sessionId########<n>` 1-based and skip
+        // turns that write no record, so the highest claimed turn sits
+        // above the record count (R37-31). Seed past the highest claim
+        // (+1: the TUI mint is pre-increment), floored at the record
+        // count for transcripts whose records predate claims.
+        const resumedRecords = resumedSessionData.conversation.messages;
+        const userTurnCount = resumedRecords.filter(
           (m) =>
             m.type === 'user' &&
             m.subtype !== 'mid_turn_user_message' &&
             m.subtype !== 'realtime_message',
         ).length;
         if (userTurnCount > 0) {
-          seedPromptCount(userTurnCount);
+          seedPromptCount(
+            Math.max(
+              userTurnCount,
+              computeInitialTurnFromHistory(
+                resumedRecords,
+                config.getSessionId(),
+              ) + 1,
+            ),
+          );
         }
 
         const recovered = await config.loadPausedBackgroundAgents(
