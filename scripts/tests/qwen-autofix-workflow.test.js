@@ -35,6 +35,11 @@ const subprocessTimeoutMs = Number(
 );
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
+// The review bot's fixed-ruling NOTE shape, defined ONCE at the workflow
+// level and handed to every jq site as `--arg frf` (#9940 review, rounds
+// 28-29); the runners below pass it exactly as the workflow does.
+const fixedRulingShape =
+  workflow.match(/^ {2}FIXED_RULING_FILTER: '([^\n]*)'$/m)?.[1] ?? '';
 // Long-form rationale moved out of the YAML when the file approached
 // GitHub's 500 KB start-runs limit; assertions that pin a REASON (rather
 // than a code line) read it here.
@@ -7136,6 +7141,9 @@ exit 1
             '--argjson',
             'over',
             JSON.stringify(over),
+            '--arg',
+            'frf',
+            fixedRulingShape,
             '--argjson',
             'reviews',
             JSON.stringify([reviews]),
@@ -7407,7 +7415,7 @@ exit 1
     expect(countDeferredReviews(['maintainer'])).toBe(3);
 
     const deferredInlineFilter = prepareBranchAndFeedbackStep.match(
-      /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
+      /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" \\\n\s+--arg frf "\$\{FIXED_RULING_FILTER\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
     )?.[1];
     expect(deferredInlineFilter).toBeTruthy();
     const countDeferredInline = (over = []) =>
@@ -7431,6 +7439,9 @@ exit 1
             '--argjson',
             'over',
             JSON.stringify(over),
+            '--arg',
+            'frf',
+            fixedRulingShape,
             '--argjson',
             'reviews',
             JSON.stringify([reviews]),
@@ -9820,6 +9831,236 @@ exit 1
     expect(routeStep).toContain(
       '::warning::Permission API call failed for ${SENDER_LOGIN}',
     );
+  });
+
+  it("does not count the review bot's fixed-ruling replies as feedback — matched by their posted shape, so a Critical quoting the marker still counts (#9940 review, round 28)", () => {
+    const reviewScanStep =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
+      )?.[0] ?? '';
+    // The thread lifecycle replies `R<id> fixed by <what> <marker>` into a
+    // thread — the review bot's first inline reply class that is NOT a
+    // finding (FIXED_RULING_MARKER in lib/review-footer.ts). Counting it
+    // selected a just-approved PR for a review-address round with nothing
+    // to address. The filter matches the posted SHAPE anchored at the
+    // start: a real Critical that quotes the marker leads with its
+    // severity marker and keeps counting.
+    // Defined once, at the workflow level; the scan step no longer spells
+    // its own copy. An `--arg` value reaches jq verbatim, so the `[^\n]`
+    // class carries ONE backslash — the `[^\\n]` a jq string literal needs
+    // compiled, as a shell value, to "neither backslash nor n" and let a
+    // `by` clause with an `n` in it count (#9940 review, round 29).
+    const shape = fixedRulingShape;
+    expect(shape).toBeTruthy();
+    expect(shape).toMatch(/^\^R\[0-9\]\+-\[0-9\]\+ fixed/);
+    // The `by` class names every line break BOTH dialects must agree on:
+    // jq's `[^\n]` admits `\r`/U+2028/U+2029 and JS's `.` does not, so the
+    // census dropped comments the TypeScript side counted (#9940 review,
+    // round 31 reverse audit).
+    expect(shape).toContain('(?: by [^\\r\\n\\x{2028}\\x{2029}]*)?');
+    // Anchored over the WHOLE body: a real note is the note and, under
+    // attribution on, its footer — anything carrying further prose fails
+    // closed toward COUNTING (#9940 review, round 31).
+    // Spelled out, not `\s`: Oniguruma's `\s` matches U+0085 and JS's does
+    // not (and JS's matches U+FEFF while Oniguruma's does not), so a note
+    // with either byte on the end was a note to one engine and a finding
+    // to the other (#9940 review, round 31 reverse audit).
+    // The two whitespace runs after the marker must not OVERLAP: a
+    // `[ \t]*` followed by a `[ \t\r\n]*` gives a run of spaces no
+    // unique split, which is quadratic — real jq aborts the scan step with
+    // `retry-limit-in-match` and `set -e` fails the whole job (#9940
+    // review, round 31 reverse audit). The trailing run therefore starts
+    // at a LINE BREAK.
+    expect(shape).toMatch(/\(\[\\r\\n\]\[ \\t\\r\\n\]\*\)\?\$$/);
+    expect(shape).not.toContain('\\s');
+    expect(shape).not.toContain('\\\\');
+    expect(reviewScanStep).not.toContain("FIXED_RULING_FILTER='");
+    const program = reviewScanStep.match(
+      /--arg frf "\$\{FIXED_RULING_FILTER\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
+    )?.[1];
+    expect(program).toBeTruthy();
+    const run = (comments) =>
+      execFileSync(
+        'jq',
+        [
+          '--arg',
+          'wm',
+          '2026-09-01T00:00:00Z',
+          '--arg',
+          'rb',
+          'qwen-code-ci-bot',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--argjson',
+          'trust',
+          '["OWNER","MEMBER","COLLABORATOR"]',
+          '--arg',
+          'frf',
+          shape,
+          program,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(comments) },
+      ).trim();
+    const after = { created_at: '2026-09-02T00:00:00Z' };
+    const bot = {
+      user: { login: 'qwen-code-ci-bot' },
+      author_association: 'NONE',
+    };
+    const marker = '<!-- qwen-review-fixed-ruling -->';
+    // The ruling note, with and without a `by`, attribution on and off.
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: `R1-2 fixed by the guard rewrite ${marker}\n\n_— m via Qwen Code /review (v1)_`,
+        },
+        { ...after, ...bot, in_reply_to_id: 1, body: `R1-3 fixed ${marker}` },
+        // A `by` clause with an `n` in it — the double-backslash class let
+        // this one count (#9940 review, round 29).
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: `R1-4 fixed by the new parser ${marker}`,
+        },
+      ]),
+    ).toBe('0');
+    // A Critical that QUOTES the marker — a review of the file defining it
+    // — is a finding: root, carried re-post reply, marker in a code block.
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          body: `**[Critical]** R3-1: the census filter \`${marker}\` is substring-anywhere`,
+        },
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: `**[Critical]** R3-1: still stands — \`${marker}\``,
+        },
+        {
+          ...after,
+          ...bot,
+          body: `**[Critical]** R3-2: quoted\n\n    R1-2 fixed by x ${marker}`,
+        },
+      ]),
+    ).toBe('3');
+    // Attribution off strips the severity marker, so a Critical's own
+    // claim line can OPEN with a quoted ruling — the start anchor alone
+    // dropped it from the census (#9940 review, round 30).
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          body: `R1-2 fixed by the guard ${marker} is the shape this filter matches, and it is anchored at both ends`,
+        },
+      ]),
+    ).toBe('1');
+    // …and a comment that quotes the whole note on its first line and
+    // states its finding underneath is a finding, not a note: anchoring
+    // the LINE dropped that comment wholesale, the live Critical with it
+    // (#9940 review, round 31).
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          body: `R1-2 fixed by x ${marker}\n\n**[Critical]** R3-4: the census drops this whole comment`,
+        },
+      ]),
+    ).toBe('1');
+    // The tail after the marker is the CANONICAL footer, not "any italic
+    // line": a comment whose own second paragraph is italic prose is a
+    // finding, and a permissive tail read it as a note (#9940 review,
+    // round 31 reverse audit).
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          body: `R1-2 fixed by x ${marker}\n\n_— **[Critical]** R3-4: the auth check is still missing_`,
+        },
+      ]),
+    ).toBe('1');
+    // …and the same body under a long run of horizontal whitespace still
+    // COUNTS, in bounded time. jq aborts a quadratic match rather than
+    // returning false, and the scan step runs under `set -e`, so the
+    // overlap cost the whole census, not one row (#9940 review, round 31
+    // reverse audit).
+    for (const pad of [' '.repeat(20000), '\t'.repeat(20000)]) {
+      const t0 = Date.now();
+      expect(
+        run([{ ...after, ...bot, body: `R1-2 fixed by x ${marker}${pad}x` }]),
+      ).toBe('1');
+      expect(Date.now() - t0).toBeLessThan(10000);
+    }
+    // Real jq, real Oniguruma: `\s` is not the same set in the two engines
+    // — it matches U+0085 here and not in JS, and U+00A0/U+FEFF in JS and
+    // not here — so the shape spells its whitespace out. Each of these
+    // must COUNT: dropping a comment the TypeScript side counts is the
+    // direction that loses a finding (#9940 review, round 31 reverse
+    // audit).
+    for (const tail of ['\u0085', '\u00a0', '\ufeff']) {
+      expect(
+        run([{ ...after, ...bot, body: `R1-2 fixed by x ${marker}${tail}` }]),
+      ).toBe('1');
+      expect(
+        run([
+          {
+            ...after,
+            ...bot,
+            body: `R1-2 fixed by x ${marker}\n${tail}_— m via Qwen Code /review (v1)_`,
+          },
+        ]),
+      ).toBe('1');
+    }
+    // Every other reply and root keeps counting: a carried re-post, a
+    // bot reply in prose, a human reply, a human quoting the shape.
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: '**[Critical]** R1-2: still stands at HEAD',
+        },
+        {
+          ...after,
+          ...bot,
+          in_reply_to_id: 1,
+          body: 'The assertion should cover the fallback path too.',
+        },
+        {
+          ...after,
+          user: { login: 'wenshao' },
+          author_association: 'OWNER',
+          in_reply_to_id: 1,
+          body: 'looks fine',
+        },
+        {
+          ...after,
+          user: { login: 'wenshao' },
+          author_association: 'OWNER',
+          body: `R1-2 fixed by me ${marker}`,
+        },
+      ]),
+    ).toBe('4');
+    // The scan count, the two digest legs over $comments[] whose rows
+    // survive to the rendering, and the prepare job's LIVE_NEW revalidation
+    // apply the ONE shape, each handed the env value as `--arg frf` (the
+    // OVER_BUDGET leg drops every bot row later anyway); no site spells a
+    // copy of its own.
+    expect(workflow.split('test($frf)').length - 1).toBe(4);
+    expect(
+      workflow.split('--arg frf "${FIXED_RULING_FILTER}"').length - 1,
+    ).toBe(4);
+    expect(workflow.split('qwen-review-fixed-ruling -->').length - 1).toBe(1);
   });
 
   it('never counts or renders the salvage note as actionable feedback (R5-3)', () => {
