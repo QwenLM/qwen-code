@@ -418,9 +418,11 @@ export interface QueryOptions {
    * `tools.disabled` entry removes one) the
    * demoted tools that remain hidden are not offered to the model and cannot
    * be reached through the bridge for that session, and a warning is
-   * written to the CLI process's stderr (the SDK discards it unless
-   * `debug: true` is set; a `stderr` handler alone also needs
-   * `logLevel: 'debug'`);
+   * written to the CLI process's stderr. The SDK forwards it only when
+   * stderr is piped (`debug: true` or a `stderr` handler) and the effective
+   * log level is `debug`: either leave `logLevel` unset with `debug: true`,
+   * or set `logLevel: 'debug'` together with `debug: true` or a `stderr`
+   * handler. An explicit higher `logLevel` overrides `debug: true`;
    * they stay registered, so a direct call by their own name is still
    * evaluated and approved normally — except tools also listed in
    * `tools.visible`, which
@@ -483,9 +485,11 @@ export interface QueryOptions {
    *   `tools.disabled` entry removes one) the
    *   demoted tools that remain hidden are not offered to the model and cannot
    *   be reached through the bridge for that session, and a warning is
-   *   written to the CLI process's stderr (the SDK discards it unless
-   *   `debug: true` is set; a `stderr` handler alone also needs
-   *   `logLevel: 'debug'`);
+   *   written to the CLI process's stderr. The SDK forwards it only when
+   *   stderr is piped (`debug: true` or a `stderr` handler) and the effective
+   *   log level is `debug`: either leave `logLevel` unset with `debug: true`,
+   *   or set `logLevel: 'debug'` together with `debug: true` or a `stderr`
+   *   handler. An explicit higher `logLevel` overrides `debug: true`;
    *   they stay registered, so a direct call by their own name is still
    *   evaluated and approved normally — except tools also listed in
    *   `tools.visible`,

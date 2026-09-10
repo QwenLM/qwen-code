@@ -281,12 +281,32 @@ function partWritesToMemory(part: Part, projectRoot: string): boolean {
     const targetArgs = args?.['arguments'];
     if (typeof targetName === 'string') {
       name = canonicalToolName(targetName);
-      args =
+      if (
         typeof targetArgs === 'object' &&
         targetArgs !== null &&
         !Array.isArray(targetArgs)
-          ? (targetArgs as Record<string, unknown>)
-          : undefined;
+      ) {
+        args = targetArgs as Record<string, unknown>;
+      } else {
+        args = undefined;
+        if (typeof targetArgs === 'string') {
+          const trimmedArgs = targetArgs.trim();
+          if (trimmedArgs.startsWith('{') && trimmedArgs.endsWith('}')) {
+            try {
+              const parsedArgs: unknown = JSON.parse(trimmedArgs);
+              if (
+                typeof parsedArgs === 'object' &&
+                parsedArgs !== null &&
+                !Array.isArray(parsedArgs)
+              ) {
+                args = parsedArgs as Record<string, unknown>;
+              }
+            } catch {
+              // Invalid JSON cannot describe a memory-writing target.
+            }
+          }
+        }
+      }
     }
   }
   if (name && WRITE_TOOL_NAMES.has(name)) {

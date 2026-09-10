@@ -2868,25 +2868,45 @@ describe('LoopDetectionService', () => {
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
 
-    it('uses changing result evidence for bridged task-list polling', () => {
-      const bridgeArgs = {
-        name: 'task_list',
-        arguments: TASK_LIST_ARGS,
-      };
+    it.each(['task_list', 'Task_List'])(
+      'uses changing result evidence for bridged task-list polling (%s)',
+      (targetName) => {
+        const bridgeArgs = {
+          name: targetName,
+          arguments: TASK_LIST_ARGS,
+        };
+        for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+          expect(
+            service.checkAlwaysOnSafeties(
+              createToolCallRequestEvent(ToolNames.TOOL_CALL, bridgeArgs),
+            ),
+          ).toBe(false);
+          expect(
+            service.recordToolResult(
+              { name: ToolNames.TOOL_CALL, args: bridgeArgs },
+              taskListResult(`bridged board state v${i}`),
+            ),
+          ).toBe(false);
+        }
+        expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+      },
+    );
+
+    it('treats case variants of a bridged tool as one loop identity', () => {
+      let fired = false;
       for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
-        expect(
-          service.checkAlwaysOnSafeties(
-            createToolCallRequestEvent(ToolNames.TOOL_CALL, bridgeArgs),
-          ),
-        ).toBe(false);
-        expect(
-          service.recordToolResult(
-            { name: ToolNames.TOOL_CALL, args: bridgeArgs },
-            taskListResult(`bridged board state v${i}`),
-          ),
-        ).toBe(false);
+        fired = service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent(ToolNames.TOOL_CALL, {
+            name: i % 2 === 0 ? 'Read_File' : 'read_file',
+            arguments: { file_path: '/tmp/example' },
+          }),
+        );
+        if (fired) break;
       }
-      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
     });
 
     it('keeps productive polling alive past the adaptive per-turn cap', () => {

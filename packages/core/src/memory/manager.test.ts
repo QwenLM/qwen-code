@@ -180,13 +180,19 @@ describe('MemoryManager', () => {
     });
 
     it.each([
-      ['private', '.qwen/memory/user/test.md', false],
-      ['team', '.qwen/team-memory/test.md', false],
-      ['bridged private', '.qwen/memory/user/test.md', true],
-      ['bridged team', '.qwen/team-memory/test.md', true],
+      ['private', '.qwen/memory/user/test.md', false, false],
+      ['team', '.qwen/team-memory/test.md', false, false],
+      ['bridged private', '.qwen/memory/user/test.md', true, false],
+      ['bridged team', '.qwen/team-memory/test.md', true, false],
+      [
+        'bridged private with JSON arguments',
+        '.qwen/memory/user/test.md',
+        true,
+        true,
+      ],
     ])(
       'skips extraction when history writes to a %s memory file',
-      async (_label, filePath, bridged) => {
+      async (_label, filePath, bridged, stringified) => {
         const writeCall = {
           name: 'write_file',
           args: {
@@ -207,7 +213,9 @@ describe('MemoryManager', () => {
                     args: bridged
                       ? {
                           name: writeCall.name,
-                          arguments: writeCall.args,
+                          arguments: stringified
+                            ? JSON.stringify(writeCall.args)
+                            : writeCall.args,
                         }
                       : writeCall.args,
                   },

@@ -20,7 +20,7 @@ import {
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
 import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
-import { ToolNames } from '../tools/tool-names.js';
+import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 import {
   FULL_OUTPUT_DIGEST_LABEL,
   PREVIEW_SIZE_CHARS,
@@ -45,7 +45,9 @@ function getLoopDetectionToolCall<T extends { name: string; args: object }>(
   const targetArgs = envelopeArgs['arguments'];
   return {
     ...toolCall,
-    name: targetName,
+    // The bridge resolves target names case-insensitively, so loop identity
+    // and read-tool classification must use the same canonical casing.
+    name: canonicalToolName(targetName).toLowerCase(),
     // A non-object payload (e.g. a JSON-string `arguments` a later repair
     // pass would normalize) cannot be unwrapped, but dropping it would
     // collapse every bridged call to the target onto one repeat key; keep
