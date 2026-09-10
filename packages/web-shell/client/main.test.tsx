@@ -17,6 +17,9 @@ interface CapturedWorkspaceSessionProps {
 
 const testState = vi.hoisted(() => ({
   props: undefined as CapturedWorkspaceSessionProps | undefined,
+  throwOnRender: false,
+  tokenSurvivesReload: true,
+  renderCount: 0,
 }));
 
 vi.mock('react-dom/client', async (importOriginal) => ({
@@ -28,6 +31,10 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 }));
 vi.mock('./components/WorkspaceSessionProvider', () => ({
   WorkspaceSessionProvider: (props: CapturedWorkspaceSessionProps) => {
+    testState.renderCount += 1;
+    if (testState.throwOnRender) {
+      throw new Error('render boom');
+    }
     testState.props = props;
     return null;
   },
@@ -35,6 +42,7 @@ vi.mock('./components/WorkspaceSessionProvider', () => ({
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
   getDaemonToken: () => 'token',
+  hasReloadSurvivableDaemonToken: () => testState.tokenSurvivesReload,
   persistDaemonToken: vi.fn(),
   removeDaemonTokenFromUrl: vi.fn(),
   waitForDaemonTokenMessage: vi.fn(),
@@ -48,6 +56,9 @@ describe('StandaloneApp', () => {
 
   beforeEach(() => {
     testState.props = undefined;
+    testState.throwOnRender = false;
+    testState.tokenSurvivesReload = true;
+    testState.renderCount = 0;
     window.history.replaceState(null, '', '/');
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -57,6 +68,124 @@ describe('StandaloneApp', () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.unstubAllGlobals();
+    // A failing assertion mid-test must not leak the console.error spy into
+    // later tests in this file.
+    vi.restoreAllMocks();
+  });
+
+  it('reloads the page when the root error fallback retry is clicked', () => {
+    testState.throwOnRender = true;
+    const reload = vi.fn();
+    vi.stubGlobal('location', { ...window.location, reload });
+    // The boundary logs the caught error; keep the test output clean.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    const retry = container.querySelector('button');
+    expect(retry?.textContent).toBe('Reload page');
+    expect(reload).not.toHaveBeenCalled();
+
+    act(() => {
+      retry?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to an in-place reset when the token cannot survive a reload', () => {
+    testState.throwOnRender = true;
+    testState.tokenSurvivesReload = false;
+    const reload = vi.fn();
+    vi.stubGlobal('location', { ...window.location, reload });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    const retry = container.querySelector('button');
+    expect(retry?.textContent).toBe('Try again');
+    // React replays a throwing render before the boundary catches it, so pin
+    // the delta across the retry, not an absolute render count.
+    const rendersBeforeRetry = testState.renderCount;
+
+    // The transient cause is gone by the time the user retries.
+    testState.throwOnRender = false;
+    act(() => {
+      retry?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(reload).not.toHaveBeenCalled();
+    expect(testState.renderCount).toBeGreaterThan(rendersBeforeRetry);
+    expect(container.querySelector('button')).toBeNull();
+  });
+
+  it('reloads even without a survivable token when no token was resolved at boot', () => {
+    // Tokenless trusted loopback: nothing a reload could strand.
+    testState.throwOnRender = true;
+    testState.tokenSurvivesReload = false;
+    const reload = vi.fn();
+    vi.stubGlobal('location', { ...window.location, reload });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    act(() => root.render(<StandaloneApp daemonToken={undefined} />));
+
+    const retry = container.querySelector('button');
+    expect(retry?.textContent).toBe('Reload page');
+    expect(reload).not.toHaveBeenCalled();
+
+    act(() => {
+      retry?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('carries the live theme and language across a reload retry', () => {
+    window.history.replaceState(null, '', '/?theme=light&language=zh-CN');
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    // Boot consumes the one-shot params, then strips them from the URL.
+    expect(window.location.search).not.toContain('theme=');
+    expect(testState.props?.webShellProps.theme).toBe('light');
+    expect(testState.props?.webShellProps.language).toBe('zh-CN');
+
+    act(() => {
+      testState.props?.webShellProps.onSessionIdChange?.(
+        'session-1',
+        'workspace-1',
+      );
+    });
+
+    testState.throwOnRender = true;
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    act(() => {
+      testState.props?.webShellProps.onSessionIdChange?.(
+        'session-2',
+        'workspace-1',
+      );
+    });
+
+    // Stub after the last navigation so the snapshot href is current —
+    // the handler builds the reload URL from window.location.href.
+    const reload = vi.fn();
+    vi.stubGlobal('location', { ...window.location, reload });
+    const replaceState = vi.spyOn(window.history, 'replaceState');
+
+    const retry = container.querySelector('button');
+    expect(retry?.textContent).toBe('重新加载');
+
+    act(() => {
+      retry?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    const reloadUrl = String(replaceState.mock.calls.at(-1)?.[2]);
+    expect(reloadUrl).toContain('theme=light');
+    expect(reloadUrl).toContain('language=zh-CN');
+    // The reload must land on the live session URL, not a stale snapshot.
+    expect(reloadUrl).toContain('session-2');
+    expect(reloadUrl).toContain('workspace=workspace-1');
   });
 
   it('keeps the controlled session target in sync with URL changes', () => {
