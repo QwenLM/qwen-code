@@ -753,7 +753,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       return [feature, 'workspace_skills_config_runtime'];
     }
     if (feature === 'session_artifacts') {
-      return [feature, 'session_artifacts_persistence'];
+      return [feature, 'session_artifacts_persistence', 'session_sources'];
     }
     if (feature === 'mcp_guardrail_events') {
       return [feature, 'external_tool_guard'];
@@ -2492,6 +2492,25 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       summaryCalls.push(sessionId);
       return summaryImpl(sessionId);
     },
+    async getSessionSources() {
+      return { revision: 0, sources: [] };
+    },
+    async upsertSessionSource(_sessionId, input) {
+      return {
+        revision: 1,
+        source: {
+          ...input,
+          id: 'source-1',
+          kind: input.locator.type === 'url' ? 'link' : 'file',
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+        change: 'created',
+      };
+    },
+    async removeSessionSource() {
+      return { revision: 1, removed: false };
+    },
     async getSessionArtifacts(sessionId, context) {
       sessionArtifactsCalls.push({
         sessionId,
@@ -3365,7 +3384,10 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'session_artifacts_persistence') {
+        if (
+          feature === 'session_artifacts_persistence' ||
+          feature === 'session_sources'
+        ) {
           expect(
             predicate({ sessionArtifactsPersistenceAvailable: true }),
           ).toBe(true);
@@ -24224,6 +24246,78 @@ describe('createServeApp', () => {
       expect(res.body.code).toBe('token_required');
       expect(bridge.addSessionArtifactCalls).toHaveLength(0);
     });
+
+    it('session sources route reads and mutations to the owner with client identity', async () => {
+      const bridge = fakeBridge();
+      const list = vi.spyOn(bridge, 'getSessionSources');
+      const upsert = vi.spyOn(bridge, 'upsertSessionSource');
+      const remove = vi.spyOn(bridge, 'removeSessionSource');
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const input = {
+        title: 'Requirements',
+        locator: { type: 'url', url: 'https://example.com/#part' },
+      };
+      const get = await auth(request(app).get('/session/session-A/sources'));
+      expect(get.status).toBe(200);
+      expect(get.body).toEqual({ revision: 0, sources: [] });
+      expect(list).toHaveBeenCalledWith('session-A', undefined);
+      const post = await auth(request(app).post('/session/session-A/sources'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send(input);
+      expect(post.status).toBe(200);
+      expect(upsert).toHaveBeenCalledWith('session-A', input, {
+        clientId: 'client-1',
+      });
+      const deleted = await auth(
+        request(app).delete('/session/session-A/sources/source-1'),
+      ).set('X-Qwen-Client-Id', 'client-1');
+      expect(deleted.body).toEqual({ revision: 1, removed: false });
+      expect(remove).toHaveBeenCalledWith('session-A', 'source-1', {
+        clientId: 'client-1',
+      });
+    });
+
+    it('session sources mutations require a bound client before forwarding', async () => {
+      const bridge = fakeBridge();
+      const upsert = vi.spyOn(bridge, 'upsertSessionSource');
+      const remove = vi.spyOn(bridge, 'removeSessionSource');
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const post = await auth(
+        request(app).post('/session/session-A/sources'),
+      ).send({ title: 'Test' });
+      const deleted = await auth(
+        request(app).delete('/session/session-A/sources/source-1'),
+      );
+      expect(post.status).toBe(403);
+      expect(deleted.status).toBe(403);
+      expect(upsert).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['invalid_source', 400],
+      ['source_limit_reached', 409],
+      ['source_persistence_unavailable', 503],
+      ['source_attachment_not_found', 404],
+    ])(
+      'session sources maps %s without acknowledging a mutation',
+      async (errorKind, status) => {
+        const bridge = fakeBridge();
+        vi.spyOn(bridge, 'upsertSessionSource').mockRejectedValue(
+          Object.assign(new Error('Source operation failed'), {
+            data: { errorKind },
+          }),
+        );
+        const app = createServeApp(tokenOpts, undefined, { bridge });
+        const result = await auth(
+          request(app).post('/session/session-A/sources'),
+        )
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ title: 'Test' });
+        expect(result.status).toBe(status);
+        expect(result.body.code).toBe(errorKind);
+      },
+    );
 
     it('POST /session/:id/artifacts requires a client id', async () => {
       const bridge = fakeBridge();
