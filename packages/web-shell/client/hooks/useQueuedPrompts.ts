@@ -901,18 +901,29 @@ export function useQueuedPrompts({
       // unbound submission means this prompt's own admission is still in
       // flight — its body will echo the full payload when it lands.
       const parkedText = pendingStartedByPromptIdRef.current.get(promptId);
+      // A row already bound to this id proves the park is not the in-flight
+      // own-admission case below, even when a foreign unbound submission
+      // happens to render the same text.
+      const boundRowExists = queuedPromptsRef.current.some(
+        (item) => item.serverPromptId === promptId,
+      );
+      const pendingOwnSubmission = queuedPromptsRef.current.some(
+        (item) =>
+          !item.serverPromptId &&
+          item.serverState === 'submitting' &&
+          pendingPromptTextsMatch(item.text, parkedText ?? ''),
+      );
       if (
         parkedText !== undefined &&
         !settledServerPromptIdsRef.current.has(promptId) &&
         !displayedServerPromptIdsRef.current.has(promptId) &&
-        !queuedPromptsRef.current.some(
-          (item) =>
-            !item.serverPromptId &&
-            item.serverState === 'submitting' &&
-            pendingPromptTextsMatch(item.text, parkedText),
-        )
+        (boundRowExists || !pendingOwnSubmission)
       ) {
         pendingStartedByPromptIdRef.current.delete(promptId);
+        // The settle clears the displayed marker below; this marker is what
+        // the prompt's own submit body re-reads to know the echo happened,
+        // so a still-pending body must not echo it again.
+        appendedBeforeResponsePromptIdsRef.current.add(promptId);
         // The parked text is the daemon's rendering: for a payload the event
         // cannot reproduce, echo the stashed or row-held full payload
         // instead of the placeholder.
@@ -996,6 +1007,18 @@ export function useQueuedPrompts({
                 !result.pendingPrompts.some(
                   (p) => p.promptId === clearedPromptId && p.state === 'queued',
                 )
+              ) {
+                continue;
+              }
+              // Client-side evidence wins over a snapshot the daemon answered
+              // before the start it shows: removing a prompt that already
+              // started would abort a live turn.
+              if (
+                displayedServerPromptIdsRef.current.has(clearedPromptId) ||
+                pendingStartedByPromptIdRef.current.has(clearedPromptId) ||
+                startedDuringRemovalRef.current.has(clearedPromptId) ||
+                completedPromptIdsRef.current.has(clearedPromptId) ||
+                settledServerPromptIdsRef.current.has(clearedPromptId)
               ) {
                 continue;
               }
@@ -2124,6 +2147,11 @@ export function useQueuedPrompts({
                 if (prompt.onComplete) {
                   settleCompletionCallback(result.promptId, prompt.onComplete);
                 }
+              } else if (prompt.onComplete) {
+                // The row stays submitting for a later sync to bind; the
+                // daemon already holds the prompt, so its callback must be
+                // registered now or no terminal event will ever fire it.
+                settleCompletionCallback(result.promptId, prompt.onComplete);
               }
               return;
             }

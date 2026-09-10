@@ -8796,7 +8796,9 @@ export function registerSessionRoutes(
   // snapshot can still report `hasActivePrompt: true`). Every other rejection
   // cause — closing, attachment budget, mismatched `messageId`, full queue —
   // omits it, and a kept mismatched payload is not a delivery promise: a
-  // removed promoted message stays findable until its aborted turn settles.
+  // removed promoted message disappears from snapshots at once and is
+  // retained internally — doomed — until its aborted turn settles, so the
+  // removal response is the only `removed = true` a client ever observes.
   // Accepted requests are owned by the daemon; rejected
   // requests were not admitted. Synchronous — the bridge only mutates its
   // in-memory session queues.

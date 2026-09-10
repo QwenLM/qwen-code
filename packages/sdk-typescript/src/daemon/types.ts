@@ -3877,9 +3877,11 @@ export interface DaemonSessionBtwResult {
  * report `hasActivePrompt: true`). It is absent on older daemons and on every
  * other rejection cause (queue full, closing session, attachment budget,
  * mismatched `messageId` — the payload the daemon already admitted is kept,
- * though that is not a delivery promise: a removed promoted message stays
- * findable until its aborted turn settles), so callers must keep their own
- * idle detection alongside it.
+ * though that is not a delivery promise: a removed promoted message
+ * disappears from pending-prompt snapshots at once and is retained
+ * internally — doomed — until its aborted turn settles, so the removal
+ * response is the only `removed = true` a client observes), so callers must
+ * keep their own idle detection alongside it.
  */
 export interface DaemonMidTurnMessageResult {
   accepted: boolean;
