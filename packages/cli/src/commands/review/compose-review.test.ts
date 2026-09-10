@@ -3249,7 +3249,7 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
       }),
     );
     expect(r.body).toContain(
-      '1 seam-bounded: 1 of 4 hunk(s) republished; 1 republished whole, every hunk on the seam',
+      '1 seam-bounded: 1 of 4 hunk(s) republished; 1 republished whole, nothing shed',
     );
     expect(r.body).not.toContain('4 of 7');
     // Every file kept whole: no seam-bounded count at all.
@@ -3268,9 +3268,7 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
         },
       }),
     );
-    expect(whole.body).toContain(
-      '(1 republished whole, every hunk on the seam)',
-    );
+    expect(whole.body).toContain('(1 republished whole, nothing shed)');
     expect(whole.body).not.toContain('seam-bounded:');
     // Two seam-bounded files ACCUMULATE: 1 of 4 plus 2 of 3 is 3 of 7 —
     // an assignment in place of the `+=` posts the last file alone.
@@ -3305,7 +3303,7 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
       }),
     );
     expect(two.body).toContain(
-      '2 seam-bounded: 3 of 7 hunk(s) republished; 2 republished whole, every hunk on the seam',
+      '2 seam-bounded: 3 of 7 hunk(s) republished; 2 republished whole, nothing shed',
     );
   });
 

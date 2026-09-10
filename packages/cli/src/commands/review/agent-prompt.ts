@@ -263,7 +263,7 @@ function chunkScopeBullets(
           ? ` (seam-bounded: ${e.seam.kept} of ${e.seam.total} hunk(s) republished; ` +
             `the rest were cleared by an earlier round and are not re-shown)`
           : e.seam
-            ? ` (seam scan: all ${e.seam.total} hunk(s) display a seam line and are republished)`
+            ? ` (seam scan: all ${e.seam.total} hunk(s) republished, none shed)`
             : ''),
     ),
   ];
@@ -811,13 +811,14 @@ export function buildChunkAgentPrompt(
             `do not report defects in it that the change it imports does not affect.` +
             (e.seam && e.seam.kept < e.seam.total
               ? ` Its diff here is SEAM-BOUNDED: ${e.seam.kept} of ${e.seam.total} hunk(s) ` +
-                `republished — only the ones displaying a line that imports or uses what ` +
-                `changed; the rest were cleared by an earlier round and are not re-shown. ` +
+                `republished — the ones displaying a line that imports or uses what ` +
+                `changed, and any hunk that only REMOVES lines (a removal leaves no ` +
+                `post-image line to match, so it is kept unread); the rest were cleared ` +
+                `by an earlier round and are not re-shown. ` +
                 `The seam question above is still yours in full, from the worktree.`
               : e.seam
-                ? ` The seam scan kept every one of its ${e.seam.total} hunk(s): each ` +
-                  `displays a line that imports or uses what changed, so its diff here ` +
-                  `is complete.`
+                ? ` The seam scan shed none of its ${e.seam.total} hunk(s), so its diff ` +
+                  `here is complete.`
                 : ''),
         ),
       );

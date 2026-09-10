@@ -5606,9 +5606,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     );
     if (key15 === undefined) throw new Error('chunk 15 was not built');
     const brief = readFileSync(briefPath(plan, key15), 'utf8');
-    expect(brief).toContain(
-      'all 2 hunk(s) display a seam line and are republished',
-    );
+    expect(brief).toContain('all 2 hunk(s) republished, none shed');
     expect(brief).not.toContain('not re-shown');
     // The reverse auditor's brief carries the fix-audit framing too — the
     // floor governs posting, never finding (#10136).
@@ -7887,7 +7885,7 @@ describe('incremental-scope briefs', () => {
     const seam = buildChunkAgentPrompt(whole, 2);
     expect(seam).not.toContain('SEAM-BOUNDED');
     expect(seam).not.toContain('not re-shown');
-    expect(seam).toContain('The seam scan kept every one of its 4 hunk(s)');
+    expect(seam).toContain('The seam scan shed none of its 4 hunk(s)');
     expect(seam).toContain('its diff here is complete');
   });
 

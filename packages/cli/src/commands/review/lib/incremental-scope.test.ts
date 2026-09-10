@@ -745,6 +745,60 @@ describe('widenScope seam bound (#10104)', () => {
     ).toContain('-const legacy = moved();');
   });
 
+  it('a kept-whole census reports a shed of nothing, never a seam claim per hunk (#10136 R20-5)', () => {
+    // Every kept hunk used to be one the marks matched, so the census could
+    // be read as "each of these displays a seam line". A removal-only hunk
+    // is kept for the other reason — there is no post-image line to match —
+    // so the census means "nothing was shed", which is what the brief and
+    // the posted body now say. The counts themselves are the contract.
+    const impSection = [
+      'diff --git a/src/imp.ts b/src/imp.ts',
+      '--- a/src/imp.ts',
+      '+++ b/src/imp.ts',
+      '@@ -1,1 +0,0 @@',
+      '-const legacy = moved();',
+      '@@ -8,1 +7,1 @@',
+      '-  return 0;',
+      '+  return 1;',
+      '',
+    ].join('\n');
+    const selection = selectNarrowing(
+      Buffer.from(section('src/changed.ts') + impSection, 'utf8'),
+      Buffer.from(section('src/changed.ts'), 'utf8'),
+    );
+    if (selection === null)
+      throw new Error('the narrowing refused this fixture');
+    // The head source's seam sits on lines 1-2; the second hunk (post-image
+    // line 7) displays none of it, so it is shed while the removal is kept.
+    const source = [
+      "import { moved } from './changed.js';",
+      'export const a = moved();',
+      '',
+      '',
+      '',
+      '',
+      'function unrelated() {',
+      '  return 1;',
+      '}',
+      '',
+    ].join('\n');
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? source : null),
+      seamBound: true,
+    });
+    expect(widened.scope.interaction[0].seam).toEqual({ kept: 1, total: 2 });
+    expect([...(widened.hunkKeep?.get('src/imp.ts') ?? [])]).toEqual([0]);
+    const diff = assembleSections(
+      selection,
+      widened.paths,
+      widened.hunkKeep,
+    )?.toString('utf8');
+    expect(diff).toContain('-const legacy = moved();');
+    expect(diff).not.toContain('+  return 1;');
+  });
+
   it('records nothing and drops nothing when the bound is off', () => {
     const selection = seamSelection();
     const widened = widenScope({

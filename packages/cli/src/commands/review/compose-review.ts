@@ -7876,10 +7876,10 @@ function composeReviewBody(
         : fixAudit && fixAudit.seamFiles > 0
           ? ` (${fixAudit.seamFiles} seam-bounded: ${fixAudit.seamKept} of ${fixAudit.seamTotal} hunk(s) republished` +
             (fixAudit.wholeFiles > 0
-              ? `; ${fixAudit.wholeFiles} republished whole, every hunk on the seam)`
+              ? `; ${fixAudit.wholeFiles} republished whole, nothing shed)`
               : ')')
           : fixAudit && fixAudit.wholeFiles > 0
-            ? ` (${fixAudit.wholeFiles} republished whole, every hunk on the seam)`
+            ? ` (${fixAudit.wholeFiles} republished whole, nothing shed)`
             : '';
   const fixAuditSeamZh =
     fixAudit && fixAudit.oracleUnavailable
@@ -7891,10 +7891,10 @@ function composeReviewBody(
         : fixAudit && fixAudit.seamFiles > 0
           ? `（${fixAudit.seamFiles} 个按接缝收窄：重发 ${fixAudit.seamKept}/${fixAudit.seamTotal} 个 hunk` +
             (fixAudit.wholeFiles > 0
-              ? `；${fixAudit.wholeFiles} 个整体重发，其每个 hunk 都在接缝上）`
+              ? `；${fixAudit.wholeFiles} 个整体重发，未裁剪任何 hunk）`
               : '）')
           : fixAudit && fixAudit.wholeFiles > 0
-            ? `（${fixAudit.wholeFiles} 个整体重发，其每个 hunk 都在接缝上）`
+            ? `（${fixAudit.wholeFiles} 个整体重发，未裁剪任何 hunk）`
             : '';
   const fixAuditShapeBlock: Bi[] = fixAudit
     ? [
