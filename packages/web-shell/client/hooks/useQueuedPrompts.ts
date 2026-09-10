@@ -1693,7 +1693,8 @@ export function useQueuedPrompts({
             typeof event.data.text === 'string' ? event.data.text : '';
           // A rendered text is not an identity, so ambiguity degrades to no
           // echo: each submit body echoes its own row once its admission
-          // resolves.
+          // resolves, and a body that already returned without binding
+          // leaves the echo to this park's settle-time consume.
           const unboundMatches = queuedPromptsRef.current.filter((item) =>
             matchesUnboundSubmittingRow(
               item,
@@ -2293,10 +2294,26 @@ export function useQueuedPrompts({
                   if (removeResult.removed) {
                     pendingEchoByPromptIdRef.current.delete(result.promptId);
                   } else {
+                    // The removal failed, so the prompt may still run and
+                    // settle: register the callback now or no terminal event
+                    // will ever fire it. The success arm stays silent — a
+                    // removed prompt is a cancellation.
+                    if (prompt.onComplete) {
+                      settleCompletionCallback(
+                        result.promptId,
+                        prompt.onComplete,
+                      );
+                    }
                     void refreshPendingPrompts(targetSessionId);
                   }
                 },
                 () => {
+                  if (prompt.onComplete) {
+                    settleCompletionCallback(
+                      result.promptId,
+                      prompt.onComplete,
+                    );
+                  }
                   void refreshPendingPrompts(targetSessionId);
                 },
               );

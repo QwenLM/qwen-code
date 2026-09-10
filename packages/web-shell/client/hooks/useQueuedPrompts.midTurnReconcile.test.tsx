@@ -2504,8 +2504,21 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await act(async () => {
         resolveFirst?.({ promptId: 'prompt-1' });
         resolveSecond?.({ promptId: 'prompt-2' });
-        await new Promise((resolve) => setTimeout(resolve, 250));
       });
+      // Adaptive wait on the end state instead of a fixed sleep: each
+      // iteration's act commits the pending renders, so a slow runner
+      // extends the wait rather than failing, while a retry storm still
+      // trips the call-count assertion below.
+      let boundIds: Array<string | undefined> = [];
+      for (let i = 0; i < 100; i++) {
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        });
+        boundIds = harness
+          .result()
+          .queuedPrompts.map((row) => row.serverPromptId);
+        if (boundIds.length === 2 && boundIds.every(Boolean)) break;
+      }
       expect(sdkMock.actions.getPendingPrompts.mock.calls.length).toBeLessThan(
         8,
       );
@@ -12200,4 +12213,88 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await harness.dispose();
     }
   });
+
+  it.each(['refused', 'failed'] as const)(
+    'completes a cleared first-time submission whose removal is %s and the prompt runs',
+    async (mode) => {
+      let resolveFirst: ((value: { promptId: string }) => void) | undefined;
+      sdkMock.actions.submitPrompt
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveFirst = resolve;
+            }),
+        )
+        .mockImplementation(() => new Promise(() => {}));
+      if (mode === 'refused') {
+        sdkMock.actions.removePendingPrompt.mockResolvedValue({
+          removed: false,
+        });
+      } else {
+        sdkMock.actions.removePendingPrompt.mockRejectedValue(
+          new Error('delete lost'),
+        );
+      }
+      const onComplete = vi.fn();
+      const harness = createHarness();
+      try {
+        await harness.render({ streamingState: 'idle' });
+        await act(async () => {
+          harness
+            .result()
+            .enqueuePrompt('first-time text', undefined, undefined, onComplete);
+          for (let i = 0; i < 6; i++) await Promise.resolve();
+        });
+        expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(1);
+        // The user clears the row mid-admission; the body can only hand the
+        // prompt to the daemon's removal path once the id lands.
+        act(() => {
+          harness.result().clearQueuedPrompts();
+        });
+        await harness.render({
+          streamingState: 'responding',
+          sessionHasActivePrompt: true,
+        });
+        await act(async () => {
+          resolveFirst?.({ promptId: 'prompt-1' });
+          for (let i = 0; i < 8; i++) await Promise.resolve();
+        });
+        expect(sdkMock.actions.removePendingPrompt).toHaveBeenCalledWith(
+          'prompt-1',
+          { sessionId: 'session-a' },
+        );
+        // The removal fails, so the prompt really runs: the callback the
+        // body captured must fire when the turn settles.
+        await act(async () => {
+          sdkMock.publishPendingEvents([
+            {
+              type: 'pending_prompt_started',
+              promptId: 'prompt-1',
+              originatorClientId: CLIENT_ID,
+              data: {
+                sessionId: 'session-a',
+                promptId: 'prompt-1',
+                text: 'first-time text',
+              },
+            },
+          ]);
+          for (let i = 0; i < 6; i++) await Promise.resolve();
+        });
+        expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+        await act(async () => {
+          sdkMock.publishPendingEvents([
+            {
+              type: 'turn_complete',
+              promptId: 'prompt-1',
+              data: { sessionId: 'session-a', promptId: 'prompt-1' },
+            },
+          ]);
+          for (let i = 0; i < 6; i++) await Promise.resolve();
+        });
+        expect(onComplete).toHaveBeenCalledTimes(1);
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
 });
