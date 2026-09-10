@@ -53,15 +53,20 @@ const ActiveContextMenu: React.FC = () => {
         closeMenu();
         return true;
       }
-      if (key.name === 'up') {
+      // Claim the menu's keys only without modifiers: a modified Return or
+      // arrow belongs to a composer binding (Shift+Enter / Ctrl+Enter are
+      // Command.NEWLINE in keyBindings.ts), and consuming it here would
+      // drop the newline while still firing the highlighted item.
+      const unmodified = !key.ctrl && !key.shift && !key.meta;
+      if (key.name === 'up' && unmodified) {
         setSelectedIndex(Math.max(0, selectedIndex - 1));
         return true;
       }
-      if (key.name === 'down') {
+      if (key.name === 'down' && unmodified) {
         setSelectedIndex(Math.min(menu.items.length - 1, selectedIndex + 1));
         return true;
       }
-      if (key.name === 'return') {
+      if (key.name === 'return' && unmodified) {
         executeIndex(selectedIndex);
         return true;
       }

@@ -232,6 +232,29 @@ describe('ContextMenuOverlay', () => {
       expect(bystanderKeys).toContain('x');
     });
 
+    it('Shift+Enter dismisses the menu and falls through without firing the item', async () => {
+      const handlers = { open: vi.fn(), copy: vi.fn() };
+      const bystanderKeys: string[] = [];
+      const { lastFrame, stdin } = renderWithProviders(
+        <ExclusiveScene
+          items={makeItems(handlers)}
+          onKey={(k) => bystanderKeys.push(k)}
+        />,
+      );
+      await waitFor(() => expect(lastFrame()).toContain('Open Link'));
+
+      // Shift+Enter is Command.NEWLINE in the composer, not menu-execute.
+      // Kitty CSI-u form (the provider enables the protocol): modifiers 2.
+      // It must dismiss the menu, reach ordinary handlers, and never run
+      // the highlighted item's onSelect.
+      stdin.write('\u001b[13;2u');
+      await waitFor(() => expect(lastFrame()).not.toContain('Open Link'));
+
+      expect(handlers.open).not.toHaveBeenCalled();
+      expect(handlers.copy).not.toHaveBeenCalled();
+      expect(bystanderKeys.length).toBeGreaterThan(0);
+    });
+
     it('ordinary handlers receive keys again after the menu closes', async () => {
       const handlers = { open: vi.fn(), copy: vi.fn() };
       const bystanderKeys: string[] = [];
