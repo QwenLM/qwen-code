@@ -23,8 +23,10 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -75,6 +77,14 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
 }
 
+// The R15-5/R24-1 cases below plant symlinks and (all but one) address trees
+// under `.qwen/tmp`, where the location gate only has an answer where
+// containment can exist. On Windows `mountRootFor` refuses every absolute
+// path (a drive letter is a colon), so the gate never speaks — and the
+// fixtures cannot even be built there, symlink creation being privileged.
+// Same convention as worktree.test.ts / scratch-tree.test.ts.
+const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
+
 /**
  * A real two-hunk history: a base commit, then one commit editing the file's
  * top AND bottom — far enough apart that git emits two hunks. The tree is
@@ -104,6 +114,42 @@ function twoHunkFixture(trailingNewline = true) {
   const diffPath = join(dir, 'pr.diff');
   writeFileSync(diffPath, git(dir, 'diff', 'HEAD~1', 'HEAD'));
   return { dir, diffPath };
+}
+
+/**
+ * A scratch tree in the pipeline's real geometry — a genuine linked worktree
+ * at `<repo>/.qwen/tmp/shard/scratch`, one commit deep, with the PR diff
+ * beside it. The `shard` component is the ancestor between the review temp
+ * root and the leaf that the R24-1 witness swaps for a symlink.
+ */
+function scratchTreeFixture() {
+  const repo = join(tempDir('rh-scratch-'), 'repo');
+  mkdirSync(repo, { recursive: true });
+  git(repo, 'init', '-q', '-b', 'main');
+  git(repo, 'config', 'user.email', 't@t');
+  git(repo, 'config', 'user.name', 't');
+  writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-qm', 'pr head');
+  const diffPath = join(repo, 'p.diff');
+  writeFileSync(
+    diffPath,
+    [
+      'diff --git a/a.ts b/a.ts',
+      'index 1111111..2222222 100644',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1 +1 @@',
+      '-export const x = 1;',
+      '+export const x = 2;',
+      '',
+    ].join('\n'),
+  );
+  const shard = join(repo, '.qwen', 'tmp', 'shard');
+  mkdirSync(shard, { recursive: true });
+  const scratch = join(shard, 'scratch');
+  git(repo, 'worktree', 'add', '--detach', scratch);
+  return { diffPath, shard, scratch };
 }
 
 describe('listHunks', () => {
@@ -715,6 +761,175 @@ describe('runRevertHunk', () => {
     expect(r.note).toContain('no destination line');
     expect(readFileSync(join(dir, 'y'), 'utf8')).toBe(before); // decoy untouched
   });
+
+  itWhereContainmentExists(
+    'refuses a --tree that IS a symlink, and leaves its target untouched (R15-5)',
+    () => {
+      // `resolve(args.tree)` is lexical, `gitTreeState` realpaths BOTH sides on
+      // purpose so a linked tree answers 'root', and `untrustedGitfile`'s
+      // existsSync/lstatSync pair dereferences every component except the last —
+      // so a link AT the path is invisible to all three while the `.git` they
+      // inspect is the TARGET's genuine gitfile, whose admin entry sits outside
+      // the mount and is admitted. `gitApply` then spawns with `cwd: tree` and
+      // reverse-applies into whichever tree the link names — in the pipeline, the
+      // shared review worktree other agents are reading, or the A/B's base side —
+      // while the report certifies the scratch path. None of the suite's other
+      // `runRevertHunk` call sites can reach this: their fixtures are outside any
+      // `.qwen/tmp`, so the location gate never speaks there.
+      const dir = tempDir('rh-tree-target-');
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 't@t');
+      git(dir, 'config', 'user.name', 't');
+      writeFileSync(join(dir, 'a.ts'), 'export const x = 2;\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-qm', 'head');
+      const diffPath = join(dir, 'p.diff');
+      writeFileSync(
+        diffPath,
+        [
+          'diff --git a/a.ts b/a.ts',
+          'index 1111111..2222222 100644',
+          '--- a/a.ts',
+          '+++ b/a.ts',
+          '@@ -1 +1 @@',
+          '-export const x = 1;',
+          '+export const x = 2;',
+          '',
+        ].join('\n'),
+      );
+      const link = join(tempDir('rh-tree-link-'), 'scratch');
+      symlinkSync(dir, link);
+
+      const r = runRevertHunk({ diff: diffPath, tree: link, hunk: 'a.ts:1' });
+      expect(r.applied).toBe(false);
+      expect(r.harnessFailure).toBe(true);
+      expect(r.note).toContain('is a symlink');
+      // The tree the link names is byte-identical, which is the part the report
+      // would otherwise have lied about.
+      expect(readFileSync(join(dir, 'a.ts'), 'utf8')).toBe(
+        'export const x = 2;\n',
+      );
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses a --tree whose ANCESTOR under the review temp root is a symlink (R24-1)',
+    () => {
+      // The R15-5 leaf check lstats the scratch path itself; a link swapped in
+      // one component ABOVE it — anywhere between the review temp root and the
+      // leaf, the writable surface the sandbox hands the reviewed code — is
+      // invisible to that lstat, to `gitTreeState`'s realpath-both-sides
+      // compare (both sides resolve THROUGH the link), and to
+      // `untrustedGitfile` (the gitfile it reaches is the target's genuine
+      // one). `git apply -R` would then spawn with `cwd: tree` and reverse into
+      // whichever tree the link names while the report certifies the scratch
+      // path. The swap here keeps the link's target a real directory holding
+      // the same tree, so every resolving check still passes and only the
+      // bounded ancestor walk can speak.
+      const { diffPath, shard, scratch } = scratchTreeFixture();
+      const shardReal = join(dirname(shard), 'shard-real');
+      renameSync(shard, shardReal);
+      symlinkSync(shardReal, shard);
+
+      const r = runRevertHunk({
+        diff: diffPath,
+        tree: scratch,
+        hunk: 'a.ts:1',
+      });
+      expect(r.applied).toBe(false);
+      expect(r.harnessFailure).toBe(true);
+      expect(r.note).toContain('ancestor');
+      expect(r.note).toContain('is a symlink');
+      // The tree the link resolves into is byte-identical — the part the
+      // report would otherwise have lied about.
+      expect(readFileSync(join(scratch, 'a.ts'), 'utf8')).toBe(
+        'export const x = 2;\n',
+      );
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses an ancestor swap at the OUTER layer of a nested review temp root (R24-1, dogfood geometry)',
+    () => {
+      // The bound is the OUTERMOST review temp root: in the nested (review
+      // inside a review) layout, the outer layer's components are inside a
+      // writable surface too, and a bound computed at the deepest marker would
+      // stop the walk before reaching them. The link here sits at the OUTER
+      // layer's component — a `lastIndexOf` drift would bound at the inner
+      // root and never lstat it.
+      const repo = join(tempDir('rh-nested-'), 'repo');
+      mkdirSync(repo, { recursive: true });
+      git(repo, 'init', '-q', '-b', 'main');
+      git(repo, 'config', 'user.email', 't@t');
+      git(repo, 'config', 'user.name', 't');
+      writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+      git(repo, 'add', '.');
+      git(repo, 'commit', '-qm', 'pr head');
+      const diffPath = join(repo, 'p.diff');
+      writeFileSync(
+        diffPath,
+        [
+          'diff --git a/a.ts b/a.ts',
+          'index 1111111..2222222 100644',
+          '--- a/a.ts',
+          '+++ b/a.ts',
+          '@@ -1 +1 @@',
+          '-export const x = 1;',
+          '+export const x = 2;',
+          '',
+        ].join('\n'),
+      );
+      // The nested geometry: <repo>/.qwen/tmp/outer/.qwen/tmp/shard/scratch.
+      const shard = join(
+        repo,
+        '.qwen',
+        'tmp',
+        'outer',
+        '.qwen',
+        'tmp',
+        'shard',
+      );
+      mkdirSync(shard, { recursive: true });
+      const scratch = join(shard, 'scratch');
+      git(repo, 'worktree', 'add', '--detach', scratch);
+      // The swap at the OUTER layer: `outer` becomes a link.
+      const outer = join(repo, '.qwen', 'tmp', 'outer');
+      const outerReal = join(repo, '.qwen', 'tmp', 'outer-real');
+      renameSync(outer, outerReal);
+      symlinkSync(outerReal, outer);
+
+      const r = runRevertHunk({
+        diff: diffPath,
+        tree: scratch,
+        hunk: 'a.ts:1',
+      });
+      expect(r.applied).toBe(false);
+      expect(r.harnessFailure).toBe(true);
+      expect(r.note).toContain('ancestor');
+      expect(readFileSync(join(scratch, 'a.ts'), 'utf8')).toBe(
+        'export const x = 2;\n',
+      );
+    },
+  );
+
+  itWhereContainmentExists(
+    'still applies in a scratch tree under the review temp root with no redirect (R24-1 control)',
+    () => {
+      // The bounded walk must not buy its refusal at the price of the ordinary
+      // path: a genuine linked worktree under `.qwen/tmp` has every ancestor
+      // between the temp root and the leaf real, and the revert applies.
+      const { diffPath, scratch } = scratchTreeFixture();
+      const r = runRevertHunk({
+        diff: diffPath,
+        tree: scratch,
+        hunk: 'a.ts:1',
+      });
+      expect(r.applied).toBe(true);
+      expect(readFileSync(join(scratch, 'a.ts'), 'utf8')).toBe(
+        'export const x = 1;\n',
+      );
+    },
+  );
 
   it('refuses a symlink type-change section — git apply -R restores content, not TYPE (R16-6)', () => {
     // A single-section symlink→file capture applies with exit 0 leaving a

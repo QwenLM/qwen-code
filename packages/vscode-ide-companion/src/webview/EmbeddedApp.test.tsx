@@ -352,7 +352,7 @@ describe('EmbeddedApp host wiring', () => {
     expect(container.textContent).toContain('Get Started');
   });
 
-  it('keeps an explicit active-file exclusion across same-file editor changes', async () => {
+  it('keeps an explicit active-file exclusion across editor changes', async () => {
     await renderApp();
 
     const dispatchEditorChanged = (fileName: string, filePath: string) =>
@@ -410,7 +410,7 @@ describe('EmbeddedApp host wiring', () => {
         prepareSubmitAfterSameFile({ prompt: 'hi', inputAnnotations: [] }),
       ).resolves.toBeUndefined();
 
-      // Switching to a different file re-arms inclusion.
+      // Switching to a different file must preserve the explicit exclusion.
       await dispatchEditorChanged('other.ts', '/workspace/other.ts');
       const prepareSubmitAfterSwitch = callback<
         (submission: {
@@ -422,7 +422,7 @@ describe('EmbeddedApp host wiring', () => {
       >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
       await expect(
         prepareSubmitAfterSwitch({ prompt: 'hi', inputAnnotations: [] }),
-      ).resolves.toMatchObject({ prompt: '@other.ts hi' });
+      ).resolves.toBeUndefined();
     } finally {
       act(() => toolbarRoot.unmount());
       toolbarContainer.remove();
@@ -815,6 +815,146 @@ describe('EmbeddedApp host wiring', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('merges allowlisted pre-cutover sessions into the history list', async () => {
+    // v0.21-era conversations were recorded without source attribution, so
+    // the vscode-scoped catalog query cannot return them. The host ships the
+    // legacy ids it still has in globalState; the panel then claims exactly
+    // those sessions back from the daemon's default catalog — without
+    // surfacing unattributed CLI sessions or browser-stamped ones.
+    sdkMocks.listWorkspaceSessionsPage.mockImplementation(
+      (options?: { sourceType?: string }) => {
+        if (options?.sourceType === 'vscode') {
+          return Promise.resolve({
+            sessions: [
+              {
+                sessionId: 'vscode-1',
+                workspaceCwd: '/workspace',
+                displayName: 'Current chat',
+                sourceType: 'vscode',
+                updatedAt: '2026-09-09T12:00:00.000Z',
+              },
+            ],
+            nextCursor: undefined,
+          });
+        }
+        if (options?.sourceType === 'default') {
+          return Promise.resolve({
+            sessions: [
+              {
+                sessionId: 'legacy-1',
+                workspaceCwd: '/workspace',
+                displayName: 'Pre-upgrade chat',
+                updatedAt: '2026-08-01T12:00:00.000Z',
+              },
+              {
+                sessionId: 'cli-1',
+                workspaceCwd: '/workspace',
+                displayName: 'Terminal chat',
+                updatedAt: '2026-08-02T12:00:00.000Z',
+              },
+              {
+                sessionId: 'web-1',
+                workspaceCwd: '/workspace',
+                displayName: 'Browser chat',
+                sourceType: 'default',
+                updatedAt: '2026-08-03T12:00:00.000Z',
+              },
+            ],
+            nextCursor: undefined,
+          });
+        }
+        return Promise.resolve({ sessions: [], nextCursor: undefined });
+      },
+    );
+
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrap',
+            data: {
+              baseUrl: 'http://localhost:4141',
+              clientId: 'client-1',
+              workspaceCwd: '/workspace',
+              sessionId: 'session-1',
+              hostKind: 'panel',
+              legacyConversationIds: ['legacy-1', 'never-recorded'],
+            },
+          },
+        }),
+      );
+      // The remount effect refetches the vscode page, then pages the default
+      // catalog for allowlisted ids — both are sequential awaits.
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+    });
+
+    const historyButton = container.querySelector(
+      'button[aria-haspopup="dialog"]',
+    ) as HTMLButtonElement;
+    expect(historyButton).not.toBeNull();
+    await act(async () => {
+      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    // Opening the dropdown triggers the first-page load, which now includes
+    // the legacy-catalog scan; wait for its rows instead of fixed flushes.
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('[data-session-id="legacy-1"]'),
+      ).not.toBeNull();
+    });
+
+    expect(
+      document.querySelector('[data-session-id="vscode-1"]'),
+    ).not.toBeNull();
+    // Neither the unattributed CLI session nor the browser-stamped one is
+    // allowlisted, so the panel must not claim them.
+    expect(document.querySelector('[data-session-id="cli-1"]')).toBeNull();
+    expect(document.querySelector('[data-session-id="web-1"]')).toBeNull();
+
+    const defaultCatalogCalls = sdkMocks.listWorkspaceSessionsPage.mock.calls
+      .map(([options]) => options)
+      .filter(
+        (options) =>
+          (options as { sourceType?: string })?.sourceType === 'default',
+      );
+    expect(defaultCatalogCalls.length).toBeGreaterThan(0);
+    expect(defaultCatalogCalls[0]).toMatchObject({
+      archiveState: 'active',
+    });
+
+    // The scan converges after its first successful run: ids that never
+    // match (other workspaces, deleted transcripts, since-stamped sessions)
+    // must not re-page the default catalog on every dropdown open.
+    await act(async () => {
+      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      const vscodeCalls = sdkMocks.listWorkspaceSessionsPage.mock.calls.filter(
+        ([options]) =>
+          (options as { sourceType?: string })?.sourceType === 'vscode',
+      );
+      expect(vscodeCalls.length).toBeGreaterThanOrEqual(2);
+    });
+    expect(
+      sdkMocks.listWorkspaceSessionsPage.mock.calls.filter(
+        ([options]) =>
+          (options as { sourceType?: string })?.sourceType === 'default',
+      ),
+    ).toHaveLength(1);
+    expect(
+      document.querySelector('[data-session-id="legacy-1"]'),
+    ).not.toBeNull();
   });
 });
 
