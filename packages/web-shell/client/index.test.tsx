@@ -346,6 +346,17 @@ describe('WebShellWithProviders top-level boundary', () => {
     expect(refreshCapabilities).toHaveBeenCalledTimes(1);
   });
 
+  it('forwards the brand prop and its resolution callback to the shell', () => {
+    const brand = { name: 'QiuQiu Code' };
+    const onBrandResolved = vi.fn();
+
+    render(
+      <WebShellWithProviders brand={brand} onBrandResolved={onBrandResolved} />,
+    );
+
+    expect(appProps.at(-1)).toMatchObject({ brand, onBrandResolved });
+  });
+
   it('catches a daemon-provider render crash instead of white-screening', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     workspaceShouldThrow = true;

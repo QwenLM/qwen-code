@@ -36,7 +36,7 @@ These commands help you save, restore, and summarize work progress.
 
 > [!note]
 >
-> Opening an HTML export loads the renderer for that exact Qwen Code version from `unpkg.com`. If the version has not been published or the renderer cannot be reached, the file shows a load error. Markdown, JSON, and JSONL exports remain self-contained.
+> Opening an HTML export loads the renderer and stylesheet for that exact Qwen Code version from `unpkg.com`. If the version has not been published or either asset cannot be reached, the file shows a load error. Markdown, JSON, and JSONL exports remain self-contained.
 
 > [!note]
 >
@@ -776,7 +776,10 @@ A table with columns: NAME, KIND, PID, AGE, DIRECTORY.
 KIND says what registered the session — `tui` for someone at a terminal,
 `external` for a program that is not a Qwen Code session at all (a voice
 front-end, a relay), and `headless` or `serve` for a session another
-program drives. It is a self-report, like NAME and DIRECTORY: every field
+program drives. Several `serve` or `headless` rows can share one PID: a
+`qwen --acp` child hosts all its sessions in one process — `serve` when
+the daemon spawned it, `headless` when a client is driving it directly —
+and each of them registers separately. It is a self-report, like NAME and DIRECTORY: every field
 here was written by the process it describes, and nothing about what a
 session is allowed to do depends on it. See
 [Cross-Session Protocol](./cross-session-protocol.md) for the record
@@ -1026,6 +1029,28 @@ on your behalf.
 Anyone who holds the token can send as that controller, so treat it like
 any other credential: give it to one program, keep it out of shared
 config, and revoke it when that program is done.
+
+### Sessions a program drives over ACP
+
+Any `qwen --acp` child registers each session it hosts — as `serve` when
+the daemon spawned the process, as `headless` when an editor or another
+client is driving `qwen --acp` directly — and the session appears in
+`qwen sessions ps` and in another session's `list_agents` like any
+other. It can send: its model can call `send_message` to reach a terminal
+you have open. Several of them share one process and one inbox, so a
+sender has to name the session it means — every Qwen Code session does
+that automatically.
+
+Messages sent _to_ one are refused rather than held. Holding is a
+question put to a person, and nobody is watching a held-message list on a
+driven session's behalf; a sender is told at once instead of
+waiting out an expiry. Where a held message should surface for those
+sessions is not settled yet.
+
+A session registers only while its own settings have
+`agents.crossSessionMessaging` on. With it off it stays invisible,
+because the only reason to list a session nobody can message would be to
+advertise an address that never answers.
 
 ### Programs that are not Qwen Code sessions
 

@@ -919,6 +919,60 @@ describe('convertResponsesEventToGemini', () => {
     expect((thrown as { code?: string }).code).toBe('server_error');
   });
 
+  it.each([
+    {
+      data: {
+        type: 'error',
+        error: {
+          message: 'Requests in eastus have exceeded rate limit.',
+          code: 'rate_limit_exceeded',
+          type: 'too_many_requests',
+        },
+      },
+      message:
+        'rate_limit_exceeded: Requests in eastus have exceeded rate limit.',
+      code: 'rate_limit_exceeded',
+      type: 'too_many_requests',
+      status: 429,
+    },
+    {
+      data: {
+        type: 'error',
+        message: 'Server unavailable',
+        code: 'server_error',
+      },
+      message: 'server_error: Server unavailable',
+      code: 'server_error',
+      type: 'server_error',
+      status: 500,
+    },
+    {
+      data: { type: 'error', error: { code: 'invalid_request' } },
+      message: 'invalid_request',
+      code: 'invalid_request',
+      type: 'invalid_request',
+      status: undefined,
+    },
+  ])('preserves $code details for display and telemetry', (testCase) => {
+    let thrown: unknown;
+    try {
+      convertResponsesEventToGemini(
+        { event: 'error', data: testCase.data },
+        'gpt-6-astra',
+        new ResponsesStreamState(),
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown).toMatchObject({
+      message: `Responses API error: ${testCase.message}`,
+      code: testCase.code,
+      type: testCase.type,
+    });
+    expect((thrown as { status?: number }).status).toBe(testCase.status);
+  });
+
   describe('response.incomplete', () => {
     it('extracts usage and maps incomplete_details.reason to MAX_TOKENS', () => {
       const state = new ResponsesStreamState();
