@@ -9,6 +9,7 @@ import {
   PERMISSION_MODE_VALUES,
   COLOR_VALUES,
   claudePermissionModeToApprovalMode,
+  parseAgentExecutor,
   parseAgentHooks,
   parseAgentMcpServers,
   parseMaxTurns,
@@ -242,6 +243,102 @@ describe('agent-frontmatter-schema', () => {
       expect(result).toBeDefined();
       expect(Object.getPrototypeOf(result!)).toBeNull();
       expect(Object.hasOwn(result!, '__proto__')).toBe(true);
+    });
+  });
+
+  describe('parseAgentExecutor — qwen-code extension (not mirrored from CC)', () => {
+    it('parses a minimal legal spec', () => {
+      expect(parseAgentExecutor({ kind: 'acp', command: 'npx' })).toEqual({
+        kind: 'acp',
+        command: 'npx',
+      });
+    });
+
+    it('preserves args and trims the command', () => {
+      expect(
+        parseAgentExecutor({
+          kind: 'acp',
+          command: '  npx  ',
+          args: ['-y', '@agentclientprotocol/claude-agent-acp'],
+        }),
+      ).toEqual({
+        kind: 'acp',
+        command: 'npx',
+        args: ['-y', '@agentclientprotocol/claude-agent-acp'],
+      });
+    });
+
+    it('keeps an explicitly empty args array', () => {
+      expect(
+        parseAgentExecutor({ kind: 'acp', command: 'x', args: [] }),
+      ).toEqual({ kind: 'acp', command: 'x', args: [] });
+    });
+
+    it('drops the whole field for an unrecognized or missing kind', () => {
+      expect(
+        parseAgentExecutor({ kind: 'subprocess', command: 'npx' }),
+      ).toBeUndefined();
+      expect(parseAgentExecutor({ command: 'npx' })).toBeUndefined();
+      expect(
+        parseAgentExecutor({ kind: 'ACP', command: 'npx' }),
+      ).toBeUndefined();
+    });
+
+    it('drops the whole field for a missing, non-string, or blank command', () => {
+      expect(parseAgentExecutor({ kind: 'acp' })).toBeUndefined();
+      expect(parseAgentExecutor({ kind: 'acp', command: 42 })).toBeUndefined();
+      expect(
+        parseAgentExecutor({ kind: 'acp', command: ['npx'] }),
+      ).toBeUndefined();
+      expect(
+        parseAgentExecutor({ kind: 'acp', command: '   ' }),
+      ).toBeUndefined();
+    });
+
+    it('drops the whole field when args is not an array of strings', () => {
+      expect(
+        parseAgentExecutor({ kind: 'acp', command: 'npx', args: '-y' }),
+      ).toBeUndefined();
+      expect(
+        parseAgentExecutor({ kind: 'acp', command: 'npx', args: {} }),
+      ).toBeUndefined();
+    });
+
+    it('drops the whole field rather than filtering a partially invalid args array', () => {
+      // Running with silently-truncated arguments is worse than not running:
+      // a dropped `-y` or a dropped package specifier changes what executes.
+      expect(
+        parseAgentExecutor({
+          kind: 'acp',
+          command: 'npx',
+          args: ['-y', 42, '@agentclientprotocol/claude-agent-acp'],
+        }),
+      ).toBeUndefined();
+    });
+
+    it('returns undefined for a non-object top level', () => {
+      expect(parseAgentExecutor(undefined)).toBeUndefined();
+      expect(parseAgentExecutor(null)).toBeUndefined();
+      expect(parseAgentExecutor('npx')).toBeUndefined();
+      expect(
+        parseAgentExecutor([{ kind: 'acp', command: 'npx' }]),
+      ).toBeUndefined();
+      expect(parseAgentExecutor(42)).toBeUndefined();
+    });
+
+    it('does not pass through unrecognized keys', () => {
+      // The result is rebuilt from known fields only, so a definition cannot
+      // smuggle extra executor options past the parser into the spawn site.
+      const result = parseAgentExecutor({
+        kind: 'acp',
+        command: 'npx',
+        args: ['-y'],
+        env: { MALICIOUS: '1' },
+        cwd: '/etc',
+        shell: true,
+      });
+      expect(result).toEqual({ kind: 'acp', command: 'npx', args: ['-y'] });
+      expect(Object.keys(result!)).toEqual(['kind', 'command', 'args']);
     });
   });
 });
