@@ -18,6 +18,7 @@ import {
   type DaemonSessionContextUsageStatus,
   type DaemonSessionMonitorTaskStatus,
   type DaemonSessionShellTaskStatus,
+  type DaemonBrand,
   type DaemonSessionStatsStatus,
   type DaemonSessionTaskStatus,
   type DaemonSettingDescriptor,
@@ -25,6 +26,8 @@ import {
   type DaemonWorkspaceMcpServerStatus,
   type DaemonWorkspaceGitStatus,
   type GoalSnapshotV2,
+  type SessionSource,
+  type SessionSourcesResult,
 } from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
 import { DEFAULT_SESSION_ACTION_ITEMS } from './components/sidebar/WebShellSidebar';
@@ -54,7 +57,8 @@ type MockConnection = {
   titleSource?: 'manual' | 'auto';
   workspaceCwd: string;
   currentModel: string | undefined;
-  currentMode: string;
+  currentMode: string | undefined;
+  planExecutionMode?: string;
   models: Array<{
     id: string;
     label?: string;
@@ -115,6 +119,11 @@ function activeGoalSnapshot(
 }
 
 type ChatEditorTestProps = {
+  currentMode?: string;
+  planMode?: boolean;
+  modeControlsDisabled?: boolean;
+  onTogglePlan?: () => void;
+  onSelectMode?: (mode: string) => void;
   onSubmit: (
     text: string,
     images?: { data: string; media_type: string }[],
@@ -123,6 +132,12 @@ type ChatEditorTestProps = {
     metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
   ) => boolean | void;
   onCancel?: () => void;
+  onAttachmentPreview?: (file: {
+    name: string;
+    attachmentId?: string;
+    mimeType?: string;
+    text?: string;
+  }) => void;
   onInputTextChange?: (text: string) => void;
   onAttachmentsChange?: (hasAttachments: boolean) => void;
   onStartNewSessionSuggestion?: () => void;
@@ -408,6 +423,7 @@ const {
       switchStarted: true,
     }),
     submitPermission: vi.fn().mockResolvedValue(true),
+    respondToPermission: vi.fn().mockResolvedValue(true),
     clearGoal: vi.fn().mockResolvedValue(undefined),
     getGoal: vi.fn().mockResolvedValue({
       snapshot: { v: 2, activity: 'idle', goal: null },
@@ -430,6 +446,9 @@ const {
       mimeType: 'text/plain',
     }),
     listAttachments: vi.fn().mockResolvedValue([]),
+    listSources: vi
+      .fn<() => Promise<SessionSourcesResult>>()
+      .mockResolvedValue({ revision: 0, sources: [] }),
     getTasks: vi.fn().mockResolvedValue({
       v: 1,
       sessionId: 'session-1',
@@ -461,9 +480,12 @@ const {
       capabilities: {
         workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
       },
+      brand: undefined as DaemonBrand | undefined,
+      brandSettled: false,
       status: 'connected' as 'connected' | 'error',
       client: workspaceClient,
       refreshCapabilities: vi.fn(),
+      refreshBrand: vi.fn(),
     },
     mockWorkspaceActions: {
       readWorkspaceFile: vi.fn().mockResolvedValue({
@@ -597,6 +619,7 @@ const {
         }) => Promise<boolean | void> | boolean | void;
         manageLiveState?: boolean;
       } | null,
+      latestToolApprovalDisabled: false,
       latestToolApprovalKeyboardActive: null as boolean | null,
       toolApprovalKeyboardActiveHistory: [] as Array<boolean | null>,
       latestToolApprovalPlanTodos: [] as Array<{ id: string }>,
@@ -643,6 +666,7 @@ const {
         | undefined,
       workspaceEventSignals: {
         artifactsVersion: 0,
+        sourcesVersion: 0,
         extensionsVersion: 0,
         skillsVersion: 0,
         lastSkillMutation: undefined as DaemonSkillToggleMutation | undefined,
@@ -2167,9 +2191,12 @@ vi.doMock('./components/messages/ToolApproval', async () => {
   return {
     ToolApproval: (props: {
       keyboardActive?: boolean;
+      disabled?: boolean;
       planTodos?: Array<{ id: string }>;
+      planExecutionMode?: string;
       onConfirm?: (id: string, selectedOption: string) => void | Promise<void>;
     }) => {
+      testState.latestToolApprovalDisabled = props.disabled ?? false;
       testState.latestToolApprovalKeyboardActive = props.keyboardActive ?? null;
       testState.toolApprovalKeyboardActiveHistory.push(
         props.keyboardActive ?? null,
@@ -2180,6 +2207,7 @@ vi.doMock('./components/messages/ToolApproval', async () => {
       testState.latestToolApprovalOnConfirm = props.onConfirm ?? null;
       return React.createElement('div', {
         'data-web-shell-permission-panel': '',
+        'data-plan-execution-mode': props.planExecutionMode,
       });
     },
   };
@@ -2472,36 +2500,376 @@ describe('task activity key', () => {
     ).toBeNull();
   });
 
-  it('lists current-session attachments in the environment panel', async () => {
+  it.each([
+    { items: ['sources'] as const },
+    { items: ['attachments'] as const },
+    { items: ['sources', 'attachments'] as const },
+  ])(
+    'lists current-session attachments under Sources with $items',
+    async ({ items }) => {
+      mockConnection.capabilities.features = ['session_attachment_list'];
+      mockSessionActions.listAttachments.mockResolvedValue([
+        {
+          type: 'resource',
+          attachmentId: 'notes.txt',
+          mimeType: 'text/plain',
+          size: 5,
+        },
+      ]);
+      const { container } = renderApp({ environmentPanel: { items } });
+      await flush();
+
+      act(() => {
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle environment information"]',
+          )
+          ?.click();
+      });
+      await act(async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      });
+      await flush();
+
+      expect(mockSessionActions.listAttachments).toHaveBeenCalled();
+      const panel = container.querySelector(
+        '[data-testid="environment-panel"]:not([hidden])',
+      );
+      expect(panel?.textContent).toContain('Sources');
+      expect(
+        panel?.querySelectorAll('[data-testid="sources-section"]'),
+      ).toHaveLength(1);
+      expect(panel?.textContent).not.toContain('Attachments');
+    },
+  );
+
+  it('refreshes the open source title and detail when its metadata changes', async () => {
+    const { source, container, rerender } = await renderOpenSource();
+    expect(
+      container.querySelector('[role="tab"][title="Old source title"]'),
+    ).not.toBeNull();
+    mockSessionActions.listSources.mockResolvedValue({
+      revision: 2,
+      sources: [
+        {
+          ...source,
+          title: 'New source title',
+          description: 'Updated description',
+        },
+      ],
+    });
+    testState.workspaceEventSignals = {
+      ...testState.workspaceEventSignals,
+      sourcesVersion: 1,
+    };
+    rerender();
+    await flush();
+    expect(
+      container.querySelector('[role="tab"][title="New source title"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]')?.textContent,
+    ).toContain('Updated description');
+    expect(container.textContent).not.toContain('Old source title');
+  });
+
+  it.each([
+    { change: 'trust', background: false },
+    { change: 'removal', background: false },
+    { change: 'trust', background: true },
+    { change: 'removal', background: true },
+  ])(
+    'prunes source tabs after $change and closes only an active source (background=$background)',
+    async ({ change, background }) => {
+      const { container, rerender } = await renderOpenSource();
+      if (background) {
+        await act(async () =>
+          testState.latestChatEditorProps?.onAttachmentPreview?.({
+            name: 'kept.txt',
+            text: 'Keep open',
+          }),
+        );
+      }
+      if (change === 'trust') {
+        mockWorkspace.capabilities = {
+          ...mockWorkspace.capabilities,
+          workspaces: [
+            {
+              id: 'primary',
+              cwd: '/tmp/project',
+              primary: true,
+              trusted: false,
+            },
+          ],
+        };
+      } else {
+        mockSessionActions.listSources.mockResolvedValue({
+          revision: 2,
+          sources: [],
+        });
+        testState.workspaceEventSignals = {
+          ...testState.workspaceEventSignals,
+          sourcesVersion: 1,
+        };
+      }
+      rerender();
+      await flush();
+      expect(
+        container.querySelector('[role="tab"][title="Old source title"]'),
+      ).toBeNull();
+      const panel = container.querySelector('aside[aria-label="Right panel"]');
+      const stored = JSON.parse(
+        localStorage.getItem('qwen-code-web-shell-right-panel-state') ?? '{}',
+      )['/tmp/project\0session-1'];
+      expect(stored.open).toBe(background);
+      if (background) {
+        expect(panel).not.toBeNull();
+        expect(stored.activeTabId).toContain('kept.txt');
+      } else {
+        expect(panel).toBeNull();
+        expect(stored.activeTabId).toBeNull();
+      }
+    },
+  );
+
+  it('opens URL sources without a workspace in a standalone session', async () => {
+    mockConnection.workspaceCwd = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    const { container } = await renderOpenSource();
+    const link = container.querySelector<HTMLAnchorElement>(
+      'aside[aria-label="Right panel"] a[href="https://example.com"]',
+    );
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toBe('Open original');
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('keeps standalone workspace sources unavailable without reading files', async () => {
+    mockConnection.workspaceCwd = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    const { container } = await renderOpenSource({
+      kind: 'file',
+      workspaceCwd: '/tmp/project',
+      locator: { type: 'workspace_file', workspacePath: 'secret.txt' },
+    });
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]')?.textContent,
+    ).toContain('This reference is no longer available in this workspace.');
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.stat).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'does not make an unsafe source URL clickable (standalone=%s)',
+    async (standalone) => {
+      if (standalone) {
+        mockConnection.workspaceCwd = undefined;
+        mockConnection.sessionContext = { kind: 'standalone' };
+      }
+      const { container } = await renderOpenSource({
+        locator: { type: 'url', url: 'javascript:alert(1)' },
+      });
+      const panel = container.querySelector('aside[aria-label="Right panel"]');
+      expect(panel?.textContent).toContain('javascript:alert(1)');
+      expect(panel?.querySelector('a[href]')).toBeNull();
+    },
+  );
+
+  it.each([true, false])(
+    'keeps HTML source and ordinary attachment previews independent (source first=%s)',
+    async (sourceFirst) => {
+      mockConnection.capabilities.features = ['session_attachment_list'];
+      mockSessionActions.listAttachments.mockResolvedValue([
+        {
+          type: 'resource',
+          attachmentId: 'page.html',
+          mimeType: 'text/html',
+          size: 20,
+        },
+      ]);
+      mockSessionActions.readAttachment.mockResolvedValue({
+        data: btoa('<h1>Page</h1>'),
+        mimeType: 'text/html',
+      });
+      const { container, unmount } = renderApp({
+        environmentPanel: { items: ['sources'] },
+      });
+      await flush();
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle environment information"]',
+          )
+          ?.click(),
+      );
+      await flush();
+      const openSource = async () => {
+        await act(async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        });
+        const button = container.querySelector<HTMLButtonElement>(
+          '[data-testid="sources-section"] button[title="page.html"]',
+        );
+        expect(button).not.toBeNull();
+        await act(async () => button!.click());
+        await flush();
+        expect(
+          container.querySelector('button[aria-label="Preview"]'),
+        ).toBeNull();
+      };
+      const openOrdinary = async () => {
+        await act(async () =>
+          testState.latestChatEditorProps?.onAttachmentPreview?.({
+            name: 'page.html',
+            attachmentId: 'page.html',
+            mimeType: 'text/html',
+          }),
+        );
+        await flush();
+        expect(
+          container.querySelector('button[aria-label="Preview"]'),
+        ).not.toBeNull();
+      };
+      if (sourceFirst) {
+        await openSource();
+        await openOrdinary();
+      } else {
+        await openOrdinary();
+        await openSource();
+      }
+      const stored = JSON.parse(
+        localStorage.getItem('qwen-code-web-shell-right-panel-state') ?? '{}',
+      )['/tmp/project\0session-1'];
+      expect(stored.tabs).toHaveLength(2);
+      expect(
+        new Set(stored.tabs.map((tab: { id: string }) => tab.id)).size,
+      ).toBe(2);
+      await openSource();
+      expect(container.querySelector('iframe')).toBeNull();
+      await openOrdinary();
+      expect(
+        container.querySelectorAll('[role="tab"][title="page.html"]'),
+      ).toHaveLength(2);
+      unmount();
+      const restored = renderApp();
+      await flush();
+      const tabs = restored.container.querySelectorAll<HTMLButtonElement>(
+        '[role="tab"][title="page.html"]',
+      );
+      expect(tabs).toHaveLength(2);
+      for (const [index, tab] of Array.from(tabs).entries()) {
+        await act(async () => tab.click());
+        await flush();
+        expect(
+          Boolean(
+            restored.container.querySelector('button[aria-label="Preview"]'),
+          ),
+        ).toBe(!stored.tabs[index].sourcePreview);
+        expect(restored.container.querySelector('iframe')).toBeNull();
+      }
+    },
+  );
+
+  it('opens historical HTML from Sources as text and retains that policy after reload', async () => {
     mockConnection.capabilities.features = ['session_attachment_list'];
     mockSessionActions.listAttachments.mockResolvedValue([
       {
         type: 'resource',
-        attachmentId: 'notes.txt',
-        mimeType: 'text/plain',
-        size: 5,
+        attachmentId: 'historical.html',
+        mimeType: 'text/html',
+        size: 20,
       },
     ]);
-    const { container } = renderApp();
+    mockSessionActions.readAttachment.mockResolvedValue({
+      data: btoa('<h1>Source only</h1>'),
+      mimeType: 'text/html',
+    });
+    const first = renderApp({ environmentPanel: { items: ['sources'] } });
     await flush();
-
-    act(() => {
-      container
+    act(() =>
+      first.container
         .querySelector<HTMLButtonElement>(
           'button[aria-label="Toggle environment information"]',
         )
-        ?.click();
-    });
+        ?.click(),
+    );
     await act(async () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     });
     await flush();
-
-    expect(mockSessionActions.listAttachments).toHaveBeenCalled();
-    const panel = container.querySelector(
-      '[data-testid="environment-panel"]:not([hidden])',
+    const row = first.container.querySelector<HTMLButtonElement>(
+      '[data-testid="sources-section"] button[title="historical.html"]',
     );
-    expect(panel?.textContent).toContain('Attachments');
+    expect(row).not.toBeNull();
+    await act(async () => row?.click());
+    await flush();
+    const stored = JSON.parse(
+      window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+        '{}',
+    )['/tmp/project\0session-1'];
+    expect(stored?.tabs).toEqual([
+      expect.objectContaining({
+        kind: 'file',
+        attachmentId: 'historical.html',
+        sourcePreview: true,
+      }),
+    ]);
+    expect(
+      first.container.querySelector('button[aria-label="Preview"]'),
+    ).toBeNull();
+    expect(first.container.querySelector('iframe')).toBeNull();
+    act(() => first.unmount());
+    const second = renderApp();
+    await flush();
+    expect(mockSessionActions.readAttachment).toHaveBeenCalledTimes(2);
+    expect(
+      second.container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+    expect(
+      second.container.querySelector('button[aria-label="Preview"]'),
+    ).toBeNull();
+    expect(second.container.querySelector('iframe')).toBeNull();
+  });
+
+  it('shows attachment listing failures in Sources with a working retry', async () => {
+    vi.useFakeTimers();
+    mockConnection.capabilities.features = ['session_attachment_list'];
+    mockSessionActions.listAttachments.mockRejectedValue(
+      new Error('Listing unavailable'),
+    );
+    const { container } = renderApp({
+      environmentPanel: { items: ['sources'] },
+    });
+    await flush();
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle environment information"]',
+        )
+        ?.click(),
+    );
+    for (const delay of [0, 1_000, 0, 1_000, 0]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    expect(mockSessionActions.listAttachments).toHaveBeenCalledTimes(3);
+    const alert = container.querySelector(
+      '[data-testid="sources-section"] [role="alert"]',
+    );
+    expect(alert?.textContent).toContain('Listing unavailable');
+    mockSessionActions.listAttachments.mockResolvedValue([
+      {
+        type: 'resource',
+        attachmentId: 'recovered.txt',
+        mimeType: 'text/plain',
+        size: 2,
+      },
+    ]);
+    act(() => alert?.querySelector<HTMLButtonElement>('button')?.click());
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    expect(container.textContent).toContain('recovered.txt');
+    expect(
+      container.querySelector('[data-testid="sources-section"] [role="alert"]'),
+    ).toBeNull();
   });
 
   it('retries a failed first attachment listing without flashing empty', async () => {
@@ -6922,6 +7290,190 @@ describe('artifact panel fullscreen', () => {
     expect(testState.latestAskUserQuestionKeyboardActive).toBe(true);
   });
 
+  it('blocks same-tick plan handoff until a mode request completes, then permits approval', async () => {
+    mockConnection.currentMode = 'plan';
+    mockConnection.planExecutionMode = 'default';
+    testState.blocks = [makePlanPermissionBlock()];
+    const pendingMode = deferred<{ mode: string; planExecutionMode: string }>();
+    mockSessionActions.setApprovalMode.mockReturnValueOnce(pendingMode.promise);
+    renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectMode?.('yolo');
+      await expect(
+        testState.latestToolApprovalOnConfirm?.('req-1', 'restore_previous'),
+      ).rejects.toThrow('still pending');
+    });
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+    expect(testState.latestToolApprovalDisabled).toBe(true);
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(true);
+    await act(async () => {
+      pendingMode.resolve({ mode: 'plan', planExecutionMode: 'yolo' });
+    });
+    expect(testState.latestToolApprovalDisabled).toBe(false);
+    await act(async () => {
+      await testState.latestToolApprovalOnConfirm?.(
+        'req-1',
+        'restore_previous',
+      );
+    });
+    expect(mockSessionActions.respondToPermission).toHaveBeenCalledWith(
+      'req-1',
+      {
+        outcome: { outcome: 'selected', optionId: 'restore_previous' },
+        expectedPlanExecutionMode: 'default',
+      },
+    );
+  });
+
+  it('holds plan handoff through permission acknowledgement and disappearance until runtime exits Plan', async () => {
+    mockConnection.currentMode = 'plan';
+    mockConnection.planExecutionMode = 'yolo';
+    testState.blocks = [makePlanPermissionBlock()];
+    const permission = deferred<void>();
+    mockSessionActions.respondToPermission.mockReturnValueOnce(
+      permission.promise,
+    );
+    const { rerender } = renderApp();
+    await flush();
+    let submitted: void | Promise<void>;
+    act(() => {
+      submitted = testState.latestToolApprovalOnConfirm?.(
+        'req-1',
+        'restore_previous',
+      );
+      testState.latestChatEditorProps?.onSelectMode?.('default');
+      testState.latestChatEditorProps?.onTogglePlan?.();
+    });
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+    await act(async () => {
+      permission.resolve();
+      await submitted;
+    });
+    testState.blocks = [];
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(true);
+    testState.blocks = [
+      makePendingPermissionBlock({ requestId: 'background-approval' }),
+    ];
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(true);
+    act(() => testState.latestChatEditorProps?.onTogglePlan?.());
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+    mockConnection.currentMode = 'yolo';
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(false);
+    await act(async () =>
+      testState.latestChatEditorProps?.onSelectMode?.('default'),
+    );
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('default', {
+      planMode: false,
+    });
+  });
+
+  it('releases plan handoff after mode or permission failure so both controls can retry', async () => {
+    mockConnection.currentMode = 'plan';
+    testState.blocks = [makePlanPermissionBlock()];
+    renderApp();
+    await flush();
+    mockSessionActions.setApprovalMode.mockRejectedValueOnce(
+      new Error('mode failed'),
+    );
+    await act(async () =>
+      testState.latestChatEditorProps?.onSelectMode?.('yolo'),
+    );
+    expect(testState.latestToolApprovalDisabled).toBe(false);
+    mockSessionActions.submitPermission.mockRejectedValueOnce(
+      new Error('permission failed'),
+    );
+    await act(async () => {
+      await expect(
+        testState.latestToolApprovalOnConfirm?.('req-1', 'restore_previous'),
+      ).rejects.toThrow('permission failed');
+    });
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(false);
+    await act(async () => testState.latestChatEditorProps?.onTogglePlan?.());
+    expect(mockSessionActions.setApprovalMode).toHaveBeenLastCalledWith(
+      'default',
+      { planMode: false },
+    );
+  });
+
+  it('releases a plan handoff owner without letting its late failure unlock a replacement mode request', async () => {
+    mockConnection.currentMode = 'plan';
+    testState.blocks = [makePlanPermissionBlock()];
+    const permission = deferred<void>();
+    mockSessionActions.submitPermission.mockReturnValueOnce(permission.promise);
+    const { rerender } = renderApp();
+    await flush();
+    let submission: void | Promise<void>;
+    act(() => {
+      submission = testState.latestToolApprovalOnConfirm?.(
+        'req-1',
+        'restore_previous',
+      );
+    });
+    testState.ownerVersion += 1;
+    testState.blocks = [];
+    mockConnection.sessionId = 'replacement';
+    mockConnection.currentMode = 'default';
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(false);
+    const mode = deferred<{ mode: string }>();
+    mockSessionActions.setApprovalMode.mockReturnValueOnce(mode.promise);
+    act(() => testState.latestChatEditorProps?.onSelectMode?.('yolo'));
+    await act(async () => {
+      permission.reject(new Error('old owner failed'));
+      await expect(submission).rejects.toThrow('old owner failed');
+    });
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(true);
+    await act(async () => {
+      mode.resolve({ mode: 'yolo' });
+    });
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(false);
+  });
+
+  it('releases a plan handoff when its turn terminates even if Plan stays enabled', async () => {
+    mockConnection.currentMode = 'plan';
+    testState.streamingState = 'responding';
+    testState.blocks = [makePlanPermissionBlock()];
+    const { rerender } = renderApp();
+    await flush();
+    await act(async () => {
+      await testState.latestToolApprovalOnConfirm?.(
+        'req-1',
+        'restore_previous',
+      );
+    });
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(true);
+    testState.streamingState = 'idle';
+    testState.blocks = [];
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(false);
+  });
+
+  it('releases plan handoff after rejecting a plan without waiting for runtime mode to change', async () => {
+    mockConnection.currentMode = 'plan';
+    testState.blocks = [makePlanPermissionBlock()];
+    renderApp();
+    await flush();
+    await act(async () => {
+      await testState.latestToolApprovalOnConfirm?.('req-1', 'cancel');
+    });
+    expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(false);
+    await act(async () =>
+      testState.latestChatEditorProps?.onSelectMode?.('yolo'),
+    );
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('yolo', {
+      planMode: true,
+    });
+  });
+
   it('rethrows a rejected permission submission so the overlay re-arms', async () => {
     // The main-chat approval overlay is onConfirm for every main-chat
     // approval. ToolApproval re-arms its double-submit guard only when the
@@ -9139,6 +9691,50 @@ describe('environment agent tasks', () => {
   });
 });
 
+async function renderOpenSource(overrides: Partial<SessionSource> = {}) {
+  const source: SessionSource = {
+    id: 'source-1',
+    title: 'Old source title',
+    kind: 'link',
+    locator: { type: 'url', url: 'https://example.com' },
+    createdAt: '2026-09-07T00:00:00Z',
+    updatedAt: '2026-09-07T00:00:00Z',
+    ...overrides,
+  };
+  mockConnection.capabilities.features = ['session_sources'];
+  mockWorkspace.capabilities = {
+    workspaceCwd: '/tmp/project',
+    workspaces: [
+      { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+    ],
+  } as typeof mockWorkspace.capabilities;
+  mockSessionActions.listSources.mockResolvedValue({
+    revision: 1,
+    sources: [source],
+  });
+  const view = renderApp({ environmentPanel: { items: ['sources'] } });
+  await flush();
+  await act(async () =>
+    view.container
+      .querySelector<HTMLButtonElement>(
+        'button[aria-label="Toggle environment information"]',
+      )
+      ?.click(),
+  );
+  await flush();
+  expect(mockSessionActions.listSources).toHaveBeenCalled();
+  const sourceButton = view.container.querySelector<HTMLButtonElement>(
+    '[data-testid="sources-section"] button[aria-label="Open source Old source title"]',
+  );
+  expect(sourceButton).not.toBeNull();
+  await act(async () => sourceButton?.click());
+  await flush();
+  expect(
+    view.container.querySelector('aside[aria-label="Right panel"]'),
+  ).not.toBeNull();
+  return { ...view, source };
+}
+
 function renderApp(props: React.ComponentProps<typeof App> = {}): {
   container: HTMLElement;
   rerender: (nextProps?: React.ComponentProps<typeof App>) => void;
@@ -9282,6 +9878,7 @@ async function triggerAutoRecap(): Promise<{
 // (getPermissionRawInput reads toolCall.input) — a bare toolName isn't enough.
 function makePendingPermissionBlock(
   overrides: {
+    requestId?: string;
     resolved?: boolean;
     toolName?: string;
     kind?: string;
@@ -9299,7 +9896,7 @@ function makePendingPermissionBlock(
   return {
     kind: 'permission',
     resolved: overrides.resolved ?? false,
-    requestId: 'req-1',
+    requestId: overrides.requestId ?? 'req-1',
     sessionId: 'session-1',
     title: 'Run ls',
     toolCall: {
@@ -9319,6 +9916,25 @@ function makePendingPermissionBlock(
       { optionId: 'cancel', label: 'Reject', raw: {} },
     ],
   };
+}
+
+function makePlanPermissionBlock() {
+  return makePendingPermissionBlock({
+    toolName: 'exit_plan_mode',
+    kind: 'switch_mode',
+    options: [
+      {
+        optionId: 'restore_previous',
+        label: 'Approve',
+        raw: { kind: 'allow_once' },
+      },
+      {
+        optionId: 'cancel',
+        label: 'Continue planning',
+        raw: { kind: 'reject_once' },
+      },
+    ],
+  });
 }
 
 beforeEach(() => {
@@ -9358,6 +9974,7 @@ beforeEach(() => {
   mockConnection.displayName = 'Session One';
   mockConnection.titleSource = undefined;
   mockConnection.currentMode = 'default';
+  mockConnection.planExecutionMode = undefined;
   mockConnection.currentModel = 'qwen';
   mockConnection.models = [{ id: 'qwen', label: 'Qwen' }];
   mockConnection.error = undefined;
@@ -9381,6 +9998,7 @@ beforeEach(() => {
   testState.ownerVersion = 0;
   testState.workspaceEventSignals = {
     artifactsVersion: 0,
+    sourcesVersion: 0,
     extensionsVersion: 0,
     skillsVersion: 0,
     lastSkillMutation: undefined,
@@ -9396,10 +10014,13 @@ beforeEach(() => {
     activeWorkState: undefined,
   }));
   mockWorkspace.status = 'connected';
+  mockWorkspace.brand = undefined;
+  mockWorkspace.brandSettled = false;
   mockWorkspace.refreshCapabilities.mockReset();
   mockWorkspace.refreshCapabilities.mockResolvedValue(
     mockWorkspace.capabilities,
   );
+  mockWorkspace.refreshBrand.mockReset();
   mockWorkspace.client.workspaceByCwd.mockReset();
   mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
     workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
@@ -9613,7 +10234,12 @@ beforeEach(() => {
   mockSessionActions.refreshCommands.mockResolvedValue(undefined);
   mockSessionActions.setModel.mockResolvedValue(undefined);
   mockSessionActions.setReasoningEffort.mockResolvedValue(undefined);
-  mockSessionActions.setApprovalMode.mockResolvedValue(undefined);
+  mockSessionActions.setApprovalMode.mockImplementation(
+    async (mode: string, options?: { planMode?: boolean }) => ({
+      mode: options?.planMode ? 'plan' : mode,
+      ...(options?.planMode ? { planExecutionMode: mode } : {}),
+    }),
+  );
   mockSessionActions.getRewindSnapshots.mockResolvedValue([]);
   mockSessionActions.rewindSession.mockResolvedValue(undefined);
   mockSessionActions.branchSession.mockResolvedValue({
@@ -9637,6 +10263,11 @@ beforeEach(() => {
   mockSessionActions.readAttachment.mockResolvedValue({
     data: 'aGVsbG8=',
     mimeType: 'text/plain',
+  });
+  mockSessionActions.listSources.mockReset();
+  mockSessionActions.listSources.mockResolvedValue({
+    revision: 0,
+    sources: [],
   });
   mockSessionActions.getTasks.mockResolvedValue({
     v: 1,
@@ -13579,6 +14210,28 @@ describe('App session callbacks', () => {
     ).toBeNull();
   });
 
+  it('shows the Plan entry only when explicitly configured and hides it on removal', () => {
+    const { rerender } = renderApp();
+    expect(
+      testState.latestChatEditorProps?.visibleToolbarActions,
+    ).not.toContain('plan');
+    rerender({ composerToolbarActions: ['approvalMode', 'plan'] });
+    expect(testState.latestChatEditorProps?.visibleToolbarActions).toContain(
+      'plan',
+    );
+    rerender({ composerToolbarActions: ['approvalMode'] });
+    expect(
+      testState.latestChatEditorProps?.visibleToolbarActions,
+    ).not.toContain('plan');
+    rerender({
+      composerToolbarActions: undefined,
+      composerToolbarAdditionalActions: ['plan'],
+    });
+    expect(testState.latestChatEditorProps?.visibleToolbarActions).toContain(
+      'plan',
+    );
+  });
+
   it('appends composer actions without replacing context-sensitive defaults', () => {
     mockConnection.sessionId = undefined;
     testState.messages = [];
@@ -15389,6 +16042,30 @@ describe('App session callbacks', () => {
     ).toBeFalsy();
   });
 
+  it('does not re-ask the brand when the connection is healthy', async () => {
+    // The recovery branch is the only refreshBrand caller: on a healthy
+    // connection nothing must re-ask, or a resolved brand would churn on
+    // every session creation.
+    mockWorkspace.status = 'connected';
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as unknown as typeof mockWorkspace.capabilities;
+    const shellRef = createRef<WebShellApi>();
+    renderApp({ shellRef });
+    await flush();
+
+    let created: boolean | undefined;
+    await act(async () => {
+      created = await shellRef.current?.createNewSession();
+    });
+
+    expect(created).toBe(true);
+    expect(mockWorkspace.refreshBrand).not.toHaveBeenCalled();
+  });
+
   it('retries failed capabilities before routing a global new session', async () => {
     mockWorkspace.status = 'error';
     mockWorkspace.capabilities =
@@ -15416,6 +16093,9 @@ describe('App session callbacks', () => {
 
     expect(created).toBe(true);
     expect(mockWorkspace.refreshCapabilities).toHaveBeenCalledOnce();
+    // The recovery path also re-asks the brand — a retryable brand failure
+    // never retries on its own, and this is the one caller that can heal it.
+    expect(mockWorkspace.refreshBrand).toHaveBeenCalledOnce();
     expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
 
     act(() => {
@@ -19355,6 +20035,57 @@ describe('App session callbacks', () => {
     expect(composerWrapper()?.className).not.toContain('composerHidden');
   });
 
+  it.each([undefined, 'yolo'])(
+    'uses only the reported Plan execution policy for approval: %s',
+    async (planExecutionMode) => {
+      mockConnection.currentMode = 'plan';
+      mockConnection.planExecutionMode = planExecutionMode;
+      testState.blocks = [
+        makePendingPermissionBlock({
+          toolName: 'exit_plan_mode',
+          kind: 'switch_mode',
+        }),
+      ];
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container
+          .querySelector('[data-web-shell-permission-panel]')
+          ?.getAttribute('data-plan-execution-mode'),
+      ).toBe(planExecutionMode ?? null);
+    },
+  );
+
+  it('hides the composer during plan approval and restores it after resolution', async () => {
+    mockConnection.currentMode = 'plan';
+    mockConnection.planExecutionMode = 'default';
+    testState.blocks = [
+      makePendingPermissionBlock({
+        toolName: 'exit_plan_mode',
+        kind: 'switch_mode',
+      }),
+    ];
+    const { container, rerender } = renderApp();
+    await flush();
+    const composerWrapper = () =>
+      container.querySelector('[data-web-shell-composer]')?.parentElement;
+    expect(composerWrapper()?.className).toContain('composerHidden');
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+
+    await act(async () => {
+      testState.blocks = [];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(composerWrapper()?.className).not.toContain('composerHidden');
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).toBeNull();
+  });
+
   it('hides the composer while an ask-user question overlay is pending', async () => {
     const { container, rerender } = renderApp();
     await flush();
@@ -21997,6 +22728,237 @@ describe('App session callbacks', () => {
     },
   );
 
+  it('enables toggle-only Welcome thinking after a saved off preference', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.currentModel = 'qwen3.7-plus';
+    mockConnection.models = [
+      {
+        id: 'qwen3.7-plus',
+        label: 'Qwen',
+        reasoningPreview: {
+          enabled: false,
+          effort: 'default',
+          efforts: [],
+          canDisable: true,
+        },
+      },
+    ];
+    renderApp();
+    await flush();
+    act(() =>
+      testState.latestChatEditorProps?.onSelectReasoningEffort?.(
+        'default',
+        'toggle',
+      ),
+    );
+    await flush();
+    expect(testState.latestChatEditorProps?.reasoning?.enabled).toBe(true);
+  });
+
+  it.each([
+    ['toggle', 'gpt-5.4', false, undefined, undefined],
+    ['toggle', 'gpt-5.5', false, undefined, undefined],
+    ['toggle', 'gpt-5.5', true, undefined, undefined],
+    [undefined, 'gpt-5.4', false, undefined, undefined],
+    [undefined, 'gpt-5.5', false, undefined, undefined],
+    [undefined, 'gpt-5.5', false, false, undefined],
+    [undefined, 'gpt-5.4', true, undefined, 'default'],
+    [undefined, 'gpt-5.5', true, false, undefined],
+  ] as const)(
+    'keeps Welcome on intent tied to its source model (%s, %s, target enabled=%s, canEnable=%s, enableValue=%s)',
+    async (source, targetModel, targetEnabled, canEnable, enableValue) => {
+      const carryTier =
+        source !== 'toggle' && canEnable !== false && enableValue !== 'default';
+      mockConnection.sessionId = undefined;
+      mockConnection.workspaceCwd = '/workspace';
+      mockConnection.currentModel = 'qwen3.8-max';
+      mockConnection.models = [
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen',
+          reasoningPreview: {
+            enabled: false,
+            effort: 'none',
+            efforts: ['low', 'medium', 'xhigh'],
+            defaultEffort: 'xhigh',
+            canDisable: true,
+          },
+        },
+        {
+          id: targetModel,
+          label: 'GPT',
+          reasoningPreview: {
+            enabled: targetEnabled,
+            canEnable,
+            enableValue,
+            effort: 'medium',
+            efforts: ['low', 'medium', 'high', 'xhigh'],
+            defaultEffort: 'medium',
+            canDisable: true,
+          },
+        },
+      ];
+      mockSessionActions.createSession.mockImplementation(async () => {
+        mockConnection.sessionId = 'session-created';
+        return { sessionId: 'session-created' };
+      });
+      renderApp();
+      await flush();
+      act(() =>
+        testState.latestChatEditorProps?.onSelectReasoningEffort?.(
+          'xhigh',
+          source,
+        ),
+      );
+      await flush();
+      expect(testState.latestChatEditorProps?.reasoning).toMatchObject({
+        enabled: true,
+        effort: 'xhigh',
+      });
+      act(() => testState.latestChatEditorProps?.onSelectModel?.(targetModel));
+      await flush();
+      expect(testState.latestChatEditorProps?.reasoning).toMatchObject(
+        carryTier
+          ? { enabled: true, effort: 'xhigh' }
+          : { enabled: targetEnabled, effort: 'medium' },
+      );
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first prompt');
+        await vi.waitFor(() =>
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce(),
+        );
+      });
+      if (!carryTier) {
+        expect(mockSessionActions.setReasoningEffort).not.toHaveBeenCalled();
+      } else {
+        expect(mockSessionActions.setReasoningEffort).toHaveBeenCalledWith(
+          'xhigh',
+          { persist: true },
+        );
+      }
+    },
+  );
+
+  it.each([
+    { enabled: false, canEnable: false },
+    { enabled: true, effort: 'high', enableValue: 'default' },
+  ] as const)(
+    'drops a pending Welcome tier when refreshed metadata blocks it: %j',
+    async (blockedState) => {
+      mockConnection.sessionId = undefined;
+      mockConnection.workspaceCwd = '/workspace';
+      mockConnection.currentModel = 'gpt-5.5';
+      const reasoningPreview = {
+        enabled: false,
+        effort: 'medium',
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        canDisable: true,
+      };
+      mockConnection.models = [
+        { id: 'gpt-5.5', label: 'GPT', reasoningPreview },
+      ];
+      mockSessionActions.createSession.mockImplementation(async () => {
+        mockConnection.sessionId = 'session-created';
+        return { sessionId: 'session-created' };
+      });
+      const { rerender } = renderApp();
+      await flush();
+      act(() =>
+        testState.latestChatEditorProps?.onSelectReasoningEffort?.('xhigh'),
+      );
+      await flush();
+      expect(testState.latestChatEditorProps?.reasoning).toMatchObject({
+        enabled: true,
+        effort: 'xhigh',
+      });
+      mockConnection.models = [
+        {
+          id: 'gpt-5.5',
+          label: 'GPT',
+          reasoningPreview: { ...reasoningPreview, ...blockedState },
+        },
+      ];
+      rerender();
+      await flush();
+      expect(testState.latestChatEditorProps?.reasoning).toEqual({
+        ...reasoningPreview,
+        ...blockedState,
+      });
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first prompt');
+        await vi.waitFor(() =>
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce(),
+        );
+      });
+      expect(mockSessionActions.setReasoningEffort).not.toHaveBeenCalled();
+      expect(mockSessionActions.releaseSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['max', false],
+    ['none', false],
+    ['max', true],
+    ['none', true],
+  ] as const)(
+    'uses the target Welcome preview without resetting %s (pending=%s)',
+    async (selection, pending) => {
+      const sourceModel = selection === 'max' ? 'gpt-6-astra' : 'gpt-5.5';
+      const targetModel = selection === 'max' ? 'gpt-5.4' : 'gpt-6-astra';
+      const targetPreview = {
+        enabled: true,
+        effort: selection === 'max' ? 'xhigh' : 'medium',
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        canDisable: selection === 'max',
+      };
+      mockConnection.sessionId = undefined;
+      mockConnection.workspaceCwd = '/workspace';
+      mockConnection.currentModel = sourceModel;
+      mockConnection.models = [
+        {
+          id: sourceModel,
+          label: sourceModel,
+          reasoningPreview: {
+            enabled: selection !== 'none',
+            effort: selection,
+            efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+            defaultEffort: 'medium',
+            canDisable: selection === 'none',
+          },
+        },
+        {
+          id: targetModel,
+          label: targetModel,
+          reasoningPreview: targetPreview,
+        },
+      ];
+      mockSessionActions.createSession.mockImplementation(async () => {
+        mockConnection.sessionId = 'session-created';
+        return { sessionId: 'session-created' };
+      });
+      renderApp();
+      await flush();
+      if (pending) {
+        act(() =>
+          testState.latestChatEditorProps?.onSelectReasoningEffort?.(selection),
+        );
+        await flush();
+      }
+      act(() => testState.latestChatEditorProps?.onSelectModel?.(targetModel));
+      await flush();
+      expect(testState.latestChatEditorProps?.reasoning).toEqual(targetPreview);
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first prompt');
+        await vi.waitFor(() =>
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce(),
+        );
+      });
+      expect(mockSessionActions.setReasoningEffort).not.toHaveBeenCalled();
+    },
+  );
+
   it('commits the first prompt after creating its session', async () => {
     mockConnection.sessionId = undefined;
     mockSessionActions.createSession.mockImplementation(async () => {
@@ -24276,6 +25238,141 @@ describe('App session callbacks', () => {
     expect(secondHandler).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['default', 'auto-edit', 'auto', 'yolo'])(
+    'shows selected %s separately from Plan and follows approved completion',
+    async (mode) => {
+      mockConnection.currentMode = 'plan';
+      mockConnection.planExecutionMode = mode;
+      const { rerender } = renderApp({
+        composerToolbarAdditionalActions: ['plan'],
+      });
+      await flush();
+      expect(testState.latestChatEditorProps?.currentMode).toBe(mode);
+      expect(testState.latestChatEditorProps?.planMode).toBe(true);
+      expect(testState.latestChatEditorProps?.visibleToolbarActions).toContain(
+        'plan',
+      );
+      mockConnection.currentMode = mode;
+      rerender();
+      await flush();
+      expect(testState.latestChatEditorProps?.currentMode).toBe(mode);
+      expect(testState.latestChatEditorProps?.planMode).toBe(false);
+    },
+  );
+
+  it('shares the Plan toggle with on/off commands without sending control words as prompts', async () => {
+    mockConnection.currentMode = 'yolo';
+    renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestChatEditorProps?.onTogglePlan?.();
+    });
+    expect(mockSessionActions.setApprovalMode).toHaveBeenLastCalledWith(
+      'yolo',
+      { planMode: true },
+    );
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/plan off');
+    });
+    expect(mockSessionActions.setApprovalMode).toHaveBeenLastCalledWith(
+      'yolo',
+      { planMode: false },
+    );
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/plan on');
+    });
+    expect(mockSessionActions.setApprovalMode).toHaveBeenLastCalledWith(
+      'yolo',
+      { planMode: true },
+    );
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/plan');
+    });
+    expect(mockSessionActions.setApprovalMode).toHaveBeenLastCalledWith(
+      'yolo',
+      { planMode: false },
+    );
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it.each(['/plan', '/plan on', '/plan off', '/plan exit'])(
+    'retains %s during a pending mode request and accepts it after completion',
+    async (command) => {
+      const pendingMode = deferred<{ mode: string }>();
+      mockSessionActions.setApprovalMode.mockReturnValueOnce(
+        pendingMode.promise,
+      );
+      const onToast = vi.fn();
+      renderApp({ onToast });
+      await flush();
+      act(() => {
+        testState.latestChatEditorProps?.onSelectMode?.('yolo');
+      });
+      expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(true);
+      onToast.mockClear();
+
+      let accepted: boolean | void;
+      act(() => {
+        accepted = testState.latestChatEditorProps?.onSubmit(command);
+      });
+      expect(accepted).toBe(false);
+      expect(mockSessionActions.setApprovalMode).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        pendingMode.resolve({ mode: 'yolo' });
+      });
+      await act(async () => {
+        accepted = testState.latestChatEditorProps?.onSubmit(command);
+      });
+      expect(accepted).toBe(true);
+      expect(mockSessionActions.setApprovalMode).toHaveBeenCalledTimes(2);
+      expect(mockSessionActions.setApprovalMode).toHaveBeenLastCalledWith(
+        'yolo',
+        { planMode: command === '/plan' || command === '/plan on' },
+      );
+    },
+  );
+
+  it('retains both welcome Plan and execution permission when defaults hydrate late', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.currentMode = undefined;
+    const { rerender } = renderApp();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onSelectMode?.('auto-edit');
+      testState.latestChatEditorProps?.onTogglePlan?.();
+    });
+    expect(testState.latestChatEditorProps?.currentMode).toBe('auto-edit');
+    expect(testState.latestChatEditorProps?.planMode).toBe(true);
+    mockConnection.currentMode = 'yolo';
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.currentMode).toBe('auto-edit');
+    expect(testState.latestChatEditorProps?.planMode).toBe(true);
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('takes both mode axes from a newly selected session after welcome Plan', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.currentMode = undefined;
+    const { rerender } = renderApp();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onSelectMode?.('yolo');
+      testState.latestChatEditorProps?.onTogglePlan?.();
+    });
+    expect(testState.latestChatEditorProps?.planMode).toBe(true);
+    mockConnection.sessionId = 'replacement-session';
+    mockConnection.currentMode = 'auto-edit';
+    testState.ownerVersion += 1;
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.currentMode).toBe('auto-edit');
+    expect(testState.latestChatEditorProps?.planMode).toBe(false);
+  });
+
   it('forwards input annotations for /plan prompts in active sessions', async () => {
     const annotation: DaemonInputAnnotation = {
       type: 'reference',
@@ -24296,7 +25393,9 @@ describe('App session callbacks', () => {
     await clickSubmit(container);
     await flush();
 
-    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('plan');
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('default', {
+      planMode: true,
+    });
     expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
       '@.husky/ explain',
       expect.objectContaining({
@@ -24306,14 +25405,16 @@ describe('App session callbacks', () => {
   });
 
   it('does not send a deferred plan prompt into a replacement owner', async () => {
-    const approval = deferred<void>();
+    const approval = deferred<{ mode: string; planExecutionMode: string }>();
     mockSessionActions.setApprovalMode.mockReturnValueOnce(approval.promise);
     const { container, rerender } = renderApp();
     await flush();
 
     testState.prompt = '/plan explain the migration';
     await clickSubmit(container);
-    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('plan');
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('default', {
+      planMode: true,
+    });
 
     act(() => {
       testState.ownerVersion += 1;
@@ -24321,7 +25422,7 @@ describe('App session callbacks', () => {
       rerender();
     });
     await act(async () => {
-      approval.resolve();
+      approval.resolve({ mode: 'plan', planExecutionMode: 'default' });
       await approval.promise;
     });
 
@@ -24330,14 +25431,16 @@ describe('App session callbacks', () => {
   });
 
   it('does not send a deferred plan prompt after an interrupted navigation', async () => {
-    const approval = deferred<void>();
+    const approval = deferred<{ mode: string; planExecutionMode: string }>();
     mockSessionActions.setApprovalMode.mockReturnValueOnce(approval.promise);
     const { container, rerender } = renderApp();
     await flush();
 
     testState.prompt = '/plan explain the migration';
     await clickSubmit(container);
-    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('plan');
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('default', {
+      planMode: true,
+    });
 
     act(() => {
       mockConnection.loadingTranscript = true;
@@ -24348,7 +25451,7 @@ describe('App session callbacks', () => {
       rerender({});
     });
     await act(async () => {
-      approval.resolve();
+      approval.resolve({ mode: 'plan', planExecutionMode: 'default' });
       await approval.promise;
     });
 
@@ -24358,7 +25461,7 @@ describe('App session callbacks', () => {
   });
 
   it('clears deferred plan preparation after a same-session reattach', async () => {
-    const approval = deferred<void>();
+    const approval = deferred<{ mode: string; planExecutionMode: string }>();
     mockSessionActions.setApprovalMode.mockReturnValueOnce(approval.promise);
     const { container, rerender } = renderApp();
     await flush();
@@ -24372,7 +25475,7 @@ describe('App session callbacks', () => {
       rerender();
     });
     await act(async () => {
-      approval.resolve();
+      approval.resolve({ mode: 'plan', planExecutionMode: 'default' });
       await approval.promise;
     });
 
@@ -24381,8 +25484,14 @@ describe('App session callbacks', () => {
   });
 
   it('does not let an A-to-B-to-A plan completion clear newer preparation', async () => {
-    const firstApproval = deferred<void>();
-    const secondApproval = deferred<void>();
+    const firstApproval = deferred<{
+      mode: string;
+      planExecutionMode: string;
+    }>();
+    const secondApproval = deferred<{
+      mode: string;
+      planExecutionMode: string;
+    }>();
     mockSessionActions.setApprovalMode
       .mockReturnValueOnce(firstApproval.promise)
       .mockReturnValueOnce(secondApproval.promise);
@@ -24410,13 +25519,13 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.isPreparing).toBe(true);
 
     await act(async () => {
-      firstApproval.resolve();
+      firstApproval.resolve({ mode: 'plan', planExecutionMode: 'default' });
       await firstApproval.promise;
     });
     expect(testState.latestChatEditorProps?.isPreparing).toBe(true);
 
     await act(async () => {
-      secondApproval.resolve();
+      secondApproval.resolve({ mode: 'plan', planExecutionMode: 'default' });
       await secondApproval.promise;
     });
     expect(testState.latestChatEditorProps?.isPreparing).toBe(false);
@@ -27466,6 +28575,7 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
       'req-1',
       'proceed_once',
+      undefined,
     );
   });
 
@@ -28935,13 +30045,15 @@ describe('App session callbacks', () => {
       const report = testState.latestSplitViewProps!.onPendingPanesChange!;
       const ownerIds = outerPending ? [mockConnection.sessionId!] : [];
       await act(async () => report(ownerIds));
+      // Clear setup-time calls so the guard below measures only this rerender.
+      mockUseDaemonSessionActivityBridge.mockClear();
       rerender();
       expect(testState.latestSplitViewProps!.onPendingPanesChange).toBe(report);
-      expect(mockUseDaemonActivePromptBridge).toHaveBeenCalled();
-      mockUseDaemonActivePromptBridge.mockClear();
+      expect(mockUseDaemonSessionActivityBridge).toHaveBeenCalled();
+      mockUseDaemonSessionActivityBridge.mockClear();
       for (const ids of [['foreign-session'], ['another-session'], []]) {
         await act(async () => report([...ownerIds, ...ids]));
-        expect(mockUseDaemonActivePromptBridge).not.toHaveBeenCalled();
+        expect(mockUseDaemonSessionActivityBridge).not.toHaveBeenCalled();
       }
     },
   );
@@ -35268,6 +36380,217 @@ describe('App connection error reporting (#10406)', () => {
     await flush();
 
     expect(calls).toEqual(['daemon unreachable']);
+  });
+});
+
+describe('brand resolution', () => {
+  it('reports an empty brand once the daemon settles with none configured', async () => {
+    // Reporting the empty brand only happens once the fetch settles — that is
+    // what lets the standalone entry clear branding cached from an earlier
+    // daemon. Before `brandSettled` existed, that cache could only be permanent.
+    mockWorkspace.brand = {};
+    mockWorkspace.brandSettled = true;
+    const resolved: unknown[] = [];
+    renderApp({
+      onBrandResolved: (brand) => resolved.push(brand),
+    });
+    await flush();
+
+    expect(resolved.at(-1)).toEqual({});
+  });
+
+  it('reports nothing while the brand fetch is in flight, so the tab is not reset mid-load', async () => {
+    // `brandSettled` is false here, which is also the in-flight state. Reporting
+    // the built-in brand at that point would make the standalone entry clear
+    // its pre-paint cache on every load and flash branded → default → branded
+    // in the tab. An older daemon without `GET /brand` settles via the
+    // rejection path and IS reported (the case above).
+    const resolved: unknown[] = [];
+    renderApp({ onBrandResolved: (brand) => resolved.push(brand) });
+    await flush();
+
+    expect(resolved).toEqual([]);
+  });
+
+  it('fires when the daemon brand arrives after an unsettled mount', async () => {
+    // Production never starts settled: the provider mounts in flight and
+    // flips both fields once `client.brand()` resolves. If the gate ever
+    // stopped being re-read per render, `onBrandResolved` would never fire
+    // in standalone mode and the whole white-label feature would no-op.
+    const resolved: unknown[] = [];
+    const { rerender } = renderApp({
+      onBrandResolved: (brand) => resolved.push(brand),
+    });
+    await flush();
+    expect(resolved).toEqual([]);
+
+    mockWorkspace.brand = { name: 'Daemon Brand' };
+    mockWorkspace.brandSettled = true;
+    rerender({ onBrandResolved: (brand) => resolved.push(brand) });
+    await flush();
+
+    expect(resolved).toEqual([{ name: 'Daemon Brand' }]);
+  });
+
+  it('reports nothing for a nullish host brand while the daemon is still answering', async () => {
+    // A host whose brand comes from JSON page config passes `null` when
+    // nothing is configured. The resolution expression treats null as absent,
+    // so the gate must too — otherwise the in-flight state fires `{}`, which
+    // resets the tab title and deletes the pre-paint cache on every load.
+    const resolved: unknown[] = [];
+    renderApp({
+      brand: null as unknown as { name: string },
+      onBrandResolved: (brand) => resolved.push(brand),
+    });
+    await flush();
+
+    expect(resolved).toEqual([]);
+  });
+
+  it('lets the host prop replace a daemon brand that carries a logo', async () => {
+    // The takeover is whole-object, not field-merge: with a daemon logo in
+    // play, a host that passes only a name must receive exactly that name —
+    // no operator artwork leaking into the host's payload (and from there
+    // into the host page's favicon).
+    mockWorkspace.brand = {
+      name: 'Daemon Brand',
+      logoDataUri: 'data:image/svg+xml,DAEMON',
+    };
+    mockWorkspace.brandSettled = true;
+    const resolved: unknown[] = [];
+    renderApp({
+      brand: { name: 'Host Brand' },
+      onBrandResolved: (brand) => resolved.push(brand),
+    });
+    await flush();
+
+    expect(resolved.at(-1)).toEqual({ name: 'Host Brand' });
+  });
+
+  it('reports an empty brand again when the host withdraws the prop', async () => {
+    // brandSettled is true even though the daemon contributed nothing, so
+    // withdrawing the prop resolves to the built-in brand — a host that was
+    // told to apply its own brand must learn the revocation, not keep it.
+    mockWorkspace.brandSettled = true;
+    const resolved: unknown[] = [];
+    const { rerender } = renderApp({
+      brand: { name: 'Host Brand' },
+      onBrandResolved: (brand) => resolved.push(brand),
+    });
+    await flush();
+    expect(resolved.at(-1)).toEqual({ name: 'Host Brand' });
+
+    rerender({ onBrandResolved: (brand) => resolved.push(brand) });
+    await flush();
+
+    expect(resolved.at(-1)).toEqual({});
+  });
+
+  it('reports the daemon-resolved brand when the host passes no prop', async () => {
+    mockWorkspace.brand = { name: 'Daemon Brand' };
+    mockWorkspace.brandSettled = true;
+    const resolved: unknown[] = [];
+    renderApp({ onBrandResolved: (brand) => resolved.push(brand) });
+    await flush();
+
+    expect(resolved.at(-1)).toEqual({ name: 'Daemon Brand' });
+  });
+
+  it('passes a daemon-resolved logo URI through to the host callback', async () => {
+    mockWorkspace.brand = {
+      name: 'Daemon Brand',
+      logoDataUri: 'data:image/svg+xml,DAEMON',
+    };
+    mockWorkspace.brandSettled = true;
+    const resolved: unknown[] = [];
+    renderApp({ onBrandResolved: (brand) => resolved.push(brand) });
+    await flush();
+
+    expect(resolved.at(-1)).toEqual({
+      name: 'Daemon Brand',
+      logoDataUri: 'data:image/svg+xml,DAEMON',
+    });
+  });
+
+  it('lets the host prop replace the daemon-resolved brand outright', async () => {
+    mockWorkspace.brand = { name: 'Daemon Brand' };
+    const resolved: unknown[] = [];
+    renderApp({
+      brand: { name: 'Host Brand' },
+      onBrandResolved: (brand) => resolved.push(brand),
+    });
+    await flush();
+
+    expect(resolved.at(-1)).toEqual({ name: 'Host Brand' });
+    expect(resolved).not.toContainEqual({ name: 'Daemon Brand' });
+  });
+
+  it('treats an empty host name as unset rather than reporting it to the document', async () => {
+    // `""` means "use the built-in name" everywhere in-shell; a host writing
+    // `document.title` from this payload must not receive an empty string it
+    // would render as `" Web chat"`.
+    const resolved: unknown[] = [];
+    renderApp({
+      brand: { name: '' },
+      onBrandResolved: (brand) => resolved.push(brand),
+    });
+    await flush();
+
+    expect(resolved.at(-1)).toEqual({});
+  });
+
+  it('reports the host prop without waiting for the daemon', async () => {
+    const resolved: unknown[] = [];
+    renderApp({
+      brand: { name: 'Host Brand' },
+      onBrandResolved: (brand) => resolved.push(brand),
+    });
+    await flush();
+
+    expect(resolved.at(-1)).toEqual({ name: 'Host Brand' });
+  });
+
+  it('does not re-fire for a host that passes fresh but equal inline props', async () => {
+    // The README shows exactly this shape. Keying the effect on object identity
+    // fires it on every render, and a handler that stores the value re-renders
+    // into the next call — an unbounded loop that hangs the host page. The
+    // callback identity is also fresh on the last render, and `logo` (a React
+    // node) is deliberately excluded from the dependency key.
+    const handler = vi.fn();
+    const { rerender } = renderApp({
+      brand: { name: 'Host Brand', logo: <span /> },
+      onBrandResolved: handler,
+    });
+    await flush();
+
+    rerender({
+      brand: { name: 'Host Brand', logo: <span /> },
+      onBrandResolved: handler,
+    });
+    await flush();
+    rerender({
+      brand: { name: 'Host Brand', logo: <span /> },
+      onBrandResolved: (b) => handler(b),
+    });
+    await flush();
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenLastCalledWith({ name: 'Host Brand' });
+  });
+
+  it('reports a changed brand name again', async () => {
+    const handler = vi.fn();
+    const { rerender } = renderApp({
+      brand: { name: 'First' },
+      onBrandResolved: handler,
+    });
+    await flush();
+
+    rerender({ brand: { name: 'Second' }, onBrandResolved: handler });
+    await flush();
+
+    expect(handler).toHaveBeenLastCalledWith({ name: 'Second' });
+    expect(handler).toHaveBeenCalledTimes(2);
   });
 });
 

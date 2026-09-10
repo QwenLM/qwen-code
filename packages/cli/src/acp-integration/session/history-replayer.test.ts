@@ -1316,8 +1316,6 @@ describe('HistoryReplayer', () => {
     it('refuses to replay a goal card whose condition is empty', async () => {
       // A transcript is a file: a corrupted or hand-edited condition would
       // otherwise ride out to every client inside `_meta.goalStatus`.
-      // `restoreGoalFromHistory` refuses the same card, so neither the card nor
-      // the hook survives — they stay consistent.
       await replayer.replay([
         goalRecord({ type: 'goal_status', kind: 'set', condition: '' }),
       ]);

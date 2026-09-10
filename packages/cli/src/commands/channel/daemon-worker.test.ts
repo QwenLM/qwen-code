@@ -7,6 +7,9 @@ const mockLoadChannelsConfig = vi.hoisted(() => vi.fn());
 const mockLoadChannelsFromExtensions = vi.hoisted(() => vi.fn());
 const mockParseConfiguredChannels = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
+const mockResolveChannelLocale = vi.hoisted(() =>
+  vi.fn((value: unknown) => (value === 'Chinese' ? 'zh' : 'en')),
+);
 const mockReadChannelMemory = vi.hoisted(() => vi.fn());
 const mockGetChannelMemoryRevision = vi.hoisted(() => vi.fn());
 const mockListChannelMemoryEntries = vi.hoisted(() => vi.fn());
@@ -58,6 +61,7 @@ const mockLoadSettings = vi.hoisted(() =>
       merged: {
         proxy?: string;
         experimental?: { cron?: boolean };
+        general?: { language?: string };
       };
     } => ({
       merged: { proxy: 'http://settings-proxy:8080' },
@@ -269,6 +273,7 @@ vi.mock('./runtime.js', () => ({
   registerPermissionRelay: mockRegisterPermissionRelay,
   registerSessionCleanup: mockRegisterSessionCleanup,
   registerToolCallDispatch: mockRegisterToolCallDispatch,
+  resolveChannelLocale: mockResolveChannelLocale,
   selectFirstModel: mockSelectFirstModel,
   sessionsPath: mockSessionsPath,
 }));
@@ -1340,6 +1345,28 @@ describe('runChannelDaemonWorker', () => {
     );
     expect(mockCreateChannel.mock.calls[0]![3]).not.toHaveProperty(
       'loopController',
+    );
+
+    await handle.close();
+  });
+
+  it('passes the default Chinese language to daemon-managed channels', async () => {
+    const sdk = createSdk();
+    mockLoadSettings.mockReturnValueOnce({
+      merged: { general: { language: 'Chinese' } },
+    });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      daemonToken: 'secret-token',
+      promptAuthorization: 'worker-prompt-token',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockCreateChannel.mock.calls[0]?.[3]).toEqual(
+      expect.objectContaining({ locale: 'zh' }),
     );
 
     await handle.close();

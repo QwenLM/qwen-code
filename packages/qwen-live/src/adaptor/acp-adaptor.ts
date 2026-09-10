@@ -76,7 +76,8 @@ import type {
 } from './types.js';
 import { AsyncEventQueue } from './async-event-queue.js';
 
-export const ACP_INIT_TIMEOUT_MS = 10_000;
+// Match upstream's 30s native handshake budget for loaded macOS runners.
+export const ACP_INIT_TIMEOUT_MS = 30_000;
 // Adapter-backed agents are commonly launched through `npx`. On a cold cache,
 // a package runner may need to download and install the adapter (and its CLI
 // dependencies) before it can read the ACP initialize request from stdin.
@@ -660,7 +661,7 @@ export class AcpAdaptor implements BackendAdaptor {
       exited = spawned.exitPromise;
     }
     // Race the handshake against both a timeout and child exit — a
-    // crash-on-boot must fail in milliseconds, not after 10s.
+    // crash-on-boot must fail in milliseconds, not after the deadline.
     const initializeTimeoutMs = this.initializeTimeoutMs();
     if (initializeTimeoutMs > ACP_INIT_TIMEOUT_MS) {
       this.logger.info(

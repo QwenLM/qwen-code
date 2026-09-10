@@ -1130,6 +1130,48 @@ describe('createDaemonTurnNavigationStore', () => {
     expect(store.getSnapshot().historicalPages.size).toBe(2);
   });
 
+  it.each(['current', 'cancel-before-response', 'cancel-in-callback'])(
+    'runs the pre-admission capture only for the current boundary: %s',
+    async (mode) => {
+      const store = createDaemonTurnNavigationStore();
+      const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+      getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn-0']));
+      let resolveBoundary!: (page: DaemonSessionTranscriptPage) => void;
+      getTranscriptPage
+        .mockResolvedValueOnce(
+          transcriptPage('turn-0', { hasMore: true, nextCursor: 'next-1' }),
+        )
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveBoundary = resolve;
+            }),
+        );
+      await ready(store, client);
+      const location = await store.locateOrdinal(0);
+      let current = true;
+      const beforeAdmit = vi.fn(() => {
+        expect(store.getViewportSnapshot().pages.size).toBe(1);
+        if (mode === 'cancel-in-callback') current = false;
+      });
+      const loading = store.loadViewportBoundary(
+        location.rangeId!,
+        'newer',
+        { isCurrent: () => current },
+        beforeAdmit,
+      );
+      if (mode === 'cancel-before-response') current = false;
+      resolveBoundary(transcriptPage('turn-1'));
+      await loading;
+      expect(beforeAdmit).toHaveBeenCalledTimes(
+        mode === 'cancel-before-response' ? 0 : 1,
+      );
+      expect(store.getViewportSnapshot().pages.size).toBe(
+        mode === 'current' ? 2 : 1,
+      );
+    },
+  );
+
   it('releases a loading boundary when its session owner disconnects', async () => {
     const store = createDaemonTurnNavigationStore();
     const { client, getTurnIndexPage, getTranscriptPage } = createClient();

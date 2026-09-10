@@ -340,14 +340,36 @@ describe('AcpAdaptor sessions and receipts', () => {
     expect(connection.authCalls).toHaveLength(1);
   });
 
-  it('keeps the native ACP initialization timeout fail-fast', async () => {
+  it('completes the handshake when initialize outlasts the old 10s budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      let resolveInitialize!: (value: Record<string, unknown>) => void;
+      connection.initialize = () =>
+        new Promise((resolve) => {
+          resolveInitialize = resolve;
+        });
+      const adaptor = makeAdaptor(connection);
+      adaptors.push(adaptor);
+      const preflight = adaptor.preflight();
+      // The old 10s budget would have rejected here; the widened budget
+      // still lets a slow handshake finish.
+      await vi.advanceTimersByTimeAsync(29_000);
+      resolveInitialize({ agentCapabilities: {}, authMethods: [] });
+      await preflight;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects native ACP initialization at the 30 second deadline', async () => {
     vi.useFakeTimers();
     try {
       const connection = new FakeConnection();
       connection.initialize = () => new Promise(() => {});
       const adaptor = makeAdaptor(connection);
       adaptors.push(adaptor);
-
+      expect(ACP_INIT_TIMEOUT_MS).toBe(30_000);
       let settled = false;
       const result = adaptor.preflight().then(
         () => undefined,
@@ -732,7 +754,7 @@ describe('AcpAdaptor real child lifecycle', () => {
     adaptors.push(adaptor);
     const started = Date.now();
     await expect(adaptor.preflight()).rejects.toThrow();
-    // The 10s handshake timeout must not be the failure path.
+    // The handshake timeout must not be the failure path.
     expect(Date.now() - started).toBeLessThan(5_000);
   });
 });

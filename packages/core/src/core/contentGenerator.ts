@@ -529,6 +529,13 @@ export async function createContentGenerator(
         );
         return createOpenAIContentGenerator(generatorConfig, config);
       };
+    } else if (authType === AuthType.USE_OPENAI_RESPONSES) {
+      loadBaseGenerator = async () => {
+        const { createOpenAIResponsesContentGenerator } = await import(
+          './openaiResponsesContentGenerator/index.js'
+        );
+        return createOpenAIResponsesContentGenerator(generatorConfig, config);
+      };
     } else if (authType === AuthType.QWEN_OAUTH) {
       const { getQwenOAuthClient: getQwenOauthClient } = await import(
         '../qwen/qwenOAuth2.js'
