@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+exec 9>/run/qwen-docker-cleanup.lock
+flock --nonblock 9 || exit 0
+
+mkdir -p /home/github-runner/.cache/qwen-code-ci
+exec 8>/home/github-runner/.cache/qwen-code-ci/docker-sandbox-daemon.lock
+flock --nonblock 8 || exit 0
+
+now=$(date +%s)
+while read -r id; do
+  [[ -n "$id" ]] || continue
+
+  read -r created name sandbox_label < <(
+    docker inspect --format '{{.Created}} {{.Name}} {{index .Config.Labels "org.qwen-code.ci.sandbox"}}' "$id" 2>/dev/null
+  ) || continue
+  name=${name#/}
+  if [[ "$sandbox_label" != 'true' && ! "$name" =~ ^qwen-code(-integration-test)?-[0-9a-f]+$ ]]; then
+    continue
+  fi
+
+  created_at=$(date -d "$created" +%s 2>/dev/null) || continue
+  if ((now - created_at > 86400)); then
+    docker rm --force "$id" || echo "warning: failed to remove stale container $id"
+  fi
+done < <(docker ps --all --quiet)
+
+timeout 20m docker image prune --all --force \
+  --filter 'label=org.qwen-code.ci.sandbox=true' \
+  --filter 'until=24h' || echo 'warning: Qwen CI image prune failed'
+docker image prune --force --filter 'until=24h' || echo 'warning: dangling image prune failed'

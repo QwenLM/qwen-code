@@ -1,0 +1,8 @@
+[Unit]
+Description=Clean stale Qwen CI Docker resources
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/qwen-docker-cleanup
