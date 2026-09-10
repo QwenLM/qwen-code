@@ -917,14 +917,33 @@ function linkRefDefLines(lines: string[], i: number): number {
  * BLOCK CONTEXT. The `<!` and `<?` arms hide the same span wherever the
  * opener stands, though the renderer does not: mid-line a `<?` without its
  * `?>` forms nothing and its characters are VISIBLE, while at a line's
- * content start it is an HTML block. Splitting the two was tried and
- * REVERTED — being right about it needs the block structure this module
- * deliberately does not model. Measured on a prose-weighted corpus of
- * 30 000 bodies: the split alone traded 121 → 116 bodies wrongly called
- * empty for 1426 → 1730 wrongly called visible, and teaching it the
- * container prefixes (so `><?…` reads as a block) then needs the
- * container's EXTENT as well — without it, 121 → 3594. The arms stay
- * position-blind until something in this module knows where a block ends.
+ * content start it is an HTML block. Splitting the two BY HAND was tried
+ * and REVERTED. Measured on a prose-weighted corpus of 30 000 bodies: the
+ * split alone traded 121 → 116 bodies wrongly called empty for 1426 → 1730
+ * wrongly called visible, and teaching it the container prefixes (so
+ * `><?…` reads as a block) then needs the container's EXTENT as well —
+ * without that, bodies wrongly called EMPTY went 121 → 3594. (A one-off
+ * corpus, not kept: the numbers are the shape of the trade, not a
+ * benchmark to re-run.)
+ *
+ * The parse is not what stops it, and neither is the parser. `BLOCK_PARSER`
+ * ABOVE hands every BLOCK token its line span, and this path already pays
+ * for a run of it: `stripReviewFooter` opens `canProjectFooterMarker` on a
+ * `<`, which every body these arms judge carries by construction, and
+ * reaches `scanLines`. So the parse is already in the bill — on the body
+ * shapes these arms fire on, adding one costs about what this leg already
+ * spends in `stripReviewFooter`, and the two move together across shapes
+ * (a directional measurement, not a benchmark: the absolute figures swing
+ * more than twentyfold with the body's structure).
+ *
+ * What stops it is the PROJECTION. `scanLines` flattens `token.map` into a
+ * per-line kind and returns `{line, kind, depth, content}` — the extent is
+ * discarded, and `depth` counts block-quote markers only, so a list item
+ * reads 0. Extent is the exact fact the numbers above say the split needs:
+ * a container prefix tells you an opener is at a line's content start, and
+ * only the container's END tells you how far the block it opens reaches.
+ * So the arms stay position-blind until something here surfaces that, and
+ * the price is the `&nbsp;<?x>` miscall pinned in the tests.
  */
 /**
  * The `<!` family and `<?`, taken as ONE left-to-right decision.

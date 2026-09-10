@@ -7427,33 +7427,72 @@ describe('composeReview — fixedFindings', () => {
 
   it('every model-written channel reaches the escape as ONE line — the invariant the per-line escape rests on (#9940 review, round 12 reverse audit)', () => {
     // `escapeTagOpeners` models CommonMark INLINE structure only. That is
-    // correct exactly while every channel folds its text to a line before
-    // it, and that fold lives at five sites, not one — `ingestEntryList`
-    // for the entry channels, the `\s+` normalisation for downgrade
-    // reasons, `collapseEntry` for the disclosures, `scriptLintGate`'s own
-    // push, and compose's refusal of a line break in a ruling note's `by`.
-    // `scriptLintGate` is the proof that a SIXTH channel can appear and be
-    // missed: it joins `bodyCriticals` after `ingestEntryList` has run, and
-    // for a while it did not fold. This case is the guard for the next one
-    // — it drives every channel and asserts the CONSEQUENCE, so a new
-    // channel that skips the fold reddens here instead of rendering a
-    // literal `&amp;lt;` to a reviewer.
+    // correct exactly while every channel folds its text to ONE LINE before
+    // posting it — and the fold is not one primitive. `collapseEntry` and
+    // `collapseToLine` carry the entry, disclosure and duplicate-drop
+    // legs; the downgrade reasons have their own `\s+` pass; the deferral
+    // leg is held TWICE, by a `collapse` pass and by `mdField`'s
+    // line-ending strip (lib/md-field.ts), and either alone holds it —
+    // MEASURED: break only one and the row is still folded; the bare CR
+    // reaches the POSTED LINE only with both broken. Two more legs are
+    // held twice: cannot-tell by `collapseEntry` AND `collapseToLine`, and
+    // the RELOCATION exit THREE times — `collapseToLine` at
+    // `toDeferredEntries` and again inside `boundDeferredLine`, then
+    // `mdField`. Breaking any two of the three still leaves it folded.
+    //
+    // So THREE rows cannot redden on a SINGLE-site regression — a property
+    // of the code, not a gap here — and the other five do redden on theirs
+    // (all eight measured). Do not read a double-held row as a sentinel
+    // for its own folds; it is here for the channel, not for them.
+    //
+    // The two rows asserted inert as a CODE SPAN get there differently.
+    // The deferral LIST line is `- ${mdField(entry)}` and never reaches
+    // `escapeTagOpeners` at all; the relocation line does reach it, and
+    // comes back unchanged because the escape reads `mdField`'s backtick
+    // span correctly. The fold is what all eight share, and it is what
+    // this case is about.
+    //
+    // Three producers push into `bodyCriticals` AFTER `ingestEntryList`
+    // has run, and that is how a channel gets missed: `scriptLintGate`'s
+    // push, which for a while did not fold; a Critical deferral's
+    // RELOCATION exit, which a `Suggestion` row never reaches (armed
+    // below); and the non-convergence Critical, which is this module's own
+    // fixed prose and carries no line break to fold. The gate's push is
+    // the one this case does not arm — it needs a report fixture beside
+    // the plan — and it is pinned by `folds its own entry`. A producer
+    // outside these still owes a case.
     const multiline = [
       'the retry helper\n<div class="w"> and `x\nnever clears it',
       'the retry helper\r\n<div class="w"> and `x\r\nnever clears it',
       'the retry helper\r<div class="w"> and `x\rnever clears it',
     ];
     const carries = (body: string, where: string, escapes = true) => {
+      // Split on `\n` ONLY, so a surviving bare `\r` stays INSIDE the
+      // matched line where the next assertion can see it. Splitting on the
+      // folds' own set here would consume the very break under test, and
+      // counting lines proves nothing on its own: the filter keeps the
+      // entry's first physical line whatever happened to the rest.
       const lines = body
         .split('\n')
         .filter(
           (l) =>
             l.includes('retry helper') && !l.includes('qwen-review-ledger'),
         );
-      // ONE rendered line, the tag inert, and no `&amp;lt;` — the signature
-      // of an escape that ran inside a fence the fold should have closed.
       expect([where, lines.length]).toEqual([where, 1]);
-      expect([where, body.includes('&amp;lt;')]).toEqual([where, false]);
+      // The head and the TAIL of the entry on the SAME line, and no break
+      // left inside it. That is the fold, stated as the reader sees it: an
+      // LF that survives puts the tail on another line, a bare CR that
+      // survives stays in this one — and the per-line escape then decides
+      // each half on its own and can post a tag the renderer holds live
+      // (compose-review.ts records that happening). `&amp;lt;` was asserted
+      // here before and could not fail: the escape only ever writes
+      // `&lt;`, so the only body that trips it is one a model wrote with
+      // those characters already in it.
+      expect([where, lines[0]!.includes('never clears it')]).toEqual([
+        where,
+        true,
+      ]);
+      expect([where, /[\r\n]/.test(lines[0]!)]).toEqual([where, false]);
       // Inert by ESCAPE on the prose channels; the deferral line is a code
       // span, where the renderer already holds the tag and an escape would
       // show the reader a literal `&lt;`.
@@ -7461,7 +7500,7 @@ describe('composeReview — fixedFindings', () => {
         where,
         escapes
           ? lines[0]!.includes('&lt;div class="w">')
-          : /^- `[^`]*<div class="w">[^`]*`$/.test(lines[0]!),
+          : /^[^`]*`[^`]*<div class="w">[^`]*`[^`]*$/.test(lines[0]!),
       ]).toEqual([where, true]);
     };
     for (const text of multiline) {
@@ -7493,6 +7532,18 @@ describe('composeReview — fixedFindings', () => {
       carries(
         composeReview(
           base({
+            criticalsInline: 1,
+            presubmit: {
+              downgradeRequestChanges: true,
+              downgradeReasons: [text],
+            },
+          }),
+        ).body,
+        'downgradeReasons',
+      );
+      carries(
+        composeReview(
+          base({
             suggestionsInline: 1,
             deferredSuggestions: [
               {
@@ -7506,6 +7557,28 @@ describe('composeReview — fixedFindings', () => {
           }),
         ).body,
         'deferredSuggestions',
+        false,
+      );
+      // The deferral channel has a SECOND exit: a Critical relocates into
+      // `bodyCriticals` — another producer that joins after
+      // `ingestEntryList` has run, and the one this case would otherwise
+      // miss, since a `Suggestion` never reaches it.
+      carries(
+        composeReview(
+          base({
+            suggestionsInline: 1,
+            deferredSuggestions: [
+              {
+                file: 'a.ts',
+                line: 1,
+                source: 'review',
+                severity: 'Critical',
+                title: text,
+              },
+            ],
+          }),
+        ).body,
+        'deferredSuggestions (relocated)',
         false,
       );
       // A ruling note's `by` does not fold — it REFUSES, because the note
