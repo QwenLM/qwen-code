@@ -52,7 +52,6 @@ function makeStatus(
 function render(
   status: DaemonSessionContextUsageStatus,
   compact?: boolean,
-  detailNameMaxLen?: number,
   onShowDetail?: () => void,
 ): HTMLElement {
   const container = document.createElement('div');
@@ -65,7 +64,6 @@ function render(
           status={status}
           onShowDetail={onShowDetail}
           {...(compact === undefined ? {} : { compact })}
-          {...(detailNameMaxLen === undefined ? {} : { detailNameMaxLen })}
         />
       </I18nProvider>,
     );
@@ -179,7 +177,7 @@ describe('ContextUsageMessage', () => {
     ).toBe('Context Usage');
   });
 
-  it('wraps full names by default and preserves explicit name limits', () => {
+  it('renders full names in sidebar and transcript details', () => {
     const status = makeStatus(60, false);
     const longName = 'mcp__github__create_repository_issue';
     status.usage.showDetails = true;
@@ -192,9 +190,7 @@ describe('ContextUsageMessage', () => {
       expect(group.querySelector('summary')?.textContent).toBe(
         'Built-in tools (1)',
       );
-      const capped = render(status, compact, 30);
-      expect(capped.textContent).toContain('mcp__github__create_repositor…');
-      expect(capped.querySelector('[title]')?.getAttribute('title')).toBe(
+      expect(container.querySelector('[title]')?.getAttribute('title')).toBe(
         longName,
       );
     }
@@ -203,7 +199,7 @@ describe('ContextUsageMessage', () => {
   it('offers a detail action only when its caller supports it', () => {
     const onShowDetail = vi.fn();
     const status = makeStatus(60, false);
-    const container = render(status, false, undefined, onShowDetail);
+    const container = render(status, false, onShowDetail);
     const button = container.querySelector('button')!;
     expect(button.textContent).toBe('View details');
     act(() => button.click());

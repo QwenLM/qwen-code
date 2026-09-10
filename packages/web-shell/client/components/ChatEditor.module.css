@@ -61,7 +61,8 @@
 }
 
 .container:focus-within .content,
-.container:has([aria-expanded='true']) .content {
+.container:has([aria-expanded='true']) .content,
+.container[data-at-panel-open] .content {
   border-color: var(--chat-editor-accent-color);
 }
 

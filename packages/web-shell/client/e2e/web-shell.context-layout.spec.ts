@@ -91,6 +91,12 @@ for (const theme of ['light', 'dark']) {
     const composer = page.locator('[data-web-shell-composer-content]');
     const focusColor =
       theme === 'dark' ? 'rgb(74, 158, 255)' : 'rgb(11, 102, 195)';
+    const restingColor =
+      theme === 'dark' ? 'rgb(42, 45, 52)' : 'rgb(212, 215, 226)';
+    await page.evaluate(() =>
+      (document.activeElement as HTMLElement | null)?.blur(),
+    );
+    await expect(composer).toHaveCSS('border-top-color', restingColor);
     for (const trigger of [
       page.locator('[data-web-shell-mode-button]'),
       page.locator('[data-web-shell-model-button]'),
@@ -106,6 +112,33 @@ for (const theme of ['light', 'dark']) {
       await expect(trigger).toBeFocused();
       await expect(composer).toHaveCSS('border-top-color', focusColor);
     }
+    await page.evaluate(() =>
+      (document.activeElement as HTMLElement | null)?.blur(),
+    );
+    await expect(composer).toHaveCSS('border-top-color', restingColor);
+    const editor = surface.locator('.cm-content[contenteditable="true"]');
+    await editor.focus();
+    await page.keyboard.insertText('@');
+    const references = page.locator('[data-at-mention-panel]');
+    await expect(references).toBeVisible();
+    await page.keyboard.press('Enter');
+    const referenceSearch = references.getByRole('textbox', { name: 'Search' });
+    await expect(referenceSearch).toBeFocused();
+    await referenceSearch.fill('package');
+    await expect
+      .poll(() =>
+        surface.evaluate((element) => element.contains(document.activeElement)),
+      )
+      .toBe(false);
+    await expect(composer).toHaveCSS('border-top-color', focusColor);
+    await editor.focus();
+    await page.keyboard.press('ControlOrMeta+A');
+    await page.keyboard.press('Backspace');
+    await expect(references).toHaveCount(0);
+    await page.evaluate(() =>
+      (document.activeElement as HTMLElement | null)?.blur(),
+    );
+    await expect(composer).toHaveCSS('border-top-color', restingColor);
     const usage = page.locator('[data-web-shell-context-usage]');
     const percentage = usage.getByText('60.0%', { exact: true });
     await expect(percentage).toBeVisible();
@@ -231,6 +264,8 @@ for (const theme of ['light', 'dark']) {
     await expect(panel).toContainText('body loaded');
 
     const context = panel.locator('[class*="compact"]');
+    const rows = context.locator('[class*="detailRow"]');
+    await expect(rows).toHaveCount(5);
     for (const width of [280, 360, 480]) {
       await context.evaluate((element, width) => {
         (element as HTMLElement).style.width = `${width}px`;
@@ -240,7 +275,7 @@ for (const theme of ['light', 'dark']) {
           (element) => element.scrollWidth - element.clientWidth,
         ),
       ).toBeLessThanOrEqual(1);
-      for (const row of await context.locator('[class*="detailRow"]').all()) {
+      for (const row of await rows.all()) {
         const [name, value] = await Promise.all([
           row.locator('[title]').boundingBox(),
           row.locator(':scope > span').last().boundingBox(),

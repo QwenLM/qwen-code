@@ -162,7 +162,6 @@ function builtInMark(): Element | null {
 
 beforeEach(() => {
   window.localStorage.clear();
-  window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '400');
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -194,6 +193,8 @@ describe('sidebar brand', () => {
   });
 
   it('treats an empty name as unset rather than blanking the brand row', () => {
+    // The version tooltip is rendered above the 344px compact breakpoint.
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '360');
     // `""` means "use the built-in name" on the settings surface, so a host
     // that builds its prop the same way must not get an empty sidebar row and
     // a version tooltip reading " v1.2.3".
@@ -206,6 +207,8 @@ describe('sidebar brand', () => {
   });
 
   it('names the version tooltip after the brand', () => {
+    // The version tooltip is rendered above the 344px compact breakpoint.
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '360');
     renderSidebar({ name: 'QiuQiu Code' });
 
     expect(

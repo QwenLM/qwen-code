@@ -16,7 +16,7 @@ or public customization options.
 ## Design
 
 - Reduce the default composer minimum height to 116px and show a subtle focus
-  border while the editor or its toolbar popup is active. Escape restores the
+  border while the editor, toolbar popup, or reference picker is active. Escape restores the
   popup trigger focus; choosing an insertion keeps its existing focus action.
   Preserve automatic growth, existing maximum heights, attachment
   scrolling, and host CSS variables.
@@ -41,8 +41,8 @@ or public customization options.
   and complete wrapping names in the interface sans-serif font. Show occupancy
   beside the title; only transcript cards add a named region landmark. A localized
   "View details" button invokes the existing `/context detail` action; read-only
-  renderers without a callback retain the command hint. Explicit name length
-  overrides remain supported; the default no longer truncates names.
+  renderers without a callback retain the command hint. Detail names are shown
+  in full, without the unused internal length override.
 
 Reuse existing CSS Modules and theme variables. Native details/summary provide
 keyboard interaction without adding a dependency or custom disclosure state.
@@ -65,7 +65,8 @@ estimated and over-limit readings, hover/focus without requests, and clicking
 the ring followed by "View details". Read-only rendering retains the command
 hint; explicit detail requests start expanded. Test narrow transcript cards in
 both themes. Pin 520/521px composer widths, actual theme colors, keyboard ring
-access, menu focus, and alignment on wrapped rows. Tag the focused browser
+access, resting/focused borders, reference search, and alignment on every wrapped
+row. Tag the focused browser
 coverage for the PR smoke lane.
 Run build, typecheck, bundle, focused unit and browser tests, then review the
 complete diff. Browser fixtures may supply deterministic context readings;

@@ -15,7 +15,6 @@ const SENTINEL = 'web-shell:context-usage:v1:';
 const FILLED = '\u2588';
 const BUFFER = '\u2592';
 const EMPTY = '\u2591';
-const DETAIL_NAME_MAX_LEN = Infinity;
 
 export function serializeContextUsageMessage(
   status: DaemonSessionContextUsageStatus,
@@ -36,11 +35,6 @@ export function parseContextUsageMessage(
   } catch {
     return null;
   }
-}
-
-function truncateName(name: string, maxLen: number): string {
-  if (name.length <= maxLen) return name;
-  return `${name.slice(0, maxLen - 1)}\u2026`;
 }
 
 function formatPercentage(tokens: number, contextWindowSize: number): string {
@@ -158,18 +152,16 @@ function DetailRow({
   name,
   tokens,
   tokenLabel,
-  detailNameMaxLen,
 }: {
   name: string;
   tokens: number;
   tokenLabel: string;
-  detailNameMaxLen: number;
 }) {
   return (
     <div className={styles.detailRow}>
       <span className={styles.secondary}>{'\u2514'} </span>
       <span className={styles.detailName} title={name}>
-        {truncateName(name, detailNameMaxLen)}
+        {name}
       </span>
       <span className={styles.value}>
         {formatTokens(tokens)} {tokenLabel}
@@ -204,7 +196,6 @@ function DetailSection({
   items,
   getName,
   tokenLabel,
-  detailNameMaxLen,
   compact,
 }: {
   title: string;
@@ -213,7 +204,6 @@ function DetailSection({
     item: DaemonContextToolDetail | DaemonContextMemoryDetail,
   ) => string;
   tokenLabel: string;
-  detailNameMaxLen: number;
   compact: boolean;
 }) {
   const sorted = sortByTokens(items);
@@ -226,7 +216,6 @@ function DetailSection({
           name={getName(item)}
           tokens={item.tokens}
           tokenLabel={tokenLabel}
-          detailNameMaxLen={detailNameMaxLen}
         />
       ))}
     </DetailGroup>
@@ -236,7 +225,6 @@ function DetailSection({
 function SkillsSection({
   skills,
   labels,
-  detailNameMaxLen,
   compact,
 }: {
   skills: readonly DaemonContextSkillDetail[];
@@ -246,7 +234,6 @@ function SkillsSection({
     skills: string;
     tokens: string;
   };
-  detailNameMaxLen: number;
   compact: boolean;
 }) {
   const sorted = [...skills].sort((a, b) => {
@@ -262,7 +249,7 @@ function SkillsSection({
           <div className={styles.detailRow}>
             <span className={styles.secondary}>{'\u2514'} </span>
             <span className={styles.detailName} title={skill.name}>
-              {truncateName(skill.name, detailNameMaxLen)}
+              {skill.name}
               {skill.loaded && (
                 <span className={styles.success}> {labels.active}</span>
               )}
@@ -290,14 +277,11 @@ export function ContextUsageMessage({
   status,
   onShowDetail,
   compact = false,
-  detailNameMaxLen = DETAIL_NAME_MAX_LEN,
 }: {
   status: DaemonSessionContextUsageStatus;
   /** Run /context detail, exactly like typing it. */
   onShowDetail?: () => void;
   compact?: boolean;
-  /** Override the default full names with an explicit character limit. */
-  detailNameMaxLen?: number;
 }) {
   const { t } = useI18n();
   const { usage } = status;
@@ -465,7 +449,6 @@ export function ContextUsageMessage({
             compact={compact}
             getName={(item) => ('name' in item ? item.name : item.path)}
             tokenLabel={t('contextUsage.tokens')}
-            detailNameMaxLen={detailNameMaxLen}
           />
           <DetailSection
             title={t('contextUsage.mcpTools')}
@@ -473,7 +456,6 @@ export function ContextUsageMessage({
             compact={compact}
             getName={(item) => ('name' in item ? item.name : item.path)}
             tokenLabel={t('contextUsage.tokens')}
-            detailNameMaxLen={detailNameMaxLen}
           />
           <DetailSection
             title={t('contextUsage.memoryFiles')}
@@ -481,7 +463,6 @@ export function ContextUsageMessage({
             compact={compact}
             getName={(item) => ('path' in item ? item.path : item.name)}
             tokenLabel={t('contextUsage.tokens')}
-            detailNameMaxLen={detailNameMaxLen}
           />
           <SkillsSection
             skills={usage.skills}
@@ -492,7 +473,6 @@ export function ContextUsageMessage({
               skills: t('contextUsage.skills'),
               tokens: t('contextUsage.tokens'),
             }}
-            detailNameMaxLen={detailNameMaxLen}
           />
         </>
       ) : (
