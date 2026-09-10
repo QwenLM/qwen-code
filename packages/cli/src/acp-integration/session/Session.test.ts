@@ -31059,6 +31059,182 @@ describe('Session', () => {
           );
         });
 
+        it.each<{
+          name: string;
+          prompt: PromptRequest['prompt'];
+          submitted?: string;
+          declared?: unknown;
+          displayText?: string;
+          modelPrompt?: string;
+          retry?: boolean;
+          metaRetry?: boolean;
+          channel?: boolean;
+        }>([
+          {
+            name: 'text blocks without resource bodies',
+            prompt: [
+              { type: 'text', text: '  check' },
+              {
+                type: 'resource',
+                resource: {
+                  uri: 'file:///notes.txt',
+                  text: 'PRIVATE RESOURCE',
+                },
+              },
+              { type: 'text', text: 'this\n' },
+            ],
+            submitted: '  check this\n',
+            declared: '  check this\n',
+          },
+          {
+            name: 'explicit submission overrides unrelated display text',
+            prompt: [{ type: 'text', text: 'internal channel instructions' }],
+            displayText: 'display label',
+            submitted: 'original question',
+            declared: 'original question',
+          },
+          {
+            name: 'display projection cannot declare submission provenance',
+            prompt: [{ type: 'text', text: 'internal channel instructions' }],
+            displayText: 'display text without a declaration',
+          },
+          {
+            name: 'model-only delegation excluded',
+            prompt: [{ type: 'text', text: 'original question' }],
+            modelPrompt:
+              '<realtime_delegation>private model context</realtime_delegation>',
+            submitted: 'original question',
+            declared: 'original question',
+          },
+          { name: 'blank text', prompt: [{ type: 'text', text: ' \n ' }] },
+          {
+            name: 'resource-only submission',
+            prompt: [
+              {
+                type: 'resource',
+                resource: {
+                  uri: 'file:///notes.txt',
+                  text: 'PRIVATE RESOURCE',
+                },
+              },
+            ],
+          },
+          {
+            name: 'legacy retry',
+            prompt: [{ type: 'text', text: 'retry question' }],
+            retry: true,
+            declared: 'retry question',
+          },
+          {
+            name: 'daemon retry',
+            prompt: [{ type: 'text', text: 'retry question' }],
+            metaRetry: true,
+            declared: 'retry question',
+          },
+          {
+            name: 'channel turn with display projection',
+            prompt: [{ type: 'text', text: 'composed channel wrapper' }],
+            displayText: 'Issue assigned: broken build',
+            channel: true,
+            declared: 'human channel message',
+          },
+          {
+            name: 'channel turn without display projection',
+            prompt: [{ type: 'text', text: 'composed channel wrapper' }],
+            channel: true,
+            declared: 'human channel message',
+          },
+          {
+            name: 'machine dispatch without a declaration',
+            prompt: [{ type: 'text', text: 'Run this scheduled task now' }],
+          },
+          {
+            name: 'empty declaration never falls back to request text',
+            prompt: [{ type: 'text', text: 'internal wrapper' }],
+            declared: '',
+          },
+          {
+            name: 'blank declaration',
+            prompt: [{ type: 'text', text: 'internal wrapper' }],
+            declared: '  \n',
+          },
+          {
+            name: 'invalid declaration',
+            prompt: [{ type: 'text', text: 'internal wrapper' }],
+            declared: { text: 'not a string' },
+          },
+        ])(
+          'preserves submission provenance: $name',
+          async ({
+            prompt,
+            submitted,
+            declared,
+            displayText,
+            modelPrompt,
+            retry,
+            metaRetry,
+            channel,
+          }) => {
+            const messageBus = {
+              request: vi.fn().mockResolvedValue({ success: true, output: {} }),
+            };
+            mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+            mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+            mockConfig.hasHooksForEvent = vi
+              .fn()
+              .mockImplementation(
+                (eventName: string) => eventName === 'UserPromptSubmit',
+              );
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValue(createEmptyStream());
+
+            await session.prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt,
+                ...(retry ? { retry: true } : {}),
+                _meta: {
+                  ...(declared !== undefined
+                    ? { 'qwen.daemon.submittedPrompt': declared }
+                    : {}),
+                  ...(channel ? { [CHANNEL_PROMPT_META_KEY]: true } : {}),
+                  ...(displayText !== undefined
+                    ? { 'qwen.daemon.promptDisplayText': displayText }
+                    : {}),
+                  ...(metaRetry ? { 'qwen.daemon.retry': true } : {}),
+                },
+              } as PromptRequest,
+              modelPrompt === undefined
+                ? undefined
+                : {
+                    version: 1,
+                    sessionId: 'test-session-id',
+                    promptId: 'daemon-prompt-id',
+                  },
+              undefined,
+              modelPrompt,
+            );
+
+            expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+            expect(messageBus.request).toHaveBeenCalledWith(
+              expect.objectContaining({
+                eventName: 'UserPromptSubmit',
+                input: {
+                  prompt: prompt
+                    .filter((block) => block.type === 'text')
+                    .map((block) => (block.type === 'text' ? block.text : ''))
+                    .join(' '),
+                  ...(submitted === undefined
+                    ? {}
+                    : { submitted_prompt: submitted }),
+                },
+              }),
+              expect.anything(),
+            );
+          },
+        );
+
         it('blocks prompt when UserPromptSubmit hook returns blocking decision', async () => {
           const messageBus = {
             request: vi.fn().mockResolvedValue({
