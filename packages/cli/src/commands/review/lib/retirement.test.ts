@@ -623,6 +623,56 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(false);
   });
 
+  it('a numbered entry is an entry — the reader sees both bullet spellings (#10136 R20-3)', () => {
+    // The list is model-edited markdown, and an entry this reader cannot
+    // see costs recall rather than safety: every consumer fails closed on
+    // an unreadable list, so an unseen entry keeps the chunk hot forever.
+    // Read through the arm where that costs something — round 2's list
+    // genuinely CARRIES round 1's yield, so the chunk should narrow, and
+    // it only does if the numbered entries are read.
+    const L1 =
+      '- **File:** src/pay.ts:42 — the double charge — [unverified]\n' +
+      '- **Severity:** Suggestion\n';
+    const L2_NUMBERED =
+      '1. **File:** src/pay.ts:42 — the double charge\n' +
+      '   **Severity:** Suggestion\n' +
+      '2. **File:** packages/cli/src/commands/review/x.test.ts:12 — the yield\n' +
+      '   **Severity:** Suggestion\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', L1);
+    const f2 = writeFindingsFile(
+      plan,
+      'reverse-audit--round-2--d2',
+      L2_NUMBERED,
+    );
+    transcript(
+      record(
+        1,
+        14,
+        'chunk 14 round 1 territory walk\n' +
+          `read_file(file_path="${f1 ?? ''}")`,
+        'd1',
+      ),
+      YIELD,
+    );
+    transcript(
+      record(
+        2,
+        14,
+        'chunk 14 round 2 territory walk\n' +
+          `read_file(file_path="${f2 ?? ''}")`,
+        'd2',
+      ),
+      DRY,
+    );
+
+    const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([]);
+    expect(r3.narrowed).toEqual([{ chunkId: 14, dryRound: 2 }]);
+    expect(r3.converged).toBe(true);
+  });
+
   it('a quoted marker at a line end does not swallow the entry after it (#10136 R20-3)', () => {
     // The recall direction of the same regex. Unanchored, `\s*` crosses the
     // newline and the capture takes the NEXT line whole, so the genuine

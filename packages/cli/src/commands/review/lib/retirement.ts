@@ -222,9 +222,14 @@ const FILE_LINE_RE = /\*\*File:\*\*\s*([^\n]*)/g;
  * prose quoting it, which contributes a junk token — and its `\s*` crosses
  * the newline, so a quoted marker at a line's end captures the NEXT line
  * whole and the genuine entry there yields no token at all.
+ *
+ * The bullet is optional and covers the numbered spelling too: the list is
+ * model-edited markdown, and an entry this reader cannot see is an entry a
+ * quotation of which reads as a filing. Prose cannot slip in behind it —
+ * the marker must follow the bullet immediately.
  */
 const ENTRY_FILE_LINE_RE =
-  /^[^\S\r\n]*(?:[-*+][^\S\r\n]*)?\*\*File:\*\*[^\S\r\n]*([^\r\n]*)/gm;
+  /^[^\S\r\n]*(?:(?:[-*+]|\d+[.)])[^\S\r\n]*)?\*\*File:\*\*[^\S\r\n]*([^\r\n]*)/gm;
 
 /**
  * The other half of a filed finding. A `**File:**` line alone is not proof
@@ -1108,10 +1113,11 @@ export function scheduleReverseAuditRound(
       .sort((a, b) => a.round - b.round);
     // The posture narrowing, ruled before retirement so a non-delta chunk
     // never earns a cold-check slot the posture does not run: its most
-    // recent audit being provably dry is the whole bar. Everything less
-    // certain — no history, an unknown, a yield — falls through to the
-    // ordinary rules and stays hot, the same fail-toward-auditing floor as
-    // every other refusal in this file. One dry receipt is NOT decisive
+    // recent ROUND being provably dry — folded dry, and dry in every
+    // member — is the whole bar. Everything less certain — no history, an
+    // unknown, a yield, a dry receipt beside an uncertified sibling —
+    // falls through to the ordinary rules and stays hot, the same
+    // fail-toward-auditing floor as every other refusal in this file. One dry receipt is NOT decisive
     // when it shares its findings digest with ANY round the record does
     // not certify dry — a yield, or an uncertified `unknown`: fix-audit
     // rounds run their first two waves as a convergence pair against the
