@@ -237,16 +237,11 @@ write. Cancellation therefore does not prove that no memory was created.
 
 ### Auto-recall profile
 
-Auto-recall sends a sanitized best-effort query to the external provider for
-each eligible ordinary interactive prompt. It requires a non-empty
-`submitted_prompt` captured at a supported submission boundary — an
-interactive TUI submission, a first-turn headless `UserQuery`, or a fresh
-non-channel user turn on the ACP session path (daemon and `serve` hosts) —
-before reminders, file and resource expansion, extension output, and vision
-expansion. It never
-falls back to the legacy model-bound `prompt`. Missing or invalid provenance
-fails closed before configuration or credentials are read. Common credential
-shapes are removed from the submitted text, but this is not DLP.
+This managed Auto Profile supports a fresh interactive TTY launcher, as constrained below. It sends a sanitized best-effort query to the external provider for eligible submissions. The Hook requires a non-empty `submitted_prompt` and never falls back to legacy `prompt`.
+
+The field itself has a broader producer contract than this managed launcher: supported TUI and first-turn headless submissions, and explicitly declared fresh non-channel turns on the ACP path used by ACP clients, `serve`, and daemon hosts. ACP declarations are opt-in per request; ordinary clients without them, internal background dispatches, and all channel messages (including human messages) do not trigger recall. See [UserPromptSubmit](../../docs/users/features/hooks.md#userpromptsubmit) for the current field contract. This does not expand this Direct Profile's supported launchers. The original [Direct Auto Recall design](../../docs/design/direct-external-context-auto-recall.md) describes its TTY deployment constraints; its producer enumeration predates subsequent headless and ACP support.
+
+Missing or invalid provenance fails closed before configuration or credentials are read. Common credential shapes are removed from the submitted text, but this is not DLP.
 
 1. Copy `examples/auto-recall-mem0.json` or
    `examples/auto-recall-generic-http.json` to an

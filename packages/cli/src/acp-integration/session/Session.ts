@@ -254,6 +254,7 @@ import {
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
@@ -5296,7 +5297,10 @@ export class Session implements SessionContext {
               typeof promptDisplayTextValue === 'string'
                 ? promptDisplayTextValue
                 : undefined;
-            const submittedPrompt = promptDisplayText ?? promptText;
+            const declaredSubmission =
+              promptMetadata?.[DAEMON_SUBMITTED_PROMPT_META_KEY];
+            const submittedPrompt =
+              typeof declaredSubmission === 'string' ? declaredSubmission : '';
             const modelPromptBlocks: PromptRequest['prompt'] =
               modelPrompt === undefined
                 ? params.prompt
@@ -5609,12 +5613,9 @@ export class Session implements SessionContext {
               !isContinue &&
               !isRestoreAskUserQuestion &&
               !isRuntimeContinuation;
-            // Channel turns are machine-relayed deliveries (loop jobs,
-            // webhook tasks, adapter-synthesized events): nothing crossed a
-            // submission boundary, and `submitted_prompt` presence alone
-            // gates Auto Recall's outbound provider search, so such a turn
-            // must not publish its display projection or composed wrapper
-            // text as submission provenance.
+            // Channel markers cover both automated and human messages. Keep
+            // that class excluded until its producers distinguish them; see
+            // docs/design/daemon-user-prompt-submit-provenance.md.
             const isUserSubmissionTurn = isFreshUserTurn && !channelTurn;
             if (
               !isContinue &&

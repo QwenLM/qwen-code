@@ -431,9 +431,9 @@ export interface NotificationRecordPayload {
 
 export interface UserPromptRecordPayload {
   /**
-   * Submission projection when available (TUI composer text, headless
-   * submitted text, or the trusted ACP display projection); otherwise the
-   * expanded pre-hook prompt.
+   * Core/headless: submitted projection, otherwise expanded pre-hook text.
+   * ACP: display projection or raw request text before expansion. ACP omits
+   * this payload when neither a projection nor attachment references exist.
    */
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */

@@ -330,6 +330,8 @@ export interface DaemonCommandInfo {
 }
 
 export interface SendPromptOptions {
+  /** Original text declared at the user submission boundary, before host preparation. */
+  submittedPrompt?: string;
   optimisticUserMessage?: boolean;
   images?: DaemonPromptImage[];
   files?: DaemonPromptFile[];

@@ -30636,7 +30636,7 @@ describe('Session', () => {
           expect(messageBus.request).toHaveBeenCalledWith(
             expect.objectContaining({
               eventName: 'UserPromptSubmit',
-              input: { prompt: 'hello', submitted_prompt: 'hello' },
+              input: { prompt: 'hello' },
             }),
             expect.anything(),
           );
@@ -30646,6 +30646,7 @@ describe('Session', () => {
           name: string;
           prompt: PromptRequest['prompt'];
           submitted?: string;
+          declared?: unknown;
           displayText?: string;
           modelPrompt?: string;
           retry?: boolean;
@@ -30666,17 +30667,19 @@ describe('Session', () => {
               { type: 'text', text: 'this\n' },
             ],
             submitted: '  check this\n',
+            declared: '  check this\n',
           },
           {
-            name: 'trusted display projection',
+            name: 'explicit submission overrides unrelated display text',
             prompt: [{ type: 'text', text: 'internal channel instructions' }],
-            displayText: 'original question',
+            displayText: 'display label',
             submitted: 'original question',
+            declared: 'original question',
           },
           {
-            name: 'empty display projection without internal fallback',
+            name: 'display projection cannot declare submission provenance',
             prompt: [{ type: 'text', text: 'internal channel instructions' }],
-            displayText: '',
+            displayText: 'display text without a declaration',
           },
           {
             name: 'model-only delegation excluded',
@@ -30684,6 +30687,7 @@ describe('Session', () => {
             modelPrompt:
               '<realtime_delegation>private model context</realtime_delegation>',
             submitted: 'original question',
+            declared: 'original question',
           },
           { name: 'blank text', prompt: [{ type: 'text', text: ' \n ' }] },
           {
@@ -30702,28 +30706,52 @@ describe('Session', () => {
             name: 'legacy retry',
             prompt: [{ type: 'text', text: 'retry question' }],
             retry: true,
+            declared: 'retry question',
           },
           {
             name: 'daemon retry',
             prompt: [{ type: 'text', text: 'retry question' }],
             metaRetry: true,
+            declared: 'retry question',
           },
           {
             name: 'channel turn with display projection',
             prompt: [{ type: 'text', text: 'composed channel wrapper' }],
             displayText: 'Issue assigned: broken build',
             channel: true,
+            declared: 'human channel message',
           },
           {
             name: 'channel turn without display projection',
             prompt: [{ type: 'text', text: 'composed channel wrapper' }],
             channel: true,
+            declared: 'human channel message',
+          },
+          {
+            name: 'machine dispatch without a declaration',
+            prompt: [{ type: 'text', text: 'Run this scheduled task now' }],
+          },
+          {
+            name: 'empty declaration never falls back to request text',
+            prompt: [{ type: 'text', text: 'internal wrapper' }],
+            declared: '',
+          },
+          {
+            name: 'blank declaration',
+            prompt: [{ type: 'text', text: 'internal wrapper' }],
+            declared: '  \n',
+          },
+          {
+            name: 'invalid declaration',
+            prompt: [{ type: 'text', text: 'internal wrapper' }],
+            declared: { text: 'not a string' },
           },
         ])(
           'preserves submission provenance: $name',
           async ({
             prompt,
             submitted,
+            declared,
             displayText,
             modelPrompt,
             retry,
@@ -30750,6 +30778,9 @@ describe('Session', () => {
                 prompt,
                 ...(retry ? { retry: true } : {}),
                 _meta: {
+                  ...(declared !== undefined
+                    ? { 'qwen.daemon.submittedPrompt': declared }
+                    : {}),
                   ...(channel ? { [CHANNEL_PROMPT_META_KEY]: true } : {}),
                   ...(displayText !== undefined
                     ? { 'qwen.daemon.promptDisplayText': displayText }

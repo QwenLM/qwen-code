@@ -15444,6 +15444,41 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('forwards only explicitly declared submission text from trusted context', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const req = {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'machine wrapper' }],
+        _meta: {
+          'qwen.submittedPrompt': 'forged public declaration',
+          'qwen.daemon.submittedPrompt': 'forged private declaration',
+        },
+      } as PromptRequest;
+      await bridge.sendPrompt(session.sessionId, req);
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.submittedPrompt'],
+      ).toBeUndefined();
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.submittedPrompt'],
+      ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, req, undefined, {
+        submittedPrompt: ' original question\n',
+      });
+      expect(
+        handle.agent.promptCalls[1]?._meta?.['qwen.daemon.submittedPrompt'],
+      ).toBe(' original question\n');
+      await bridge.sendPrompt(session.sessionId, req, undefined, {
+        submittedPrompt: 'human channel message',
+        channelPrompt: true,
+      });
+      expect(
+        handle.agent.promptCalls[2]?._meta?.['qwen.daemon.submittedPrompt'],
+      ).toBeUndefined();
+      await bridge.shutdown();
+    });
+
     it('strips spoofed channel-prompt classification and injects only trusted context', async () => {
       // `qwen.channel.prompt` opts a turn out of loop-detected rejection,
       // so a forged key must not reach the child; only the authenticated

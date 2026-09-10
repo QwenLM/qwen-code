@@ -1008,6 +1008,7 @@ export function ChatPane({
         const submit = () =>
           actions
             .sendPrompt(trimmed, {
+              submittedPrompt: text,
               ...(images && images.length ? { images } : {}),
               ...(files && files.length ? { files } : {}),
               ...(inputAnnotations ? { inputAnnotations } : {}),
@@ -1086,7 +1087,15 @@ export function ChatPane({
       }
       const queued =
         !trimmed && !inputAnnotations
-          ? enqueuePrompt(trimmed, images, files)
+          ? enqueuePrompt(
+              trimmed,
+              images,
+              files,
+              undefined,
+              undefined,
+              undefined,
+              text,
+            )
           : enqueuePrompt(
               trimmed,
               images,
@@ -1094,6 +1103,7 @@ export function ChatPane({
               undefined,
               inputAnnotations,
               notifyFirstPromptAdmitted,
+              text,
             );
       if (queued !== false && catalogOwnerCwd) {
         sessionCatalogController.invalidateWorkspace(catalogOwnerCwd);
