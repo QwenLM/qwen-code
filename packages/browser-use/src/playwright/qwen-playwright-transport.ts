@@ -6,6 +6,7 @@
  * 350d24a344b07543fdc4014339a7871fd1c1b227.
  */
 
+import { platform } from 'node:os';
 import { runInThisContext } from 'node:vm';
 
 import type { ConnectOverCDPTransport } from 'playwright-core';
@@ -108,10 +109,15 @@ export class QwenPlaywrightTransport implements ConnectOverCDPTransport {
     const params = message.params ?? {};
     switch (message.method) {
       case 'Browser.getVersion':
+        // Playwright derives its keyboard editing commands and feature gates
+        // from these strings: a non-numeric product version parses to NaN,
+        // and a platform-less userAgent registers as Linux on every host.
+        // The bridge drives this machine's Chrome, so report the host
+        // platform and a Chrome version the pinned Playwright supports.
         return {
           protocolVersion: '1.3',
-          product: 'Chrome/Extension-Bridge',
-          userAgent: 'Qwen-Browser-Use/1.0',
+          product: 'Chrome/151.0.0.0',
+          userAgent: `Mozilla/5.0 (${hostUserAgentPlatform()}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36`,
           jsVersion: '',
         };
       case 'Browser.setDownloadBehavior':
@@ -207,6 +213,17 @@ export function playwrightTransportAdapter(
     },
   });
   return adapter;
+}
+
+function hostUserAgentPlatform(): string {
+  switch (platform()) {
+    case 'darwin':
+      return 'Macintosh; Intel Mac OS X 15_0_0';
+    case 'win32':
+      return 'Windows NT 10.0; Win64; x64';
+    default:
+      return 'X11; Linux x86_64';
+  }
 }
 
 function command(value: object): CdpCommand {

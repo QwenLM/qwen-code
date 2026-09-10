@@ -46,6 +46,30 @@ describe('Playwright AI snapshots', () => {
     );
   });
 
+  it('keeps quoted keys, link props, and honest subtree markers', async () => {
+    const fixture = fakePage(
+      [
+        '- generic [ref=e1]:',
+        `  - 'button "Cart: 3 items" [ref=e2]'`,
+        '  - link "Docs" [ref=e3]:',
+        '    - /url: /docs/intro',
+        '  - link "Plain" [ref=e4]:',
+        '    - generic [ref=e5]',
+      ].join('\n'),
+    );
+
+    await expect(
+      snapshotTab(tab(fixture.page), { interactiveOnly: true }),
+    ).resolves.toBe(
+      [
+        `- 'button "Cart: 3 items" [ref=e2]'`,
+        '- link "Docs" [ref=e3]:',
+        '  - /url: /docs/intro',
+        '- link "Plain" [ref=e4]',
+      ].join('\n'),
+    );
+  });
+
   it('does not treat multiline text as accessibility nodes', async () => {
     const fixture = fakePage(
       [

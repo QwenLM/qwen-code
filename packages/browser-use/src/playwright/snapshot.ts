@@ -33,6 +33,7 @@ const INTERACTIVE_ROLES = new Set([
 interface SnapshotNode {
   line: string;
   role: string | undefined;
+  prop: boolean;
   children: SnapshotNode[];
 }
 
@@ -76,10 +77,14 @@ function parseSnapshot(text: string): SnapshotNode[] {
       blockScalarIndent = undefined;
     }
     while ((stack.at(-1)?.indent ?? -1) >= indent) stack.pop();
-    const role = /^\s*-\s+([\w-]+)/.exec(line)?.[1];
+    // Playwright YAML-quotes the whole key when the name needs it, and node
+    // props (e.g. /url) use a slash-prefixed key; the role token itself is
+    // never quoted.
+    const key = /^\s*-\s+'?(\/?[\w-]+)/.exec(line)?.[1];
     const node: SnapshotNode = {
       line,
-      role,
+      role: key !== undefined && !key.startsWith('/') ? key : undefined,
+      prop: key?.startsWith('/') === true,
       children: [],
     };
     const parent = stack.at(-1)?.node;
@@ -94,15 +99,24 @@ function parseSnapshot(text: string): SnapshotNode[] {
 
 function selectInteractiveNodes(
   nodes: readonly SnapshotNode[],
+  parentSelected = false,
 ): SnapshotNode[] {
   const selected: SnapshotNode[] = [];
   for (const node of nodes) {
-    const children = selectInteractiveNodes(node.children);
     const keep =
       node.role === 'iframe' ||
       (node.role !== undefined && INTERACTIVE_ROLES.has(node.role));
-    if (keep) selected.push({ ...node, children });
-    else selected.push(...children);
+    if (keep) {
+      selected.push({
+        ...node,
+        children: selectInteractiveNodes(node.children, true),
+      });
+    } else if (parentSelected && node.prop) {
+      // A prop (e.g. /url) is only meaningful under its kept parent.
+      selected.push({ ...node, children: [] });
+    } else {
+      selected.push(...selectInteractiveNodes(node.children));
+    }
   }
   return selected;
 }
@@ -110,7 +124,11 @@ function selectInteractiveNodes(
 function renderNodes(nodes: readonly SnapshotNode[], depth = 0): string {
   const lines: string[] = [];
   for (const node of nodes) {
-    const line = node.line.trimStart();
+    let line = node.line.trimStart();
+    // A trailing colon declares children; drop it once filtering removed
+    // them so the listing does not claim subtrees it omits.
+    if (!node.prop && node.children.length === 0 && line.endsWith(':'))
+      line = line.slice(0, -1);
     lines.push(`${'  '.repeat(depth)}${line}`);
     const children = renderNodes(node.children, depth + 1);
     if (children !== '') lines.push(children);

@@ -226,16 +226,26 @@ export class PlaywrightRuntime {
       case 'tab.dialog.accept': {
         const tab = this.tab(args);
         const dialog = this.requireDialog(tab);
-        await dialog.accept(
-          typeof args.promptText === 'string' ? args.promptText : undefined,
-        );
-        tab.dialog = undefined;
+        try {
+          await dialog.accept(
+            typeof args.promptText === 'string' ? args.promptText : undefined,
+          );
+        } finally {
+          // A rejection means the dialog is already gone (handled in Chrome
+          // or resolved by navigation), so the cached dialog must be
+          // cleared either way — but only while it still names this dialog.
+          if (tab.dialog === dialog) tab.dialog = undefined;
+        }
         return null;
       }
       case 'tab.dialog.dismiss': {
         const tab = this.tab(args);
-        await this.requireDialog(tab).dismiss();
-        tab.dialog = undefined;
+        const dialog = this.requireDialog(tab);
+        try {
+          await dialog.dismiss();
+        } finally {
+          if (tab.dialog === dialog) tab.dialog = undefined;
+        }
         return null;
       }
       case 'dev.logs':

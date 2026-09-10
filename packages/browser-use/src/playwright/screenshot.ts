@@ -144,6 +144,18 @@ async function capture(
 
   const buffer = Buffer.from(data, 'base64');
   const dimensions = jpegDimensions(buffer);
+  // The css-pixels contract requires the capture to come back 1:1 with the
+  // requested CSS region. The pixel ratio behind clip.scale is probed from
+  // page script, so a page-controlled or stale ratio must not silently ship
+  // a rescaled image; ±1 covers Chrome's rounding of fractional CSS sizes.
+  if (
+    Math.abs(dimensions.width - Math.round(width)) > 1 ||
+    Math.abs(dimensions.height - Math.round(height)) > 1
+  )
+    throw new BrowserRuntimeError(
+      'OPERATION_FAILED',
+      'Chrome returned a screenshot that does not match the viewport; retry',
+    );
   if (constrained)
     assertScreenshotBudget(dimensions.width, dimensions.height, 'Captured');
   else

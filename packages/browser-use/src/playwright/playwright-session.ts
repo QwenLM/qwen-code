@@ -358,6 +358,10 @@ export class PlaywrightSession {
     page.on('dialog', (dialog) => {
       tab.dialog = dialog;
     });
+    page.on('framenavigated', () => {
+      // Chrome resolves any open dialog when the page navigates away.
+      tab.dialog = undefined;
+    });
     page.on('console', (message) => {
       const location = message.location();
       pushBounded(tab.logs, {
@@ -389,7 +393,18 @@ export class PlaywrightSession {
         provider.derivedFromProviderTabId !== undefined &&
         controlledProviders.has(provider.derivedFromProviderTabId)
       ) {
-        await this.registerTab(provider);
+        // One unattachable derived tab must not fail the whole listing,
+        // but a lost session still propagates.
+        try {
+          await this.registerTab(provider);
+        } catch (error) {
+          if (
+            error instanceof BrowserRuntimeError &&
+            (error.code === 'STALE_BROWSER_SESSION' ||
+              error.code === 'BROWSER_DISCONNECTED')
+          )
+            throw error;
+        }
         controlledProviders.add(provider.providerTabId);
       }
     }

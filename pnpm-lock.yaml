@@ -19,7 +19,7 @@ overrides:
   axios: ^1.19.0
   react-markdown: ^9.0.0
 
-pnpmfileChecksum: sha256-YMmpx+dQrBqa8zfJspP6zukr7YJJ5XNi4HD4BYo9SzM=
+pnpmfileChecksum: sha256-o12CkxegrDZYmKfjHBJibTOQXHpn07+XVejaIMLWq4o=
 
 importers:
 
@@ -279,6 +279,28 @@ importers:
       vitest:
         specifier: ^3.1.1
         version: 3.2.7(@types/debug@4.1.13)(@types/node@22.20.1)(@vitest/browser@3.2.7)(jiti@2.7.0)(jsdom@26.1.0(supports-color@8.1.1))(lightningcss@1.32.0)(msw@2.10.4(@types/node@22.20.1)(typescript@5.8.3))(supports-color@8.1.1)(tsx@4.20.3)(yaml@2.9.0)
+
+  packages/browser-use:
+    dependencies:
+      playwright-core:
+        specifier: 1.62.1
+        version: 1.62.1
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      esbuild:
+        specifier: ^0.25.0
+        version: 0.25.12
+      typescript:
+        specifier: 5.8.3
+        version: 5.8.3
+      vitest:
+        specifier: ^3.1.1
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@22.20.1)(@vitest/browser@3.2.7)(jiti@2.7.0)(jsdom@26.1.0(supports-color@8.1.1))(lightningcss@1.32.0)(msw@2.10.4(@types/node@22.20.1)(typescript@5.8.3))(supports-color@8.1.1)(tsx@4.20.3)(yaml@2.9.0)
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
 
   packages/channels/base:
     dependencies:
@@ -8419,6 +8441,11 @@ packages:
   playwright-core@1.61.1:
     resolution: {integrity: sha512-h7Qlt6m4REp25qvIdvbDtVmD4LqVXfpRxhORv9L0jzETM05p4fuPJ3dKyuSXQxDSbXnmS79HAgi9589lGSpLkg==}
     engines: {node: '>=18'}
+    hasBin: true
+
+  playwright-core@1.62.1:
+    resolution: {integrity: sha512-wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw==}
+    engines: {node: '>=20'}
     hasBin: true
 
   playwright@1.58.2:
@@ -18379,6 +18406,8 @@ snapshots:
   playwright-core@1.58.2: {}
 
   playwright-core@1.61.1: {}
+
+  playwright-core@1.62.1: {}
 
   playwright@1.58.2:
     dependencies:
