@@ -27642,7 +27642,11 @@ describe('createAcpSessionBridge', () => {
         { persist: false },
       );
 
-      await bridge.killSession(session.sessionId);
+      // A user-initiated delete is caller-owned destruction: the park dies
+      // with the session.
+      await bridge.killSession(session.sessionId, {
+        retireRememberedApprovalMode: true,
+      });
 
       const restored = await bridge.loadSession({
         sessionId: session.sessionId,
@@ -28538,6 +28542,10 @@ describe('createAcpSessionBridge', () => {
         workspaceCwd: WS_A,
         sessionScope: 'thread',
       });
+      const third = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
       await bridge.setSessionApprovalMode(first.sessionId, ApprovalMode.YOLO, {
         persist: false,
       });
@@ -28568,6 +28576,17 @@ describe('createAcpSessionBridge', () => {
           persist: true,
         },
       );
+      // An unrelated retirement landing after the write must not disable
+      // the convergence: the guard compares the write's epoch against the
+      // replay's capture, not against every later retirement.
+      await bridge.setSessionApprovalMode(
+        third.sessionId,
+        ApprovalMode.AUTO_EDIT,
+        { persist: false },
+      );
+      await bridge.killSession(third.sessionId, {
+        retireRememberedApprovalMode: true,
+      });
       replayGate.resolve();
       const restored = await restoredPromise;
 
@@ -28652,6 +28671,730 @@ describe('createAcpSessionBridge', () => {
         params: { sessionId: session.sessionId, mode: ApprovalMode.YOLO },
       });
       expect(restored.state.modes?.currentModeId).toBe(ApprovalMode.YOLO);
+      await bridge.shutdown();
+    });
+
+    it('keeps the remembered mode when the agent announces the parked mode after an inconclusive replay failure', async () => {
+      // The failed replay deliberately leaves the cache on the cold-load
+      // mode while the park keeps the caller's selection — and the child
+      // here DID apply the replayed mode (the response was lost). The
+      // child's late echo of the timed-out replay then announces the very
+      // mode that is parked; comparing only against the stale cache would
+      // delete the memory the announcement confirms.
+      const handles: ChannelHandle[] = [];
+      const contextReadEntered = deferred<void>();
+      const contextGate = deferred<void>();
+      const factory: ChannelFactory = async () => {
+        const index = handles.length;
+        let currentMode = index > 0 ? ApprovalMode.YOLO : ApprovalMode.DEFAULT;
+        let lostMode: ApprovalMode | undefined;
+        const handle = makeChannel({
+          loadSessionImpl: () => ({
+            modes: { currentModeId: currentMode, availableModes: [] },
+          }),
+          extMethodImpl: async (method, params) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+              if (index === 1) {
+                // Never answers — the bridge times the round trip out —
+                // but the child applied the mode; the status re-read
+                // observes it once its gate is released below.
+                lostMode = (params as { mode: ApprovalMode }).mode;
+                return new Promise(() => {});
+              }
+              const previous = currentMode;
+              currentMode = (params as { mode: ApprovalMode }).mode;
+              return { previous, current: currentMode };
+            }
+            if (method === SERVE_STATUS_EXT_METHODS.sessionContext) {
+              if (lostMode !== undefined) {
+                // Hold the reconcile's status read so the announcement
+                // below is processed first; releasing then observes the
+                // applied mode with the cache already corrected, so no
+                // corrective fires.
+                contextReadEntered.resolve();
+                await contextGate.promise;
+                currentMode = lostMode;
+                lostMode = undefined;
+              }
+              return { state: { modes: { currentModeId: currentMode } } };
+            }
+            return {};
+          },
+        });
+        handles.push(handle);
+        return handle.channel;
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        initializeTimeoutMs: 1000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.setSessionApprovalMode(
+        session.sessionId,
+        ApprovalMode.DEFAULT,
+        { persist: false },
+      );
+
+      await bridge.closeSession(session.sessionId);
+
+      // The cold child reports the settings-derived YOLO; the replayed
+      // DEFAULT round trip times out, so the park is kept and the cache
+      // stays stale.
+      const firstRestore = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(firstRestore.state.modes?.currentModeId).toBe(ApprovalMode.YOLO);
+
+      // The restore created a fresh entry with its own event bus, so the
+      // subscription attaches now — the closed incarnation's bus is gone.
+      const abort = new AbortController();
+      const events: BridgeEvent[] = [];
+      void (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId, {
+          signal: abort.signal,
+        })) {
+          events.push(event);
+        }
+      })();
+
+      // The child's late echo of the timed-out replay announces the
+      // session's real mode — the very value that is parked.
+      void handles[1]?.agentConnection.extNotification(
+        'qwen/notify/session/mode-update',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          currentModeId: ApprovalMode.DEFAULT,
+        },
+      );
+      // The publish is the barrier: it proves the demux processed the
+      // announcement before the reconcile's read is released below.
+      await vi.waitFor(() => {
+        expect(
+          events.some(
+            (e) =>
+              e.type === 'approval_mode_changed' &&
+              (e.data as { next?: string }).next === ApprovalMode.DEFAULT,
+          ),
+        ).toBe(true);
+      });
+      // Let the reconcile observe the child: it applied the announced
+      // (and parked) mode, so nothing is corrected and nothing retires.
+      await contextReadEntered.promise;
+      contextGate.resolve();
+      await vi.waitFor(() => {
+        expect(
+          bridge.getDaemonStatusSnapshot().sessions[0]?.currentApprovalMode,
+        ).toBe(ApprovalMode.DEFAULT);
+      });
+      abort.abort();
+      await bridge.closeSession(session.sessionId);
+
+      const restored = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(handles).toHaveLength(3);
+      expect(handles[2]?.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+        params: { sessionId: session.sessionId, mode: ApprovalMode.DEFAULT },
+      });
+      expect(restored.state.modes?.currentModeId).toBe(ApprovalMode.DEFAULT);
+      await bridge.shutdown();
+    });
+
+    it('publishes a corrective frame when the child turns out to hold the replayed mode after an inconclusive failure', async () => {
+      // The replay times out but the child applies the mode before the
+      // bridge re-reads it — the response was lost, the change was not.
+      // The keep-the-memory branch re-reads the child and publishes the
+      // `approval_mode_changed` frame the protocol doc names as
+      // authoritative for the stale cold-load snapshot; and because the
+      // corrective reads back the very mode that is parked, the park is
+      // confirmed, not retired.
+      const handles: ChannelHandle[] = [];
+      const contextReadEntered = deferred<void>();
+      const contextGate = deferred<void>();
+      const factory: ChannelFactory = async () => {
+        const index = handles.length;
+        let currentMode = index > 0 ? ApprovalMode.YOLO : ApprovalMode.DEFAULT;
+        let lostMode: ApprovalMode | undefined;
+        const handle = makeChannel({
+          loadSessionImpl: () => ({
+            modes: { currentModeId: currentMode, availableModes: [] },
+          }),
+          extMethodImpl: async (method, params) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+              if (index === 1) {
+                // Never answers — the bridge times the round trip out —
+                // but the child applies the mode before the status
+                // re-read below observes it.
+                lostMode = (params as { mode: ApprovalMode }).mode;
+                return new Promise(() => {});
+              }
+              const previous = currentMode;
+              currentMode = (params as { mode: ApprovalMode }).mode;
+              return { previous, current: currentMode };
+            }
+            if (method === SERVE_STATUS_EXT_METHODS.sessionContext) {
+              if (lostMode !== undefined) {
+                // Hold the reconcile's status read so the test can attach
+                // its event subscription before the corrective publishes.
+                contextReadEntered.resolve();
+                await contextGate.promise;
+                currentMode = lostMode;
+                lostMode = undefined;
+              }
+              return { state: { modes: { currentModeId: currentMode } } };
+            }
+            return {};
+          },
+        });
+        handles.push(handle);
+        return handle.channel;
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        initializeTimeoutMs: 1000,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.setSessionApprovalMode(
+        session.sessionId,
+        ApprovalMode.DEFAULT,
+        { persist: false },
+      );
+
+      await bridge.closeSession(session.sessionId);
+
+      const firstRestore = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      // The load reports the cold-load mode; the corrective frame is the
+      // authoritative follow-up the doc sentence points at.
+      expect(firstRestore.state.modes?.currentModeId).toBe(ApprovalMode.YOLO);
+
+      // The restore created a fresh entry with its own event bus; attach
+      // the subscription before releasing the reconcile's gated read so
+      // the corrective frame cannot be missed.
+      const abort = new AbortController();
+      const events: BridgeEvent[] = [];
+      void (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId, {
+          signal: abort.signal,
+        })) {
+          events.push(event);
+        }
+      })();
+      await contextReadEntered.promise;
+      contextGate.resolve();
+      await vi.waitFor(() => {
+        expect(
+          events.some(
+            (e) =>
+              e.type === 'approval_mode_changed' &&
+              (e.data as { next?: string }).next === ApprovalMode.DEFAULT,
+          ),
+        ).toBe(true);
+      });
+      abort.abort();
+
+      // The corrective confirmed the parked mode, so the park survives:
+      // the next cold restore replays it.
+      await bridge.closeSession(session.sessionId);
+      const restored = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(handles).toHaveLength(3);
+      expect(handles[2]?.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+        params: { sessionId: session.sessionId, mode: ApprovalMode.DEFAULT },
+      });
+      expect(restored.state.modes?.currentModeId).toBe(ApprovalMode.DEFAULT);
+      await bridge.shutdown();
+    });
+
+    it('keeps a remembered approval mode when a POST /session attach re-applies the parked value', async () => {
+      // The attach applies the very mode that is parked: the memory is
+      // not stale, so retiring it would destroy a caller-owned park and
+      // let colder, more privileged settings win on the next cold
+      // restore.
+      const { factory, handles } = approvalModeHarness({
+        coldLoadMode: ApprovalMode.YOLO,
+      });
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.setSessionApprovalMode(
+        session.sessionId,
+        ApprovalMode.DEFAULT,
+        { persist: false },
+      );
+
+      // The default-entry attach re-applies the parked mode.
+      await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+      await bridge.closeSession(session.sessionId);
+
+      const restored = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(handles).toHaveLength(2);
+      expect(handles[1]?.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+        params: { sessionId: session.sessionId, mode: ApprovalMode.DEFAULT },
+      });
+      expect(restored.state.modes?.currentModeId).toBe(ApprovalMode.DEFAULT);
+      await bridge.shutdown();
+    });
+
+    it('keeps a remembered approval mode across an internal-cleanup kill that leaves the id restorable', async () => {
+      // `killSession` is also the daemon's cleanup verb for undeliverable
+      // restore responses and internal recovery; those kills leave the
+      // persisted id restorable, so the parked override must survive for
+      // the next cold restore. Only caller-owned destruction
+      // (`retireRememberedApprovalMode`) drops it.
+      const { factory, handles } = approvalModeHarness();
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.setSessionApprovalMode(
+        session.sessionId,
+        ApprovalMode.YOLO,
+        { persist: false },
+      );
+      await bridge.closeSession(session.sessionId);
+
+      const firstRestore = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(handles).toHaveLength(2);
+      expect(firstRestore.state.modes?.currentModeId).toBe(ApprovalMode.YOLO);
+
+      // The cleanup verb: no caller owns a destruction here.
+      await bridge.killSession(session.sessionId);
+
+      const restored = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(handles).toHaveLength(3);
+      expect(handles[2]?.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+        params: { sessionId: session.sessionId, mode: ApprovalMode.YOLO },
+      });
+      expect(restored.state.modes?.currentModeId).toBe(ApprovalMode.YOLO);
+      await bridge.shutdown();
+    });
+
+    it('re-parks a remembered approval mode when only an unrelated session retires during the failed spawn window', async () => {
+      // The unrelated retirement must not block this id's re-park:
+      // retirement freshness is per session.
+      const handles: ChannelHandle[] = [];
+      const sessionId = 'sess-spawn-window-unrelated-retire';
+      const newSessionEntered = deferred<void>();
+      const releaseNewSession = deferred<void>();
+      let gateSpawn = false;
+      const factory: ChannelFactory = async () => {
+        let currentMode = ApprovalMode.DEFAULT;
+        const handle = makeChannel({
+          newSessionImpl: async (params) => {
+            const requested = String(
+              params._meta?.[REQUESTED_SESSION_ID_META_KEY],
+            );
+            if (gateSpawn && requested === sessionId) {
+              newSessionEntered.resolve();
+              await releaseNewSession.promise;
+              throw new Error('probe: ACP child failed to start');
+            }
+            return { sessionId: requested };
+          },
+          loadSessionImpl: () => ({
+            modes: { currentModeId: currentMode, availableModes: [] },
+          }),
+          extMethodImpl: (method, params) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+              const previous = currentMode;
+              currentMode = (params as { mode: ApprovalMode }).mode;
+              return { previous, current: currentMode };
+            }
+            return {};
+          },
+        });
+        handles.push(handle);
+        return handle.channel;
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        persistApprovalMode: async () => {},
+      });
+      await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionId,
+        sessionScope: 'thread',
+      });
+      const peer = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      await bridge.setSessionApprovalMode(sessionId, ApprovalMode.YOLO, {
+        persist: false,
+      });
+      await bridge.setSessionApprovalMode(peer.sessionId, ApprovalMode.YOLO, {
+        persist: false,
+      });
+      await bridge.closeSession(sessionId);
+
+      gateSpawn = true;
+      const respawn = bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionId,
+        sessionScope: 'thread',
+      });
+      respawn.catch(() => {});
+      await newSessionEntered.promise;
+      // An UNRELATED session is deliberately destroyed inside the window.
+      await bridge.killSession(peer.sessionId, {
+        retireRememberedApprovalMode: true,
+      });
+      releaseNewSession.resolve();
+      await expect(respawn).rejects.toThrow();
+
+      const restored = await bridge.loadSession({
+        sessionId,
+        workspaceCwd: WS_A,
+      });
+
+      const yoloCalls = handles.flatMap((handle) =>
+        handle.agent.extMethodCalls.filter(
+          ({ method, params }) =>
+            method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode &&
+            (params as { sessionId?: string }).sessionId === sessionId,
+        ),
+      );
+      // The original set plus the replayed one: the failed spawn's
+      // re-park survived the unrelated retirement.
+      expect(yoloCalls).toHaveLength(2);
+      expect(restored.state.modes?.currentModeId).toBe(ApprovalMode.YOLO);
+      await bridge.shutdown();
+    });
+
+    it('serves a late attacher the newest mode when a second mode-carrying load resolves inside the source round trip', async () => {
+      // The first load's applied mode is captured before its gated
+      // `sessionSource` round trip; a second mode-carrying load resolving
+      // inside that window is the newer selection, and the entry-shared
+      // snapshot must mirror the live cache (as the cold path does), not
+      // the captured value.
+      const handles: ChannelHandle[] = [];
+      const sourceGate = deferred<void>();
+      const factory: ChannelFactory = async () => {
+        let currentMode = ApprovalMode.DEFAULT;
+        const handle = makeChannel({
+          newSessionImpl: async (params) => {
+            const requested = String(
+              params._meta?.[REQUESTED_SESSION_ID_META_KEY],
+            );
+            return { sessionId: requested };
+          },
+          loadSessionImpl: () => ({
+            modes: { currentModeId: currentMode, availableModes: [] },
+          }),
+          extMethodImpl: async (method, params) => {
+            if (
+              method === SERVE_CONTROL_EXT_METHODS.sessionSource &&
+              handles[1] === handle
+            ) {
+              await sourceGate.promise;
+              return { persisted: true };
+            }
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+              const previous = currentMode;
+              currentMode = (params as { mode: ApprovalMode }).mode;
+              return { previous, current: currentMode };
+            }
+            if (method === SERVE_STATUS_EXT_METHODS.sessionContext) {
+              return { state: { modes: { currentModeId: currentMode } } };
+            }
+            return {};
+          },
+        });
+        handles.push(handle);
+        return handle.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const sessionId = 'sess-snapshot-race';
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A, sessionId });
+      await bridge.closeSession(sessionId);
+      // Cold-restore once so the live entry carries a restoreState
+      // snapshot with a modes block.
+      await bridge.loadSession({ sessionId, workspaceCwd: WS_A });
+
+      // A: a mode-carrying load whose sessionSource round trip is held
+      // open.
+      const first = bridge.loadSession({
+        sessionId,
+        workspaceCwd: WS_A,
+        approvalMode: ApprovalMode.AUTO_EDIT,
+        sourceType: 'channel',
+      });
+      await vi.waitFor(() => {
+        expect(
+          handles[1]?.agent.extMethodCalls.some(
+            ({ method }) => method === SERVE_CONTROL_EXT_METHODS.sessionSource,
+          ),
+        ).toBe(true);
+      });
+      // B: the newer mode-carrying load, resolving inside A's window.
+      await bridge.loadSession({
+        sessionId,
+        workspaceCwd: WS_A,
+        approvalMode: ApprovalMode.YOLO,
+      });
+      sourceGate.resolve();
+      await first;
+
+      // C: a mode-less attach reads the entry-shared snapshot and must
+      // see B's mode, not A's overwritten capture.
+      const third = await bridge.loadSession({ sessionId, workspaceCwd: WS_A });
+      expect(third.attached).toBe(true);
+      expect(third.state.modes?.currentModeId).toBe(ApprovalMode.YOLO);
+      await bridge.shutdown();
+    });
+
+    it('retires a remembered approval mode when a settings-reload mode-update arrives during a bridge round trip', async () => {
+      // A reload-originated mode-update is not the echo of the bridge's
+      // own round trip: suppressing it would leave the stale park in
+      // place when the in-flight round trip goes on to fail, and the next
+      // cold restore would resurrect the mode the workspace was reloaded
+      // away from.
+      const handles: ChannelHandle[] = [];
+      const stuckGate = deferred<void>();
+      let gateArmed = false;
+      const factory: ChannelFactory = async () => {
+        let currentMode = ApprovalMode.DEFAULT;
+        const handle = makeChannel({
+          loadSessionImpl: () => ({
+            modes: { currentModeId: currentMode, availableModes: [] },
+          }),
+          extMethodImpl: async (method, params) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+              if (gateArmed) {
+                gateArmed = false;
+                await stuckGate.promise;
+                throw new Error('probe: transport closed mid-round-trip');
+              }
+              const previous = currentMode;
+              currentMode = (params as { mode: ApprovalMode }).mode;
+              return { previous, current: currentMode };
+            }
+            if (method === SERVE_STATUS_EXT_METHODS.sessionContext) {
+              return { state: { modes: { currentModeId: currentMode } } };
+            }
+            return {};
+          },
+        });
+        handles.push(handle);
+        return handle.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.setSessionApprovalMode(
+        session.sessionId,
+        ApprovalMode.YOLO,
+        { persist: false },
+      );
+
+      const abort = new AbortController();
+      const events: BridgeEvent[] = [];
+      void (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId, {
+          signal: abort.signal,
+        })) {
+          events.push(event);
+        }
+      })();
+
+      // Hold a bridge-driven round trip open so the demux suppression
+      // window is active when the reload-originated notification arrives.
+      gateArmed = true;
+      const stuck = bridge.setSessionApprovalMode(
+        session.sessionId,
+        ApprovalMode.AUTO_EDIT,
+        { persist: false },
+      );
+      stuck.catch(() => {});
+      await vi.waitFor(() => {
+        expect(
+          handles[0]?.agent.extMethodCalls.filter(
+            ({ method }) =>
+              method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+          ).length,
+        ).toBe(2);
+      });
+      void handles[0]?.agentConnection.extNotification(
+        'qwen/notify/session/mode-update',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          currentModeId: ApprovalMode.DEFAULT,
+          origin: 'settings-reload',
+        },
+      );
+      // The notification is promoted despite the in-flight round trip.
+      await vi.waitFor(() => {
+        expect(
+          events.some(
+            (e) =>
+              e.type === 'approval_mode_changed' &&
+              (e.data as { next?: string }).next === ApprovalMode.DEFAULT,
+          ),
+        ).toBe(true);
+      });
+      // The in-flight round trip then fails, so nothing re-parks.
+      stuckGate.resolve();
+      await expect(stuck).rejects.toThrow();
+      abort.abort();
+      await bridge.closeSession(session.sessionId);
+
+      const restored = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(handles).toHaveLength(2);
+      expect(
+        handles[1]?.agent.extMethodCalls.filter(
+          ({ method }) =>
+            method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+        ),
+      ).toEqual([]);
+      expect(restored.state.modes?.currentModeId).toBe(ApprovalMode.DEFAULT);
+      await bridge.shutdown();
+    });
+
+    it('does not let a mid-replay persisted-write convergence revert an explicit selection queued during the replay window', async () => {
+      // The convergence is enqueued behind any explicit
+      // `setSessionApprovalMode` that joined the session's queue during
+      // the replay window; it must re-validate at dequeue and bail
+      // instead of reverting a selection that already returned 200.
+      const handles: ChannelHandle[] = [];
+      const childModes = new Map<string, ApprovalMode>();
+      const replayGate = deferred<void>();
+      let gateArmed = false;
+      let restoringId = '';
+      const factory: ChannelFactory = async () => {
+        const handle = makeChannel({
+          loadSessionImpl: (p) => ({
+            modes: {
+              currentModeId:
+                childModes.get(p.sessionId) ?? ApprovalMode.DEFAULT,
+              availableModes: [],
+            },
+          }),
+          extMethodImpl: async (method, params) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+              childModes.delete((params as { sessionId: string }).sessionId);
+              return {};
+            }
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+              const p = params as { sessionId: string; mode: ApprovalMode };
+              if (gateArmed && p.sessionId === restoringId) {
+                gateArmed = false;
+                await replayGate.promise;
+              }
+              const previous =
+                childModes.get(p.sessionId) ?? ApprovalMode.DEFAULT;
+              childModes.set(p.sessionId, p.mode);
+              return { previous, current: p.mode };
+            }
+            if (method === SERVE_STATUS_EXT_METHODS.sessionContext) {
+              const sid = (params as { sessionId?: string }).sessionId;
+              return {
+                state: {
+                  modes: {
+                    currentModeId:
+                      (sid && childModes.get(sid)) ?? ApprovalMode.DEFAULT,
+                  },
+                },
+              };
+            }
+            return {};
+          },
+        });
+        handles.push(handle);
+        return handle.channel;
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        persistApprovalMode: async () => {},
+      });
+      const first = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const peer = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      await bridge.setSessionApprovalMode(first.sessionId, ApprovalMode.YOLO, {
+        persist: false,
+      });
+      await bridge.closeSession(first.sessionId);
+
+      gateArmed = true;
+      restoringId = first.sessionId;
+      const restoredPromise = bridge.loadSession({
+        sessionId: first.sessionId,
+        workspaceCwd: WS_A,
+      });
+      await vi.waitFor(() => {
+        expect(
+          handles[0]?.agent.extMethodCalls.some(
+            ({ method, params }) =>
+              method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode &&
+              (params as { sessionId?: string }).sessionId ===
+                first.sessionId &&
+              (params as { mode?: string }).mode === ApprovalMode.YOLO,
+          ),
+        ).toBe(true);
+      });
+      // The superseding write lands while the replay's round trip is
+      // open...
+      await bridge.setSessionApprovalMode(
+        peer.sessionId,
+        ApprovalMode.DEFAULT,
+        {
+          persist: true,
+        },
+      );
+      // ...and so does an explicit selection on the restoring session,
+      // queued behind the replay.
+      const explicit = bridge.setSessionApprovalMode(
+        first.sessionId,
+        ApprovalMode.AUTO_EDIT,
+        { persist: false },
+      );
+      replayGate.resolve();
+      await explicit;
+      const restored = await restoredPromise;
+
+      const modeCalls = handles[0]!.agent.extMethodCalls.filter(
+        ({ method, params }) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode &&
+          (params as { sessionId?: string }).sessionId === first.sessionId,
+      );
+      // The explicit selection wins over the convergence: it is the
+      // newest caller-owned choice.
+      expect(modeCalls[modeCalls.length - 1]).toMatchObject({
+        params: { mode: ApprovalMode.AUTO_EDIT },
+      });
+      expect(childModes.get(first.sessionId)).toBe(ApprovalMode.AUTO_EDIT);
+      expect(restored.state.modes?.currentModeId).toBe(ApprovalMode.AUTO_EDIT);
       await bridge.shutdown();
     });
 
@@ -29322,7 +30065,9 @@ describe('createAcpSessionBridge', () => {
         { persist: false },
       );
 
-      const kill = bridge.killSession(session.sessionId);
+      const kill = bridge.killSession(session.sessionId, {
+        retireRememberedApprovalMode: true,
+      });
       await vi.waitFor(() => {
         expect(
           handles[0]?.agent.extMethodCalls.some(
@@ -29393,7 +30138,11 @@ describe('createAcpSessionBridge', () => {
           ),
         ).toBe(true);
       });
-      await expect(bridge.killSession(session.sessionId)).resolves.toBe(true);
+      await expect(
+        bridge.killSession(session.sessionId, {
+          retireRememberedApprovalMode: true,
+        }),
+      ).resolves.toBe(true);
       await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
 
       const restored = await bridge.loadSession({

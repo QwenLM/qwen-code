@@ -29355,6 +29355,11 @@ describe('sessionLanguage multi-session propagation', () => {
       expect(clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
       expect(clearTodoStopGuardTrust).toHaveBeenCalledOnce();
       expect(sendCurrentModeUpdateNotification).toHaveBeenCalledOnce();
+      // The reload-originated marker lets the bridge demux tell the
+      // notification apart from a bridge round-trip echo.
+      expect(sendCurrentModeUpdateNotification).toHaveBeenCalledWith(
+        'settings-reload',
+      );
 
       nextMode = 'default';
       await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});

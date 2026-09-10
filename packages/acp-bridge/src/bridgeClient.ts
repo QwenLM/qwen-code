@@ -2886,7 +2886,17 @@ export class BridgeClient implements Client {
       );
       return;
     }
-    if (entry.approvalModeRoundtripInFlight) {
+    // The suppression exists to drop the echo of the bridge's own
+    // approval-mode round trip. A settings-reload convergence
+    // notification is not that echo: it carries the mode the reload
+    // imposed, and swallowing it would leave a stale parked override
+    // unretired (the convergence record on the agent side has already
+    // advanced, so no later reload retries it). Only origin-less frames
+    // are treated as echoes.
+    if (
+      entry.approvalModeRoundtripInFlight &&
+      params['origin'] !== 'settings-reload'
+    ) {
       writeStderrLine(
         `[demux] session=${sessionId} type=current_mode_update action=suppressed reason=bridge_roundtrip_in_flight`,
       );

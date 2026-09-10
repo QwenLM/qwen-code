@@ -724,8 +724,11 @@ export async function deleteDaemonSessionIfOrphan(params: {
   const result = await coordinator.runExclusiveMany([sessionId], async () => {
     let killed = false;
     try {
+      // The orphan's persisted record is deleted below: the kill owns the
+      // destruction, so the remembered approval mode dies with it.
       killed = await bridge.killSession(sessionId, {
         requireZeroAttaches: true,
+        retireRememberedApprovalMode: true,
       });
     } catch (error) {
       if (!isSessionNotFoundError(error)) throw error;

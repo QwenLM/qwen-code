@@ -10931,8 +10931,14 @@ export class Session implements SessionContext {
    * Sends a current_mode_update notification to the client.
    * Called after the agent switches modes (e.g., from exit_plan_mode tool or
    * a workspace settings reload).
+   *
+   * `origin: 'settings-reload'` marks the notification as
+   * reload-originated so the bridge demux does not mistake it for the echo
+   * of a bridge-initiated round trip and suppress it.
    */
-  async sendCurrentModeUpdateNotification(): Promise<void> {
+  async sendCurrentModeUpdateNotification(
+    origin?: 'settings-reload',
+  ): Promise<void> {
     const newModeId = this.config.getApprovalMode() as ApprovalModeValue;
     const update: SessionUpdate = {
       sessionUpdate: 'current_mode_update',
@@ -10970,6 +10976,7 @@ export class Session implements SessionContext {
             }
           : {}),
         legacyFrameSent,
+        ...(origin !== undefined ? { origin } : {}),
       });
     } catch (error) {
       debugLogger.debug('mode-update extNotification failed', error);

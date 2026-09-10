@@ -1525,6 +1525,7 @@ export class StandaloneSessionService {
     runtime: WorkspaceRuntime,
     durable: Extract<StoredStandaloneState, { kind: 'standalone' }>,
     sessionId: string,
+    opts?: { retireRememberedApprovalMode?: boolean },
   ): Promise<void> {
     let live: BridgeSessionSummary;
     try {
@@ -1540,6 +1541,7 @@ export class StandaloneSessionService {
     try {
       const closed = await runtime.bridge.killSession(sessionId, {
         requireZeroAttaches: true,
+        retireRememberedApprovalMode: opts?.retireRememberedApprovalMode,
       });
       if (!closed) throw serviceError('session_busy', sessionId, true);
     } catch (error) {
@@ -1879,7 +1881,12 @@ export class StandaloneSessionService {
     if (await this.options.hasForeignSessionOwner(runtime, sessionId)) {
       throw serviceError('standalone_session_conflict', sessionId);
     }
-    await this.closeLiveStandaloneIfPresent(runtime, durable, sessionId);
+    // A delete destroys the persisted session: the live kill owns the
+    // destruction, so the remembered approval mode dies with it (an
+    // archive keeps the persisted id restorable and preserves it).
+    await this.closeLiveStandaloneIfPresent(runtime, durable, sessionId, {
+      retireRememberedApprovalMode: true,
+    });
     const root = await this.options.workspace.assertExactRoot(
       runtime.workspaceCwd,
     );

@@ -6279,6 +6279,26 @@ describe('Session', () => {
       );
     });
 
+    it('marks a settings-reload notification with its origin', async () => {
+      // The origin lets the bridge demux tell a reload-originated
+      // convergence apart from the echo of a bridge-initiated round trip
+      // (which it suppresses while the round trip is in flight).
+      await (
+        session as unknown as {
+          sendCurrentModeUpdateNotification: (
+            origin?: 'settings-reload',
+          ) => Promise<void>;
+        }
+      ).sendCurrentModeUpdateNotification('settings-reload');
+
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/mode-update',
+        expect.objectContaining({
+          origin: 'settings-reload',
+        }),
+      );
+    });
+
     it('still sends the side-channel when the legacy notification fails', async () => {
       vi.mocked(mockClient.sessionUpdate).mockRejectedValueOnce(
         new Error('legacy unavailable'),

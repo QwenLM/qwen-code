@@ -2515,11 +2515,21 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * least one other client has called `spawnOrAttach` for this
    * entry and got `attached: true`.
    *
+   * `retireRememberedApprovalMode: true` retires the session's remembered
+   * approval mode with the kill. Reserve it for destruction the caller
+   * owns (a user-initiated delete of the persisted session): the killed
+   * id stays restorable, so daemon-internal cleanup kills — an
+   * undeliverable restore response, internal recovery — must preserve the
+   * memory for the next cold restore, exactly like an idle reap or crash.
+   *
    * Returns true only when this call removed the live session.
    */
   killSession(
     sessionId: string,
-    opts?: { requireZeroAttaches?: boolean },
+    opts?: {
+      requireZeroAttaches?: boolean;
+      retireRememberedApprovalMode?: boolean;
+    },
   ): Promise<boolean>;
 
   /**

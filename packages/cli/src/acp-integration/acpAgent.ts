@@ -13861,7 +13861,15 @@ class QwenAgent implements Agent {
               }
               if (modeConverged) {
                 try {
-                  await session.sendCurrentModeUpdateNotification();
+                  // The origin marks the notification as reload-originated
+                  // so the bridge demux cannot swallow it as the echo of a
+                  // bridge-initiated round trip: a dropped convergence
+                  // would leave the session's remembered mode unretired,
+                  // and the record below has already advanced, so no later
+                  // no-edit reload retries it.
+                  await session.sendCurrentModeUpdateNotification(
+                    'settings-reload',
+                  );
                 } catch (err) {
                   debugLogger.warn(
                     `reload: sendCurrentModeUpdateNotification failed for session ${id}: ${err}`,
