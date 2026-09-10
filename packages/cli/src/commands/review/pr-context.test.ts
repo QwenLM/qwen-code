@@ -1761,8 +1761,11 @@ describe('latestLedger — the split trust surface', () => {
     sha: 'abc1234def567890',
     // The anchor's certifying identity rides beside it, so the seam below
     // covers both halves of the pair: they are written together, recovered
-    // together, and withheld together.
+    // together, and withheld together. The merge base the round captured
+    // over rides the same rung (#10136 R18-3) — the seam bound's continuity
+    // gate reads it, and a foreign or grafted anchor must not carry one.
     model: 'qwen3.7-max@1a2b3c4d',
+    mb: 'b'.repeat(40),
   };
 
   it('takes the LATEST marker whoever posted it', () => {
@@ -1808,6 +1811,9 @@ describe('latestLedger — the split trust surface', () => {
     // gone — and every reader of this object would then have to know to
     // ignore it.
     expect(foreign?.ledger.model).toBeUndefined();
+    // …and so does the base it captured over: left behind, a drive-by
+    // marker would decide which hunks the next round stops republishing.
+    expect(foreign?.ledger.mb).toBeUndefined();
     expect(foreign?.ledger.findings).toEqual(anchored.findings);
     expect(foreign?.ledger.round).toBe(2);
     // Pure-foreign (no own base): nothing was merged, so the renderer's
@@ -1855,6 +1861,11 @@ describe('latestLedger — the split trust surface', () => {
     expect(recovered?.ledger.round).toBe(4);
     expect(recovered?.ledger.sha).toBe(anchored.sha);
     expect(recovered?.ledger.model).toBe(anchored.model);
+    // The BASE does not ride the graft (#10136 R18-3): it names the range
+    // one round captured over, and this anchor comes from a different,
+    // strictly earlier round. Its absence keeps the seam bound off, which
+    // is the fail-safe direction.
+    expect(recovered?.ledger.mb).toBeUndefined();
     // …and the provenance rides, so the renderer never claims round 4
     // "reviewed at" a sha it certified nothing about.
     expect(recovered?.anchorFromRound).toBe(2);

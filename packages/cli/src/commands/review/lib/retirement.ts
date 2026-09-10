@@ -669,7 +669,16 @@ function classifyReturn(
     // list cannot be a new finding against it. Skipping costs an audit at
     // most; counting a quotation re-opens the never-retire direction on
     // the loop's most common honest return.
+    // The list's entry lines, read anchored. A NON-EMPTY list no entry
+    // extracts from is a shape this reader does not recognise, and
+    // narrowing the quotation bar on it would read a genuine quotation as
+    // a filing — the never-retire direction. There, the raw containment
+    // test the module always applied stands.
     const listed = entryRestsOf(findingsList);
+    const quotes = (file: string): boolean =>
+      listed.length > 0
+        ? listed.some((rest) => quotesEntryLine(rest, file))
+        : findingsList.includes(`**File:** ${file}`);
     for (const m of text.matchAll(FILE_LINE_RE)) {
       const file = (m[1] ?? '').trim();
       if (file === '' || /^N\/A\b/i.test(file)) continue;
@@ -678,20 +687,23 @@ function classifyReturn(
       // (#10136 R21-12): a filing at `src/pay.ts:12` is no quotation of a
       // listed `src/pay.ts:123`, and refusing it as one dropped a live
       // finding into an `unknown` that named nothing.
-      if (listed.some((rest) => quotesEntryLine(rest, file))) {
+      const token = fileLineToken(file);
+      if (quotes(file)) {
         // The refusal stands — counting a quotation re-opens the
         // never-retire direction — but the line rides along as staleness
         // EVIDENCE: the orchestrator merges what an auditor reports
         // whatever this classifier ruled, so a later dry receipt whose
         // list does not carry this entry was built before it (#10136
-        // R21-12). Evidence only; the outcome below is unchanged.
-        refusedFile ??= fileLineToken(file);
+        // R21-12). Evidence only; the outcome below is unchanged. A line
+        // that yields no token names nothing a list could carry, so it is
+        // no evidence either.
+        if (token !== '') refusedFile ??= token;
         continue;
       }
       return {
         outcome: 'yielded',
         failure: null,
-        filedFile: fileLineToken(file),
+        ...(token === '' ? {} : { filedFile: token }),
       };
     }
   }

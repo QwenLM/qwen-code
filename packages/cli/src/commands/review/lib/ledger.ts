@@ -714,6 +714,8 @@ export function serializeLedger(ledger: Ledger): string {
     anchor: boolean,
     volume: 'both' | 'posted' | 'none',
     closures: boolean,
+    /** The continuity base — its own rung above the anchor it rides with. */
+    base = true,
   ): string => {
     const payload: Ledger = {
       v: 1,
@@ -813,8 +815,11 @@ export function serializeLedger(ledger: Ledger): string {
         if (model) payload.model = model;
         // The base rides the anchor's rung: a round that will not certify
         // its own range does not vouch the base it captured over either
-        // (#10136 R18-3). ~48 bytes, shed with the pair it qualifies.
-        if (ledger.mb && SHA_RE.test(ledger.mb)) payload.mb = ledger.mb;
+        // (#10136 R18-3). ~48 bytes, shed with the pair it qualifies — and,
+        // one rung sooner, on its own (see the cascade below).
+        if (base && ledger.mb && SHA_RE.test(ledger.mb)) {
+          payload.mb = ledger.mb;
+        }
       }
     }
     // Unconditional, unlike `sha` above: the ruling that withholds an anchor
@@ -865,6 +870,16 @@ export function serializeLedger(ledger: Ledger): string {
     // and losing it costs one round of lineage, while everything below it
     // — the anchor, the work list — is a claim the next round acts on.
     marker = render(capped, total - kept, true, 'none', false);
+  }
+  if (marker.length > LEDGER_MAX_BYTES) {
+    // The continuity base sheds one rung ABOVE the anchor it rides with
+    // (#10136 R18-3). The two buy different things for the next round: the
+    // anchor narrows its DIFF, and losing it pays a full re-review; the
+    // base only lets the seam bound narrow the republication of files that
+    // diff already carries, and losing it pays a full-range republication
+    // of those files. ~48 bytes must not cost the more expensive of the
+    // two.
+    marker = render(capped, total - kept, true, 'none', false, false);
   }
   if (marker.length > LEDGER_MAX_BYTES) {
     // Shed the anchor PAIR before any finding: `dropped` withholds the pair

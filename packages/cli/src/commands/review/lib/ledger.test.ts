@@ -367,6 +367,83 @@ describe('ledger marker', () => {
     expect(back.model).toBeUndefined();
   });
 
+  it('sheds the continuity base one rung ABOVE the anchor it rides with (#10136 R18-3)', () => {
+    // The two buy different things for the next round: the anchor narrows
+    // its DIFF, and losing it pays a full re-review; the base only lets the
+    // seam bound narrow the republication of files that diff already
+    // carries. ~48 bytes must not cost the more expensive of the two.
+    const sha = 'deadbeef'.repeat(5);
+    const model = 'qwen3.7-max';
+    const mb = 'b'.repeat(40);
+    const anchoredOf = (findings: LedgerFinding[]): string =>
+      serializeLedger({ v: 1, round: 2, findings, sha, model });
+    const basedOf = (findings: LedgerFinding[]): string =>
+      serializeLedger({ v: 1, round: 2, findings, sha, model, mb });
+    const keepsAnchor = (findings: LedgerFinding[]): boolean =>
+      parseLedger(anchoredOf(findings))?.sha === sha;
+    const wide = (i: number): LedgerFinding => ({
+      id: `R2-${i}`,
+      sev: 'S',
+      file: 'p/'.repeat(100).slice(0, LEDGER_MAX_FILE),
+      line: 99999,
+      title: 'x'.repeat(LEDGER_MAX_TITLE),
+    });
+    // Pack the ANCHOR-ONLY form to the last byte that still keeps its
+    // anchor: coarse entries first, then entries grown a character at a
+    // time. At the boundary the form has zero headroom, so ANY base beside
+    // it overflows — which is the rung under test.
+    const findings: LedgerFinding[] = [];
+    for (let i = 0; i < LEDGER_MAX_FINDINGS; i++) {
+      findings.push(wide(i));
+      if (!keepsAnchor(findings)) {
+        findings.pop();
+        break;
+      }
+    }
+    let atCap = false;
+    while (!atCap && findings.length < LEDGER_MAX_FINDINGS) {
+      const seed: LedgerFinding = {
+        id: `R2-${findings.length}`,
+        sev: 'S',
+        file: 'a.ts',
+        title: '',
+      };
+      findings.push(seed);
+      if (!keepsAnchor(findings)) {
+        findings.pop();
+        break;
+      }
+      let last = seed;
+      for (;;) {
+        const title = last.title + 'x';
+        if (title.length > LEDGER_MAX_TITLE) break;
+        const grown = { ...last, title };
+        findings[findings.length - 1] = grown;
+        if (!keepsAnchor(findings)) {
+          findings[findings.length - 1] = last;
+          atCap = true;
+          break;
+        }
+        last = grown;
+      }
+    }
+    const anchored = anchoredOf(findings).length;
+    // The premise, asserted rather than assumed: the anchor-only form fits
+    // and keeps its pair, and the base beside it does not fit.
+    expect(anchored).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
+    expect(keepsAnchor(findings)).toBe(true);
+    expect(
+      anchored + (basedOf([]).length - anchoredOf([]).length),
+    ).toBeGreaterThan(LEDGER_MAX_BYTES);
+
+    const back = parseLedger(basedOf(findings))!;
+    expect(back.findings).toHaveLength(findings.length);
+    expect(back.dropped).toBeUndefined();
+    expect(back.sha).toBe(sha);
+    expect(back.model).toBe(model);
+    expect(back.mb).toBeUndefined();
+  });
+
   it('drops a malformed sha but keeps the ledger — field-level fail-quiet', () => {
     // The body is another account's writable surface. A garbage anchor must
     // not cost the next round its work list, and must not survive as an
