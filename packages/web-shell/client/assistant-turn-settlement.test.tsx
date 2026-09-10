@@ -145,8 +145,8 @@ describe('assistant turn settlement projection', () => {
       stopReason: 'end_turn',
     });
 
-    // Not the pre-tool block, and not both halves glued together: the tool
-    // call is a message boundary even though it carries no `promptId`.
+    // Not the pre-tool block: the backward scan takes this prompt's last
+    // non-empty top-level block, whatever sits between them.
     expect(settled).toEqual({
       sessionId: 'session-1',
       promptId: 'prompt-live',
@@ -187,10 +187,9 @@ describe('assistant turn settlement projection', () => {
   });
 
   it('skips a whitespace-only assistant block after a tool boundary', () => {
-    // A whitespace-only assistant block after a tool call cannot merge (the
-    // tool case sets `needsNewContentMessage`), so it renders as its own empty
-    // message and would otherwise win the backward scan as the turn's final
-    // message — dropping the substantive answer.
+    // A whitespace-only block renders as nothing, so it must not win the
+    // backward scan as the turn's final message and drop the substantive answer
+    // one slot earlier.
     harness.blocks = [
       assistantBlock('assistant-1', 'The answer is 42.', {
         promptId: 'prompt-live',
@@ -232,9 +231,9 @@ describe('assistant turn settlement projection', () => {
   });
 
   it('does not settle a streaming assistant block as the turn answer', () => {
-    // The block-level streaming guard must fire: the insight-segment adapter
-    // branch pushes its assistant messages without `isStreaming`, so only the
-    // block scan stands in front of publishing a still-streaming fragment.
+    // This prompt's own final block is still open. Streaming means "not yet
+    // settled" rather than "keep looking": the settlement key is burned once,
+    // so publishing a fragment here could never be corrected afterwards.
     harness.blocks = [
       assistantBlock(
         'assistant-1',
@@ -253,11 +252,11 @@ describe('assistant turn settlement projection', () => {
     expect(settled).not.toHaveProperty('message');
   });
 
-  it('does not settle a merged message that absorbed a streaming block from another prompt', () => {
-    // The message-level streaming guard must fire: consecutive top-level
-    // assistant blocks merge, and the merged message inherits the trailing
-    // block's `streaming` even though that block is outside this prompt's
-    // `promptBlockIds`.
+  it('publishes this prompt its own final message while a later prompt streams', () => {
+    // The next turn is still typing, but its block is stamped `prompt-other`
+    // and so is never a candidate here. This turn's own final text is finished
+    // and attributable, so withholding it would leave a `completed` turn with no
+    // message — and no corrected callback can follow.
     harness.blocks = [
       assistantBlock('assistant-1', 'The answer is 42.', {
         promptId: 'prompt-live',
@@ -275,17 +274,23 @@ describe('assistant turn settlement projection', () => {
       stopReason: 'end_turn',
     });
 
-    expect(settled).not.toHaveProperty('message');
+    expect(settled.message).toEqual({
+      id: 'assistant-1',
+      content: 'The answer is 42.',
+      isStreaming: false,
+      timestamp: 1,
+    });
   });
 
-  it('treats a finished unstamped sibling as a foreign turn', () => {
+  it('publishes this prompt its own final message past a finished unstamped sibling', () => {
     // Goal-runtime and background-notification turns never cross the
     // `session/prompt` boundary that sets `entry.activePromptId`, so their
     // frames are forwarded unstamped (`bridgeClient.ts:1066-1071`) and nothing
     // can backfill a block that already finished (`sdk-typescript
-    // daemon/ui/transcript.ts:836-840`). Admitting it re-glues a foreign turn's
-    // text onto this prompt's message id — the contamination the ownership
-    // rule exists to stop, entering through the unstamped door.
+    // daemon/ui/transcript.ts:836-840`). The sibling is therefore foreign, but
+    // `assistant-1` satisfies every term of the selection — top-level, stamped
+    // `prompt-A`, non-empty — so this `completed` turn publishes its own answer.
+    // Asserted on exact content, not presence: glued text must fail here.
     harness.blocks = [
       assistantBlock('assistant-1', 'The answer is 42.', {
         promptId: 'prompt-A',
@@ -300,15 +305,19 @@ describe('assistant turn settlement projection', () => {
       stopReason: 'end_turn',
     });
 
-    expect(settled).not.toHaveProperty('message');
+    expect(settled.message).toEqual({
+      id: 'assistant-1',
+      content: 'The answer is 42.',
+      isStreaming: false,
+      timestamp: 1,
+    });
   });
 
-  it('does not settle a merged message that absorbed an unstamped streaming block', () => {
-    // The unstamped sibling is still open, so it stays owned: a later delta can
-    // yet stamp it. The merged message inherits its `streaming`, and the
-    // block-level guard cannot fire because the sibling is not in
-    // `promptBlockIds` — the message-level guard is the sole defence against
-    // handing a host unfinished text for a prompt reported `completed`.
+  it('publishes this prompt its own final message past an unstamped streaming sibling', () => {
+    // The unstamped sibling is still open, so a later delta can yet stamp it —
+    // but it is not this prompt's block, and `prompt-A`'s own final text is
+    // finished. The foreign partial text must not be published as this turn's
+    // answer, and its presence must not cost this turn its settlement.
     harness.blocks = [
       assistantBlock('assistant-1', 'The answer is 42.', {
         promptId: 'prompt-A',
@@ -323,19 +332,21 @@ describe('assistant turn settlement projection', () => {
       stopReason: 'end_turn',
     });
 
-    expect(settled).not.toHaveProperty('message');
+    expect(settled.message).toEqual({
+      id: 'assistant-1',
+      content: 'The answer is 42.',
+      isStreaming: false,
+      timestamp: 1,
+    });
   });
 
-  it('does not publish one merged message for two adjacent prompts', () => {
+  it('gives two adjacent prompts their own messages, never a merged one', () => {
     // A continuation carries no user prompt to echo (`bridge.ts` skips
     // `echoPromptToSessionBus` when `isContinue`), so two top-level assistant
-    // blocks with different `promptId`s land adjacent with nothing between
-    // them. The reducer keeps them as two blocks (`transcript.ts` refuses to
-    // merge when both prompt ids are set and differ) and the adapter then
-    // merges them into ONE message that keeps the first block's `id` and
-    // concatenates both texts. An intersection test published that same
-    // message for both prompts: turn B's answer attributed to turn A, under a
-    // message id both settlements share.
+    // blocks with different `promptId`s land adjacent with nothing between them
+    // and the render adapter merges them into ONE message that keeps the first
+    // block's `id` and concatenates both texts. Selecting on the blocks keeps
+    // each turn's own: distinct ids, and neither carrying the other's text.
     harness.blocks = [
       assistantBlock('assistant-1', 'The answer is 42.', {
         promptId: 'prompt-A',
@@ -349,7 +360,12 @@ describe('assistant turn settlement projection', () => {
       outcome: 'completed',
       stopReason: 'end_turn',
     });
-    expect(settledA).not.toHaveProperty('message');
+    expect(settledA.message).toEqual({
+      id: 'assistant-1',
+      content: 'The answer is 42.',
+      isStreaming: false,
+      timestamp: 1,
+    });
 
     cleanupReact();
     published = [];
@@ -361,13 +377,17 @@ describe('assistant turn settlement projection', () => {
     });
     // Not A's message id, and not the glued content: B must never inherit a
     // message that also carries A's text.
-    expect(settledB).not.toHaveProperty('message');
+    expect(settledB.message).toEqual({
+      id: 'assistant-2',
+      content: 'next turn text',
+      isStreaming: false,
+      timestamp: 1,
+    });
   });
 
   it('still publishes each turn its own message when a user echo separates them', () => {
-    // Guards the fix against over-rejecting: whole-message ownership must not
-    // cost an ordinary turn (user echo between the two assistant blocks) its
-    // settlement, and the two prompts must get two distinct message ids.
+    // The ordinary shape — a user echo between the two assistant blocks. Each
+    // prompt gets its own message id and its own text.
     harness.blocks = [
       assistantBlock('assistant-1', 'The answer is 42.', {
         promptId: 'prompt-A',

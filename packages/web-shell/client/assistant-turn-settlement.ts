@@ -9,7 +9,6 @@ import {
   useTranscriptStore,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
-import { transcriptBlocksToDaemonMessages } from './adapters/transcriptToMessages.js';
 import { useDaemonPromptSettled } from './daemon/session/DaemonSessionProvider.js';
 import type { DaemonPromptSettledEvent } from './daemon/session/types.js';
 import type {
@@ -25,82 +24,45 @@ function getSettledAssistantMessage(
   blocks: readonly DaemonTranscriptBlock[],
   promptId: string,
 ): WebShellAssistantMessageInfo | undefined {
-  const promptBlockIds = new Set(
-    blocks
-      .filter(
-        (block) =>
-          block.kind === 'assistant' &&
-          block.parentToolCallId === undefined &&
-          block.promptId === promptId,
-      )
-      .map((block) => block.id),
-  );
-  if (
-    promptBlockIds.size === 0 ||
-    blocks.some(
-      (block) =>
-        block.kind === 'assistant' &&
-        promptBlockIds.has(block.id) &&
-        block.streaming,
-    )
-  ) {
-    return undefined;
-  }
-  const messages = transcriptBlocksToDaemonMessages(blocks, {
-    includeSourceIdentity: true,
-  });
-  // Ownership for the scan below, deliberately wider than `promptBlockIds`,
-  // but only while a block can still be backfilled: the reducer admits a delta
-  // with no `promptId` and stamps it from a later delta for the same block
-  // (sdk-typescript `daemon/ui/transcript.ts:836-840`). A *finished* unstamped
-  // assistant block can never be stamped, and the turns that emit one
-  // (goal-runtime and background-notification turns never cross the
-  // `session/prompt` boundary that sets `entry.activePromptId`) are foreign.
-  // Non-assistant blocks are never stamped by the reducer, so they stay
-  // admitted; a block stamped with a *different* prompt id is foreign.
-  const promptOwnedIds = new Set(
-    blocks
-      .filter(
-        (block) =>
-          block.promptId === promptId ||
-          (block.promptId === undefined &&
-            (block.kind !== 'assistant' || block.streaming === true)),
-      )
-      .map((block) => block.id),
-  );
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    // Whole-message ownership, not an intersection. The adapter merges
-    // consecutive top-level assistant blocks without consulting `promptId`,
-    // keeping the first block's `id` and concatenating the text
-    // (`adapters/transcriptToMessages.ts:603-620`), and a continuation carries
-    // no user echo to separate turns (`acp-bridge/src/bridge.ts:10582`). Two
-    // adjacent turns therefore project to one message, and an intersection test
-    // published it for both prompt ids — turn B's answer attributed to turn A,
-    // under a message id both settlements share. Omitting `message` matches the
-    // existing "not attributable" semantics rather than publishing contaminated
-    // text. Missing or empty `sourceBlockIds` is not owned either: `every` is
-    // vacuously true for an empty array.
+  // Select at the block layer, by identity: `blocks` is the array the reducer
+  // stamps `promptId` on, so this prompt's final assistant block is read off it
+  // directly. Deriving it from the render adapter instead needs ownership
+  // reconstructed from `sourceBlockIds` (the adapter drops `promptId`) and
+  // inherits the adapter's merge of consecutive top-level assistant blocks,
+  // which crosses turn boundaries — a continuation carries no user echo to
+  // separate them (`acp-bridge/src/bridge.ts:10582`). Every block shape this
+  // module did not hand-model then became a way to publish a foreign turn's
+  // text, an earlier non-final message of this turn, or nothing at all, under a
+  // `(sessionId, promptId)` key that is burned before the listener runs. The
+  // exclusion terms below are the SDK's own for this exact question
+  // (`sdk-typescript` `daemon/ui/transcript.ts`,
+  // `findFinalVisibleAssistantForPrompt`), kept local because exporting it
+  // would widen the `@qwen-code/sdk/daemon` public surface.
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    // A subagent block belongs to its parent tool call; an unstamped block
+    // belongs to a turn that never crossed the `session/prompt` boundary
+    // setting `entry.activePromptId` (goal-runtime, background notification) or
+    // to restored history, which is unstamped by construction; a block stamped
+    // with another prompt id belongs to that prompt. None is this answer.
     if (
-      message?.role !== 'assistant' ||
-      !message.sourceBlockIds?.length ||
-      !message.sourceBlockIds.every((id) => promptOwnedIds.has(id))
+      block?.kind !== 'assistant' ||
+      block.parentToolCallId !== undefined ||
+      block.promptId !== promptId
     ) {
       continue;
     }
-    // A whitespace-only assistant block that cannot merge (after a tool
-    // boundary, or carrying a segmentId) renders as its own empty message and
-    // would otherwise win the backward scan as the turn's final message. The
-    // adapter's own emptiness test rejects only zero-length text, so re-apply
-    // the block-level skip here. Streaming stays `return undefined` (not yet
-    // settled) rather than `continue`.
-    if (message.content.trim().length === 0) continue;
-    if (message.isStreaming) return undefined;
+    // Still streaming means "not yet settled", not "keep looking": publishing
+    // partial text is unrecoverable, as no corrected callback can follow.
+    if (block.streaming) return undefined;
+    // A whitespace-only block renders as nothing, so the substantive answer one
+    // slot earlier is still this turn's final visible message.
+    if (block.text.trim().length === 0) continue;
     return {
-      id: message.id,
-      content: message.content,
-      isStreaming: message.isStreaming,
-      timestamp: message.timestamp,
+      id: block.id,
+      content: block.text,
+      isStreaming: block.streaming,
+      timestamp: block.serverTimestamp ?? block.clientReceivedAt,
     };
   }
   return undefined;
