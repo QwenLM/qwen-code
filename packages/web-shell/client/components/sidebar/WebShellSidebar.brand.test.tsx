@@ -162,6 +162,7 @@ function builtInMark(): Element | null {
 
 beforeEach(() => {
   window.localStorage.clear();
+  window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '400');
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);

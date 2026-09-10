@@ -74,6 +74,7 @@ it.each(
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input));
         calls.push(`${init?.method ?? 'GET'} ${url.pathname}`);
+        if (url.pathname === '/brand') return json({});
         if (url.pathname === '/capabilities') {
           capabilityAttempts++;
           await capabilityReady;
@@ -196,7 +197,9 @@ it.each(
         );
         root.render(strictMode ? <StrictMode>{tree}</StrictMode> : tree);
       });
-      expect(calls).toEqual(['GET /capabilities']);
+      expect(calls.filter((call) => call !== 'GET /brand')).toEqual([
+        'GET /capabilities',
+      ]);
       expect(observeLiveStateSupport).not.toHaveBeenCalled();
       await act(async () => {
         releaseCapabilities();
