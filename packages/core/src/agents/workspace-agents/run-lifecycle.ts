@@ -34,6 +34,8 @@ import {
 import { requireAgentRunContext, type AgentRunContext } from './run-context.js';
 import type { Thread, ThreadEvent, ThreadMessage } from './types.js';
 import { isThreadTerminal } from './types.js';
+import { postMessageInTransaction } from './thread-actions.js';
+import { mentionToken } from './mentions.js';
 
 /** How an agent says its run is done. `unclosed` is recorded, never chosen. */
 export type RunCloseRequest =
@@ -293,21 +295,47 @@ export async function closeRunInTransaction(
   let next = thread;
   let message: ThreadMessage | undefined;
   if (input.request.kind !== 'waiting') {
-    const appended = appendMessage(
-      next,
-      {
-        authorKind: 'agent',
-        from: context.agentId,
-        authorNameSnapshot: authorName,
-        sourceRunId: run.id,
-        triggerKind: `thread_${input.request.kind}`,
-        text:
-          input.request.kind === 'blocked'
-            ? input.request.question
-            : input.request.summary,
-      },
-      now,
+    const waiters = agents.filter(
+      (agent) =>
+        agent.id !== context.agentId &&
+        thread.runs.some(
+          (entry) =>
+            entry.agentId === agent.id &&
+            entry.closeKind === 'waiting' &&
+            entry.closeAcknowledgedAtSequence === undefined &&
+            (entry.status === 'completed' || entry.status === 'finishing'),
+        ),
     );
+    const text =
+      input.request.kind === 'blocked'
+        ? input.request.question
+        : input.request.summary;
+    const appended =
+      waiters.length > 0
+        ? await postMessageInTransaction(
+            transaction,
+            thread.id,
+            {
+              authorKind: 'agent',
+              from: context.agentId,
+              sourceRunId: run.id,
+              triggerKind: `thread_${input.request.kind}`,
+              text: `${waiters.map(mentionToken).join(' ')}\n\n${text}`,
+            },
+            { agents, now, threadOverride: next },
+          )
+        : appendMessage(
+            next,
+            {
+              authorKind: 'agent',
+              from: context.agentId,
+              authorNameSnapshot: authorName,
+              sourceRunId: run.id,
+              triggerKind: `thread_${input.request.kind}`,
+              text,
+            },
+            now,
+          );
     next = appended.thread;
     message = appended.message;
   }

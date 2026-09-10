@@ -891,6 +891,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     const { runQwenServe } = await import('../serve/run-qwen-serve.js');
     try {
       const serveOptions = {
+        agentHostWorker: Boolean(argv['agent-host-server']),
         port: argv.port,
         hostname: argv.hostname,
         token: argv.token,

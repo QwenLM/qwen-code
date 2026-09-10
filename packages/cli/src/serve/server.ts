@@ -1430,8 +1430,9 @@ export function createServeApp(
   // `Config.isAgentCollaborationEnabled` so a daemon and the sessions it hosts
   // cannot disagree about whether the feature is on.
   agentCollaborationEnabled =
-    process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1' ||
-    liveSettingsAtBoot?.experimental?.agentCollaboration === true;
+    !opts.agentHostWorker &&
+    (process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1' ||
+      liveSettingsAtBoot?.experimental?.agentCollaboration === true);
 
   const liveConfigAtBoot = liveSettingsAtBoot
     ? readLiveVoiceConfiguration(liveSettingsAtBoot)
@@ -3166,7 +3167,7 @@ export function createServeApp(
         ? { deliverChannelMessage: deps.deliverChannelMessage }
         : {}),
     });
-  } else {
+  } else if (!opts.agentHostWorker) {
     // Close out runs the switch left mid-flight (architecture §6). Recovery
     // cannot tell "the daemon crashed" from "the operator turned this off"
     // — both look like a live run whose body is gone — so if these were left

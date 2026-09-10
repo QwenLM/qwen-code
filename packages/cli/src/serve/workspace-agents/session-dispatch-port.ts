@@ -24,6 +24,7 @@ import {
   LOCAL_AGENT_RUNTIME_ID,
   SessionService,
 } from '@qwen-code/qwen-code-core';
+import { setTimeout as delay } from 'node:timers/promises';
 import type {
   AgentBodyState,
   AgentDispatchPort,
@@ -48,7 +49,9 @@ export type AgentSessionBridge = Pick<
   | 'cancelSession'
   | 'getSessionStatsStatus'
 > &
-  Partial<Pick<AcpSessionBridge, 'updateSessionMetadata'>>;
+  Partial<
+    Pick<AcpSessionBridge, 'updateSessionMetadata' | 'getSessionTurnStatus'>
+  >;
 
 export interface CreateSessionDispatchPortInput {
   bridge: AgentSessionBridge;
@@ -86,6 +89,37 @@ export function createSessionDispatchPort(
   const { bridge, workspaceCwd } = input;
   const executions = new Map<string, AgentBodyState>();
   const sessions = new SessionService(workspaceCwd);
+
+  async function waitForTurn(
+    sessionId: string,
+    promptId: string,
+  ): Promise<void> {
+    const getSessionTurnStatus = bridge.getSessionTurnStatus;
+    if (!getSessionTurnStatus) return;
+    // ACP sendPrompt acknowledges admission; the turn terminal arrives on the
+    // bridge afterwards. Keep the dispatcher claim alive until that terminal
+    // is visible, otherwise a live body can be closed while calling a thread
+    // tool.
+    for (;;) {
+      const status = await getSessionTurnStatus(
+        sessionId,
+        undefined,
+        promptId,
+      );
+      if (
+        status?.promptId === promptId &&
+        (status.state === 'completed' ||
+          status.state === 'cancelled' ||
+          status.state === 'error')
+      ) {
+        if (status.state === 'error') {
+          throw new Error(status.error?.message ?? 'Agent turn failed.');
+        }
+        return;
+      }
+      await delay(250);
+    }
+  }
 
   /**
    * Sends one turn to an agent's session, saying which run it is a turn of.
@@ -125,6 +159,7 @@ export function createSessionDispatchPort(
         },
       },
     );
+    await waitForTurn(sessionId, deliveryId);
   };
 
   return {
@@ -240,9 +275,8 @@ export function createSessionDispatchPort(
               attempt,
             };
             executions.set(sessionId, execution);
-            // sendPrompt resolves at turn completion, not queue acceptance.
-            // Keep dispatch free to start peers and service cancellation.
-            void send(sessionId, prompt, runId, context).then(
+            // Wait for this attempt's terminal while dispatch services peers.
+            void send(sessionId, prompt, `${runId}:${attempt}`, context).then(
               () => {
                 if (executions.get(sessionId) === execution) {
                   executions.delete(sessionId);

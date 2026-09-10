@@ -296,12 +296,23 @@ async function executeAssignment(
         undefined,
         { promptId, modelPrompt: modelPrompt(assignment) },
       );
-      const turn = await options.bridge.getSessionTurnStatus(
-        sessionId,
-        undefined,
-        promptId,
-      );
-      summary = turn?.resultText?.trim();
+      for (;;) {
+        const turn = await options.bridge.getSessionTurnStatus(
+          sessionId,
+          undefined,
+          promptId,
+        );
+        if (turn?.promptId === promptId) {
+          if (turn.state === 'error' || turn.state === 'cancelled') {
+            throw new Error(turn.error?.message ?? 'Managed Agent cancelled.');
+          }
+          if (turn.state === 'completed') {
+            summary = turn.resultText?.trim();
+            break;
+          }
+        }
+        await delay(250);
+      }
     }
   } finally {
     clearInterval(renew);
