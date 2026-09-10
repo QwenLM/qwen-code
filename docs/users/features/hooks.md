@@ -610,24 +610,28 @@ For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather 
 
 #### UserPromptSubmit
 
-**Purpose**: Executed before supported model invocations to validate, block, or enrich the current model-bound prompt. The event currently covers `UserQuery`, `ToolResult`, and `Hook` sends, while `Retry`, `Steer`, `Cron`, `Notification`, and `Teammate` sends are skipped. It can therefore occur on continuation paths, and `prompt` must not be assumed to be raw user input.
+**Purpose**: Executed before supported model invocations to validate, block, or enrich their input. On the core/headless path, the event currently covers `UserQuery`, `ToolResult`, and `Hook` sends, while `Retry`, `Steer`, `Cron`, `Notification`, and `Teammate` sends are skipped. It can therefore occur on continuation paths, and `prompt` must not be assumed to be raw user input. The ACP session path has its own invocation policy: retries and newly dispatched background tasks can still invoke legacy hooks; continue, restored-question, and runtime-goal turns do not.
 
 **Event-specific fields**:
 
 ```json
 {
-  "prompt": "current model-bound prompt for this hook invocation",
-  "submitted_prompt": "optional user text captured at a supported interactive TUI submission boundary"
+  "prompt": "legacy prompt for this invocation; semantics depend on the execution path",
+  "submitted_prompt": "optional user text captured at a supported submission boundary"
 }
 ```
 
-`submitted_prompt` is optional. It is present only when Qwen can carry provenance from a supported interactive TUI submission to a fresh `UserQuery`. It is omitted for unsupported producers and machine-driven paths such as same-turn steering, tool-result continuations, retries, cron, notifications, and teammate traffic. ACP, headless, `serve`, SDK, and remote-input paths do not produce it in this version.
+`submitted_prompt` is optional. It is present on supported interactive TUI submissions and first-turn headless `UserQuery` sends. On the ACP session path used by ACP clients, `serve`, and daemon hosts, a fresh turn must carry an explicit submission declaration. Missing, non-string, empty, or whitespace-only declarations omit the field; the value is never reconstructed from `prompt` or a display label. Retries, continuations, and channel-classified turns omit it. The channel exclusion includes both automated events and human messages relayed through channel adapters.
 
-Deferred input can retain the field when its provenance remains complete. A combined batch retains provenance only when every constituent item has it; edited, partially known, or otherwise ambiguous input omits the field. Prompt, command, and shell-history navigation or selected search matches, cross-restart stash restores, and conversation rewind restores also omit it because those paths can surface model-bound text without its original provenance. Consumers that require user-submitted text should treat absence as unavailable rather than falling back to `prompt`.
+Web Shell provides the original composer text at its submission boundary. Realtime voice handoffs do not declare provenance because their request text comes from model-generated tool arguments. Other ACP/daemon SDK clients can opt in per request with `_meta: { "qwen.submittedPrompt": "original submitted text" }`, captured before resource or model-only expansion. Existing clients without this declaration continue running legacy hooks but do not trigger provenance-gated Auto Recall. Do not add the declaration globally to an SDK transport: scheduled tasks, Live task runs, sub-session spawns, model-authored cross-session messages, and promoted mid-turn messages must not acquire it automatically. The private `qwen.daemon.submittedPrompt` key is reserved for the daemon-to-child hop and is stripped from external callers. These declarations are caller-supplied provenance, not proof of human authorship or authorization.
+
+On the ACP path, the initial legacy `prompt` is the request's text blocks joined with a space before resource, attachment, slash-command, or model-only expansion. It does not expose the complete expanded model input. `submitted_prompt` can equal that text, but comes only from the explicit declaration and preserves its original whitespace. On the core/headless path, legacy `prompt` represents the current model-bound text for the hook invocation. Neither field is a complete DLP inspection surface.
+
+The following composer rules apply to the interactive TUI, not to ACP clients. Deferred input can retain the field when its provenance remains complete. A combined batch retains provenance only when every constituent item has it; edited, partially known, or otherwise ambiguous input omits the field. Prompt, command, and shell-history navigation or selected search matches, cross-restart stash restores, and conversation rewind restores also omit it because those paths can surface model-bound text without its original provenance. Consumers that require user-submitted text should treat absence as unavailable rather than falling back to `prompt`.
 
 After restored or provenance-unavailable model-bound input is cleared or submitted, the composer also clears its undo and redo history. This prevents undo from restoring expanded text after its marker or sidecar has been consumed.
 
-Large-paste placeholders remain compact in `submitted_prompt`; the expanded pasted content appears only in `prompt`. Consumers should treat the field as a TUI text projection rather than a byte-for-byte record of clipboard input.
+Large-paste placeholders remain compact in `submitted_prompt`; the expanded pasted content appears only in `prompt`. On that TUI path, consumers should treat the field as a text projection rather than a byte-for-byte record of clipboard input. ACP clients have no equivalent built-in Vim, paste-placeholder, history, or rewind provenance tracking; they own whether restored or edited text retains a valid submission declaration.
 
 Any non-empty input present while Vim mode is enabled omits `submitted_prompt`, including after Vim is disabled, because Vim registers do not carry provenance in this version. This conservative rule also covers drafts entered before enabling Vim. Clearing the composer starts a new eligible input.
 
@@ -665,10 +669,7 @@ This two-field payload is written only for this kind of user-prompt record.
 `hookContext` intentionally duplicates the tagged part so offline and
 third-party consumers can identify its provenance without parsing model text.
 `displayText` is the pre-hook display projection and never includes the hook
-context. For a supported interactive TUI submission it is the raw composer
-projection carried by `submitted_prompt`; ACP, headless, `serve`, SDK, remote
-input, and other paths without that provenance record the expanded pre-hook
-prompt instead.
+context. On the core/headless path it is the submitted projection when available, otherwise the expanded pre-hook prompt. ACP records the trusted display projection or raw request text before expansion when a projection or attachment references require a payload; otherwise it records the user message without `systemPayload` or `displayText`.
 
 Transcript display consumers treat `displayText` as this user-prompt projection
 when `systemPayload.hookContext` is a string. For compatibility with released
@@ -1495,11 +1496,11 @@ A PostToolUse HTTP hook that sends all tool execution records to a remote audit 
 }
 ```
 
-### Example 3: Interactive TUI Submitted Prompt Validation Hook
+### Example 3: Submitted Prompt Validation Hook
 
-To inspect the current model-bound content instead, read `prompt`. That field can include generated or expanded content, is not the original user input, and does not imply that `UserPromptSubmit` covers every model send. Do not silently fall back from `submitted_prompt` to `prompt` when source provenance is required.
+On the core/headless path, `prompt` can include generated or expanded content rather than original user input. On ACP it starts with the pre-expansion request text, so reading it does not inspect attachment bodies or the complete model input. `UserPromptSubmit` does not cover every model send. Do not silently fall back from `submitted_prompt` to `prompt` when source provenance is required.
 
-A UserPromptSubmit hook that validates supported interactive TUI submissions for sensitive information and provides context for long prompts. It skips invocations where source provenance is unavailable. The keyword check is illustrative and is not a complete DLP policy:
+A UserPromptSubmit hook that validates supported submitted text and provides context for long prompts. It also runs on headless submissions and explicitly declared ACP/daemon submissions; it is not TUI-only. It skips invocations where source provenance is unavailable. A blocking result stops the affected invocation, including on these non-TUI paths. The keyword check is illustrative and is not a complete DLP policy:
 
 **prompt_validator.py**
 
