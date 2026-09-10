@@ -69,13 +69,16 @@ const RESPONSES_ERROR_CODE_TO_STATUS: Record<string, number> = {
 interface ResponsesStreamError extends Error {
   status?: number;
   code?: string;
+  type?: string;
 }
 
 function makeResponsesStreamError(
   message: string,
   code?: string,
+  type?: string,
 ): ResponsesStreamError {
   const err: ResponsesStreamError = new Error(message);
+  err.type = type ?? code;
   if (code) {
     err.code = code;
     const status = RESPONSES_ERROR_CODE_TO_STATUS[code];
@@ -335,7 +338,7 @@ export function convertResponsesEventToGemini(
     case 'response.failed': {
       const raw = event.data as Record<string, unknown>;
       const envelope = (raw['response'] ?? raw) as {
-        error?: { code?: string; message?: string };
+        error?: { code?: string; message?: string; type?: string };
       };
       const errMsg = envelope.error
         ? `${envelope.error.code}: ${envelope.error.message}`
@@ -343,6 +346,7 @@ export function convertResponsesEventToGemini(
       throw makeResponsesStreamError(
         `Responses API failed: ${errMsg}`,
         envelope.error?.code,
+        envelope.error?.type,
       );
     }
 
@@ -366,10 +370,21 @@ export function convertResponsesEventToGemini(
     }
 
     case 'error': {
-      const data = event.data as { message?: string; code?: string };
+      const data = event.data as {
+        message?: string;
+        code?: string;
+        error?: { message?: string; code?: string; type?: string };
+      };
+      const code = data.error?.code ?? data.code;
+      const message = data.error?.message ?? data.message;
+      const detail =
+        [code, message].filter(Boolean).join(': ') ||
+        data.error?.type ||
+        'Unknown error';
       throw makeResponsesStreamError(
-        `Responses API error: ${data.message ?? 'Unknown error'}`,
-        data.code,
+        `Responses API error: ${detail}`,
+        code,
+        data.error?.type,
       );
     }
 
