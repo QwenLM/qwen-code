@@ -1145,3 +1145,51 @@ index 51f696c..1f66ca0 100644
  export default wrapText;
  //# sourceMappingURL=wrap-text.js.map
 \ No newline at end of file
+diff --git a/node_modules/ink/build/hooks/use-box-metrics.js b/node_modules/ink/build/hooks/use-box-metrics.js
+--- a/node_modules/ink/build/hooks/use-box-metrics.js
++++ b/node_modules/ink/build/hooks/use-box-metrics.js
+@@ -7,6 +7,15 @@
+     left: 0,
+     top: 0,
+ };
++// Breaks the commit -> layout listener -> setState -> commit feedback loop.
++// When a measured box oscillates between two layouts, updateMetrics would
++// otherwise keep scheduling renders until React throws error #185 and the
++// whole process dies. The counter resets on the next tick, so normal
++// measuring (mount, resize, content changes) is unaffected.
++const loopGuard = {
++    count: 0,
++    timer: null,
++};
+ // eslint-disable-next-line @typescript-eslint/no-restricted-types
+ const findRootNode = (node) => {
+     if (!node) {
+@@ -52,6 +61,16 @@
+     const [hasMeasured, setHasMeasured] = useState(false);
+     const { stdout } = useStdout();
+     const updateMetrics = useCallback(() => {
++        if (loopGuard.count >= 32) {
++            return;
++        }
++        loopGuard.count += 1;
++        if (loopGuard.timer === null) {
++            loopGuard.timer = setImmediate(() => {
++                loopGuard.count = 0;
++                loopGuard.timer = null;
++            });
++        }
+         const layout = ref.current?.yogaNode?.getComputedLayout() ?? emptyMetrics;
+         setMetrics(previousMetrics => {
+             const hasChanged = previousMetrics.width !== layout.width ||
+@@ -60,7 +79,10 @@
+                 previousMetrics.top !== layout.top;
+             return hasChanged ? layout : previousMetrics;
+         });
+-        setHasMeasured(Boolean(ref.current));
++        setHasMeasured(previousHasMeasured => {
++            const nextHasMeasured = Boolean(ref.current);
++            return previousHasMeasured === nextHasMeasured ? previousHasMeasured : nextHasMeasured;
++        });
+     }, [ref]);
+     // Runs after every render of this component.
+     // This keeps metrics fresh when local state/props in this subtree change.
