@@ -140,27 +140,6 @@ describe('effortCommand', () => {
     expect(res).toMatchObject({ messageType: 'info' });
   });
 
-  it('persists Default explicitly so a lower-scope preference cannot reappear on reload', async () => {
-    const generation = {
-      model: 'alias',
-      reasoning: { effort: 'xhigh' as const },
-    };
-    Object.assign(context.services.config!, {
-      getContentGeneratorConfig: () => generation,
-    });
-    Object.assign(context.services.settings!, {
-      merged: { model: { reasoningEffort: 'high' } },
-    });
-    const result = await effortCommand.action!(context, 'default');
-    expect(result).toMatchObject({ type: 'message', messageType: 'info' });
-    expect(generation.reasoning).toBeUndefined();
-    expect(setValue).toHaveBeenCalledWith(
-      expect.anything(),
-      'model.reasoningEffort',
-      'default',
-    );
-  });
-
   it('keeps a valid tier session-local when persistence is disabled', async () => {
     const res = await effortCommand.action!(
       {
@@ -281,8 +260,6 @@ describe('effortCommand', () => {
     // No completion so bare `/effort` opens the picker instead of auto-picking
     // the first tier; `/effort <tier>` still parses in the action above.
     expect(effortCommand.completion).toBeUndefined();
-    expect(effortCommand.argumentHint).toBe(
-      '[default|low|medium|high|xhigh|max]',
-    );
+    expect(effortCommand.argumentHint).toBe('[low|medium|high|xhigh|max]');
   });
 });

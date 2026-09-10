@@ -19,11 +19,7 @@ import {
   REASONING_EFFORT_TIERS,
 } from '@qwen-code/qwen-code-core';
 import { formatEffortChangeMessage } from './effort-utils.js';
-import {
-  getReasoningEffortsForConfig,
-  applyReasoningSelection,
-  getDefaultReasoningConfig,
-} from '../../acp-integration/model-configuration.js';
+import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
 
 const TIER_LIST = REASONING_EFFORT_TIERS.join(', ');
 
@@ -40,7 +36,7 @@ export const effortCommand: SlashCommand = {
   // (no tier auto-selected), while `/effort <tier>` still sets one directly. A
   // completion function would surface the tiers as submenu-like entries and let
   // Enter auto-pick the first one, which we don't want here.
-  argumentHint: '[default|low|medium|high|xhigh|max]',
+  argumentHint: '[low|medium|high|xhigh|max]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (
@@ -60,24 +56,6 @@ export const effortCommand: SlashCommand = {
 
     const args = context.invocation?.args?.trim() || actionArgs.trim();
     const availableTiers = getReasoningEffortsForConfig(config);
-    if (args === 'default' && settings) {
-      applyReasoningSelection(
-        config,
-        'default',
-        getDefaultReasoningConfig(config, settings),
-      );
-      if (context.executionPolicy?.persistModelSelection !== false)
-        settings.setValue(
-          getPersistScopeForModelSelection(settings),
-          'model.reasoningEffort',
-          'default',
-        );
-      return {
-        type: 'message',
-        messageType: 'info',
-        content: t('No effort configured — using the model/provider default.'),
-      };
-    }
 
     if (availableTiers.length === 0) {
       return {

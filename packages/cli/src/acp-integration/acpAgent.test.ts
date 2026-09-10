@@ -5116,13 +5116,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(() => {
+      reloadScopesFromDiskAtomically: vi.fn(() => {
         mergedSettings = {
           mcpServers: {},
           modelProviders: { openai: [{ id: 'new-model' }] },
         };
+        return true;
       }),
-      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       forScope: vi.fn().mockReturnValue({ settings: { mcpServers: {} } }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
@@ -28851,8 +28851,9 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(() => {
+      reloadScopesFromDiskAtomically: vi.fn(() => {
         mergedSettings = { tools: { approvalMode: nextMode } };
+        return true;
       }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
@@ -28957,8 +28958,9 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(() => {
+      reloadScopesFromDiskAtomically: vi.fn(() => {
         mergedSettings = { experimental: { sessionWorkflow: nextEnabled } };
+        return true;
       }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
@@ -29063,16 +29065,21 @@ describe('sessionLanguage multi-session propagation', () => {
 
   it('does not re-pin or clear live sessions when a reload diff fires against a stale settings view', async () => {
     // The child boots with the gate off on disk; its settings view only
-    // syncs through reloadScopeFromDisk, and the UI write path never
+    // syncs through the atomic settings reload, and the UI write path never
     // triggers one — so after a UI toggle the first reload diffs the new
     // merged view against a stale clone.
     let viewEnabled = false;
+    let reloadCount = 0;
     const settings = {
       get merged() {
         return { experimental: { sessionWorkflow: viewEnabled } };
       },
-      reloadScopeFromDisk: vi.fn(() => {
-        viewEnabled = true; // the UI write persisted true behind the child's back
+      reloadScopesFromDiskAtomically: vi.fn(() => {
+        if (reloadCount > 0) {
+          viewEnabled = true; // the UI write persisted true behind the child's back
+        }
+        reloadCount += 1;
+        return true;
       }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
@@ -29151,7 +29158,7 @@ describe('sessionLanguage multi-session propagation', () => {
 
     // A genuine disk flip away from the pinned value must still reach the
     // live session.
-    settings.reloadScopeFromDisk = vi.fn(() => {
+    settings.reloadScopesFromDiskAtomically = vi.fn(() => {
       viewEnabled = false;
       return true;
     });
@@ -29178,7 +29185,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -29244,7 +29251,7 @@ describe('sessionLanguage multi-session propagation', () => {
       user: { settings: {}, path: '/home/u/.qwen/settings.json' },
       workspace: { settings: {}, path: '/reload/.qwen/settings.json' },
       isTrusted: true,
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -29276,7 +29283,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -29342,7 +29349,7 @@ describe('sessionLanguage multi-session propagation', () => {
       user: { settings: {}, path: '/home/u/.qwen/settings.json' },
       workspace: { settings: {}, path: '/reload/.qwen/settings.json' },
       isTrusted: true,
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -29394,7 +29401,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -29506,7 +29513,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -29629,7 +29636,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -29743,7 +29750,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -29835,7 +29842,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -29928,7 +29935,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -30063,7 +30070,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -30147,7 +30154,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -30226,7 +30233,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -30314,7 +30321,7 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -30401,8 +30408,9 @@ describe('sessionLanguage multi-session propagation', () => {
       get merged() {
         return mergedSettings;
       },
-      reloadScopeFromDisk: vi.fn(() => {
+      reloadScopesFromDiskAtomically: vi.fn(() => {
         mergedSettings = { tools: { workflowsEnabled: false } };
+        return true;
       }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),

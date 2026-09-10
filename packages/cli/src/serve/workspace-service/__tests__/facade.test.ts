@@ -64,6 +64,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       STREAM_JSON: 'stream-json',
     },
     REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
+    REASONING_PROFILES: (
+      await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+    ).REASONING_PROFILES,
     getGptReasoningCapabilities: vi.fn(() => undefined),
     clampReasoningEffort: (
       await importOriginal<typeof import('@qwen-code/qwen-code-core')>()

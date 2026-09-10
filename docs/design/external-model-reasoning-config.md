@@ -54,7 +54,7 @@ mapping. Invalid declarations report the model and field.
 
 Keep model defaults separate from explicit user selections. Existing selection
 precedence remains intact; when no selection exists, an external default affects
-both the request and the controls. Default restores the current model's settings.
+both the request and the controls. The controls expose concrete effort tiers only.
 Clamping uses the effective supported set once, without a second built-in clamp.
 Keep existing raw-parameter overrides, request opt-out, thinking-mandatory rules
 and budget ceilings. A default must not override a request's thinking opt-out.
@@ -73,8 +73,8 @@ configuration. A failed update preserves the previous runtime and reports an
 error. Reuse existing workspace ownership and prompt admission paths.
 
 ACP keeps `reasoning_effort`; existing metadata carries defaults and thinking
-availability. CLI and WebShell render the same effective state and Default
-action, including mandatory-thinking and toggle-only models.
+availability. CLI and WebShell render the same effective state. Tiered profiles
+expose concrete efforts only; toggle-only models remain switches.
 
 ## Validation and acceptance
 

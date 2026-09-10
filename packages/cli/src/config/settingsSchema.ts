@@ -1634,17 +1634,16 @@ const SETTINGS_SCHEMA = {
           'How hard reasoning-capable models think, applied across all providers. Set with /effort. Each provider maps and clamps this to what the active model supports (e.g. Gemini caps at "high"; Anthropic clamps tiers a model lacks). Leave unset to use the model/provider default.',
         showInDialog: true,
         options: [
-          { value: 'default', label: 'Model default' },
           { value: 'low', label: 'Low' },
           { value: 'medium', label: 'Medium' },
           { value: 'high', label: 'High' },
           { value: 'xhigh', label: 'Extra High' },
           { value: 'max', label: 'Max' },
         ],
-        // Both surfaces accept default; WebShell also persists none.
+        // WebShell also persists none.
         jsonSchemaOverride: {
           type: 'string',
-          enum: ['default', 'none', ...REASONING_EFFORT_TIERS],
+          enum: ['none', ...REASONING_EFFORT_TIERS],
         },
       },
       maxSessionTurns: {

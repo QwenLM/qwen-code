@@ -505,7 +505,7 @@ export function buildModelReasoningConfigOption(
             },
           ]
         : [
-            ...(reasoning.defaultEffort && !reasoning.profile
+            ...(reasoning.defaultEffort
               ? []
               : [
                   {
@@ -529,7 +529,6 @@ export function buildModelReasoningConfigOption(
             ...(canDisable ? {} : { thinkingMandatory: true }),
           }
         : {
-            ...(reasoning.profile ? { resetToDefault: true } : {}),
             ...(state.enableValue ? { enableValue: state.enableValue } : {}),
             ...(state.canEnable === false ? { canEnable: false } : {}),
             ...(reasoning.defaultEffort

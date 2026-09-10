@@ -40,7 +40,7 @@ describe('external model thinking controls', () => {
     },
   };
 
-  it('advertises a real default and a way to restore it', () => {
+  it('advertises the configured default without an extra choice', () => {
     const options = buildModelReasoningConfigPreview(
       generation.model,
       {},
@@ -51,13 +51,12 @@ describe('external model thinking controls', () => {
       currentValue: 'medium',
       options: [
         { value: 'none' },
-        { value: 'default' },
         { value: 'low' },
         { value: 'medium' },
         { value: 'xhigh' },
       ],
       _meta: {
-        'qwenCode/reasoning': { defaultEffort: 'medium', resetToDefault: true },
+        'qwenCode/reasoning': { defaultEffort: 'medium' },
       },
     });
   });

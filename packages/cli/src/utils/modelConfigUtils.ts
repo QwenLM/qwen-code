@@ -440,11 +440,8 @@ export function resolveCliGenerationConfig(
   // normalizes to undefined and is silently skipped below. Surface it as a
   // warning so the user isn't left wondering why /effort had no effect.
   const invalidReasoningEffortWarning =
-    rawReasoningEffort &&
-    rawReasoningEffort !== 'default' &&
-    !reasoningDisabled &&
-    !reasoningEffort
-      ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: default, none, ${REASONING_EFFORT_TIERS.join(', ')}.`
+    rawReasoningEffort && !reasoningDisabled && !reasoningEffort
+      ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: none, ${REASONING_EFFORT_TIERS.join(', ')}.`
       : undefined;
   if (reasoningDisabled && generationConfig.thinkingMandatory !== true) {
     generationConfig.reasoning = false;
