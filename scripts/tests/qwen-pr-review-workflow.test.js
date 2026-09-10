@@ -6234,8 +6234,11 @@ describe('review supersede salvage (#10110)', () => {
       // run start is the triggering push's shape, and no watcher poll
       // could have recorded the kill that early) — so the event postdates
       // START_TS + SALVAGE_POLL_SECONDS with margin for the harness setup
-      // between now and the loop start.
-      const now = new Date(Date.now() + 75000).toISOString();
+      // between now and the loop start. The margin is deliberately
+      // generous: the branch has no upper bound on the timestamp, and a
+      // loaded self-hosted runner once ate a 15s margin and turned this
+      // genuine cede red.
+      const now = new Date(Date.now() + 300000).toISOString();
       const r = runScenario('cede_revert_ff_kill', {
         armWatcher: true,
         extraEnv: {
@@ -6364,7 +6367,7 @@ describe('review supersede salvage (#10110)', () => {
         armWatcher: true,
         extraEnv: {
           ...base,
-          STUB_TIMELINE: `head-x head-a ${new Date(Date.now() + 75000).toISOString()}`,
+          STUB_TIMELINE: `head-x head-a ${new Date(Date.now() + 300000).toISOString()}`,
           STUB_TIMELINE_ACTOR: 'qwen-ci-bot',
         },
       });

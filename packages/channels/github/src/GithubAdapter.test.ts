@@ -1459,7 +1459,6 @@ describe('GithubChannel', () => {
       await initWithoutLoop({
         senderPolicy: 'allowlist',
         allowedUsers: ['maintainer', 'bob'],
-        messagePrefix: '/review',
       });
       channel.usePreflight = true;
       mockOctokit.paginate
@@ -1506,12 +1505,11 @@ describe('GithubChannel', () => {
         senderId: 'maintainer',
         threadId: 'pr:99',
         isMentioned: true,
-        bypassMessagePrefix: true,
       });
       expect(channel.inboundEnvelopes[1]).toMatchObject({
         senderId: 'bob',
         threadId: 'pr:99',
-        text: 'check this review note',
+        text: ' /review check this review note',
         isMentioned: true,
       });
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
@@ -1719,8 +1717,8 @@ describe('GithubChannel', () => {
       },
     );
 
-    it('filters each aggregated comment and consumes unmatched comments', async () => {
-      await initWithoutLoop({ messagePrefix: '/review' });
+    it('aggregates ordinary comments and preserves literal slash-prefixed text', async () => {
+      await initWithoutLoop();
       channel.usePreflight = true;
       mockOctokit.paginate
         .mockResolvedValueOnce([
@@ -1743,8 +1741,7 @@ describe('GithubChannel', () => {
 
       expect(channel.inboundEnvelopes).toHaveLength(1);
       expect(channel.inboundEnvelopes[0]).toMatchObject({
-        displayText: '- @bob: inspect this',
-        bypassMessagePrefix: true,
+        displayText: '- @alice: ignore this\n- @bob: /review inspect this',
       });
       expect(channel.cursor.dispatchedComments).toEqual(['C_1001', 'C_1002']);
     });
