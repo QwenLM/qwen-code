@@ -33,6 +33,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { createTwoFilesPatch } from 'diff';
+import { isStaticDocsNavDiff } from './lib/docs-nav-profile.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
@@ -428,41 +430,52 @@ describe('agent-prompt (command boundary)', () => {
     ).toThrow(/cannot read the plan/);
   });
 
-  it('stops reverse audit for focused navigation without recording a prompt', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'ap-nav-'));
-    const savedExit = process.exitCode;
-    try {
-      const plan = join(dir, 'plan.json');
-      writeFileSync(
-        plan,
-        JSON.stringify({ ...PLAN, reviewProfile: 'docs-nav' }),
-      );
-      (agentPromptCommand.handler as (a: unknown) => void)({
-        plan,
-        role: 'reverse-audit',
-        findings: join(dir, 'findings.md'),
-        round: 1,
-      });
-      expect(process.exitCode).toBe(4);
-      expect(writeStdoutLine).not.toHaveBeenCalled();
-      expect(readRecordedPrompts(plan).size).toBe(0);
-      expect(readBudgetStop(plan)).toBeNull();
-      expect(writeStderrLine).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'PROFILE SKIP: focused navigation review skips reverse audit',
-        ),
-      );
-      expect(writeStderrLine).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'no marker is recorded and no unreviewedDimensions entry is owed',
-        ),
-      );
-      expect(agentPromptCommand.describe).toContain('PROFILE SKIP');
-    } finally {
-      process.exitCode = savedExit;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  it.each([false, true])(
+    'stops reverse audit for focused navigation without recording a prompt (allChunks=%s)',
+    (allChunks) => {
+      const dir = mkdtempSync(join(tmpdir(), 'ap-nav-'));
+      const savedExit = process.exitCode;
+      const savedDeadline = process.env[DEADLINE_ENV];
+      try {
+        process.exitCode = undefined;
+        delete process.env[DEADLINE_ENV];
+        const plan = join(dir, 'plan.json');
+        const findings = join(dir, 'findings.md');
+        writeFileSync(findings, '');
+        writeFileSync(
+          plan,
+          JSON.stringify({ ...PLAN, reviewProfile: 'docs-nav' }),
+        );
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          role: 'reverse-audit',
+          findings,
+          round: 1,
+          'all-chunks': allChunks,
+        });
+        expect(process.exitCode).toBe(4);
+        expect(writeStdoutLine).not.toHaveBeenCalled();
+        expect(readRecordedPrompts(plan).size).toBe(0);
+        expect(readBudgetStop(plan)).toBeNull();
+        expect(writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'PROFILE SKIP: focused navigation review skips reverse audit',
+          ),
+        );
+        expect(writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'no marker is recorded and no unreviewedDimensions entry is owed',
+          ),
+        );
+        expect(agentPromptCommand.describe).toContain('PROFILE SKIP');
+      } finally {
+        process.exitCode = savedExit;
+        if (savedDeadline === undefined) delete process.env[DEADLINE_ENV];
+        else process.env[DEADLINE_ENV] = savedDeadline;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
   it('injects the project rules the review loaded', () => {
     // They were loaded, written to a file, and dropped: `buildChunkAgentPrompt`
     // took a `rules` argument that the CLI had no flag to supply. The review
@@ -2856,11 +2869,10 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
         expect(brief).not.toContain('channel above is withdrawn');
         expect(brief).toContain('Do not file incidental findings');
         expect(brief).toContain(
-          `git show ${PR_PLAN.mergeBaseSha}:docs/developers/_meta.ts`,
+          `read the complete captured base with \`git show ${PR_PLAN.mergeBaseSha}:docs/developers/_meta.ts\` ` +
+            `and head with \`git show ${'a'.repeat(40)}:docs/developers/_meta.ts\``,
         );
-        expect(brief).toContain(
-          `git show ${'a'.repeat(40)}:docs/developers/_meta.ts`,
-        );
+        expect(brief).not.toContain('do not guess the context path');
       }
       if (role === 'verify') {
         // The verify brief carries the `### Incidental findings` channel two
@@ -2872,6 +2884,7 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
         expect(brief).not.toContain(
           join(absTmp, 'qwen-review-pr-6766-context.md'),
         );
+        expect(brief).not.toContain('do not guess the context path');
       }
     },
   );
@@ -2911,6 +2924,51 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
   );
 
   it.each([
+    ['docs/_meta.ts', true],
+    ['docs/developers/_meta.ts', true],
+    ['docs/a_b/c-d/_meta.ts', true],
+    ['docs/x/_meta.json', false],
+    ['docs/a.b/_meta.ts', false],
+    ['docs/a b/_meta.ts', false],
+    ['docs/$(touch unsafe)/_meta.ts', false],
+    ['docs/_meta.ts\n', false],
+  ] as const)(
+    'keeps classification and navigation reads aligned for %j',
+    (path, expected) => {
+      const base = "export default { examples: 'Old' };\n";
+      const head = "export default { examples: 'New' };\n";
+      const beforePath = JSON.stringify(`a/${path}`);
+      const afterPath = JSON.stringify(`b/${path}`);
+      const patch = createTwoFilesPatch(beforePath, afterPath, base, head);
+      const diff = `diff --git ${beforePath} ${afterPath}\nindex aaaaaaa..bbbbbbb 100644\n${patch.slice(patch.indexOf('---'))}`;
+      const eligible = isStaticDocsNavDiff(diff, (side) =>
+        side === 'base' ? base : head,
+      );
+      const brief = buildRoleBrief(
+        {
+          ...PR_PLAN,
+          reviewProfile: 'docs-nav',
+          fetchedSha: 'a'.repeat(40),
+          files: [{ path }],
+        },
+        'docs-nav',
+        { planPath: join(absTmp, 'plan.json') },
+      );
+      const read = 'read the complete captured base with';
+      expect(brief.includes(read)).toBe(eligible);
+      expect(eligible).toBe(expected);
+      if (eligible) {
+        expect(brief).toContain(
+          `${read} \`git show ${PR_PLAN.mergeBaseSha}:${path}\` and head with \`git show ${'a'.repeat(40)}:${path}\``,
+        );
+        expect(brief).not.toContain('do not guess a base revision');
+      } else {
+        expect(brief).toContain('do not guess a base revision');
+      }
+    },
+  );
+
+  it.each([
     // '007' passes `isPositivePrNumber` but fails the no-leading-zero shape
     // conjunct. The remaining three pass both shape conjuncts and are refused
     // by the safe-integer bound alone — without it they weld a junk-row
@@ -2932,8 +2990,18 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       );
       expect(brief).not.toContain('-context.md');
       expect(brief).toContain('causal base/head difference');
+      expect(brief).toContain('do not guess the context path');
     },
   );
+
+  it('discloses a missing plan path for the focused PR context', () => {
+    const brief = buildRoleBrief(
+      { ...PR_PLAN, reviewProfile: 'docs-nav' },
+      'docs-nav',
+    );
+    expect(brief).not.toContain('-context.md');
+    expect(brief).toContain('do not guess the context path');
+  });
 
   it.each([
     '1a',

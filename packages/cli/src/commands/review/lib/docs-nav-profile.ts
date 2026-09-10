@@ -9,6 +9,9 @@ import { parseJsoncObject } from '../../../utils/jsonc-editor.js';
 import { parseDiff } from './diff-plan.js';
 
 export const DOCS_NAV_PROFILE = 'docs-nav';
+// This also guards paths embedded in git-show commands; keep the character
+// class closed when changing profile eligibility.
+export const DOCS_NAV_PATH_RE = /^docs\/(?:[A-Za-z0-9_-]+\/)*_meta\.ts$/;
 
 /**
  * Whether this capture is the automatic workflow's. Operator-only, in the
@@ -100,7 +103,7 @@ export function isStaticDocsNavDiff(
   const file = files[0];
   if (
     files.length !== 1 ||
-    !/^docs\/(?:[A-Za-z0-9_-]+\/)*_meta\.ts$/.test(file.path) ||
+    !DOCS_NAV_PATH_RE.test(file.path) ||
     file.binary ||
     file.renameFrom ||
     file.addedLines + file.removedLines === 0 ||

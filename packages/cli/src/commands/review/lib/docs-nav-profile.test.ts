@@ -114,6 +114,22 @@ describe('static documentation navigation profile', () => {
     },
   );
 
+  it.each(['__proto__', 'constructor', 'prototype'])(
+    'refuses a prototype-named entry on both sides: %s',
+    (key) => {
+      for (const property of [key, JSON.stringify(key)]) {
+        const nav = (label: string) =>
+          `export default { ${property}: '${label}' };\n`;
+        expect(classify(nav('Old'), nav('New'))).toBe(false);
+        expect(classify(nav('New'), nav('Old'))).toBe(false);
+      }
+      const base = `export default { examples: { title: 'Old', items: { '${key}': 'Unchanged' } } };\n`;
+      expect(classify(base, base.replace("title: 'Old'", "title: 'New'"))).toBe(
+        false,
+      );
+    },
+  );
+
   it.each([
     "export default { architecture: 'Architecture', examples: getTitle() };",
     "export default { architecture: 'Architecture', examples: title };",
