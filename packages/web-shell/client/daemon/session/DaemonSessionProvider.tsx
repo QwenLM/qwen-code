@@ -779,6 +779,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     sessionContext,
     sessionId,
     clientId,
+    sessionSourceType,
     createSessionRequest,
     maxQueued = 1024,
     maxBlocks = DEFAULT_MAX_BLOCKS,
@@ -842,6 +843,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     initialRestoreSessionId === undefined;
   const resolvedWorkspaceCwdRef = useRef(resolvedWorkspaceCwd);
   resolvedWorkspaceCwdRef.current = resolvedWorkspaceCwd;
+  // Restore-time attribution is read inside the reconnect/restore effect;
+  // mirror it so a host prop change never re-triggers a session load.
+  const sessionSourceTypeRef = useRef(sessionSourceType);
+  sessionSourceTypeRef.current = sessionSourceType;
   const resolvedSessionContextRef = useRef(resolvedSessionContext);
   resolvedSessionContextRef.current = resolvedSessionContext;
   const sessionContextResolutionErrorRef = useRef(
@@ -2034,6 +2039,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               resolveSessionRestoreTimeouts(capabilities).requestTimeoutMs;
             const restoreRequest = {
               timeoutMs: restoreRequestTimeoutMs,
+              // Workspace restores only: the standalone request type omits
+              // source attribution, and the daemon applies it solely when the
+              // restored session has none persisted (legacy upgrade path).
+              ...(effectSessionContext?.kind !== 'standalone' &&
+              sessionSourceTypeRef.current !== undefined
+                ? { sourceType: sessionSourceTypeRef.current }
+                : {}),
               ...(!shouldResumeRequestedSession &&
               subagentTranscriptModeRef.current === 'summary'
                 ? { liveReplayMode: 'summary' as const }
