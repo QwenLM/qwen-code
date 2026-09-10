@@ -4189,7 +4189,26 @@ export const AppContainer = (props: AppContainerProps) => {
         let hasRestoreFailure = false;
         if (option === 'code' || option === 'both') {
           const promptId = (userItem as HistoryItemUser).promptId;
-          if (promptId) {
+          // A session whose counter restarted on resume can hold TWO live
+          // items wearing the same promptId (a surviving resumed turn and
+          // its live re-mint). The file consumer resolves a shared key by
+          // last occurrence — the wrong turn's snapshot — then prunes the
+          // newer snapshots and permanently deletes their backups (R36-1).
+          // Refuse loudly, as the resume-side census does for the
+          // duplicates it can see.
+          const promptIdIsShared = promptId
+            ? historyManager.history.some(
+                (item) =>
+                  item.id !== userItem.id &&
+                  (item as HistoryItemUser).promptId === promptId,
+              )
+            : false;
+          if (promptId && promptIdIsShared) {
+            hasRestoreFailure = true;
+            fileRestoreError = t(
+              'Cannot restore files: this turn shares its checkpoint identity with another turn.',
+            );
+          } else if (promptId) {
             try {
               const truncateHistory =
                 option === 'both' && !!llmClient && apiTruncateIndex >= 0;

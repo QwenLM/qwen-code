@@ -1626,6 +1626,46 @@ describe('early-walk demotion with drained notification entries', () => {
     // notification's entry (2).
     expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
   });
+
+  it('keeps the placeholder-texted match when a notification entry precedes it', () => {
+    // R35-2: the ordinal census must count the same owners on both sides.
+    // The API side counts the drained notification's entry, so the UI side
+    // must count the notification item — mirrored from the demotion census.
+    // With the item uncounted the aligned counts disagree and the target's
+    // own marked, text-matching entry is discarded for the walk, which
+    // lands on the notification's boundary (2), one turn further back.
+    const PLACEHOLDER = '[Old inline media cleared: image/png]';
+    const firstEntry = userContent('first prompt');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const notificationEntry = userContent(
+      '<task-notification>\nBackground agent completed: task 7\n</task-notification>',
+    );
+    const targetEntry = userContent(PLACEHOLDER);
+    markApiHistoryPrompt(targetEntry, 'session########1');
+
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      {
+        type: 'notification',
+        id: 3,
+        text: 'Background agent completed: task 7',
+      } as HistoryItem,
+      llmItem(4),
+      userItemWithPromptId(5, PLACEHOLDER, 'session########1'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      firstEntry,
+      modelContent('r0'),
+      notificationEntry, // drained notification: counted, no UI user turn
+      modelContent('r1'),
+      targetEntry, // the target's own entry, marked
+      modelContent('r2'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+  });
 });
 
 describe('promptIdFileKeyOnly guards', () => {
@@ -2050,6 +2090,121 @@ describe("this PR's own headline reproduction (#9437)", () => {
       modelContent('r0'),
       attachmentEntry, // the attachment-only turn's own entry: no text part
       modelContent('r1'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+  });
+
+  it('refuses (-1) when a structural reminder inflates the absolute backstop', () => {
+    // R35-4: the absolute backstop must count only entries that can own a
+    // UI turn. A mid-history structural reminder (the MCP added-tools
+    // notice) is a user-role entry with no functionResponse part, so the
+    // unfiltered backstop counted it — supplying the position unit that
+    // admits a re-minted placeholder impostor the aligned counts accept
+    // trivially. Same impostor shape as the pin above with one structural
+    // reminder entry inserted before the match: with the reminder counted
+    // the gate resolves the impostor's boundary where the walk refuses.
+    const PLACEHOLDER = '[Old inline media cleared: image/png]';
+    const attachmentOnlyItem = (id: number, promptId: string): HistoryItem => {
+      const item = userItem(
+        id,
+        '[User message with attachments]',
+      ) as HistoryItem & { promptId: string; promptHasModelText?: boolean };
+      item.promptId = promptId;
+      item.promptHasModelText = false;
+      return item;
+    };
+    const withPromptId = (
+      id: number,
+      text: string,
+      promptId: string,
+    ): HistoryItem => {
+      const item = userItem(id, text) as HistoryItem & { promptId: string };
+      item.promptId = promptId;
+      return item;
+    };
+    const markedUser = (text: string, promptId: string): Content => {
+      const content = userContent(text);
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+    const attachmentEntry: Content = {
+      role: 'user',
+      parts: [
+        {
+          inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+        } as unknown as Part,
+      ],
+    };
+    markApiHistoryPrompt(attachmentEntry, 'session########1');
+    const impostor = userContent(PLACEHOLDER);
+    markApiHistoryPrompt(impostor, 'session########2');
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'hello', 'session########0'),
+      llmItem(2),
+      attachmentOnlyItem(3, 'session########1'),
+      llmItem(4),
+      withPromptId(5, PLACEHOLDER, 'session########2'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      markedUser('hello', 'session########0'),
+      userContent(
+        `${SYSTEM_REMINDER_OPEN}\nThe following tools were added or updated:\n- tool_x\n${SYSTEM_REMINDER_CLOSE}`,
+      ), // structural mid-history reminder; owns no UI turn
+      impostor, // cleared media-only entry wearing the target's re-minted id
+      modelContent('r0'),
+      attachmentEntry, // the attachment-only turn's own entry: no text part
+      modelContent('r1'),
+    ];
+
+    // uiUserTurnCount is 2 (hello + the attachment-only turn). The reminder
+    // must not supply the second backstop position: pre-fix the gate
+    // resolved the impostor at 2; the walk cannot land, so the refusal is
+    // loud.
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+  });
+
+  it('refuses (-1) an attachment-only target that carries no promptId', () => {
+    // R35-1: the attachment-only refusal must hold for every such target,
+    // not only the id-ful ones the identity gate admits. An id-less
+    // attachment-only target skips the gate and falls to the positional
+    // walk, which skips its text-less entry and lands on the NEXT turn's
+    // boundary (4) — silently keeping this turn's prompt+response in model
+    // context while the UI deletes the turn.
+    const attachmentOnlyItem = (id: number): HistoryItem => {
+      const item = userItem(
+        id,
+        '[User message with attachments]',
+      ) as HistoryItem & { promptHasModelText?: boolean };
+      item.promptHasModelText = false;
+      return item;
+    };
+    const attachmentEntry: Content = {
+      role: 'user',
+      parts: [
+        {
+          inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+        } as unknown as Part,
+      ],
+    };
+
+    const ui: HistoryItem[] = [
+      userItem(1, 'hello'),
+      llmItem(2),
+      attachmentOnlyItem(3),
+      llmItem(4),
+      userItem(5, 'later prompt'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      userContent('hello'),
+      modelContent('r0'),
+      attachmentEntry, // the target's entry: no text part
+      modelContent('r1'),
+      userContent('later prompt'),
+      modelContent('r2'),
     ];
 
     expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);

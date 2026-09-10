@@ -227,6 +227,19 @@ export function computeApiTruncationIndex(
   };
 
   const target = uiHistory[targetIndex]!;
+  // A resumed attachment-only turn has no model-facing text: the text
+  // ownership proof can never match its entry, and the positional walk
+  // skips text-less entries, so it would land on the NEXT turn's
+  // boundary — silently keeping this turn's prompt+response in model
+  // context while the UI deletes the turn, and rolling files back for
+  // 'both' (R34-2). The refusal sits above the identity gate so the two
+  // populations the gate exempts — an id-less target and a file-key-only
+  // one — refuse the same way instead of falling through to that walk
+  // (R35-1), and below the first-turn early return so an attachment-only
+  // FIRST turn keeps its exact `startIndex` boundary.
+  if (isRealUserTurn(target) && target.promptHasModelText === false) {
+    return -1;
+  }
   if (
     isRealUserTurn(target) &&
     target.promptId &&
@@ -251,15 +264,6 @@ export function computeApiTruncationIndex(
     // silently never fired for such turns. Prefer the model-facing text the
     // resume builder records for exactly this comparison.
     const ownerText = target.promptOwnerText ?? target.text;
-    if (target.promptHasModelText === false) {
-      // A resumed attachment-only turn has no model-facing text: the text
-      // ownership proof can never match its entry, and the positional walk
-      // skips text-less entries, so it would land on the NEXT turn's
-      // boundary — silently keeping this turn's prompt+response in model
-      // context while the UI deletes the turn, and rolling files back for
-      // 'both' (R34-2). Refuse loudly instead.
-      return -1;
-    }
     const identifiedIndex = findApiHistoryPromptIndex(
       apiHistory,
       target.promptId,
@@ -337,7 +341,13 @@ export function computeApiTruncationIndex(
         i++
       ) {
         const item = uiHistory[i]!;
-        if (isRealUserTurn(item) && item.promptHasModelText !== false) {
+        // The API side counts a drained notification's entry, so the UI
+        // side counts its item — the same owning population the demotion
+        // census below enumerates (R35-2).
+        if (
+          item.type === 'notification' ||
+          (isRealUserTurn(item) && item.promptHasModelText !== false)
+        ) {
           expected++;
         }
       }
@@ -345,20 +355,30 @@ export function computeApiTruncationIndex(
       let absolute = 0;
       for (let i = startIndex; i < matchIndex; i++) {
         const entry = apiHistory[i]!;
-        if (isUserTextContent(entry)) counted++;
+        const ownable = isUserTextContent(entry);
+        if (ownable) counted++;
+        // The backstop counts only entries that can own a UI turn: a real
+        // prompt entry, or a text-less media entry (an attachment-only
+        // turn's uncleared entry). A wholly-structural reminder entry (the
+        // mid-history MCP added-tools notice) and a cleared media-only
+        // entry both fail `isUserTextContent` yet still carry a text part —
+        // counting either inflates the backstop with a position no UI turn
+        // owns, exactly the unit that admits a re-minted placeholder
+        // impostor the aligned counts accept trivially (R35-4).
         if (
           entry.role === 'user' &&
-          !entry.parts?.some((part) => 'functionResponse' in part)
+          !entry.parts?.some((part) => 'functionResponse' in part) &&
+          (ownable || !entry.parts?.some((part) => 'text' in part))
         ) {
           absolute++;
         }
       }
       // The aligned counts drop TOGETHER when both sides skip an
       // attachment-only turn, so they can agree trivially at an entry that
-      // is not the target's own (R32-1). Cleared and media-only entries
-      // still occupy positions even though the filtered count skips them,
-      // so the match must also sit behind at least as many user-role,
-      // non-tool-result entries as the target has preceding real UI turns.
+      // is not the target's own (R32-1). Media-only entries still occupy
+      // positions even though the filtered count skips them, so the match
+      // must also sit behind at least as many ownable user-role entries as
+      // the target has preceding real UI turns.
       return counted === expected && absolute >= uiUserTurnCount;
     };
     const ownershipProven = (matchIndex: number): boolean =>
@@ -387,6 +407,15 @@ export function computeApiTruncationIndex(
       // truncation shape the pre-identity mapping would not have produced.
       // A walk that lands late or cannot land leaves identity preferred,
       // which is the absorbed-turn exactness this gate is for.
+      //
+      // Known unpaired kinds this census cannot see (R36-2; the structural
+      // fix — one owner pairing both sides derive from — is deferred to a
+      // follow-up): UI items owning NO counted entry inflate the UI side
+      // and can suppress the demotion — a model-fallback notice, items
+      // 2..N of a drained batch (one submitQuery serves the whole batch), a
+      // dropped-summary notice; API entries no UI item owns inflate the API
+      // side and can fire it spuriously — a Goal continuation, a standalone
+      // steer pushed via the history.push fallback.
       const positional = positionalTruncationIndex();
       if (positional !== -1 && positional < identifiedIndex) {
         let countedBeforeMatch = 0;
