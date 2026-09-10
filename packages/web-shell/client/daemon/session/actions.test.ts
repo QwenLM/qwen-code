@@ -4038,7 +4038,7 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
-  it('forwards a daemon idle rejection across the session hop', async () => {
+  it('forwards the daemon idle rejection reason across the actions hop', async () => {
     const session = {
       ...createMockSession('session-a'),
       enqueueMidTurnMessage: vi
@@ -4047,8 +4047,9 @@ describe('createDaemonSessionActions', () => {
     };
     const { actions } = createActionsHarness({ session });
 
-    // Every hook consumer injects this actions object, so a narrowing at this
-    // seam would silently drop the idle verdict the client keys on.
+    // The hook decides whether to resubmit on this field alone, and a
+    // narrowing at this hop type-checks because the field is optional — it
+    // would silently restore the race the reason exists to end.
     await expect(
       actions.enqueueMidTurnMessage('follow up', { messageId: 'stable-id' }),
     ).resolves.toEqual({ accepted: false, reason: 'session_idle' });
