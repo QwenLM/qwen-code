@@ -5412,6 +5412,246 @@ describe('ContentGenerationPipeline', () => {
       expect(results).toEqual([thoughtResponse, finishResponse]);
       expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
     });
+
+    it('does not re-deliver a Stage 2d finish when the consumer throws into the generator', async () => {
+      // The Stage 2d flush yields the parked finish and suspends there. A
+      // consumer that throws into the generator at that point lands in the
+      // error-path flush, which re-tests `finishYielded`: had Stage 2d not set
+      // it, the same response object would be delivered a second time, and
+      // every part it carries would be folded into the persisted turn twice.
+      // Latent rather than live: nothing in production initiates a throw into
+      // this chain — the two `.throw()` sites in it only forward one
+      // (`llm-content-generator.ts`, `loggingContentGenerator.ts`), and a
+      // `for await` consumer abandons through `.return()`, which does not run
+      // the catch. This pins the invariant so the first caller that does throw
+      // cannot double-deliver.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'finish-chunk',
+            choices: [{ delta: {}, finish_reason: 'stop' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ text: 'a complete answer' }], role: 'model' },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValueOnce(
+        finishResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      const first = await resultGenerator.next();
+      expect(first.value).toBe(finishResponse);
+
+      // The error-path flush must not hand the same response back a second
+      // time: the throw propagates to the consumer instead of resolving with
+      // another value.
+      await expect(
+        resultGenerator.throw!(new Error('consumer threw into the generator')),
+      ).rejects.toThrow('consumer threw into the generator');
+      expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not re-deliver an in-loop merged finish when the consumer throws into the generator', async () => {
+      // Sibling of the Stage 2d case above, for the other yield of a parked
+      // finish: a chunk arriving after the finish one is merged into it and
+      // yielded in-loop. A throw landing on that suspension point reaches the
+      // error-path flush with the same parked response still set, so the flag
+      // has to be raised before suspending here too.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'finish-chunk',
+            choices: [{ delta: {}, finish_reason: 'stop' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          yield {
+            id: 'usage-chunk',
+            choices: [{ delta: {} }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ text: 'a complete answer' }], role: 'model' },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+      const usageResponse = new GenerateContentResponse();
+      usageResponse.usageMetadata = {
+        promptTokenCount: 3,
+        candidatesTokenCount: 5,
+        totalTokenCount: 8,
+      };
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
+        .mockReturnValueOnce(finishResponse)
+        .mockReturnValueOnce(usageResponse);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      const first = await resultGenerator.next();
+      // The merged response keeps the parked finish's candidates and carries
+      // the late usage.
+      expect(first.value?.candidates).toBe(finishResponse.candidates);
+      expect(first.value?.usageMetadata?.totalTokenCount).toBe(8);
+
+      await expect(
+        resultGenerator.throw!(new Error('consumer threw into the generator')),
+      ).rejects.toThrow('consumer threw into the generator');
+      expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases a parked tool call when the held-parts flush delivered the content', async () => {
+      // The unclosed-thinking-tag flush yields the parts the converter was
+      // holding. When those carry non-thought content, LlmChat counts the
+      // chunk as delivered and shuts its transport replay gate, so
+      // `contentYielded` has to agree at this yield site too — otherwise the
+      // error-path flush withholds a parked tool call that no recovery arm can
+      // pick up any more, stranding the model's decided call into a prose
+      // continuation. Held parts that are thought-only must keep the flag
+      // false — that is the withhold sibling below.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'held-parts-chunk',
+            choices: [{ delta: { content: ' ' }, finish_reason: null }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
+        (_chunk, context) => {
+          // A whitespace-only candidate with no closing tag takes the flush
+          // branch, and the parts it holds are plain content, not reasoning.
+          context.pendingThinkingTagCandidate = { text: ' ' };
+          context.pendingUntrustedResponseParts = [
+            { text: 'Let me read that file. ' },
+          ];
+          return finishResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      const first = await resultGenerator.next();
+      expect(first.value?.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Let me read that file. ' },
+      ]);
+
+      const second = await resultGenerator.throw!(
+        new Error('consumer threw into the generator'),
+      );
+      expect(second.value).toBe(finishResponse);
+    });
+
+    it('keeps a parked tool call withheld when the held-parts flush delivered only thought', async () => {
+      // The other end of the same knob. Held parts can be thought-marked
+      // reasoning, which LlmChat does not count as delivered, so its transport
+      // replay gate is still open and withholding the parked tool call still
+      // buys the recovery it exists for. Updating the flag unconditionally at
+      // that yield site would strand the call in the other direction.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'held-thought-chunk',
+            choices: [{ delta: { content: ' ' }, finish_reason: null }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
+        (_chunk, context) => {
+          context.pendingThinkingTagCandidate = { text: ' ' };
+          context.pendingUntrustedResponseParts = [
+            { thought: true, text: 'reasoning' },
+          ];
+          return finishResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      const first = await resultGenerator.next();
+      expect(first.value?.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'reasoning' },
+      ]);
+
+      // Nothing user-visible was delivered, so the parked finish stays parked
+      // and the throw propagates instead of resolving with it.
+      await expect(
+        resultGenerator.throw!(new Error('consumer threw into the generator')),
+      ).rejects.toThrow('consumer threw into the generator');
+    });
   });
 
   describe('buildResponseFormat endpoint gate', () => {

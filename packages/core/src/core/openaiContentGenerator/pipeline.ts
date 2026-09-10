@@ -701,8 +701,12 @@ export class ContentGenerationPipeline {
               pendingFinishResponse,
               pendingFinishProtocolTagSanitized,
             );
-            yield pendingFinishResponse;
+            // Set before suspending rather than after: a consumer that throws
+            // into this generator at the yield below never runs the statement
+            // that follows it, and the error-path flush re-tests this flag
+            // before deciding whether the response still needs delivering.
             finishYielded = true;
+            yield pendingFinishResponse;
             // Keep pendingFinishResponse alive so late-arriving usage
             // metadata can still be merged (see finishYielded block above).
           } else {
@@ -729,6 +733,13 @@ export class ContentGenerationPipeline {
               index: 0,
             },
           ];
+          // Held parts are whatever the converter had accumulated — plain
+          // content, thought-marked reasoning, or both — so this goes through
+          // the same predicate as every other yield site. LlmChat counts a
+          // chunk as delivered on that same rule; if the two flags disagree
+          // here, the error-path flush below withholds a parked tool call
+          // whose replay gate is already shut.
+          contentYielded ||= hasNonThoughtCandidateParts(response);
           yield response;
         }
       } else if (
@@ -749,6 +760,8 @@ export class ContentGenerationPipeline {
           pendingFinishResponse,
           pendingFinishProtocolTagSanitized,
         );
+        // Before the yield, for the reason given at the in-loop one above.
+        finishYielded = true;
         yield pendingFinishResponse;
       }
     } catch (error) {
@@ -763,9 +776,10 @@ export class ContentGenerationPipeline {
       // completed answer from a cut one. The flush sits below the
       // InvalidStreamError rethrow — a protocol-tag-leak stream must not
       // deliver one — and above the guard and StreamContentError rethrows so
-      // every recoverable error class still sees it. `handleError` never
-      // returns, so the Stage 2d flush above cannot double-yield this
-      // response.
+      // every recoverable error class still sees it. The Stage 2d flush above
+      // sets `finishYielded` before it suspends, so a consumer that throws
+      // into this generator while it is parked on that yield cannot make this
+      // flush deliver the same response a second time.
       //
       // A parked finish carrying a functionCall stays parked only while
       // nothing user-visible was delivered: the converter emits functionCall
