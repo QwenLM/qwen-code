@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
+import { findUnexpectedImportMeta } from './import-meta-guard.mjs';
 
 const assetsDir = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(assetsDir, 'src');
@@ -203,9 +204,6 @@ const documentBuildResult = await build({
   target: ['chrome120'],
   legalComments: 'none',
   loader: { '.css': 'css' },
-  // Keep warnings out of the log but in result.warnings for the check below
-  // (logOverride 'silent' would discard them and make that check vacuous).
-  logLevel: 'error',
   define: {
     'process.env.NODE_ENV': '"production"',
     __EXPORT_TRANSCRIPT_RENDERER_VERSION__: JSON.stringify(
@@ -218,25 +216,20 @@ const documentBuildResult = await build({
   },
 });
 
-// DaemonWorkspaceProvider.tsx reads import.meta.url (guarded) for its
-// module-copy diagnostic id; esbuild lowers import.meta to {} under iife.
-// Tolerate exactly that read — it arrives through the prebuilt
-// packages/web-shell/dist/transcript.js, so esbuild never sees the .tsx
-// source — and fail on any other site: a new import.meta.env read would be
-// lowered to ({}).env and throw in every exported document at runtime.
-// (The separator class keeps the allowlist working where esbuild reports
-// Windows-style paths.)
-const unexpectedImportMeta = documentBuildResult.warnings.filter(
-  (warning) =>
-    warning.id === 'empty-import-meta' &&
-    !/web-shell[/\\]dist[/\\]transcript\.js$/.test(
-      warning.location?.file ?? '',
-    ),
+// esbuild lowers import.meta to {} under iife, and the export document
+// evaluates the bundle top-level, so any stray import.meta read (e.g.
+// import.meta.env) would throw in every exported file. Tolerate exactly the
+// deliberate guarded read inside the prebuilt web-shell transcript entry and
+// fail on anything else. No logLevel/logOverride here: silencing the warning
+// class would also hide every other warning this build emits, and
+// logOverride 'silent' would empty result.warnings and vacate this check.
+const unexpectedImportMeta = findUnexpectedImportMeta(
+  documentBuildResult.warnings,
 );
 if (unexpectedImportMeta.length > 0) {
   throw new Error(
     'export-transcript-document build: unexpected import.meta use in ' +
-      unexpectedImportMeta.map((w) => w.location?.file).join(', '),
+      unexpectedImportMeta.join(', '),
   );
 }
 
