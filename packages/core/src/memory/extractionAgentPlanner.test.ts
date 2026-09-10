@@ -122,6 +122,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
     for (const category of AUTO_MEMORY_TREE_CATEGORIES) {
       expect(systemPrompt).toContain(category);
     }
+    expect(systemPrompt).toContain('at most 64 characters');
   });
 
   it('threads the configured memory agent timeout into the forked agent', async () => {

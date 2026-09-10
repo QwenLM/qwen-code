@@ -40,6 +40,7 @@ import {
   scanAllUserAutoMemoryTopicDocuments,
   scanAutoMemorySnapshot,
   validateStructuredAutoMemoryDocument,
+  type StructuredAutoMemoryValidation,
 } from './scan.js';
 import {
   AUTO_MEMORY_TREE_CATEGORIES,
@@ -47,6 +48,7 @@ import {
   type AutoMemoryScope,
 } from './types.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
+import { MEMORY_METADATA_ITEM_BOUNDS } from './prompt.js';
 
 const MAX_FILES_PER_RUN = 10;
 const MAX_BODY_CHARS_PER_RUN = 40_000;
@@ -111,6 +113,8 @@ type GenerateMetadata = (
   candidate: MemoryMetadataMigrationCandidate,
   vocabulary: string,
   abortSignal?: AbortSignal,
+  /** Frontmatter fields whose previous generated values failed validation. */
+  validationFeedback?: readonly string[],
 ) => Promise<GeneratedMemoryMetadata | GeneratedMemoryMetadataWithUsage>;
 
 interface FrontmatterParts {
@@ -279,10 +283,24 @@ export async function scanMemoryMetadataCorpusStatus(params: {
   };
 }
 
+const OWNED_FRONTMATTER_KEYS = [
+  'name',
+  'description',
+  'type',
+  'category',
+  'keywords',
+  'usage_scenarios',
+] as const;
+
+interface MergedMetadata {
+  content: string;
+  validation: StructuredAutoMemoryValidation;
+}
+
 function mergeMetadata(
   candidate: MemoryMetadataMigrationCandidate,
   metadata: GeneratedMemoryMetadata,
-): string | null {
+): MergedMetadata | null {
   if (
     metadata.relativePath !== candidate.relativePath ||
     metadata.sourceHash !== candidate.sourceHash
@@ -290,22 +308,42 @@ function mergeMetadata(
     return null;
   }
   const parts = splitFrontmatter(candidate.filePath, candidate.content);
-  const frontmatter = parts.frontmatter.trim()
-    ? parseYaml(parts.frontmatter)
-    : {};
-  Object.assign(frontmatter, {
-    name: metadata.name,
-    description: metadata.description,
-    type: metadata.type,
-    category: metadata.category,
-    keywords: metadata.keywords,
-    usage_scenarios: metadata.usage_scenarios,
-  });
-  const renderedYaml = stringifyYaml(frontmatter)
+  let renderedYaml: string | undefined;
+  if (parts.frontmatter.trim()) {
+    // Splice the owned keys through the YAML CST so hand-maintained comments,
+    // anchors, quoting, key order, and unknown fields survive untouched;
+    // a parse -> stringify round-trip would rewrite the whole document.
+    const document = parseDocument(parts.frontmatter, { schema: 'core' });
+    if (document.errors.length === 0) {
+      try {
+        for (const key of OWNED_FRONTMATTER_KEYS) {
+          document.set(key, metadata[key]);
+        }
+        renderedYaml = document.toString();
+      } catch {
+        renderedYaml = undefined;
+      }
+    }
+  }
+  if (renderedYaml === undefined) {
+    // No pre-existing frontmatter, or frontmatter only the lenient parser
+    // accepts (e.g. tab indentation): round-trip through it instead.
+    const frontmatter = parts.frontmatter.trim()
+      ? parseYaml(parts.frontmatter)
+      : {};
+    for (const key of OWNED_FRONTMATTER_KEYS) {
+      frontmatter[key] = metadata[key];
+    }
+    renderedYaml = stringifyYaml(frontmatter);
+  }
+  const normalizedYaml = renderedYaml
     .trimEnd()
     .replaceAll('\n', parts.lineEnding);
-  const merged = `---${parts.lineEnding}${renderedYaml}${parts.lineEnding}---${parts.suffix}`;
-  return validateStructuredAutoMemoryDocument(merged).valid ? merged : null;
+  const merged = `---${parts.lineEnding}${normalizedYaml}${parts.lineEnding}---${parts.suffix}`;
+  return {
+    content: merged,
+    validation: validateStructuredAutoMemoryDocument(merged),
+  };
 }
 
 class MigrationConflictError extends Error {}
@@ -316,7 +354,7 @@ export async function commitMigratedMemoryMetadata(
   canCommit: () => boolean = () => true,
 ): Promise<'committed' | 'conflict' | 'invalid'> {
   const merged = mergeMetadata(candidate, metadata);
-  if (!merged) return 'invalid';
+  if (!merged || !merged.validation.valid) return 'invalid';
   if (!canCommit()) return 'conflict';
   const trustedFile = await resolveTrustedMemoryFile(
     candidate.root,
@@ -335,7 +373,7 @@ export async function commitMigratedMemoryMetadata(
     return 'conflict';
   }
   try {
-    await atomicWriteFile(trustedFile, merged, {
+    await atomicWriteFile(trustedFile, merged.content, {
       encoding: 'utf-8',
       noFollow: true,
       assertCanCommit: () => {
@@ -371,6 +409,7 @@ async function generateMemoryMetadataWithAgent(
   candidate: MemoryMetadataMigrationCandidate,
   vocabulary: string,
   abortSignal?: AbortSignal,
+  validationFeedback?: readonly string[],
 ): Promise<GeneratedMemoryMetadataWithUsage> {
   const startedAt = Date.now();
   const agentConfig = deriveConfig(config, {
@@ -386,6 +425,7 @@ async function generateMemoryMetadataWithAgent(
       `type must be one of: ${AUTO_MEMORY_TYPES.join(', ')}`,
       `category must be one of: ${AUTO_MEMORY_TREE_CATEGORIES.join(', ')}`,
       'Use 2-6 discriminative keywords or short phrases and 1-3 usage_scenarios.',
+      MEMORY_METADATA_ITEM_BOUNDS,
     ].join('\n'),
     taskPrompt: [
       `relativePath: ${candidate.relativePath}`,
@@ -393,6 +433,12 @@ async function generateMemoryMetadataWithAgent(
       '',
       vocabulary,
       '',
+      ...(validationFeedback?.length
+        ? [
+            `The previous metadata was rejected; fix these fields: ${validationFeedback.join(', ')}. ${MEMORY_METADATA_ITEM_BOUNDS}`,
+            '',
+          ]
+        : []),
       'Return: {"relativePath","sourceHash","name","description","type","category","keywords","usage_scenarios"}',
       '',
       '<memory-file>',
@@ -528,18 +574,33 @@ export async function runMemoryMetadataMigration(params: {
               bodyChars: remainingBodyChars,
             }
           : candidate;
-      const generated = await generateMetadata(
-        params.config,
-        agentCandidate,
-        vocabulary,
-        params.abortSignal,
-      );
-      const metadata = 'metadata' in generated ? generated.metadata : generated;
-      if ('metadata' in generated) {
-        result.agentDurationMs += generated.durationMs;
-        result.inputTokens += generated.usage.inputTokens;
-        result.outputTokens += generated.usage.outputTokens;
-        result.totalTokens += generated.usage.totalTokens;
+      const generate = async (
+        validationFeedback?: readonly string[],
+      ): Promise<GeneratedMemoryMetadata> => {
+        const generated = await generateMetadata(
+          params.config,
+          agentCandidate,
+          vocabulary,
+          params.abortSignal,
+          validationFeedback,
+        );
+        const generatedMetadata =
+          'metadata' in generated ? generated.metadata : generated;
+        if ('metadata' in generated) {
+          result.agentDurationMs += generated.durationMs;
+          result.inputTokens += generated.usage.inputTokens;
+          result.outputTokens += generated.usage.outputTokens;
+          result.totalTokens += generated.usage.totalTokens;
+        }
+        return generatedMetadata;
+      };
+      let metadata = await generate();
+      const merged = mergeMetadata(candidate, metadata);
+      if (merged && !merged.validation.valid) {
+        // Tell the writer which fields failed instead of silently counting the
+        // file as failed; one informed retry fixes bound violations the prompt
+        // contract could not prevent.
+        metadata = await generate(merged.validation.missingOrInvalidFields);
       }
       const status = await commitMigratedMemoryMetadata(
         candidate,

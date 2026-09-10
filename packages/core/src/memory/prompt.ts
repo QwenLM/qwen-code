@@ -18,6 +18,9 @@ const DIR_EXISTS_GUIDANCE =
 // Spell out the tier count so a future 4th tier never silently reads "two".
 const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four'] as const;
 
+export const MEMORY_METADATA_ITEM_BOUNDS =
+  'Keep each keyword and usage_scenario at most 64 characters, and keywords unique case-insensitively.';
+
 export const MEMORY_FRONTMATTER_EXAMPLE: readonly string[] = [
   '```markdown',
   '---',
@@ -26,9 +29,9 @@ export const MEMORY_FRONTMATTER_EXAMPLE: readonly string[] = [
   'type: {{user, feedback, project, reference}}',
   'category: {{one fixed memory category}}',
   'keywords:',
-  '  - {{2-6 discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words; put at most 2 exact identifiers last}}',
+  '  - {{2-6 discriminative retrieval terms or short phrases, each at most 64 characters and unique case-insensitively; prefer domain-qualified phrases over generic single words; put at most 2 exact identifiers last}}',
   'usage_scenarios:',
-  '  - {{1-3 future tasks where this memory would help — do not repeat the description}}',
+  '  - {{1-3 future tasks where this memory would help, each at most 64 characters — do not repeat the description}}',
   '---',
   '',
   '{{memory content — for feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines}}',

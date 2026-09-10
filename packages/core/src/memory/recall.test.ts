@@ -22,6 +22,7 @@ import {
   type ScannedAutoMemoryDocument,
 } from './scan.js';
 import { logMemoryRecall } from '../telemetry/index.js';
+import { toAutoMemoryRef } from './tree.js';
 
 const debugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -1203,5 +1204,53 @@ describe('auto-memory relevant recall', () => {
     );
 
     expect(result.selectedDocs).toHaveLength(5);
+  });
+
+  it('reports only the documents the focused prompt actually rendered', async () => {
+    const capSizedDocs: ScannedAutoMemoryDocument[] = Array.from(
+      { length: 5 },
+      (_, index) => ({
+        ...docs[1]!,
+        filePath: `/tmp/cap-${index}.md`,
+        relativePath: `cap-${index}.md`,
+        filename: `cap-${index}.md`,
+        title: `t${index}${'t'.repeat(253)}`,
+        description: `d${index}${'d'.repeat(510)}`,
+        keywords: Array.from(
+          { length: 8 },
+          (_, k) => `k${index}-${k}-${'k'.repeat(58)}`,
+        ),
+        usageScenarios: Array.from(
+          { length: 3 },
+          (_, k) => `s${index}-${k}-${'s'.repeat(57)}`,
+        ),
+        mtimeMs: index,
+      }),
+    );
+    mockSnapshot(capSizedDocs);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue(
+      capSizedDocs,
+    );
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'shared release context',
+      { config },
+    );
+
+    // The five cap-sized documents overflow the 6000-char focused budget, so
+    // the render trims the tail; selectedDocs must not claim undelivered docs.
+    expect(result.selectedDocs.length).toBeGreaterThan(0);
+    expect(result.selectedDocs.length).toBeLessThan(capSizedDocs.length);
+    for (const doc of result.selectedDocs) {
+      expect(result.focusedPrompt).toContain(toAutoMemoryRef(doc));
+    }
+    expect(result.focusedPrompt).toContain('另 ');
+    const renderedRefs = new Set(result.selectedDocs.map(toAutoMemoryRef));
+    for (const doc of capSizedDocs) {
+      if (!renderedRefs.has(toAutoMemoryRef(doc))) {
+        expect(result.focusedPrompt).not.toContain(toAutoMemoryRef(doc));
+      }
+    }
   });
 });

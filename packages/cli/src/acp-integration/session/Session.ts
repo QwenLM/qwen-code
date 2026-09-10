@@ -5629,6 +5629,13 @@ export class Session implements SessionContext {
 
             if (isFreshUserTurn) {
               managedMemoryRecallStarted = true;
+              // Mirror LlmClient.sendMessageStream: commit a prepared
+              // legacy->structured recall transition before the per-turn
+              // reset, so ACP sessions leave legacy mode once migration
+              // completes instead of re-scanning the corpus every turn.
+              await this.config
+                .getLlmClient()
+                .activatePreparedMemoryRecallTransition();
               this.config
                 .getMemoryManager()
                 .resetExhaustedBodyRefsForCurrentTurn();

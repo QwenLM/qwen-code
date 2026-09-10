@@ -228,6 +228,13 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // fan-out: a subagent spawned by Workflow that calls Workflow would create
   // O(k^n) subagents.
   ToolNames.WORKFLOW,
+  // Memory recall state (turn-scoped request claims, residency maps) and the
+  // user's cross-project memory files are parent-owned and session-scoped: a
+  // subagent's fetch/search would mark refs delivered in the parent's turn
+  // while its own transcript is discarded, and manage_memory would mutate
+  // shared memory without the parent's review.
+  ToolNames.SEARCH_MEMORY,
+  ToolNames.MANAGE_MEMORY,
 ]);
 
 /**

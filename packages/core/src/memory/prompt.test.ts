@@ -13,6 +13,7 @@ import {
   CONDENSED_TYPES_SECTION,
   CONDENSED_WHEN_TO_ACCESS_SECTION,
   MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
+  MEMORY_FRONTMATTER_EXAMPLE,
 } from './prompt.js';
 
 describe('managed auto-memory prompt helpers', () => {
@@ -338,6 +339,13 @@ describe('managed auto-memory prompt helpers', () => {
     expect(prompt).toContain(
       'Update or remove memories that turn out to be wrong',
     );
+  });
+
+  it('states the per-item frontmatter bounds in the writer example', () => {
+    const example = MEMORY_FRONTMATTER_EXAMPLE.join('\n');
+
+    expect(example).toContain('at most 64 characters');
+    expect(example).toContain('unique case-insensitively');
   });
 
   it('condensed prompt includes read-path behavioral guidance', () => {

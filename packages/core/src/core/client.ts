@@ -1624,7 +1624,8 @@ export class LlmClient {
     };
   }
 
-  private async activatePreparedMemoryRecallTransition(): Promise<void> {
+  /** @internal */
+  async activatePreparedMemoryRecallTransition(): Promise<void> {
     const startedAt = Date.now();
     const prepare = this.config.prepareMemoryRecallTransition;
     if (typeof prepare !== 'function') return;

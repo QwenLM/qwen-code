@@ -25,6 +25,9 @@ import {
   getUserAutoMemoryRoot,
 } from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
+import { runForkedAgent } from '../agents/forkedAgent.js';
+
+vi.mock('../agents/forkedAgent.js', () => ({ runForkedAgent: vi.fn() }));
 
 function legacyContent(body = 'BODY\nWITH TRAILING NEWLINE\n'): string {
   return [
@@ -561,6 +564,118 @@ describe('memory metadata migration', () => {
     expect(await fs.readFile(candidate!.filePath, 'utf-8')).toBe(original);
   });
 
+  it('preserves hand-maintained comments, anchors, and unknown fields', async () => {
+    const original = [
+      '---',
+      '# hand-maintained note',
+      'custom_field: &flag custom value',
+      'alias_field: *flag',
+      'notes: "quoted: value # kept"',
+      'type: project',
+      'title: Legacy title',
+      '---',
+      'Body.',
+    ].join('\n');
+    await write('project/legacy.md', original);
+    const [candidate] = await scanMemoryMetadataMigrationCandidates(
+      memoryRoot,
+      'project',
+    );
+
+    expect(
+      await commitMigratedMemoryMetadata(candidate!, metadata(candidate!)),
+    ).toBe('committed');
+
+    const updated = await fs.readFile(candidate!.filePath, 'utf-8');
+    expect(updated).toContain('# hand-maintained note');
+    expect(updated).toContain('custom_field: &flag custom value');
+    expect(updated).toContain('alias_field: *flag');
+    expect(updated).toContain('notes: "quoted: value # kept"');
+    expect(updated).toContain('name: Migrated memory');
+    expect(updated.endsWith('Body.')).toBe(true);
+  });
+
+  it('tells the writer which fields failed validation and retries once', async () => {
+    await write('project/legacy.md', legacyContent());
+    const prefix = 'x'.repeat(64);
+    const feedbackSeen: Array<readonly string[] | undefined> = [];
+    const generateMetadata = vi.fn(
+      async (
+        _config: Config,
+        candidate: MemoryMetadataMigrationCandidate,
+        _vocabulary: string,
+        _abortSignal?: AbortSignal,
+        validationFeedback?: readonly string[],
+      ) => {
+        feedbackSeen.push(validationFeedback);
+        if (feedbackSeen.length === 1) {
+          // Two distinct 90-char scenarios sharing a 64-char prefix collapse
+          // to one after sanitization, failing the usage_scenarios contract.
+          return {
+            ...metadata(candidate),
+            usage_scenarios: [
+              `${prefix}-first-${'a'.repeat(19)}`,
+              `${prefix}-second-${'b'.repeat(18)}`,
+            ],
+          };
+        }
+        return metadata(candidate);
+      },
+    );
+
+    const result = await runMemoryMetadataMigration({
+      config: {} as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project',
+      generateMetadata,
+    });
+
+    expect(feedbackSeen).toEqual([undefined, ['usage_scenarios']]);
+    expect(result).toMatchObject({ attempted: 1, committed: 1, failed: 0 });
+    const updated = await fs.readFile(
+      path.join(memoryRoot, 'project', 'legacy.md'),
+      'utf-8',
+    );
+    expect(updated).toContain('name: Migrated memory');
+  });
+
+  it('states the per-item metadata bounds to the migration agent', async () => {
+    await write('project/legacy.md', legacyContent());
+    let systemPrompt = '';
+    vi.mocked(runForkedAgent).mockImplementationOnce(async (params) => {
+      systemPrompt = params.systemPrompt ?? '';
+      const relativePath = /relativePath: (.+)/.exec(params.taskPrompt)?.[1];
+      const sourceHash = /sourceHash: (.+)/.exec(params.taskPrompt)?.[1];
+      return {
+        status: 'completed',
+        finalText: JSON.stringify({
+          relativePath,
+          sourceHash,
+          name: 'Migrated memory',
+          description: 'Complete migrated metadata',
+          type: 'project',
+          category: 'project_introduction',
+          keywords: ['memory migration', 'frontmatter migration'],
+          usage_scenarios: ['Migrating legacy memories'],
+        }),
+        filesTouched: [],
+      };
+    });
+
+    const result = await runMemoryMetadataMigration({
+      config: {
+        getMemoryAgentTimeoutMinutes: () => undefined,
+      } as unknown as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project',
+    });
+
+    expect(result.committed).toBe(1);
+    expect(systemPrompt).toContain('at most 64 characters');
+  });
+
   it('rebuilds vocabulary after every successful file', async () => {
     await write('project/one.md', legacyContent('First body'));
     await write('project/two.md', legacyContent('Second body'));
@@ -823,7 +938,7 @@ describe('memory metadata migration', () => {
     expect(receivedBodies).toEqual([40_000, 40_000]);
   });
 
-  it('continues after one invalid result and retries that file on the next run', async () => {
+  it('continues after one invalid result and recovers it with an informed retry', async () => {
     await write('project/one.md', legacyContent('One'));
     await write('project/two.md', legacyContent('Two'));
     const failedPaths = new Set<string>();
@@ -844,22 +959,25 @@ describe('memory metadata migration', () => {
       generateMetadata,
     };
 
+    // The first generation fails validation (a single keyword), so the run
+    // retries it once with the failing fields named and commits in-run;
+    // nothing is left for the next run.
     expect(await runMemoryMetadataMigration(params)).toEqual({
       filesScanned: 2,
       legacyFiles: 2,
-      remainingLegacyFiles: 1,
+      remainingLegacyFiles: 0,
       attempted: 2,
-      committed: 1,
+      committed: 2,
       conflicts: 0,
-      failed: 1,
+      failed: 0,
       agentDurationMs: 0,
       inputTokens: 0,
       outputTokens: 0,
       totalTokens: 0,
     });
     expect(await runMemoryMetadataMigration(params)).toMatchObject({
-      attempted: 1,
-      committed: 1,
+      attempted: 0,
+      committed: 0,
     });
   });
 

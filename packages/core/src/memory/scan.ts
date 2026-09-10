@@ -162,6 +162,33 @@ function recoverUnquotedHashList(
     : value;
 }
 
+// Fixed-vocabulary fields keep plain YAML semantics (a trailing ` #...` is a
+// comment). Every other frontmatter field is free text, where an unquoted `#`
+// is content, not a comment — restore the raw text for those fields in one
+// pass so a newly added free-text field is rescued by default instead of
+// silently losing data until someone hand-writes its rescue.
+const YAML_VOCABULARY_KEYS: ReadonlySet<string> = new Set(['type', 'category']);
+
+function rescueUnquotedHashFields(
+  frontmatter: string,
+  parsed: Record<string, unknown>,
+): Record<string, unknown> {
+  const rescued: Record<string, unknown> = { ...parsed };
+  for (const key of Object.keys(rescued)) {
+    if (YAML_VOCABULARY_KEYS.has(key)) continue;
+    const value = rescued[key];
+    if (typeof value === 'string') {
+      rescued[key] = preserveUnquotedHash(
+        value,
+        rawFrontmatterValue(frontmatter, key),
+      );
+    } else if (Array.isArray(value)) {
+      rescued[key] = recoverUnquotedHashList(frontmatter, key, value);
+    }
+  }
+  return rescued;
+}
+
 export function normalizeAutoMemoryKeyword(value: string): string {
   return sanitizeAutoMemoryPromptField(value, Number.MAX_SAFE_INTEGER);
 }
@@ -323,18 +350,15 @@ export function parseAutoMemoryTopicDocument(
   }
 
   const [, frontmatter, bodyContent] = frontmatterMatch;
-  const parsedFrontmatter = parseYaml(frontmatter);
+  const parsedFrontmatter = rescueUnquotedHashFields(
+    frontmatter,
+    parseYaml(frontmatter),
+  );
   const rawType = stringValue(parsedFrontmatter['type']);
   if (!rawType || !AUTO_MEMORY_TYPES.includes(rawType as AutoMemoryType)) {
     return null;
   }
-  const description =
-    stringValue(
-      preserveUnquotedHash(
-        parsedFrontmatter['description'],
-        rawFrontmatterValue(frontmatter, 'description'),
-      ),
-    ) ?? '';
+  const description = stringValue(parsedFrontmatter['description']) ?? '';
 
   return {
     scope,
@@ -343,34 +367,14 @@ export function parseAutoMemoryTopicDocument(
     relativePath,
     filename: path.basename(filePath),
     title:
-      stringValue(
-        preserveUnquotedHash(
-          parsedFrontmatter['name'],
-          rawFrontmatterValue(frontmatter, 'name'),
-        ),
-      ) ??
-      stringValue(
-        preserveUnquotedHash(
-          parsedFrontmatter['title'],
-          rawFrontmatterValue(frontmatter, 'title'),
-        ),
-      ) ??
+      stringValue(parsedFrontmatter['name']) ??
+      stringValue(parsedFrontmatter['title']) ??
       rawType,
     description,
     category: parseCategory(parsedFrontmatter['category']),
-    keywords: parseKeywords(
-      recoverUnquotedHashList(
-        frontmatter,
-        'keywords',
-        parsedFrontmatter['keywords'],
-      ),
-    ),
+    keywords: parseKeywords(parsedFrontmatter['keywords']),
     usageScenarios: parseUsageScenarios(
-      recoverUnquotedHashList(
-        frontmatter,
-        'usage_scenarios',
-        parsedFrontmatter['usage_scenarios'],
-      ),
+      parsedFrontmatter['usage_scenarios'],
       description,
     ),
     body: bodyContent.trim(),

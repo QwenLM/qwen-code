@@ -532,6 +532,7 @@ describe('Session', () => {
     refreshSystemInstruction: ReturnType<typeof vi.fn>;
     setTools: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
+    activatePreparedMemoryRecallTransition: ReturnType<typeof vi.fn>;
     beginManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
     consumeManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
     commitManagedAutoMemoryRecallDelivery: ReturnType<typeof vi.fn>;
@@ -779,6 +780,9 @@ describe('Session', () => {
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+      activatePreparedMemoryRecallTransition: vi
+        .fn()
+        .mockResolvedValue(undefined),
       beginManagedAutoMemoryRecall: vi.fn(),
       consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
       commitManagedAutoMemoryRecallDelivery: vi.fn(),
@@ -2721,6 +2725,31 @@ describe('Session', () => {
       expect(
         mockLlmClient.finishManagedAutoMemoryRecall,
       ).toHaveBeenCalledOnce();
+    });
+
+    it('drives the prepared recall-mode transition before the per-turn reset on a fresh user turn', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(
+        mockLlmClient.activatePreparedMemoryRecallTransition,
+      ).toHaveBeenCalledOnce();
+      const activationOrder =
+        mockLlmClient.activatePreparedMemoryRecallTransition.mock
+          .invocationCallOrder[0]!;
+      expect(activationOrder).toBeLessThan(
+        mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn.mock
+          .invocationCallOrder[0]!,
+      );
+      expect(activationOrder).toBeLessThan(
+        mockLlmClient.beginManagedAutoMemoryRecall.mock.invocationCallOrder[0]!,
+      );
     });
 
     it('delivers refined recall after tool responses and records the completed tool', async () => {

@@ -111,6 +111,57 @@ describe('SearchMemoryTool', () => {
     expect(executeSearchMemory).toHaveBeenCalledTimes(2);
   });
 
+  it("does not roll back a concurrent sibling call's recorded body state on failure", async () => {
+    const mockConfig = config();
+    const tool = new SearchMemoryTool(mockConfig);
+    let resolveSibling!: () => void;
+    const siblingDone = new Promise<void>((resolve) => {
+      resolveSibling = resolve;
+    });
+    // The failing call starts first and snapshots the shared collections; the
+    // sibling call then records its own reads and succeeds; only afterwards
+    // does the first call fail.
+    vi.mocked(executeSearchMemory)
+      .mockImplementationOnce(async (_params, options) => {
+        await siblingDone;
+        options?.bodyPresentVersions?.set('project:failing.md', 1);
+        throw new Error('search failed');
+      })
+      .mockImplementationOnce(async (_params, options) => {
+        options?.bodyPresentVersions?.set('project:sibling.md', 2);
+        resolveSibling();
+        return {
+          mode: 'search',
+          sourceStatus: {
+            requestedScopes: ['project'],
+            searchedScopes: ['project'],
+            unavailableScopes: [],
+            complete: true,
+            incompleteScopes: [],
+          },
+          results: [],
+        };
+      });
+
+    const failing = tool
+      .build({ mode: 'search' as const, keywords: ['failing call'] })
+      .execute(new AbortController().signal);
+    const sibling = tool
+      .build({ mode: 'search' as const, keywords: ['sibling call'] })
+      .execute(new AbortController().signal);
+
+    await expect(failing).rejects.toThrow('search failed');
+    await expect(sibling).resolves.toBeDefined();
+
+    const memoryManager = mockConfig.getMemoryManager();
+    expect(
+      memoryManager.getBodyPresentVersionsInHistory().get('project:sibling.md'),
+    ).toBe(2);
+    expect(
+      memoryManager.getBodyPresentVersionsInHistory().has('project:failing.md'),
+    ).toBe(false);
+  });
+
   it('rejects stale historical calls while the legacy protocol is active', async () => {
     const mockConfig = config();
     vi.mocked(mockConfig.getMemoryRecallMode).mockReturnValue('legacy');

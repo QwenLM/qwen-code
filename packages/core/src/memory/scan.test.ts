@@ -265,6 +265,29 @@ describe('auto-memory topic scanning', () => {
     });
   });
 
+  it('keeps YAML comment semantics for fixed-vocabulary fields', () => {
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/vocabulary-comment.md',
+      [
+        '---',
+        'type: project # scoped to this repository',
+        'category: project_introduction # fixed list',
+        'name: Release issue #1234',
+        'description: Pointers to issue #1234',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+
+    // Enum fields keep YAML semantics: a trailing ` #...` is a comment there,
+    // while free-text fields still rescue the `#` as content.
+    expect(parsed).not.toBeNull();
+    expect(parsed?.type).toBe('project');
+    expect(parsed?.category).toBe('project_introduction');
+    expect(parsed?.title).toBe('Release issue #1234');
+    expect(parsed?.description).toBe('Pointers to issue #1234');
+  });
+
   it('ignores invalid keyword fields while preserving semantic recall data', () => {
     const parsed = parseAutoMemoryTopicDocument(
       '/tmp/invalid-keywords.md',

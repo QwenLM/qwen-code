@@ -67,9 +67,13 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
     const bodyCoverage = memoryManager.getBodyCoverageInHistory();
     const exhaustedBodyRefs =
       memoryManager.getExhaustedBodyRefsForCurrentTurn();
-    const bodyPresentVersionsBefore = new Map(bodyPresentVersions);
-    const bodyCoverageBefore = structuredClone(bodyCoverage);
-    const exhaustedBodyRefsBefore = new Set(exhaustedBodyRefs);
+    // Execute against per-call copies and merge only on success. Restoring a
+    // before-snapshot into the shared collections on failure would also wipe
+    // a concurrent sibling call's already-committed reads (search_memory is
+    // Kind.Fetch and runs concurrently).
+    const callBodyPresentVersions = new Map(bodyPresentVersions);
+    const callBodyCoverage = structuredClone(bodyCoverage);
+    const callExhaustedBodyRefs = new Set(exhaustedBodyRefs);
     let result: SearchMemoryToolResult;
     try {
       result = await executeSearchMemory(this.params, {
@@ -77,9 +81,9 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
         abortSignal: signal,
         teamMemoryEnabled: this.config.getTeamMemoryEnabled?.() ?? false,
         trustedProject: this.config.isTrustedFolder?.() ?? false,
-        bodyPresentVersions,
-        bodyCoverage,
-        exhaustedBodyRefs,
+        bodyPresentVersions: callBodyPresentVersions,
+        bodyCoverage: callBodyCoverage,
+        exhaustedBodyRefs: callExhaustedBodyRefs,
         onComplete: (observation) => {
           logMemorySearch(
             this.config,
@@ -94,21 +98,18 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
       });
       signal.throwIfAborted();
     } catch (error) {
-      bodyPresentVersions.clear();
-      bodyCoverage.clear();
-      exhaustedBodyRefs.clear();
-      bodyPresentVersionsBefore.forEach((version, ref) =>
-        bodyPresentVersions.set(ref, version),
-      );
-      bodyCoverageBefore.forEach((coverage, ref) =>
-        bodyCoverage.set(ref, coverage),
-      );
-      exhaustedBodyRefsBefore.forEach((ref) => exhaustedBodyRefs.add(ref));
       if (claimed) {
         memoryManager.releaseSearchMemoryRequestForCurrentTurn(signature);
       }
       throw error;
     }
+    callBodyPresentVersions.forEach((version, ref) =>
+      bodyPresentVersions.set(ref, version),
+    );
+    callBodyCoverage.forEach((coverage, ref) =>
+      bodyCoverage.set(ref, coverage),
+    );
+    callExhaustedBodyRefs.forEach((ref) => exhaustedBodyRefs.add(ref));
     const content = JSON.stringify(result, null, 2);
     return {
       llmContent: content,

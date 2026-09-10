@@ -488,16 +488,21 @@ function createRecallResult(
   bodyPresentVersions?: ReadonlyMap<string, number>,
   legacy = false,
 ): RelevantAutoMemoryPromptResult {
-  const focusedPrompt = legacy
-    ? buildLegacyRelevantAutoMemoryPrompt(selectedDocs)
-    : renderAutoMemoryFocusedSubtree(selectedDocs, {
-        bodyPresentVersions,
-      }).prompt;
+  if (legacy) {
+    const focusedPrompt = buildLegacyRelevantAutoMemoryPrompt(selectedDocs);
+    return { focusedPrompt, prompt: focusedPrompt, selectedDocs, strategy };
+  }
+  const rendered = renderAutoMemoryFocusedSubtree(selectedDocs, {
+    bodyPresentVersions,
+  });
   return {
-    ...(legacy ? {} : { treeSnapshot }),
-    focusedPrompt,
-    prompt: focusedPrompt,
-    selectedDocs,
+    treeSnapshot,
+    focusedPrompt: rendered.prompt,
+    prompt: rendered.prompt,
+    // The character budget may have trimmed trailing documents from the
+    // rendered prompt; downstream consumers treat selectedDocs as what was
+    // actually delivered, so report only the rendered prefix.
+    selectedDocs: selectedDocs.slice(0, rendered.displayed),
     strategy,
   };
 }

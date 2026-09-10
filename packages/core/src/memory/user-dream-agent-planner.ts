@@ -34,7 +34,7 @@ Rules:
 - Merge semantic duplicates into one complete canonical file.
 - Keep one independently retrievable fact, rule, preference, or reference per file.
 - Use description for what the memory says and usage_scenarios for future tasks where it would help.
-- Every memory must have one fixed category, 1-3 usage_scenarios, and 2-6 keywords in YAML frontmatter.
+- Every memory must have one fixed category, 1-3 usage_scenarios, and 2-6 keywords in YAML frontmatter; keep each keyword and usage_scenario at most 64 characters and keywords unique case-insensitively.
 - Use discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words and put at most 2 exact identifiers last.
 - Compress repetition; split only at semantic retrieval boundaries.
 - Preserve the complete rule or fact, including Why and How to apply when present.
@@ -57,7 +57,7 @@ export function buildUserConsolidationTaskPrompt(
     '',
     ...MEMORY_CATEGORY_SECTION,
     '',
-    '- Keep 2-6 discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words, with at most 2 exact identifiers last.',
+    '- Keep 2-6 discriminative retrieval terms or short phrases, each at most 64 characters and unique case-insensitively; prefer domain-qualified phrases over generic single words, with at most 2 exact identifiers last.',
     '- Remove duplicate, generic, or corpus-wide hub keywords.',
     '- Refresh `description`, `category`, `usage_scenarios`, and `keywords` whenever body meaning changes.',
     '- Inspect memories over roughly 1,200 characters and remove repetition or incidental detail.',
@@ -71,10 +71,11 @@ export function buildUserConsolidationTaskPrompt(
     '',
     `If files must be removed, write \`${memoryRoot}/${DREAM_OPERATIONS_FILENAME}\` after all replacement files are valid.`,
     'Use this exact JSON shape with paths relative to User Memory:',
-    '`{"version":1,"delete":["feedback/old.md"],"operations":[{"type":"dedupe","sources":["feedback/old.md"],"target":"feedback/canonical.md"},{"type":"split","source":"user/long.md","targets":["user/role.md","user/goals.md"]}]}`',
+    '`{"version":1,"delete":["feedback/old.md","user/long.md"],"operations":[{"type":"dedupe","sources":["feedback/old.md"],"target":"feedback/canonical.md"},{"type":"split","source":"user/long.md","targets":["user/role.md","user/goals.md"]}]}`',
     '- `delete` lists every old file the runtime should remove.',
     '- `dedupe` lists redundant sources merged into a surviving target.',
     '- `split` lists one old source replaced by at least two surviving targets.',
+    '- Every `dedupe` source and `split` source must also appear in `delete`; the runtime rejects the whole manifest otherwise.',
     '- Use an empty operations array for a plain stale-file deletion.',
     '- Never schedule or modify files under the top-level `pinned/` directory.',
     `- Never schedule \`${AUTO_MEMORY_INDEX_FILENAME}\`, the operations file, an absolute path, or a path outside User Memory.`,

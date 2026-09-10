@@ -39,7 +39,7 @@ Rules:
 - Fix contradicted or stale facts only when the evidence is clear from the existing memory content or recent transcript signal.
 - Keep each file independently retrievable: one coherent fact, rule, preference, or reference per file.
 - Use description for what the memory says and usage_scenarios for future tasks where it would help.
-- Every memory must have one fixed category, 1-3 usage_scenarios, and 2-6 keywords in YAML frontmatter.
+- Every memory must have one fixed category, 1-3 usage_scenarios, and 2-6 keywords in YAML frontmatter; keep each keyword and usage_scenario at most 64 characters and keywords unique case-insensitively.
 - Use discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words and put at most 2 exact identifiers last.
 - Do not edit MEMORY.md. The runtime rebuilds it after your work.
 - If nothing needs consolidation, do nothing and say so.`;
@@ -69,10 +69,11 @@ export function buildConsolidationTaskPrompt(
         '',
         `If files must be removed, write \`${memoryRoot}/${DREAM_OPERATIONS_FILENAME}\` only after every replacement file is complete and valid.`,
         'Use paths relative to the memory directory and this exact JSON shape:',
-        '`{"version":1,"delete":["project/old.md"],"operations":[{"type":"dedupe","sources":["project/old.md"],"target":"project/canonical.md"},{"type":"split","source":"feedback/long.md","targets":["feedback/rule-a.md","feedback/rule-b.md"]}]}`',
+        '`{"version":1,"delete":["project/old.md","feedback/long.md"],"operations":[{"type":"dedupe","sources":["project/old.md"],"target":"project/canonical.md"},{"type":"split","source":"feedback/long.md","targets":["feedback/rule-a.md","feedback/rule-b.md"]}]}`',
         '- `delete` contains every old file the runtime should remove',
         '- `dedupe` records redundant source files merged into a surviving target',
         '- `split` records one old source replaced by at least two surviving targets',
+        '- Every `dedupe` source and `split` source must also appear in `delete`; the runtime rejects the whole manifest otherwise',
         '- Omit unrelated operation types; use an empty operations array for plain stale-file deletion',
         '- Never schedule `MEMORY.md`, the operations file, an absolute path, or a path outside the memory directory',
         `- Do not edit \`${memoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\`; the runtime validates operations, deletes scheduled files, and rebuilds it`,
@@ -123,7 +124,7 @@ export function buildConsolidationTaskPrompt(
     ...MEMORY_CATEGORY_SECTION,
     '',
     '- Remove duplicate, generic, or corpus-wide hub keywords.',
-    '- Keep 2-6 discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words, with at most 2 exact identifiers last.',
+    '- Keep 2-6 discriminative retrieval terms or short phrases, each at most 64 characters and unique case-insensitively; prefer domain-qualified phrases over generic single words, with at most 2 exact identifiers last.',
     '- Refresh `description`, `category`, `usage_scenarios`, and `keywords` whenever the body meaning changes',
     '- Inspect memories over roughly 1,200 characters and remove repetition or incidental detail',
     '- Strongly compress or split memories over 2,400 characters',
