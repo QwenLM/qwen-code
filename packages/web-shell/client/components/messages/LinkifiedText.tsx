@@ -21,7 +21,11 @@ export const LinkifiedText = memo(function LinkifiedText({
   }
   return segments.map((segment, index) => {
     if (segment.type === 'text') return segment.value;
-    const safeHref = isSafeHref(segment.value) ? segment.value : undefined;
+    // A bare `%` (not starting a percent-encoded pair) is normalized in the
+    // href only — matching the assistant markdown path's normalizeUri — while
+    // the visible text stays verbatim.
+    const href = segment.value.replace(/%(?![0-9A-Fa-f]{2})/g, '%25');
+    const safeHref = isSafeHref(href) ? href : undefined;
     return (
       <a
         key={index}

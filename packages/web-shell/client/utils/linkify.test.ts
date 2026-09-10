@@ -49,14 +49,63 @@ describe('splitTextByUrls', () => {
     },
   );
 
-  // `"` and the backtick are outside the allowlist, so the match terminates
-  // before them — these cases pin the termination, not the trimmer.
-  it.each(['"', '`'])('terminates the match at markup delimiter %s', (d) => {
-    const text = `go https://example.com/foo${d} end`;
-    expect(splitTextByUrls(text)).toEqual([
-      { type: 'text', value: 'go ' },
-      { type: 'url', value: 'https://example.com/foo' },
-      { type: 'text', value: `${d} end` },
+  // The allowlist excludes seven printable ASCII characters outright; these
+  // cases pin the termination (not the trimmer) for every one of them.
+  it.each(['"', '<', '>', '\\', '^', '`', '|'])(
+    'terminates the match at markup delimiter %s',
+    (d) => {
+      const text = `go https://example.com/foo${d} end`;
+      expect(splitTextByUrls(text)).toEqual([
+        { type: 'text', value: 'go ' },
+        { type: 'url', value: 'https://example.com/foo' },
+        { type: 'text', value: `${d} end` },
+      ]);
+    },
+  );
+
+  it('keeps the angle-bracket autolink form out of the href', () => {
+    expect(splitTextByUrls('<https://example.com/a>')).toEqual([
+      { type: 'text', value: '<' },
+      { type: 'url', value: 'https://example.com/a' },
+      { type: 'text', value: '>' },
+    ]);
+  });
+
+  it('needs no left boundary before the scheme', () => {
+    expect(splitTextByUrls('xhttps://a.com')).toEqual([
+      { type: 'text', value: 'x' },
+      { type: 'url', value: 'https://a.com' },
+    ]);
+  });
+
+  // Interior placement matters: at a trailing position these characters are
+  // trimmed by TRAILING_PUNCT either way, which would not discriminate the
+  // character class at all.
+  it.each([':', ',', ';', '!', '*', '$', '+', '-', '%', '~', '@'])(
+    'keeps %s inside the URL',
+    (c) => {
+      const url = `https://example.com/a${c}b`;
+      expect(splitTextByUrls(url)).toEqual([{ type: 'url', value: url }]);
+    },
+  );
+
+  it('keeps the port in a host:port authority', () => {
+    expect(splitTextByUrls('https://ci.example.com:8443/job/1')).toEqual([
+      { type: 'url', value: 'https://ci.example.com:8443/job/1' },
+    ]);
+  });
+
+  it('trims a trailing tilde (GFM strikethrough delimiter)', () => {
+    expect(splitTextByUrls('~~https://example.com~~')).toEqual([
+      { type: 'text', value: '~~' },
+      { type: 'url', value: 'https://example.com' },
+      { type: 'text', value: '~~' },
+    ]);
+  });
+
+  it('keeps an interior tilde', () => {
+    expect(splitTextByUrls('https://example.com/~user')).toEqual([
+      { type: 'url', value: 'https://example.com/~user' },
     ]);
   });
 

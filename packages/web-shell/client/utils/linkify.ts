@@ -5,12 +5,12 @@
  * allowlist of the ASCII URL grammar, so anything else — whitespace, markup
  * delimiters, CJK prose, emoji — terminates the match (`详情见https://a.com即可`
  * splits at the boundary, `https://a.com👍` does not absorb the emoji).
- * Trailing ASCII sentence punctuation, markdown emphasis delimiters (`*`, `_`),
- * and closing brackets with no matching opener inside the URL are trimmed from
- * it (so `https://en.wikipedia.org/wiki/Foo_(bar)` keeps its `)` while
- * `(see https://example.com/foo)` drops it, and `**https://a.com**` sheds the
- * asterisks). A match that trims down to the bare scheme (`https://`) is not a
- * URL and stays text.
+ * Trailing ASCII sentence punctuation, markdown emphasis delimiters (`*`,
+ * `_`, `~`), and closing brackets with no matching opener inside the URL are
+ * trimmed from it (so `https://en.wikipedia.org/wiki/Foo_(bar)` keeps its `)`
+ * while `(see https://example.com/foo)` drops it, and `**https://a.com**`
+ * sheds the asterisks). A match that trims down to the bare scheme
+ * (`https://`) is not a URL and stays text.
  */
 
 export interface LinkifySegment {
@@ -24,7 +24,7 @@ export interface LinkifySegment {
 // in real URLs, so they fail closed to plain text.
 const URL_PATTERN = /https?:\/\/[A-Za-z0-9\-._~:/?#[\]{}@!$&'()*+,;=%]+/gi;
 
-const TRAILING_PUNCT = new Set([...".,;:!?'*_"]);
+const TRAILING_PUNCT = new Set([...".,;:!?'*_~"]);
 
 const PAIRED_CLOSERS: Record<string, string> = {
   ')': '(',

@@ -67,6 +67,24 @@ describe('LinkifiedText', () => {
     expect(container.textContent).toBe('mail me at a@b.test');
   });
 
+  it('normalizes a bare % in the href but keeps the visible text verbatim', () => {
+    const container = render(
+      <LinkifiedText text="discount https://example.com/100% today" />,
+    );
+    const link = container.querySelector('a');
+    expect(link?.getAttribute('href')).toBe('https://example.com/100%25');
+    expect(link?.textContent).toBe('https://example.com/100%');
+  });
+
+  it('leaves valid percent-encoding untouched', () => {
+    const container = render(
+      <LinkifiedText text="see https://example.com/a%20b end" />,
+    );
+    expect(container.querySelector('a')?.getAttribute('href')).toBe(
+      'https://example.com/a%20b',
+    );
+  });
+
   it('routes clicks through the desktop external opener', () => {
     externalOpenMock.isDesktopShell.mockReturnValue(true);
     const container = render(<LinkifiedText text="see https://a.example/b" />);
