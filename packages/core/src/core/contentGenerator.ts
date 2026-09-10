@@ -140,7 +140,8 @@ export type ContentGeneratorConfig = {
         //     Anthropic `output_config.effort` on Opus 4.7+, OpenAI `xhigh`).
         //   - Generic OpenAI-compatible endpoints and the DashScope
         //     qwen3.8-max family cap at 'xhigh' ('max' is a vendor extension,
-        //     not part of the generic ladder); Gemini caps at 'high'.
+        //     not part of the generic ladder); Gemini 3 caps at 'high' (Gemini
+        //     2.5 maps 'xhigh'/'max' to its thinking-budget ceiling).
         //   - Real Anthropic clamps each tier to the active model's supported
         //     set (Opus 4.7+/5.x accept 'xhigh'/'max'; Opus/Sonnet 4.6 accept
         //     'max'; older models cap at 'high'), logged once per generator via

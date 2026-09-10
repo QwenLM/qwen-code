@@ -47,6 +47,7 @@ const debugLogger = createDebugLogger('GEMINI');
 // (docs/design/2026-06-30-unified-reasoning-effort-cli.md).
 const BUDGET_STYLE_MODEL = /gemini-2\.5/;
 const BUDGET_STYLE_PRO = /gemini-2\.5-pro/;
+const LEVEL_STYLE_PRO = /gemini-3.*pro/;
 
 // Buckets invert the budget -> level thresholds in that same design doc. The
 // top tiers take the model's documented ceiling, which is the one place where
@@ -115,6 +116,8 @@ export class LlmContentGenerator implements ContentGenerator {
   // Latch so the effort-clamp warning fires once per generator lifetime
   // instead of on every request that needs the downgrade.
   private effortClampWarned = false;
+  // Latch so the unsupported budget_tokens warning fires once per generator lifetime.
+  private budgetTokensWarned = false;
 
   constructor(
     options: {
@@ -246,6 +249,9 @@ export class LlmContentGenerator implements ContentGenerator {
     };
   }
 
+  // Config-level reasoning takes precedence over request-level thinkingConfig via
+  // getParameterValue (consistent with other parameters). Request-level overrides
+  // like thinkingBudget: 0 are respected when config-level reasoning is unset.
   private buildThinkingConfig(model: string):
     | {
         includeThoughts: boolean;
@@ -263,6 +269,13 @@ export class LlmContentGenerator implements ContentGenerator {
       return undefined;
     }
 
+    if (reasoning.budget_tokens !== undefined && !this.budgetTokensWarned) {
+      debugLogger.warn(
+        `reasoning.budget_tokens=${reasoning.budget_tokens} is not supported by Gemini; ignoring budget_tokens.`,
+      );
+      this.budgetTokensWarned = true;
+    }
+
     // No effort set: send neither knob. THINKING_LEVEL_UNSPECIFIED means "the
     // model decides", which is exactly what omitting the field does, and the
     // 2.5 family rejects the field itself.
@@ -277,15 +290,13 @@ export class LlmContentGenerator implements ContentGenerator {
       };
     }
 
-    // Gemini's thinkingLevel ladder is MINIMAL / LOW / MEDIUM / HIGH — there
-    // is no xhigh/max, so the extra-strong tiers clamp down via the shared
-    // rank-based clamp (the Anthropic generator uses the same helper for its
-    // own per-model ceilings).
-    const clamped = clampReasoningEffort(reasoning.effort, [
-      'low',
-      'medium',
-      'high',
-    ]);
+    // Gemini 3 Pro models support low and high only; Flash models support
+    // minimal, low, medium, high. Extra-strong tiers (xhigh/max) and unsupported
+    // intermediate tiers (medium on Pro) clamp via the shared rank-based clamp.
+    const supported = LEVEL_STYLE_PRO.test(model)
+      ? (['low', 'high'] as const)
+      : (['low', 'medium', 'high'] as const);
+    const clamped = clampReasoningEffort(reasoning.effort, supported);
     if (clamped !== reasoning.effort && !this.effortClampWarned) {
       debugLogger.warn(
         `reasoning.effort='${reasoning.effort}' is not supported by Gemini; clamping to '${clamped.toUpperCase()}'.`,
