@@ -185,6 +185,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '制品',
   'toolDisplayName.RecordArtifact': '记录制品',
+  'toolDisplayName.RecordSource': '记录来源',
   'toolDisplayName.ReportFindings': '上报评审发现',
   'toolDisplayName.DisplayImage': '显示图片',
   'toolDisplayName.Skill': '技能',

@@ -80,6 +80,54 @@ function goalCardRecord(
 }
 
 describe('createTranscriptReplayMachine', () => {
+  it('projects the daemon identity on every user block before a turn result', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-1', 'user', {
+        daemonPromptId: 'daemon-prompt-1',
+        message: {
+          role: 'user',
+          parts: [
+            { text: 'model input' },
+            { inlineData: { mimeType: 'image/png', data: 'AQID' } },
+          ],
+        },
+        systemPayload: {
+          displayText: 'visible input',
+          hookContext: '',
+          attachmentReferences: [
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 3,
+            },
+          ],
+        },
+      }),
+    );
+    expect(projected).toHaveLength(3);
+    for (const update of projected) {
+      expect(update.sessionUpdate).toBe('user_message_chunk');
+      expect(update._meta).not.toHaveProperty('daemonPromptId');
+      expect(update._meta).toMatchObject({
+        promptId: 'daemon-prompt-1',
+        qwenTranscript: { sourceRecordIds: ['user-1'] },
+      });
+    }
+  });
+
+  it('does not infer a prompt identity for legacy user records', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('legacy', 'user', {
+        message: { role: 'user', parts: [{ text: 'same prompt' }] },
+      }),
+    );
+    expect(projected).toHaveLength(1);
+    expect(projected[0]?._meta?.['promptId']).toBeUndefined();
+  });
+
   it('stamps stable segment identity across replayed text parts', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
@@ -510,6 +558,94 @@ describe('createTranscriptReplayMachine', () => {
 
     expect(machine.snapshot().goalState?.goal).toEqual(recommitted);
   });
+
+  it.each([
+    undefined,
+    null,
+    'invalid',
+    {},
+    { callId: '', subagentSessionReady: true },
+    { callId: 1, subagentSessionReady: true },
+    { callId: 'agent-1', subagentSessionReady: 'false' },
+  ])('reports and skips malformed readiness payload %j', (systemPayload) => {
+    const onDiagnostic = vi.fn();
+    const machine = createTranscriptReplayMachine({ onDiagnostic });
+    expect(
+      updates(
+        machine,
+        record('ready-malformed', 'system', {
+          subtype: 'agent_session_ready',
+          systemPayload,
+        }),
+      ),
+    ).toEqual([]);
+    expect(onDiagnostic).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        code: 'malformed_agent_session_ready',
+        recordId: 'ready-malformed',
+        path: 'systemPayload',
+      }),
+    );
+  });
+
+  it.each([false, true])(
+    'replays valid readiness %s without a diagnostic',
+    (subagentSessionReady) => {
+      const onDiagnostic = vi.fn();
+      const machine = createTranscriptReplayMachine({ onDiagnostic });
+      updates(
+        machine,
+        record('start', 'assistant', {
+          message: {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'agent-1', name: 'agent', args: {} } },
+            ],
+          },
+        }),
+      );
+      expect(
+        updates(
+          machine,
+          record('ready', 'system', {
+            subtype: 'agent_session_ready',
+            systemPayload: { callId: 'agent-1', subagentSessionReady },
+          }),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'agent-1',
+          _meta: expect.objectContaining({ subagentSessionReady }),
+        }),
+      ]);
+      expect(onDiagnostic).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'reports and skips readiness %s without a matching tool start',
+    (subagentSessionReady) => {
+      const onDiagnostic = vi.fn();
+      const machine = createTranscriptReplayMachine({ onDiagnostic });
+      expect(
+        updates(
+          machine,
+          record('orphan-ready', 'system', {
+            subtype: 'agent_session_ready',
+            systemPayload: { callId: 'missing-start', subagentSessionReady },
+          }),
+        ),
+      ).toEqual([]);
+      expect(onDiagnostic).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          code: 'orphan_agent_session_ready',
+          recordId: 'orphan-ready',
+          path: 'systemPayload.callId',
+        }),
+      );
+    },
+  );
 
   it('reports and skips a malformed goal_state record', () => {
     const onDiagnostic = vi.fn();
