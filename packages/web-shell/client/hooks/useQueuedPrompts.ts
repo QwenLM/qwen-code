@@ -948,8 +948,24 @@ export function useQueuedPrompts({
             item.id < parked.rowIdFrontier &&
             pendingPromptTextsMatch(item.text, parked.text),
         );
+      // The parked text is the daemon's rendering: for a payload the event
+      // cannot reproduce, echo the stashed or row-held full payload instead
+      // of the placeholder.
+      const full =
+        parkedText !== undefined
+          ? (pendingEchoByPromptIdRef.current.get(promptId) ??
+            queuedPromptsRef.current.find(
+              (item) =>
+                item.serverPromptId === promptId &&
+                item.payloadCompleteness !== 'summary-only',
+            ))
+          : undefined;
       if (
         parkedText !== undefined &&
+        // An empty rendering with no payload source carries no message to
+        // show: leave the park (inert once settled) rather than echo a blank
+        // bubble. Both sibling consumers of a parked text refuse it too.
+        (full !== undefined || parkedText !== '') &&
         !settledServerPromptIdsRef.current.has(promptId) &&
         !displayedServerPromptIdsRef.current.has(promptId) &&
         (boundRowExists || !pendingOwnSubmission)
@@ -959,16 +975,6 @@ export function useQueuedPrompts({
         // the prompt's own submit body re-reads to know the echo happened,
         // so a still-pending body must not echo it again.
         appendedBeforeResponsePromptIdsRef.current.add(promptId);
-        // The parked text is the daemon's rendering: for a payload the event
-        // cannot reproduce, echo the stashed or row-held full payload
-        // instead of the placeholder.
-        const full =
-          pendingEchoByPromptIdRef.current.get(promptId) ??
-          queuedPromptsRef.current.find(
-            (item) =>
-              item.serverPromptId === promptId &&
-              item.payloadCompleteness !== 'summary-only',
-          );
         if (full) {
           appendLocalQueuedPrompt(full, promptId);
         } else {
@@ -1021,8 +1027,10 @@ export function useQueuedPrompts({
   const refreshPendingPrompts = useCallback(
     (
       targetSessionId = sessionId,
-      // Default fence: a refresh that follows a local state change must not
-      // join (and sync from) a flight dispatched before that change.
+      // Fence anchor: a refresh that follows a local state change must not
+      // sync from a flight dispatched before that change — it waits the
+      // stale flight out and re-dispatches, joining only a flight dispatched
+      // after this anchor.
       notBefore = refreshRequestSeqRef.current,
     ): Promise<RefreshPendingPromptsResult> => {
       if (!latestConnectedRef.current || !targetSessionId)
@@ -1032,9 +1040,9 @@ export function useQueuedPrompts({
       const dispatchRefresh = (): Promise<RefreshPendingPromptsResult> => {
         const ownerToken = ownerTokenRef.current;
         const requestSeq = ++refreshRequestSeqRef.current;
-        // The finally clears the ref through the closure; the async body
-        // always yields at the GET await before the finally can run, so
-        // `promise` is assigned by then.
+        // The finally clears the ref by dispatch sequence, not by promise
+        // identity: a synchronous throw inside the try would reach the
+        // finally before `promise` below is assigned.
         const runRefresh = async (): Promise<RefreshPendingPromptsResult> => {
           try {
             const result = await sessionActions.getPendingPrompts({
@@ -1053,6 +1061,7 @@ export function useQueuedPrompts({
             // was waiting for. Anything it does not list as still queued has
             // either started or gone, and removing that would abort a live
             // turn, so the entry is dropped.
+            const overruledClearedIds = new Set<string>();
             for (const clearedPromptId of [
               ...clearedUnconfirmedPromptIdsRef.current,
             ]) {
@@ -1066,7 +1075,9 @@ export function useQueuedPrompts({
               }
               // Client-side evidence wins over a snapshot the daemon answered
               // before the start it shows: removing a prompt that already
-              // started would abort a live turn.
+              // started would abort a live turn. The same stale snapshot
+              // must not re-materialize the cancelled message either, so the
+              // id is kept out of this pass's sync.
               if (
                 displayedServerPromptIdsRef.current.has(clearedPromptId) ||
                 pendingStartedByPromptIdRef.current.has(clearedPromptId) ||
@@ -1074,12 +1085,14 @@ export function useQueuedPrompts({
                 completedPromptIdsRef.current.has(clearedPromptId) ||
                 settledServerPromptIdsRef.current.has(clearedPromptId)
               ) {
+                overruledClearedIds.add(clearedPromptId);
                 continue;
               }
               removingServerPromptIdsRef.current.add(clearedPromptId);
-              // The daemon publishes the removed event BEFORE the DELETE
-              // resolves (bridge.ts:13232), and an event-first ordering fires
-              // any callback still registered — for a prompt the user
+              // The daemon publishes pending_prompt_completed
+              // {state:'removed'} inside bridgeApi.removePendingPrompt,
+              // before the DELETE resolves, and an event-first ordering
+              // fires any callback still registered — for a prompt the user
               // cancelled. Capture and unregister it now; a failed removal
               // re-settles it, because the prompt may already be running.
               const clearedCallback =
@@ -1114,7 +1127,9 @@ export function useQueuedPrompts({
             }
             syncServerQueuedPrompts(
               result.pendingPrompts.filter(
-                (p) => p.state === 'queued' || p.state === 'running',
+                (p) =>
+                  (p.state === 'queued' || p.state === 'running') &&
+                  !overruledClearedIds.has(p.promptId),
               ),
               targetSessionId,
               clientId,
@@ -1127,7 +1142,7 @@ export function useQueuedPrompts({
             console.warn('Failed to refresh pending prompts', error);
             return { status: 'failed' };
           } finally {
-            if (inflightRefreshRef.current?.promise === promise) {
+            if (inflightRefreshRef.current?.seq === requestSeq) {
               inflightRefreshRef.current = null;
             }
           }
@@ -1147,7 +1162,6 @@ export function useQueuedPrompts({
         inflight.sessionId === targetSessionId &&
         isCurrentOwnerTokenRef.current(inflight.ownerToken)
       ) {
-        if (inflight.seq > notBefore) return inflight.promise;
         // The in-flight snapshot was dispatched before the state change the
         // caller is confirming, so it can prove nothing about it. Wait the
         // stale flight out rather than storm the daemon, then take exactly
@@ -1692,8 +1706,10 @@ export function useQueuedPrompts({
       pendingMidTurnAdmissionsRef.current.delete(promptId);
       if (event.type === 'pending_prompt_started') {
         if (removingServerPromptIdsRef.current.has(promptId)) {
-          // Park rather than drop: the removal may still fail (a started
-          // prompt is not removable), and the failure arm replays from here.
+          // Park rather than drop: the removal may still come back
+          // not-removed (the id can be absent, or already removed by another
+          // client while the doomed prompt runs on to settle), and the
+          // failure arm replays from here.
           startedDuringRemovalRef.current.set(
             promptId,
             typeof event.data.text === 'string' ? event.data.text : '',
@@ -2181,6 +2197,19 @@ export function useQueuedPrompts({
                 settleCompletionCallback(result.promptId, prompt.onComplete);
               }
             };
+            // A start whose raw-text echo was suppressed (an identical
+            // unbound submission was in flight) parked the message, and the
+            // settle's own consume defers to this body while it is in
+            // flight — so this body is the last echo path. Consume the park
+            // here, before the settled arms below drop the row in silence.
+            if (
+              !localMessageAppended &&
+              !displayedServerPromptIdsRef.current.has(result.promptId) &&
+              pendingStartedByPromptIdRef.current.delete(result.promptId)
+            ) {
+              appendLocalQueuedPrompt(prompt, result.promptId);
+              localMessageAppended = true;
+            }
             if (refresh.status !== 'refreshed') {
               // A settle that beat the snapshot wins over it: the message
               // already ran (and the settle cleared the echo guard), so the
@@ -2290,11 +2319,12 @@ export function useQueuedPrompts({
               if (!refreshedInBody) void refreshPendingPrompts(targetSessionId);
               return;
             }
-            // The removal can still fail — a started prompt is not
-            // removable — and the started event carries only rendered text,
-            // so keep the payload under the daemon's id until the outcome:
-            // a failed removal replays the echo from here instead of
-            // dropping to the placeholder.
+            // The removal can still come back not-removed — the id may be
+            // absent, or already removed by another client while the doomed
+            // prompt runs on to settle — and the started event carries only
+            // rendered text, so keep the payload under the daemon's id until
+            // the outcome: a failed removal replays the echo from here
+            // instead of dropping to the placeholder.
             if (
               (prompt.images?.length ?? 0) > 0 ||
               (prompt.files?.length ?? 0) > 0 ||

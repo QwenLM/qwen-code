@@ -1663,7 +1663,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('binds an image-only idle fallback through the daemon placeholder text', async () => {
+  it('binds an image-only idle fallback by the daemon prompt id when the snapshot carries no originator', async () => {
     let rejectAdmission: (() => void) | undefined;
     sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
       (_message: string, opts?: { onAdmissionStarted?: () => void }) =>
@@ -1678,8 +1678,9 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         pendingPrompts: [
           {
             promptId: 'prompt-1',
-            // The daemon renders an image-only prompt with this placeholder, so
-            // it is the only key the empty local text can bind through.
+            // No originatorClientId: the matcher refuses an attachment row
+            // it cannot attribute, so the sync binds nothing here — the
+            // body's own daemon-returned id does the binding.
             text: '[image]',
             content: [
               { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
@@ -2334,6 +2335,49 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       expect(rows[0]?.serverPromptId).toBeUndefined();
       expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
       expect(harness.reportError).not.toHaveBeenCalled();
+      await act(async () => {
+        // A transient hydration failure leaves the second image as a raw
+        // unhydrated reference: the surviving image matches the row's byte
+        // for byte, so only the unhydrated-media refusal keeps this
+        // different message from claiming the row.
+        sdkMock.actions.getPendingPrompts.mockResolvedValueOnce({
+          pendingPrompts: [
+            {
+              promptId: 'prompt-p2',
+              text: '[image]',
+              content: [
+                { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
+                {
+                  type: 'image',
+                  attachmentId: 'media-2',
+                  mimeType: 'image/png',
+                  size: 3,
+                },
+              ],
+              queuedAt: Date.now(),
+              state: 'running' as const,
+              originatorClientId: CLIENT_ID,
+            },
+          ],
+        });
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-other',
+            originatorClientId: 'client-other',
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-other',
+              text: 'someone else',
+            },
+          },
+        ]);
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      const unhydratedRows = harness.result().queuedPrompts;
+      expect(unhydratedRows).toHaveLength(1);
+      expect(unhydratedRows[0]?.serverPromptId).toBeUndefined();
+      expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
     } finally {
       await harness.dispose();
     }
@@ -4737,8 +4781,8 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         resolveSecond?.({ promptId: 'prompt-2' });
         for (let i = 0; i < 4; i++) await Promise.resolve();
       });
-      // The first prompt starts — without an echo, since neither row can be
-      // singled out — while the first body's confirmation GET is parked.
+      // The first prompt starts while the first body's confirmation GET is
+      // parked.
       await act(async () => {
         sdkMock.publishPendingEvents([
           {
@@ -4800,7 +4844,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('does not remove a cleared fallback whose prompt settled before its snapshot arrived', async () => {
+  it('does not remove a started fallback whose prompt settled before its snapshot arrived', async () => {
     const confirmation = deferred<{
       pendingPrompts: Array<{
         promptId: string;
@@ -8838,6 +8882,16 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         for (let i = 0; i < 3; i++) await Promise.resolve();
       });
       expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
+      // The running snapshot is itself an echo trigger: the body still holds
+      // the real attachments, so the message reaches the transcript here —
+      // before any started event arrives.
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
+        '',
+        [{ data: 'aGVsbG8=', mimeType: 'image/png' }],
+        { promptId: 'prompt-1' },
+        undefined,
+      );
       // The daemon is running a message whose row the user already cleared, so
       // it belongs in the transcript — but the started event carries only the
       // rendered placeholder, which would put a literal "[image]" there and
@@ -8858,12 +8912,6 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         for (let i = 0; i < 3; i++) await Promise.resolve();
       });
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
-      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
-        '',
-        [{ data: 'aGVsbG8=', mimeType: 'image/png' }],
-        { promptId: 'prompt-1' },
-        undefined,
-      );
     } finally {
       await harness.dispose();
     }
@@ -8928,8 +8976,23 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         for (let i = 0; i < 3; i++) await Promise.resolve();
       });
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      // The user clears the queue while the confirmation is still in flight,
+      // so the body resumes with no local row and only the re-read echo flag
+      // standing between it and a second append.
+      act(() => {
+        harness.result().clearQueuedPrompts();
+      });
       await act(async () => {
-        resolvePending?.({ pendingPrompts: [] });
+        resolvePending?.({
+          pendingPrompts: [
+            {
+              promptId: 'prompt-1',
+              text: 'follow-up after server idle',
+              queuedAt: Date.now(),
+              state: 'running',
+            },
+          ],
+        });
         for (let i = 0; i < 4; i++) await Promise.resolve();
       });
       // The body resumes after the await: it must re-read the started
@@ -10247,7 +10310,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('does not remove a cleared fallback whose parked start makes its snapshot stale', async () => {
+  it('does not remove a cleared fallback whose parked start its own snapshot postdates', async () => {
     let resolvePending:
       | ((value: {
           pendingPrompts: Array<{
@@ -10291,10 +10354,11 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         harness.result().enqueuePrompt('second message');
         for (let i = 0; i < 4; i++) await Promise.resolve();
       });
-      // The start is parked before the confirming snapshot resolves, and the
-      // started handler's own refresh supersedes that snapshot — so the
-      // stale 'queued' licenses no removal, and the park's echo is consumed
-      // instead.
+      // The start parks before the confirming snapshot resolves. The
+      // started handler's refresh waits the in-flight confirmation out
+      // rather than superseding it, so this snapshot resolves 'refreshed'
+      // and still lists the prompt 'queued' — what blocks the removal is
+      // the parked-start marker, and the park's echo is consumed instead.
       await act(async () => {
         sdkMock.publishPendingEvents([
           {
@@ -11129,7 +11193,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       });
       // The settle echoes the suppressed start; the cancelled turn of a
       // started prompt still counts as completed for the callback the body
-      // settles when its superseded snapshot returns.
+      // settles when its confirming snapshot returns.
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
       expect(onComplete).not.toHaveBeenCalled();
       await act(async () => {
@@ -11397,6 +11461,125 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('does not re-materialize a cleared fallback whose parked start overrules the stale snapshot', async () => {
+    let rejectPending: ((error: Error) => void) | undefined;
+    let resolveNext:
+      | ((value: {
+          pendingPrompts: Array<{
+            promptId: string;
+            text: string;
+            queuedAt: number;
+            state: 'queued';
+          }>;
+        }) => void)
+      | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false, reason: 'session_idle' });
+      },
+    );
+    sdkMock.actions.submitPrompt
+      .mockResolvedValueOnce({ promptId: 'prompt-1' })
+      .mockImplementation(() => new Promise(() => {}));
+    sdkMock.actions.removePendingPrompt.mockClear();
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts
+          .mockImplementationOnce(
+            () =>
+              new Promise((_resolve, reject) => {
+                rejectPending = reject;
+              }),
+          )
+          .mockImplementationOnce(
+            () =>
+              new Promise((resolve) => {
+                resolveNext = resolve;
+              }),
+          );
+        harness.result().enqueuePrompt('stale clear');
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      act(() => {
+        harness.result().clearQueuedPrompts();
+      });
+      await act(async () => {
+        rejectPending?.(new Error('pending snapshot unavailable'));
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      // A different-text submission is in flight, so the started event's raw
+      // echo is suppressed and the start only parks: the snapshot the daemon
+      // answered before it must neither license a DELETE nor re-materialize
+      // the message the user cancelled.
+      await act(async () => {
+        harness.result().enqueuePrompt('unrelated text');
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-1',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-1',
+              text: 'stale clear',
+            },
+          },
+        ]);
+        for (let i = 0; i < 3; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      await act(async () => {
+        // Later snapshots report the started prompt as running — the state
+        // the daemon is actually in — so a phantom row materialized from
+        // the stale snapshot would be retained, not cleaned up.
+        sdkMock.actions.getPendingPrompts.mockResolvedValue({
+          pendingPrompts: [
+            {
+              promptId: 'prompt-1',
+              text: 'stale clear',
+              queuedAt: Date.now(),
+              state: 'running' as const,
+              originatorClientId: CLIENT_ID,
+            },
+          ],
+        });
+        resolveNext?.({
+          pendingPrompts: [
+            {
+              promptId: 'prompt-1',
+              text: 'stale clear',
+              queuedAt: Date.now(),
+              state: 'queued',
+            },
+          ],
+        });
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
+      // The cancelled message must not reappear in the queue: only the
+      // unrelated in-flight submission's own row survives.
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: 'unrelated text',
+          serverState: 'submitting',
+        }),
+      ]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('echoes a settled fallback whose bound row wins over a foreign in-flight submission', async () => {
     let resolveFirst: ((value: { promptId: string }) => void) | undefined;
     sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
@@ -11442,6 +11625,17 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         for (let i = 0; i < 4; i++) await Promise.resolve();
       });
       expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      // A second image-only submission stays unbound with its admission in
+      // flight: its blank row renders the same placeholder, so a text-match
+      // guard cannot tell it apart from the first prompt's own — and it
+      // predates the park below, so the settle cannot use the frontier to
+      // rule it out.
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('', [{ data: 'c2Vjb25k', media_type: 'image/png' }]);
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
       // The start outruns the admission: no stash exists yet, the unbound
       // row refuses the content-less event, and the raw-text branch is
       // suppressed by the row itself — so the start is parked, and the
@@ -11467,15 +11661,6 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
           .queuedPrompts.some((row) => row.serverPromptId === 'prompt-1'),
       ).toBe(true);
       expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
-      // A second image-only submission stays unbound with its admission in
-      // flight: its blank row renders the same placeholder, so a text-match
-      // guard cannot tell it apart from the first prompt's own.
-      await act(async () => {
-        harness
-          .result()
-          .enqueuePrompt('', [{ data: 'c2Vjb25k', media_type: 'image/png' }]);
-        for (let i = 0; i < 4; i++) await Promise.resolve();
-      });
       // The first turn ends: the parked start must be echoed from the bound
       // row's payload, not skipped over the foreign in-flight row.
       await act(async () => {
@@ -12497,6 +12682,137 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       });
       expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
       expect(harness.result().queuedPrompts).toEqual([]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('echoes a resubmission whose ambiguous start settled inside its confirmation', async () => {
+    let rejectConfirmation: ((error: Error) => void) | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false, reason: 'session_idle' });
+      },
+    );
+    sdkMock.actions.submitPrompt
+      .mockResolvedValueOnce({ promptId: 'prompt-1' })
+      .mockImplementation(() => new Promise(() => {}));
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts.mockImplementationOnce(
+          () =>
+            new Promise((_resolve, reject) => {
+              rejectConfirmation = reject;
+            }),
+        );
+        harness.result().enqueuePrompt('same text');
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(1);
+      // An identical second resubmission is in flight, so the started
+      // event's raw echo is suppressed and the start parks on ambiguity.
+      await act(async () => {
+        harness.result().enqueuePrompt('same text');
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-1',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-1',
+              text: 'same text',
+            },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      // The settle defers to the first body still in flight: its own row is
+      // an unbound submission that renders the same text.
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'turn_complete',
+            promptId: 'prompt-1',
+            data: { sessionId: 'session-a', promptId: 'prompt-1' },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      // The body is the last echo path: its confirmation fails after the
+      // settle, so it must consume the surviving park instead of dropping
+      // the row in silence.
+      await act(async () => {
+        rejectConfirmation?.(new Error('pending snapshot unavailable'));
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
+        'same text',
+        undefined,
+        { promptId: 'prompt-1' },
+        undefined,
+      );
+      // The settled prompt's row is gone; the second submission's row — a
+      // different message whose body is still in flight — survives.
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: 'same text',
+          serverState: 'submitting',
+        }),
+      ]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('does not echo an empty bubble for a settled prompt that rendered as nothing', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      // A files-only prompt from a client that declares no id renders as an
+      // empty text: the started event cannot attribute it to any local row
+      // or payload, so it parks with nothing to echo.
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-foreign',
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-foreign',
+              text: '',
+            },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      // At settle there is still no payload source: silence beats an empty
+      // user bubble for a message this client never sent.
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'turn_complete',
+            promptId: 'prompt-foreign',
+            data: { sessionId: 'session-a', promptId: 'prompt-foreign' },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
     } finally {
       await harness.dispose();
     }
