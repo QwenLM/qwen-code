@@ -5,4 +5,8 @@ After=docker.service
 
 [Service]
 Type=oneshot
+# The script budgets `timeout 20m` for the labeled image prune alone, so a
+# oneshot's inherited 90s start timeout would SIGTERM the daily run mid-sweep
+# on exactly the backlog this service exists to clear. Cover the whole budget.
+TimeoutStartSec=30min
 ExecStart=/usr/local/sbin/qwen-docker-cleanup

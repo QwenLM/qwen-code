@@ -1,32 +1,50 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+# Host-level mutex: only one cleanup per host at a time. Lives under /run, so
+# it is root-owned by design and never collides with the shared sandbox daemon
+# lock in the runner's home below.
 exec 9>/run/qwen-docker-cleanup.lock
-flock --nonblock 9 || exit 0
+flock --nonblock 9 || { echo 'skipped: another cleanup is already running' >&2; exit 0; }
 
-mkdir -p /home/github-runner/.cache/qwen-code-ci
-exec 8>/home/github-runner/.cache/qwen-code-ci/docker-sandbox-daemon.lock
-flock --nonblock 8 || exit 0
+# The sandbox daemon lock is created runner-owned by CI jobs on first use
+# (${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock). Never create it
+# here: this service runs as root, and a root-owned directory or lock file in
+# the runner's home would make every later CI job's `exec 9>` fail with EACCES
+# under `set -e`. If it does not exist yet, no CI has run on this host, so
+# there is nothing to serialize against.
+runner_home=$(getent passwd github-runner | cut -d: -f6 || true)
+daemon_lock="${runner_home:-/home/github-runner}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"
+if [[ ! -e "$daemon_lock" ]]; then
+  echo 'skipped: sandbox daemon lock not present (no CI has run yet)' >&2
+  exit 0
+fi
 
+# Reap leaked containers older than 24h. The org.qwen-code.ci.sandbox=true
+# label is set on the sandbox image and inherited by every CI container, so
+# filter on it directly instead of iterating every container and guessing
+# names. `--all` includes stopped containers; the age gate, not the daemon
+# lock, is what protects still-running jobs, so the lock is only taken around
+# the prunes below.
 now=$(date +%s)
 while read -r id; do
   [[ -n "$id" ]] || continue
-
-  read -r created name sandbox_label < <(
-    docker inspect --format '{{.Created}} {{.Name}} {{index .Config.Labels "org.qwen-code.ci.sandbox"}}' "$id" 2>/dev/null
-  ) || continue
-  name=${name#/}
-  if [[ "$sandbox_label" != 'true' && ! "$name" =~ ^qwen-code(-integration-test)?-[0-9a-f]+$ ]]; then
-    continue
-  fi
-
+  created=$(docker inspect --format '{{.Created}}' "$id" 2>/dev/null) || continue
   created_at=$(date -d "$created" +%s 2>/dev/null) || continue
   if ((now - created_at > 86400)); then
-    docker rm --force "$id" || echo "warning: failed to remove stale container $id"
+    docker rm --force "$id" || echo "warning: failed to remove stale container $id" >&2
   fi
-done < <(docker ps --all --quiet)
+done < <(docker ps --all --quiet --filter 'label=org.qwen-code.ci.sandbox=true')
+
+# Take the shared daemon lock exclusively, non-blocking, only around the two
+# prunes — the same shape as the job's own prune step. Holding it across the
+# container loop above would starve CI jobs waiting on `flock --shared --wait
+# 1800` for the whole step. Append (not `>`) so opening the lock never
+# truncates an inode another process is holding a flock on.
+exec 8>>"$daemon_lock"
+flock --nonblock 8 || { echo 'skipped: sandbox daemon lock busy' >&2; exit 0; }
 
 timeout 20m docker image prune --all --force \
   --filter 'label=org.qwen-code.ci.sandbox=true' \
-  --filter 'until=24h' || echo 'warning: Qwen CI image prune failed'
-docker image prune --force --filter 'until=24h' || echo 'warning: dangling image prune failed'
+  --filter 'until=24h' || echo 'warning: Qwen CI image prune failed' >&2
+docker image prune --force --filter 'until=24h' || echo 'warning: dangling image prune failed' >&2
