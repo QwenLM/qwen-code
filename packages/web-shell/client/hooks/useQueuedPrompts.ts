@@ -779,6 +779,12 @@ export function useQueuedPrompts({
             ).length === 1;
           if (serverSideUnique) {
             const submittingIndex = next.indexOf(submittingRow);
+            // An attachment row matched to a prompt already displayed is left
+            // unbound: claiming or content-binding it would misattribute a
+            // deliberate re-send of identical bytes — and the payload would be
+            // unrecoverable. Its own body binds it to the id the daemon
+            // returned for it.
+            if (hasDisplayedPrompt && rowHasAttachments) continue;
             if (hasDisplayedPrompt) {
               // Remember the claim: a submit body that later finds this row
               // gone must not read the splice as a user cancellation. Both
