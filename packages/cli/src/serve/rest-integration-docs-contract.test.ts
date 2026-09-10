@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -104,6 +104,54 @@ function slug(heading: string): string {
 }
 
 describe('REST integration guide contract', () => {
+  it('matches the routes and missing-section notes in the guide tables', () => {
+    const rows = readFileSync(GUIDE, 'utf8')
+      .split('\n')
+      .filter((line) => /^\| .*`(?:GET|POST|PATCH|DELETE) \//.test(line));
+    const routes = rows.flatMap((row) =>
+      [
+        ...row
+          .split('|')[1]
+          .matchAll(/`(?:GET |POST |PATCH |DELETE )?(\/[^`]+)`/g),
+      ].map((match) => ({
+        route: match[1] === '/resume' ? '/session/:id/resume' : match[1],
+        undocumented: /no dedicated/i.test(row),
+      })),
+    );
+    expect(routes.map(({ route }) => route).sort()).toEqual(
+      [...GUIDE_ROUTES].sort(),
+    );
+    expect(
+      routes
+        .filter(({ undocumented }) => undocumented)
+        .map(({ route }) => route)
+        .sort(),
+    ).toEqual([
+      '/glob',
+      '/list',
+      '/session/:id/export',
+      '/session/:id/pending-prompts',
+      '/session/:id/permission/:requestId',
+      '/session/:id/status',
+      '/stat',
+      '/workspace/tools',
+    ]);
+  });
+
+  it('links only to documentation files that exist', () => {
+    const targets = [
+      ...readFileSync(GUIDE, 'utf8').matchAll(
+        /\]\((\.\.?\/[^)#\s]+\.md)(?:#[^)]*)?\)/g,
+      ),
+    ].map((match) => match[1]);
+    expect(targets.length).toBeGreaterThan(0);
+    expect(
+      targets.filter(
+        (target) => !existsSync(path.resolve(path.dirname(GUIDE), target)),
+      ),
+    ).toEqual([]);
+  });
+
   it('promises only routes the daemon still registers', () => {
     const registered = registeredPaths();
     expect(GUIDE_ROUTES.filter((route) => !registered.has(route))).toEqual([]);
