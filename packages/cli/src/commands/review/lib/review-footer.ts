@@ -902,6 +902,29 @@ function linkRefDefLines(lines: string[], i: number): number {
  * toward the verdict, and re-promotes as an unanswerable blocker. This is a
  * judgment projection, not a sanitizer, so it is deliberately fence-blind: a
  * quotation of scaffolding is still not a finding.
+ *
+ * Two further blind spots are DECISIONS, not gaps, and both were measured
+ * against cmark-gfm and an HTML parser before being left alone (#9940
+ * review, round 12 reverse audit):
+ *
+ * FOLDS. A body whose prose sits inside a `<details>` renders as a
+ * collapsed triangle — one click from readable, not invisible — and an arm
+ * that deleted the fold's content would delete a quoted `` `<details>` ``
+ * too, which is the shape a review OF THIS FILE writes. That trade loses a
+ * real finding to catch a readable one, so a fold that hides an inline
+ * comment's whole text posts, and counts.
+ *
+ * BLOCK CONTEXT. The `<!` and `<?` arms hide the same span wherever the
+ * opener stands, though the renderer does not: mid-line a `<?` without its
+ * `?>` forms nothing and its characters are VISIBLE, while at a line's
+ * content start it is an HTML block. Splitting the two was tried and
+ * REVERTED — being right about it needs the block structure this module
+ * deliberately does not model. Measured on a prose-weighted corpus of
+ * 30 000 bodies: the split alone traded 121 → 116 bodies wrongly called
+ * empty for 1426 → 1730 wrongly called visible, and teaching it the
+ * container prefixes (so `><?…` reads as a block) then needs the
+ * container's EXTENT as well — without it, 121 → 3594. The arms stay
+ * position-blind until something in this module knows where a block ends.
  */
 /**
  * The `<!` family and `<?`, taken as ONE left-to-right decision.

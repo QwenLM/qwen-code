@@ -7342,6 +7342,18 @@ describe('composeReview — fixedFindings', () => {
       // An inline link's DESTINATION is raw characters, so a backtick in it
       // is not a delimiter either.
       ['see [x](a`b) <details>` here', 'see [x](a`b) &lt;details>` here'],
+      // A reference link's LABEL is not: MEASURED against cmark-gfm, a
+      // backtick inside `[a`b][c]`, `[x][a`b]`, `[a`b]` or a link
+      // reference definition's own label is an ordinary code-span
+      // delimiter, and the tag it pairs over is code. Ordinary text is
+      // what this pass already reads them as, so nothing special is
+      // needed — the rows are here because two audits reasoned the other
+      // way and neither could build a counterexample (#9940 review,
+      // rounds 11 and 12).
+      ['see [a`b][c] and <details>` here', 'see [a`b][c] and <details>` here'],
+      ['see [x][a`b] <details>` here', 'see [x][a`b] <details>` here'],
+      ['see [a`b] <details>` here', 'see [a`b] <details>` here'],
+      ['[a`b]: /u <details>` here', '[a`b]: /u <details>` here'],
       // …and the `_` rule reaches the LAST label too, not only the one
       // before it: `http://a.b_c` does not link, so the backticks pair and
       // the tag between them is live.
@@ -7411,6 +7423,110 @@ describe('composeReview — fixedFindings', () => {
     expect(escapeTagOpeners('| ` c1 | <script>bad()</script> ` |')).toBe(
       '| ` c1 | <script>bad()</script> ` |',
     );
+  });
+
+  it('every model-written channel reaches the escape as ONE line — the invariant the per-line escape rests on (#9940 review, round 12 reverse audit)', () => {
+    // `escapeTagOpeners` models CommonMark INLINE structure only. That is
+    // correct exactly while every channel folds its text to a line before
+    // it, and that fold lives at five sites, not one — `ingestEntryList`
+    // for the entry channels, the `\s+` normalisation for downgrade
+    // reasons, `collapseEntry` for the disclosures, `scriptLintGate`'s own
+    // push, and compose's refusal of a line break in a ruling note's `by`.
+    // `scriptLintGate` is the proof that a SIXTH channel can appear and be
+    // missed: it joins `bodyCriticals` after `ingestEntryList` has run, and
+    // for a while it did not fold. This case is the guard for the next one
+    // — it drives every channel and asserts the CONSEQUENCE, so a new
+    // channel that skips the fold reddens here instead of rendering a
+    // literal `&amp;lt;` to a reviewer.
+    const multiline = [
+      'the retry helper\n<div class="w"> and `x\nnever clears it',
+      'the retry helper\r\n<div class="w"> and `x\r\nnever clears it',
+      'the retry helper\r<div class="w"> and `x\rnever clears it',
+    ];
+    const carries = (body: string, where: string, escapes = true) => {
+      const lines = body
+        .split('\n')
+        .filter(
+          (l) =>
+            l.includes('retry helper') && !l.includes('qwen-review-ledger'),
+        );
+      // ONE rendered line, the tag inert, and no `&amp;lt;` — the signature
+      // of an escape that ran inside a fence the fold should have closed.
+      expect([where, lines.length]).toEqual([where, 1]);
+      expect([where, body.includes('&amp;lt;')]).toEqual([where, false]);
+      // Inert by ESCAPE on the prose channels; the deferral line is a code
+      // span, where the renderer already holds the tag and an escape would
+      // show the reader a literal `&lt;`.
+      expect([
+        where,
+        escapes
+          ? lines[0]!.includes('&lt;div class="w">')
+          : /^- `[^`]*<div class="w">[^`]*`$/.test(lines[0]!),
+      ]).toEqual([where, true]);
+    };
+    for (const text of multiline) {
+      carries(
+        composeReview(base({ bodyCriticals: [text, 'blocker two'] })).body,
+        'bodyCriticals',
+      );
+      carries(
+        composeReview(base({ cannotTellCriticals: [text] })).body,
+        'cannotTellCriticals',
+      );
+      carries(
+        composeReview(
+          base({
+            suggestionsInline: 1,
+            suggestionsDroppedAsDuplicates: [text],
+          }),
+        ).body,
+        'suggestionsDroppedAsDuplicates',
+      );
+      carries(
+        composeReview(base({ uncoverableChunks: [text] })).body,
+        'uncoverableChunks',
+      );
+      carries(
+        composeReview(base({ unreviewedDimensions: [text] })).body,
+        'unreviewedDimensions',
+      );
+      carries(
+        composeReview(
+          base({
+            suggestionsInline: 1,
+            deferredSuggestions: [
+              {
+                file: 'a.ts',
+                line: 1,
+                source: 'review',
+                severity: 'Suggestion',
+                title: text,
+              },
+            ],
+          }),
+        ).body,
+        'deferredSuggestions',
+        false,
+      );
+      // A ruling note's `by` does not fold — it REFUSES, because the note
+      // is one posted line and a folded `by` would misquote the author.
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by: text }] })),
+      ).toThrow(/must be ONE non-empty line/);
+    }
+    // A quoted FENCE is refused rather than folded on the two Critical
+    // channels: folding it would join the delimiters onto one line and
+    // silently change what the author quoted.
+    const fenced =
+      'the retry helper\n```\n<div class="w">\n```\nnever clears it';
+    for (const input of [
+      { bodyCriticals: [fenced, 'blocker two'] },
+      { cannotTellCriticals: [fenced] },
+    ]) {
+      expect(() => composeReview(base(input))).toThrow(
+        /quotes a code fence its one-line render cannot carry/,
+      );
+    }
   });
 
   it('a raw `<![CDATA[ … > … <details> … ]]>` does not fold the rest of the body away (#9940 review, round 10 reverse audit)', () => {
