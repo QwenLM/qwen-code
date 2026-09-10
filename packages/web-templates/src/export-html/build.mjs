@@ -47,6 +47,15 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // budget the JS bundle alone — the asset a browser must download, parse and
 // compile before the transcript renders. The CSS is a separate, parallel,
 // year-cached asset and is logged rather than budgeted.
+//
+// Last measured at 1,833,894 bytes of JS with 2,302,905 bytes of CSS moved
+// out, by the Lint & Static lane on this branch. Before the split that lane
+// measured the combined bundle at 4,133,282 bytes on main at c3023b3e6d — the
+// measurement #11372 raised these two constants for, and which this branch
+// supersedes because the CSS it counted is no longer in the JS. Keep the
+// warning close to the measurement and the hard ceiling close above it: a cap
+// left far above the measurement is a ratchet with enough slack for a whole
+// dependency family to come back unnoticed.
 const DOCUMENT_RUNTIME_WARNING_BYTES = 1_870_000;
 const MAX_DOCUMENT_RUNTIME_BYTES = 1_930_000;
 
