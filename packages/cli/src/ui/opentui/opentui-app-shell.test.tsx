@@ -1665,4 +1665,31 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     expect(mocks.state.footerProps?.['approvalMode']).toBe(ApprovalMode.YOLO);
     expect(mocks.state.inputProps?.['approvalMode']).toBe(ApprovalMode.YOLO);
   });
+
+  it('does not re-announce when the dialog re-picks the AUTO it already holds', async () => {
+    const { config } = fakeConfig(ApprovalMode.AUTO);
+    renderApp({ config, approvalMode: ApprovalMode.AUTO });
+    await settle();
+    expect(mocks.state.emitAutoModeEntryNotices).toHaveBeenCalledTimes(1);
+
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'approval-mode' },
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/approval-mode');
+
+    const onChanged = mocks.state.dialogProps?.['onApprovalModeChanged'] as
+      | ((mode: ApprovalMode) => void)
+      | undefined;
+    if (typeof onChanged !== 'function') {
+      throw new Error('dialog mount was not given onApprovalModeChanged');
+    }
+    // The dialog opens with the mode it already holds selected, so a bare Enter
+    // re-picks AUTO. The stripped-rules notice is not idempotent, and ink
+    // guards both of its routes against reprinting it.
+    await act(async () => {
+      onChanged(ApprovalMode.AUTO);
+    });
+    expect(mocks.state.emitAutoModeEntryNotices).toHaveBeenCalledTimes(1);
+  });
 });

@@ -279,13 +279,19 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const adoptApprovalMode = useCallback(
     (next: ApprovalMode) => {
       setCurrentApprovalMode(next);
-      // ink's keypress handler also guards on "was not already AUTO", which a
-      // rotation can never satisfy, and its /approval-mode has no guard.
-      if (next === ApprovalMode.AUTO) {
+      // Both of ink's routes guard the notices on "was not already AUTO". A
+      // rotation can never re-enter AUTO, but the dialog can — it opens with
+      // the current mode already selected, so Enter re-picks it and would
+      // reprint the stripped-rules notice, the one part of the entry notices
+      // that is not idempotent.
+      if (
+        next === ApprovalMode.AUTO &&
+        currentApprovalMode !== ApprovalMode.AUTO
+      ) {
         emitAutoModeEntryNotices({ config, settings, addItem: addInfoItem });
       }
     },
-    [config, settings, addInfoItem],
+    [config, settings, addInfoItem, currentApprovalMode],
   );
   const cycleApprovalMode = useCallback(() => {
     const next = nextApprovalMode(config.getApprovalMode());
