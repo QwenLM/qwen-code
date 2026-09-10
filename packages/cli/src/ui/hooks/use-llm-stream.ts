@@ -99,7 +99,10 @@ import {
   isBtwCommand,
   isSlashCommand,
 } from '../utils/commandUtils.js';
-import { findLastUserItemIndex } from '../utils/historyUtils.js';
+import {
+  findLastUserItemIndex,
+  stripLeadingSystemReminders,
+} from '../utils/historyUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import {
   handleAtCommand,
@@ -1607,6 +1610,11 @@ export const useLlmStream = (
 
       if (typeof query === 'string') {
         const trimmedQuery = query.trim();
+        // `trimmedQuery` is the model text and may carry an injected one-shot
+        // reminder envelope; everything the user reads back (transcript,
+        // ↑-recall, cancel-restore) must use this instead.
+        const userVisibleQuery =
+          stripLeadingSystemReminders(trimmedQuery) || trimmedQuery;
 
         // Notification messages (e.g. background agent completions) are
         // pre-processed by the notification drain loop which already
@@ -1635,7 +1643,7 @@ export const useLlmStream = (
         }
 
         onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
-        await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
+        await logger?.logMessage(MessageSenderType.USER, userVisibleQuery);
         canUndoLastLoggedUserMessageRef.current =
           !preserveTurnOwnership && logger != null;
 
@@ -1740,7 +1748,7 @@ export const useLlmStream = (
           const insertedId = addItem(
             {
               type: MessageType.USER,
-              text: trimmedQuery,
+              text: userVisibleQuery,
               promptId: prompt_id,
             } as HistoryItemWithoutId,
             userMessageTimestamp,
@@ -1750,10 +1758,13 @@ export const useLlmStream = (
           // skipped insertion (consecutive-duplicate user); the older
           // matching USER in history carries a DIFFERENT id, so the
           // mismatch makes auto-restore bail correctly in that case.
+          // The text must stay identical to the history item's: the
+          // cancel handler compares the two, and it is also what gets
+          // restored into the composer.
           if (!preserveTurnOwnership) {
             lastTurnUserItemRef.current = {
               id: insertedId,
-              text: trimmedQuery,
+              text: userVisibleQuery,
               ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
             };
           }

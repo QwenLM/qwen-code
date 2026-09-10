@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  SYSTEM_REMINDER_CLOSE,
+  SYSTEM_REMINDER_OPEN,
+} from '@qwen-code/qwen-code-core';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 
 /**
@@ -147,6 +151,32 @@ export function realUserPromptTexts(history: readonly HistoryItem[]): string[] {
         item.text.trim() !== '',
     )
     .map((item) => item.text);
+}
+
+/**
+ * Removes the one-shot `<system-reminder>` envelopes the submit path prepends
+ * to the model text (recovered background agents, worktree restore, workflow
+ * steering — see AppContainer's `handleFinalSubmit`). They are model context,
+ * not something the user typed, so every surface that reads a user prompt back
+ * to them — the live transcript, the ↑-recall log, the cancel-restore buffer,
+ * and the history rebuilt on resume — must show the text without them.
+ *
+ * Leading-only on purpose: an envelope the user pasted into the middle of
+ * their own message stays visible, so a prompt is never partly hidden. An
+ * unterminated envelope stops the scan and is left in place rather than
+ * swallowed.
+ */
+export function stripLeadingSystemReminders(text: string): string {
+  let rest = text;
+  while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
+    const close = rest.indexOf(
+      SYSTEM_REMINDER_CLOSE,
+      SYSTEM_REMINDER_OPEN.length,
+    );
+    if (close === -1) break;
+    rest = rest.slice(close + SYSTEM_REMINDER_CLOSE.length).replace(/^\s+/, '');
+  }
+  return rest;
 }
 
 /**

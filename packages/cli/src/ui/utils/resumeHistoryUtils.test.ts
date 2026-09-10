@@ -377,6 +377,41 @@ describe('resumeHistoryUtils', () => {
     ]);
   });
 
+  describe('injected system-reminder envelopes', () => {
+    const buildUserItems = (record: Record<string, unknown>) => {
+      const conversation = {
+        messages: [record],
+      } as unknown as ConversationRecord;
+      const session: ResumedSessionData = {
+        conversation,
+      } as ResumedSessionData;
+      return buildResumedHistoryItems(session, makeConfig({}), 1_000);
+    };
+
+    it('restores the prompt without the envelope only the model should see', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: {
+          parts: [
+            {
+              text: '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>\n\nmy prompt',
+            },
+          ],
+        },
+      });
+      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+    });
+
+    it('keeps an envelope the user pasted into their own prompt', () => {
+      const text = 'quote: <system-reminder>mine</system-reminder> end';
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text }] },
+      });
+      expect(items).toEqual([{ id: 1_001, type: 'user', text }]);
+    });
+  });
+
   describe('UserPromptSubmit hook context provenance', () => {
     const tagged =
       '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';

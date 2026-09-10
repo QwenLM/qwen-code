@@ -832,6 +832,67 @@ describe('useLlmStream', () => {
     );
   });
 
+  it('keeps an injected system-reminder envelope out of everything the user reads back', async () => {
+    const mockLogMessage = vi.fn();
+    const { result, mockSendMessageStream } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      () => {},
+      { logMessage: mockLogMessage } as any,
+    );
+    const modelText =
+      '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>\n\nreview this';
+
+    await act(async () => {
+      await result.current.submitQuery(modelText, SendMessageType.UserQuery);
+    });
+
+    // The envelope is model context: the request must still carry it.
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe(modelText);
+    // The transcript shows what the user typed, and the ↑-recall log that
+    // seeds the next session's composer must not resurrect the envelope.
+    const userItems = mockAddItem.mock.calls.filter(
+      (call) => call[0].type === MessageType.USER,
+    );
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0][0].text).toBe('review this');
+    expect(mockLogMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      'review this',
+    );
+  });
+
+  it('strips stacked envelopes but never hides user-authored text', async () => {
+    const { result } = renderTestHook();
+    const lastUserText = () =>
+      mockAddItem.mock.calls
+        .filter((call) => call[0].type === MessageType.USER)
+        .at(-1)?.[0].text;
+
+    await act(async () => {
+      await result.current.submitQuery(
+        '<system-reminder>one</system-reminder>\n\n' +
+          '<system-reminder>two</system-reminder>\n\nreview this',
+        SendMessageType.UserQuery,
+      );
+    });
+    expect(lastUserText()).toBe('review this');
+
+    // An envelope the user pasted themselves is content, not injected
+    // context — mid-message and unterminated envelopes stay visible.
+    for (const pasted of [
+      'review <system-reminder>pasted</system-reminder> this',
+      '<system-reminder>never closed\nreview this',
+    ]) {
+      mockAddItem.mockClear();
+      await act(async () => {
+        await result.current.submitQuery(pasted, SendMessageType.UserQuery);
+      });
+      expect(lastUserText()).toBe(pasted);
+    }
+  });
+
   describe('vision bridge gate', () => {
     const imagePart = { inlineData: { mimeType: 'image/png', data: 'abc123' } };
     const enableBridge = (primaryAcceptsImages = false) => {
@@ -12487,9 +12548,11 @@ describe('useLlmStream', () => {
       // consecutive-duplicate user message. (Whether the content flag
       // ended up true depends on whether the stream's mock yielded
       // content before cancel; that's covered by a separate test below.)
+      // `text` mirrors the history item, so it drops the injected
+      // `<system-reminder>` envelope the model text carries.
       expect(info?.lastTurnUserItem).toEqual({
         id: expect.any(Number),
-        text: '<system-reminder>managed</system-reminder>\n\nwhat time is it?',
+        text: 'what time is it?',
         submittedPrompt: 'what time is it?',
       });
       expect(info?.canUndoLastLoggedUserMessage).toBe(true);
@@ -18154,7 +18217,7 @@ describe('useLlmStream', () => {
           cancelSubmitSpy.mock.calls.at(-1)?.[0]?.lastTurnUserItem,
         ).toEqual({
           id: expect.any(Number),
-          text: '<system-reminder>managed</system-reminder>\n\nFirst query',
+          text: 'First query',
           submittedPrompt: 'First query',
         });
         expect(
@@ -18248,7 +18311,7 @@ describe('useLlmStream', () => {
           cancelSubmitSpy.mock.calls.at(-1)?.[0]?.lastTurnUserItem,
         ).toEqual({
           id: expect.any(Number),
-          text: '<system-reminder>managed</system-reminder>\n\nFirst query',
+          text: 'First query',
           submittedPrompt: 'First query',
         });
       } finally {

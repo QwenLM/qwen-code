@@ -38,6 +38,7 @@ import {
   formatHistoryGapNotice,
   indexGapsByChild,
 } from './history-gap-notice.js';
+import { stripLeadingSystemReminders } from './historyUtils.js';
 import { coalesceFindingsHistoryItems } from './findings-coalescing.js';
 import { shouldDisplayGoalStateCause } from './goal-runtime.js';
 import {
@@ -417,7 +418,10 @@ function convertToHistoryItems(
           const projection = projectUserTranscriptForDisplay(record);
           const text =
             payload.userText ||
-            (projection.displayText ?? extractTextFromParts(projection.parts));
+            (projection.displayText ??
+              stripLeadingSystemReminders(
+                extractTextFromParts(projection.parts),
+              ));
           if (text) {
             items.push({ type: 'user', text });
           }
@@ -451,7 +455,9 @@ function convertToHistoryItems(
           projection.displayText ||
           (hasAttachmentReferences
             ? '[User message with attachments]'
-            : extractTextFromParts(projection.parts));
+            : stripLeadingSystemReminders(
+                extractTextFromParts(projection.parts),
+              ));
         if (text) {
           items.push({ type: 'user', text });
         }
