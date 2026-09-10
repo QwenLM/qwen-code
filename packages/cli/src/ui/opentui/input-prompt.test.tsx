@@ -1554,3 +1554,204 @@ describe('OpenTuiInputPrompt follow-up suggestion (U-7)', () => {
     expect(dismiss).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('OpenTuiInputPrompt completion dropdown (F-19)', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+  });
+
+  // The mocked useTerminalDimensions reports width 80, so a row has
+  // columns = 78 and a description keeps 78 - 6 (nested margins, active marker,
+  // gutter) minus whatever the widest label column took. Asserting the exact
+  // surviving prefix is what pins that arithmetic: jsdom has no layout, so an
+  // over-allocated budget only shows up as a wrapped row on a real terminal.
+  async function dropdownText(command: Record<string, unknown>) {
+    mocks.state.slashCommands = [command];
+    const { container } = render(
+      <OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />,
+    );
+    // Let loadInteractiveCommands resolve into commandsRef.
+    await act(async () => {});
+    await typeText('/');
+    return container.textContent ?? '';
+  }
+
+  it('draws the source badge ink puts next to the label', async () => {
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'Diagnose a hung session',
+      source: 'bundled-skill',
+    });
+    expect(text).toContain('stuck [Skill]');
+  });
+
+  it('counts the badge toward the label column, not on top of it', async () => {
+    // `stuck [Skill]` is 13 wide, so the description keeps 78 - 6 - 13 = 59
+    // columns and truncateToWidth leaves 58 x's plus the ellipsis. Without the
+    // badge in the measurement the same row would keep 66.
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'x'.repeat(120),
+      source: 'bundled-skill',
+    });
+    expect(text).toContain(`${'x'.repeat(58)}…`);
+    expect(text).not.toContain(`${'x'.repeat(59)}…`);
+  });
+
+  it('truncates an over-long description to a single line', async () => {
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'x'.repeat(120),
+    });
+    expect(text).toContain(`${'x'.repeat(66)}…`);
+    expect(text).not.toContain('x'.repeat(120));
+  });
+
+  it('collapses the newlines a multi-line SKILL.md description carries', async () => {
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'Diagnose\n  a hung\n  session',
+    });
+    expect(text).toContain('Diagnose a hung session');
+  });
+
+  // The wrap alignment measured on a real terminal only holds while these stay
+  // three separate flex children: concatenated into one text run, a long hint
+  // word-wraps the whole run and the row grows to three lines instead of ink's
+  // two. jsdom has no layout, so this pins the structure behind the frame.
+  it('keeps the label, hint and badge as three separate text runs', async () => {
+    mocks.state.slashCommands = [
+      {
+        name: 'stuck',
+        description: 'Diagnose a hung session',
+        source: 'bundled-skill',
+        argumentHint: '[PID or symptom]',
+      },
+    ];
+    const { container } = render(
+      <OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />,
+    );
+    await act(async () => {});
+    await typeText('/');
+    const runs = [...container.querySelectorAll('span')].map(
+      (span) => span.textContent,
+    );
+    expect(runs).toContain('stuck');
+    expect(runs).toContain(' [PID or symptom]');
+    expect(runs).toContain(' [Skill]');
+    expect(runs).not.toContain('stuck [PID or symptom] [Skill]');
+  });
+});
+
+describe('OpenTuiInputPrompt Shift+Tab approval-mode cycle (F-2)', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+  });
+
+  const shiftTab = baseKeyEvent({
+    name: 'tab',
+    sequence: '\x1b[Z',
+    shift: true,
+  });
+
+  function renderWithCycle(onCycleApprovalMode: () => void) {
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onCycleApprovalMode={onCycleApprovalMode}
+      />,
+    );
+  }
+
+  async function withPlatform(
+    platform: NodeJS.Platform,
+    run: () => Promise<void>,
+  ) {
+    const original = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: platform,
+      configurable: true,
+    });
+    try {
+      await run();
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: original,
+        configurable: true,
+      });
+    }
+  }
+
+  it('cycles on Shift+Tab', async () => {
+    let cycles = 0;
+    renderWithCycle(() => {
+      cycles += 1;
+    });
+    await act(async () => {
+      lastKeyboardHandler()(shiftTab);
+    });
+    expect(cycles).toBe(1);
+  });
+
+  it('leaves a bare Tab alone off Windows', async () => {
+    let cycles = 0;
+    renderWithCycle(() => {
+      cycles += 1;
+    });
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+    });
+    expect(cycles).toBe(0);
+  });
+
+  it('accepts a bare Tab on Windows, where terminals cannot tell them apart', async () => {
+    let cycles = 0;
+    renderWithCycle(() => {
+      cycles += 1;
+    });
+    await withPlatform('win32', async () => {
+      await act(async () => {
+        lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+      });
+    });
+    expect(cycles).toBe(1);
+  });
+
+  it('does not also cycle when the bare Tab was spent on a completion', async () => {
+    // The Windows fallback only needs no extra guard because both completion
+    // consumers return, so a Tab that filled `/help ` never reaches the cycle
+    // branch. ink has to thread shouldBlockTab across two components for the
+    // same reason (#4171).
+    mocks.state.slashCommands = [
+      { name: 'help', description: 'Show help', kind: 'built-in' },
+    ];
+    let cycles = 0;
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onCycleApprovalMode={() => {
+          cycles += 1;
+        }}
+      />,
+    );
+    await act(async () => {});
+    await withPlatform('win32', async () => {
+      await typeText('/he');
+      await act(async () => {
+        lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+      });
+    });
+    expect(currentEditor().plainText).toBe('/help ');
+    expect(cycles).toBe(0);
+  });
+});

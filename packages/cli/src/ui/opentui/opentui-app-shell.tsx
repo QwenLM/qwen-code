@@ -40,19 +40,28 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
-import type { Config, Logger, ApprovalMode } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  type Config,
+  type Logger,
+} from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
-import type { HistoryItem } from '../types.js';
+import {
+  MessageType,
+  type HistoryItem,
+  type HistoryItemWithoutId,
+} from '../types.js';
 import type { OpenTuiRuntime } from './opentui-runtime.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { ShellConfirmationResolution } from './commands-context.js';
-import type { WaitingCallInfo } from './live-session.js';
+import { nextApprovalMode, type WaitingCallInfo } from './live-session.js';
 import type { OpenTuiSubmitOptions } from './live-turn.js';
+import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
@@ -249,6 +258,56 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     (visible: boolean) => setShowSuggestions(visible),
     [],
   );
+  // ink's useAutoAcceptIndicator holds the mode locally so a cycle repaints at
+  // once — the `approvalMode` prop is only re-read when the entry re-renders —
+  // and keeps re-syncing from it so a change made elsewhere (`/plan`, the
+  // approval-mode dialog) still lands. Both routes funnel through
+  // adoptApprovalMode so entering AUTO explains itself either way.
+  const [currentApprovalMode, setCurrentApprovalMode] = useState(approvalMode);
+  useEffect(() => {
+    setCurrentApprovalMode(approvalMode);
+  }, [approvalMode]);
+  // emitAutoModeEntryNotices only ever adds INFO rows.
+  const addInfoItem = useCallback(
+    (item: HistoryItemWithoutId) => {
+      if (item.type === MessageType.INFO) {
+        onTranscriptEvent?.({ type: 'info', text: item.text });
+      }
+    },
+    [onTranscriptEvent],
+  );
+  const adoptApprovalMode = useCallback(
+    (next: ApprovalMode) => {
+      setCurrentApprovalMode(next);
+      // ink's keypress handler also guards on "was not already AUTO", which a
+      // rotation can never satisfy, and its /approval-mode has no guard.
+      if (next === ApprovalMode.AUTO) {
+        emitAutoModeEntryNotices({ config, settings, addItem: addInfoItem });
+      }
+    },
+    [config, settings, addInfoItem],
+  );
+  const cycleApprovalMode = useCallback(() => {
+    const next = nextApprovalMode(config.getApprovalMode());
+    try {
+      config.setApprovalMode(next);
+    } catch (e) {
+      addInfoItem({ type: MessageType.INFO, text: (e as Error).message });
+      return;
+    }
+    adoptApprovalMode(next);
+  }, [config, addInfoItem, adoptApprovalMode]);
+  // ink announces AUTO on mount too, so `--approval-mode auto` and
+  // `tools.approvalMode: "auto"` do not open a session silently in AUTO. The
+  // keypress and dialog routes above never fire for a mode set before start.
+  useEffect(() => {
+    if (approvalMode === ApprovalMode.AUTO) {
+      emitAutoModeEntryNotices({ config, settings, addItem: addInfoItem });
+    }
+    // Intentionally mount-only, as in ink; later entries go through
+    // adoptApprovalMode.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const runShellCommand = useCallback(
     (command: string) => {
       const emit = props.onTranscriptEvent;
@@ -810,7 +869,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             notify={notify}
             fillInput={fillComposer}
             onSelectSetting={handleSelectSetting}
-            onApprovalModeChanged={undefined}
+            onApprovalModeChanged={adoptApprovalMode}
             availableTerminalHeight={props.availableTerminalHeight}
           />
         ) : (
@@ -829,7 +888,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               focus
               streaming={streaming}
               onInterrupt={onInterrupt}
-              approvalMode={approvalMode}
+              approvalMode={currentApprovalMode}
               queueLength={queueLength}
               onPopQueue={onPopQueue}
               composerHandle={props.composerHandle}
@@ -839,6 +898,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               shellModeActive={shellModeActive}
               onToggleShellMode={toggleShellMode}
               onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
+              onCycleApprovalMode={cycleApprovalMode}
             />
           </>
         )}
@@ -846,7 +906,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           <OpenTuiFooter
             config={config}
             streaming={Boolean(streaming)}
-            approvalMode={approvalMode}
+            approvalMode={currentApprovalMode}
             queueLength={queueLength}
             sessionName={host.sessionName}
             shellModeActive={shellModeActive}

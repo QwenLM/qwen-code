@@ -65,8 +65,8 @@ import {
 import path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
-import type { Suggestion } from '../utils/suggestions.js';
-import { cpLen, toCodePoints } from '../utils/textUtils.js';
+import { normalizeDescription, type Suggestion } from '../utils/suggestions.js';
+import { cpLen, toCodePoints, truncateToWidth } from '../utils/textUtils.js';
 import { C } from './theme.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
 import { InputHistory } from './input-history.js';
@@ -214,6 +214,12 @@ export interface InputPromptProps {
    * sibling of the composer rather than a child of it.
    */
   onSuggestionsVisibilityChange?: (visible: boolean) => void;
+  /**
+   * Shift+Tab cycles the approval mode (ink `useAutoAcceptIndicator`). The
+   * shell owns the mode; the composer owns the keystroke, because it is the
+   * only place that knows whether Tab was already spent on a completion.
+   */
+  onCycleApprovalMode?: () => void;
 }
 
 export function OpenTuiInputPrompt(props: InputPromptProps) {
@@ -236,6 +242,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     shellModeActive = false,
     onToggleShellMode,
     onSuggestionsVisibilityChange,
+    onCycleApprovalMode,
   } = props;
 
   const { width } = useTerminalDimensions();
@@ -1016,6 +1023,21 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       onPromptSuggestionDismiss?.();
       return;
     }
+
+    // Shift+Tab cycles the approval mode (ink useAutoAcceptIndicator). Both Tab
+    // consumers above return, so a free Tab reaching here is why the Windows
+    // fallback needs no guard of its own (ink threads shouldBlockTab, #4171).
+    if (
+      key.name === 'tab' &&
+      !key.ctrl &&
+      !key.meta &&
+      (key.shift || process.platform === 'win32')
+    ) {
+      key.preventDefault();
+      onCycleApprovalMode?.();
+      return;
+    }
+
     if (
       key.name === 'right' &&
       !key.ctrl &&
@@ -1135,18 +1157,26 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   }, [showDropdown, onSuggestionsVisibilityChange]);
 
   // Slash-mode labels share one half-width command column, exactly like the
-  // ink SuggestionsDisplay.
+  // ink SuggestionsDisplay. The badge counts toward the column: ink measures
+  // label + argumentHint + sourceBadge, so a `[Skill]` row fits the column it
+  // was sized for.
   const labelColumnWidth = Math.min(
     Math.max(
       ...suggestions.map(
         (s) =>
-          (s.label ?? s.value).length +
-          (s.argumentHint ? 1 + s.argumentHint.length : 0),
+          [s.label ?? s.value, s.argumentHint, s.sourceBadge]
+            .filter(Boolean)
+            .join(' ').length,
       ),
       0,
     ),
     Math.floor(columns * 0.5),
   );
+  // What a row actually has left for description text: the dropdown box nests
+  // its own one-column margins inside the composer's (2), the active marker
+  // takes 2, and the description pays a 2-column gutter. Over-allocating here
+  // does not clip — it wraps the tail onto a second row and doubles the height.
+  const descriptionWidth = Math.max(columns - 6 - labelColumnWidth, 1);
 
   return (
     <box flexDirection="column" marginLeft={1} marginRight={1}>
@@ -1211,16 +1241,43 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
                   <text fg={color}>{isActive ? '> ' : '  '}</text>
                 </box>
                 <box width={labelColumnWidth} flexShrink={0}>
-                  <text fg={color} attributes={isActive ? 1 : 0}>
-                    {label}
-                    {suggestion.argumentHint
-                      ? ` ${suggestion.argumentHint}`
-                      : ''}
-                  </text>
+                  {/* Separate flex children, not one text: an over-long hint then
+                      wraps in the width left after the label. Char wrap matches
+                      ink's hard wrap-ansi; word wrap strands `[` on its own row. */}
+                  <box flexDirection="row">
+                    <box flexShrink={0}>
+                      <text
+                        fg={color}
+                        attributes={isActive ? 1 : 0}
+                        wrapMode="char"
+                      >
+                        {label}
+                      </text>
+                    </box>
+                    {suggestion.argumentHint && (
+                      <text fg={C.dim} wrapMode="char">
+                        {` ${suggestion.argumentHint}`}
+                      </text>
+                    )}
+                    {suggestion.sourceBadge && (
+                      <text
+                        fg={color}
+                        attributes={isActive ? 1 : 0}
+                        wrapMode="char"
+                      >
+                        {` ${suggestion.sourceBadge}`}
+                      </text>
+                    )}
+                  </box>
                 </box>
                 {suggestion.description && (
                   <box paddingLeft={2} flexGrow={1}>
-                    <text fg={color}>{suggestion.description}</text>
+                    <text fg={color}>
+                      {truncateToWidth(
+                        normalizeDescription(suggestion.description),
+                        descriptionWidth,
+                      )}
+                    </text>
                   </box>
                 )}
               </box>

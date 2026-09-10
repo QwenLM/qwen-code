@@ -28,6 +28,7 @@ import type {
   ToolResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import {
+  APPROVAL_MODES,
   ApprovalMode,
   clampInlineMediaPart,
   compactToolResultDisplayForHistory,
@@ -127,23 +128,15 @@ export interface LivePromptOptions {
 }
 
 /**
- * Shift+Tab cycle order (core approval-mode.ts order:
- * [plan, default, auto-edit, auto, yolo]).
+ * Next mode in the Shift+Tab cycle (unset mode cycles from DEFAULT). Cycles
+ * core's own `APPROVAL_MODES`, so the order cannot drift from the enum ink
+ * walks; an unknown mode indexes to -1 and wraps to entry 0, as ink does.
  */
-export const APPROVAL_MODE_CYCLE: readonly ApprovalMode[] = [
-  ApprovalMode.PLAN,
-  ApprovalMode.DEFAULT,
-  ApprovalMode.AUTO_EDIT,
-  ApprovalMode.AUTO,
-  ApprovalMode.YOLO,
-];
-
-/** Next mode in the Shift+Tab cycle (unset mode cycles from DEFAULT). */
 export function nextApprovalMode(
   current: ApprovalMode | undefined,
 ): ApprovalMode {
-  const idx = APPROVAL_MODE_CYCLE.indexOf(current ?? ApprovalMode.DEFAULT);
-  return APPROVAL_MODE_CYCLE[(idx + 1) % APPROVAL_MODE_CYCLE.length];
+  const idx = APPROVAL_MODES.indexOf(current ?? ApprovalMode.DEFAULT);
+  return APPROVAL_MODES[(idx + 1) % APPROVAL_MODES.length];
 }
 
 /** A scheduler call parked in `awaiting_approval`, tracked by the backend. */

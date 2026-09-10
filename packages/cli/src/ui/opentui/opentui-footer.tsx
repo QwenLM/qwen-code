@@ -13,8 +13,7 @@
  *
  * The mode segment is labelled by `formatApprovalModeName`, the mapping the rest
  * of the UI already uses, and stays dim: the composer carries the mode's colour
- * on its prefix glyph and border. ink's `(shift + tab to cycle)` suffix is
- * omitted because shift+tab is not bound in this renderer.
+ * on its prefix glyph and border.
  */
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
@@ -173,11 +172,17 @@ export function OpenTuiFooter({
     (gitBranch ? ` · git:(${gitBranch})` : '') +
     (footerModel ? ` · ${footerModel}` : '') +
     contextLabel;
-  // ink's AutoAcceptIndicator prefixes the default mode with a pause glyph;
-  // formatApprovalModeName is shared with the dialogs and carries none.
+  // ink's AutoAcceptIndicator prefixes the default mode with a pause glyph and
+  // suffixes the cycle shortcut; formatApprovalModeName is shared with the
+  // dialogs and carries neither. Windows gets the bare-Tab wording because
+  // some terminals there cannot tell Shift+Tab from Tab.
+  const cycleText =
+    process.platform === 'win32'
+      ? t('(tab to cycle)')
+      : t('(shift + tab to cycle)');
   const pausePrefix = approvalMode === ApprovalMode.DEFAULT ? '⏸ ' : '';
   const modeLabel = approvalMode
-    ? `${pausePrefix}${formatApprovalModeName(approvalMode)}`
+    ? `${pausePrefix}${formatApprovalModeName(approvalMode)} ${cycleText}`
     : null;
   const modeHint = shellModeActive
     ? 'shell mode enabled (esc to disable)'

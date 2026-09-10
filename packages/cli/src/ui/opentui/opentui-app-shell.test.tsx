@@ -44,7 +44,10 @@ import { act, render, screen } from '@testing-library/react';
 import { OpenTuiApp } from './opentui-app-shell.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
 import { hasSlashCommandPathSeparator } from '../utils/commandUtils.js';
-import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  ToolConfirmationOutcome,
+} from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
@@ -80,6 +83,8 @@ const mocks = vi.hoisted(() => {
     /** Holds the dispatcher's busy slot on this text until released. */
     holdHandleOn: null as string | null,
     releaseHandle: null as null | (() => void),
+    /** ink's AUTO entry notices, spied so the shell's call is observable. */
+    emitAutoModeEntryNotices: vi.fn(),
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -229,6 +234,9 @@ vi.mock('./dialogs-confirm.js', () => ({
 }));
 vi.mock('./exit-lifecycle.js', () => ({
   isExitInProgress: () => mocks.state.exitInProgress,
+}));
+vi.mock('../hooks/useAutoAcceptIndicator.js', () => ({
+  emitAutoModeEntryNotices: mocks.state.emitAutoModeEntryNotices,
 }));
 
 const CONFIG = {} as unknown as Config;
@@ -1513,5 +1521,148 @@ describe('OpenTuiApp shell wiring', () => {
       screen.getByText('Something went wrong while rendering.'),
     ).toBeTruthy();
     boom.mockRestore();
+  });
+});
+
+describe('OpenTuiApp approval-mode cycling (F-2)', () => {
+  beforeEach(() => {
+    mocks.state.handleResult = { kind: 'handled' };
+    mocks.state.handleResults.length = 0;
+    mocks.state.handledTexts.length = 0;
+    mocks.state.host = null;
+    mocks.state.hosts.length = 0;
+    mocks.state.dispatcherConstructions = 0;
+    mocks.state.inputProps = null;
+    mocks.state.dialogProps = null;
+    mocks.state.footerProps = null;
+    mocks.state.exitInProgress = false;
+    mocks.state.emitAutoModeEntryNotices.mockClear();
+  });
+
+  function fakeConfig(
+    initial: ApprovalMode,
+    options: { refuse?: boolean } = {},
+  ) {
+    let mode = initial;
+    const writes: ApprovalMode[] = [];
+    const config = {
+      getApprovalMode: () => mode,
+      setApprovalMode(next: ApprovalMode) {
+        if (options.refuse) throw new Error('approval mode is pinned');
+        writes.push(next);
+        mode = next;
+      },
+    } as unknown as Config;
+    return { config, writes };
+  }
+
+  async function cycleOnce() {
+    const cycle = mocks.state.inputProps?.['onCycleApprovalMode'] as
+      | (() => void)
+      | undefined;
+    if (typeof cycle !== 'function') {
+      throw new Error('composer was not given a cycle handler');
+    }
+    await act(async () => {
+      cycle();
+    });
+  }
+
+  it('writes the next mode and repaints both chrome rows', async () => {
+    const { config, writes } = fakeConfig(ApprovalMode.DEFAULT);
+    renderApp({ config, approvalMode: ApprovalMode.DEFAULT });
+    await settle();
+    await cycleOnce();
+    expect(writes).toEqual([ApprovalMode.AUTO_EDIT]);
+    // The shell holds the mode locally, so the cycle repaints without waiting
+    // for the entry to re-render with a fresh `approvalMode` prop.
+    expect(mocks.state.inputProps?.['approvalMode']).toBe(
+      ApprovalMode.AUTO_EDIT,
+    );
+    expect(mocks.state.footerProps?.['approvalMode']).toBe(
+      ApprovalMode.AUTO_EDIT,
+    );
+  });
+
+  it('explains entering AUTO the way ink does', async () => {
+    const { config } = fakeConfig(ApprovalMode.AUTO_EDIT);
+    renderApp({ config, approvalMode: ApprovalMode.AUTO_EDIT });
+    await settle();
+    await cycleOnce();
+    expect(mocks.state.emitAutoModeEntryNotices).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays quiet when the cycle does not enter AUTO', async () => {
+    const { config } = fakeConfig(ApprovalMode.DEFAULT);
+    renderApp({ config, approvalMode: ApprovalMode.DEFAULT });
+    await settle();
+    await cycleOnce();
+    expect(mocks.state.emitAutoModeEntryNotices).not.toHaveBeenCalled();
+  });
+
+  it('announces a session that starts already in AUTO', async () => {
+    const { config } = fakeConfig(ApprovalMode.AUTO);
+    renderApp({ config, approvalMode: ApprovalMode.AUTO });
+    await settle();
+    // No keystroke: --approval-mode auto and tools.approvalMode both land here
+    // before any handler could run.
+    expect(mocks.state.emitAutoModeEntryNotices).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not announce on mount when the session starts outside AUTO', async () => {
+    const { config } = fakeConfig(ApprovalMode.DEFAULT);
+    renderApp({ config, approvalMode: ApprovalMode.DEFAULT });
+    await settle();
+    expect(mocks.state.emitAutoModeEntryNotices).not.toHaveBeenCalled();
+  });
+
+  it('reports a refused change instead of repainting a mode it does not hold', async () => {
+    const { config, writes } = fakeConfig(ApprovalMode.DEFAULT, {
+      refuse: true,
+    });
+    const events: unknown[] = [];
+    renderApp({
+      config,
+      approvalMode: ApprovalMode.DEFAULT,
+      onTranscriptEvent: (event) => events.push(event),
+    });
+    await settle();
+    await cycleOnce();
+    expect(writes).toEqual([]);
+    expect(mocks.state.footerProps?.['approvalMode']).toBe(
+      ApprovalMode.DEFAULT,
+    );
+    expect(events).toContainEqual({
+      type: 'info',
+      text: 'approval mode is pinned',
+    });
+  });
+
+  it('takes the dialog’s choice into the same state the composer cycles', async () => {
+    const { config } = fakeConfig(ApprovalMode.DEFAULT);
+    renderApp({ config, approvalMode: ApprovalMode.DEFAULT });
+    await settle();
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'approval-mode' },
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/approval-mode');
+
+    const onChanged = mocks.state.dialogProps?.['onApprovalModeChanged'] as
+      | ((mode: ApprovalMode) => void)
+      | undefined;
+    if (typeof onChanged !== 'function') {
+      throw new Error('dialog mount was not given onApprovalModeChanged');
+    }
+    await act(async () => {
+      onChanged(ApprovalMode.YOLO);
+    });
+    // The footer is unmounted while a dialog is open, so close it first: the
+    // staleness this guards against is the chrome the user sees afterwards.
+    await act(async () => {
+      (mocks.state.dialogProps?.['onClose'] as () => void)();
+    });
+    expect(mocks.state.footerProps?.['approvalMode']).toBe(ApprovalMode.YOLO);
+    expect(mocks.state.inputProps?.['approvalMode']).toBe(ApprovalMode.YOLO);
   });
 });

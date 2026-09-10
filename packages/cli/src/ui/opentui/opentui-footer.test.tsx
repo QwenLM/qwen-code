@@ -270,9 +270,9 @@ describe('OpenTuiFooter', () => {
     const text = container.textContent ?? '';
     expect(text).toContain('auto-accept edits');
     expect(text).not.toContain('Auto-edit mode');
-    // shift+tab is not bound to cycle modes in this renderer, so ink's
-    // `(shift + tab to cycle)` suffix would be a dead affordance here.
-    expect(text).not.toContain('shift + tab');
+    // ink's AutoAcceptIndicator suffixes the mode with the cycle shortcut, and
+    // the composer now binds it.
+    expect(text).toContain('auto-accept edits (shift + tab to cycle)');
 
     rerender(
       <OpenTuiFooter
@@ -295,6 +295,30 @@ describe('OpenTuiFooter', () => {
     expect(container.textContent).toContain('⏸ Ask permissions');
   });
 
+  it('words the cycle hint for Windows, where Shift+Tab is not distinguishable', () => {
+    const original = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    });
+    try {
+      const { container } = render(
+        <OpenTuiFooter
+          config={fakeConfig()}
+          streaming
+          approvalMode={ApprovalMode.AUTO}
+        />,
+      );
+      expect(container.textContent).toContain('Auto mode (tab to cycle)');
+      expect(container.textContent).not.toContain('shift + tab');
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: original,
+        configurable: true,
+      });
+    }
+  });
+
   it('orders the hint row as steer, mode, queue', () => {
     const { container } = render(
       <OpenTuiFooter
@@ -305,7 +329,7 @@ describe('OpenTuiFooter', () => {
       />,
     );
     expect(container.textContent).toContain(
-      'Enter to steer · Ctrl+Q to queue · Auto mode · ⏳ 2 queued',
+      'Enter to steer · Ctrl+Q to queue · Auto mode (shift + tab to cycle) · ⏳ 2 queued',
     );
   });
 
