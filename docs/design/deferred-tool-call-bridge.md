@@ -46,6 +46,13 @@ explicitly visible tools, plan lifecycle setup, and replay of older histories
 that contain direct calls to deferred tools. Only `tool_search` stops creating
 new reveal state.
 
+Startup preloading becomes opt-in: `tools.toolSearch.threshold` now defaults to
+`0`. The gate shipped on by default because a reveal then rewrote the
+declaration list and busted the prompt-cache prefix; a bridge reveal does not,
+so always-defer is affordable and the extra `tool_search` round trip is the
+only remaining cost. See
+[ToolSearch preload threshold](toolsearch-preload-threshold.md).
+
 Disabling `tools.toolSearch` also disables `tool_call`; the existing fallback
 continues to declare ordinary deferred schemas eagerly — tools demoted by
 `tools.eager` stay hidden in that mode and are reported as unreachable

@@ -304,8 +304,10 @@ const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 const ACTIVE_TODO_REMINDER_REFRESH_TURNS = 3;
 
 // Default `tools.toolSearch.threshold` (percent of the context window):
-// mirrors the settings-schema default in packages/cli.
-const DEFAULT_TOOL_SEARCH_THRESHOLD = 10;
+// mirrors the settings-schema default in packages/cli. `0` keeps every
+// deferred tool behind the bridge, which is now affordable because a bridge
+// reveal never rewrites the declaration list.
+const DEFAULT_TOOL_SEARCH_THRESHOLD = 0;
 
 import {
   ModelsConfig,

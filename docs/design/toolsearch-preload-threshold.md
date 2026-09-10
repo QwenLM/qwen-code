@@ -5,6 +5,15 @@
 > Session-start threshold preloading remains; tools that stay deferred are now
 > reviewed through ToolSearch and invoked through ToolCall without changing the
 > declaration list.
+>
+> **The default changed from `10` to `0`.** The cache argument below — every
+> reveal rewrote the declaration list and so busted the whole prompt prefix —
+> was the sole reason this gate shipped on by default. The bridge removes that
+> premise: a reveal no longer touches the declaration list, so always-defer is
+> affordable and this now matches Claude Code's default. What preloading still
+> buys is the one `tool_search` round trip before a deferred tool's first use,
+> which is a per-tool one-off rather than the whole-session compounding cost a
+> cache bust was. Raise the threshold to opt back in.
 
 ## Problem
 
@@ -25,7 +34,8 @@ the equivalent gate.
 
 ## Design
 
-New setting `tools.toolSearch.threshold` (number, percent, default `10`).
+New setting `tools.toolSearch.threshold` (number, percent, default `0` —
+preload is opt-in; see the update note above).
 
 At session start (`GeminiClient.startChat`, before the deferred-tools reminder
 is resolved), when ToolSearch is registered and the threshold is > 0:
@@ -39,8 +49,8 @@ is resolved), when ToolSearch is registered and the threshold is > 0:
   `revealDeferredTool` mechanism. All-or-nothing — a partial reveal would
   leave an arbitrary subset behind ToolSearch, and any tool left deferred
   can still bust the cache on first use.
-- Otherwise everything stays deferred (previous behavior). `threshold: 0`
-  restores the old behavior unconditionally.
+- Otherwise everything stays deferred — which, at the `0` default, is
+  unconditionally.
 
 Preloaded tools therefore land in the initial declaration list, are filtered
 out of the startup deferred-tools reminder, and the declaration list stays
@@ -68,12 +78,13 @@ stable for the whole session.
   cache bust, forfeiting exactly the stability the preload buys. When the
   union exceeds the budget everything stays deferred, which matches the
   pre-threshold baseline for bundled tools.
-- **Threshold defaults to 10 (auto-mode on), unlike Claude Code's default.**
-  Claude Code's unset default keeps MCP tools always deferred and makes
-  `auto` opt-in — affordable there because a deferred tool's first use costs
-  no cache invalidation. Here it costs a full prefix rebuild, so the
-  auto-style gate is on by default; `threshold: 0` reproduces Claude Code's
-  always-defer default.
+- **Threshold defaults to 0 (always-defer), matching Claude Code's default.**
+  This shipped as `10` — auto-mode on — because a reveal then cost a full
+  prefix rebuild, which Claude Code's `tool_reference` expansion does not.
+  The bridge removed that asymmetry, so the default now matches Claude Code's
+  always-defer and `threshold: N` is the opt-in. The gate itself is unchanged:
+  it still runs only at session start, still covers bundled and MCP deferred
+  tools alike, and is still all-or-nothing.
 - **Already-revealed tools count toward the budget** so repeated session
   starts (compression also passes through `startChat`) cannot ratchet the
   revealed set past the budget as servers come and go.
