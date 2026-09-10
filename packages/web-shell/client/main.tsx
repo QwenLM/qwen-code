@@ -1,3 +1,5 @@
+// Load resets before any component can import CSS modules.
+import './styles/globals.css';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { useCallback, useEffect, useState } from 'react';
