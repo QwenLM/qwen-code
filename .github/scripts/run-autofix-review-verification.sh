@@ -1593,11 +1593,18 @@ if (( ${#WEAKENED_PATHS[@]} > 0 )); then
     fi
   done
   if [[ -n "${WEAKEN_MISSING}" ]]; then
+    # The ack list must be complete and reachable: the rejection document
+    # is a tail-bounded window of GATE_LOG, and a long list gets cut from
+    # the FRONT while the remedy text below survives — the agent would be
+    # told to ack a list it was never shown (R32-2). The full measured
+    # list rides in its own file, which the repair pass can read from the
+    # same workdir.
+    printf '%s' "${WEAKEN_MISSING}" > "${WORKDIR}/weaken-missing.txt"
     {
       echo 'This round deleted or weakened pre-existing tests without recording the required evidence:'
       printf '%s' "${WEAKEN_MISSING}"
       echo 'Deleting or weakening a test is sound only when the pinned behaviour itself was wrong (show the probe that proves the correct behaviour) or the coverage demonstrably survives in a named surviving test.'
-      echo 'Either restore the assertions, or record the evidence: write <workdir>/test-weakening.json — a JSON array of {"path": "<file>", "reason": "<evidence, at least 40 characters>"} carrying one entry for every file listed above.'
+      echo 'Either restore the assertions, or record the evidence: write <workdir>/test-weakening.json — a JSON array of {"path": "<file>", "reason": "<evidence, at least 40 characters>"} carrying one entry for every file listed above. If the list above is cut off, the complete list is <workdir>/weaken-missing.txt.'
     } >> "${GATE_LOG}"
     reject_fix 'round weakened pre-existing tests without recorded evidence'
   fi

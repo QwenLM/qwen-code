@@ -28524,6 +28524,16 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       'branch_side="$(sed -n 5p <<< "${weaken_pair}")"',
     );
     expect(reviewVerificationRunner).toContain('branch: (if $bs == ""');
+    // R32-2: the ack remedy must not lean on the rejection document's
+    // tail window for the file list — a long list is cut from the front
+    // there, and the agent would ack a list it never saw. The complete
+    // measured list rides in its own workdir file.
+    expect(reviewVerificationRunner).toContain(
+      '> "${WORKDIR}/weaken-missing.txt"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'the complete list is <workdir>/weaken-missing.txt',
+    );
   });
 });
 
@@ -29072,6 +29082,32 @@ describe('count-test-surface: the declared test surface of a test file', () => {
       "reads Playwright's fixme as the disabled registration it is",
       ["test.fixme('a', fn);", "it('b', fn);"],
       { a: 0, e: 1, d: ['test:a'] },
+    ],
+    [
+      'books the Playwright-namespaced API by kind, and utilities as nothing',
+      [
+        // R30-2: `test.describe` is a suite (its disabled state
+        // propagates), `test.beforeEach` is a hook, and the utility
+        // members register no phantom test.
+        "test.describe('a', () => { it('x', () => { expect(one()).toBe(1); }); });",
+        "test.describe.skip('b', () => { it('y', fn); });",
+        'test.beforeEach(() => { expect(setup()).toBe(true); });',
+        "test.step('logged step', fn);",
+        'test.use({ headless: true });',
+      ],
+      { a: 2, e: 1, d: ['describe:b', 'test:y'] },
+    ],
+    [
+      'never folds an operator over a placeholder value',
+      [
+        // R32-1: the object fold carries truthiness, not a value —
+        // `-[]` is -0 (falsy) at runtime, never the placeholder's -1.
+        "it.skipIf(+{})('a', fn);",
+        "it.runIf(-[])('b', fn);",
+        "it('c', { skip: +[] }, fn);",
+        "it('d', { skip: -1 }, fn);",
+      ],
+      { a: 0, e: 3, d: ['test:d'] },
     ],
     [
       'measures a registration through a callback handed by name',
@@ -30029,6 +30065,16 @@ describe('review-address: regression accounting (af-155)', () => {
     expect(
       giveUpArm.indexOf('if [[ -n "${REGRESSED_ROUND:-}" ]]; then'),
     ).toBeLessThan(giveUpArm.indexOf('autofix-regression round='));
+    // R31-2: the fallback note also carries the eval marker, in both arms
+    // — round numbering reads autofix-eval only, so a fallback-posted
+    // round that consumes no number makes the NEXT round reuse it, and
+    // the brake's regression walk then charges two rounds as one.
+    expect(giveUpArm).toContain(
+      '<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->',
+    );
+    expect(giveUpArm).toContain(
+      '<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->',
+    );
     // The emitter's headline shape and the brake's reader agree on where
     // the round number sits.
     expect(pushAndReportScript).toContain(

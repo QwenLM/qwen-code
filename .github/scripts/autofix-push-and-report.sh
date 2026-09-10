@@ -781,6 +781,15 @@ for attempt in 1 2 3; do
           echo "🤖 Round ${ROUND} could not post its report; this note carries the round's regression record only. · 第 ${ROUND} 轮报告发布失败；本条仅记录本轮的回归标记。"
         fi
         echo
+        # R31-2: the note must also carry the eval marker — round numbering
+        # reads autofix-eval only, and a fallback-posted round that consumes
+        # no number makes the NEXT round reuse it (the brake's
+        # regression-round walk then charges two rounds as one).
+        if [[ -n "${PUSHED_HEAD:-}" ]]; then
+          echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
+        else
+          echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
+        fi
         if [[ -n "${PUSHED_HEAD:-}" ]]; then
           echo "<!-- autofix-push round=${NEXT_ROUND} head=${PUSHED_HEAD} pre=${PUSH_PRE} key=${WINDOW:-none} -->"
         fi

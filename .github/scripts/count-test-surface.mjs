@@ -143,6 +143,27 @@ const HOOKS = new Set(['beforeEach', 'beforeAll', 'afterEach', 'afterAll']);
 // the test, which is what `fails`/`failing` already say here.
 const DISABLING = new Set(['skip', 'todo', 'fails', 'failing', 'fixme']);
 const DISABLING_OPTIONS = new Set(['skip', 'todo', 'fails']);
+// Members under a `test.*` root that still name a collector: anything
+// else (`step`, `use`, `setTimeout`, `expect`, …) is a utility call, not
+// a registration (R30-2). `extend` is deliberately absent — it is a
+// factory whose binding is opaque to this instrument.
+const PW_COLLECTOR_MEMBERS = new Set([
+  'skip',
+  'todo',
+  'fails',
+  'failing',
+  'fixme',
+  'only',
+  'each',
+  'for',
+  'concurrent',
+  'sequential',
+  'skipIf',
+  'runIf',
+  'describe',
+  'suite',
+  'configure',
+]);
 
 const ZERO = () => ({
   language: 'other',
@@ -174,6 +195,21 @@ function unwrap(node) {
     n = n.expression;
   }
   return n;
+}
+
+// The object/array/regex and bigint folds carry no VALUE — the former a
+// truthiness placeholder, the latter a Number with the int64 semantics
+// dropped — so neither may feed an operator whose answer depends on the
+// value (unary -/+/~, binary arithmetic, comparison). `!x` and the
+// logical selectors read truthiness alone and stay foldable (R32-1).
+function opaqueLiteral(node) {
+  const u = unwrap(node);
+  return (
+    ts.isObjectLiteralExpression(u) ||
+    ts.isArrayLiteralExpression(u) ||
+    ts.isRegularExpressionLiteral(u) ||
+    ts.isBigIntLiteral(u)
+  );
 }
 
 // The constant value of an expression the parser can decide without a
@@ -222,11 +258,20 @@ function constant(node) {
       case ts.SyntaxKind.ExclamationToken:
         return { known: true, value: !inner.value };
       case ts.SyntaxKind.MinusToken:
-        return { known: true, value: -inner.value };
       case ts.SyntaxKind.PlusToken:
-        return { known: true, value: +inner.value };
       case ts.SyntaxKind.TildeToken:
-        return { known: true, value: ~inner.value };
+        // A placeholder is not an operand: `-[]` is -0 (falsy) where the
+        // placeholder's `-true` reads truthy (R32-1).
+        if (opaqueLiteral(node.operand)) return { known: false };
+        return {
+          known: true,
+          value:
+            node.operator === ts.SyntaxKind.MinusToken
+              ? -inner.value
+              : node.operator === ts.SyntaxKind.PlusToken
+                ? +inner.value
+                : ~inner.value,
+        };
       default:
         return { known: false };
     }
@@ -264,16 +309,9 @@ function constant(node) {
     // truthiness placeholder, not a value (`{} === {}` must never fold
     // true), and a bigint literal folds to a Number for arithmetic, which
     // `1n === 1` would mis-fold.
-    const opaque = (n) => {
-      const u = unwrap(n);
-      return (
-        ts.isObjectLiteralExpression(u) ||
-        ts.isArrayLiteralExpression(u) ||
-        ts.isRegularExpressionLiteral(u) ||
-        ts.isBigIntLiteral(u)
-      );
-    };
-    if (opaque(node.left) || opaque(node.right)) return { known: false };
+    if (opaqueLiteral(node.left) || opaqueLiteral(node.right)) {
+      return { known: false };
+    }
     const a = l.value;
     const b = r.value;
     if (op === ts.SyntaxKind.EqualsEqualsEqualsToken) {
@@ -691,6 +729,32 @@ export function count(text, path) {
       ) {
         const last = chain.calls[chain.calls.length - 1].call;
         const lastArgs = last.arguments ?? [];
+        // Playwright namespaces its API on `test`: the kind and the hook
+        // boundary follow the chain's first member, so `test.describe` is
+        // a SUITE (a disabled one propagates into its body), a
+        // `test.beforeEach` is a hook, and the utility members
+        // (`test.step`, `test.use`, …) register nothing at all (R30-2).
+        const firstMember = chain.members.find((m) => m !== null) ?? null;
+        if (
+          chain.root === 'test' &&
+          firstMember !== null &&
+          HOOKS.has(firstMember)
+        ) {
+          const fns = lastArgs.filter(
+            (a) => ts.isArrowFunction(a) || ts.isFunctionExpression(a),
+          );
+          if (fns.length) hookBodies.push(fns[fns.length - 1]);
+          ts.forEachChild(node, visit);
+          return;
+        }
+        if (
+          chain.root === 'test' &&
+          firstMember !== null &&
+          !PW_COLLECTOR_MEMBERS.has(firstMember)
+        ) {
+          ts.forEachChild(node, visit);
+          return;
+        }
         // A chain that never reaches a registration call registers
         // nothing: `it.skipIf(cond)`, `it.each(cases)` and
         // `test.extend({})` are collector FACTORIES, and binding one to a
@@ -718,7 +782,13 @@ export function count(text, path) {
             }
           }
           registrations.push({
-            kind: ROOTS.get(chain.root) ?? XROOTS.get(chain.root),
+            // A namespaced suite is a SUITE: `test.describe(...)` reads
+            // as kind describe, or its disabled state never propagates
+            // into the body (R30-2).
+            kind:
+              firstMember === 'describe' || firstMember === 'suite'
+                ? 'describe'
+                : (ROOTS.get(chain.root) ?? XROOTS.get(chain.root)),
             title: titleOf(last, sf),
             disabled: registrationDisabled(chain),
             pos: node.getStart(sf),
