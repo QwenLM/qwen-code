@@ -176,6 +176,13 @@ export interface DaemonSessionProviderProps {
   sessionId?: string;
   /** Stable client identity to reuse for session-scoped daemon requests. */
   clientId?: string;
+  /**
+   * Creator attribution forwarded on workspace session load/resume. The
+   * daemon applies it only when the restored session has no persisted source,
+   * so a host (e.g. the VS Code companion) reclaims its pre-attribution
+   * sessions on first open without ever overwriting existing attribution.
+   */
+  sessionSourceType?: string;
   /** Extra create-session options, excluding workspaceCwd which is owned by the provider. */
   createSessionRequest?: Omit<CreateSessionRequest, 'workspaceCwd'>;
   /** Maximum queued SSE events requested from the daemon per subscription. */

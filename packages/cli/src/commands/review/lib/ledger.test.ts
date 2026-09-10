@@ -27,10 +27,12 @@ import {
   LEDGER_MAX_REC_CODES,
   LEDGER_MAX_REC_CODE,
   axesOf,
+  readClaim,
   isLedgerFinding,
   normalizeLedgerFinding,
   type Ledger,
   type LedgerFinding,
+  canonicalLedgerId,
 } from './ledger.js';
 
 const LEDGER: Ledger = {
@@ -707,11 +709,30 @@ describe('LEDGER_ID_READBACK', () => {
     ['R3-2] claim', 'R3-2'],
     ['R3-2 claim', 'R3-2'],
     ['R3-2', 'R3-2'],
+    // The marker-separator grammar admits the full-width colon (`[:：]`),
+    // so a carry written with it reads back — self-sufficient, no space
+    // after it in CJK usage (#9940 review).
+    ['R3-2：claim', 'R3-2'],
+    ['R3-2： claim', 'R3-2'],
     ['R3-2-1: extended run', null],
     ['see R3-2: cross-reference', null],
   ];
   it.each(cases)('reads %j as %j', (line, expected) => {
     expect(LEDGER_ID_READBACK.exec(line)?.[1] ?? null).toBe(expected);
+  });
+});
+
+describe('readClaim — the shared claim-line read (#9940 review)', () => {
+  it('reads the full-width-colon carry the separator grammar admits', () => {
+    // Reverting the terminator admission must turn this red: with it
+    // gone, compose's ledger builder mints a fresh id and the stamp
+    // mints a double-id root (`R2-4: R1-2：…`) under the wrong lineage
+    // (#9940 review).
+    expect(readClaim('R1-2：the claim')).toMatchObject({
+      id: 'R1-2',
+      fixInduced: false,
+    });
+    expect(readClaim('R1-2：the claim').title).toBe('the claim');
   });
 });
 
@@ -1553,5 +1574,30 @@ describe('the finding axes (#10291)', () => {
     expect(axesOf({ d: 'c' })).toBe('certifies-falsely');
     expect(axesOf({ b: 'r' })).toBe('regression');
     expect(axesOf({})).toBe('');
+  });
+});
+
+describe('readClaim — the head-slot read over a multi-line claim', () => {
+  it('splits on a bare CR like every other line model — a second-line token never enters the head slot (#9940 review, audit)', () => {
+    expect(readClaim('R1-2:\r(fix-induced) the new hole')).toEqual({
+      id: 'R1-2',
+      fixInduced: false,
+      title: '',
+    });
+    expect(readClaim('R1-2: (fix-induced) x\rmore').fixInduced).toBe(true);
+  });
+});
+
+describe('canonical ledger ids at the marker (#9940 review, audit 2)', () => {
+  it('normalizeLedgerFinding and serializeLedger write the one spelling', () => {
+    const f = normalizeLedgerFinding({
+      id: 'R02-03',
+      sev: 'C',
+      file: 'src/a.ts',
+      title: 'x',
+    });
+    expect(f.id).toBe('R2-3');
+    expect(canonicalLedgerId('R0-1')).toBe('R0-1');
+    expect(canonicalLedgerId('R007-010')).toBe('R7-10');
   });
 });

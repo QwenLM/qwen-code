@@ -6592,6 +6592,380 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it.each([
+    {
+      label: 'question',
+      sessionSuffix: 'question',
+      toolCall: {
+        toolCallId: 'q1',
+        title: 'Ask user 1 question',
+        _meta: {
+          toolName: 'ask_user_question',
+          qwenInteractionKind: 'user_question',
+          qwenQuestions: [{ question: 'Continue?' }],
+        },
+      },
+      options: [
+        { optionId: 'proceed_once', name: 'Submit', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+      ],
+      waitFlag: 'isWaitingForUserQuestion' as const,
+      voteOptionId: 'proceed_once',
+      payloadMarks: ['Continue?', 'proceed_once'],
+    },
+    {
+      // The guard is kind-agnostic: a plain tool-approval request with no
+      // question metadata must be re-presented exactly like a question.
+      // Narrowing the guard to the question kind must turn this variant red.
+      label: 'tool permission',
+      sessionSuffix: 'permission',
+      toolCall: {
+        toolCallId: 'perm-1',
+        title: 'Run command',
+        kind: 'execute',
+      },
+      options: [
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+      ],
+      waitFlag: 'isWaitingForPermission' as const,
+      voteOptionId: 'allow',
+      // 'allow' alone would be satisfied by the option kind ("allow_once")
+      // even if its optionId were stripped — match the frame's own spelling.
+      payloadMarks: ['Run command', '"optionId":"allow"'],
+    },
+  ])(
+    'serves the in-memory journal on refreshed load while a $label is pending',
+    async (variant) => {
+      const handle = makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              updates: [
+                {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'initial prompt' },
+                },
+              ],
+            },
+          },
+        }),
+        extMethodImpl: (method, params) => {
+          if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+            throw new Error(`unexpected extMethod ${method}`);
+          }
+          // The persisted page can never contain the pending interaction:
+          // permission requests are journaled in memory only.
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'persisted tail' },
+                  _meta: { 'qwen.session.recordId': 'record-persisted' },
+                },
+              },
+            ],
+            hasMore: false,
+          };
+        },
+      });
+      // Count only the refreshed-load loop's fetches (identified by the
+      // requested page size); the pagination-anchor backfill fetches with a
+      // different fixed limit and must not be attributed to the guard.
+      const loopTranscriptFetches = () =>
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_STATUS_EXT_METHODS.sessionTranscript &&
+            (call.params as { limit?: number }).limit === 100,
+        ).length;
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const loaded = await bridge.loadSession({
+        sessionId: `persisted-pending-${variant.sessionSuffix}`,
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      // Park the session on an unanswered interaction. A parked
+      // Goal/background-notification turn does not keep promptActive set, so
+      // the refreshed-load guard would otherwise serve the persisted page
+      // with an empty liveJournal — stranding the interaction (badge on, no
+      // card) for the re-opening client.
+      const pendingAnswer = (
+        handle.agentConnection as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: loaded.sessionId,
+        toolCall: variant.toolCall,
+        options: variant.options,
+      });
+      await vi.waitFor(() =>
+        expect(
+          bridge.getSessionSummary(loaded.sessionId)?.[variant.waitFlag],
+        ).toBe(true),
+      );
+
+      const reopened = await bridge.loadSession({
+        sessionId: loaded.sessionId,
+        workspaceCwd: WS_A,
+        clientId: 'client-reopen',
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      const frame = (reopened.liveJournal ?? []).find(
+        (event) => event.type === 'permission_request',
+      );
+      expect(frame).toBeDefined();
+      // The re-presented card must carry the payload that makes it
+      // answerable (questions + options), not merely the frame's type.
+      for (const mark of variant.payloadMarks) {
+        expect(JSON.stringify(frame?.data)).toContain(mark);
+      }
+      // The card the client renders must be the interaction the mediator
+      // accepts a vote for: the delivered frame's id equals the registry key.
+      const frameRequestId = (frame?.data as { requestId?: string } | undefined)
+        ?.requestId;
+      expect(frameRequestId).toBeDefined();
+      const registryRequestId = bridge.getSessionSummary(loaded.sessionId)
+        ?.pendingInteractions?.[0]?.requestId;
+      expect(frameRequestId).toBe(registryRequestId);
+      // The guard's observable effect: no persisted-page fetch happens at all
+      // while an interaction is pending (this fixture's journal emits no
+      // history_truncated marker, so the anchor backfill fetches nothing).
+      expect(loopTranscriptFetches()).toBe(0);
+      // The guarded branch switches the history source to the in-memory
+      // replay; the session's prior history must survive the switch.
+      const reopenedEvents = [
+        ...(reopened.compactedReplay ?? []),
+        ...(reopened.liveJournal ?? []),
+      ];
+      expect(
+        reopenedEvents.some(
+          (event) =>
+            event.type === 'session_update' &&
+            JSON.stringify(event.data).includes('initial prompt'),
+        ),
+      ).toBe(true);
+
+      // Delivery alone is not enough — the re-presented card must stay
+      // answerable for the client that just attached: vote with its
+      // registered identity through the session-scoped route.
+      expect(
+        bridge.respondToSessionPermission(
+          loaded.sessionId,
+          frameRequestId!,
+          {
+            outcome: {
+              outcome: 'selected',
+              optionId: variant.voteOptionId,
+            },
+          },
+          { clientId: reopened.clientId },
+        ),
+      ).toBe(true);
+      await expect(pendingAnswer).resolves.toEqual({
+        outcome: { outcome: 'selected', optionId: variant.voteOptionId },
+      });
+      await bridge.shutdown();
+    },
+  );
+
+  it.each([
+    {
+      label: 'question',
+      sessionSuffix: 'question',
+      toolCall: {
+        toolCallId: 'q-mid-fetch',
+        title: 'Ask user 1 question',
+        _meta: {
+          toolName: 'ask_user_question',
+          qwenInteractionKind: 'user_question',
+          qwenQuestions: [{ question: 'Continue?' }],
+        },
+      },
+      options: [
+        { optionId: 'proceed_once', name: 'Submit', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+      ],
+      waitFlag: 'isWaitingForUserQuestion' as const,
+      voteOptionId: 'proceed_once',
+      payloadMarks: ['Continue?', 'proceed_once'],
+    },
+    {
+      // The loop-exit break is kind-agnostic: a plain tool approval arriving
+      // mid-fetch must stop the retry exactly like a question does.
+      label: 'tool permission',
+      sessionSuffix: 'permission',
+      toolCall: {
+        toolCallId: 'perm-mid-fetch',
+        title: 'Run command',
+        kind: 'execute',
+      },
+      options: [
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+      ],
+      waitFlag: 'isWaitingForPermission' as const,
+      voteOptionId: 'allow',
+      // 'allow' alone would be satisfied by the option kind ("allow_once");
+      // match the frame's own spelling so a stripped optionId fails here.
+      payloadMarks: ['Run command', '"optionId":"allow"'],
+    },
+  ])(
+    'stops refetching the persisted page when a $label arrives mid-fetch',
+    async (variant) => {
+      let pendingAnswer: Promise<unknown> | undefined;
+      let reopening = false;
+      let interactionRegistered = false;
+      const handle = makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              updates: [
+                {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'initial prompt' },
+                },
+              ],
+            },
+          },
+        }),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+            throw new Error(`unexpected extMethod ${method}`);
+          }
+          if (reopening && pendingAnswer === undefined) {
+            // The interaction arrives while the reopened load's transcript
+            // fetch is in flight: publish + registration land before the
+            // page returns. Read the session id from the request itself —
+            // reading the later-declared `loaded` binding here would be a
+            // TDZ hazard if a cold load ever fetched a page.
+            pendingAnswer = (
+              handle.agentConnection as unknown as {
+                requestPermission(p: unknown): Promise<unknown>;
+              }
+            ).requestPermission({
+              sessionId: String(params['sessionId']),
+              toolCall: variant.toolCall,
+              options: variant.options,
+            });
+            await vi.waitFor(() =>
+              expect(
+                bridge.getSessionSummary(String(params['sessionId']))?.[
+                  variant.waitFlag
+                ],
+              ).toBe(true),
+            );
+            // Recorded outside the production catch: a failed precondition
+            // inside this mock would otherwise be swallowed by
+            // refreshedReplayFieldsFor's catch and leave the test green
+            // without ever exercising the guarded path.
+            interactionRegistered = true;
+          }
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'persisted tail' },
+                  _meta: { 'qwen.session.recordId': 'record-persisted' },
+                },
+              },
+            ],
+            hasMore: false,
+          };
+        },
+      });
+      // Count only the refreshed-load loop's fetches (identified by the
+      // requested page size); the pagination-anchor backfill fetches with a
+      // different fixed limit and must not be attributed to the guard.
+      const loopTranscriptFetches = () =>
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_STATUS_EXT_METHODS.sessionTranscript &&
+            (call.params as { limit?: number }).limit === 100,
+        ).length;
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const loaded = await bridge.loadSession({
+        sessionId: `persisted-mid-fetch-${variant.sessionSuffix}`,
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      // Premise: the cold load issues no fetch, so the one fetch asserted
+      // below belongs to the reopened load.
+      expect(loopTranscriptFetches()).toBe(0);
+      reopening = true;
+      const reopened = await bridge.loadSession({
+        sessionId: loaded.sessionId,
+        workspaceCwd: WS_A,
+        clientId: 'client-reopen',
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      expect(interactionRegistered).toBe(true);
+      // Exactly one fetch: the interaction arrived mid-fetch, so the loop
+      // leaves instead of re-fetching a page that cannot contain it.
+      expect(loopTranscriptFetches()).toBe(1);
+      // The fetched page was discarded, not spliced in front of the journal.
+      expect(
+        [
+          ...(reopened.compactedReplay ?? []),
+          ...(reopened.liveJournal ?? []),
+        ].some((event) =>
+          JSON.stringify(event.data).includes('persisted tail'),
+        ),
+      ).toBe(false);
+
+      const frame = (reopened.liveJournal ?? []).find(
+        (event) => event.type === 'permission_request',
+      );
+      expect(frame).toBeDefined();
+      for (const mark of variant.payloadMarks) {
+        expect(JSON.stringify(frame?.data)).toContain(mark);
+      }
+      const frameRequestId = (frame?.data as { requestId?: string } | undefined)
+        ?.requestId;
+      expect(frameRequestId).toBeDefined();
+      const registryRequestId = bridge.getSessionSummary(loaded.sessionId)
+        ?.pendingInteractions?.[0]?.requestId;
+      expect(frameRequestId).toBe(registryRequestId);
+
+      expect(
+        bridge.respondToSessionPermission(
+          loaded.sessionId,
+          frameRequestId!,
+          {
+            outcome: {
+              outcome: 'selected',
+              optionId: variant.voteOptionId,
+            },
+          },
+          { clientId: reopened.clientId },
+        ),
+      ).toBe(true);
+      await expect(pendingAnswer).resolves.toEqual({
+        outcome: { outcome: 'selected', optionId: variant.voteOptionId },
+      });
+      await bridge.shutdown();
+    },
+  );
+
   it('keeps the current turn error when refreshing from persisted history', async () => {
     const handle = makeChannel({
       promptImpl: () => {
