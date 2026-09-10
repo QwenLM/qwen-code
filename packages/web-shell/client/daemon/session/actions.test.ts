@@ -26,6 +26,27 @@ import type {
 } from './types';
 
 describe('getConnectionAfterSessionClear', () => {
+  it.each(['sendPrompt', 'submitPrompt'] as const)(
+    'preserves declared text before host and attachment expansion through %s',
+    async (method) => {
+      const session = createMockSession('session-a');
+      const { actions } = createActionsHarness({ session });
+      const pending = actions[method]('host-expanded request', {
+        submittedPrompt: ' original question\n',
+      });
+      await vi.waitFor(() => expect(session.submitPrompt).toHaveBeenCalled());
+      expect(session.submitPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: [{ type: 'text', text: 'host-expanded request' }],
+          _meta: { 'qwen.submittedPrompt': ' original question\n' },
+        }),
+        ...(method === 'sendPrompt' ? [expect.any(AbortSignal)] : []),
+      );
+      if (method === 'sendPrompt') await actions.cancel();
+      await pending;
+    },
+  );
+
   it('clears session fields for the session being detached', () => {
     const next = getConnectionAfterSessionClear(
       {

@@ -37,7 +37,8 @@ export type ResumeRefusal =
   | 'diff-unreadable' // the captured diff is gone or cannot be read
   | 'diff-hash-mismatch' // the diff file changed since it was captured
   | 'head-moved' // the PR head advanced — the once-per-review restart case
-  | 'resume-cap'; // this review has already resumed RESUME_MAX times
+  | 'resume-cap' // this review has already resumed RESUME_MAX times
+  | 'worktree-untrusted'; // the tree's gitfile no longer resolves to its own admin entry
 
 export type ResumeAssessment =
   | { ok: true }
