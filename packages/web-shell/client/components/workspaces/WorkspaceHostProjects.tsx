@@ -1,12 +1,12 @@
-import { useContext, useEffect, useState } from 'react';
+import { useContext, useEffect } from 'react';
 import { DaemonClient } from '@qwen-code/sdk/daemon';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import { getDaemonToken } from '../../config/daemon';
 import {
   WorkspaceHostsEnabled,
-  readWorkspaceHosts,
   rememberWorkspaceHost,
   openHostedWorkspace,
+  useWorkspaceHosts,
 } from '../../config/workspace-hosts';
 import { useI18n } from '../../i18n';
 import { Laptop, Folder, Server } from 'lucide-react';
@@ -23,16 +23,7 @@ function HostProjects() {
     workspace.baseUrl || window.location.origin,
     window.location.origin,
   ).origin;
-  const [hosts, setHosts] = useState(readWorkspaceHosts);
-  useEffect(() => {
-    const update = () => setHosts(readWorkspaceHosts());
-    window.addEventListener('qwen-workspace-hosts', update);
-    window.addEventListener('storage', update);
-    return () => {
-      window.removeEventListener('qwen-workspace-hosts', update);
-      window.removeEventListener('storage', update);
-    };
-  }, []);
+  const hosts = useWorkspaceHosts();
   useEffect(() => {
     if (workspace.capabilities?.workspaces) {
       rememberWorkspaceHost(
@@ -66,6 +57,11 @@ function HostProjects() {
     };
   }, [origin]);
   const otherHosts = hosts.filter((host) => host.origin !== origin);
+  // Until another host is saved there is nowhere else to go, so a browser that
+  // only uses the page's own daemon keeps the plain project list.
+  if (origin === window.location.origin && otherHosts.length === 0) {
+    return null;
+  }
   if (
     origin !== window.location.origin &&
     !otherHosts.some((host) => host.origin === window.location.origin)

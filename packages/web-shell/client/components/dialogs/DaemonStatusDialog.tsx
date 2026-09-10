@@ -1,11 +1,13 @@
 import {
   useCallback,
+  useContext,
   useEffect,
   useRef,
   useState,
   type KeyboardEvent,
   type ReactNode,
 } from 'react';
+import { WorkspaceHostsEnabled } from '../../config/workspace-hosts';
 import {
   useStatusReport,
   useWorkspace,
@@ -626,6 +628,9 @@ function DaemonStatusDialogInner({
 }) {
   const { t } = useI18n();
   const workspace = useWorkspace();
+  // Switching targets navigates the page, which only the standalone shell
+  // owns; embedders keep a read-only view of the connection.
+  const hostsEnabled = useContext(WorkspaceHostsEnabled);
   const [connectionAddress, setConnectionAddress] = useState(workspace.baseUrl);
   const [connectionToken, setConnectionToken] = useState('');
   const [connectionError, setConnectionError] = useState('');
@@ -826,57 +831,59 @@ function DaemonStatusDialogInner({
               label={t('daemon.connection.state')}
               value={t(CONNECTION_STATUS_KEYS[workspace.status])}
             />
-            <form
-              className="mt-3 flex flex-col gap-2"
-              onSubmit={(event) => {
-                event.preventDefault();
-                const daemonOrigin = getAllowedDaemonOrigin(
-                  connectionAddress.trim(),
-                );
-                if (!daemonOrigin) {
-                  setConnectionError(t('daemon.connection.invalid'));
-                  return;
-                }
-                setConnectionError('');
-                onChangeTarget(
-                  daemonOrigin,
-                  connectionToken.trim() || getDaemonToken(daemonOrigin),
-                );
-              }}
-            >
-              <Label htmlFor="daemon-connection-address">
-                {t('daemon.connection.address')}
-              </Label>
-              <Input
-                id="daemon-connection-address"
-                type="url"
-                inputMode="url"
-                autoComplete="url"
-                value={connectionAddress}
-                onChange={(event) => {
-                  setConnectionAddress(event.target.value);
-                  setConnectionToken('');
+            {hostsEnabled && (
+              <form
+                className="mt-3 flex flex-col gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const daemonOrigin = getAllowedDaemonOrigin(
+                    connectionAddress.trim(),
+                  );
+                  if (!daemonOrigin) {
+                    setConnectionError(t('daemon.connection.invalid'));
+                    return;
+                  }
+                  setConnectionError('');
+                  onChangeTarget(
+                    daemonOrigin,
+                    connectionToken.trim() || getDaemonToken(daemonOrigin),
+                  );
                 }}
-              />
-              <Label htmlFor="daemon-connection-token">
-                {t('daemon.connection.token')}
-              </Label>
-              <Input
-                id="daemon-connection-token"
-                type="password"
-                autoComplete="off"
-                value={connectionToken}
-                onChange={(event) => setConnectionToken(event.target.value)}
-              />
-              {connectionError && (
-                <p role="alert" className="text-xs text-destructive">
-                  {connectionError}
-                </p>
-              )}
-              <Button type="submit" size="sm" className="mt-1 w-full">
-                {t('daemon.connection.connect')}
-              </Button>
-            </form>
+              >
+                <Label htmlFor="daemon-connection-address">
+                  {t('daemon.connection.address')}
+                </Label>
+                <Input
+                  id="daemon-connection-address"
+                  type="url"
+                  inputMode="url"
+                  autoComplete="url"
+                  value={connectionAddress}
+                  onChange={(event) => {
+                    setConnectionAddress(event.target.value);
+                    setConnectionToken('');
+                  }}
+                />
+                <Label htmlFor="daemon-connection-token">
+                  {t('daemon.connection.token')}
+                </Label>
+                <Input
+                  id="daemon-connection-token"
+                  type="password"
+                  autoComplete="off"
+                  value={connectionToken}
+                  onChange={(event) => setConnectionToken(event.target.value)}
+                />
+                {connectionError && (
+                  <p role="alert" className="text-xs text-destructive">
+                    {connectionError}
+                  </p>
+                )}
+                <Button type="submit" size="sm" className="mt-1 w-full">
+                  {t('daemon.connection.connect')}
+                </Button>
+              </form>
+            )}
           </Card>
           <Card title={t('daemon.overview.title')}>
             {daemon.qwenCodeVersion && (

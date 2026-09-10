@@ -16888,6 +16888,7 @@ export function App({
           {!lockedWorkspaceCwd && showAddWorkspaceDialog && workspaceHostsEnabled && (
             <AddHostedWorkspaceDialog
               onClose={() => setShowAddWorkspaceDialog(false)}
+              onAddCurrent={handleAddWorkspace}
             />
           )}
           {!lockedWorkspaceCwd && showAddWorkspaceDialog && !workspaceHostsEnabled && (

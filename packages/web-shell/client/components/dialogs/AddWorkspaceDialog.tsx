@@ -415,7 +415,16 @@ export function AddWorkspaceDialog({
                   disabled={submitting}
                   onClick={() => {
                     const trimmed = path.replace(/[\\/]+$/, '');
-                    const index = trimmed.lastIndexOf(hostSep);
+                    // A drive root is its own parent; `hostSep` is only known
+                    // once suggestions arrive, so split on either separator.
+                    if (/^[A-Za-z]:$/.test(trimmed)) {
+                      setPath(`${trimmed}\\`);
+                      return;
+                    }
+                    const index = Math.max(
+                      trimmed.lastIndexOf('/'),
+                      trimmed.lastIndexOf('\\'),
+                    );
                     setPath(index >= 0 ? trimmed.slice(0, index + 1) : hostSep);
                   }}
                 >

@@ -52,6 +52,8 @@ interface AuthCopy {
   enterToken: string;
   policyBlocked: string;
   invalidAddress: string;
+  confirmTarget: string;
+  remoteHint: string;
   addressLabel: string;
   tokenLabel: string;
   connect: string;
@@ -77,6 +79,10 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     policyBlocked:
       'Access blocked by the daemon Origin or Host policy. Open its direct address, or check --allow-origin for cross-origin access.',
     invalidAddress: 'Invalid daemon address. Enter an HTTP or HTTPS origin.',
+    confirmTarget:
+      'This page points to a daemon this browser has not connected to before. Connect only if you trust it.',
+    remoteHint:
+      'The token is sent to the address shown above. Enter only a token issued by that daemon.',
     addressLabel: 'Daemon address',
     tokenLabel: 'Bearer token (optional)',
     connect: 'Connect',
@@ -97,6 +103,9 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     policyBlocked:
       '访问被守护进程的 Origin 或 Host 策略拦截。请直接打开守护进程地址，或检查 --allow-origin 以允许跨域访问。',
     invalidAddress: 'Daemon 地址无效。请输入 HTTP 或 HTTPS origin。',
+    confirmTarget:
+      '此页面指向一个本浏览器从未连接过的守护进程。仅在你信任它时再连接。',
+    remoteHint: '令牌会发送到上方显示的地址。请只输入该守护进程签发的令牌。',
     addressLabel: 'Daemon 地址',
     tokenLabel: 'Bearer token（可选）',
     connect: '连接',
@@ -126,6 +135,7 @@ export function StandaloneAuth({
   language = 'en',
   theme = WebShellThemeId.Dark,
   invalidTarget = false,
+  unconfirmedTarget = false,
   onChangeTarget = navigateToDaemon,
   children,
 }: {
@@ -137,6 +147,8 @@ export function StandaloneAuth({
   /** Selects the theme palette the app root will apply after mount. */
   theme?: WebShellTheme;
   invalidTarget?: boolean;
+  /** The daemon came from a link to an origin this browser has not used. */
+  unconfirmedTarget?: boolean;
   onChangeTarget?: (daemonOrigin: string, token?: string) => void;
   children: (token: string | undefined) => ReactNode;
 }) {
@@ -146,10 +158,18 @@ export function StandaloneAuth({
   const [hosts] = useState(readWorkspaceHosts);
   const [token, setToken] = useState(initialToken ?? '');
   const [accepted, setAccepted] = useState<{ token?: string }>();
-  const [status, setStatus] = useState(
-    invalidTarget ? copy.invalidAddress : copy.connecting,
+  // Nothing is sent to an unconfirmed target until the user presses Connect.
+  const [confirming, setConfirming] = useState(
+    unconfirmedTarget && !invalidTarget,
   );
-  const [busy, setBusy] = useState(!invalidTarget);
+  const [status, setStatus] = useState(
+    invalidTarget
+      ? copy.invalidAddress
+      : confirming
+        ? copy.confirmTarget
+        : copy.connecting,
+  );
+  const [busy, setBusy] = useState(!invalidTarget && !confirming);
   const [needsToken, setNeedsToken] = useState(false);
   // Every probe — the first one, a manual retry, and each auto-retry — is one
   // bump of this counter, so exactly one effect run owns the in-flight request
@@ -264,7 +284,7 @@ export function StandaloneAuth({
   );
 
   useEffect(() => {
-    if (invalidTarget) return undefined;
+    if (invalidTarget || confirming) return undefined;
     void connect(candidateRef.current);
     return () => {
       controllerRef.current?.abort();
@@ -272,7 +292,7 @@ export function StandaloneAuth({
       if (timerRef.current !== null) clearTimeout(timerRef.current);
       timerRef.current = null;
     };
-  }, [connect, attempt, invalidTarget]);
+  }, [connect, attempt, invalidTarget, confirming]);
 
   if (accepted) return children(accepted.token);
   const normalizedAddress = getAllowedDaemonOrigin(address.trim());
@@ -323,6 +343,8 @@ export function StandaloneAuth({
                 );
                 return;
               }
+              // Confirming an unfamiliar target starts its first probe.
+              if (confirming) setConfirming(false);
               operatorProbeRef.current = true;
               candidateRef.current = token.trim();
               setAttempt((n) => n + 1);
@@ -360,7 +382,7 @@ export function StandaloneAuth({
               className="h-11 w-full text-base"
               disabled={busy && !changingTarget}
             >
-              {changingTarget
+              {changingTarget || confirming
                 ? copy.connect
                 : busy
                   ? copy.connecting
@@ -403,6 +425,7 @@ export function StandaloneAuth({
         <CardFooter className="justify-center">
           <p className="text-center text-xs text-muted-foreground">
             {copy.hint}
+            {baseUrl !== window.location.origin && ` ${copy.remoteHint}`}
           </p>
         </CardFooter>
       </Card>

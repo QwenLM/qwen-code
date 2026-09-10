@@ -243,10 +243,37 @@ export function buildDaemonConnectionUrl(
   return url.toString();
 }
 
+// A `?daemon=` link can name any origin, so a page load connects to an origin
+// it has not used before only after the user picked it in this tab. The
+// marker is one-shot: the next load consumes it, and a successful connection
+// then records the origin in the workspace host catalog.
+const DAEMON_TARGET_CONFIRMATION_KEY = 'qwen-daemon-target-confirmed';
+
+export function confirmDaemonTarget(origin: string): void {
+  try {
+    window.sessionStorage.setItem(DAEMON_TARGET_CONFIRMATION_KEY, origin);
+  } catch {
+    // Without storage the next load asks for confirmation again.
+  }
+}
+
+export function consumeDaemonTargetConfirmation(origin: string): boolean {
+  try {
+    const confirmed = window.sessionStorage.getItem(
+      DAEMON_TARGET_CONFIRMATION_KEY,
+    );
+    window.sessionStorage.removeItem(DAEMON_TARGET_CONFIRMATION_KEY);
+    return confirmed === origin;
+  } catch {
+    return false;
+  }
+}
+
 export function navigateToDaemon(raw: string, token?: string): void {
   const daemonOrigin = getAllowedDaemonOrigin(raw);
   const nextUrl = buildDaemonConnectionUrl(raw, window.location.href);
   if (!daemonOrigin || !nextUrl) return;
   if (token !== undefined) persistDaemonToken(token.trim(), daemonOrigin);
+  confirmDaemonTarget(daemonOrigin);
   window.location.assign(nextUrl);
 }

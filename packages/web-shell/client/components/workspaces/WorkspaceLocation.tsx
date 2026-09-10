@@ -1,11 +1,20 @@
 import { Laptop, Server } from 'lucide-react';
 import { getDaemonBaseUrl } from '../../config/daemon';
+import { useWorkspaceHosts } from '../../config/workspace-hosts';
 import { useI18n } from '../../i18n';
 
 export function WorkspaceLocation({ cwd }: { cwd?: string }) {
   const { t } = useI18n();
+  const hosts = useWorkspaceHosts();
   const origin = getDaemonBaseUrl();
-  const remote = origin && origin !== window.location.origin;
+  const remote = Boolean(origin) && origin !== window.location.origin;
+  // Naming the host only helps once a project can live on more than one.
+  if (
+    !remote &&
+    !hosts.some((host) => host.origin !== window.location.origin)
+  ) {
+    return null;
+  }
   const Icon = remote ? Server : Laptop;
   const label = remote ? origin : t('workspaceHost.local');
   return (

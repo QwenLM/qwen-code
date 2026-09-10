@@ -4023,7 +4023,7 @@ describe('createServeApp', () => {
       expect(res.headers['cache-control']).toContain('no-cache');
     });
 
-    it('allows the explicitly selected remote daemon in the shell CSP', async () => {
+    it('adds the validated ?daemon= origin to the shell CSP connect-src', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
       const res = await request(app)
         .get('/?daemon=https%3A%2F%2Fdaemon.example.com%3A4170')

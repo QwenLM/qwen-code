@@ -1,13 +1,36 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { confirmDaemonTarget } from './daemon';
 import {
   getWorkspaceReturnUrl,
+  isKnownDaemonTarget,
   readWorkspaceHosts,
   rememberWorkspaceHost,
 } from './workspace-hosts';
 
 describe('workspace host catalog', () => {
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+
+  it('connects on load only to the page daemon, saved hosts, or a target just chosen in this tab', () => {
+    expect(isKnownDaemonTarget(window.location.origin)).toBe(true);
+    expect(isKnownDaemonTarget('https://unknown.example')).toBe(false);
+
+    confirmDaemonTarget('https://chosen.example');
+    expect(isKnownDaemonTarget('https://chosen.example')).toBe(true);
+    // One-shot: reloading the same link later asks again.
+    expect(isKnownDaemonTarget('https://chosen.example')).toBe(false);
+
+    // A choice for one origin does not vouch for another, and is spent by it.
+    confirmDaemonTarget('https://chosen.example');
+    expect(isKnownDaemonTarget('https://other.example')).toBe(false);
+    expect(isKnownDaemonTarget('https://chosen.example')).toBe(false);
+
+    rememberWorkspaceHost('https://saved.example', []);
+    expect(isKnownDaemonTarget('https://saved.example')).toBe(true);
+  });
 
   it('does not notify or reorder hosts on an unchanged refresh', () => {
     rememberWorkspaceHost('https://first.example', []);

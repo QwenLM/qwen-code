@@ -42,6 +42,8 @@ vi.mock('./components/WorkspaceSessionProvider', () => ({
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
   getAllowedDaemonOrigin: (value: string) => value,
+  confirmDaemonTarget: vi.fn(),
+  consumeDaemonTargetConfirmation: () => false,
   getDaemonToken: () => 'token',
   hasReloadSurvivableDaemonToken: () => testState.tokenSurvivesReload,
   navigateToDaemon: vi.fn(),

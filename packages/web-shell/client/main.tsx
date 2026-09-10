@@ -1,7 +1,10 @@
 // Load resets before any component can import CSS modules.
 import './styles/globals.css';
 import React from 'react';
-import { WorkspaceHostsEnabled } from './config/workspace-hosts';
+import {
+  isKnownDaemonTarget,
+  WorkspaceHostsEnabled,
+} from './config/workspace-hosts';
 import ReactDOM from 'react-dom/client';
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -32,6 +35,10 @@ const REQUESTED_DAEMON_TARGET =
   new URLSearchParams(window.location.search).get('daemon') || '';
 const INVALID_DAEMON_TARGET =
   Boolean(REQUESTED_DAEMON_TARGET) && !DAEMON_BASE_URL;
+// A `?daemon=` link can name any origin; one this browser has never connected
+// to is shown for confirmation instead of being probed on load.
+const UNCONFIRMED_DAEMON_TARGET =
+  Boolean(DAEMON_BASE_URL) && !isKnownDaemonTarget(DAEMON_BASE_URL);
 
 const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu', 'plan'] as const;
 
@@ -385,6 +392,7 @@ async function main() {
         language={getInitialLanguage()}
         theme={getInitialTheme()}
         invalidTarget={INVALID_DAEMON_TARGET}
+        unconfirmedTarget={UNCONFIRMED_DAEMON_TARGET}
       >
         {(token) => <StandaloneApp daemonToken={token} />}
       </StandaloneAuth>

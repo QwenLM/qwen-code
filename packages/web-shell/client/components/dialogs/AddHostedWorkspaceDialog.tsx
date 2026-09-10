@@ -4,6 +4,7 @@ import {
   getAllowedDaemonOrigin,
   getDaemonBaseUrl,
   buildDaemonConnectionUrl,
+  confirmDaemonTarget,
   getDaemonToken,
   persistDaemonToken,
 } from '../../config/daemon';
@@ -24,13 +25,26 @@ import { Input } from '../ui/input';
 import { Label } from '../ui/label';
 import { Laptop, Server } from 'lucide-react';
 
-export function AddHostedWorkspaceDialog({ onClose }: { onClose: () => void }) {
+export function AddHostedWorkspaceDialog({
+  onClose,
+  onAddCurrent,
+}: {
+  onClose: () => void;
+  /** Registers a folder on the daemon this page is connected to, in place. */
+  onAddCurrent?: (
+    cwd: string,
+    persist: boolean,
+    displayName?: string,
+  ) => Promise<void>;
+}) {
   const { t } = useI18n();
   const [resume] = useState(() =>
     new URLSearchParams(window.location.search).has('addWorkspace'),
   );
   const resumed = useRef(false);
-  const addedRef = useRef(false);
+  // 'navigating': a workspace is opening by page navigation, so closing must
+  // not also send the user back; 'added': registered in place, just close.
+  const outcomeRef = useRef<'navigating' | 'added' | undefined>(undefined);
   const [returnTo] = useState(() => {
     const current = new URL(window.location.href);
     const saved = getWorkspaceReturnUrl();
@@ -42,9 +56,12 @@ export function AddHostedWorkspaceDialog({ onClose }: { onClose: () => void }) {
     return current.toString();
   });
   const close = () => {
-    if (addedRef.current) return;
-    if (returnTo !== window.location.href) window.location.assign(returnTo);
-    else onClose();
+    if (outcomeRef.current === 'navigating') return;
+    if (!outcomeRef.current && returnTo !== window.location.href) {
+      window.location.assign(returnTo);
+    } else {
+      onClose();
+    }
   };
   const [kind, setKind] = useState<'local' | 'remote'>(() =>
     resume && getDaemonBaseUrl() ? 'remote' : 'local',
@@ -85,6 +102,7 @@ export function AddHostedWorkspaceDialog({ onClose }: { onClose: () => void }) {
       const url = new URL(href);
       url.searchParams.set('addWorkspace', '1');
       url.searchParams.set('workspaceReturn', returnTo);
+      confirmDaemonTarget(origin);
       window.location.assign(url.toString());
       return;
     }
@@ -130,7 +148,9 @@ export function AddHostedWorkspaceDialog({ onClose }: { onClose: () => void }) {
         onClose={close}
         onBack={() => setTarget(undefined)}
         initialPath={
-          target.capabilities.workspaceCwd?.replace(/[^\\/]+[\\/]?$/, '') || '/'
+          target.capabilities.workspaceCwd?.replace(/[^\\/]+[\\/]?$/, '') ||
+          target.capabilities.workspaceCwd ||
+          '/'
         }
         daemonAddress={
           kind === 'local' ? t('workspaceHost.local') : target.origin
@@ -156,16 +176,33 @@ export function AddHostedWorkspaceDialog({ onClose }: { onClose: () => void }) {
           'persistent_workspace_registration',
         )}
         onAdd={async (cwd, persist, displayName) => {
+          // Drive-letter paths compare case-insensitively, with either separator.
+          const comparable = (value: string) => {
+            const trimmed = value.replace(/[\\/]+$/, '');
+            return /^[A-Za-z]:/.test(trimmed)
+              ? trimmed.replace(/\//g, '\\').toLowerCase()
+              : trimmed;
+          };
           const existing = target.capabilities.workspaces?.find(
-            (ws) =>
-              ws.cwd.replace(/[\\/]+$/, '') === cwd.replace(/[\\/]+$/, ''),
+            (ws) => comparable(ws.cwd) === comparable(cwd),
           );
           if (existing) {
             if (displayName && displayName !== existing.displayName) {
               await target.client.updateWorkspace(existing.id, { displayName });
             }
-            addedRef.current = true;
+            outcomeRef.current = 'navigating';
             openHostedWorkspace(target.origin, existing.id);
+            return;
+          }
+          if (
+            onAddCurrent &&
+            target.origin === (getDaemonBaseUrl() || window.location.origin)
+          ) {
+            // The app is already connected to this daemon: register through its
+            // workspace lane so the list refreshes and a trusted folder opens
+            // without a page reload.
+            await onAddCurrent(cwd, persist, displayName);
+            outcomeRef.current = 'added';
             return;
           }
           const added = await target.client.addWorkspace(cwd, {
@@ -180,8 +217,8 @@ export function AddHostedWorkspaceDialog({ onClose }: { onClose: () => void }) {
             ),
             added,
           ]);
+          outcomeRef.current = 'navigating';
           openHostedWorkspace(target.origin, added.id);
-          addedRef.current = true;
         }}
       />
     );

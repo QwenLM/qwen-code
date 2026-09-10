@@ -20,7 +20,9 @@ export { resolveWebShellDir } from './web-shell-resolver.js';
  * UI loads same-origin module scripts plus the inline performance.measure
  * patch baked into `index.html`, runs shiki/mermaid (eval + wasm + blob
  * workers), pulls katex fonts/images as `data:`, and streams SSE
- * (same origin plus the explicitly selected daemon). `frame-ancestors 'none'` + `X-Frame-Options: DENY`
+ * (`connect-src 'self'` plus the validated `?daemon=` origin from
+ * `remoteDaemonConnectOrigins`; the client asks before connecting to an origin
+ * it has not used). `frame-ancestors 'none'` + `X-Frame-Options: DENY`
  * still block clickjacking. Tightening `script-src` (drop `'unsafe-inline'`
  * via a hash, externalise the inline patch) is a follow-up, not a blocker for
  * a loopback-default local tool.

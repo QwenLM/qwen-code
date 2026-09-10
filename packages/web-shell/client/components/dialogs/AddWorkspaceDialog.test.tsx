@@ -983,4 +983,56 @@ describe('AddWorkspaceDialog', () => {
       await Promise.resolve();
     });
   });
+
+  describe('browse mode', () => {
+    const buttonNamed = (name: string) =>
+      Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent === name,
+      )!;
+
+    it('adds only the folder the user explicitly chose', async () => {
+      const onAdd = vi.fn().mockResolvedValue(undefined);
+      mount(
+        <AddWorkspaceDialog
+          browseDirectories
+          initialPath="/repo/"
+          onClose={vi.fn()}
+          onAdd={onAdd}
+        />,
+      );
+
+      expect(submitButton().disabled).toBe(true);
+      act(() => buttonNamed('Use this folder').click());
+      expect(submitButton().disabled).toBe(false);
+
+      // Editing the path after choosing withdraws the choice.
+      type('/repo/other');
+      expect(submitButton().disabled).toBe(true);
+      act(() => buttonNamed('Use this folder').click());
+      submit();
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(onAdd).toHaveBeenCalledWith('/repo/other', true);
+    });
+
+    it('treats a Windows drive root as its own parent', () => {
+      mount(
+        <AddWorkspaceDialog
+          browseDirectories
+          initialPath="C:\repo\app"
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+        />,
+      );
+
+      act(() => buttonNamed('Parent folder').click());
+      expect(input().value).toBe('C:\\repo\\');
+      act(() => buttonNamed('Parent folder').click());
+      expect(input().value).toBe('C:\\');
+      act(() => buttonNamed('Parent folder').click());
+      expect(input().value).toBe('C:\\');
+    });
+  });
 });

@@ -216,6 +216,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 }));
 
 const { DaemonStatusDialog } = await import('./DaemonStatusDialog');
+const { WorkspaceHostsEnabled } = await import('../../config/workspace-hosts');
 
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
@@ -223,15 +224,18 @@ let root: Root | null = null;
 function mount(
   language: 'en' | 'zh-CN' = 'en',
   onChangeTarget?: (daemonOrigin: string, token?: string) => void,
+  hostsEnabled = true,
 ) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root!.render(
-      <I18nProvider language={language}>
-        <DaemonStatusDialog onChangeTarget={onChangeTarget} />
-      </I18nProvider>,
+      <WorkspaceHostsEnabled.Provider value={hostsEnabled}>
+        <I18nProvider language={language}>
+          <DaemonStatusDialog onChangeTarget={onChangeTarget} />
+        </I18nProvider>
+      </WorkspaceHostsEnabled.Provider>,
     );
   });
 }
@@ -320,6 +324,12 @@ describe('DaemonStatusDialog', () => {
       address.dispatchEvent(new Event('input', { bubbles: true }));
     });
     expect(token.value).toBe('');
+  });
+
+  it('shows the target but no switch form outside the standalone shell', () => {
+    mount('en', vi.fn(), false);
+    expect(container!.textContent).toContain('http://localhost:4170');
+    expect(container!.querySelector('#daemon-connection-address')).toBeNull();
   });
 
   it('keeps an invalid daemon address on the form', () => {

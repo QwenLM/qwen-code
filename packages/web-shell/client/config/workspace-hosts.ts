@@ -1,9 +1,15 @@
-import { createContext } from 'react';
+import { createContext, useEffect, useState } from 'react';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
-import { buildDaemonConnectionUrl, getAllowedDaemonOrigin } from './daemon';
+import {
+  buildDaemonConnectionUrl,
+  confirmDaemonTarget,
+  consumeDaemonTargetConfirmation,
+  getAllowedDaemonOrigin,
+} from './daemon';
 
 export const WorkspaceHostsEnabled = createContext(false);
 const STORAGE_KEY = 'qwen-workspace-hosts';
+const CHANGE_EVENT = 'qwen-workspace-hosts';
 export interface WorkspaceHost {
   origin: string;
   workspaces: Pick<DaemonWorkspaceCapability, 'id' | 'cwd' | 'displayName'>[];
@@ -57,10 +63,38 @@ export function rememberWorkspaceHost(
   }
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(hosts));
-    window.dispatchEvent(new Event('qwen-workspace-hosts'));
+    window.dispatchEvent(new Event(CHANGE_EVENT));
   } catch {
     // Connections remain usable when browser persistence is unavailable.
   }
+}
+
+/** Saved hosts, kept in sync with catalog updates from this and other tabs. */
+export function useWorkspaceHosts(): WorkspaceHost[] {
+  const [hosts, setHosts] = useState(readWorkspaceHosts);
+  useEffect(() => {
+    const update = () => setHosts(readWorkspaceHosts());
+    window.addEventListener(CHANGE_EVENT, update);
+    window.addEventListener('storage', update);
+    return () => {
+      window.removeEventListener(CHANGE_EVENT, update);
+      window.removeEventListener('storage', update);
+    };
+  }, []);
+  return hosts;
+}
+
+/**
+ * Whether a page load may connect to `origin` without asking first: the page's
+ * own daemon, a host this browser has already connected to, or a host the user
+ * just chose in this tab. A bare `?daemon=` link is none of these.
+ */
+export function isKnownDaemonTarget(origin: string): boolean {
+  if (origin === window.location.origin) return true;
+  const confirmed = consumeDaemonTargetConfirmation(origin);
+  return (
+    confirmed || readWorkspaceHosts().some((host) => host.origin === origin)
+  );
 }
 
 export function getWorkspaceReturnUrl(): string | undefined {
@@ -88,5 +122,6 @@ export function openHostedWorkspace(
   if (!href) return;
   const url = new URL(href);
   if (workspaceId) url.searchParams.set('workspace', workspaceId);
+  confirmDaemonTarget(getAllowedDaemonOrigin(origin));
   window.location.assign(url.toString());
 }

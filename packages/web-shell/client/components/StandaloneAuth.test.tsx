@@ -171,6 +171,28 @@ it('lets an invalid target be replaced from the connection form', async () => {
   );
   expect(fetch).not.toHaveBeenCalled();
 });
+it('asks before probing a daemon this browser has not connected to', async () => {
+  const fetch = vi.fn().mockResolvedValue(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await act(async () =>
+    root.render(
+      <StandaloneAuth baseUrl="http://daemon.test" unconfirmedTarget>
+        {(token) => <p>Connected {token}</p>}
+      </StandaloneAuth>,
+    ),
+  );
+  expect(container.textContent).toContain('has not connected to before');
+  expect(container.textContent).toContain('http://daemon.test');
+  expect(container.textContent).toContain('sent to the address shown above');
+  expect(submitButton().textContent).toBe('Connect');
+  expect(submitButton().disabled).toBe(false);
+  expect(fetch).not.toHaveBeenCalled();
+
+  await act(submitForm);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetch.mock.calls[0][0]).toBe('http://daemon.test/capabilities');
+  expect(container.textContent).toContain('Connected');
+});
 it('distinguishes policy rejection from authentication failure', async () => {
   vi.stubGlobal(
     'fetch',
