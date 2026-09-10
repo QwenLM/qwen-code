@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
+import { findUnexpectedImportMeta } from './import-meta-guard.mjs';
 
 const assetsDir = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(assetsDir, 'src');
@@ -212,6 +213,23 @@ const documentBuildResult = await build({
     ),
   },
 });
+
+// esbuild lowers import.meta to {} under iife, and the export document
+// evaluates the bundle top-level, so any stray import.meta read (e.g.
+// import.meta.env) would throw in every exported file. Tolerate exactly the
+// deliberate guarded read inside the prebuilt web-shell transcript entry and
+// fail on anything else. No logLevel/logOverride here: silencing the warning
+// class would also hide every other warning this build emits, and
+// logOverride 'silent' would empty result.warnings and vacate this check.
+const unexpectedImportMeta = findUnexpectedImportMeta(
+  documentBuildResult.warnings,
+);
+if (unexpectedImportMeta.length > 0) {
+  throw new Error(
+    'export-transcript-document build: unexpected import.meta use in ' +
+      unexpectedImportMeta.join(', '),
+  );
+}
 
 const documentJsBundle = documentBuildResult.outputFiles.find((file) =>
   file.path.endsWith('.js'),
