@@ -6911,6 +6911,15 @@ export class Session implements SessionContext {
         true,
       );
     };
+    // A skipped send that yields to a queued user prompt (or to an
+    // unreliable queue read) is not a normally-finished turn for a parked
+    // Goal proposal; the loop-level exits already block settlement there.
+    const blockGoalProposalSettlement = () => {
+      const proposalTurn = options.responseCapture?.goalProposalTurn;
+      if (proposalTurn) {
+        proposalTurn.settlementBlocked = true;
+      }
+    };
 
     while (nextMessage !== null) {
       if (this.pendingPrompt && this.pendingPrompt !== pendingSend) {
@@ -7044,6 +7053,7 @@ export class Session implements SessionContext {
                     nextGuardContinuation = undefined;
                     if (!options.externalParts) {
                       preserveGuardOnSkippedSend = true;
+                      blockGoalProposalSettlement();
                       return { kind: 'stop', stopReason: 'end_turn' };
                     }
                     if (!initialSend && nextMessage) {
@@ -7066,6 +7076,7 @@ export class Session implements SessionContext {
                       guardForThisSend = undefined;
                       nextGuardContinuation = undefined;
                       preserveGuardOnSkippedSend = true;
+                      blockGoalProposalSettlement();
                       if (initialSend) {
                         supersededAutomaticContinuation = true;
                       }
@@ -7142,6 +7153,7 @@ export class Session implements SessionContext {
                       guardForThisSend = undefined;
                       nextGuardContinuation = undefined;
                       preserveGuardOnSkippedSend = true;
+                      blockGoalProposalSettlement();
                       if (initialSend) {
                         supersededAutomaticContinuation = true;
                       }

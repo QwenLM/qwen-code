@@ -33664,6 +33664,150 @@ describe('Session', () => {
       expect(pending).toBeUndefined();
     });
 
+    it('does not start a Goal when a guard continuation yields to a queued prompt before sending', async () => {
+      const internals = session as unknown as {
+        todoStopGuard: DaemonTodoStopGuard;
+      };
+      vi.spyOn(internals.todoStopGuard, 'decide').mockReturnValue({
+        kind: 'continue',
+        attempt: 1,
+        maxAttempts: 2,
+        unfinishedCount: 1,
+      });
+      vi.mocked(mockClient.extMethod).mockImplementation(async (method) => {
+        if (method === 'craft/drainMidTurnQueue') {
+          return { messages: [], hasQueuedPrompt: true };
+        }
+        if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+          return { claimed: false, hasQueuedPrompt: true };
+        }
+        return {};
+      });
+
+      await expect(
+        prompt({
+          version: 1,
+          sessionId: 'test-session-id',
+          promptId: 'queued-prompt-owner',
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(mockConfig.setPendingGoalProposal).toHaveBeenCalledOnce();
+      expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+      expect(pending).toBeUndefined();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'agent_message_chunk',
+            content: expect.objectContaining({
+              text: expect.stringContaining('/goal set'),
+            }),
+          }),
+        }),
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: expect.objectContaining({
+              text: expect.stringContaining(objective),
+            }),
+          }),
+        }),
+      );
+    });
+
+    it('does not start a Goal when a guard continuation stops on an unreliable queue drain', async () => {
+      const internals = session as unknown as {
+        todoStopGuard: DaemonTodoStopGuard;
+      };
+      vi.spyOn(internals.todoStopGuard, 'decide').mockReturnValue({
+        kind: 'continue',
+        attempt: 1,
+        maxAttempts: 2,
+        unfinishedCount: 1,
+      });
+      // A response with no 'messages'/'items' payload fails validation, so
+      // the continuation is skipped without ever consulting the claim.
+      vi.mocked(mockClient.extMethod).mockImplementation(async () => ({}));
+
+      await expect(prompt()).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(mockConfig.setPendingGoalProposal).toHaveBeenCalledOnce();
+      expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+      expect(pending).toBeUndefined();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'agent_message_chunk',
+            content: expect.objectContaining({
+              text: expect.stringContaining('/goal set'),
+            }),
+          }),
+        }),
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: expect.objectContaining({
+              text: expect.stringContaining(objective),
+            }),
+          }),
+        }),
+      );
+    });
+
+    it('does not start a Goal when a queued prompt claims the guard continuation at send time', async () => {
+      const internals = session as unknown as {
+        todoStopGuard: DaemonTodoStopGuard;
+      };
+      vi.spyOn(internals.todoStopGuard, 'decide').mockReturnValue({
+        kind: 'continue',
+        attempt: 1,
+        maxAttempts: 2,
+        unfinishedCount: 1,
+      });
+      vi.mocked(mockClient.extMethod).mockImplementation(async (method) => {
+        if (method === 'craft/drainMidTurnQueue') {
+          return { messages: [], hasQueuedPrompt: false };
+        }
+        if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+          return { claimed: false, hasQueuedPrompt: true };
+        }
+        return {};
+      });
+
+      await expect(
+        prompt({
+          version: 1,
+          sessionId: 'test-session-id',
+          promptId: 'queued-prompt-owner',
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(mockConfig.setPendingGoalProposal).toHaveBeenCalledOnce();
+      expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+      expect(pending).toBeUndefined();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'agent_message_chunk',
+            content: expect.objectContaining({
+              text: expect.stringContaining('/goal set'),
+            }),
+          }),
+        }),
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: expect.objectContaining({
+              text: expect.stringContaining(objective),
+            }),
+          }),
+        }),
+      );
+    });
+
     it('does not start a Goal when the Todo Stop Guard is exhausted', async () => {
       const internals = session as unknown as {
         todoStopGuard: {
