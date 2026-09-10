@@ -1,0 +1,179 @@
+name: 'Desktop Promote'
+
+run-name: 'Promote Qwen Code Desktop ${{ inputs.version }}'
+
+# Publishes an already-built desktop release and advances the updater feed,
+# without building anything.
+#
+# The version string is compiled into every artifact — the app bundle's
+# Info.plist, the NSIS VIProductVersion, the deb control file, the binary
+# itself — so a build made as `0.3.0-preview.0` can never become `0.3.0` by
+# renaming files. The installed app would keep reporting the prerelease
+# version, the feed would keep offering it the stable one, and it would
+# update in a loop. Promotion therefore only works on a release built under
+# the version it will ship as, held back as a draft:
+#
+#   Desktop Release   version=0.3.1  dry_run=false  draft=true  prerelease=false
+#     signed, notarized, complete — and invisible: the publish job leaves the
+#     feed alone for a draft, and the OSS mirror does not run
+#   verify that draft's assets on a real machine
+#   Desktop Promote   version=0.3.1
+#     publishes the release, advances the feed, mirrors to OSS
+#
+# What this replaces is building the same commit twice and notarizing it
+# twice — once as a preview, once as the release — for a change of version
+# string alone.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Stable desktop version to promote, for example 0.3.1. Its release must already exist.'
+        required: true
+        type: 'string'
+
+permissions:
+  contents: 'read'
+
+# Shares the release workflow's publishing group: a promote and a publishing
+# release run both move the feed, and must not interleave.
+concurrency:
+  group: 'desktop-release-publish'
+  cancel-in-progress: false
+
+env:
+  DESKTOP_FEED_TAG: 'desktop-latest'
+
+jobs:
+  promote:
+    name: 'Promote release'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 20
+    permissions:
+      contents: 'write'
+    outputs:
+      version: '${{ steps.resolve.outputs.version }}'
+      url: '${{ steps.publish.outputs.url }}'
+    steps:
+      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - name: 'Resolve release'
+        id: 'resolve'
+        shell: 'bash'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          INPUT_VERSION: '${{ inputs.version }}'
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_NAME" != 'main' ]; then
+            echo '::error::Desktop promotions must run from main.'
+            exit 1
+          fi
+          version="${INPUT_VERSION#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Promotion needs a stable X.Y.Z version, got '$INPUT_VERSION'. A prerelease build cannot be promoted: its version is compiled into the artifacts, so it must be rebuilt under the stable version instead."
+            exit 1
+          fi
+          tag="desktop-v$version"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::Release $tag does not exist. Build it first with Desktop Release (dry_run=false, draft=true)."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: 'Verify the release ships this version'
+        shell: 'bash'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          RELEASE_TAG: '${{ steps.resolve.outputs.tag }}'
+          RELEASE_VERSION: '${{ steps.resolve.outputs.version }}'
+        run: |
+          set -euo pipefail
+          mkdir -p promote-assets
+          gh release download "$RELEASE_TAG" --dir promote-assets --pattern 'desktop-latest.json'
+          # The manifest is generated from the artifacts themselves, so a
+          # mismatch here means the release was built under a different
+          # version and renaming it would start the update loop above.
+          manifest_version="$(jq -r '.version' promote-assets/desktop-latest.json)"
+          if [ "$manifest_version" != "$RELEASE_VERSION" ]; then
+            echo "::error::$RELEASE_TAG carries an updater manifest for $manifest_version, not $RELEASE_VERSION."
+            exit 1
+          fi
+          for platform in darwin-aarch64 darwin-x86_64 windows-x86_64 linux-x86_64; do
+            if ! jq -e --arg platform "$platform" '.platforms[$platform].url' promote-assets/desktop-latest.json >/dev/null; then
+              echo "::error::The updater manifest in $RELEASE_TAG has no entry for $platform."
+              exit 1
+            fi
+          done
+
+      - name: 'Publish the release'
+        id: 'publish'
+        shell: 'bash'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          RELEASE_TAG: '${{ steps.resolve.outputs.tag }}'
+        run: |
+          set -euo pipefail
+          # Before the feed: the manifest points at this release's download
+          # URLs, which only resolve once it is no longer a draft.
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false
+          echo "url=$(gh release view "$RELEASE_TAG" --json url --jq '.url')" >> "$GITHUB_OUTPUT"
+
+      - name: 'Update stable updater feed'
+        shell: 'bash'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          FEED_TAG: '${{ env.DESKTOP_FEED_TAG }}'
+          RELEASE_VERSION: '${{ steps.resolve.outputs.version }}'
+        run: |
+          set -euo pipefail
+          if gh release view "$FEED_TAG" >/dev/null 2>&1; then
+            directory="$(mktemp -d)"
+            trap 'rm -rf "$directory"' EXIT
+            gh release download "$FEED_TAG" --dir "$directory" --pattern 'desktop-latest.json'
+            current="$(jq -r '.version' "$directory/desktop-latest.json")"
+            if [[ ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Current Desktop stable feed has an invalid version: $current"
+              exit 1
+            fi
+            newest="$(printf '%s\n%s\n' "$RELEASE_VERSION" "$current" | sort -V | tail -n 1)"
+            if [ "$current" != "$RELEASE_VERSION" ] && [ "$newest" = "$current" ]; then
+              echo "::notice::Desktop $RELEASE_VERSION will not replace newer stable feed $current."
+              exit 0
+            fi
+            gh release upload "$FEED_TAG" promote-assets/desktop-latest.json --clobber
+          else
+            gh release create "$FEED_TAG" promote-assets/desktop-latest.json --title 'Qwen Code Desktop latest' --notes 'Stable desktop updater feed.' --latest=false
+          fi
+
+      - name: 'Promotion summary'
+        shell: 'bash'
+        env:
+          RELEASE_TAG: '${{ steps.resolve.outputs.tag }}'
+          RELEASE_URL: '${{ steps.publish.outputs.url }}'
+          RELEASE_VERSION: '${{ steps.resolve.outputs.version }}'
+        run: |
+          {
+            echo '## Desktop promotion'
+            echo
+            echo "Version: $RELEASE_VERSION"
+            echo "Tag: $RELEASE_TAG"
+            echo "Release: $RELEASE_URL"
+            echo
+            echo 'Nothing was rebuilt: the published assets are the ones this release was already carrying.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  sync-oss:
+    name: 'Mirror stable Desktop release to Aliyun OSS'
+    needs: 'promote'
+    permissions:
+      actions: 'read'
+      contents: 'read'
+    uses: './.github/workflows/sync-desktop-to-oss.yml'
+    with:
+      version: '${{ needs.promote.outputs.version }}'
+      source: 'release'
+    secrets:
+      ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+      ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
