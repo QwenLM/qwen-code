@@ -627,9 +627,6 @@ export async function unregisterSession(
   try {
     const filePath = thisProcessRecordPath(slot);
     if (filePath === null) return;
-    // Consume the capture regardless of the outcome below: after this
-    // call returns, this process no longer holds a record at the path.
-    registeredRecordPaths.delete(slot);
     // The path is keyed by PID alone, and PIDs collide across namespace
     // and machine boundaries: the record sitting at our path may belong
     // to a live session on the other side of a shared home. Unlink only
@@ -639,12 +636,17 @@ export async function unregisterSession(
     // and the same holds for a read that failed transiently: the file
     // is intact and may be a foreign live record.
     const existing = await readRecord(filePath);
-    if (
-      existing.status === 'unsupported-version' ||
-      existing.status === 'read-error'
-    ) {
+    if (existing.status === 'read-error') {
+      // The one branch that keeps the capture. The file is intact and
+      // may still be this session's own, and a minted path cannot be
+      // derived a second time — forgetting it here would leave a record
+      // this process can no longer name, patch or remove, advertising a
+      // session that is gone until the PID itself dies. Every other exit
+      // below has established that the path is not ours to hold.
       return;
     }
+    registeredRecordPaths.delete(slot);
+    if (existing.status === 'unsupported-version') return;
     if (existing.status === 'ok' && !matchesLocalIdentity(existing.record)) {
       return;
     }

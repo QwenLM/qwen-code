@@ -5146,6 +5146,126 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await agentPromise;
     });
 
+    it('gives every hosted session the one inbox, however late it binds', async () => {
+      // The daemon's steady state is many sessions in one process, and
+      // the bind resolves while the first is still booting. Sessions
+      // published before the address arrives depend on the fan-out;
+      // sessions published after it depend on the catch-up. One test
+      // walks both, because in production almost every session is the
+      // second kind.
+      const first = await setupSessionMocks('hosted-1');
+      const second = makeInnerConfig();
+      second.getSessionId = vi.fn().mockReturnValue('hosted-2');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      vi.mocked(loadCliConfig)
+        .mockResolvedValueOnce(first as unknown as Config)
+        .mockResolvedValue(second as unknown as Config);
+
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp/one', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      const options = mockPeerMessagingStart.mock.calls[0]![0] as {
+        updateSessionRegistryIpcPath: (
+          path: string | undefined,
+          token?: string,
+        ) => Promise<void>;
+        ownsSessionId: (id: string) => boolean;
+      };
+
+      // Fan-out: the session already published gets the address.
+      await options.updateSessionRegistryIpcPath('/tmp/acp.sock', 'tok');
+      expect(first.updateSessionRegistryIpcPath).toHaveBeenCalledWith(
+        '/tmp/acp.sock',
+        'tok',
+      );
+
+      // Catch-up: a session published afterwards gets it on registration,
+      // and the bind is not attempted a second time.
+      await agent.newSession({ cwd: '/tmp/two', mcpServers: [] });
+      expect(second.updateSessionRegistryIpcPath).toHaveBeenCalledWith(
+        '/tmp/acp.sock',
+        'tok',
+      );
+      expect(mockPeerMessagingStart).toHaveBeenCalledTimes(1);
+
+      // Two records, one per session, both addressable through the
+      // process's single inbox.
+      expect(mockRegisterSession).toHaveBeenCalledTimes(2);
+      expect(
+        mockRegisterSession.mock.calls.map(([fields]) => fields.sessionId),
+      ).toEqual(['hosted-1', 'hosted-2']);
+      expect(
+        mockRegisterSession.mock.calls.every(
+          ([fields]) => fields.slot === 'own',
+        ),
+      ).toBe(true);
+      expect(options.ownsSessionId('hosted-1')).toBe(true);
+      expect(options.ownsSessionId('hosted-2')).toBe(true);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('closes the inbox and stops advertising it when the sessions go', async () => {
+      const close = vi.fn().mockResolvedValue(undefined);
+      mockPeerMessagingStart.mockResolvedValue({ close });
+      const innerConfig = await setupSessionMocks('hosted-close');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      const options = mockPeerMessagingStart.mock.calls[0]![0] as {
+        updateSessionRegistryIpcPath: (
+          path: string | undefined,
+          token?: string,
+        ) => Promise<void>;
+      };
+      await options.updateSessionRegistryIpcPath('/tmp/acp.sock', 'tok');
+
+      // The clearing half, driven through the callback the agent handed
+      // the transport — which is what `PeerMessaging.close()` calls when
+      // the socket goes. A record still naming a socket that is gone
+      // sends every peer at a dead address until the PID is swept.
+      await options.updateSessionRegistryIpcPath(undefined, undefined);
+      expect(innerConfig.updateSessionRegistryIpcPath).toHaveBeenLastCalledWith(
+        undefined,
+        undefined,
+      );
+
+      mockConnectionState.resolve();
+      await agentPromise;
+
+      // And the socket itself is closed on the way out, rather than left
+      // listening for the life of the process.
+      expect(close).toHaveBeenCalled();
+    });
+
+    it('arms the inbox close as exit cleanup, for the paths teardown never reaches', async () => {
+      // A bare SIGTERM to a `qwen --acp` child reaches neither
+      // disposeSessions nor finishManagedShutdown; runExitCleanup is
+      // what runs there, so the close has to be registered with it.
+      const close = vi.fn().mockResolvedValue(undefined);
+      mockPeerMessagingStart.mockResolvedValue({ close });
+      await setupSessionMocks('hosted-signal');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+
+      expect(mockRegisterCleanup).toHaveBeenCalled();
+      const armed = mockRegisterCleanup.mock.calls.map(
+        ([entry]) => entry as () => Promise<void> | void,
+      );
+      await Promise.all(armed.map((entry) => entry()));
+      expect(close).toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
     it('aborts in-flight generations before waiting on the inbox drain', async () => {
       // The close can hang on a slow drain; a running turn must not keep
       // executing tools after the client is gone while it waits.

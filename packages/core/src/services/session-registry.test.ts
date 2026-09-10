@@ -759,13 +759,92 @@ describe('registerSession — one process, several records', () => {
     expect((await listLiveSessions()).length).toBe(2);
   });
 
+  it('never resolves an unknown slot onto a live shared record', async () => {
+    // The interesting arm of the rule above: with a shared record present
+    // at this PID's path, a stale or unknown minted slot must still name
+    // nothing. Falling back would let one session read, rewrite and
+    // finally unlink a record belonging to whatever else runs under this
+    // PID — the case the three assertions above cannot see, because they
+    // run with no shared record on disk at all.
+    await registerSession({ sessionId: 'plain', cwd: '/w/plain' });
+    const before = await listLiveSessions();
+    expect(before.map((record) => record.sessionId)).toEqual(['plain']);
+
+    expect(await readOwnSessionRecord('deadbeef')).toBeNull();
+    expect(await patchSessionRecord({ sessionId: 'stolen' }, 'deadbeef')).toBe(
+      false,
+    );
+    await unregisterSession('deadbeef');
+
+    const after = await listLiveSessions();
+    expect(after.map((record) => record.sessionId)).toEqual(['plain']);
+  });
+
+  it('keeps a minted record at its own filename when the session id is swapped', async () => {
+    // The invariant the whole design rests on: a `/clear` or a session
+    // load swaps the id underneath, and the record follows by patch. A
+    // filename derived from the id — or renamed on a patch — would
+    // strand every reader holding the old name.
+    const own = await registerSession({
+      sessionId: 'before',
+      cwd: '/w/hosted',
+      slot: 'own',
+    });
+    const fileName = `${process.pid}-${own.slot}.json`;
+    expect(await fs.readdir(getSessionRegistryDir())).toEqual([fileName]);
+
+    expect(await patchSessionRecord({ sessionId: 'after' }, own.slot)).toBe(
+      true,
+    );
+
+    expect(await fs.readdir(getSessionRegistryDir())).toEqual([fileName]);
+    expect((await readOwnSessionRecord(own.slot))?.sessionId).toBe('after');
+    expect((await listLiveSessions())[0]?.sessionId).toBe('after');
+  });
+
+  it('keeps the path of a record whose removal could not read it', async () => {
+    // A minted path cannot be derived a second time, so forgetting it on
+    // a transient read failure would leave a record this process can
+    // never name again — advertising a session that is gone until the
+    // PID dies. Every other exit has established the path is not ours.
+    const own = await registerSession({
+      sessionId: 'hosted',
+      cwd: '/w/hosted',
+      slot: 'own',
+    });
+    const failing = vi
+      .spyOn(fs, 'stat')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('EIO'), { code: 'EIO' }) as never,
+      );
+    await unregisterSession(own.slot);
+    failing.mockRestore();
+    // Still there, and still addressable: the capture survived.
+    expect((await listLiveSessions()).map((r) => r.sessionId)).toEqual([
+      'hosted',
+    ]);
+
+    await unregisterSession(own.slot);
+    expect(await listLiveSessions()).toEqual([]);
+  });
+
   it('leaves the shared record alone, and is left alone by it', async () => {
     const own = await registerSession({
       sessionId: 'hosted',
       cwd: '/w/hosted',
       slot: 'own',
     });
-    await registerSession({ sessionId: 'plain', cwd: '/w/plain' });
+    const plain = await registerSession({
+      sessionId: 'plain',
+      cwd: '/w/plain',
+    });
+    // Asserted, not assumed: any of registration's refusal branches
+    // hitting this call would leave the half of this test its name comes
+    // from checking nothing at all.
+    expect(plain.registered).toBe(true);
+    expect((await fs.readdir(getSessionRegistryDir())).sort()).toEqual(
+      [`${process.pid}.json`, `${process.pid}-${own.slot}.json`].sort(),
+    );
 
     await unregisterSession();
     const live = await listLiveSessions();
@@ -1397,6 +1476,33 @@ describe('listLiveSessions', () => {
 
     await expect(fs.stat(orphan)).rejects.toThrow();
     await expect(fs.stat(fresh)).resolves.toBeDefined();
+  });
+
+  it('ignores near-misses of the minted <pid>-<8 hex>.json shape', async () => {
+    // The suffix widened the grammar the sweep unlinks through, so the
+    // "matched exactly" strictness the filter claims needs near-misses of
+    // the NEW shape, not only of the old one. Each of these is a name a
+    // backup tool, another build, or a shared home could plausibly drop
+    // into the directory; every one of them names a dead PID, so a
+    // grammar that accepted it would both list a phantom and delete a
+    // file this code never wrote.
+    const nearMisses = [
+      `${DEAD_PID}-a1b2c3d.json`, // seven hex, not eight
+      `${DEAD_PID}-a1b2c3d4e.json`, // nine
+      `${DEAD_PID}-A1B2C3D4.json`, // uppercase
+      `${DEAD_PID}-a1b2c3g4.json`, // 'g' is not hex
+      `${DEAD_PID}-notes.json`, // words
+      `${DEAD_PID}-a1b2c3d4-e5f6a7b8.json`, // two suffixes
+      `${DEAD_PID}_a1b2c3d4.json`, // underscore, not dash
+    ];
+    for (const name of nearMisses) {
+      await writeRaw(name, liveBody({ pid: DEAD_PID }));
+    }
+
+    expect(await listLiveSessions()).toEqual([]);
+    expect((await fs.readdir(getSessionRegistryDir())).sort()).toEqual(
+      [...nearMisses].sort(),
+    );
   });
 
   it('ignores files that are not <pid>.json', async () => {
