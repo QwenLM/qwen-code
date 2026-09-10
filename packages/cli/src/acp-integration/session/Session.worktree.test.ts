@@ -184,6 +184,8 @@ describe('Session.pendingWorktreeNotice', () => {
       }),
       getMonitorRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
       }),
       getBackgroundShellRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
