@@ -20,5 +20,6 @@ export function toCompletedToolCallOutcome(
     executionStatus: response?.executionStatus,
     errorType: response?.errorType,
     responseParts: response?.responseParts,
+    exitCode: response?.exitCode,
   };
 }

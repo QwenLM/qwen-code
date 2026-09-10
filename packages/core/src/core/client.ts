@@ -3179,6 +3179,12 @@ export class LlmClient {
       return typeof published === 'number' ? published : undefined;
     };
     let pushInitiated = false;
+    // Once-per-send latch (mirrors settledSteerInputs): this is invoked from the
+    // stream loop AND the outer finally, and the finally fires after
+    // runManagedAutoMemoryBackgroundTasks has already reset the review window, so
+    // an unlatched re-invocation writes userSteeredSinceReview back into the
+    // cleared window and re-dispatches a review for an already-reviewed steer.
+    let experienceInputRecorded = false;
     // Acceptance for the attached carrier, mirroring settleSteerInput: a
     // missing snapshot means this send exited before its push site, so no
     // counter comparison may count it as accepted.
@@ -3187,6 +3193,7 @@ export class LlmClient {
       return snapshot !== undefined && currentPushCount() > snapshot;
     };
     const recordAcceptedExperienceInput = () => {
+      if (experienceInputRecorded) return;
       const content =
         messageType === SendMessageType.ToolResult ||
         messageType === SendMessageType.Retry ||
@@ -3201,8 +3208,10 @@ export class LlmClient {
         if (attachedSteerInput && attachedSteerInput.parts.length > 0) {
           this.userSteeredSinceReview = true;
         }
+        experienceInputRecorded = true;
       } else if (messageType === SendMessageType.Steer) {
         this.userSteeredSinceReview = true;
+        experienceInputRecorded = true;
       } else {
         return;
       }

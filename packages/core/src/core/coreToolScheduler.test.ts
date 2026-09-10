@@ -13432,6 +13432,38 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(responseText).not.toContain('had already completed');
   });
 
+  it('treats an error-shaped cancellation as cancelled, not completed work', async () => {
+    // R21-2: web_search reports a user cancellation as a resolved error result
+    // (WEB_SEARCH_BACKEND_FAILED); exit_plan_mode did the same via its approval
+    // reject. When the parent aborted, the settle must classify as cancelled so
+    // the experience gate does not count it as produced work and the model is
+    // told the call never completed.
+    const abortController = new AbortController();
+    const { completedCalls } = await runSingleTool({
+      abortController,
+      execute: vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return {
+          llmContent: 'Web search cancelled.',
+          returnDisplay: 'Web search cancelled.',
+          error: {
+            message: 'Web search cancelled.',
+            type: ToolErrorType.WEB_SEARCH_BACKEND_FAILED,
+          },
+        };
+      }),
+    });
+
+    const completedCall = completedCalls[0] as CompletedToolCall;
+    expect(completedCall.status).toBe('cancelled');
+    expect(completedCall.response.executionStatus).toBe('cancelled');
+    const responseText = JSON.stringify(completedCall.response.responseParts);
+    expect(responseText).toContain(
+      'User intentionally cancelled this tool call.',
+    );
+    expect(responseText).not.toContain('had already completed');
+  });
+
   it('preserves settled work on a post-completion cancellation', async () => {
     const abortController = new AbortController();
     const { completedCalls } = await runSingleTool({

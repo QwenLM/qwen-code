@@ -6,7 +6,6 @@
 
 import type { Part } from '@google/genai';
 import type { ToolExecutionStatus } from '../core/turn.js';
-import { SHELL_EXIT_CODE_PREFIX } from '../tools/shell-exit-code.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 
@@ -27,6 +26,15 @@ export interface CompletedToolCallOutcome {
   executionStatus?: ToolExecutionStatus;
   errorType?: ToolErrorType;
   responseParts?: readonly Part[];
+  /**
+   * Structured shell exit status, forwarded only by the foreground-completion
+   * path that actually ran a process to term. Absent for renders that never
+   * carry a genuine exit code — promoted-to-background, sed-edit,
+   * promote-refused — so the gate below classifies from a real exit code
+   * instead of scanning output text that the model's own command or arbitrary
+   * stdout can spoof with a line-initial `Exit Code: `.
+   */
+  exitCode?: number | null;
 }
 
 export type ToolExperienceOutcome = 'success' | 'failure';
@@ -50,20 +58,6 @@ export function didToolCallProduceWork(
   );
 }
 
-function hasKnownShellExitStatus(parts: readonly Part[] | undefined): boolean {
-  let finalExitStatus: string | undefined;
-  for (const part of parts ?? []) {
-    const output = part.functionResponse?.response?.['output'];
-    if (typeof output !== 'string') continue;
-    for (const line of output.split(/\r?\n/)) {
-      if (line.startsWith(SHELL_EXIT_CODE_PREFIX)) {
-        finalExitStatus = line.slice(SHELL_EXIT_CODE_PREFIX.length).trim();
-      }
-    }
-  }
-  return finalExitStatus !== undefined && /^-?\d+$/.test(finalExitStatus);
-}
-
 export function classifyToolExperienceOutcome(
   toolName: string,
   outcome: CompletedToolCallOutcome,
@@ -82,7 +76,7 @@ export function classifyToolExperienceOutcome(
   }
   if (
     canonicalToolName(toolName) === ToolNames.SHELL &&
-    !hasKnownShellExitStatus(outcome.responseParts)
+    typeof outcome.exitCode !== 'number'
   ) {
     return null;
   }

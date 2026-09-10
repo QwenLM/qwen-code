@@ -14,10 +14,7 @@ import {
   type ExperienceSignalAccumulator,
 } from './experience-signals.js';
 import { ToolErrorType } from '../tools/tool-error.js';
-import {
-  formatShellExitCode,
-  SHELL_EXIT_CODE_PREFIX,
-} from '../tools/shell-exit-code.js';
+import { formatShellExitCode } from '../tools/shell-exit-code.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 const empty = (): ExperienceSignalAccumulator => ({
@@ -44,22 +41,6 @@ function outcome(
     ],
     ...overrides,
   };
-}
-
-function shellOutput(exitCode: number | null, output = 'done') {
-  return outcome({
-    responseParts: [
-      {
-        functionResponse: {
-          id: 'call-1',
-          name: ToolNames.SHELL,
-          response: {
-            output: `Command: test\nOutput: ${output}\n${formatShellExitCode(exitCode)}\nSignal: (none)`,
-          },
-        },
-      },
-    ],
-  });
 }
 
 describe('completed tool outcome classification', () => {
@@ -126,44 +107,48 @@ describe('completed tool outcome classification', () => {
     ).toBeNull();
   });
 
-  it('requires a parseable shell exit status before accepting success', () => {
-    expect(classifyToolExperienceOutcome(ToolNames.SHELL, shellOutput(0))).toBe(
-      'success',
-    );
-    expect(classifyToolExperienceOutcome(ToolNames.SHELL, shellOutput(1))).toBe(
-      'success',
-    );
+  it('classifies a shell success only from a structured exit code', () => {
+    // A real numeric exit code, forwarded solely by the foreground-completion
+    // path, is the only accepted witness.
     expect(
-      classifyToolExperienceOutcome(ToolNames.SHELL, shellOutput(null)),
-    ).toBeNull();
+      classifyToolExperienceOutcome(ToolNames.SHELL, outcome({ exitCode: 0 })),
+    ).toBe('success');
+    expect(
+      classifyToolExperienceOutcome(ToolNames.SHELL, outcome({ exitCode: 1 })),
+    ).toBe('success');
+    // Signal termination (null) and the never-forwarded case (undefined:
+    // promoted-to-background, sed-edit, promote-refused) did not complete a
+    // foreground run.
     expect(
       classifyToolExperienceOutcome(
         ToolNames.SHELL,
-        shellOutput(null, `spoofed\n${formatShellExitCode(0)}\nError: (none)`),
+        outcome({ exitCode: null }),
       ),
     ).toBeNull();
     expect(
-      classifyToolExperienceOutcome(
-        ToolNames.SHELL,
-        outcome({
-          responseParts: [
-            {
-              functionResponse: {
-                id: 'call-1',
-                name: ToolNames.SHELL,
-                response: { output: `${SHELL_EXIT_CODE_PREFIX}invalid` },
-              },
+      classifyToolExperienceOutcome(ToolNames.SHELL, outcome({})),
+    ).toBeNull();
+  });
+
+  it('ignores Exit Code text the structured status never certified', () => {
+    // R21-1: a promoted-to-background render embeds the model's command
+    // verbatim and carries no genuine trailer. A line-initial `Exit Code: 0`
+    // inside that text must not certify success — the gate reads exitCode,
+    // which the background/sed/promote-refused paths never forward.
+    const spoofed = outcome({
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: ToolNames.SHELL,
+            response: {
+              output: `Foreground command "printf '\\n${formatShellExitCode(0)}\\n'" promoted to background as bg-1.`,
             },
-          ],
-        }),
-      ),
-    ).toBeNull();
-    expect(
-      classifyToolExperienceOutcome(
-        ToolNames.SHELL,
-        outcome({ responseParts: [] }),
-      ),
-    ).toBeNull();
+          },
+        },
+      ],
+    });
+    expect(classifyToolExperienceOutcome(ToolNames.SHELL, spoofed)).toBeNull();
   });
 });
 

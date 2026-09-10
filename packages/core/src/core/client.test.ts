@@ -9973,6 +9973,54 @@ hello
         expect(client['userSteeredSinceReview']).toBe(true);
       });
 
+      it('does not re-record an attached steer after the review window resets', async () => {
+        // R21-3: recordAcceptedExperienceInput runs from the stream loop AND the
+        // outer finally, and the finally fires after a scheduled review has
+        // reset the window. Without the once-per-send latch it writes
+        // userSteeredSinceReview back into the cleared window, re-dispatching a
+        // review for the same steer.
+        mockMemoryManager.scheduleSkillReview.mockReturnValueOnce({
+          status: 'scheduled',
+          taskId: 'task-1',
+        });
+        client['toolCallCount'] = 7;
+        client['userSteeredSinceReview'] = true;
+        client['experienceSignalsSinceReview'] = {
+          retryArc: false,
+          hasSubstantiveWork: true,
+          failedToolNames: new Set(),
+        };
+        recordOutcome('steered-read-reset', 'read_file', 'success', 'success', {
+          output: 'contents',
+        });
+
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              {
+                functionResponse: {
+                  id: 'steered-read-reset',
+                  name: 'read_file',
+                  response: { output: 'contents' },
+                },
+              },
+            ],
+            new AbortController().signal,
+            'prompt-autoskill-attached-steer-reset',
+            {
+              type: SendMessageType.ToolResult,
+              steerInput: {
+                parts: [{ text: 'read the other file' }],
+                accept: vi.fn(),
+                restore: vi.fn(),
+              },
+            },
+          ),
+        );
+
+        expect(client['userSteeredSinceReview']).toBe(false);
+      });
+
       it('does not count an accepted empty steer carrier as user input', async () => {
         const accept = vi.fn();
         const restore = vi.fn();

@@ -163,6 +163,8 @@ export interface ToolCallResponseInfo {
   error: Error | undefined;
   errorType: ToolErrorType | undefined;
   executionStatus?: ToolExecutionStatus;
+  /** Structured shell exit status; see CompletedToolCallOutcome.exitCode. */
+  exitCode?: number | null;
   contentLength?: number;
   persistedOutputFiles?: string[];
   modelOverride?: string;

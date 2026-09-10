@@ -5223,17 +5223,16 @@ export class CoreToolScheduler {
       const settledExecutionStatus: ToolExecutionStatus = toolResult.error
         ? 'error'
         : 'success';
-      // A cooperative tool (e.g. shell) observes the abort, kills its
-      // work mid-execution, and still resolves error-free. That is a
-      // cancellation DURING execution — record 'cancelled', not the
-      // settled status, so the experience gate does not count it as
-      // completed work. Abort-unaware tools keep the settled status:
-      // their work finished before the abort landed.
-      const cancelledSettleStatus: ToolExecutionStatus = toolResult.error
-        ? 'error'
-        : toolResult.aborted
-          ? 'cancelled'
-          : 'success';
+      // This branch is reached only when the parent aborted the call. A
+      // cancellation is the dominant event: whether the tool reported the
+      // interruption as an error result (web_search, exit_plan_mode) or as a
+      // cooperative aborted flag (shell), it did not complete its work, so
+      // record 'cancelled' — never 'error', which the experience gate counts as
+      // produced work. Only an abort-unaware tool that resolved a clean,
+      // error-free result finished before the abort landed; keep that 'success'
+      // so already-settled work is preserved.
+      const cancelledSettleStatus: ToolExecutionStatus =
+        toolResult.error || toolResult.aborted ? 'cancelled' : 'success';
       executionStatus =
         aborted || toolResult.aborted ? 'cancelled' : settledExecutionStatus;
       executionSettled = true;
@@ -5256,10 +5255,13 @@ export class CoreToolScheduler {
       }
       if (aborted) {
         // PostToolUseFailure Hook
-        // Cooperative interruptions can resolve without completing the work.
-        let cancelMessage = toolResult.aborted
-          ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
-          : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
+        // The message must match cancelledSettleStatus: 'success' means the work
+        // finished before the abort landed (tell the model it already
+        // completed); anything else was interrupted mid-flight.
+        let cancelMessage =
+          cancelledSettleStatus === 'success'
+            ? TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE
+            : TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE;
         let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
           const failureHookResult = await this.withHookSpan(
@@ -5702,6 +5704,9 @@ export class CoreToolScheduler {
           error: undefined,
           errorType: undefined,
           executionStatus,
+          ...(toolResult.exitCode !== undefined
+            ? { exitCode: toolResult.exitCode }
+            : {}),
           contentLength,
           ...(persistedOutputFiles !== undefined
             ? { persistedOutputFiles }
