@@ -1451,6 +1451,59 @@ describe('bundled review skill', () => {
     expect(posting).not.toContain('occurs _anywhere_ in its body');
   });
 
+  it("joins the repost exemption on the id alone — a carry-reply entry sits at the reply's location, not the finding's (#9940 review, round 29)", () => {
+    // presubmit's reply carrier matches a wanted id at ANY location (its
+    // anchor may be unmapped or the finding moved); a location-qualified
+    // drop rule denied exactly the exemption that entry exists to grant.
+    const posting = referenceBody('posting.md');
+    expect(posting).toContain(
+      '**except a finding whose `id` appears in `matchedIds` of ANY `existingComments.repost` entry**',
+    );
+    expect(posting).toContain('so never re-check the location');
+    expect(posting).toContain('id appears in matchedIds of ANY repost');
+    expect(posting).not.toContain('entry at the same location');
+    expect(posting).not.toContain('repost entry at the same');
+    // The anchors-file and Exclusion-Criteria restatements of the rule.
+    expect(posting).toContain(
+      'the carried-id re-post exemption joins on the id',
+    );
+    expect(posting).not.toContain('intersects on `(path, line)` plus id');
+    expect(posting).not.toContain('at its location is exempted');
+  });
+
+  it('tells the model a deferral title leading with a fixed id is refused (#9940 review, round 30)', () => {
+    // `submit`'s gate reads deferred titles through the same head-slot
+    // read the closure mint uses, so an id-leading title IS a re-post —
+    // the doc listed it as a safe cross-reference, which sends the model
+    // into a refusal it was told could not happen.
+    const core = coreBody();
+    expect(core).toContain('A **deferral title is not**');
+    expect(core).toContain('a title whose HEAD SLOT carries a fixed id');
+    expect(core).toContain('re-posts that finding and is refused');
+    expect(core).not.toContain(
+      "a duplicate-drop note, a deferral title, another ruling's `by` — is a cross-reference",
+    );
+    // The gate reads the whole head slot, so "leading with" alone sends
+    // the model into the refusal the sentence exists to prevent.
+    expect(core).toContain('behind axis and source tags');
+  });
+
+  it('states where the repost legs anchor and who caps the downgrade reasons (#9940 review, round 30)', () => {
+    // presubmit writes the reasons uncapped; compose-review caps each at
+    // 400 code points, drops what a 2000-point total cannot hold, and
+    // joins and escapes the rest. And a carry-reply repost entry carries
+    // the REPLY's anchor, never null — a model told otherwise re-checks a
+    // location that answers nothing.
+    const posting = referenceBody('posting.md');
+    expect(posting).toContain("a ROOT leg's matchedIds are the ids of");
+    expect(posting).toContain("findings at that entry's own location");
+    expect(posting).toContain('else 0) — never null');
+    expect(posting).not.toContain("may be the reply's, `line: null` unmapped");
+    expect(posting).toContain('`compose-review` caps');
+    expect(posting).toContain('each at 400 code points');
+    expect(posting).toContain('ones past a 2000-point total');
+  });
+
   it('names the CI salvage contract as the one exception to the drift restart', () => {
     // The workflow's supersede watcher arms a salvage past its threshold
     // and exports QWEN_REVIEW_SALVAGE_POST beside the marker; without this
