@@ -1704,10 +1704,13 @@ function makeConfig(
     eagerTools: string[];
     /** Live folder trust; absent reads as trusted. */
     isTrustedFolder: () => boolean;
+    /** Live session id; absent means no session scoping is applied. */
+    getSessionId: () => string;
   }> = {},
 ): PermissionManagerConfig {
   return {
     ...(opts.isTrustedFolder ? { isTrustedFolder: opts.isTrustedFolder } : {}),
+    ...(opts.getSessionId ? { getSessionId: opts.getSessionId } : {}),
     getPermissionsAllow: () => opts.permissionsAllow,
     getPermissionsAsk: () => opts.permissionsAsk,
     getPermissionsDeny: () => opts.permissionsDeny,
@@ -3108,9 +3111,14 @@ describe('PermissionManager', () => {
       expect(pm.listRules().some((r) => r.rule.raw === 'Bash(git *)')).toBe(
         false,
       );
+      // So does the telemetry summary: `core_tools_enabled` listing a rule
+      // `evaluate()` answers `ask` for would be a false audit record of
+      // exactly the approval the gate suspends.
+      expect(pm.getAllowRawStrings()).toEqual(['Bash(npm *)']);
 
       trusted = true;
       expect(await pm.evaluate(call)).toBe('allow');
+      expect(pm.getAllowRawStrings()).toEqual(['Bash(git *)', 'Bash(npm *)']);
     });
 
     it('an ungated grant of the same raw rule outranks the repo grant — the dedup must not inherit the suspension', async () => {
@@ -3146,6 +3154,275 @@ describe('PermissionManager', () => {
           command: 'git commit',
         }),
       ).toBe('allow');
+    });
+
+    it("a skill's grant stops applying once the process swaps sessions", async () => {
+      // `PermissionManager` is built once per process and outlives a session
+      // swap: `/clear` and an in-process `/resume` change the session id but
+      // never touch `sessionRules`. A skill's `allowedTools` are granted for
+      // the session that loaded the skill — the same scope its hooks get — so
+      // without this the next session would keep auto-approving them with no
+      // skill loaded, no body in context and no trace of where the approval
+      // came from. An unscoped grant is unaffected — a rule added without a
+      // `sessionId`, which nothing in-tree produces today (a user's "Always
+      // allow" is a persistent rule, not a session one), so it stands for the
+      // defensive branch rather than a live user path.
+      let sessionId = 'session-A';
+      pm = new PermissionManager(makeConfig({ getSessionId: () => sessionId }));
+      pm.initialize();
+      const call = { toolName: 'run_shell_command', command: 'git push' };
+      pm.addSessionAllowRule('Bash(git *)', { sessionId: 'session-A' });
+      pm.addSessionAllowRule('Bash(npm *)'); // unscoped
+      expect(await pm.evaluate(call)).toBe('allow');
+
+      sessionId = 'session-B';
+      expect(await pm.evaluate(call)).toBe('ask');
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'npm test',
+        }),
+      ).toBe('allow');
+      // The effective-rules listing agrees with the decision.
+      expect(pm.listRules().some((r) => r.rule.raw === 'Bash(git *)')).toBe(
+        false,
+      );
+
+      // Loading the same skill again in session B re-points the deduped
+      // entry at the session granting it now, rather than leaving it stuck
+      // on the id it first received.
+      pm.addSessionAllowRule('Bash(git *)', { sessionId: 'session-B' });
+      expect(await pm.evaluate(call)).toBe('allow');
+      expect(
+        (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules
+          .allow,
+      ).toHaveLength(2);
+    });
+
+    it("re-points a skill's grant stashed under AUTO mode at the session granting it now", async () => {
+      // The AUTO stash is the second dedup path, and it returns before the
+      // live re-point below. Without the same treatment there, a dangerous
+      // `allowedTools` rule granted in session A keeps A's id while stashed;
+      // leaving AUTO re-attaches that same object and the session filter then
+      // drops it for good, so a skill loaded in session B silently holds no
+      // grant at all and every matching call prompts again.
+      let sessionId = 'session-A';
+      pm = new PermissionManager(makeConfig({ getSessionId: () => sessionId }));
+      pm.initialize();
+      const call = { toolName: 'run_shell_command', command: 'npm test' };
+
+      pm.stripDangerousRulesForAutoMode();
+      pm.addSessionAllowRule('Bash(npm *)', { sessionId: 'session-A' });
+      // Stashed, not active: the AUTO invariant this branch exists for.
+      expect(
+        (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules
+          .allow,
+      ).toHaveLength(0);
+
+      sessionId = 'session-B';
+      pm.addSessionAllowRule('Bash(npm *)', { sessionId: 'session-B' });
+      expect(pm.getStrippedDangerousRules()?.session).toHaveLength(1);
+
+      pm.restoreDangerousRules();
+      expect(await pm.evaluate(call)).toBe('allow');
+    });
+
+    it("a dead session's grant is absent from telemetry and from the AUTO strip", async () => {
+      // `sessionRules.allow` deliberately keeps inert entries, so every reader
+      // of the raw array would otherwise report a previous session's grants as
+      // live: the `StartSessionEvent` emitted inside `startNewSession` would
+      // record an approval the new session answers `ask` for, and the AUTO
+      // notice would name a rule that was never in force and promise to
+      // restore it.
+      let sessionId = 'session-A';
+      pm = new PermissionManager(makeConfig({ getSessionId: () => sessionId }));
+      pm.initialize();
+      pm.addSessionAllowRule('run_shell_command', { sessionId: 'session-A' });
+      pm.addSessionAllowRule('Bash(git *)', { sessionId: 'session-A' });
+      pm.addSessionAllowRule('Bash(ls *)'); // unscoped
+      expect(pm.getAllowRawStrings()).toEqual([
+        'run_shell_command',
+        'Bash(git *)',
+        'Bash(ls *)',
+      ]);
+
+      sessionId = 'session-B';
+      expect(pm.getAllowRawStrings()).toEqual(['Bash(ls *)']);
+
+      pm.stripDangerousRulesForAutoMode();
+      expect(pm.getStrippedDangerousRules()?.session).toEqual([]);
+      // Still in the store — the filter is a read-time predicate, not a purge.
+      expect(
+        (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules
+          .allow,
+      ).toHaveLength(3);
+    });
+
+    it('a dangerous grant the strip could not see stays inert when its session is re-entered under a latched AUTO', async () => {
+      // The strip takes its candidates from the session-scoped half, so a
+      // grant tagged with another session is neither stripped nor stashed —
+      // and the `if (this.strippedAllowRules) return` latch means it never
+      // re-scans. `/resume` takes an arbitrary persisted id and touches
+      // neither the approval mode nor `sessionRules`, so re-entering the
+      // granting session is reachable with AUTO still on. The AUTO invariant
+      // therefore has to hold at the read side, where session provenance
+      // cannot defeat it.
+      let sessionId = 'session-A';
+      pm = new PermissionManager(makeConfig({ getSessionId: () => sessionId }));
+      pm.initialize();
+      const call = { toolName: 'run_shell_command', command: 'rm -rf /tmp/x' };
+      pm.addSessionAllowRule('run_shell_command', { sessionId: 'session-A' });
+      expect(await pm.evaluate(call)).toBe('allow');
+
+      sessionId = 'session-B';
+      pm.stripDangerousRulesForAutoMode();
+      // Out of scope, so it was left physically in the store.
+      expect(pm.getStrippedDangerousRules()?.session).toEqual([]);
+      expect(
+        (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules
+          .allow,
+      ).toHaveLength(1);
+
+      sessionId = 'session-A';
+      expect(await pm.evaluate(call)).not.toBe('allow');
+    });
+
+    it('re-attaching the stash merges by raw rather than seating a second copy', async () => {
+      // An AUTO cycle that spans a session swap leaves the first session's
+      // entry in the store (out of the strip's scope) while an equivalent one
+      // sits in the stash. Concatenating on restore would seat both, and the
+      // dedup `find` would thereafter re-point whichever copy comes first —
+      // which can be the one nothing else reaches — while `/permissions` and
+      // telemetry each render the rule once per copy.
+      let sessionId = 'session-A';
+      pm = new PermissionManager(makeConfig({ getSessionId: () => sessionId }));
+      pm.initialize();
+
+      pm.stripDangerousRulesForAutoMode();
+      pm.addSessionAllowRule('Bash(npm *)', { sessionId: 'session-A' });
+      pm.restoreDangerousRules();
+
+      sessionId = 'session-B';
+      pm.stripDangerousRulesForAutoMode();
+      pm.addSessionAllowRule('Bash(npm *)', { sessionId: 'session-B' });
+      pm.restoreDangerousRules();
+
+      const store = (
+        pm as unknown as { sessionRules: { allow: Array<{ raw: string }> } }
+      ).sessionRules.allow;
+      expect(store.filter((r) => r.raw === 'Bash(npm *)')).toHaveLength(1);
+      expect(pm.getAllowRawStrings()).toEqual(['Bash(npm *)']);
+    });
+
+    it("a cross-session re-point takes the arriving grant's trust gating instead of widening", async () => {
+      // Session A's ungated grant leaves an entry the swap makes inert. When
+      // a project skill then grants the same raw in session B, the dedup
+      // re-points that entry into B — so it stops standing for A's grant and
+      // must take B's gating. Widening here would let a dead session's grant
+      // permanently de-gate a repository-controlled one, and the folder-trust
+      // suspension would fail open for a rule session B only ever received
+      // from repository-controlled configuration.
+      let trusted = true;
+      let sessionId = 'session-A';
+      pm = new PermissionManager(
+        makeConfig({
+          isTrustedFolder: () => trusted,
+          getSessionId: () => sessionId,
+        }),
+      );
+      pm.initialize();
+      const call = { toolName: 'run_shell_command', command: 'npm test' };
+      pm.addSessionAllowRule('run_shell_command', { sessionId: 'session-A' });
+      expect(await pm.evaluate(call)).toBe('allow');
+
+      sessionId = 'session-B';
+      expect(await pm.evaluate(call)).toBe('ask');
+      pm.addSessionAllowRule('run_shell_command', {
+        trustGated: true,
+        sessionId: 'session-B',
+      });
+      expect(await pm.evaluate(call)).toBe('allow');
+
+      trusted = false;
+      expect(await pm.evaluate(call)).toBe('ask');
+      expect(pm.getAllowRawStrings()).toEqual([]);
+    });
+
+    it('the AUTO stash widens trust gating the same way the live dedup does', async () => {
+      // The stash is the one dedup path whose entries become live later, on
+      // `restoreDangerousRules()`. Re-pointing only the session there would
+      // make it the single path where a user-level skill's grant inherits a
+      // project skill's trust suspension.
+      let trusted = true;
+      pm = new PermissionManager(
+        makeConfig({
+          isTrustedFolder: () => trusted,
+          getSessionId: () => 'session-A',
+        }),
+      );
+      pm.initialize();
+      const call = { toolName: 'run_shell_command', command: 'npm test' };
+
+      pm.stripDangerousRulesForAutoMode();
+      pm.addSessionAllowRule('Bash(npm *)', {
+        trustGated: true,
+        sessionId: 'session-A',
+      });
+      pm.addSessionAllowRule('Bash(npm *)', { sessionId: 'session-A' });
+      pm.restoreDangerousRules();
+
+      trusted = false;
+      expect(await pm.evaluate(call)).toBe('allow');
+    });
+
+    it('strips and stashes a trust-gated dangerous rule in an untrusted folder', async () => {
+      // The strip deliberately reads the trust-*inclusive* half: excluding
+      // trust-gated rules from the candidates would let a mid-AUTO grant of
+      // folder trust activate a rule that was never stripped, and it would
+      // never appear in the "Auto mode temporarily disabled these allow
+      // rules" notice either. The state is reachable through
+      // `initialize()`'s AUTO-on-startup strip and through a mid-session
+      // trust revocation.
+      pm = new PermissionManager(
+        makeConfig({
+          isTrustedFolder: () => false,
+          getSessionId: () => 'session-A',
+        }),
+      );
+      pm.initialize();
+      pm.addSessionAllowRule('run_shell_command', {
+        trustGated: true,
+        sessionId: 'session-A',
+      });
+
+      pm.stripDangerousRulesForAutoMode();
+      expect(pm.getStrippedDangerousRules()?.session.map((r) => r.raw)).toEqual(
+        ['run_shell_command'],
+      );
+      expect(
+        (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules
+          .allow,
+      ).toHaveLength(0);
+    });
+
+    it("an unscoped grant of the same raw rule outranks a skill's session-scoped one", async () => {
+      // Same widening rule the trust gating follows: the kept entry must
+      // never be narrower than the grant that just arrived, so an unscoped
+      // arrival survives the session swap that drops the skill grant. No
+      // in-tree caller omits `sessionId` today, so this pins the branch that
+      // makes omitting it widen an existing entry rather than be inert.
+      let sessionId = 'session-A';
+      pm = new PermissionManager(makeConfig({ getSessionId: () => sessionId }));
+      pm.initialize();
+      const call = { toolName: 'run_shell_command', command: 'git push' };
+      pm.addSessionAllowRule('Bash(git *)', { sessionId: 'session-A' });
+      pm.addSessionAllowRule('Bash(git *)'); // unscoped
+      sessionId = 'session-B';
+      expect(await pm.evaluate(call)).toBe('allow');
+      expect(
+        (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules
+          .allow,
+      ).toHaveLength(1);
     });
 
     it('addSessionAllowRule deduplicates identical rules', () => {

@@ -12,61 +12,23 @@
  * when the user started the skill by hand.
  */
 
-import { describe, it, expect, afterEach, vi } from 'vitest';
-import {
-  applyContainerSandboxNoProxy,
-  fakeServerHostOptions,
-  TestRig,
-} from './test-helper.js';
+import { describe, it, expect, afterEach } from 'vitest';
+import { fakeServerHostOptions, TestRig } from './test-helper.js';
 import { fakeToolCall, startFakeOpenAIServer } from './fake-openai-server.js';
 import type { FakeOpenAIServer } from './fake-openai-server.js';
+import {
+  EXECUTED_FLAG,
+  GATE_MARKER,
+  SKILL_DESCRIPTION_PREFIX,
+  SKILL_NAME,
+  exitInteractive,
+  fakeModelLaunchArgs,
+  installGatedSkill,
+  makeWaitFor,
+  stubFakeModelEnv,
+} from './helpers/gated-skill-fixture.js';
 import { join } from 'node:path';
-import { mkdirSync, writeFileSync, chmodSync, existsSync } from 'node:fs';
-
-const GATE_MARKER = 'GATE_BLOCKED_DOWNSTREAM_SESSION_ID_MISSING';
-const EXECUTED_FLAG = 'executed.flag';
-const SKILL_DESCRIPTION =
-  'Calls the downstream CLI using a runtime-injected session ID';
-// Only a loaded skill command can render its own description in the
-// completion menu, which is what the user path polls for. Match on a prefix
-// short enough to survive a narrow terminal truncating the rest.
-const SKILL_DESCRIPTION_PREFIX = 'Calls the downstream CLI';
-
-function installGatedSkill(testDir: string) {
-  const skillDir = join(testDir, '.qwen', 'skills', 'gated-skill');
-  mkdirSync(join(skillDir, 'scripts'), { recursive: true });
-
-  writeFileSync(
-    join(skillDir, 'SKILL.md'),
-    `---
-name: gated-skill
-description: ${SKILL_DESCRIPTION}
-hooks:
-  PreToolUse:
-    - matcher: Shell
-      hooks:
-        - type: command
-          command: "$QWEN_SKILL_ROOT/scripts/gate-session-id.sh"
----
-
-Only use the exact runtime-injected ID (\`DOWNSTREAM_SESSION_ID\`).
-Never fabricate a fallback; stop if it is missing.
-`,
-  );
-
-  const gate = join(skillDir, 'scripts', 'gate-session-id.sh');
-  writeFileSync(
-    gate,
-    `#!/usr/bin/env bash
-if [ -z "\${DOWNSTREAM_SESSION_ID:-}" ]; then
-  echo "${GATE_MARKER}" >&2
-  exit 2
-fi
-exit 0
-`,
-  );
-  chmodSync(gate, 0o755);
-}
+import { existsSync } from 'node:fs';
 
 describe('skill hooks fire on both invocation paths', () => {
   let rig: TestRig;
@@ -102,7 +64,7 @@ describe('skill hooks fire on both invocation paths', () => {
       if (options.modelInvokesSkill && i === 0) {
         return {
           toolCalls: [
-            fakeToolCall('skill', { skill: 'gated-skill' }, 'call-skill'),
+            fakeToolCall('skill', { skill: SKILL_NAME }, 'call-skill'),
           ],
         };
       }
@@ -121,28 +83,10 @@ describe('skill hooks fire on both invocation paths', () => {
       return { content: 'done' };
     }, fakeServerHostOptions());
 
-    vi.stubEnv('OPENAI_API_KEY', 'fake-key');
-    vi.stubEnv('OPENAI_BASE_URL', fakeServer.baseUrl);
-    vi.stubEnv('OPENAI_MODEL', 'fake-model');
-    vi.stubEnv('QWEN_MODEL', 'fake-model');
-    vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
-    vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
-    // Under the docker/podman sandbox legs the CLI is containerized, so the
-    // fake server must be reachable as host.docker.internal and excluded from
-    // the proxy. Both helpers are no-ops outside a container sandbox.
-    restoreNoProxy = applyContainerSandboxNoProxy();
-    // The gate's required value is deliberately absent.
-    vi.stubEnv('DOWNSTREAM_SESSION_ID', '');
+    restoreNoProxy = stubFakeModelEnv(rig, fakeServer);
 
     const { ptyProcess } = rig.runInteractive(
-      '--auth-type',
-      'openai',
-      '--model',
-      'fake-model',
-      '--openai-base-url',
-      fakeServer.baseUrl,
-      '--openai-api-key',
-      'fake-key',
+      ...fakeModelLaunchArgs(fakeServer),
     );
 
     let output = '';
@@ -153,26 +97,18 @@ describe('skill hooks fire on both invocation paths', () => {
     const ready = await rig.waitForText('Type your message', 30000);
     expect(ready, `CLI did not start. Output:\n${output}`).toBe(true);
 
-    // Every wait below polls for the condition it is actually waiting on, so
-    // the test neither burns a fixed budget on a fast runner nor gives up
-    // early on a slow one.
-    const waitFor = async (label: string, done: () => boolean) => {
-      const ok = await rig.poll(done, 30000, 100);
-      expect(ok, `timed out waiting for ${label}. Output:\n${output}`).toBe(
-        true,
-      );
-    };
+    const waitFor = makeWaitFor(rig, () => output);
 
     if (!options.modelInvokesSkill) {
       // USER path: start the skill by hand. Wait for the command to exist,
       // not merely for the typed text to come back: the echo lands long
       // before the skill command registry does, and submitting into that gap
-      // gets `Unknown command: /gated-skill` instead of the skill. That
-      // failure is undetectable downstream — the error text contains
-      // `/gated-skill`, so any inclusion check on the typed command matches
-      // it too. The completion menu rendering the skill's own description is
-      // a signal only a registered command can produce.
-      ptyProcess.write('/gated-skill');
+      // gets `Unknown command: /<skill>` instead of the skill. That failure
+      // is undetectable downstream — the error text contains the typed
+      // command, so any inclusion check on it matches the error too. The
+      // completion menu rendering the skill's own description is a signal
+      // only a registered command can produce.
+      ptyProcess.write(`/${SKILL_NAME}`);
       await waitFor('the skill command to be registered', () =>
         output.includes(SKILL_DESCRIPTION_PREFIX),
       );
@@ -189,7 +125,7 @@ describe('skill hooks fire on both invocation paths', () => {
       expect(
         output,
         'the slash command was submitted before it was registered',
-      ).not.toContain('Unknown command: /gated-skill');
+      ).not.toContain(`Unknown command: /${SKILL_NAME}`);
     }
 
     const prompt = 'run the downstream command';
@@ -203,13 +139,7 @@ describe('skill hooks fire on both invocation paths', () => {
       () => existsSync(flagPath) || output.includes(GATE_MARKER),
     );
 
-    // Ctrl+C twice to exit; the second only registers once the first has been
-    // acknowledged.
-    ptyProcess.write('\x03');
-    await waitFor('the exit confirmation', () =>
-      output.includes('Ctrl+C again to exit'),
-    );
-    ptyProcess.write('\x03');
+    await exitInteractive(ptyProcess, waitFor, () => output);
 
     return { output, executed: existsSync(flagPath) };
   }

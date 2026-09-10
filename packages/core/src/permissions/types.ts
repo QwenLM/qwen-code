@@ -81,6 +81,25 @@ export interface PermissionRule {
    * restores it, without any per-skill bookkeeping.
    */
   trustGated?: boolean;
+  /**
+   * The session this allow rule was granted for. Set for grants that belong
+   * to a single session — a skill's `allowedTools` — so they stop applying
+   * when the process swaps sessions (`/clear`, `/resume`) without the rule
+   * having to be found and removed. The scope is a read-time predicate, not
+   * a purge: the entry stays in the session set, so re-entering the id it
+   * was tagged with — `/resume` takes an arbitrary persisted id — makes it
+   * apply again. That is why the AUTO invariant is enforced at the read side
+   * too (`activeSessionAllowRules`) rather than only by the strip, which
+   * cannot see an out-of-scope entry. Unset means the grant is not
+   * session-scoped. Nothing in-tree produces one today: the only non-test
+   * writer of the session allow set is `applySkillSideEffects`, which always
+   * tags with the current session id, and a user's "Always allow" is a
+   * persistent rule (`addPersistentRule`), not a session rule. Omitting
+   * `sessionId` on the exported `applySkillAllowedTools` therefore WIDENS an
+   * existing entry rather than being inert — it clears a scope a live
+   * session already earned.
+   */
+  sessionId?: string;
 }
 
 /** A complete set of permission rules organized by type. */

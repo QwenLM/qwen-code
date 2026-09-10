@@ -17,12 +17,65 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('SKILL');
 
 /**
+ * The first bytes of every injected skill body. Exported so a recorded tool
+ * response can be told apart from the other strings the Skill tool records —
+ * its dedup message and its refusals — without inventing a second contract.
+ */
+export const SKILL_LLM_CONTENT_PREFIX = 'Base directory for this skill: ';
+
+/**
+ * Why the model cannot invoke a skill right now, or `undefined` when it can.
+ *
+ * The single source of truth for the model-facing availability rule. It is
+ * asked twice, for two different jobs: `collectAvailableSkillEntriesUncached`
+ * decides what to put in front of the model, and `SkillTool`'s resume path
+ * decides whether a skill carried by a replayed conversation may have its
+ * `allowedTools` and `hooks:` re-armed. Those must agree — a resumed session
+ * that grants what no tool call can ask for is a permission the user can
+ * neither see nor account for — and before this they were two hand-rolled
+ * copies of the same trio.
+ *
+ * A reason rather than a boolean, because the resume path has to say which
+ * condition failed: its whole point is that a missing gate stops being
+ * silent.
+ *
+ * The order is the one the resume path reports in, and only shows through
+ * when more than one condition fails at once. It runs permanent conditions
+ * before transient ones: `disable-model-invocation` is a frontmatter fact
+ * that no session can satisfy, and `SkillManager` never even enters such a
+ * skill into the activation registry, so `isSkillActive` stays false for it
+ * forever. Reporting `inactive` first would send the operator to touch a
+ * matching file to clear a condition that cannot clear, and hide the
+ * permanent cause that actually explains the decline.
+ *
+ * Every condition is read live — off `Config` and `SkillManager` — rather
+ * than off `SkillTool`'s `hiddenSkillNames` / `pendingConditionalSkillNames`
+ * snapshots: those are committed by an async `refreshSkills()` that nothing
+ * sequences against a resume, so reading them here would race the very state
+ * this decides on.
+ *
+ * Not to be reused for `pendingConditionalSkillNames`: that set is
+ * deliberately this trio *minus* `isSkillActive` — a skill excluded here for
+ * being inactive is exactly what it exists to name.
+ */
+export function skillModelInvocationBlock(
+  config: Config,
+  skillManager: SkillManager,
+  skill: SkillConfig,
+): 'disabled' | 'inactive' | 'hidden' | undefined {
+  if (!config.isSkillEnabled(skill)) return 'disabled';
+  if (skill.disableModelInvocation) return 'hidden';
+  if (!skillManager.isSkillActive(skill)) return 'inactive';
+  return undefined;
+}
+
+/**
  * Builds the LLM-facing content string when a skill body is injected.
  * Shared between SkillToolInvocation (runtime) and /context (estimation)
  * so that token estimates stay in sync with actual usage.
  */
 export function buildSkillLlmContent(baseDir: string, body: string): string {
-  return `Base directory for this skill: ${baseDir}\nImportant: ALWAYS resolve absolute paths from this base directory when working with skills.\n\n${body}\n`;
+  return `${SKILL_LLM_CONTENT_PREFIX}${baseDir}\nImportant: ALWAYS resolve absolute paths from this base directory when working with skills.\n\n${body}\n`;
 }
 
 /**
@@ -137,19 +190,15 @@ async function collectAvailableSkillEntriesUncached(
   skillManager: SkillManager,
   config: Config,
 ): Promise<CollectedAvailableSkills> {
-  // Include a skill only when (a) it is not hidden from the model
-  // (`disable-model-invocation`), (b) it is not user-disabled via
-  // `skills.disabled`, and (c) it is unconditional or already activated by a
-  // matching file path this session. Keeps the listing small in large monorepos
-  // where most conditional skills are not yet relevant.
+  // Include a skill only when the model could invoke it right now — see
+  // `skillModelInvocationBlock` for the three conditions, which the resume
+  // path reads from the same place. Keeps the listing small in large
+  // monorepos where most conditional skills are not yet relevant.
   const allSkills = await skillManager.listSkills();
   const isEnabled = (skill: SkillConfig) => config.isSkillEnabled(skill);
 
   const availableSkills = allSkills.filter(
-    (s) =>
-      !s.disableModelInvocation &&
-      skillManager.isSkillActive(s) &&
-      isEnabled(s),
+    (s) => skillModelInvocationBlock(config, skillManager, s) === undefined,
   );
   const hiddenSkillNames = new Set(
     allSkills.filter((s) => s.disableModelInvocation).map((s) => s.name),
@@ -307,11 +356,17 @@ export function canApplySkillSideEffects(
  * permission decision. Whether that re-check can change mid-session depends
  * on where trust comes from — see `applySkillHooks`, which is gated the same
  * way. Pass `skill.level === 'project'`.
+ *
+ * `sessionId` scopes the grants to the session that loaded the skill, the
+ * same scope the skill's hooks already get. `PermissionManager` is built once
+ * per process and outlives a session swap, so without it a grant made in one
+ * session would keep auto-approving in the next one — which has no skill
+ * loaded, no body in context and no trace of where the approval came from.
  */
 export function applySkillAllowedTools(
   permissionManager: PermissionManager | null | undefined,
   allowedTools: string[] | undefined,
-  options?: { trustGated?: boolean },
+  options?: { trustGated?: boolean; sessionId?: string },
 ): void {
   if (!permissionManager || !allowedTools?.length) {
     return;
@@ -319,6 +374,7 @@ export function applySkillAllowedTools(
   for (const rule of allowedTools) {
     permissionManager.addSessionAllowRule(rule, {
       trustGated: options?.trustGated === true,
+      sessionId: options?.sessionId,
     });
   }
 }
@@ -424,6 +480,7 @@ export function applySkillSideEffects(
   }
   applySkillAllowedTools(config.getPermissionManager(), skill.allowedTools, {
     trustGated: skill.level === 'project',
+    sessionId: config.getSessionId(),
   });
   applySkillHooks(config, skill);
 }
