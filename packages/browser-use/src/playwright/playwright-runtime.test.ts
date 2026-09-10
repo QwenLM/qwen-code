@@ -127,9 +127,6 @@ describe('PlaywrightRuntime command contracts', () => {
 
   it('builds locator plans and delegates read and input operations', async () => {
     const fixture = await runtimeFixture();
-    fixture.locator.evaluate
-      .mockResolvedValueOnce('')
-      .mockResolvedValueOnce('hello');
     const tab = await createTab(fixture.runtime);
     const steps = [
       {
@@ -184,7 +181,7 @@ describe('PlaywrightRuntime command contracts', () => {
 
   it('reports when Chrome browser UI swallows locator typing', async () => {
     const fixture = await runtimeFixture();
-    fixture.locator.evaluate.mockResolvedValue('');
+    fixture.typingState.evaluate.mockResolvedValue(true);
     const tab = await createTab(fixture.runtime);
 
     await expect(
@@ -684,11 +681,7 @@ describe('PlaywrightRuntime command contracts', () => {
       timeout: 11,
     });
     expect(fixture.locator.fill).toHaveBeenCalledWith('value', { timeout: 12 });
-    expect(fixture.locator.dispatchEvent).toHaveBeenCalledWith(
-      'change',
-      { bubbles: true },
-      { timeout: 12 },
-    );
+    expect(fixture.locator.dispatchEvent).not.toHaveBeenCalled();
     expect(fixture.locator.evaluate).toHaveBeenCalledWith(
       expect.any(Function),
       undefined,
@@ -1381,6 +1374,10 @@ interface RuntimeFixture {
   runtime: PlaywrightRuntime;
   page: ReturnType<typeof fakePage>['methods'];
   locator: ReturnType<typeof fakeLocator>['methods'];
+  typingState: {
+    evaluate: ReturnType<typeof vi.fn>;
+    dispose: ReturnType<typeof vi.fn>;
+  };
   cdp: {
     send: ReturnType<typeof vi.fn>;
     detach: ReturnType<typeof vi.fn>;
@@ -1427,6 +1424,11 @@ async function runtimeFixture(
   options: { unrelatedPage?: boolean } = {},
 ): Promise<RuntimeFixture> {
   const locator = fakeLocator();
+  const typingState = {
+    evaluate: vi.fn(async () => false),
+    dispose: vi.fn(async () => undefined),
+  };
+  locator.methods.evaluateHandle.mockResolvedValue(typingState);
   const page = fakePage(locator.value);
   const unrelatedPage = options.unrelatedPage
     ? fakePage(locator.value, 'Unrelated popup')
@@ -1546,6 +1548,7 @@ async function runtimeFixture(
     runtime,
     page: page.methods,
     locator: locator.methods,
+    typingState,
     cdp,
     request,
     emitEvent(event) {
@@ -1568,6 +1571,7 @@ function fakeLocator(): {
     press: ReturnType<typeof vi.fn>;
     pressSequentially: ReturnType<typeof vi.fn>;
     evaluate: ReturnType<typeof vi.fn>;
+    evaluateHandle: ReturnType<typeof vi.fn>;
     getAttribute: ReturnType<typeof vi.fn>;
     fill: ReturnType<typeof vi.fn>;
     dispatchEvent: ReturnType<typeof vi.fn>;
@@ -1592,6 +1596,7 @@ function fakeLocator(): {
     press: vi.fn(async () => undefined),
     pressSequentially: vi.fn(async () => undefined),
     evaluate: vi.fn(async () => undefined),
+    evaluateHandle: vi.fn(),
     getAttribute: vi.fn(async () => 'Field'),
     fill: vi.fn(async () => undefined),
     dispatchEvent: vi.fn(async () => undefined),
