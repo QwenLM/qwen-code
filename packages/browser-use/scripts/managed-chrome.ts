@@ -6,19 +6,13 @@
 
 import { execFile } from 'node:child_process';
 import { once } from 'node:events';
-import {
-  access,
-  mkdir,
-  mkdtemp,
-  readdir,
-  rm,
-  writeFile,
-} from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { chromium } from 'playwright-core';
 import {
   CHROME_EXTENSION_ID,
   CHROME_NATIVE_HOST_NAME,
@@ -150,32 +144,13 @@ async function findChrome(): Promise<string> {
   const configured = process.env['QWEN_BROWSER_USE_CHROME']?.trim();
   if (configured) return configured;
   const candidates = [
+    chromium.executablePath(),
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     '/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
     '/usr/bin/google-chrome',
     '/usr/bin/google-chrome-stable',
     '/usr/bin/chromium',
   ];
-  for (const cache of [
-    join(homedir(), 'Library/Caches/ms-playwright'),
-    join(homedir(), '.cache/ms-playwright'),
-  ]) {
-    try {
-      for (const entry of (await readdir(cache)).sort()) {
-        if (!/^chromium-\d+$/.test(entry)) continue;
-        candidates.unshift(
-          join(
-            cache,
-            entry,
-            'chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
-          ),
-          join(cache, entry, 'chrome-linux64/chrome'),
-        );
-      }
-    } catch {
-      // Cache root is absent.
-    }
-  }
   for (const candidate of candidates) {
     try {
       await access(candidate);
