@@ -3365,3 +3365,107 @@ describe('ChatPane daemon keep-alive (#9487)', () => {
     expect(testid('pane-running')!.textContent).toBe('false');
   });
 });
+
+describe('ChatPane continuation errors', () => {
+  it.each([false, true])(
+    'keeps a current continuation failure visible and isolates old owners (replace owner: %s)',
+    async (replaceOwner) => {
+      const { createDaemonSessionActions } = await import(
+        '../daemon/session/actions'
+      );
+      const request = deferred<never>();
+      const continueRequest = vi.fn(() => request.promise);
+      const addNotice = vi.fn();
+      const onError = vi.fn();
+      const requestError = new TypeError('Failed to fetch continuation');
+      const sessionRef = {
+        current: {
+          sessionId: 'sess-1',
+          clientId: 'pane-client',
+          continueSession: continueRequest,
+        },
+      };
+      connectionState.context = {
+        v: 1,
+        sessionId: 'sess-1',
+        workspaceCwd: '/w',
+        state: {},
+        recovery: { kind: 'interrupted_prompt', canContinue: true },
+      };
+      // Actual action + actual ChatPane/Banner; only SDK request and hook state
+      // delivery are simulated. No SSE frames or provider replay are invented.
+      const actions = createDaemonSessionActions({
+        sessionRef,
+        activePromptsRef: { current: new Map() },
+        settledPromptsRef: { current: new Map() },
+        sessionRecoveryGeneration: new WeakMap(),
+        passiveAssistantDoneTimerRef: { current: undefined },
+        getConnection: () => connectionState,
+        hasSessionActivePrompt: () => false,
+        setConnection: (next: unknown) => {
+          connectionState =
+            typeof next === 'function' ? next(connectionState) : next;
+        },
+        setPromptStatus: vi.fn(),
+        addNotice,
+      } as unknown as Parameters<typeof createDaemonSessionActions>[0]);
+      Object.assign(daemonActions, {
+        continueSession: actions.continueSession,
+      });
+      try {
+        render({ onError });
+        const button = testid('session-recovery-banner')?.querySelector(
+          'button',
+        );
+        expect(button).toBeTruthy();
+        act(() => {
+          button!.click();
+          button!.click();
+        });
+        rerender({ onError });
+        expect(continueRequest).toHaveBeenCalledOnce();
+        expect(connectionState.context.recovery.canContinue).toBe(false);
+        expect(
+          testid('session-recovery-banner')?.querySelector('button'),
+        ).toBeFalsy();
+        if (replaceOwner) {
+          ownerVersion += 1;
+          sessionRef.current = { ...sessionRef.current, sessionId: 'sess-2' };
+          connectionState = {
+            ...connectionState,
+            sessionId: 'sess-2',
+            context: { ...connectionState.context, sessionId: 'sess-2' },
+          };
+          rerender({ onError });
+        }
+        await act(async () => {
+          request.reject(requestError);
+          await Promise.resolve();
+        });
+        rerender({ onError });
+        const inlineErrors = Array.from(
+          container!.querySelectorAll('[role="alert"]'),
+        )
+          .map((alert) => alert.textContent)
+          .filter(Boolean);
+        expect(continueRequest).toHaveBeenCalledOnce();
+        expect(connectionState.context.recovery.canContinue).toBe(false);
+        expect(
+          testid('session-recovery-banner')?.querySelector('button'),
+        ).toBeFalsy();
+        if (replaceOwner) {
+          expect(onError).not.toHaveBeenCalled();
+          expect(inlineErrors).toEqual([]);
+          expect(addNotice).not.toHaveBeenCalled();
+        } else {
+          expect(addNotice).toHaveBeenCalledOnce();
+          expect(inlineErrors).toEqual([
+            'Could not continue the conversation.',
+          ]);
+        }
+      } finally {
+        Reflect.deleteProperty(daemonActions, 'continueSession');
+      }
+    },
+  );
+});

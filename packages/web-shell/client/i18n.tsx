@@ -623,6 +623,15 @@ const EN: Messages = {
   'common.invalid': 'invalid',
   'common.loading': 'Loading...',
   'common.retry': 'Try again',
+  'session.recovery.interrupted_prompt':
+    'The previous request was interrupted before the response completed.',
+  'session.recovery.interrupted_turn':
+    'The previous task was interrupted. Some tool results were not saved.',
+  'session.recovery.degraded_history':
+    'Conversation history is incomplete. The interrupted task cannot be continued.',
+  'session.recovery.continue': 'Continue execution',
+  'session.recovery.continuing': 'Continuing…',
+  'session.recovery.failed': 'Could not continue the conversation.',
   'session.archived': 'This conversation is archived',
   'session.archivedDescription':
     'Unarchive it before opening the conversation.',
@@ -4266,6 +4275,12 @@ const ZH: Messages = {
   'common.invalid': '无效',
   'common.loading': '加载中...',
   'common.retry': '重试',
+  'session.recovery.interrupted_prompt': '上次请求在回答完成前中断。',
+  'session.recovery.interrupted_turn': '上次任务已中断，部分工具结果未保存。',
+  'session.recovery.degraded_history': '会话历史不完整，无法继续中断的任务。',
+  'session.recovery.continue': '继续执行',
+  'session.recovery.continuing': '正在继续…',
+  'session.recovery.failed': '无法继续此会话。',
   'session.archived': '该会话已归档',
   'session.archivedDescription': '需要先取消归档，才能打开该会话。',
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',

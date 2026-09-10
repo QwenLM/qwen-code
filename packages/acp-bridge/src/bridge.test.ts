@@ -4149,6 +4149,7 @@ describe('createAcpSessionBridge', () => {
                 v: 1,
                 sessionId: params['sessionId'],
                 workspaceCwd: WS_A,
+                recovery: { kind: 'interrupted_prompt', canContinue: true },
                 state: {},
               };
             }
@@ -4231,6 +4232,7 @@ describe('createAcpSessionBridge', () => {
       bridge.getSessionContextStatus(session.sessionId),
     ).resolves.toMatchObject({
       sessionId: session.sessionId,
+      recovery: { kind: 'interrupted_prompt', canContinue: true },
       state: {},
     });
     await expect(
@@ -15511,6 +15513,62 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('does not admit a continuation cancelled during precheck', async () => {
+      const entered = deferred<void>();
+      const precheck = deferred<Record<string, unknown>>();
+      const prompt = deferred<PromptResponse>();
+      let checks = 0;
+      const handle = makeChannel({
+        promptImpl: () => prompt.promise,
+        cancelImpl: () => {
+          throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
+        },
+        extMethodImpl: (method) => {
+          if (method !== 'qwen/control/session/continue')
+            throw new Error(method);
+          if (++checks === 1) {
+            entered.resolve(undefined);
+            return precheck.promise;
+          }
+          return { accepted: true, interruption: 'interrupted_prompt' };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const summary = () =>
+          bridge
+            .getDaemonStatusSnapshot()
+            .sessions.find((entry) => entry.sessionId === session.sessionId);
+        const pending = bridge.continueSession(session.sessionId, {
+          promptId: 'cancelled-precheck',
+        });
+        await entered.promise;
+        expect(handle.agent.promptCalls).toHaveLength(0);
+        await bridge.cancelSession(session.sessionId);
+        expect(handle.agent.cancelCalls).toHaveLength(1);
+        precheck.resolve({
+          accepted: true,
+          interruption: 'interrupted_prompt',
+        });
+        const decision = await pending;
+        expect(decision.accepted).toBe(false);
+        expect(handle.agent.promptCalls).toHaveLength(0);
+        expect(summary()?.pendingPromptCount).toBe(0);
+        prompt.resolve({ stopReason: 'end_turn' });
+        const later = await bridge.continueSession(session.sessionId, {
+          promptId: 'later-explicit',
+        });
+        expect(later.accepted).toBe(true);
+        await vi.waitFor(() =>
+          expect(handle.agent.promptCalls).toHaveLength(1),
+        );
+      } finally {
+        prompt.resolve({ stopReason: 'end_turn' });
+        await bridge.shutdown();
+      }
+    });
+
     it('rejects continueSession for a nonexistent session', async () => {
       const handle = makeChannel();
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
@@ -15584,6 +15642,50 @@ describe('createAcpSessionBridge', () => {
         handle.agent.promptCalls[0]?._meta?.['qwen.daemon.continueLastTurn'],
       ).toBe(true);
 
+      await bridge.shutdown();
+    });
+
+    it('admits only one continuation when concurrent pre-checks both accept', async () => {
+      const preChecks = deferred<Record<string, unknown>>();
+      const prompt = deferred<PromptResponse>();
+      let preCheckCount = 0;
+      const handle = makeChannel({
+        promptImpl: () => prompt.promise,
+        extMethodImpl: (method) => {
+          if (method === 'qwen/control/session/continue') {
+            preCheckCount += 1;
+            return preChecks.promise;
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const decisions = Promise.all([
+        bridge.continueSession(session.sessionId, { promptId: 'cont-1' }),
+        bridge.continueSession(session.sessionId, { promptId: 'cont-2' }),
+      ]);
+      await vi.waitFor(() => expect(preCheckCount).toBe(2));
+      preChecks.resolve({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+
+      const results = await decisions;
+      expect(results.filter((result) => result.accepted)).toHaveLength(1);
+      expect(results.filter((result) => !result.accepted)).toEqual([
+        { accepted: false, interruption: 'interrupted_prompt' },
+      ]);
+      const summary = () =>
+        bridge
+          .getDaemonStatusSnapshot()
+          .sessions.find((entry) => entry.sessionId === session.sessionId);
+      expect(summary()?.pendingPromptCount).toBe(1);
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+
+      prompt.resolve({ stopReason: 'end_turn' });
+      await vi.waitFor(() => expect(summary()?.pendingPromptCount).toBe(0));
+      expect(handle.agent.promptCalls).toHaveLength(1);
       await bridge.shutdown();
     });
 

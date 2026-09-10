@@ -48,6 +48,7 @@ import {
   type DaemonUnrecognizedDiagnostic,
 } from '@qwen-code/sdk/daemon';
 import {
+  advanceSessionRecoveryGeneration,
   createDaemonSessionActions,
   getConnectionAfterSessionClear,
   getPromptSettledKey,
@@ -853,6 +854,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
   const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
   const sessionConfigGenerationRef = useRef(
+    new WeakMap<DaemonSessionClient, number>(),
+  );
+  const sessionRecoveryGenerationRef = useRef(
     new WeakMap<DaemonSessionClient, number>(),
   );
   const transcriptHistoryRef = useRef<{
@@ -2915,6 +2919,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     .workspaceGit()
                 : client.workspaceGit()
               : Promise.resolve(undefined);
+          const readRecovery =
+            !canReuseSessionMetadata ||
+            !!connectionRef.current.context?.recovery;
+          const recoveryGeneration = readRecovery
+            ? advanceSessionRecoveryGeneration(
+                sessionRecoveryGenerationRef.current,
+                activeSession,
+              )
+            : undefined;
           const metadataPromise = Promise.allSettled([
             canReuseSessionMetadata || !activeWorkspaceScoped
               ? Promise.resolve(undefined)
@@ -2922,9 +2935,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             canReuseSessionMetadata
               ? Promise.resolve(undefined)
               : activeSession.supportedCommands(),
-            canReuseSessionMetadata
-              ? Promise.resolve(undefined)
-              : activeSession.context(),
+            readRecovery ? activeSession.context() : Promise.resolve(undefined),
             gitPromise,
           ]);
           // Hydrate Goal ownership independently so unrelated metadata cannot
@@ -3049,6 +3060,23 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               configGeneration % 2 === 0 &&
               (sessionConfigGenerationRef.current.get(activeSession) ?? 0) ===
                 configGeneration;
+            const recoverySnapshotCurrent =
+              context?.sessionId === activeSession.sessionId &&
+              recoveryGeneration !== undefined &&
+              sessionRecoveryGenerationRef.current.get(activeSession) ===
+                recoveryGeneration;
+            const nextContext =
+              configSnapshotCurrent && context
+                ? context
+                : (current.context ??
+                  (context?.recovery
+                    ? {
+                        v: context.v,
+                        sessionId: context.sessionId,
+                        workspaceCwd: context.workspaceCwd,
+                        state: {},
+                      }
+                    : undefined));
             return {
               ...current,
               status: 'connected',
@@ -3105,9 +3133,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   : current.providers
                 : undefined,
               supportedCommands: supportedCommands ?? current.supportedCommands,
-              context: configSnapshotCurrent
-                ? (context ?? current.context)
-                : current.context,
+              context: nextContext
+                ? {
+                    ...nextContext,
+                    recovery: recoverySnapshotCurrent
+                      ? context?.recovery
+                      : (current.context?.recovery ??
+                        (context?.recovery
+                          ? { ...context.recovery, canContinue: false }
+                          : undefined)),
+                  }
+                : undefined,
               // Reconcile rather than reference-compare: the load response and
               // any frame that arrived during the load window share a revision
               // domain, and routing through `selectGoalState` is what registers
@@ -3227,6 +3263,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             abort.signal.removeEventListener('abort', abortEventStream);
           const sseConnectReason = nextSseConnectReason;
           nextSseConnectReason = undefined;
+          const recoveryEventCursor = activeSession.lastEventId ?? 0;
           for await (const event of activeSession.events({
             signal: eventStreamController.signal,
             maxQueued,
@@ -3297,6 +3334,83 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 addNotice,
                 dismissNotice,
               );
+              if (
+                (context?.recovery ||
+                  connectionRef.current.context?.recovery) &&
+                (event.id === undefined || event.id > recoveryEventCursor)
+              ) {
+                if (
+                  event.type === 'pending_prompt_started' ||
+                  hasActiveGenerationSignal(uiEvents) ||
+                  uiEvents.some((item) => item.type === 'user.text.delta')
+                ) {
+                  advanceSessionRecoveryGeneration(
+                    sessionRecoveryGenerationRef.current,
+                    activeSession,
+                  );
+                  setConnection((current) =>
+                    sessionRef.current === activeSession &&
+                    current.context?.recovery?.canContinue
+                      ? {
+                          ...current,
+                          context: {
+                            ...current.context,
+                            recovery: {
+                              ...current.context.recovery,
+                              canContinue: false,
+                            },
+                          },
+                        }
+                      : current,
+                  );
+                }
+                if (
+                  event.type === 'turn_complete' ||
+                  event.type === 'turn_error' ||
+                  uiEvents.some((item) => item.type === 'prompt.cancelled')
+                ) {
+                  const generation = advanceSessionRecoveryGeneration(
+                    sessionRecoveryGenerationRef.current,
+                    activeSession,
+                  );
+                  void activeSession.context().then(
+                    (updated) => {
+                      if (
+                        disposed ||
+                        abort.signal.aborted ||
+                        eventStreamController.signal.aborted ||
+                        eventStreamRef.current !== eventStream ||
+                        sessionRef.current !== activeSession ||
+                        generation !==
+                          sessionRecoveryGenerationRef.current.get(
+                            activeSession,
+                          ) ||
+                        updated.sessionId !== activeSession.sessionId
+                      ) {
+                        return;
+                      }
+                      setConnection((current) =>
+                        current.context &&
+                        eventStreamRef.current === eventStream &&
+                        sessionRef.current === activeSession &&
+                        generation ===
+                          sessionRecoveryGenerationRef.current.get(
+                            activeSession,
+                          )
+                          ? {
+                              ...current,
+                              context: {
+                                ...current.context,
+                                recovery: updated.recovery,
+                              },
+                            }
+                          : current,
+                      );
+                    },
+                    () => {},
+                  );
+                }
+              }
               const transcriptUiEvents =
                 subagentTranscriptModeRef.current === 'summary'
                   ? projectMainTranscriptEvents(uiEvents)
@@ -4314,6 +4428,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         pendingSessionLoadRef,
         pendingSessionLoadIdRef,
         sessionConfigGeneration: sessionConfigGenerationRef.current,
+        sessionRecoveryGeneration: sessionRecoveryGenerationRef.current,
         heartbeatSupportedRef,
         manualSessionClearRef,
         skipNextCleanupDetachSessionRef,
@@ -4448,6 +4563,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           ) {
             turnNavigationStore.recordPromptAdmitted(admission);
           }
+        },
+        onContinuationAdmitted: (owner, promptId) => {
+          if (sessionRef.current === owner)
+            turnNotifications.admit(owner, promptId);
         },
         onPromptRemoved: (owner, promptId) => {
           if (sessionRef.current === owner)
@@ -4813,9 +4932,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
   const ownerGuardValue = useMemo<DaemonSessionOwnerGuard>(
     () => ({
-      capture: () => {
+      capture: (options) => {
         const session = sessionRef.current;
-        return { isCurrent: () => sessionRef.current === session };
+        const includeRecovery = options?.includeRecovery === true;
+        const recoveryGeneration = session
+          ? sessionRecoveryGenerationRef.current.get(session)
+          : undefined;
+        return {
+          isCurrent: () =>
+            sessionRef.current === session &&
+            (!includeRecovery ||
+              (session !== undefined &&
+                sessionRecoveryGenerationRef.current.get(session) ===
+                  recoveryGeneration)),
+        };
       },
     }),
     [],

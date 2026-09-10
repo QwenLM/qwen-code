@@ -1174,6 +1174,8 @@ interface SessionEntry {
   promptQueue: Promise<void>;
   /** Accepted prompts that have not settled yet (queued + active). */
   pendingPromptCount: number;
+  /** Invalidates continuation pre-checks when cancellation starts. */
+  cancelGeneration: number;
   deferredRestoreAskUserQuestionPrompts?: Map<string, string>;
   pendingAgentNotificationCount: number;
   /**
@@ -7169,6 +7171,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       cwdChangeQueue: Promise.resolve(),
       promptQueue: Promise.resolve(),
       pendingPromptCount: 0,
+      cancelGeneration: 0,
       pendingAgentNotificationCount: 0,
       ...(opts.promptLedger ? { promptLedger: opts.promptLedger } : {}),
       pendingPromptList: [],
@@ -10864,6 +10867,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry,
         context?.clientId,
       );
+      entry.cancelGeneration += 1;
       const runningPrompt = entry.pendingPromptList.find(
         (pending) => pending.state === 'running' && !pending.terminalPublished,
       );
@@ -12789,6 +12793,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
+      const cancelGeneration = entry.cancelGeneration;
 
       // Accept/reject pre-check: the agent classifies the last turn (and rejects
       // when one is already in flight) without firing anything.
@@ -12810,6 +12815,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // and correlate turn_complete / turn_error with this continuation.
       const liveEntry = byId.get(sessionId);
       if (!liveEntry) throw new SessionNotFoundError(sessionId);
+      // Cancellation or session replacement can overtake the async pre-check.
+      // Recheck synchronously with sendPrompt so continuation never queues.
+      if (
+        liveEntry !== entry ||
+        liveEntry.cancelGeneration !== cancelGeneration ||
+        liveEntry.pendingPromptCount > 0 ||
+        liveEntry.promptActive ||
+        liveEntry.goalTurnActive
+      ) {
+        return { accepted: false, interruption: decision.interruption };
+      }
       const lastEventId = liveEntry.events.lastEventId;
       // Epoch token paired with the cursor above, mirroring the prompt 202
       // envelope (DAEMON-001): without it a client that seeds its SSE resume

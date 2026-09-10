@@ -4596,6 +4596,10 @@ describe('Session', () => {
       const result = await session.continueLastTurn();
 
       expect(result).toEqual({ accepted: false, interruption: 'none' });
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'clean',
+        canContinue: false,
+      });
       expect(promptSpy).not.toHaveBeenCalled();
     });
 
@@ -4612,6 +4616,10 @@ describe('Session', () => {
       expect(result).toEqual({
         accepted: true,
         interruption: 'interrupted_prompt',
+      });
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'interrupted_prompt',
+        canContinue: true,
       });
       // continueLastTurn is now a pure accept/reject pre-check — the daemon
       // bridge drives the actual turn through sendPrompt, so the agent must NOT
@@ -4640,6 +4648,10 @@ describe('Session', () => {
         accepted: true,
         interruption: 'interrupted_turn',
       });
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'interrupted_turn',
+        canContinue: true,
+      });
       // continueLastTurn is decision-only for interrupted_turn too — the bridge
       // drives the turn, so the agent must not fire its own prompt() here.
       await Promise.resolve();
@@ -4657,6 +4669,103 @@ describe('Session', () => {
       expect(result).toEqual({ accepted: false, interruption: 'none' });
       expect(promptSpy).not.toHaveBeenCalled();
     });
+
+    it.each(['runtime', 'legacy'] as const)(
+      'rejects %s history gaps both in the status and before execution',
+      async (source) => {
+        vi.mocked(mockChat.getHistory).mockReturnValue([
+          { role: 'user', parts: [{ text: 'unanswered' }] },
+        ]);
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: true,
+          interruption: 'interrupted_prompt',
+        });
+
+        const historyGaps = [
+          { childUuid: 'child', missingParentUuid: 'missing' },
+        ];
+        Object.assign(mockConfig, {
+          getSessionRestoreRuntime: vi.fn().mockReturnValue({
+            historyGaps: source === 'runtime' ? historyGaps : [],
+          }),
+          getResumedSessionData: vi.fn().mockReturnValue({
+            historyGaps: source === 'legacy' ? historyGaps : [],
+          }),
+        });
+
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'degraded_history',
+          canContinue: false,
+        });
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: false,
+          interruption: 'none',
+        });
+        expect(
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [],
+            _meta: { 'qwen.daemon.continueLastTurn': true },
+          }),
+        ).toEqual({ stopReason: 'end_turn' });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(
+          mockChat.stripOrphanedUserEntriesFromHistory,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      '550e8400-e29b-41d4-a716-446655440000',
+      '550E8400-E29B-41D4-A716-446655440000',
+    ])(
+      'retains finalized history gaps for %s only in its original session',
+      async (storageSessionId) => {
+        const restoreRuntime = vi.fn().mockReturnValue({
+          historyGaps: [{ childUuid: 'child', missingParentUuid: 'missing' }],
+        });
+        Object.assign(mockConfig, {
+          getSessionRestoreRuntime: restoreRuntime,
+          getResumedSessionData: vi.fn().mockReturnValue(undefined),
+        });
+        vi.mocked(mockConfig.getSessionId).mockReturnValue(storageSessionId);
+        session.dispose();
+        session = new Session(
+          storageSessionId.toLowerCase(),
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+        restoreRuntime.mockReturnValue(undefined);
+        vi.mocked(mockChat.getHistory).mockReturnValue([
+          { role: 'user', parts: [{ text: 'unanswered' }] },
+        ]);
+
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'degraded_history',
+          canContinue: false,
+        });
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: false,
+          interruption: 'none',
+        });
+        await session.prompt({
+          sessionId: storageSessionId.toLowerCase(),
+          prompt: [],
+          _meta: { 'qwen.daemon.continueLastTurn': true },
+        });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(
+          mockChat.stripOrphanedUserEntriesFromHistory,
+        ).not.toHaveBeenCalled();
+
+        vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session-id');
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'interrupted_prompt',
+          canContinue: true,
+        });
+      },
+    );
 
     it('preserves the orphaned turn when a continuation send fails (no data loss)', async () => {
       // An interrupted prompt: an orphaned user turn the model never answered.
@@ -4749,6 +4858,10 @@ describe('Session', () => {
         accepted: false,
         interruption: 'interrupted_prompt',
       });
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'interrupted_prompt',
+        canContinue: false,
+      });
       expect(promptSpy).not.toHaveBeenCalled();
     });
   });
@@ -4788,6 +4901,20 @@ describe('Session', () => {
         },
       ];
     }
+
+    it('does not classify a restorable question as an interrupted tool turn', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue(danglingAuqHistory());
+
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'clean',
+        canContinue: false,
+      });
+      expect(await session.continueLastTurn()).toEqual({
+        accepted: false,
+        interruption: 'none',
+      });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
 
     it('requests permission and continues with the real function response', async () => {
       mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());

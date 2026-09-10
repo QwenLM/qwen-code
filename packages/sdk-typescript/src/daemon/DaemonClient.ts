@@ -37,6 +37,7 @@ import type {
   DaemonSessionAgentsStatus,
   DaemonAgentTrace,
   DaemonSessionContextStatus,
+  DaemonContinueSessionResult,
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
   ReasoningSelection,
@@ -3316,6 +3317,24 @@ export class DaemonClient {
       `/session/${urlEncode(sessionId)}/subagents/${urlEncode(subagentRef)}/cancel`,
       'POST /session/:id/subagents/:subagentRef/cancel',
       { clientId, mode: 'rest', method: 'POST' },
+    );
+  }
+
+  /** Admit an interrupted turn without adding a user message. */
+  async continueSession(
+    sessionId: string,
+    opts: { clientId?: string; signal?: AbortSignal } = {},
+  ): Promise<DaemonContinueSessionResult> {
+    opts.signal?.throwIfAborted();
+    return await this.jsonRequest<DaemonContinueSessionResult>(
+      `/session/${urlEncode(sessionId)}/continue`,
+      'POST /session/:id/continue',
+      {
+        method: 'POST',
+        clientId: opts.clientId,
+        signal: opts.signal,
+        mode: 'rest',
+      },
     );
   }
 

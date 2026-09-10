@@ -2181,6 +2181,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
         getDefaultReasoningConfig: ReturnType<typeof vi.fn>;
+        getRecoveryStatus: ReturnType<typeof vi.fn>;
         reloadReasoningSelection: ReturnType<typeof vi.fn>;
         persistReasoningSelection: ReturnType<typeof vi.fn>;
         setSessionReasoningSelection: ReturnType<typeof vi.fn>;
@@ -4766,6 +4767,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ) => {
         const sessionMock = {
           sessionId: createdSessionId,
+          getRecoveryStatus: vi.fn().mockReturnValue({
+            kind: 'clean',
+            canContinue: false,
+          }),
           getId: vi.fn().mockReturnValue(createdSessionId),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(createdConfig),
@@ -11858,6 +11863,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }) as AgentLike;
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock!.getRecoveryStatus.mockReturnValue({
+      kind: 'interrupted_prompt',
+      canContinue: true,
+    });
     const context = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionContext,
       { sessionId },
@@ -11888,6 +11897,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       v: 1,
       sessionId,
       workspaceCwd: '/tmp',
+      recovery: { kind: 'interrupted_prompt', canContinue: true },
       state: {
         models: { currentModelId: 'm(api-key)', availableModels: [] },
         modes: {

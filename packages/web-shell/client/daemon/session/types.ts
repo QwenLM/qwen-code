@@ -73,7 +73,7 @@ export interface DaemonSessionOwnerSnapshot {
 }
 
 export interface DaemonSessionOwnerGuard {
-  capture(): DaemonSessionOwnerSnapshot;
+  capture(options?: { includeRecovery?: boolean }): DaemonSessionOwnerSnapshot;
 }
 
 export type DaemonProductSessionContext =
@@ -243,6 +243,7 @@ export type DaemonNoticeCategory =
 
 export type DaemonNoticeOperation =
   | 'send_prompt'
+  | 'continue_session'
   | 'send_shell_command'
   | 'switch_model'
   | 'set_reasoning_effort'
@@ -440,6 +441,7 @@ export interface DaemonSessionActions {
     owner?: Pick<DaemonActivePromptState, 'workspaceCwd' | 'sessionId'>,
   ): void;
   sendPrompt(text: string, options?: SendPromptOptions): Promise<PromptResult>;
+  continueSession(): Promise<void>;
   /**
    * Non-blocking prompt submission. POSTs to the daemon and returns
    * immediately with the `promptId`. The daemon queues the prompt in its

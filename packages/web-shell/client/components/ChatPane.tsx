@@ -100,6 +100,7 @@ import type { MessageListHandle } from './MessageList';
 import { TranscriptViewport } from './TranscriptViewport';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import { SessionRecoveryBanner } from './SessionRecoveryBanner';
 import { QueuedPromptDisplay } from './QueuedPromptDisplay';
 import { GoalStatusStrip } from './GoalStatusStrip';
 import composerStatusStyles from './ComposerStatusStack.module.css';
@@ -1739,6 +1740,11 @@ export function ChatPane({
               )}
             </div>
           )}
+          <SessionRecoveryBanner
+            blocked={
+              approvalActive || admissionPayloadLocked || sessionHasActivePrompt
+            }
+          />
           <ChatEditor
             ref={editorRef}
             onSubmit={handleSubmit}

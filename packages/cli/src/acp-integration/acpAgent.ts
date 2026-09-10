@@ -7884,6 +7884,7 @@ class QwenAgent implements Agent {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
       workspaceCwd: this.workspaceCwd(config),
+      recovery: session.getRecoveryStatus(),
       state: {
         models: this.buildAvailableModels(config),
         modes: this.buildModesData(config),
