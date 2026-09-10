@@ -185,16 +185,20 @@ describe('startInteractiveUI session registration', () => {
     vi.clearAllMocks();
   });
 
-  it('registers the session with its id, target dir, and CLI version', async () => {
+  it('registers the session with its id, target dir, CLI version, and kind', async () => {
     registerSession.mockResolvedValue(true);
     const config = makeConfig();
 
     await start(config);
 
+    // `kind` is stated rather than left to the default: this is the one
+    // registrant a listing describes as someone sitting at a terminal,
+    // and it is the only place that claim is made.
     expect(registerSession).toHaveBeenCalledWith({
       sessionId: 'session-123',
       cwd: '/work/app',
       qwenVersion: '9.9.9',
+      kind: 'tui',
     });
     expect(config.trackSessionRegistration).toHaveBeenCalledTimes(1);
     await expect(
