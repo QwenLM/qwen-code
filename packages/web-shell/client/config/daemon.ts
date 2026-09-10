@@ -110,6 +110,7 @@ function readTokenFromLocation(): string | undefined {
  * its in-memory cache always reports a token after boot.
  */
 export function hasReloadSurvivableDaemonToken(): boolean {
+  if (typeof window === 'undefined') return false;
   return (
     readTokenFromLocation() !== undefined ||
     readStoredDaemonToken(daemonTokenStorageKey()) !== undefined
