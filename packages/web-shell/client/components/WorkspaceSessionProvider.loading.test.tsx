@@ -105,6 +105,12 @@ it.each(
             ],
           });
         }
+        // A daemon without the brand route (#11244): a 404 settles the
+        // provider's brand fetch immediately instead of arming its retry
+        // timer.
+        if (url.pathname === '/brand') {
+          return new Response('not found', { status: 404 });
+        }
         if (url.pathname.endsWith('/load')) {
           loadBodies.push(JSON.parse(String(init?.body)));
           const n = loadBodies.length;
@@ -196,7 +202,13 @@ it.each(
         );
         root.render(strictMode ? <StrictMode>{tree}</StrictMode> : tree);
       });
-      expect(calls).toEqual(['GET /capabilities']);
+      // The workspace provider fetches the brand beside capabilities
+      // (#11244); StrictMode's remount issues that brand fetch twice.
+      expect(calls).toEqual(
+        strictMode
+          ? ['GET /capabilities', 'GET /brand', 'GET /brand']
+          : ['GET /capabilities', 'GET /brand'],
+      );
       expect(observeLiveStateSupport).not.toHaveBeenCalled();
       await act(async () => {
         releaseCapabilities();
