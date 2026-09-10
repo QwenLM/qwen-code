@@ -14,6 +14,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -69,6 +70,12 @@ const upsertDeferredScript = readFileSync(
 );
 const autofixContractsScriptPath = '.github/scripts/check-autofix-contracts.sh';
 const autofixContractsScript = readFileSync(autofixContractsScriptPath, 'utf8');
+// The loop-owned lane exclusion list lives in ONE workflow env entry
+// (R27-23); harnesses executing the real classifier blocks inject the
+// REAL value read from the workflow, so a drift between the two fails
+// here, not in production.
+const loopOwnedLanesJson =
+  workflow.match(/^ {2}LOOP_OWNED_LANES: '(.+)'$/m)?.[1] ?? '[]';
 const autofixRunnerScriptPath = '.qwen/skills/autofix/scripts/run-agent.mjs';
 const checkBotCredentialsStep =
   workflow.match(
@@ -641,6 +648,9 @@ describe('qwen-autofix workflow', () => {
           !/startswith\("review-address"\)/.test(sel) &&
           !/!= "Qwen Autofix"/.test(sel) &&
           !/IN\("Qwen Autofix"/.test(sel) &&
+          // The wake filter excludes the loop's fleet through the shared
+          // env list now (R27-23) — the reference IS the guard.
+          !/IN\(\$looplanes\[\]\)/.test(sel) &&
           // The review-in-flight gate (#8888) selects BY NAME for the LLM
           // review check — a liveness probe, not a feedback selector, so it
           // needs neither the review-address carve-out nor the workflow guard.
@@ -8646,6 +8656,7 @@ exit 1
           '-c',
           `set -e\nAUTOFIX_BOT=qwen-code-dev-bot\nREVIEW_BOT=qwen-code-ci-bot\n` +
             `LIVE_REARM_KEY=W1\nWORKDIR=${dir}\nSTALE=${stale}\n` +
+            `LOOP_OWNED_LANES=${JSON.stringify(loopOwnedLanesJson)}\n` +
             `BASE_UPD_AT='${baseUpdAt}'\n` +
             `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
             `${conflictBlock}\nprintf '%s' "$STALE"`,
@@ -22896,6 +22907,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
               PR: '1',
               CHECKS_JSON: JSON.stringify(checks),
               TRUSTED_ASSOC: '["OWNER", "MEMBER", "COLLABORATOR"]',
+              LOOP_OWNED_LANES: loopOwnedLanesJson,
               RV_FIXTURE: join(dir, 'rv.fixture.json'),
               RC_FIXTURE: join(dir, 'rc.fixture.json'),
             },
@@ -25960,6 +25972,17 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       round: roundWrites({
         'pkg/a.test.ts': testA(
           "it('a', () => {",
+          '  return;',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'early-return-conditional': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
           '  if (!process.env.QWEN_RUN_ADDS) {',
           '    return;',
           '  }',
@@ -26989,9 +27012,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           WT_IMPORT,
           "describe('d', () => {",
           "  it('smoke', () => { expect(one()).toBe(1); });",
-          '  if (!process.env.QWEN_FULL) {',
-          '    return;',
-          '  }',
+          '  return;',
           "  it('a', () => { expect(one()).toBe(1); });",
           "  it('b', () => { expect(two()).toBe(2); });",
           '});',
@@ -27004,9 +27025,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'pkg/a.test.ts': [
           WT_IMPORT,
           "it('a', () => {",
-          '  if (!process.env.QWEN_RUN_ADDS) {',
-          '    return;',
-          '  }',
+          '  return;',
           '  expect(one()).toBe(1);',
           '  expect(two()).toBe(2);',
           '});',
@@ -27585,6 +27604,11 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // A brand-new test carrying its own platform guard silences nothing
       // that existed.
       acceptsWithoutCharge('adds-guarded-test');
+      // A CONDITIONAL early return planted ahead of existing assertions
+      // is the environment-guard idiom (R27-21): sheltered assertions
+      // stay measured, so the round reads as no movement — the runner,
+      // not this gate, judges the condition.
+      acceptsWithoutCharge('early-return-conditional');
       // A brand-new todo registration is the round's own.
       acceptsWithoutCharge('todo-new');
       // A retitled test keeps its assertions and its enabled state.
@@ -28488,6 +28512,18 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(reviewVerificationRunner).toContain(
       'WEAKEN_PARSER_FILE="${WEAKEN_PARSER}" node "${WEAKEN_COUNTER}" measure',
     );
+    // The landed clamp's baseline is the branch's own side at the merge
+    // (R27-20): the manifest carries it as `branch`, emitted as
+    // weaken_emit's fifth field. A dropped arm falls back to the merge
+    // base silently and the wrong-attribution bug returns — pin the
+    // producer/consumer pair together.
+    expect(reviewVerificationRunner).toContain(
+      "printf '%s\\n%s\\n%s\\n%s\\n%s\\n'",
+    );
+    expect(reviewVerificationRunner).toContain(
+      'branch_side="$(sed -n 5p <<< "${weaken_pair}")"',
+    );
+    expect(reviewVerificationRunner).toContain('branch: (if $bs == ""');
   });
 });
 
@@ -28675,8 +28711,13 @@ describe('count-test-surface: the declared test surface of a test file', () => {
       { a: 1, e: 2, d: ['test:a', 'test:b', 'test:c'] },
     ],
     [
-      'drops the assertions a bare early return shelters, and only those',
+      'measures what a conditional guard shelters; drops what an unconditional return shelters',
       [
+        // The environment-guard idiom: a CONDITIONAL return silences
+        // nothing — the runner may still reach the assertions, and the
+        // header delegates the condition to the runner (R27-21: HEAD's
+        // own contract.test.ts measured {assertions: 0} from exactly
+        // this shape).
         "it('a', () => {",
         '  if (!process.env.X) {',
         '    return;',
@@ -28684,10 +28725,14 @@ describe('count-test-surface: the declared test surface of a test file', () => {
         '  expect(x).toBe(1);',
         '});',
         "it('b', () => { expect(x).toBe(1); return; });",
-        "it('c', () => { const h = (m) => { if (m) { return; } }; expect(x).toBe(1); });",
-        "it('d', () => { return expect(p).resolves.toBe(1); });",
+        // …while an UNCONDITIONAL one still reports the test PASSED
+        // having asserted nothing, whatever constant it carries.
+        "it('c', () => { return; expect(x).toBe(1); });",
+        "it('d', () => { return 1; expect(x).toBe(1); });",
+        "it('e', () => { const h = (m) => { if (m) { return; } }; expect(x).toBe(1); });",
+        "it('f', () => { return expect(p).resolves.toBe(1); });",
       ],
-      { a: 3, e: 4, d: [] },
+      { a: 4, e: 6, d: [] },
     ],
     [
       'reads a truthy options constant and the fails option, not a condition',
@@ -28797,20 +28842,23 @@ describe('count-test-surface: the declared test surface of a test file', () => {
       { a: 1, e: 4, d: ['test:a', 'test:b', 'test:c'] },
     ],
     [
-      'drops the assertions a nothing-returning early return shelters',
+      'measures the assertions behind a conditional return, whatever it yields',
       [
+        // R27-27: the silencer no longer keys on the return's VALUE —
+        // sync and async spellings of the same conditional guard read
+        // alike, and both keep the sheltered assertions.
         "it('a', () => { if (x) { return undefined; } expect(x).toBe(1); });",
         "it('b', () => { if (x) return null; expect(x).toBe(1); });",
         "it('c', () => { if (x) return void 0; expect(x).toBe(1); });",
-        // A return of any CONSTANT is one too: vitest ignores a
-        // callback's non-thenable return and reports the test PASSED.
         "it('d', () => { if (x) return 1; expect(x).toBe(1); });",
+        "it('e', async () => { if (x) return Promise.resolve(); expect(x).toBe(1); });",
+        "it('f', async () => { if (x) return await go(); expect(x).toBe(1); });",
         // ...as is one that follows every assertion, or one inside a
         // nested function the test merely defines.
-        "it('e', () => { expect(x).toBe(1); return; });",
-        "it('f', () => { const h = () => { return; }; expect(x).toBe(1); });",
+        "it('g', () => { expect(x).toBe(1); return; });",
+        "it('h', () => { const h = () => { return; }; expect(x).toBe(1); });",
       ],
-      { a: 2, e: 6, d: [] },
+      { a: 8, e: 8, d: [] },
     ],
     [
       'counts an assertion chain used as a variable initializer',
@@ -28874,6 +28922,9 @@ describe('count-test-surface: the declared test surface of a test file', () => {
     [
       'folds every constant shape a return or a collector option can carry',
       [
+        // A CONDITIONAL return silences nothing whatever it yields
+        // (R27-21) — the constant folding is exercised on the collector
+        // spellings below, where it decides enabled state.
         "it('a', () => { if (!r) return -1; expect(x).toBe(1); });",
         "it('b', () => { if (!r) return {}; expect(x).toBe(1); });",
         "it('c', () => { if (!r) return []; expect(x).toBe(1); });",
@@ -28885,11 +28936,14 @@ describe('count-test-surface: the declared test surface of a test file', () => {
         "it.runIf(-0)('h', fn);",
         "it('i', { skip: -1 }, fn);",
       ],
-      { a: 1, e: 6, d: ['test:g', 'test:h', 'test:i'] },
+      { a: 6, e: 6, d: ['test:g', 'test:h', 'test:i'] },
     ],
     [
-      'reads a constant return through wrappers and templates alike',
+      'measures a conditional constant return through wrappers and templates alike',
       [
+        // The wrappers and template spellings fold as constants, but a
+        // CONDITIONAL return silences nothing either way (R27-21) — the
+        // fold decides the UNCONDITIONAL arms elsewhere in this table.
         "it('a', () => { if (!r) return undefined as void; expect(x).toBe(1); });",
         "it('b', () => { if (!r) return `full suite only: ${process.env.QWEN_FULL}`; expect(x).toBe(1); });",
         "it('c', () => { if (!r) return `reason`; expect(x).toBe(1); });",
@@ -28897,10 +28951,10 @@ describe('count-test-surface: the declared test surface of a test file', () => {
         "it('d', () => { if (!r) return go(); expect(x).toBe(1); });",
         "it('e', () => { return expect(p).resolves.toBe(1); });",
       ],
-      { a: 2, e: 5, d: [] },
+      { a: 5, e: 5, d: [] },
     ],
     [
-      'silences the assertions a describe body or a hook shelters',
+      'measures what a conditional return in a describe body or a hook shelters',
       [
         "describe('d', () => {",
         '  if (!process.env.QWEN_FULL) {',
@@ -28916,10 +28970,24 @@ describe('count-test-surface: the declared test surface of a test file', () => {
         '});',
         "it('a', () => { expect(x).toBe(1); });",
       ],
-      { a: 1, e: 1, d: [] },
+      { a: 3, e: 1, d: [] },
     ],
     [
-      'reads an early return in a DESCRIBE body as silencing what follows',
+      'reads an UNCONDITIONAL early return in a DESCRIBE body as silencing what follows',
+      [
+        "describe('d', () => {",
+        "  it('smoke', () => { expect(t).toBe(1); });",
+        '  if (true) {',
+        '    return;',
+        '  }',
+        "  it('a', () => { expect(x).toBe(1); });",
+        "  it('b', fn);",
+        '});',
+      ],
+      { a: 1, e: 1, d: ['test:a', 'test:b'] },
+    ],
+    [
+      'lets a CONDITIONAL early return in a DESCRIBE body keep every registration',
       [
         "describe('d', () => {",
         "  it('smoke', () => { expect(t).toBe(1); });",
@@ -28930,7 +28998,7 @@ describe('count-test-surface: the declared test surface of a test file', () => {
         "  it('b', fn);",
         '});',
       ],
-      { a: 1, e: 1, d: ['test:a', 'test:b'] },
+      { a: 2, e: 3, d: [] },
     ],
     [
       'shelters nothing extra in a test that is already disabled',
@@ -28939,7 +29007,7 @@ describe('count-test-surface: the declared test surface of a test file', () => {
         "it('b', () => { if (!s) { return; } expect(y).toBe(1); });",
         "it('c', () => { expect(z).toBe(1); });",
       ],
-      { a: 1, e: 2, d: ['test:a'] },
+      { a: 2, e: 2, d: ['test:a'] },
     ],
     [
       'reads a skip in a catch clause as the setup-failure guard it is',
@@ -28966,6 +29034,44 @@ describe('count-test-surface: the declared test surface of a test file', () => {
         "it('c', (ctx) => { if (1 === 1) { ctx.skip(); } expect(x).toBe(1); });",
       ],
       { a: 0, e: 0, d: ['test:a', 'test:b', 'test:c'] },
+    ],
+    [
+      'reads the constant-condition arms exactly as the runner reads them',
+      [
+        // Arm-aware (R27-1's other direction): the arm a constant takes
+        // is unconditional, the arm it skips is dead code that disables
+        // nothing — and an undecidable condition stays the runner's.
+        "it('a', (ctx) => { if (false) { ctx.skip(); } });",
+        "it('b', (ctx) => { if (false) {} else { ctx.skip(); } });",
+        "it('c', (ctx) => { true && ctx.skip(); });",
+        "it('d', (ctx) => { false && ctx.skip(); });",
+        "it('e', (ctx) => { if (cond) ctx.skip(); });",
+        "it('f', (ctx) => { true ? ctx.skip() : noop(); });",
+        "it('g', (ctx) => { false ? noop() : ctx.skip(); });",
+      ],
+      { a: 0, e: 3, d: ['test:b', 'test:c', 'test:f', 'test:g'] },
+    ],
+    [
+      'folds arithmetic in a collector position with JavaScript semantics',
+      [
+        // Every operator arm is pinned DISCRIMINATIVELY: dropping one
+        // flips its row between disabled and enabled.
+        "it.skipIf(6 * 7 === 42)('a', fn);",
+        "it.runIf(10 % 3)('b', fn);",
+        "it('c', { skip: 2 ** 10 > 1000 }, fn);",
+        "it.skipIf(8 - 8)('d', fn);",
+        "it.skipIf(8 - 7)('d2', fn);",
+        "it.skipIf(10 % 3)('x', fn);",
+        // A placeholder or a bigint never enters the fold.
+        "it.skipIf([] * 2)('e', fn);",
+        "it.skipIf(2n * 2n > 1n)('f', fn);",
+      ],
+      { a: 0, e: 4, d: ['test:a', 'test:c', 'test:d2', 'test:x'] },
+    ],
+    [
+      "reads Playwright's fixme as the disabled registration it is",
+      ["test.fixme('a', fn);", "it('b', fn);"],
+      { a: 0, e: 1, d: ['test:a'] },
     ],
     [
       'measures a registration through a callback handed by name',
@@ -29368,19 +29474,20 @@ describe('count-test-surface: the declared test surface of a test file', () => {
       expect(m({ tip: twoAsPlusTodo, pre: twoAs, events: [] })).toMatchObject({
         newlyDisabled: [],
       });
-      // An early return the round plants in front of existing assertions
-      // measures as their removal, while a brand-new test carrying its own
-      // guard costs nothing and no throwaway registration can pay for one.
+      // An UNCONDITIONAL early return the round plants in front of
+      // existing assertions measures as their removal, while a brand-new
+      // test carrying its own guard costs nothing and no throwaway
+      // registration can pay for one.
       const oneNoGuard = blob('one-no-guard', [
         "it('a', () => { expect(x).toBe(1); });",
       ]);
       const oneGuardedPlusTodo = blob('one-guarded-todo', [
-        "it('a', () => { if (!s) { return; } expect(x).toBe(1); });",
+        "it('a', () => { return; expect(x).toBe(1); });",
         "it.todo('c');",
       ]);
       const oneNoGuardPlusGuarded = blob('one-plus-guarded', [
         "it('a', () => { expect(x).toBe(1); });",
-        "it('c', () => { if (!s) { return; } expect(y).toBe(2); });",
+        "it('c', () => { return; expect(y).toBe(2); });",
       ]);
       expect(
         m({ tip: oneGuardedPlusTodo, pre: oneNoGuard, events: [] }),
@@ -29388,9 +29495,21 @@ describe('count-test-surface: the declared test surface of a test file', () => {
       expect(
         m({ tip: oneNoGuardPlusGuarded, pre: oneNoGuard, events: [] }),
       ).toMatchObject({ assertions: 0 });
+      // …while the CONDITIONAL spelling is the environment-guard idiom:
+      // sheltered assertions stay measured, so planting one reads as no
+      // movement in either direction (R27-21/R27-27).
+      const oneCondGuarded = blob('one-cond-guarded', [
+        "it('a', () => { if (!s) { return; } expect(x).toBe(1); });",
+      ]);
+      expect(
+        m({ tip: oneCondGuarded, pre: oneNoGuard, events: [] }),
+      ).toMatchObject({ assertions: 0 });
+      expect(
+        m({ tip: oneNoGuard, pre: oneCondGuarded, events: [] }),
+      ).toMatchObject({ assertions: 0 });
       // ...and an assertion the baseline already carried behind a guard
-      // is not free to delete: the un-guarded total falls even when the
-      // guarded one cannot.
+      // is not free to delete: the conditional guard keeps it measured,
+      // so deleting it still charges its removal.
       const guardedTwo = blob('guarded-two', [
         "it('a', () => { if (!s) { return; } expect(x).toBe(1); expect(y).toBe(2); });",
       ]);
@@ -29399,6 +29518,35 @@ describe('count-test-surface: the declared test surface of a test file', () => {
       ]);
       expect(
         m({ tip: guardedNone, pre: guardedTwo, events: [] }),
+      ).toMatchObject({ assertions: -2 });
+      // R27-20: the landed delta is measured against the branch's side at
+      // the merge, or a resolution that DISCARDED main's removal still
+      // credits it — main removed three, the round removed two of its
+      // own, the merge kept the branch's side whole, and main's credit
+      // is zero (the old before-baseline read the round's own removal as
+      // main's landed one and the file reported no movement).
+      const baseFive = blob('base-five', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); expect(z).toBe(3); expect(u).toBe(4); expect(v).toBe(5); });",
+      ]);
+      const mainTwo = blob('main-two', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+      ]);
+      const branchThree = blob('branch-three', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); expect(z).toBe(3); });",
+      ]);
+      expect(
+        m({
+          tip: branchThree,
+          pre: baseFive,
+          events: [
+            {
+              before: baseFive,
+              after: mainTwo,
+              landed: branchThree,
+              branch: branchThree,
+            },
+          ],
+        }),
       ).toMatchObject({ assertions: -2 });
       // An event that moved nothing — both sides absent, or byte-identical
       // — neither shields nor decides whether the baseline holds the file.
@@ -29431,6 +29579,50 @@ describe('review-address: regression accounting (af-155)', () => {
     expect(script).toBeTruthy();
   });
 
+  it('excludes every loop-owned lane from the head-state classifiers, by name', () => {
+    // R27-23: a lane the loop owns but the exclusion omits attaches its
+    // check runs to the same PR head, so the charge classifier reads the
+    // loop's OWN red as the round's regression (and the wake classifiers
+    // wake on it). The list lives in ONE env entry every classifier
+    // references — a hand-copied list per site drifts.
+    const expected = [
+      'Qwen Autofix',
+      '🧐 Qwen Pull Request Review',
+      'Qwen CI Failure Patrol',
+      'Qwen Autofix Fork Bridge',
+      'Qwen Autofix Fork Signal',
+      'Qwen Triage',
+      'Qwen Triage Finalize',
+      'PR self-report label',
+      'Qwen PR Safety Precheck',
+      'Comment Attachment Guard',
+      'PR Asset Branch Cleanup',
+    ];
+    const lanes = JSON.parse(loopOwnedLanesJson);
+    expect([...lanes].sort()).toEqual([...expected].sort());
+    // …every listed name is a real workflow's `name:` line, or a rename
+    // leaves the exclusion matching nothing while the suite is green.
+    const workflowNames = readdirSync('.github/workflows')
+      .filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
+      .map(
+        (f) =>
+          readFileSync(join('.github/workflows', f), 'utf8').match(
+            /^name:\s*'([^']+)'/m,
+          )?.[1] ??
+          readFileSync(join('.github/workflows', f), 'utf8').match(
+            /^name:\s*"?([^"\n]+)"?/m,
+          )?.[1],
+      );
+    for (const n of lanes) expect(workflowNames).toContain(n);
+    // …and every head-state classifier references the shared list —
+    // charge (review-address) and both wake sites (review-address,
+    // review-scan) — with no literal copy surviving beside it.
+    const uses = workflow.match(/IN\(\$looplanes\[\]\)/g) ?? [];
+    expect(uses.length).toBe(3);
+    expect(workflow).not.toMatch(/IN\("Qwen Autofix"/);
+    expect(workflow).not.toMatch(/IN\('Qwen Autofix'/);
+  });
+
   const HEAD = 'a'.repeat(40);
   const OTHER = 'b'.repeat(40);
   const run = ({
@@ -29455,7 +29647,7 @@ describe('review-address: regression accounting (af-155)', () => {
         'bash',
         [
           '-c',
-          `set -euo pipefail\nWORKDIR=${JSON.stringify(dir)}\nAUTOFIX_BOT=qwen-code-dev-bot\nDISPATCH_STATUS_CONTEXT='qwen-autofix/dispatch-pending'\nCHECKED_OUT_HEAD='${checkedOutHead}'\nROLLUP_HEAD='${checksHead}'\nWINDOW='${window}'\nLIVE_REARM_KEY='${liveKey}'\nPR=1\nGITHUB_OUTPUT=${JSON.stringify(outFile)}\n${script}`,
+          `set -euo pipefail\nWORKDIR=${JSON.stringify(dir)}\nAUTOFIX_BOT=qwen-code-dev-bot\nDISPATCH_STATUS_CONTEXT='qwen-autofix/dispatch-pending'\nCHECKED_OUT_HEAD='${checkedOutHead}'\nROLLUP_HEAD='${checksHead}'\nWINDOW='${window}'\nLIVE_REARM_KEY='${liveKey}'\nLOOP_OWNED_LANES=${JSON.stringify(loopOwnedLanesJson)}\nPR=1\nGITHUB_OUTPUT=${JSON.stringify(outFile)}\n${script}`,
         ],
         { encoding: 'utf8' },
       );

@@ -1271,11 +1271,14 @@ weaken_blob() {
     printf '%s\n' "${out}"
   fi
 }
-# One event, four lines, always: main's own side at the event, the merge
+# One event, five lines, always: main's own side at the event, the merge
 # base to measure it against, the blob the merge commit actually landed,
-# and whether main held the file at all. Empty lines are absent sides.
+# whether main held the file at all, and the BRANCH's own side at the
+# merge -- the baseline the landed delta is measured against, so the
+# round's own pre-merge edits never enter main's landed contribution
+# (R27-20). Empty lines are absent sides.
 weaken_emit() {
-  printf '%s\n%s\n%s\n%s\n' "${1}" "${2}" "${3}" "${4}"
+  printf '%s\n%s\n%s\n%s\n%s\n' "${1}" "${2}" "${3}" "${4}" "${5}"
 }
 # MAIN's contribution at merge commit ${1} for file ${2}, main being parent
 # ${3}: main's OWN delta, measured on main's own side against the merge
@@ -1285,7 +1288,7 @@ weaken_emit() {
 # What the merge actually DID with that contribution rides along as the
 # landed blob, and the counter clamps by it.
 weaken_auto_blob() {
-  local c="${1}" f="${2}" mp="${3}" tag="${4}" mb p2 base res holds='0'
+  local c="${1}" f="${2}" mp="${3}" tag="${4}" mb p1 p2 base res holds='0'
   # A criss-cross history has more than one equally valid merge base, and
   # git picks one without promising which. Main's delta is measured against
   # that base, so a pick can decide the verdict -- one candidate can credit
@@ -1316,6 +1319,7 @@ weaken_auto_blob() {
     fi
   done <<< "${weaken_bases}"
   mb="$(git merge-base "${c}^" "${c}^${mp}" 2> /dev/null)" || mb=''
+  p1="$(weaken_blob "${c}^" "${f}" "${tag}.p1")" || return 1
   p2="$(weaken_blob "${c}^${mp}" "${f}" "${tag}.p2")" || return 1
   res="$(weaken_blob "${c}" "${f}" "${tag}.res")" || return 1
   base=''
@@ -1333,14 +1337,14 @@ weaken_auto_blob() {
     return 0
   fi
   [[ -z "${p2}" ]] || holds='1'
-  weaken_emit "${p2}" "${base}" "${res}" "${holds}"
+  weaken_emit "${p2}" "${base}" "${res}" "${holds}" "${p1}"
 }
 # Measure file ${1}: write the manifest (tip, pre-round, and every main
 # event that moved the file) and print the counter's verdict JSON. One
 # name throughout -- a round that renames a test file is measured as the
 # deletion of the old path and a new file at the new one.
 weaken_measure() {
-  local f="${1}" tag="${2}" tip pre before after landed holds events='' weaken_i c kind mp j=0
+  local f="${1}" tag="${2}" tip pre before after landed holds branch_side events='' weaken_i c kind mp j=0
   local weaken_pair weaken_prev='' weaken_prev_set=''
   tip="$(weaken_blob "${BRANCH}" "${f}" "${tag}.tip")" || return 1
   pre="$(weaken_blob "origin/${BRANCH}" "${f}" "${tag}.pre")" || return 1
@@ -1358,6 +1362,7 @@ weaken_measure() {
     before="$(weaken_blob "${c}^" "${f}" "${tag}.e${j}.before")" || return 1
     landed=''
     holds='0'
+    branch_side=''
     if [[ "${kind}" == 'main' ]]; then
       # A commit main itself has been: its own delta IS main's, and what it
       # landed is what it holds.
@@ -1378,6 +1383,7 @@ weaken_measure() {
       before="$(sed -n 2p <<< "${weaken_pair}")"
       landed="$(sed -n 3p <<< "${weaken_pair}")"
       holds="$(sed -n 4p <<< "${weaken_pair}")"
+      branch_side="$(sed -n 5p <<< "${weaken_pair}")"
       [[ "${holds}" == '1' ]] || holds='0'
     fi
     # Main's contributions CHAIN: after the first event, main's side is
@@ -1389,10 +1395,11 @@ weaken_measure() {
     weaken_prev="${after}"
     weaken_prev_set='1'
     events+="$(jq -cn --arg b "${before}" --arg a "${after}" --arg l "${landed}" \
-      --argjson h "${holds}" \
+      --arg bs "${branch_side}" --argjson h "${holds}" \
       '{before: (if $b == "" then null else $b end),
         after: (if $a == "" then null else $a end),
         landed: (if $l == "" then null else $l end),
+        branch: (if $bs == "" then null else $bs end),
         mainHolds: ($h == 1)}'),"
   done
   jq -n --arg path "${f}" --arg tip "${tip}" --arg pre "${pre}" --argjson events "[${events%,}]" '

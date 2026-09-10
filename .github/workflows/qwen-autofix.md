@@ -3978,6 +3978,23 @@ deletion reopens only the cosmetic overwrite (nothing
 rides the stamp but the comment text), and finalize's
 read is bounded like the loop's pid-file read so a
 planted FIFO cannot stall it.
+
+The gate-side kill block (review-address's verify gate is
+the first step that runs branch code ON THE HOST — the
+agent phase sandboxes it in docker — and the loop holds
+the bot PAT in its env, so the PAT overlap is bounded to
+the sandboxed agent phase, never the host-side gate) kills
+from the pid the launch recorded in expression context;
+WORKDIR files are sandbox-writable and are never read as
+kill targets. The session kill covers a kill landing
+MID-TICK, per the KILL paragraph above. Its command words
+are ABSOLUTE-PATH-ONLY, NOT builtin: the block runs in the
+gate's OUTER shell, which inherits every $GITHUB_ENV plant
+— a BASH_FUNC_builtin%% import shadows the `builtin`
+keyword itself (the R6-4 doctrine). `builtin kill` is
+sound only inside the env -i clean child (finalize); in
+the outer shell kill is /usr/bin/kill, the same procps
+already relied on for pkill.
 ```
 
 <a id="af-150"></a>

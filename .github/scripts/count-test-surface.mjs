@@ -139,7 +139,9 @@ const XROOTS = new Map([
   ['xdescribe', 'describe'],
 ]);
 const HOOKS = new Set(['beforeEach', 'beforeAll', 'afterEach', 'afterAll']);
-const DISABLING = new Set(['skip', 'todo', 'fails', 'failing']);
+// `fixme` rides the same arm: Playwright's expected-failure mark skips
+// the test, which is what `fails`/`failing` already say here.
+const DISABLING = new Set(['skip', 'todo', 'fails', 'failing', 'fixme']);
 const DISABLING_OPTIONS = new Set(['skip', 'todo', 'fails']);
 
 const ZERO = () => ({
@@ -298,6 +300,26 @@ function constant(node) {
     if (op === ts.SyntaxKind.GreaterThanEqualsToken) {
       return { known: true, value: a >= b };
     }
+    // Arithmetic and bitwise apply JavaScript's own operators, so the
+    // fold IS the runtime's answer; the opaque guard above has already
+    // kept placeholders and bigints out.
+    if (op === ts.SyntaxKind.MinusToken) return { known: true, value: a - b };
+    if (op === ts.SyntaxKind.AsteriskToken)
+      return { known: true, value: a * b };
+    if (op === ts.SyntaxKind.SlashToken) return { known: true, value: a / b };
+    if (op === ts.SyntaxKind.PercentToken) return { known: true, value: a % b };
+    if (op === ts.SyntaxKind.AsteriskAsteriskToken)
+      return { known: true, value: a ** b };
+    if (op === ts.SyntaxKind.AmpersandToken)
+      return { known: true, value: a & b };
+    if (op === ts.SyntaxKind.BarToken) return { known: true, value: a | b };
+    if (op === ts.SyntaxKind.CaretToken) return { known: true, value: a ^ b };
+    if (op === ts.SyntaxKind.LessThanLessThanToken)
+      return { known: true, value: a << b };
+    if (op === ts.SyntaxKind.GreaterThanGreaterThanToken)
+      return { known: true, value: a >> b };
+    if (op === ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken)
+      return { known: true, value: a >>> b };
     return { known: false };
   }
   return { known: false };
@@ -486,17 +508,30 @@ function isBodySkip({ root, members, calls }) {
 
 // True when `node` sits under a REAL condition inside the nearest
 // enclosing function: an if/switch/loop, a ternary, or a short-circuit
-// operand. Two wrappers only look conditional and are walked through: an
-// `if` whose test constant-folds TRUE never withholds its branch, and a
-// `catch` whose try block holds a counted assertion fires exactly when
-// that assertion fails — a skip in either is the runner's unconditional
-// outcome, not an environment guard. `assertionPositions` must be complete
-// when this runs: callers collect their skips during the visit and resolve
-// them after it.
+// operand. A wrapper whose deciding operand constant-folds is walked
+// through ARM-AWARE: the arm the constant takes is no condition at all
+// (`if (true) ctx.skip()`, `true && ctx.skip()`), and the arm it skips
+// is dead code that disables nothing (`if (false) { ctx.skip(); }` never
+// runs, while `if (false) {} else { ctx.skip(); }` DOES disable — the
+// runner reaches the else). A `catch` whose try block holds a counted
+// assertion fires exactly when that assertion fails — a skip in either
+// is the runner's unconditional outcome, not an environment guard.
+// `assertionPositions` must be complete when this runs: callers collect
+// their skips during the visit and resolve them after it.
 function underCondition(node, assertionPositions) {
+  const K = ts.SyntaxKind;
+  const inside = (container) =>
+    !!container && node.pos >= container.pos && node.end <= container.end;
   for (let p = node.parent; p && !ts.isFunctionLike(p); p = p.parent) {
     if (ts.isIfStatement(p)) {
-      if (truthyConstant(p.expression)) continue;
+      if (inside(p.expression)) return true;
+      const c = constant(p.expression);
+      if (!c.known) return true;
+      // The arm a constant-true `if` takes is no condition at all; the
+      // other arm never runs, so a skip there disables nothing and reads
+      // as guard-shaped either way. `if (false) {} else { ctx.skip(); }`
+      // is the runner skipping, and it must not hide here.
+      if (Boolean(c.value) === inside(p.thenStatement)) continue;
       return true;
     }
     if (ts.isCatchClause(p)) {
@@ -509,15 +544,36 @@ function underCondition(node, assertionPositions) {
       }
       return true;
     }
+    if (ts.isConditionalExpression(p)) {
+      if (inside(p.condition)) return true;
+      if (!inside(p.whenTrue) && !inside(p.whenFalse)) return true;
+      const c = constant(p.condition);
+      if (!c.known) return true;
+      if (Boolean(c.value) === inside(p.whenTrue)) continue;
+      return true;
+    }
+    if (ts.isSwitchStatement(p) || ts.isIterationStatement(p, false)) {
+      return true;
+    }
     if (
-      ts.isConditionalExpression(p) ||
-      ts.isSwitchStatement(p) ||
-      ts.isIterationStatement(p, false) ||
-      (ts.isBinaryExpression(p) &&
-        (p.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
-          p.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
-          p.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken))
+      ts.isBinaryExpression(p) &&
+      (p.operatorToken.kind === K.AmpersandAmpersandToken ||
+        p.operatorToken.kind === K.BarBarToken ||
+        p.operatorToken.kind === K.QuestionQuestionToken)
     ) {
+      if (inside(p.left)) continue;
+      const l = constant(p.left);
+      if (!l.known) return true;
+      const shortCircuits =
+        (p.operatorToken.kind === K.AmpersandAmpersandToken && !l.value) ||
+        (p.operatorToken.kind === K.BarBarToken && !!l.value) ||
+        (p.operatorToken.kind === K.QuestionQuestionToken &&
+          l.value !== null &&
+          l.value !== undefined);
+      // A decidable short-circuit's right operand either always runs or
+      // never does: `true && ctx.skip()` skips, `false && ctx.skip()` is
+      // dead code that disables nothing.
+      if (!shortCircuits) continue;
       return true;
     }
   }
@@ -725,7 +781,15 @@ export function count(text, path) {
   const collect = (fn, into) => {
     const walk = (n) => {
       if (n !== fn && (ts.isFunctionLike(n) || ts.isClassLike(n))) return;
-      if (ts.isReturnStatement(n) && returnsNothing(n)) {
+      // Only a return the runner provably reaches on EVERY entry silences
+      // what follows: one under a runtime condition is the
+      // environment-guard idiom whose sheltered assertions stay measured
+      // (R27-21/R27-27), and one in dead code never runs.
+      if (
+        ts.isReturnStatement(n) &&
+        returnsNothing(n) &&
+        !underCondition(n, assertionPositions)
+      ) {
         into.push({ from: n.getStart(sf), start: fn.pos, end: fn.end });
       }
       ts.forEachChild(n, walk);
@@ -941,22 +1005,34 @@ export function measure({ path, tip, pre, events = [] }) {
     const landed = sameContent(ev.after, landedRef)
       ? after
       : countFile(landedRef, path);
+    // "What actually landed" is the merge result measured against the
+    // BRANCH's own side at the merge, not against the merge base: the
+    // latter folds the round's own pre-merge edits into main's landed
+    // contribution, so a resolution that kept the branch's side whole
+    // would credit main's discarded removal against the round's own
+    // (R27-20). A fast-forwarded main commit carries no branch side —
+    // its landed blob is main's own, and the merge base is the right
+    // baseline there.
+    const landedBase =
+      ev.branch !== undefined && ev.branch !== null
+        ? countFile(ev.branch, path)
+        : before;
     assertions -= clamp(
       after.assertions - before.assertions,
-      landed.assertions - before.assertions,
+      landed.assertions - landedBase.assertions,
     );
     declared -= clamp(
       after.declared - before.declared,
-      landed.declared - before.declared,
+      landed.declared - landedBase.declared,
     );
     enabled -= clamp(
       after.enabled - before.enabled,
-      landed.enabled - before.enabled,
+      landed.enabled - landedBase.enabled,
     );
     const modelledTitles = new Map();
     absorb(modelledTitles, before.enabledTitles, after.enabledTitles);
     const landedTitles = new Map();
-    absorb(landedTitles, before.enabledTitles, landed.enabledTitles);
+    absorb(landedTitles, landedBase.enabledTitles, landed.enabledTitles);
     for (const [k, n] of clampBag(modelledTitles, landedTitles)) {
       bagAdd(baselineEnabled, k, n);
     }

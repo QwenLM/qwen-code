@@ -89,6 +89,11 @@ env:
   # is the prompt-injection trust gate: feedback from anyone else is ignored so a
   # hostile commenter cannot steer the agent.
   TRUSTED_ASSOC: '["OWNER", "MEMBER", "COLLABORATOR"]'
+  # Every lane this loop owns whose check runs attach to the PR head:
+  # excluded from the head-state classifiers (charge + wake) by name, or
+  # the loop reads its own red as the round's regression (af-155, R27-23).
+  # A test pins the names against the workflows' `name:` lines.
+  LOOP_OWNED_LANES: '["Qwen Autofix","🧐 Qwen Pull Request Review","Qwen CI Failure Patrol","Qwen Autofix Fork Bridge","Qwen Autofix Fork Signal","Qwen Triage","Qwen Triage Finalize","PR self-report label","Qwen PR Safety Precheck","Comment Attachment Guard","PR Asset Branch Cleanup"]'
   # Hard cap on automated review-address rounds per PR. After this the bot stops
   # and leaves the PR for a human. Raised from 5: across the last 40 bot PRs
   # only 3 ever reached the cap and all 3 merged AT it (one having spent two of
@@ -3127,7 +3132,7 @@ jobs:
               CONFLICT_WAKE_SCAN="$(jq -rs \
                 --arg since "${CONFLICT_SINCE_SCAN}" --arg baseupd "${BASE_UPD_AT_SCAN}" \
                 --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-                --argjson trust "${TRUSTED_ASSOC}" '
+                --argjson trust "${TRUSTED_ASSOC}" --argjson looplanes "${LOOP_OWNED_LANES}" '
                 (.[0] | map(select((.submitted_at // "") > $since)
                   | select((.user.login // "") != $ab and (.user.login // "") != $rb)
                   | select(((.author_association // "") | IN($trust[])))
@@ -3141,7 +3146,7 @@ jobs:
                   | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                   | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
                 + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
-                  | select(((.workflowName // "") | IN("Qwen Autofix", "🧐 Qwen Pull Request Review", "Qwen CI Failure Patrol", "Qwen Autofix Fork Bridge", "Qwen Autofix Fork Signal")) | not)
+                  | select(((.workflowName // "") | IN($looplanes[])) | not)
                   | select((.completedAt // .updatedAt // "") > $since)
                   | select((.completedAt // .updatedAt // "") > $baseupd)) | length)' \
                 "${WORKDIR}/rv.scan.json" "${WORKDIR}/rc.scan.json" "${WORKDIR}/ic.json" "${WORKDIR}/checks.scan.json" 2> /dev/null || echo 0)"
@@ -4617,7 +4622,7 @@ jobs:
             CONFLICT_WAKE="$(jq -rs \
               --arg since "${CONFLICT_SINCE}" --arg baseupd "${BASE_UPD_AT}" \
               --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson trust "${TRUSTED_ASSOC}" --argjson looplanes "${LOOP_OWNED_LANES}" '
               (.[0] | map(select((.submitted_at // "") > $since)
                 | select((.user.login // "") != $ab and (.user.login // "") != $rb)
                 | select(((.author_association // "") | IN($trust[])))
@@ -4631,7 +4636,7 @@ jobs:
                 | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
               + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
-                | select(((.workflowName // "") | IN("Qwen Autofix", "🧐 Qwen Pull Request Review", "Qwen CI Failure Patrol", "Qwen Autofix Fork Bridge", "Qwen Autofix Fork Signal")) | not)
+                | select(((.workflowName // "") | IN($looplanes[])) | not)
                 | select((.completedAt // .updatedAt // "") > $since)
                 | select((.completedAt // .updatedAt // "") > $baseupd)) | length)' \
               "${WORKDIR}/rv.json" "${WORKDIR}/rc.json" "${WORKDIR}/ic.json" "${WORKDIR}/checks.json" 2> /dev/null || echo 0)"
@@ -4760,9 +4765,10 @@ jobs:
           # Classify the live head: a push onto a fully GREEN head that
           # leaves it red introduced the red.
           # Full rationale → qwen-autofix.md#af-155
-          CHECK_STATE="$(jq -r --arg dispatch "${DISPATCH_STATUS_CONTEXT}" '
+          CHECK_STATE="$(jq -r --arg dispatch "${DISPATCH_STATUS_CONTEXT}" \
+            --argjson looplanes "${LOOP_OWNED_LANES}" '
             [ .[] | select((((.workflowName // "")
-                | IN("Qwen Autofix", "🧐 Qwen Pull Request Review", "Qwen CI Failure Patrol", "Qwen Autofix Fork Bridge", "Qwen Autofix Fork Signal")) | not))
+                | IN($looplanes[])) | not))
               | select(((.context // "") == $dispatch) | not) ] as $c
             | if ($c | length) == 0 then "none"
               elif any($c[]; (.conclusion // .state // "")
@@ -5458,24 +5464,9 @@ jobs:
           HB_PID: '${{ steps.post_status.outputs.heartbeat_pid }}'
           HB_START_TICKS: '${{ steps.post_status.outputs.heartbeat_start_ticks }}'
         run: |-
-          # The round heartbeat ends HERE: this is the first step that runs
-          # branch code ON THE HOST (the agent phase sandboxes it in
-          # docker), and the loop holds the bot PAT in its env — the
-          # overlap is bounded to the sandboxed agent phase, never the
-          # host-side gate. Kill from the pid the launch recorded in
-          # expression context; WORKDIR files are sandbox-writable and are
-          # never read as kill targets. The session kill covers a kill
-          # landing MID-TICK: each tick's `timeout 60 gh` subtree sits in
-          # its OWN process group (coreutils timeout default), which the
-          # group+pid kills miss — but the loop owns its session via
-          # setsid, so -s <pid> targets exactly this round's tree.
-          # ABSOLUTE-PATH-ONLY command words here, NOT builtin: this block
-          # runs in the gate's OUTER shell, which inherits every
-          # $GITHUB_ENV plant — a BASH_FUNC_builtin%% import shadows the
-          # `builtin` keyword itself (the R6-4 doctrine the gate body
-          # below documents). `builtin kill` is sound only inside the
-          # env -i clean child (finalize); here kill is /usr/bin/kill,
-          # the same procps already relied on for pkill.
+          # The round heartbeat ends HERE: kill from the pid the launch
+          # recorded in expression context, with absolute-path command
+          # words only (the outer shell inherits $GITHUB_ENV plants).
           # Full rationale → qwen-autofix.md#af-149
           /usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
           # Lifecycle-confirmed shutdown: this kill can land the whole
