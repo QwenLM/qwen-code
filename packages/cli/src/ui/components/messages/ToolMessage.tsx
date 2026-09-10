@@ -322,6 +322,17 @@ const useResultDisplayRenderer = (
       };
     }
 
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'type' in resultDisplay &&
+      resultDisplay.type === 'ask_user_question_answers' &&
+      'text' in resultDisplay &&
+      typeof resultDisplay.text === 'string'
+    ) {
+      return { type: 'string', data: resultDisplay.text };
+    }
+
     // Default to string — safeguard against non-string objects
     return {
       type: 'string',
