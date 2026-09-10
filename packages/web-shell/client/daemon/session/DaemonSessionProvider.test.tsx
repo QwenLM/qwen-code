@@ -2270,6 +2270,98 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('forwards the host source type on workspace session restore', async () => {
+    // The VS Code companion claims its pre-attribution sessions back through
+    // this: the daemon fills in missing source metadata from the restore
+    // request instead of leaving the session invisible to the host's catalog.
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'legacy-unattributed',
+        workspaceCwd: '/mock-workspace',
+        events: createIdleEvents(),
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+      sessionSourceType: 'vscode',
+    });
+    let loadPromise!: Promise<void>;
+    await act(async () => {
+      loadPromise = requireActions(actions).loadSession('legacy-unattributed');
+      await flushPromises();
+    });
+    await expect(loadPromise).resolves.toBeUndefined();
+
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenLastCalledWith(
+      expect.anything(),
+      'legacy-unattributed',
+      {
+        workspaceCwd: '/mock-workspace',
+        timeoutMs: 70_000,
+        sourceType: 'vscode',
+      },
+      expect.any(String),
+    );
+  });
+
+  it('omits restore-time attribution for standalone sessions', async () => {
+    // BridgeStandaloneRestoreSessionRequest deliberately omits sourceType; the
+    // host's restore-time attribution must not leak into that path.
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'standalone-target',
+        workspaceCwd: '/private/standalone-target',
+        session: {
+          sessionId: 'standalone-target',
+          workspaceCwd: '/private/standalone-target',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          projectlessOutputDirectory: '/output/standalone-target',
+          workingDirectory: { state: 'ready' },
+        },
+        events: createIdleEvents(),
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+      sessionContext: { kind: 'standalone' },
+      sessionSourceType: 'vscode',
+    });
+    let loadPromise!: Promise<void>;
+    await act(async () => {
+      loadPromise = requireActions(actions).loadSession('standalone-target', {
+        sessionContext: { kind: 'standalone' },
+      });
+      await flushPromises();
+    });
+    await expect(loadPromise).resolves.toBeUndefined();
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.loadStandalone,
+    ).toHaveBeenLastCalledWith(
+      expect.anything(),
+      'standalone-target',
+      expect.not.objectContaining({ sourceType: expect.anything() }),
+      expect.any(String),
+    );
+  });
+
   it('does not inherit a failed controlled target in a baseUrl-only provider', async () => {
     sdkMocks.MockDaemonSessionClient.load.mockRejectedValueOnce(
       new Error('load failed'),
