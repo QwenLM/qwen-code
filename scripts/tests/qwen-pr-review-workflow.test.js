@@ -6234,15 +6234,14 @@ describe('review supersede salvage (#10110)', () => {
       // run start is the triggering push's shape, and no watcher poll
       // could have recorded the kill that early) — so the event postdates
       // START_TS + SALVAGE_POLL_SECONDS with margin for the harness setup
-      // between now and the loop start. Size the margin for the
-      // worst setup stall the shared pool can produce, not the quiet-host
-      // figure: release run 34485181843 lost Quality Checks (Scripts)
-      // when contention pushed this replay's setup past the old 15s
-      // margin and the kill-record branch rightly refused the cede.
-      // The branch imposes no upper bound on the event time, and the
-      // suite's own 90s testTimeout bounds any stall the margin must
-      // absorb, so minutes of headroom cost nothing.
-      const now = new Date(Date.now() + 600_000).toISOString();
+      // between now and the loop start. The branch imposes no upper
+      // bound on the event time, so a generous margin costs nothing —
+      // the harness child's 30s timeout bounds the replay body long
+      // before the margin does.
+      expect(workflow).toContain(
+        '[ "$at" -ge "$(( START_TS + SALVAGE_POLL_SECONDS ))" ]',
+      );
+      const now = new Date(Date.now() + 300000).toISOString();
       const r = runScenario('cede_revert_ff_kill', {
         armWatcher: true,
         extraEnv: {
@@ -6371,7 +6370,7 @@ describe('review supersede salvage (#10110)', () => {
         armWatcher: true,
         extraEnv: {
           ...base,
-          STUB_TIMELINE: `head-x head-a ${new Date(Date.now() + 75000).toISOString()}`,
+          STUB_TIMELINE: `head-x head-a ${new Date(Date.now() + 300000).toISOString()}`,
           STUB_TIMELINE_ACTOR: 'qwen-ci-bot',
         },
       });
