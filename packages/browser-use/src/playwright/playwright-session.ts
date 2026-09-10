@@ -174,7 +174,7 @@ export class PlaywrightSession {
   }
 
   async listTabs(): Promise<TabInfo[]> {
-    await this.syncDerivedTabs();
+    await this.syncDerivedTabs('list');
     return await Promise.all(
       [...this.tabs.values()]
         .filter((tab) => !tab.stale)
@@ -371,6 +371,10 @@ export class PlaywrightSession {
     page.on('dialog', (dialog) => {
       tab.dialog = dialog;
     });
+    page.on('framenavigated', () => {
+      // Chrome resolves any open dialog when the page navigates away.
+      tab.dialog = undefined;
+    });
     page.on('console', (message) => {
       const location = message.location();
       pushBounded(tab.logs, {
@@ -389,7 +393,7 @@ export class PlaywrightSession {
     });
   }
 
-  private async syncDerivedTabs(): Promise<void> {
+  private async syncDerivedTabs(mode: 'list' | 'finalize'): Promise<void> {
     const providers = providerTabs(
       await this.bridge.request('tabs.queryDerived'),
     );
@@ -397,7 +401,12 @@ export class PlaywrightSession {
       providers.map((provider) => this.registerTab(provider, 'created', false)),
     );
     const failed = results.find(
-      (result): result is PromiseRejectedResult => result.status === 'rejected',
+      (result): result is PromiseRejectedResult =>
+        result.status === 'rejected' &&
+        (mode === 'finalize' ||
+          (result.reason instanceof BrowserRuntimeError &&
+            (result.reason.code === 'STALE_BROWSER_SESSION' ||
+              result.reason.code === 'BROWSER_DISCONNECTED'))),
     );
     if (failed !== undefined) throw failed.reason;
   }
@@ -425,7 +434,9 @@ export class PlaywrightSession {
 
   async finalizeTabs(keep: FinalizeTabDisposition[]): Promise<void> {
     await this.registration;
-    const results = await Promise.allSettled([this.syncDerivedTabs()]);
+    const results = await Promise.allSettled([
+      this.syncDerivedTabs('finalize'),
+    ]);
     await this.registration;
     const dispositions = new Map<string, FinalizeTabStatus>();
     for (const { tabId, status } of keep) {

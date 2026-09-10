@@ -375,6 +375,35 @@ describe('Chrome screenshot acquisition', () => {
     });
   });
 
+  it('rejects a fallback capture that does not match the CSS viewport', async () => {
+    const bridge = new ScreenshotBridge();
+    bridge.onStart = () => {
+      throw new Error('Screencast unavailable');
+    };
+    bridge.captureData = jpeg(1600, 1200).toString('base64');
+    await expect(captureTabScreenshot(tab(), {}, bridge)).rejects.toMatchObject(
+      {
+        code: 'OPERATION_FAILED',
+        message: expect.stringContaining('does not match the viewport'),
+      },
+    );
+  });
+
+  it('rejects a clipped capture that does not match the requested region', async () => {
+    const bridge = new ScreenshotBridge();
+    bridge.captureData = jpeg(400, 200).toString('base64');
+    await expect(
+      captureTabScreenshot(
+        tab(),
+        { clip: { x: 0, y: 0, width: 200, height: 100 } },
+        bridge,
+      ),
+    ).rejects.toMatchObject({
+      code: 'OPERATION_FAILED',
+      message: expect.stringContaining('does not match the viewport'),
+    });
+  });
+
   it('rejects oversized full-page requests before capture', async () => {
     const bridge = new ScreenshotBridge();
     bridge.content.height = 10_000;

@@ -6,7 +6,17 @@
 
 import { runInNewContext } from 'node:vm';
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const osMock = vi.hoisted(() => ({ platform: process.platform }));
+vi.mock('node:os', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:os')>()),
+  platform: () => osMock.platform,
+}));
+
+afterEach(() => {
+  osMock.platform = process.platform;
+});
 
 import type {
   BridgeConnectionListener,
@@ -92,6 +102,29 @@ describe('QwenPlaywrightTransport', () => {
     );
     transport.close();
   });
+  it('reports a parseable Chrome version and the host platform', async () => {
+    osMock.platform = 'darwin';
+    const bridge = new FakeBridge();
+    const transport = new QwenPlaywrightTransport(bridge);
+    const messages: object[] = [];
+    transport.onmessage = (message) => messages.push(message);
+
+    transport.send({ id: 1, method: 'Browser.getVersion' });
+
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    const result = (
+      messages[0] as {
+        result: { product: string; userAgent: string };
+      }
+    ).result;
+    expect(result.userAgent).toContain('Macintosh');
+    expect(result.userAgent).not.toContain('Headless');
+    const major = Number(result.product.split('/')[1]?.split('.')[0]);
+    expect(Number.isFinite(major)).toBe(true);
+    expect(major).toBeGreaterThan(0);
+    transport.close();
+  });
+
   it('adapts a Node REPL VM transport into the host realm Playwright expects', () => {
     const foreignTransport = runInNewContext(`({
       open() {},

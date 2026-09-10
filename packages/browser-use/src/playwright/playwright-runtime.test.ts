@@ -16,6 +16,7 @@ import { Buffer } from 'node:buffer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ChromeBridge } from '../bridge/index.js';
+import { BrowserRuntimeError } from '../core/errors.js';
 import type { ScreenshotEnvelope, TabInfo } from '../core/primitives.js';
 import { BrowserSdkContext } from '../sdk/context.js';
 import { TabProxy } from '../sdk/tab.js';
@@ -598,6 +599,30 @@ describe('PlaywrightRuntime command contracts', () => {
     expect(fixture.cdp.detach).toHaveBeenCalledOnce();
   });
 
+  it('releases the mouse button when a drag move fails', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    fixture.page.mouse.move
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('move failed'));
+
+    await expect(
+      fixture.runtime.dispatch('cua.drag', {
+        tabId: tab.id,
+        path: [
+          { x: 1, y: 1 },
+          { x: 2, y: 2 },
+          { x: 3, y: 3 },
+        ],
+      }),
+    ).rejects.toMatchObject({
+      code: 'OPERATION_FAILED',
+      message: 'cua.drag failed: move failed',
+    });
+    expect(fixture.page.mouse.down).toHaveBeenCalledOnce();
+    expect(fixture.page.mouse.up).toHaveBeenCalledOnce();
+  });
+
   it('binds a registered tab to the page with the matching target id', async () => {
     const fixture = await runtimeFixture({ unrelatedPage: true });
 
@@ -960,6 +985,228 @@ describe('PlaywrightRuntime command contracts', () => {
       url: 'https://example.com/',
     });
     expect(fixture.page.goto).toHaveBeenCalledOnce();
+  });
+
+  it('clears the cached dialog when Chrome reports it already gone', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    const dialog = {
+      type: () => 'confirm',
+      message: () => 'Continue?',
+      defaultValue: () => '',
+      accept: vi.fn(async () => {
+        throw new Error('No JavaScript dialog is open');
+      }),
+      dismiss: vi.fn(async () => {
+        throw new Error('No JavaScript dialog is open');
+      }),
+    } as unknown as Dialog;
+    const listener = fixture.page.on.mock.calls.find(
+      ([event]) => event === 'dialog',
+    )?.[1] as ((value: Dialog) => void) | undefined;
+    expect(listener).toBeDefined();
+    listener?.(dialog);
+
+    await expect(
+      fixture.runtime.dispatch('tab.dialog.dismiss', { tabId: tab.id }),
+    ).rejects.toMatchObject({ code: 'OPERATION_FAILED' });
+    await fixture.runtime.dispatch('tab.goto', {
+      tabId: tab.id,
+      url: 'https://example.com/',
+    });
+    expect(fixture.page.goto).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a dialog that opened while an earlier accept was in flight', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    const listener = fixture.page.on.mock.calls.find(
+      ([event]) => event === 'dialog',
+    )?.[1] as ((value: Dialog) => void) | undefined;
+    expect(listener).toBeDefined();
+    const second = {
+      type: () => 'confirm',
+      message: () => 'Really?',
+      defaultValue: () => '',
+      accept: vi.fn(async () => undefined),
+      dismiss: vi.fn(async () => undefined),
+    } as unknown as Dialog;
+    const first = {
+      type: () => 'alert',
+      message: () => 'First',
+      defaultValue: () => '',
+      accept: vi.fn(async () => {
+        listener?.(second);
+      }),
+      dismiss: vi.fn(async () => undefined),
+    } as unknown as Dialog;
+    listener?.(first);
+
+    await fixture.runtime.dispatch('tab.dialog.accept', { tabId: tab.id });
+
+    await expect(
+      fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
+    ).resolves.toMatchObject({ type: 'confirm', message: 'Really?' });
+    await expect(
+      fixture.runtime.dispatch('tab.goto', {
+        tabId: tab.id,
+        url: 'https://example.com/',
+      }),
+    ).rejects.toMatchObject({ code: 'DIALOG_OPEN' });
+  });
+
+  it('clears the cached dialog when the page navigates', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    const listeners = new Map(
+      fixture.page.on.mock.calls as Array<[string, (value: never) => void]>,
+    );
+    const dialogListener = listeners.get('dialog') as
+      | ((value: Dialog) => void)
+      | undefined;
+    expect(dialogListener).toBeDefined();
+    dialogListener?.({
+      type: () => 'confirm',
+      message: () => 'Leave?',
+      defaultValue: () => '',
+      accept: vi.fn(async () => undefined),
+      dismiss: vi.fn(async () => undefined),
+    } as unknown as Dialog);
+    const navigatedListener = listeners.get('framenavigated') as
+      | (() => void)
+      | undefined;
+    expect(navigatedListener).toBeDefined();
+
+    navigatedListener?.();
+
+    await fixture.runtime.dispatch('tab.goto', {
+      tabId: tab.id,
+      url: 'https://example.com/',
+    });
+    expect(fixture.page.goto).toHaveBeenCalledOnce();
+  });
+
+  it('records console.warn entries at the warn level', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    const listener = fixture.page.on.mock.calls.find(
+      ([event]) => event === 'console',
+    )?.[1] as ((value: unknown) => void) | undefined;
+    expect(listener).toBeDefined();
+    listener?.({
+      type: () => 'warning',
+      text: () => 'deprecated API',
+      location: () => ({ url: '' }),
+    });
+
+    await expect(
+      fixture.runtime.dispatch('dev.logs', {
+        tabId: tab.id,
+        levels: ['warning'],
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({ level: 'warn', message: 'deprecated API' }),
+    ]);
+    await expect(
+      fixture.runtime.dispatch('dev.logs', { tabId: tab.id, levels: ['log'] }),
+    ).resolves.toEqual([]);
+  });
+
+  it('lists tabs when a derived popup fails to attach', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    fixture.request.mockImplementation(
+      async (method: string, params: Record<string, unknown> = {}) => {
+        if (method === 'tabs.queryDerived')
+          return [
+            {
+              providerTabId: 18,
+              title: 'Popup',
+              url: 'https://example.com/popup',
+              derivedFromProviderTabId: 17,
+            },
+          ];
+        if (method === 'tabs.attach' && params.tabId === 18)
+          throw new Error('Cannot attach to target');
+        return null;
+      },
+    );
+
+    await expect(
+      fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
+    ).resolves.toEqual([expect.objectContaining({ id: tab.id })]);
+  });
+
+  it('lists healthy derived tabs after an earlier popup fails to attach', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    fixture.derivedTabs.push({ providerTabId: 22 }, { providerTabId: 23 });
+    const request = fixture.request.getMockImplementation()!;
+    fixture.request.mockImplementation(async (method, params = {}) => {
+      if (method === 'tabs.attach' && params.tabId === 22)
+        throw new Error('Cannot attach to target');
+      return await request(method, params);
+    });
+
+    await expect(
+      fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
+    ).resolves.toEqual([
+      expect.objectContaining({ id: tab.id }),
+      expect.objectContaining({ title: 'Nested popup' }),
+    ]);
+    expect(fixture.request).toHaveBeenCalledWith('tabs.attach', { tabId: 23 });
+  });
+
+  it.each(['BROWSER_DISCONNECTED', 'STALE_BROWSER_SESSION'] as const)(
+    'propagates %s after an earlier derived-tab attachment failure',
+    async (code) => {
+      const fixture = await runtimeFixture();
+      await createTab(fixture.runtime);
+      fixture.derivedTabs.push({ providerTabId: 22 }, { providerTabId: 23 });
+      const request = fixture.request.getMockImplementation()!;
+      fixture.request.mockImplementation(async (method, params = {}) => {
+        if (method === 'tabs.attach' && params.tabId === 22)
+          throw new Error('Cannot attach to target');
+        if (method === 'tabs.attach' && params.tabId === 23)
+          throw new BrowserRuntimeError(code, 'Chrome session lost');
+        return await request(method, params);
+      });
+
+      await expect(
+        fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
+      ).rejects.toMatchObject({ code });
+      expect(fixture.request).toHaveBeenCalledWith('tabs.attach', {
+        tabId: 23,
+      });
+    },
+  );
+
+  it('propagates a lost connection while syncing derived tabs', async () => {
+    const fixture = await runtimeFixture();
+    await createTab(fixture.runtime);
+    fixture.request.mockImplementation(
+      async (method: string, params: Record<string, unknown> = {}) => {
+        if (method === 'tabs.queryDerived')
+          return [
+            {
+              providerTabId: 18,
+              title: 'Popup',
+              url: 'https://example.com/popup',
+              derivedFromProviderTabId: 17,
+            },
+          ];
+        if (method === 'tabs.attach' && params.tabId === 18)
+          throw new BrowserRuntimeError(
+            'BROWSER_DISCONNECTED',
+            'Chrome extension disconnected',
+          );
+        return null;
+      },
+    );
+
+    await expect(
+      fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
+    ).rejects.toMatchObject({ code: 'BROWSER_DISCONNECTED' });
   });
 
   it('does not impose an origin allowlist on Playwright navigation', async () => {
@@ -1632,6 +1879,9 @@ function fakePage(
     getByRole: ReturnType<typeof vi.fn>;
     mouse: {
       click: ReturnType<typeof vi.fn>;
+      move: ReturnType<typeof vi.fn>;
+      down: ReturnType<typeof vi.fn>;
+      up: ReturnType<typeof vi.fn>;
       wheel: ReturnType<typeof vi.fn>;
     };
     keyboard: {

@@ -197,6 +197,8 @@ export function selectOptionRecord(value: unknown): {
 }
 
 export function consoleLevel(value: string): LogEntry['level'] {
+  // Playwright reports console.warn as 'warning'; the contract stores 'warn'.
+  if (value === 'warning') return 'warn';
   if (
     value === 'debug' ||
     value === 'info' ||

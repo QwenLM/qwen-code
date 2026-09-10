@@ -91,9 +91,14 @@ export async function executeCuaOperation(
       await withModifiers(page, args.keys, async () => {
         await page.mouse.move(path[0]?.x ?? 0, path[0]?.y ?? 0);
         await page.mouse.down();
-        for (const point of path.slice(1))
-          await page.mouse.move(point.x, point.y);
-        await page.mouse.up();
+        try {
+          for (const point of path.slice(1))
+            await page.mouse.move(point.x, point.y);
+        } finally {
+          // A held button corrupts every later input on the tab; the
+          // guarded release must not mask the gesture's own failure.
+          await page.mouse.up().catch(() => undefined);
+        }
       });
       return null;
     }

@@ -8,7 +8,7 @@ import {
   type WebShellAssistantTurnFooterRenderInfo,
   type WebShellCustomization,
 } from '../customization';
-import type { Message } from '../adapters/types';
+import type { ACPToolCall, Message } from '../adapters/types';
 import { summaryRunId } from './summaryRunId';
 
 vi.mock('../WebShellContexts', async () => {
@@ -94,10 +94,19 @@ vi.mock('./messages/SystemMessage', () => ({ SystemMessage: () => null }));
 vi.mock('./messages/ToolGroup', async () => {
   const React = await import('react');
   return {
-    ToolGroup: ({ compactSummary }: { compactSummary?: boolean }) =>
+    ToolGroup: ({
+      compactSummary,
+      tools,
+    }: {
+      compactSummary?: boolean;
+      tools: ACPToolCall[];
+    }) =>
       React.createElement('div', {
         'data-testid': 'tool-group',
         'data-compact-summary': String(compactSummary === true),
+        'data-agent-ready': String(
+          (tools[0]?.subTools?.[0] ?? tools[0])?.subagentSessionReady,
+        ),
       }),
   };
 });
@@ -160,6 +169,53 @@ const toolMsg = (id: string): Message => ({
 function item(message: Message) {
   return <MessageItem message={message} />;
 }
+
+it.each([false, true])(
+  'propagates readiness-only changes with nested=%s',
+  (nested) => {
+    const agent: ACPToolCall = {
+      callId: 'agent-1',
+      toolName: 'agent',
+      status: 'in_progress',
+      subagentSessionReady: false,
+    };
+    const tools = nested
+      ? [{ ...agent, callId: 'parent', subTools: [agent] }]
+      : [agent];
+    const message: Message = {
+      id: 'agent-message',
+      role: 'tool_group',
+      tools,
+      timestamp: 0,
+    };
+    const { root, container } = renderWithRoot(
+      <I18nProvider language="en">{item(message)}</I18nProvider>,
+    );
+    expect(
+      container
+        .querySelector('[data-testid="tool-group"]')
+        ?.getAttribute('data-agent-ready'),
+    ).toBe('false');
+    const readyAgent = { ...agent, subagentSessionReady: true };
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          {item({
+            ...message,
+            tools: nested
+              ? [{ ...tools[0], subTools: [readyAgent] }]
+              : [readyAgent],
+          })}
+        </I18nProvider>,
+      ),
+    );
+    expect(
+      container
+        .querySelector('[data-testid="tool-group"]')
+        ?.getAttribute('data-agent-ready'),
+    ).toBe('true');
+  },
+);
 
 describe('MessageItem error isolation', () => {
   it('renders a healthy message normally (no fallback)', () => {

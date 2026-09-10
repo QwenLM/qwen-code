@@ -16,6 +16,7 @@ import {
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
+import { resolveLanguage, resolveLanguageSetting } from '../../i18n/index.js';
 import { scrubAndReportInheritedLoaderEnv } from '../../config/shared-env-keys.js';
 import {
   ChannelLoopScheduler,
@@ -91,6 +92,7 @@ import {
   registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
+  resolveChannelLocale,
   selectFirstModel,
   type ParsedChannel,
 } from './runtime.js';
@@ -113,6 +115,8 @@ const SESSION_BTW_FEATURE: ServeFeature = 'session_btw';
 const SESSION_PERMISSION_VOTE_FEATURE: ServeFeature = 'session_permission_vote';
 const SESSION_WORKTREE_PERSISTENCE_FEATURE: ServeFeature =
   'session_worktree_persistence_v1';
+const SESSION_WORKTREE_RESET_FEATURE: ServeFeature =
+  'session_worktree_reset_v1';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
 const WORKER_CHANNEL_DISCONNECT_DRAIN_MS =
   CHANNEL_WORKER_STOP_GRACE_MS - CHANNEL_WORKER_KILL_GRACE_MS;
@@ -185,6 +189,20 @@ interface DaemonSessionClientStaticLike {
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
+  // The reset route registers no client for the caller, so unlike `create`
+  // and `resume` this takes no client id.
+  resetWorktree(
+    client: DaemonClientLike,
+    sessionId: string,
+    req: {
+      workspaceCwd: string;
+      modelServiceId?: string;
+      sessionScope: 'thread';
+      approvalMode?: string;
+      sourceType?: string;
+      sourceId?: string;
+    },
+  ): Promise<DaemonChannelSessionClient>;
 }
 
 interface DaemonSdkLike {
@@ -251,6 +269,13 @@ export function createDaemonSessionFactory({
       // (dingtalk/feishu) is derivable from the name via the channel config.
       ...(req.sourceId ? { sourceId: req.sourceId } : {}),
     };
+    if (req.worktreeReset) {
+      return await DaemonSessionClient.resetWorktree(
+        client,
+        req.worktreeReset.sessionId,
+        daemonReq,
+      );
+    }
     if (req.sessionId) {
       return await DaemonSessionClient.resume(
         client,
@@ -312,6 +337,10 @@ export function createDaemonChannelBridgeFacade(
 
   if (bridge.listSessions) {
     facade.listSessions = bridge.listSessions.bind(bridge);
+  }
+
+  if (bridge.resetWorktreeSession) {
+    facade.resetWorktreeSession = bridge.resetWorktreeSession.bind(bridge);
   }
 
   if (bridge.registerChannelLoopToolHandler) {
@@ -517,6 +546,12 @@ export async function runChannelDaemonWorker(
     undefined,
     settings.merged.proxy as string | undefined,
   );
+  const locale = resolveChannelLocale(settings.merged.general?.language);
+  const displayLanguage = resolveLanguage(
+    resolveLanguageSetting(
+      settings.merged.general?.language as string | undefined,
+    ),
+  );
   const channelsConfig = loadChannelsConfig(daemonWorkspace, settings);
   const names = selectedChannelNames(channelsConfig, opts.selection);
   const parsed = await abortableStartup(
@@ -572,6 +607,9 @@ export async function runChannelDaemonWorker(
     ),
     sessionWorktreePersistence: capabilities.features.includes(
       SESSION_WORKTREE_PERSISTENCE_FEATURE,
+    ),
+    sessionWorktreeReset: capabilities.features.includes(
+      SESSION_WORKTREE_RESET_FEATURE,
     ),
     ...(opts.promptAuthorization
       ? { promptAuthorization: opts.promptAuthorization }
@@ -644,7 +682,9 @@ export async function runChannelDaemonWorker(
         name,
         await abortableStartup(
           createChannel(name, config, bridgeFacade, {
+            locale,
             ...(proxy ? { proxy } : {}),
+            ...(displayLanguage ? { displayLanguage } : {}),
             router: createdRouter,
             stateDir: daemonChannelStateDir(daemonWorkspace, name),
             channelMemory: {
@@ -702,7 +742,7 @@ export async function runChannelDaemonWorker(
           `[Channel] Failed to connect "${safeName}": ${safeMessage}`,
         );
         try {
-          channel.disconnect();
+          await channel.disconnect();
         } catch {
           // best-effort
         }
