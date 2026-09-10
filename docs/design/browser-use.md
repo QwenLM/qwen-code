@@ -151,13 +151,16 @@ Snapshot truncation, screenshot encoding and budgets, stale-session detection,
 and the JSON transport envelope remain runtime implementation details rather
 than model-facing options.
 
-Viewport screenshots return an image object accepted by `nodeRepl.emitImage()`.
-Its metadata carries the original JPEG dimensions, viewport, device pixel ratio,
-and CSS-pixel coordinate space so visual coordinates remain usable when a model
-client resizes the preview. Viewport screenshots are limited by their encoded
-byte size rather than rejected from viewport dimensions alone. Explicit clips
-and full-page captures retain a pixel budget because their dimensions are
-caller-controlled or potentially unbounded.
+Viewport screenshots return JPEG bytes, a MIME type, and metadata carrying the
+original image dimensions, viewport, device pixel ratio, and CSS-pixel coordinate
+space so visual coordinates remain usable when a model client resizes the
+preview. The skill outputs the metadata with `nodeRepl.write()` before passing
+only the bytes and MIME type to `nodeRepl.emitImage()` in the same cell. This uses
+the existing Node REPL output APIs without extending its image protocol.
+Viewport screenshots are limited by their encoded byte size rather than rejected
+from viewport dimensions alone. Explicit clips and full-page captures retain a
+pixel budget because their dimensions are caller-controlled or potentially
+unbounded.
 
 Screenshot acquisition follows the Codex Browser Use strategy independently of
 Playwright's screenshot preparation. A short, bounded rendering synchronization

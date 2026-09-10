@@ -77,10 +77,15 @@ await tab.playwright.expectNavigation(
 );
 ```
 
-Render screenshots with:
+Output screenshot metadata and the image together in one `node_repl` call:
 
 ```js
-await nodeRepl.emitImage(await tab.screenshot());
+const shot = await tab.screenshot();
+nodeRepl.write(JSON.stringify(shot.metadata));
+await nodeRepl.emitImage({
+  bytes: shot.bytes,
+  mimeType: shot.mimeType,
+});
 ```
 
 Use `tab.dev.logs()` for bounded console diagnostics. Arm

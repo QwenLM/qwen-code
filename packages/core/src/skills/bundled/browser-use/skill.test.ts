@@ -6,7 +6,8 @@
 
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { runInNewContext } from 'node:vm';
+import { describe, expect, it, vi } from 'vitest';
 import { makeFakeConfig } from '../../../test-utils/config.js';
 import { SkillManager } from '../../skill-manager.js';
 
@@ -51,5 +52,42 @@ describe('bundled browser-use skill', () => {
     expect(skill).not.toContain('markDeliverable');
     expect(skill).not.toContain('markHandoff');
     expect(skill).not.toContain('domSnapshot({ filter:');
+  });
+
+  it('outputs screenshot metadata before the image in one cell', async () => {
+    const example = [...skill.matchAll(/```js\n([\s\S]*?)```/g)].find(
+      ([, code]) => code.includes('tab.screenshot()'),
+    )?.[1];
+    expect(example).toBeDefined();
+
+    const shot = {
+      bytes: new Uint8Array([1, 2, 3]),
+      mimeType: 'image/jpeg',
+      metadata: {
+        width: 1280,
+        height: 720,
+        viewport: { width: 1280, height: 720 },
+        devicePixelRatio: 2,
+        coordinateSpace: 'css-pixels',
+      },
+    };
+    const screenshot = vi.fn().mockResolvedValue(shot);
+    const output: unknown[] = [];
+
+    await runInNewContext(`(async () => {\n${example}\n})()`, {
+      tab: { screenshot },
+      nodeRepl: {
+        write: (text: string) => output.push({ text }),
+        emitImage: async (image: unknown) => {
+          output.push({ image });
+        },
+      },
+    });
+
+    expect(screenshot).toHaveBeenCalledTimes(1);
+    expect(output).toEqual([
+      { text: JSON.stringify(shot.metadata) },
+      { image: { bytes: shot.bytes, mimeType: shot.mimeType } },
+    ]);
   });
 });
