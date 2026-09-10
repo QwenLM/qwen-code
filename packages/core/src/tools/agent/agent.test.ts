@@ -5306,6 +5306,30 @@ describe('AgentTool', () => {
       );
     });
 
+    it('reports a blocking Stop hook without rerunning a one-shot executor', async () => {
+      Object.assign(mockAgent, {
+        continuationBlockedReason: 'Codex agents are one-shot.',
+      });
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockResolvedValue({
+        isBlockingDecision: () => true,
+        shouldStopExecution: () => false,
+        getEffectiveReason: () => 'Continue working',
+      } as never);
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Inspect files',
+        prompt: 'Inspect',
+        subagent_type: 'file-search',
+        run_in_background: false,
+      });
+      const result = await invocation.execute();
+      expect(mockAgent.execute).toHaveBeenCalledTimes(1);
+      expect(partToString(result.llmContent)).toContain(
+        'Codex agents are one-shot.',
+      );
+    });
+
     it('should re-execute subagent when stop hook returns blocking decision', async () => {
       const mockBlockOutput = {
         isBlockingDecision: vi
@@ -6139,6 +6163,59 @@ describe('AgentTool', () => {
           expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledTimes(
             1,
           );
+        }
+      },
+    );
+
+    it.each([true, false, undefined])(
+      'keeps one-shot tasks out of messaging and resident continuation (background=%s)',
+      async (background) => {
+        Object.assign(mockAgent, {
+          continuationBlockedReason: 'Codex agents are one-shot.',
+        });
+        const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+          ...bgSubagent,
+          background: false,
+          executor: { kind: 'codex', command: 'codex' },
+        });
+        const result = await (agentTool as AgentToolWithProtectedMethods)
+          .createInvocation({
+            description: 'Codex task',
+            prompt: 'Inspect',
+            subagent_type: 'monitor',
+            run_in_background: background,
+          })
+          .execute();
+        await vi.waitFor(() => expect(mockSubagentDispose).toHaveBeenCalled());
+        expect(mockRegistry.register.mock.calls[0]?.[0]).toMatchObject({
+          resumeBlockedReason: 'Codex agents are one-shot.',
+        });
+        expect(mockRegistry.registerResidentAgent).not.toHaveBeenCalled();
+        expect(mockAgent.setExternalMessageProvider).not.toHaveBeenCalled();
+        expect(mockAgent.setExternalMessageWaiter).not.toHaveBeenCalled();
+        expect(writeMetaSpy.mock.calls.at(-1)?.[1]).toMatchObject({
+          executor: 'codex',
+        });
+        expect(partToString(result.llmContent)).toContain(
+          background ? 'Background agent launched' : 'Monitor done',
+        );
+        if (background) {
+          expect(partToString(result.llmContent)).toContain(
+            'Codex agents are one-shot.',
+          );
+          expect(partToString(result.llmContent)).not.toContain(
+            `Use ${ToolNames.SEND_MESSAGE} to continue`,
+          );
+          await vi.waitFor(() =>
+            expect(mockRegistry.complete).toHaveBeenCalled(),
+          );
+          const completionText = mockRegistry.complete.mock.calls[0]?.[1];
+          expect(completionText).toContain('Monitor done');
+          expect(completionText).toContain(
+            'token usage and cost are unavailable',
+          );
+          expect(completionText).not.toContain('next turn boundary');
         }
       },
     );
