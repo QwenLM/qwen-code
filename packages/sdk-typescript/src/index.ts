@@ -142,6 +142,7 @@ export {
   type DaemonWorkspaceRemovalActivity,
   type DaemonWorkspaceRemovalResult,
   type DaemonAvailableCommand,
+  type DaemonBrand,
   type DaemonCapabilities,
   type DaemonEnvCell,
   type DaemonEnvKind,

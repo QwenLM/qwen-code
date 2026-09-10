@@ -10,6 +10,10 @@ import type {
   GoalSnapshotV2,
   GoalStateResponse,
   SessionGroupPresetColor,
+  SessionSourceInput,
+  SessionSourcesResult,
+  SessionSourceUpsertResult,
+  SessionSourceRemoveResult,
   TurnResultCode,
   TurnResultErrorPayload,
 } from '@qwen-code/qwen-code-core';
@@ -623,6 +627,7 @@ export interface BridgeBranchSessionRequest {
 }
 
 export interface BridgePersistedBranchedSession {
+  sourceWarnings?: string[];
   sessionId: string;
   displayName: string;
   forkedFrom: { sessionId: string; displayName: string };
@@ -641,6 +646,7 @@ export interface BridgeSideTaskSessionRequest {
 }
 
 export interface BridgeSideTaskSession extends BridgeRestoredSession {
+  sourceWarnings?: string[];
   displayName: string;
   parentSessionId: string;
 }
@@ -967,6 +973,8 @@ export interface BridgeClientRequestContext {
    * unchanged. HTTP routes never populate this from request input.
    */
   modelPrompt?: string;
+  /** Original text explicitly declared by a supported submission producer. */
+  submittedPrompt?: string;
   /** User-facing projection supplied by an authenticated channel worker. */
   promptDisplayText?: string;
   /**
@@ -1046,6 +1054,9 @@ export function isValidTrustedModelPrompt(value: unknown): value is string {
 }
 
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
+export const SUBMITTED_PROMPT_META_KEY = 'qwen.submittedPrompt';
+export const DAEMON_SUBMITTED_PROMPT_META_KEY = 'qwen.daemon.submittedPrompt';
+
 export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
 // Wire twin of channel-base's CHANNEL_PROMPT_META_KEY; the packages have no
@@ -1772,6 +1783,23 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * storage-agnostic. Optional so lightweight fakes may omit it.
    */
   setSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
+
+  getSessionSources(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionSourcesResult>;
+
+  upsertSessionSource(
+    sessionId: string,
+    input: SessionSourceInput,
+    context: BridgeClientRequestContext,
+  ): Promise<SessionSourceUpsertResult>;
+
+  removeSessionSource(
+    sessionId: string,
+    sourceId: string,
+    context: BridgeClientRequestContext,
+  ): Promise<SessionSourceRemoveResult>;
 
   /**
    * List the structured artifacts registered for a live session. Throws

@@ -103,6 +103,7 @@ import { SHA_RE } from './lib/ledger.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { inertPath, scratchLabel } from './lib/paths.js';
+import { createWorkflowBatch } from './lib/workflow-batch.js';
 import {
   RESIDUE_PATH_CAP,
   worktreeResidue,
@@ -130,6 +131,8 @@ interface AgentPromptArgs {
   wholeDiff?: boolean;
   /** Build every prompt the plan's roster requires, in one call. */
   roster?: boolean;
+  /** Emit an exact-key manifest for emit-workflow instead of prompt text. */
+  batch?: boolean;
   /** With --role reverse-audit: build one block PER CHUNK, in one call. */
   allChunks?: boolean;
   rules?: string;
@@ -2739,6 +2742,7 @@ function runRoster(
   planPath: string,
   rules?: string,
   residue?: WorktreeResidue,
+  batch = false,
 ): void {
   // The roster reads `plan.effort` (written by the capturing command), so a
   // `medium` plan builds the reduced set here without an `--effort` flag — and
@@ -2768,6 +2772,17 @@ function runRoster(
     recordPrompt(planPath, key, prompt);
     return `───── agent ${i + 1} of ${roster.length} — ${rosterLabel(req)} ─────\n\n${prompt}`;
   });
+  if (batch) {
+    writeStdoutLine(
+      JSON.stringify(
+        createWorkflowBatch(
+          planPath,
+          roster.map((r) => r.key),
+        ),
+      ),
+    );
+    return;
+  }
   // Worktree-mode reviews: remind the orchestrator of the exact Agent tool
   // parameters at the point of action. A run that passed both `working_dir`
   // and `isolation: "worktree"` failed all 11 agents (mutually exclusive) and
@@ -3176,6 +3191,7 @@ function runAllChunks(
   rules?: string,
   round?: number,
   residue?: WorktreeResidue,
+  batch = false,
 ): void {
   const chunks = requireAuditableChunks(report);
 
@@ -3277,8 +3293,10 @@ function runAllChunks(
     digest,
     findingsContent,
   );
+  const keys: string[] = [];
   const blocks = dueChunks.map((c, i) => {
     const key = `${role}--chunk-${c.id}${roundPart}--${digest}`;
+    keys.push(key);
     const { prompt } = buildLaunch(
       report,
       planPath,
@@ -3359,28 +3377,34 @@ function runAllChunks(
               )
               .join('\n'),
         ];
-  writeStdoutLine(
-    [
-      `${dueChunks.length} auditors required this round — ${scope}. Launch ` +
-        `one agent per block below, passing its block VERBATIM — copy, do not ` +
-        `retype, and NEVER sample this output (no \`| head\`): the text IS the ` +
-        `deliverable, and a launch reconstructed from a sample matches no ` +
-        `record. Blocks are numbered \`auditor k of ${dueChunks.length}\`, and ` +
-        `the output ends with an end-of-round line — followed by the ` +
-        `retirement and posture-narrowing notes, when there are any. If ` +
-        `either the numbering or the ` +
-        `end-of-round line is missing, the output was truncated in transit; ` +
-        `rebuild just the missing chunks with --chunk <id>. Write each ` +
-        `Agent call's \`description\` (the task ` +
-        `name the user watches) in your output language, translating the ` +
-        `separator label — display only; the prompt stays the block VERBATIM.` +
-        TYPE_NOTE,
-      ...blocks,
-      `───── end of round — ${dueChunks.length} auditors ─────`,
-      ...retirementNote,
-      ...narrowingNote,
-    ].join('\n\n'),
-  );
+  if (batch) {
+    writeStdoutLine(JSON.stringify(createWorkflowBatch(planPath, keys)));
+    for (const note of [...retirementNote, ...narrowingNote])
+      writeStderrLine(note);
+  } else {
+    writeStdoutLine(
+      [
+        `${dueChunks.length} auditors required this round — ${scope}. Launch ` +
+          `one agent per block below, passing its block VERBATIM — copy, do not ` +
+          `retype, and NEVER sample this output (no \`| head\`): the text IS the ` +
+          `deliverable, and a launch reconstructed from a sample matches no ` +
+          `record. Blocks are numbered \`auditor k of ${dueChunks.length}\`, and ` +
+          `the output ends with an end-of-round line — followed by the ` +
+          `retirement and posture-narrowing notes, when there are any. If ` +
+          `either the numbering or the ` +
+          `end-of-round line is missing, the output was truncated in transit; ` +
+          `rebuild just the missing chunks with --chunk <id>. Write each ` +
+          `Agent call's \`description\` (the task ` +
+          `name the user watches) in your output language, translating the ` +
+          `separator label — display only; the prompt stays the block VERBATIM.` +
+          TYPE_NOTE,
+        ...blocks,
+        `───── end of round — ${dueChunks.length} auditors ─────`,
+        ...retirementNote,
+        ...narrowingNote,
+      ].join('\n\n'),
+    );
+  }
   // Admitted AND built: stamp now, so the next round's gate can measure
   // this one — see the gate comment above for why never at admission.
   if (role === 'reverse-audit') {
@@ -3424,6 +3448,8 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       );
     }
   } else if (hasWhole) {
+    if (args.batch)
+      bad('--batch requires a complete role or roster, not --whole-diff');
     if (
       hasChunk ||
       hasRole ||
@@ -3669,7 +3695,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // summary of its own — and every check downstream passed, because a paraphrase
   // keeps the diff path.
   if (args.roster) {
-    runRoster(report, args.plan, rules, residue);
+    runRoster(report, args.plan, rules, residue, args.batch);
     return;
   }
 
@@ -3871,6 +3897,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       rules,
       args.round,
       residue,
+      args.batch,
     );
     return;
   }
@@ -3955,7 +3982,11 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // `agent` call, and the two paths that CAN carry a note — the roster
   // header and the audit-round header — do, because there the note sits
   // outside the ───── blocks that get pasted.
-  writeStdoutLine(printed);
+  writeStdoutLine(
+    args.batch
+      ? JSON.stringify(createWorkflowBatch(args.plan, [key]))
+      : printed,
+  );
   // Admitted AND built — the single-build twin of the all-chunks stamp in
   // `runAllChunks`. A `--chunk <id>` build lands here too: the first chunk
   // build of an unadmitted round writes its admission stamp, and the
@@ -4030,6 +4061,11 @@ export const agentPromptCommand: CommandModule = {
           'invariant agents alike — in one call, each labelled and separated. ' +
           'The list is the same one check-coverage reads out of the plan.',
       })
+      .option('batch', {
+        type: 'boolean',
+        describe:
+          'Emit a JSON batch manifest for emit-workflow, preserving the same admission and retirement gates',
+      })
       .option('whole-diff', {
         type: 'boolean',
         describe:
@@ -4070,6 +4106,7 @@ export const agentPromptCommand: CommandModule = {
       file: argv['file'] as string | undefined,
       wholeDiff: argv['whole-diff'] === true,
       roster: argv['roster'] === true,
+      batch: argv['batch'] === true,
       allChunks: argv['all-chunks'] === true,
       rules: argv['rules'] as string | undefined,
       findings: argv['findings'] as string | undefined,

@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { Storage } from '@qwen-code/qwen-code-core';
+import yargs from 'yargs';
 
 const mocks = vi.hoisted(() => ({
   writeStdoutLine: vi.fn(),
@@ -57,7 +58,12 @@ import {
   fanOutBlocker,
 } from './emit-workflow.js';
 import { buildLaunch } from './agent-prompt.js';
-import { briefPath, readRecordedPrompts } from './lib/prompt-record.js';
+import {
+  briefPath,
+  readRecordedPrompts,
+  recordPrompt,
+} from './lib/prompt-record.js';
+import { createWorkflowBatch } from './lib/workflow-batch.js';
 import { RESIDUE_PATH_CAP, worktreeResidue } from './lib/worktree.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
@@ -67,6 +73,7 @@ import {
   reviewWorkflowScriptPath,
 } from './lib/paths.js';
 import type { PlanReport } from './lib/report.js';
+import { buildReviewWorkflowScript } from './workflow-script.js';
 
 beforeEach(() => {
   mocks.writeStdoutLine.mockClear();
@@ -221,50 +228,24 @@ describe('emit-workflow — what it refuses', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  // A 3B roster grows one agent per chunk while a workflow run is wall-clock
-  // capped end to end and the generated script fails closed on any agent
-  // that does not deliver — the bigger the fan-out, the more certain the run
-  // is to exhaust its budget and discard every agent. (A large result is not
-  // truncated away: the scheduler persists it and hands the model a pointer —
-  // the caps are the bound.) The refusal must name that bound — the builder
-  // below can express the roster perfectly well.
-  it('refuses a territory fan-out, naming the delivery bound', () => {
+  it('emits every territory and whole-diff agent with the same prompts', () => {
     const territory = localPlan({ srcDiffLines: 2000, diffLines: 6000 });
-    expect(fanOutBlocker(territory as unknown as RosterPlan)).toMatch(
-      /territory fan-out \(Step 3B\)/,
-    );
-    expect(() => buildFanOutRoster(territory, planPath)).toThrow(
-      /wall-clock capped/,
-    );
-    // Refused BEFORE anything is written: no brief, no record.
-    expect(readRecordedPrompts(planPath).size).toBe(0);
-  });
-
-  // The growth premise is a SIZE fact: a fix-audit round reads as a
-  // territory fan-out whatever its narrowed sizes say, but its roster is
-  // bounded by the same size fields — so the blocker rules on size alone.
-  it('serves a 3A-sized fix-audit round and still refuses a 3B-sized one (#10136)', () => {
-    const posture = {
-      since: 'a'.repeat(40),
-      effective: true,
-      posture: 'critical',
-      postureCause: 'round',
-      scope: {
-        anchor: 'a'.repeat(40),
-        deltaFiles: ['src/a.ts'],
-        interaction: [],
-      },
-    };
-    const narrow = localPlan({ incremental: posture });
-    expect(fanOutBlocker(narrow as unknown as RosterPlan)).toBeNull();
-    const wide = localPlan({
-      incremental: posture,
-      srcDiffLines: 2000,
-      diffLines: 6000,
-    });
-    expect(fanOutBlocker(wide as unknown as RosterPlan)).toMatch(
-      /territory fan-out \(Step 3B\)/,
-    );
+    expect(fanOutBlocker(territory as unknown as RosterPlan)).toBeNull();
+    const roster = buildFanOutRoster(territory, planPath);
+    const required = requiredAgents(territory as unknown as RosterPlan);
+    expect(required.some((req) => req.role === 'chunk')).toBe(true);
+    expect(roster.map((a) => a.key)).toEqual(required.map((req) => req.key));
+    for (const req of required) {
+      expect(roster.find((a) => a.key === req.key)?.prompt).toBe(
+        buildLaunch(
+          territory,
+          planPath,
+          req.role === 'chunk'
+            ? { chunk: req.chunk }
+            : { role: req.role, file: req.file },
+        ).prompt,
+      );
+    }
   });
 
   // A plan whose sizes failed to arrive is not a small review — its topology
@@ -351,6 +332,15 @@ describe('emit-workflow — where it writes', () => {
     (emitWorkflowCommand.handler as (a: unknown) => void)({ plan });
   }
 
+  function emittedScriptPath(): string {
+    const line = mocks.writeStdoutLine.mock.calls
+      .map(([value]) => String(value))
+      .filter((value) => value.startsWith('scriptPath: '))
+      .at(-1);
+    expect(line).toBeDefined();
+    return line!.slice('scriptPath: '.length);
+  }
+
   // Not a preference: `Workflow({scriptPath})` loads through
   // `readWorkflowFileSecurely`, which accepts the saved-workflow directories
   // and the generated-scripts root and nothing else. A script beside the
@@ -361,7 +351,7 @@ describe('emit-workflow — where it writes', () => {
     writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
     run(plan);
 
-    const scriptPath = reviewWorkflowScriptPath(plan);
+    const scriptPath = emittedScriptPath();
     // The readable sanitized prefix, plus a digest of the RAW session id —
     // sanitizing is lossy, and the digest is what keeps two sessions whose
     // ids flatten identically apart (see the collision case below).
@@ -420,9 +410,9 @@ describe('emit-workflow — where it writes', () => {
     };
     const root = storage.getGeneratedWorkflowsDir();
     expect(reviewWorkflowsDir(env).startsWith(root + sep)).toBe(true);
-    expect(reviewWorkflowScriptPath('/tmp/p.json', env).startsWith(root)).toBe(
-      true,
-    );
+    expect(
+      reviewWorkflowScriptPath('/tmp/p.json', 'script', env).startsWith(root),
+    ).toBe(true);
   });
 
   it('refuses to build anything when the harness exported no project dir', () => {
@@ -444,10 +434,10 @@ describe('emit-workflow — where it writes', () => {
     const plan = join(dir, 'plan.json');
     writeFileSync(
       plan,
-      JSON.stringify(localPlan({ srcDiffLines: 2000, diffLines: 6000 })),
+      JSON.stringify(localPlan({ srcDiffLines: null })),
       'utf8',
     );
-    expect(() => run(plan)).toThrow(/territory fan-out/);
+    expect(() => run(plan)).toThrow(/no usable diff size/);
     expect(existsSync(projectDir)).toBe(false);
   });
 
@@ -476,8 +466,8 @@ describe('emit-workflow — where it writes', () => {
     expect(basename(b).startsWith('sess_1-')).toBe(true);
     // ...and the same plan cannot overwrite across the collision.
     const plan = join(dir, 'plan.json');
-    expect(reviewWorkflowScriptPath(plan, envFor('sess.1'))).not.toBe(
-      reviewWorkflowScriptPath(plan, envFor('sess_1')),
+    expect(reviewWorkflowScriptPath(plan, 'script', envFor('sess.1'))).not.toBe(
+      reviewWorkflowScriptPath(plan, 'script', envFor('sess_1')),
     );
   });
 
@@ -489,7 +479,7 @@ describe('emit-workflow — where it writes', () => {
     writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
     run(plan);
 
-    const script = readFileSync(reviewWorkflowScriptPath(plan), 'utf8');
+    const script = readFileSync(emittedScriptPath(), 'utf8');
     const recorded = readRecordedPrompts(plan);
     expect(recorded.size).toBeGreaterThan(1);
     for (const prompt of recorded.values()) {
@@ -507,7 +497,7 @@ describe('emit-workflow — where it writes', () => {
       'utf8',
     );
     run(plan);
-    expect(readFileSync(reviewWorkflowScriptPath(plan), 'utf8')).toContain(
+    expect(readFileSync(emittedScriptPath(), 'utf8')).toContain(
       'const WORKING_DIR = ".qwen/tmp/review-pr-42";',
     );
   });
@@ -515,11 +505,12 @@ describe('emit-workflow — where it writes', () => {
   it('replaces a symlinked script entry without writing through it', () => {
     const victim = join(dir, 'victim.js');
     const plan = join(dir, 'plan.json');
-    const scriptPath = reviewWorkflowScriptPath(plan);
-    mkdirSync(dirname(scriptPath), { recursive: true });
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+    run(plan);
+    const scriptPath = emittedScriptPath();
+    rmSync(scriptPath);
     writeFileSync(victim, 'keep me', 'utf8');
     symlinkSync(victim, scriptPath);
-    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
 
     run(plan);
     expect(readFileSync(victim, 'utf8')).toBe('keep me');
@@ -584,7 +575,7 @@ describe('emit-workflow — where it writes', () => {
     const plan = join(dir, 'plan.json');
     writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
     run(plan);
-    const scriptDir = dirname(reviewWorkflowScriptPath(plan));
+    const scriptDir = dirname(emittedScriptPath());
     const tempFiles = () =>
       readdirSync(scriptDir).filter((n) => n.endsWith('.tmp'));
     expect(tempFiles()).toEqual([]);
@@ -592,7 +583,7 @@ describe('emit-workflow — where it writes', () => {
     // The failed-write half: the rename throws AFTER the temp file exists,
     // the case the finally cleanup exists for. A non-empty directory at the
     // target makes renameSync throw on every platform.
-    const scriptPath = reviewWorkflowScriptPath(plan);
+    const scriptPath = emittedScriptPath();
     rmSync(scriptPath);
     mkdirSync(scriptPath);
     writeFileSync(join(scriptPath, 'blocker'), 'keep me out', 'utf8');
@@ -600,16 +591,58 @@ describe('emit-workflow — where it writes', () => {
     expect(tempFiles()).toEqual([]);
   });
 
+  it('keeps earlier script content when the required roster changes', () => {
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+    run(plan);
+    const firstPath = emittedScriptPath();
+    const firstScript = readFileSync(firstPath, 'utf8');
+    writeFileSync(
+      plan,
+      JSON.stringify(localPlan({ effort: 'medium' })),
+      'utf8',
+    );
+    run(plan);
+    const secondPath = emittedScriptPath();
+    expect(secondPath).not.toBe(firstPath);
+    expect(readFileSync(firstPath, 'utf8')).toBe(firstScript);
+    expect(readFileSync(secondPath, 'utf8')).not.toBe(firstScript);
+    run(plan);
+    expect(emittedScriptPath()).toBe(secondPath);
+  });
+
+  it('includes both prompts and the worktree pin in the script identity', () => {
+    const plan = join(dir, 'plan.json');
+    const first = buildReviewWorkflowScript(
+      [{ key: '1a', prompt: 'first' }],
+      '/tree-a',
+    );
+    const changedPrompt = buildReviewWorkflowScript(
+      [{ key: '1a', prompt: 'second' }],
+      '/tree-a',
+    );
+    const changedTree = buildReviewWorkflowScript(
+      [{ key: '1a', prompt: 'first' }],
+      '/tree-b',
+    );
+    const paths = [first, changedPrompt, changedTree].map((script) =>
+      reviewWorkflowScriptPath(plan, script),
+    );
+    expect(new Set(paths).size).toBe(3);
+  });
+
   it('names a script per plan, so concurrent reviews do not overwrite each other', () => {
     const a = join(dir, 'plan-a.json');
     const b = join(dir, 'plan-b.json');
-    expect(reviewWorkflowScriptPath(a)).not.toBe(reviewWorkflowScriptPath(b));
+    expect(reviewWorkflowScriptPath(a, 'script')).not.toBe(
+      reviewWorkflowScriptPath(b, 'script'),
+    );
     // A relative spelling of the same plan is the same script.
     const cwd = process.cwd();
     process.chdir(dir);
     try {
-      expect(reviewWorkflowScriptPath('plan-a.json')).toBe(
-        reviewWorkflowScriptPath(a),
+      expect(reviewWorkflowScriptPath('plan-a.json', 'script')).toBe(
+        reviewWorkflowScriptPath(a, 'script'),
       );
     } finally {
       process.chdir(cwd);
@@ -625,8 +658,8 @@ describe('emit-workflow — where it writes', () => {
     writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
     const alias = join(dir, 'alias.json');
     symlinkSync(plan, alias);
-    expect(reviewWorkflowScriptPath(alias)).toBe(
-      reviewWorkflowScriptPath(plan),
+    expect(reviewWorkflowScriptPath(alias, 'script')).toBe(
+      reviewWorkflowScriptPath(plan, 'script'),
     );
   });
 
@@ -636,7 +669,7 @@ describe('emit-workflow — where it writes', () => {
     const plan = join(dir, 'missing-plan.json');
     expect(() => run(plan)).toThrow(/cannot read the plan/);
     expect(readRecordedPrompts(plan).size).toBe(0);
-    expect(existsSync(reviewWorkflowScriptPath(plan))).toBe(false);
+    expect(existsSync(reviewWorkflowsDir())).toBe(false);
   });
 
   it('refuses an unreadable rules path before writing anything', () => {
@@ -649,7 +682,110 @@ describe('emit-workflow — where it writes', () => {
       }),
     ).toThrow(/cannot read the rules/);
     expect(readRecordedPrompts(plan).size).toBe(0);
-    expect(existsSync(reviewWorkflowScriptPath(plan))).toBe(false);
+    expect(existsSync(reviewWorkflowsDir())).toBe(false);
+  });
+
+  it('rejects --rules with --batch before building or writing anything', async () => {
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+    await expect(async () =>
+      yargs([
+        'emit-workflow',
+        '--plan',
+        plan,
+        '--batch',
+        join(dir, 'batch.json'),
+        '--rules',
+        join(dir, 'rules.md'),
+      ])
+        .command(emitWorkflowCommand)
+        .exitProcess(false)
+        .parseAsync(),
+    ).rejects.toThrow(/--rules cannot be combined with --batch/);
+    expect(readRecordedPrompts(plan).size).toBe(0);
+    expect(existsSync(reviewWorkflowsDir())).toBe(false);
+  });
+
+  it('combines exactly the selected manifests with verbatim prompts and the plan worktree', async () => {
+    const plan = join(dir, 'plan.json');
+    writeFileSync(
+      plan,
+      JSON.stringify(localPlan({ worktreePath: '/review-tree' })),
+      'utf8',
+    );
+    const agents = [
+      {
+        key: 'verify--round-1--abc',
+        prompt: 'verify `quoted` \\ "finding"\nverbatim',
+      },
+      { key: 'reverse-audit--round-2', prompt: 'audit next wave ${literal}' },
+    ];
+    recordPrompt(plan, 'reverse-audit--round-1', 'HISTORICAL-PROMPT');
+    const manifests = agents.map((agent, i) => {
+      recordPrompt(plan, agent.key, agent.prompt);
+      const manifest = join(dir, `wave-${i}.json`);
+      writeFileSync(
+        manifest,
+        JSON.stringify(createWorkflowBatch(plan, [agent.key])),
+      );
+      return manifest;
+    });
+    mocks.buildLaunchOverride = () => {
+      throw new Error('a selected batch must never rebuild its prompts');
+    };
+    await yargs(['emit-workflow', '--plan', plan, '--batch', ...manifests])
+      .command(emitWorkflowCommand)
+      .exitProcess(false)
+      .parseAsync();
+    const script = readFileSync(emittedScriptPath(), 'utf8');
+    expect(script).toBe(buildReviewWorkflowScript(agents, '/review-tree'));
+    expect(script).not.toContain('HISTORICAL-PROMPT');
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('2 agents required.'),
+    );
+    const firstPath = emittedScriptPath();
+    await yargs(['emit-workflow', '--plan', plan, '--batch', manifests[1]])
+      .command(emitWorkflowCommand)
+      .exitProcess(false)
+      .parseAsync();
+    expect(emittedScriptPath()).not.toBe(firstPath);
+    expect(readFileSync(firstPath, 'utf8')).toBe(script);
+    expect(readFileSync(emittedScriptPath(), 'utf8')).toBe(
+      buildReviewWorkflowScript([agents[1]], '/review-tree'),
+    );
+  });
+
+  it('rejects empty batch records before writing a workflow', () => {
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+    recordPrompt(plan, 'verify--round-1', 'prompt');
+    const manifest = join(dir, 'wave.json');
+    writeFileSync(
+      manifest,
+      JSON.stringify(createWorkflowBatch(plan, ['verify--round-1'])),
+    );
+    recordPrompt(plan, 'verify--round-1', '');
+    expect(() =>
+      (emitWorkflowCommand.handler as (a: unknown) => void)({
+        plan,
+        batch: [manifest],
+      }),
+    ).toThrow(/missing, stale or changed prompt/);
+    expect(existsSync(reviewWorkflowsDir())).toBe(false);
+    expect(mocks.writeStdoutLine).not.toHaveBeenCalled();
+  });
+
+  it('rejects --batch without a manifest instead of emitting the initial roster', async () => {
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+    await expect(async () =>
+      yargs(['emit-workflow', '--plan', plan, '--batch'])
+        .command(emitWorkflowCommand)
+        .exitProcess(false)
+        .parseAsync(),
+    ).rejects.toThrow();
+    expect(readRecordedPrompts(plan).size).toBe(0);
+    expect(existsSync(reviewWorkflowsDir())).toBe(false);
   });
 
   it('threads --rules through the handler into every reviewing brief', () => {
@@ -667,7 +803,7 @@ describe('emit-workflow — where it writes', () => {
       rules: rulesPath,
     });
 
-    expect(existsSync(reviewWorkflowScriptPath(plan))).toBe(true);
+    expect(existsSync(emittedScriptPath())).toBe(true);
     const keys = [...readRecordedPrompts(plan).keys()];
     // Agent 7 runs deterministic build and test commands, not a review, so
     // its brief carries no rules; every reviewing role's does.
