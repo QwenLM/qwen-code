@@ -834,6 +834,11 @@ export interface ServeSessionMonitorTaskStatus {
   eventCount: number;
   lastEventTime: number;
   droppedLines: number;
+  /**
+   * First output-capture write failure, when one occurred: the capture
+   * file stopped advancing, so the served output tail may be stale.
+   */
+  outputCaptureError?: string;
   exitCode?: number;
   error?: string;
   ownerAgentId?: string;

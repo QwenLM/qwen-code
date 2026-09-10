@@ -27,6 +27,7 @@ import {
   readTaskOutputTail,
   MAX_RETAINED_TERMINAL_SHELLS,
   statusFilePathFor,
+  stripOutputControlChars,
   type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
@@ -227,18 +228,73 @@ describe('readTaskOutputTail', () => {
     });
   });
 
-  it('drops the first line when the served window opens mid-escape', () => {
+  it('reconstitutes the sequence when the served window opens mid-escape', () => {
     // The window opens one byte after an ESC, between the leader and its
-    // parameters: the residue has no ESC left for the stripper to match,
-    // so it would be served as the tail's first line. A sequence can
-    // never cross a line break, so the served text starts at the first
-    // line that begins inside the window.
+    // parameters: the look-back prepends the leader so the stripper
+    // removes the whole sequence and the real first line survives,
+    // instead of dropping the line or serving the leaderless residue.
     const tail = '[31mBuild failed\n' + 'y'.repeat(60) + '\n';
     const outputFile = makeOutputFile('pad\u001b' + tail);
 
     expect(readTaskOutputTail(outputFile, Buffer.byteLength(tail))).toEqual({
-      text: 'y'.repeat(60),
+      text: 'Build failed\n' + 'y'.repeat(60),
       truncated: true,
+    });
+  });
+
+  it.each([2, 9])(
+    'reconstitutes the sequence when the window opens %i bytes into it',
+    (k) => {
+      // The capture writer strips per pipe chunk, so a reconstituted CSI
+      // can sit anywhere in the file and the window boundary sweeps every
+      // byte position of it as the file grows: no interior position may
+      // serve the sequence's parameters as the tail's first line.
+      const content =
+        'x'.repeat(40) + '\u001b[38;5;208mBuild failed\n' + 'y'.repeat(80);
+      const outputFile = makeOutputFile(content);
+      const maxBytes = Buffer.byteLength(content) - 40 - k;
+
+      expect(readTaskOutputTail(outputFile, maxBytes)).toEqual({
+        text: 'Build failed\n' + 'y'.repeat(80),
+        truncated: true,
+      });
+    },
+  );
+
+  it('serves a window with no line break that opens right after an ESC', () => {
+    // One long record with no CR or LF anywhere: dropping to the first
+    // break would empty the window and report a task that produced a full
+    // window of output as one that produced none.
+    const n = 100;
+    const outputFile = makeOutputFile('pad\u001b' + 'x'.repeat(n));
+
+    expect(readTaskOutputTail(outputFile, n)).toEqual({
+      text: 'x'.repeat(n),
+      truncated: true,
+    });
+  });
+
+  it('does not start the served tail on a blank line when the cut lands on a CRLF', () => {
+    const tail = '[0m\r\nsecond line';
+    const outputFile = makeOutputFile('pad\u001b' + tail);
+
+    expect(readTaskOutputTail(outputFile, Buffer.byteLength(tail))).toEqual({
+      text: 'second line',
+      truncated: true,
+    });
+  });
+
+  it('strips a CSI leader cut by a line break whole', () => {
+    // A log line cut mid-CSI: the sequence can never continue past the
+    // line break, so the leader and its parameters strip whole instead of
+    // leaking as the next line's text.
+    const outputFile = makeOutputFile(
+      'build ok\n\u001b[38;5;208\nERROR: real\n',
+    );
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'build ok\n\nERROR: real',
+      truncated: false,
     });
   });
 
@@ -257,6 +313,32 @@ describe('readTaskOutputTail', () => {
       ).toBeUndefined();
     },
   );
+});
+
+describe('stripOutputControlChars', () => {
+  it('strips two-byte escapes with no intermediate byte', () => {
+    // SS2/SS3 (`ESC N` / `ESC O`), the Fe single functions (IND, NEL,
+    // HTS, RI, DECID), the DEC private pairs (DECBI/DECFI, DECSC/DECRC,
+    // DECKPAM/DECKPNM), RIS, and the locking shifts: an escape with no
+    // intermediate byte used to leave its final letter behind as readable
+    // text.
+    expect(stripOutputControlChars('A\u001bOAB')).toBe('AAB');
+    expect(stripOutputControlChars('a\u001bc\u001b7b\u001bMc\n')).toBe('abc\n');
+    expect(
+      stripOutputControlChars(
+        '\u001bD\u001bE\u001bH\u001bZ\u001bN\u001b6\u001b8\u001b9\u001b=\u001b>\u001bn\u001bo\u001b|\u001b}\u001b~x',
+      ),
+    ).toBe('x');
+  });
+
+  it('deletes only the ESC of a residual lone ESC that leads no assigned escape', () => {
+    // Unassigned finals are not escapes: a bare ESC before one costs only
+    // the ESC byte, so a window that opens right after a stray ESC keeps
+    // the real byte that followed it.
+    expect(stripOutputControlChars('alpha\u001bW313 beta\n')).toBe(
+      'alphaW313 beta\n',
+    );
+  });
 });
 
 function makeEntry(

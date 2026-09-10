@@ -36,6 +36,12 @@ const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
 const MAX_NOTIFICATION_MODEL_COMMAND_LENGTH = 500;
 export const MAX_NOTIFICATION_OUTPUT_TAIL_BYTES = 8192;
 export const MAX_TASK_OUTPUT_TAIL_BYTES = 64 * 1024;
+// How far ahead of the served window readTaskOutputTail scans for the
+// leader of an escape sequence the window opens inside. A sequence never
+// crosses a line break, so the scan also stops at the previous line
+// break; the byte cap keeps the extra read bounded when one over-long
+// line fills the whole window.
+const MAX_TAIL_SEQUENCE_LOOKBACK_BYTES = 4096;
 
 /* eslint-disable no-control-regex */
 // Tail-local ECMA-48 byte classes: a string sequence can never cross a
@@ -50,18 +56,23 @@ export const MAX_TASK_OUTPUT_TAIL_BYTES = 64 * 1024;
 // unterminated leader whole, payload included, instead of leaking it as
 // text. In the terminator group `\x1b\\` must stay first: putting the
 // lookahead ahead of it matches at the ST's own ESC and leaks the
-// backslash as text. The CSI and Fe rules also accept end-of-input as
-// a terminator, so a teardown chunk or served window ending mid-sequence
-// strips the fragment instead of persisting its bracket and parameters
-// as text. The Fe rule requires an intermediate byte: a bare residual
-// ESC falls to the per-character backstop, which deletes only the ESC
+// backslash as text. The CSI and Fe rules carry the same newline
+// lookahead and also accept end-of-input as a terminator, so a leader
+// cut by a line break, a teardown chunk, or a served window boundary
+// strips whole instead of persisting its bracket and parameters as text.
+// The two-byte rule covers the assigned escapes that have no intermediate
+// byte (SS2/SS3, the Fe single functions, the DEC private pairs, RIS, and
+// the locking shifts); anything else after a bare residual ESC keeps its
+// byte, falling to the per-character backstop, which deletes only the ESC
 // instead of eating the real byte after it.
 const TAIL_OSC_REGEX =
   /\x1b\][^\x07\x1b\n\r]*(?:\x07|\x1b\\|(?=[\x1b\n\r])|$)/g;
 const TAIL_STRING_REGEX =
   /\x1b[PX^_][^\x07\x1b\n\r]*(?:\x07|\x1b\\|(?=[\x1b\n\r])|$)/g;
-const TAIL_CSI_REGEX = /\x1b\[[\x30-\x3f]*[\x20-\x2f]*(?:[\x40-\x7e]|$)/g;
-const TAIL_FE_ESC_REGEX = /\x1b[\x20-\x2f]+(?:[\x30-\x7e]|$)/g;
+const TAIL_CSI_REGEX =
+  /\x1b\[[\x30-\x3f]*[\x20-\x2f]*(?:[\x40-\x7e]|(?=[\x1b\n\r])|$)/g;
+const TAIL_FE_ESC_REGEX = /\x1b[\x20-\x2f]+(?:[\x30-\x7e]|(?=[\x1b\n\r])|$)/g;
+const TAIL_TWO_BYTE_ESC_REGEX = /\x1b(?:[DEHMNOZ]|[6-9=>]|[cno|}~])/g;
 /* eslint-enable no-control-regex */
 
 export function stripOutputControlChars(text: string): string {
@@ -72,7 +83,8 @@ export function stripOutputControlChars(text: string): string {
     .replace(TAIL_OSC_REGEX, '')
     .replace(TAIL_STRING_REGEX, '')
     .replace(TAIL_CSI_REGEX, '')
-    .replace(TAIL_FE_ESC_REGEX, '');
+    .replace(TAIL_FE_ESC_REGEX, '')
+    .replace(TAIL_TWO_BYTE_ESC_REGEX, '');
   let out = '';
   for (let i = 0; i < withoutSequences.length; i++) {
     const code = withoutSequences.charCodeAt(i);
@@ -153,17 +165,26 @@ export function readTaskOutputTail(
 
     const length = Math.min(stat.size, maxBytes, MAX_TASK_OUTPUT_TAIL_BYTES);
     const start = stat.size - length;
-    // Peek one byte ahead of the window: a window that opens immediately
-    // after an ESC starts mid-sequence, and its first line is the
-    // sequence's leaderless residue, which the stripper cannot recognize
-    // without the ESC.
-    const peek = start > 0 ? 1 : 0;
-    const buffer = Buffer.allocUnsafe(length + peek);
-    const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, start - peek);
+    // Look back a bounded prefix ahead of the window: a window that opens
+    // mid-sequence serves the sequence's leaderless residue as its first
+    // line unless the leader is reconstituted for the stripper.
+    const lookback = Math.min(MAX_TAIL_SEQUENCE_LOOKBACK_BYTES, start);
+    const buffer = Buffer.allocUnsafe(lookback + length);
+    const bytesRead = fs.readSync(
+      fd,
+      buffer,
+      0,
+      buffer.length,
+      start - lookback,
+    );
+    if (bytesRead <= lookback) {
+      // The file shrank under the read before the window was reached.
+      return undefined;
+    }
 
     // When the read offset lands mid-codepoint (truncated read), skip
     // leading UTF-8 continuation bytes to avoid U+FFFD replacement chars.
-    let sliceOffset = peek;
+    let sliceOffset = lookback;
     if (start > 0) {
       while (
         sliceOffset < bytesRead &&
@@ -174,25 +195,34 @@ export function readTaskOutputTail(
     }
 
     let windowText = buffer.subarray(sliceOffset, bytesRead).toString('utf8');
-    if (peek === 1 && bytesRead > peek && buffer[0] === 0x1b) {
-      // A sequence can never cross a line break, so everything up to the
-      // first one is residue: the served text starts at the first line
-      // that begins inside the window.
-      let firstBreak = -1;
-      for (let i = 0; i < windowText.length; i++) {
-        const code = windowText.charCodeAt(i);
-        if (code === 0x0a || code === 0x0d) {
-          firstBreak = i;
+    let prepended = false;
+    if (lookback > 0) {
+      // The nearest ESC before the window with no line break between them
+      // is the leader of the sequence the window opens inside; prepending
+      // from it lets the stripper remove the whole sequence. A lone
+      // residual ESC matches no sequence rule and falls to the stripper's
+      // per-character backstop, costing only the ESC byte.
+      for (let i = lookback - 1; i >= 0; i--) {
+        const byte = buffer[i]!;
+        if (byte === 0x0a || byte === 0x0d) break;
+        if (byte === 0x1b) {
+          windowText =
+            buffer.subarray(i, lookback).toString('utf8') + windowText;
+          prepended = true;
           break;
         }
       }
-      windowText = firstBreak === -1 ? '' : windowText.slice(firstBreak + 1);
     }
 
     const { text, droppedFrames } = normalizeOutputCarriageReturns(
       stripOutputControlChars(windowText),
     );
-    const trimmed = text.trimEnd();
+    // A line break immediately after a reconstituted sequence closed the
+    // line the window opened inside; serving it would start the tail on
+    // a blank line.
+    const trimmed = (
+      prepended && text.startsWith('\n') ? text.slice(1) : text
+    ).trimEnd();
 
     if (!trimmed) return undefined;
     return {
