@@ -10095,6 +10095,61 @@ describe('LlmChat', async () => {
         }
       });
 
+      it('propagates a throttle only the configured retry codes recognise', async () => {
+        // The gate decides by classification, so it has to classify with the
+        // send loop's own context. A provider code that only the configured
+        // `retryErrorCodes` mark as throttling carries a request id and no
+        // status: read without that context it looks like a status-less
+        // upstream frame — the one class this gate accepts — and a throttled
+        // turn gets certified as a completed one.
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+            authType: AuthType.USE_OPENAI,
+            model: 'test-model',
+            retryErrorCodes: [4999],
+          });
+          const configuredThrottle = new StreamContentError(
+            '{"error":{"code":4999,"message":"custom throttle","request_id":"req-configured-throttle"}}',
+          );
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('a complete answer', 'STOP');
+                throw configuredThrottle;
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('answer after the throttle retry', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-configured-throttle-after-finish',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 120_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          // The throttle rode the rate-limit retry that owns it instead of
+          // being swallowed by the acceptance gate.
+          expect(
+            events.some((event) => event.type === StreamEventType.RETRY),
+          ).toBe(true);
+          expect(mockDebugLoggerWarn).not.toHaveBeenCalledWith(
+            'Accepting completed answer despite trailing stream failure.',
+            expect.anything(),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('does not schedule a continuation over a closed finish reason on a tool-result send', async () => {
         // With a user[functionResponse] history tail every attempt is a
         // tool-result continuation, so processStreamResponse defers the

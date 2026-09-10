@@ -45,6 +45,7 @@ import {
   classifyRetryError,
   isFallbackEligible,
   isRetryableUpstreamError,
+  type RetryErrorClassificationContext,
 } from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
 import type {
@@ -4752,6 +4753,7 @@ export class LlmChat {
       goalContext,
       transportContinuationPrefix,
       acceptQuietToolResultCompletion,
+      { authType, extraRetryErrorCodes },
     );
   }
 
@@ -5289,6 +5291,12 @@ export class LlmChat {
    *   before either durable write, so the JSONL transcript and in-memory
    *   history carry the same merged turn (issue #8094). Undefined on every
    *   non-continuation send.
+   * @param retryClassificationContext - Auth type and configured extra retry
+   *   codes to classify a trailing stream failure with. Must match what the
+   *   send loop classifies with: the acceptance gate below decides by
+   *   classification, and a throttle only the caller's configured codes
+   *   recognise would otherwise be misread as a status-less upstream failure
+   *   and swallowed instead of reaching the rate-limit retry.
    */
   private async *processStreamResponse(
     model: string,
@@ -5297,6 +5305,7 @@ export class LlmChat {
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: string,
     acceptQuietToolResultCompletion = false,
+    retryClassificationContext?: RetryErrorClassificationContext,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -5672,7 +5681,15 @@ export class LlmChat {
       // completion, a throttling StreamContentError would never reach the
       // rate-limit retry, and the pipeline's own InvalidStreamError would
       // bypass the invalid-stream retry budget.
-      const trailingErrorClassification = classifyRetryError(streamError);
+      //
+      // Classified with the send loop's own context. A throttle that only the
+      // configured `retryErrorCodes` recognise carries a request id and no
+      // status, so without that context it reads as a status-less upstream
+      // frame — the one class this gate accepts.
+      const trailingErrorClassification = classifyRetryError(
+        streamError,
+        retryClassificationContext,
+      );
       if (
         isRetryableStreamTransportError(trailingErrorClassification) ||
         isRetryableStatuslessUpstreamError(trailingErrorClassification)
