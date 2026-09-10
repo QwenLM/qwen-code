@@ -1997,29 +1997,6 @@ export class WebViewProvider {
           ),
           canonicalWorkspaceCwd,
         );
-        // Pre-cutover companions recorded their conversations in globalState;
-        // their daemon transcripts carry no source attribution, so the
-        // vscode-scoped history query cannot surface them. Ship the legacy ids
-        // as an allowlist so the panel can claim its own sessions back from
-        // the daemon's unattributed catalog. Read-only: the store stays
-        // untouched for downgrade/recovery, and only ids cross the bridge —
-        // never the message snapshots.
-        let legacyConversationIds: string[] | undefined;
-        try {
-          const legacyIds = (await this.conversationStore.getAllConversations())
-            .map((conversation) =>
-              getRestorableDaemonSessionId(conversation.id),
-            )
-            .filter((id): id is string => id !== undefined);
-          if (legacyIds.length > 0) {
-            legacyConversationIds = legacyIds;
-          }
-        } catch (error) {
-          logger.warn(
-            '[WebViewProvider] Failed to read legacy conversations:',
-            error,
-          );
-        }
         const serializedSessionId = getRestorableDaemonSessionId(
           this.messageHandler.getCurrentConversationId(),
         );
@@ -2109,7 +2086,6 @@ export class WebViewProvider {
               : {}),
             hostKind: this.isViewHost ? 'view' : 'panel',
             ...(restoredSessionId ? { sessionId: restoredSessionId } : {}),
-            ...(legacyConversationIds ? { legacyConversationIds } : {}),
           },
         });
         // A daemon that dies after a successful start — or that gets

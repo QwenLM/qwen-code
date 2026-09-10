@@ -817,81 +817,45 @@ describe('EmbeddedApp host wiring', () => {
     }
   });
 
-  it('merges allowlisted pre-cutover sessions into the history list', async () => {
-    // v0.21-era conversations were recorded without source attribution, so
-    // the vscode-scoped catalog query cannot return them. The host ships the
-    // legacy ids it still has in globalState; the panel then claims exactly
-    // those sessions back from the daemon's default catalog — without
-    // surfacing unattributed CLI sessions or browser-stamped ones.
-    sdkMocks.listWorkspaceSessionsPage.mockImplementation(
-      (options?: { sourceType?: string }) => {
-        if (options?.sourceType === 'vscode') {
-          return Promise.resolve({
-            sessions: [
-              {
-                sessionId: 'vscode-1',
-                workspaceCwd: '/workspace',
-                displayName: 'Current chat',
-                sourceType: 'vscode',
-                updatedAt: '2026-09-09T12:00:00.000Z',
-              },
-            ],
-            nextCursor: undefined,
-          });
-        }
-        if (options?.sourceType === 'default') {
-          return Promise.resolve({
-            sessions: [
-              {
-                sessionId: 'legacy-1',
-                workspaceCwd: '/workspace',
-                displayName: 'Pre-upgrade chat',
-                updatedAt: '2026-08-01T12:00:00.000Z',
-              },
-              {
-                sessionId: 'cli-1',
-                workspaceCwd: '/workspace',
-                displayName: 'Terminal chat',
-                updatedAt: '2026-08-02T12:00:00.000Z',
-              },
-              {
-                sessionId: 'web-1',
-                workspaceCwd: '/workspace',
-                displayName: 'Browser chat',
-                sourceType: 'default',
-                updatedAt: '2026-08-03T12:00:00.000Z',
-              },
-            ],
-            nextCursor: undefined,
-          });
-        }
-        return Promise.resolve({ sessions: [], nextCursor: undefined });
-      },
-    );
+  it('lists every workspace session in history regardless of source', async () => {
+    // The daemon is shared: CLI terminal sessions, browser Web Shell
+    // sessions, and pre-attribution conversations all persist under the same
+    // workspace. Scoping the history query to the vscode source hid
+    // everything else, including the entire pre-upgrade history (#11574).
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'vscode-1',
+          workspaceCwd: '/workspace',
+          displayName: 'Current chat',
+          sourceType: 'vscode',
+          updatedAt: '2026-09-09T12:00:00.000Z',
+        },
+        {
+          sessionId: 'legacy-1',
+          workspaceCwd: '/workspace',
+          displayName: 'Pre-upgrade chat',
+          updatedAt: '2026-08-01T12:00:00.000Z',
+        },
+        {
+          sessionId: 'cli-1',
+          workspaceCwd: '/workspace',
+          displayName: 'Terminal chat',
+          updatedAt: '2026-08-02T12:00:00.000Z',
+        },
+        {
+          sessionId: 'web-1',
+          workspaceCwd: '/workspace',
+          displayName: 'Browser chat',
+          sourceType: 'default',
+          updatedAt: '2026-08-03T12:00:00.000Z',
+        },
+      ],
+      nextCursor: undefined,
+    });
 
     await renderApp();
     const { container } = mounted[mounted.length - 1];
-
-    await act(async () => {
-      window.dispatchEvent(
-        new MessageEvent('message', {
-          data: {
-            type: 'webShellBootstrap',
-            data: {
-              baseUrl: 'http://localhost:4141',
-              clientId: 'client-1',
-              workspaceCwd: '/workspace',
-              sessionId: 'session-1',
-              hostKind: 'panel',
-              legacyConversationIds: ['legacy-1', 'never-recorded'],
-            },
-          },
-        }),
-      );
-      // The remount effect refetches the vscode page, then pages the default
-      // catalog for allowlisted ids — both are sequential awaits.
-      for (let i = 0; i < 6; i++) await Promise.resolve();
-    });
 
     const historyButton = container.querySelector(
       'button[aria-haspopup="dialog"]',
@@ -901,8 +865,6 @@ describe('EmbeddedApp host wiring', () => {
       historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       await Promise.resolve();
     });
-    // Opening the dropdown triggers the first-page load, which now includes
-    // the legacy-catalog scan; wait for its rows instead of fixed flushes.
     await vi.waitFor(() => {
       expect(
         document.querySelector('[data-session-id="legacy-1"]'),
@@ -912,282 +874,15 @@ describe('EmbeddedApp host wiring', () => {
     expect(
       document.querySelector('[data-session-id="vscode-1"]'),
     ).not.toBeNull();
-    // Neither the unattributed CLI session nor the browser-stamped one is
-    // allowlisted, so the panel must not claim them.
-    expect(document.querySelector('[data-session-id="cli-1"]')).toBeNull();
-    expect(document.querySelector('[data-session-id="web-1"]')).toBeNull();
-
-    const defaultCatalogCalls = sdkMocks.listWorkspaceSessionsPage.mock.calls
-      .map(([options]) => options)
-      .filter(
-        (options) =>
-          (options as { sourceType?: string })?.sourceType === 'default',
-      );
-    expect(defaultCatalogCalls.length).toBeGreaterThan(0);
-    expect(defaultCatalogCalls[0]).toMatchObject({
-      archiveState: 'active',
-    });
-
-    // The scan converges after its first successful run: ids that never
-    // match (other workspaces, deleted transcripts, since-stamped sessions)
-    // must not re-page the default catalog on every dropdown open.
-    await act(async () => {
-      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await act(async () => {
-      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      const vscodeCalls = sdkMocks.listWorkspaceSessionsPage.mock.calls.filter(
-        ([options]) =>
-          (options as { sourceType?: string })?.sourceType === 'vscode',
-      );
-      expect(vscodeCalls.length).toBeGreaterThanOrEqual(2);
-    });
-    expect(
-      sdkMocks.listWorkspaceSessionsPage.mock.calls.filter(
-        ([options]) =>
-          (options as { sourceType?: string })?.sourceType === 'default',
-      ),
-    ).toHaveLength(1);
-    expect(
-      document.querySelector('[data-session-id="legacy-1"]'),
-    ).not.toBeNull();
-
-    const defaultSource = document.querySelector(
-      '[data-session-source="default"]',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      defaultSource.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(
-        document.querySelector('[data-session-id="cli-1"]'),
-      ).not.toBeNull();
-    });
+    expect(document.querySelector('[data-session-id="cli-1"]')).not.toBeNull();
     expect(document.querySelector('[data-session-id="web-1"]')).not.toBeNull();
-    expect(document.querySelector('[data-session-id="legacy-1"]')).toBeNull();
-  });
 
-  it('retries a legacy scan discarded by a source switch', async () => {
-    let resolveLegacyScan: (() => void) | undefined;
-    const firstLegacyScan = new Promise<void>((resolve) => {
-      resolveLegacyScan = resolve;
-    });
-    let legacyScanCount = 0;
-    sdkMocks.listWorkspaceSessionsPage.mockImplementation(
-      async (options?: { pageSize?: number; sourceType?: string }) => {
-        if (options?.sourceType === 'default' && options.pageSize === 100) {
-          legacyScanCount += 1;
-          if (legacyScanCount === 1) await firstLegacyScan;
-          return {
-            sessions: [
-              {
-                sessionId: 'legacy-1',
-                workspaceCwd: '/workspace',
-                displayName: 'Pre-upgrade chat',
-              },
-            ],
-            nextCursor: undefined,
-          };
-        }
-        if (options?.sourceType === 'default') {
-          return {
-            sessions: [
-              {
-                sessionId: 'cli-1',
-                workspaceCwd: '/workspace',
-                displayName: 'Terminal chat',
-                sourceType: 'default',
-              },
-            ],
-            nextCursor: undefined,
-          };
-        }
-        return { sessions: [], nextCursor: undefined };
-      },
-    );
-
-    await renderApp();
-    const { container } = mounted[mounted.length - 1];
-    await act(async () => {
-      window.dispatchEvent(
-        new MessageEvent('message', {
-          data: {
-            type: 'webShellBootstrap',
-            data: {
-              baseUrl: 'http://localhost:4141',
-              clientId: 'client-1',
-              workspaceCwd: '/workspace',
-              sessionId: 'session-1',
-              hostKind: 'panel',
-              legacyConversationIds: ['legacy-1'],
-            },
-          },
-        }),
-      );
-      await Promise.resolve();
-    });
-    const historyButton = container.querySelector(
-      'button[aria-haspopup="dialog"]',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => expect(legacyScanCount).toBe(1));
-
-    const defaultSource = document.querySelector(
-      '[data-session-source="default"]',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      defaultSource.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(
-        document.querySelector('[data-session-id="cli-1"]'),
-      ).not.toBeNull();
-    });
-    await act(async () => {
-      resolveLegacyScan?.();
-      await firstLegacyScan;
-    });
-
-    const vscodeSource = document.querySelector(
-      '[data-session-source="vscode"]',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      vscodeSource.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(legacyScanCount).toBe(2);
-      expect(
-        document.querySelector('[data-session-id="legacy-1"]'),
-      ).not.toBeNull();
-    });
-  });
-
-  it('switches to terminal sessions without accepting stale VS Code results', async () => {
-    let resolveVsCodePage:
-      | ((value: {
-          sessions: Array<{
-            sessionId: string;
-            workspaceCwd: string;
-            displayName: string;
-            sourceType: string;
-          }>;
-          nextCursor: undefined;
-        }) => void)
-      | undefined;
-    const vsCodePage = new Promise<{
-      sessions: Array<{
-        sessionId: string;
-        workspaceCwd: string;
-        displayName: string;
-        sourceType: string;
-      }>;
-      nextCursor: undefined;
-    }>((resolve) => {
-      resolveVsCodePage = resolve;
-    });
-    sdkMocks.listWorkspaceSessionsPage.mockImplementation(
-      (options?: { cursor?: string; sourceType?: string }) => {
-        if (options?.sourceType === 'vscode') return vsCodePage;
-        if (options?.sourceType === 'default' && options.cursor === undefined) {
-          return Promise.resolve({
-            sessions: [
-              {
-                sessionId: 'cli-1',
-                workspaceCwd: '/workspace',
-                displayName: 'Terminal chat',
-                sourceType: 'default',
-              },
-            ],
-            nextCursor: 'default-next',
-          });
-        }
-        return Promise.resolve({
-          sessions: [
-            {
-              sessionId: 'cli-2',
-              workspaceCwd: '/workspace',
-              displayName: 'Older terminal chat',
-              sourceType: 'default',
-            },
-          ],
-          nextCursor: undefined,
-        });
-      },
-    );
-
-    await renderApp();
-    const { container } = mounted[mounted.length - 1];
-    const historyButton = container.querySelector(
-      'button[aria-haspopup="dialog"]',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledWith(
-      expect.objectContaining({ sourceType: 'vscode' }),
-    );
-
-    const defaultSource = document.querySelector(
-      '[data-session-source="default"]',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      defaultSource.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(
-        document.querySelector('[data-session-id="cli-1"]'),
-      ).not.toBeNull();
-    });
-
-    await act(async () => {
-      resolveVsCodePage?.({
-        sessions: [
-          {
-            sessionId: 'vscode-1',
-            workspaceCwd: '/workspace',
-            displayName: 'VS Code chat',
-            sourceType: 'vscode',
-          },
-        ],
-        nextCursor: undefined,
-      });
-      await vsCodePage;
-    });
-    expect(document.querySelector('[data-session-id="vscode-1"]')).toBeNull();
-
-    const listbox = document.querySelector('[role="listbox"]') as HTMLElement;
-    Object.defineProperties(listbox, {
-      scrollHeight: { value: 100 },
-      scrollTop: { value: 60, configurable: true },
-      clientHeight: { value: 20 },
-    });
-    await act(async () => {
-      listbox.dispatchEvent(new Event('scroll', { bubbles: true }));
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => {
-      expect(
-        document.querySelector('[data-session-id="cli-2"]'),
-      ).not.toBeNull();
-    });
-    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        cursor: 'default-next',
-        sourceType: 'default',
-      }),
-    );
+    // The request itself must not scope by source — that filter is what hid
+    // the CLI and pre-attribution sessions.
+    for (const [options] of sdkMocks.listWorkspaceSessionsPage.mock.calls) {
+      expect((options as { sourceType?: string }).sourceType).toBeUndefined();
+      expect(options).toMatchObject({ archiveState: 'active' });
+    }
   });
 });
 

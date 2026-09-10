@@ -47,11 +47,9 @@ async function renderDropdown() {
         sessions={[makeSession('s1', 'First'), makeSession('s2', 'Second')]}
         currentSessionId="s1"
         searchQuery=""
-        source="vscode"
         loading={false}
         hasMore={false}
         onSearchChange={() => {}}
-        onSourceChange={() => {}}
         onSelect={onSelect}
         onRename={onRename}
         onDelete={async () => {}}
