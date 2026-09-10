@@ -2454,11 +2454,27 @@ describe('fetchGitRemotes repository scope', () => {
 
   it('keeps a configured slashed sibling tracking namespace when the prefix remote goes', async () => {
     const dir = makeRepo();
-    // `git remote add a/b` is legal on the CLI: the panel lists it, and
-    // refs/remotes/a/b/* is ITS namespace — a removal of `a` must not
-    // take it down.
+    // The sibling section is written, not `git remote add`ed: git newer
+    // than 2.50 refuses `remote add a/b` over an existing `a` ("is a
+    // subset of existing remote"), while a hand-edited config — the
+    // shape the panel's lax removal predicate exists for — still holds
+    // it. refs/remotes/a/b/* is ITS namespace: a removal of `a` must
+    // not take it down.
     git(dir, 'remote', 'add', 'a', 'https://example.com/a/r.git');
-    git(dir, 'remote', 'add', 'a/b', 'https://example.com/ab/r.git');
+    git(
+      dir,
+      'config',
+      '--local',
+      'remote.a/b.url',
+      'https://example.com/ab/r.git',
+    );
+    git(
+      dir,
+      'config',
+      '--local',
+      'remote.a/b.fetch',
+      '+refs/heads/*:refs/remotes/a/b/*',
+    );
     git(dir, 'update-ref', 'refs/remotes/a/main', 'HEAD');
     git(dir, 'update-ref', 'refs/remotes/a/b/main', 'HEAD');
     const remotes = await gitRemoteRemove(dir, 'a', fixtureEnv);
