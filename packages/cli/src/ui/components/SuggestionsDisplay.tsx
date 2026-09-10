@@ -14,6 +14,7 @@ import { Colors } from '../colors.js';
 import { t } from '../../i18n/index.js';
 import {
   MAX_SUGGESTIONS_TO_SHOW,
+  MIN_DESCRIPTION_WIDTH,
   normalizeDescription,
   type Suggestion,
   type SuggestionCategory,
@@ -70,12 +71,6 @@ function categoryLabel(cat: SuggestionCategory | 'all'): string {
 
 export { MAX_WIDTH };
 
-/**
- * In @-mention mode a wide resource-reference column must still leave the row's
- * description at least this many columns, so an unusually long reference can't
- * shrink the description away entirely.
- */
-const MIN_DESCRIPTION_WIDTH = 12;
 const ACTIVE_MARKER_WIDTH = 2;
 
 export function SuggestionsDisplay({
