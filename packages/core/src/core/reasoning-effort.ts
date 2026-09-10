@@ -5,6 +5,7 @@
  */
 
 import type { Config } from '../config/config.js';
+import { normalize } from './tokenLimits.js';
 import type { ModelReasoningCapabilities } from '../models/types.js';
 
 /**
@@ -40,6 +41,111 @@ export const REASONING_EFFORT_RANKS: Record<ReasoningEffort, number> = {
   xhigh: 60,
   max: 70,
 };
+
+export function getGptReasoningCapabilities(model: string | undefined):
+  | {
+      efforts: readonly ReasoningEffort[];
+      defaultEffort: ReasoningEffort;
+      defaultEnabled: boolean;
+      thinkingMandatory: boolean;
+    }
+  | undefined {
+  const normalized = normalize(
+    (model ?? '').trim().replace(/:batch(?=:|$)/gi, ''),
+  )
+    .replace(/-\d{4}-\d{2}-\d{2}$/, '')
+    .replace(/^(gpt-5\.\d+)(?:\.\d+)+(?=-|$)/, '$1');
+  switch (normalized) {
+    case 'gpt-5':
+    case 'gpt-5-mini':
+    case 'gpt-5-nano':
+    case 'gpt-5.1-codex':
+      return {
+        efforts: ['low', 'medium', 'high'],
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    case 'gpt-5-pro':
+      return {
+        efforts: ['high'],
+        defaultEffort: 'high',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    case 'gpt-5.1':
+      return {
+        efforts: ['low', 'medium', 'high'],
+        defaultEffort: 'medium',
+        defaultEnabled: false,
+        thinkingMandatory: false,
+      };
+    case 'gpt-5.2':
+    case 'gpt-5.4':
+    case 'gpt-5.4-mini':
+    case 'gpt-5.4-nano':
+      return {
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        defaultEnabled: false,
+        thinkingMandatory: false,
+      };
+    case 'gpt-5.1-codex-max':
+    case 'gpt-5.2-codex':
+    case 'gpt-5.3-codex':
+      return {
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    case 'gpt-5.2-pro':
+    case 'gpt-5.4-pro':
+      return {
+        efforts: ['medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    case 'gpt-5.5':
+      return {
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: false,
+      };
+    case 'gpt-5.5-pro':
+      return {
+        efforts: ['medium', 'high', 'xhigh'],
+        defaultEffort: 'high',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    case 'gpt-5.6':
+    case 'gpt-5.6-sol':
+    case 'gpt-5.6-terra':
+    case 'gpt-5.6-luna':
+      return {
+        efforts: REASONING_EFFORT_TIERS,
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: false,
+      };
+    case 'gpt-6-astra':
+      return {
+        efforts: REASONING_EFFORT_TIERS,
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    default:
+      return undefined;
+  }
+}
+
+export function isReasoningEffortPlaceholder(value: unknown): boolean {
+  return value == null || value === '';
+}
 
 /**
  * Normalize free-form user input to a canonical tier. Accepts separators and a
@@ -80,10 +186,9 @@ export function normalizeReasoningEffort(
  *
  * Rank-based, mirroring openclaw's `clampThinkingLevel`: if the exact tier is
  * supported, keep it; otherwise prefer the next stronger supported tier, and
- * only walk down when nothing at or above the request is available. Because an
- * unsupported `xhigh`/`max` will have no supported tier at or above it (the
- * model's supported list omits them), this naturally caps over-strong requests
- * to the model ceiling without raising cost.
+ * only walk down when nothing at or above the request is available. Requests
+ * above the model ceiling are capped; requests below its floor are raised to
+ * the weakest supported tier.
  *
  * `supported` defaults to the full ladder (no clamping).
  */

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { FIXED_RULING_MARKER } from './lib/review-footer.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -96,7 +97,7 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 import {
   prContextCommand,
-  anyRootCarriesCriticalMarker,
+  anyCommentCarriesCriticalMarker,
   isLegacySuggestionSummary,
   isReviewWorthShowing,
   SUMMARY_MARKER,
@@ -637,6 +638,78 @@ describe('buildMarkdown — a markerless maintainer blocker must not render as a
     expect(section).toBeGreaterThanOrEqual(0);
     expect(section).toBeLessThan(md.indexOf('## Description'));
     expect(blocker).toBeLessThan(25_000);
+  });
+
+  it('renders the round-1 root AND the re-post that carries the standing claim (#9940 review, round 30)', () => {
+    // The root is the reviewed claim and the only place it appears in the
+    // file; the re-post is what to rule on and the only one naming where
+    // the finding sits now. Both, never one instead of the other.
+    const md = buildMarkdown(
+      '9940',
+      'QwenLM/qwen-code',
+      meta,
+      [
+        {
+          id: 201,
+          user: { login: 'qwen-bot' },
+          path: 'packages/core/src/guard.ts',
+          line: 42,
+          body: '**[Suggestion]** R1-4: consider hardening the trust check here',
+        },
+        {
+          id: 202,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 201,
+          path: 'packages/core/src/guard.ts',
+          line: 42,
+          body: '**[Critical]** R1-4: still stands at HEAD — an untrusted workspace reaches the file-read tool with full permissions (packages/cli/src/config/settingsSchema.ts:88)',
+        },
+      ],
+      [],
+      [],
+      null,
+      'qwen-bot',
+    );
+    const section = md.indexOf('## Blockers to re-check');
+    expect(section).toBeGreaterThanOrEqual(0);
+    expect(md).toContain('consider hardening the trust check here');
+    expect(md).toContain('still stands at HEAD');
+    expect(md).toContain('`packages/cli/src/config/settingsSchema.ts:88`');
+    expect(md).toContain('(comment 201)');
+    expect(md).toContain('Re-asserted by @qwen-bot (comment 202)');
+    // Quoted once each: the lead is not repeated as a reply snippet.
+    expect(md.split('still stands at HEAD').length - 1).toBe(1);
+
+    // A long re-post degrades to a snippet rather than spending the
+    // section budget that later blockers need for their own roots.
+    const long = buildMarkdown(
+      '9940',
+      'QwenLM/qwen-code',
+      meta,
+      [
+        {
+          id: 301,
+          user: { login: 'qwen-bot' },
+          path: 'packages/core/src/guard.ts',
+          line: 42,
+          body: '**[Critical]** R1-4: the guard drops a valid case',
+        },
+        {
+          id: 302,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 301,
+          path: 'packages/core/src/guard.ts',
+          line: 42,
+          body: `**[Critical]** R1-4: still stands at HEAD ${'and here is why '.repeat(300)}`,
+        },
+      ],
+      [],
+      [],
+      null,
+      'qwen-bot',
+    );
+    expect(long).toContain('the guard drops a valid case');
+    expect(long).toContain('section budget spent');
   });
 
   it('does not promote the triage bot saying there are NO blockers', () => {
@@ -1223,6 +1296,230 @@ describe('classifyInlineThreads', () => {
     expect(t.repliesByRoot.get(1)!.map((c) => c.id)).toEqual([2]);
   });
 
+  it("promotes a thread whose blocker claim is a REPLY, and rules on the reply's body (#9940 review, round 30)", () => {
+    // The thread lifecycle re-posts a still-standing finding as a reply
+    // inside its original thread instead of a new root, and a later round
+    // may raise its severity. Reading the ROOT alone, a Critical carried
+    // into a Suggestion-rooted thread promoted nothing: the blocker left
+    // the mandatory section and settled under "Already discussed — do NOT
+    // re-report" as a snippet.
+    const inline: RawComment[] = [
+      {
+        id: 201,
+        user: { login: 'qwen-bot' },
+        path: 'packages/core/src/guard.ts',
+        line: 42,
+        body: '**[Suggestion]** R1-4: consider hardening the trust check here',
+      },
+      {
+        id: 202,
+        user: { login: 'qwen-bot' },
+        in_reply_to_id: 201,
+        path: 'packages/core/src/guard.ts',
+        line: 42,
+        body: '**[Critical]** R1-4: still stands at HEAD — an untrusted workspace reaches the file-read tool with full permissions (packages/cli/src/config/settingsSchema.ts:88)',
+      },
+    ];
+    const t = classifyInlineThreads(inline, 'qwen-bot');
+    expect(t.repliedBlockerRoots.map((c) => c.id)).toEqual([201]);
+    expect(t.repliedRoots).toEqual([]);
+    // The claim to rule on is the newest blocker-shaped comment.
+    expect(t.blockerLeads.get(201)!.id).toBe(202);
+    // A thread with no blocker anywhere in it stays out.
+    const quiet = classifyInlineThreads(
+      [
+        { id: 301, user: { login: 'qwen-bot' }, body: '**[Suggestion]** nit' },
+        {
+          id: 302,
+          user: { login: 'a' },
+          in_reply_to_id: 301,
+          body: 'done, thanks',
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quiet.repliedBlockerRoots).toEqual([]);
+    expect(quiet.blockerLeads.size).toBe(0);
+    // The steady state: a blocker root re-asserted every round. The NEWEST
+    // assertion is the standing claim — it names where the finding sits
+    // now, while the root's text is rounds old.
+    const restated = classifyInlineThreads(
+      [
+        {
+          id: 401,
+          user: { login: 'qwen-bot' },
+          body: '**[Critical]** R1-4: the guard drops a valid case',
+        },
+        {
+          id: 402,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 401,
+          body: '**[Critical]** R1-4: still stands at HEAD — now at src/guard.ts:88',
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(restated.blockerLeads.get(401)!.id).toBe(402);
+    // A THIRD PARTY's blocker-shaped reply promotes the thread (widening
+    // promotion can only add one) but is never the standing claim: the
+    // "Quote reply" button quotes the root's `**[Critical]**` marker
+    // verbatim, and rendering that as the claim evicted the reviewer's
+    // own Critical from the file.
+    const quoted = classifyInlineThreads(
+      [
+        {
+          id: 501,
+          user: { login: 'qwen-bot' },
+          body: '**[Suggestion]** R1-4: consider hardening the trust check',
+        },
+        {
+          id: 502,
+          user: { login: 'author-person' },
+          in_reply_to_id: 501,
+          body: '> **[Critical]** R1-4: …\n\nI do not think so.',
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quoted.repliedBlockerRoots.map((c) => c.id)).toEqual([501]);
+    expect(quoted.blockerLeads.size).toBe(0);
+    // The account match is case-insensitive, and an unknown account has
+    // no own re-post to prefer.
+    const cased = [
+      {
+        id: 601,
+        user: { login: 'Qwen-Bot' },
+        body: '**[Critical]** R1-4: the guard drops a valid case',
+      },
+      {
+        id: 602,
+        user: { login: 'QWEN-bot' },
+        in_reply_to_id: 601,
+        body: '**[Critical]** R1-4: still stands at HEAD',
+      },
+    ];
+    expect(
+      classifyInlineThreads(cased, 'qwen-bot').blockerLeads.get(601)!.id,
+    ).toBe(602);
+    expect(classifyInlineThreads(cased, '').blockerLeads.size).toBe(0);
+    // The lifecycle's own `fixed` ruling note is neither: its `by` clause
+    // routinely carries blocker prose, and read as a claim it promoted
+    // retired threads and displaced the real re-post.
+    const ruled = classifyInlineThreads(
+      [
+        {
+          id: 701,
+          user: { login: 'qwen-bot' },
+          body: '**[Suggestion]** R1-2: consider a guard here',
+        },
+        {
+          id: 702,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 701,
+          body: `R1-2 fixed by removing the blocking wait ${FIXED_RULING_MARKER}`,
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(ruled.repliedBlockerRoots).toEqual([]);
+    expect(ruled.blockerLeads.size).toBe(0);
+    // …matched by the note's posted SHAPE over the WHOLE body: the
+    // marker string is public, and a review of the file that defines it
+    // quotes it verbatim — read as a substring, that Critical demoted
+    // itself out of the mandatory section (#9940 review, round 30).
+    const quotingMarker = classifyInlineThreads(
+      [
+        {
+          id: 711,
+          user: { login: 'qwen-bot' },
+          body: `**[Critical]** R3-1: the filter \`${FIXED_RULING_MARKER}\` is substring-anywhere`,
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quotingMarker.openBlockerRoots.map((c) => c.id)).toEqual([711]);
+    // …and a comment that quotes a WHOLE ruling line and then states its
+    // own finding underneath is a finding: anchoring the note's line
+    // alone demoted it out of the mandatory section (#9940 review,
+    // round 31).
+    const quotesThenFinds = classifyInlineThreads(
+      [
+        {
+          id: 741,
+          user: { login: 'qwen-bot' },
+          body: `R1-2 fixed by x ${FIXED_RULING_MARKER}\n\n**[Critical]** R3-4: the auth check is still missing`,
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quotesThenFinds.openBlockerRoots.map((c) => c.id)).toEqual([741]);
+    // A reply that quotes a whole ruling line and carries on is a claim,
+    // not a note: the shape ends at the marker.
+    const quotesWholeLine = classifyInlineThreads(
+      [
+        {
+          id: 731,
+          user: { login: 'qwen-bot' },
+          body: '**[Suggestion]** R1-2: consider a guard here',
+        },
+        {
+          id: 732,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 731,
+          body: `**[Critical]** R1-2: \`R1-2 fixed by x ${FIXED_RULING_MARKER}\` is what the census matches, and it must not demote this finding`,
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quotesWholeLine.repliedBlockerRoots.map((c) => c.id)).toEqual([731]);
+    expect(quotesWholeLine.blockerLeads.get(731)!.id).toBe(732);
+    // The root is never its own lead — it is already rendered as the
+    // root, and a lead is the thing quoted BESIDE it.
+    const rootOnly = classifyInlineThreads(
+      [
+        {
+          id: 801,
+          user: { login: 'qwen-bot' },
+          body: '**[Critical]** R1-4: the guard drops a valid case',
+        },
+        {
+          id: 802,
+          user: { login: 'author-person' },
+          in_reply_to_id: 801,
+          body: 'thanks, looking now',
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(rootOnly.repliedBlockerRoots.map((c) => c.id)).toEqual([801]);
+    expect(rootOnly.blockerLeads.size).toBe(0);
+    // Among several own re-posts the NEWEST is the standing claim: it is
+    // the one that names where the finding sits now.
+    const twice = classifyInlineThreads(
+      [
+        {
+          id: 901,
+          user: { login: 'qwen-bot' },
+          body: '**[Critical]** R1-4: the guard drops a valid case',
+        },
+        {
+          id: 902,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 901,
+          body: '**[Critical]** R1-4: still stands — round 2',
+        },
+        {
+          id: 903,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 901,
+          body: '**[Critical]** R1-4: still stands — round 3, now at src/guard.ts:88',
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(twice.blockerLeads.get(901)!.id).toBe(903);
+  });
+
   it('promotes an attribution-off Critical through its invisible severity marker', () => {
     // The posted shape with attribution off: no prefix, the severity rides
     // the comment marker — and a Critical must still land in the re-check
@@ -1399,34 +1696,37 @@ describe('classifyInlineThreads', () => {
   });
 });
 
-describe('anyRootCarriesCriticalMarker', () => {
-  it('fires only on a critical marker carried by a ROOT comment', () => {
+describe('anyCommentCarriesCriticalMarker', () => {
+  it('fires on a critical marker carried by a root OR a reply (#9940 review, round 30)', () => {
     expect(
-      anyRootCarriesCriticalMarker([
+      anyCommentCarriesCriticalMarker([
         { body: 'x\n\n<!-- qwen-review critical -->' },
       ]),
     ).toBe(true);
     // A suggestion marker decides nothing: only critical promotes.
     expect(
-      anyRootCarriesCriticalMarker([
+      anyCommentCarriesCriticalMarker([
         { body: 'x\n\n<!-- qwen-review suggestion -->' },
       ]),
     ).toBe(false);
-    // A reply's marker is never read: promotion reads root bodies only, so
-    // a planted reply must not turn a tolerable identity blip into a
-    // repeating hard refusal.
+    // A reply's marker IS read: since the thread lifecycle (#9906) a
+    // still-standing Critical re-asserts itself as a reply, and the
+    // identity gates whether that marker promotes — so an unknown
+    // identity must fail closed on it exactly as it does on a root's.
     expect(
-      anyRootCarriesCriticalMarker([
+      anyCommentCarriesCriticalMarker([
         { in_reply_to_id: 1, body: 'x\n\n<!-- qwen-review critical -->' },
       ]),
-    ).toBe(false);
-    expect(anyRootCarriesCriticalMarker([{ body: 'plain prose' }])).toBe(false);
+    ).toBe(true);
+    expect(anyCommentCarriesCriticalMarker([{ body: 'plain prose' }])).toBe(
+      false,
+    );
     expect(
-      anyRootCarriesCriticalMarker([
+      anyCommentCarriesCriticalMarker([
         { body: '<!-- qwen-review critical --> mid-body' },
       ]),
     ).toBe(false);
-    expect(anyRootCarriesCriticalMarker([])).toBe(false);
+    expect(anyCommentCarriesCriticalMarker([])).toBe(false);
   });
 });
 

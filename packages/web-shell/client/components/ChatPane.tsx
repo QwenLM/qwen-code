@@ -36,6 +36,7 @@ import { SubagentDetailsProvider } from '../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../workflowDetailsContext';
 import { useI18n } from '../i18n';
+import { getSubagentDetailsUnavailableReason } from './messages/toolFormatting';
 import { useWebShellCustomization } from '../customization';
 import {
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
@@ -359,7 +360,12 @@ export function ChatPane({
   const { artifacts } = useSessionArtifacts();
   const openSubagentDetails = useCallback(
     (tool: ACPToolCall) => {
-      if (!connection.sessionId || !onRightPanelOpen) return;
+      if (
+        !connection.sessionId ||
+        !onRightPanelOpen ||
+        getSubagentDetailsUnavailableReason(tool)
+      )
+        return;
       const rawOutput =
         tool.rawOutput && typeof tool.rawOutput === 'object'
           ? (tool.rawOutput as Record<string, unknown>)

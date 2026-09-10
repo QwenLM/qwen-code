@@ -37,6 +37,10 @@ import type {
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionStatsStatus,
   DaemonSessionArtifactsEnvelope,
+  SessionSourceInput,
+  SessionSourcesResult,
+  SessionSourceUpsertResult,
+  SessionSourceRemoveResult,
   DaemonSkillToggleMutation,
   DaemonShellCommandResult,
   DaemonTranscriptBlock,
@@ -145,6 +149,8 @@ export interface DaemonReasoningControls {
   efforts: Array<Exclude<ReasoningSelection, 'none' | 'default'>>;
   /** The model default when the daemon advertises one. */
   defaultEffort?: Exclude<ReasoningSelection, 'none' | 'default'>;
+  enableValue?: 'default';
+  canEnable?: false;
   /** Defaults to true. False means effort is mutable but thinking is required. */
   canDisable?: boolean;
 }
@@ -286,6 +292,7 @@ export interface DaemonSessionNotice {
   message: string;
   debugMessage?: string;
   recoverable?: boolean;
+  sourceRetry?: () => Promise<void>;
   createdAt: number;
 }
 
@@ -635,6 +642,9 @@ export interface DaemonSessionActions {
   clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
+  listSources(): Promise<SessionSourcesResult>;
+  upsertSource(source: SessionSourceInput): Promise<SessionSourceUpsertResult>;
+  removeSource(sourceId: string): Promise<SessionSourceRemoveResult>;
   branchSession(
     name?: string,
     atRecordId?: string,
@@ -642,6 +652,7 @@ export interface DaemonSessionActions {
     sessionId: string;
     displayName: string;
     switchStarted: boolean;
+    sourceWarnings?: string[];
   }>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
@@ -664,6 +675,7 @@ export interface DaemonWorkspaceEventSignals {
   mcpVersion: number;
   extensionsVersion: number;
   artifactsVersion: number;
+  sourcesVersion?: number;
   lastExtensionChange?: {
     status?:
       | 'installed'

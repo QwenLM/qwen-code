@@ -52,6 +52,7 @@ export interface DaemonMessageToolCall {
   toolName: string;
   args?: Record<string, unknown>;
   executionMode?: 'foreground' | 'background';
+  subagentSessionReady?: boolean;
   status: DaemonMessageToolCallStatus;
   parentToolCallId?: string;
   title?: string;

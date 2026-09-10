@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
+import { findUnexpectedImportMeta } from './import-meta-guard.mjs';
 
 const assetsDir = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(assetsDir, 'src');
@@ -40,14 +41,12 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 //   cd packages/web-templates && node src/export-html/build.mjs
 // (the build prints `Document export runtime is N bytes`.)
 //
-// Last measured at 4,083,810 bytes by the Lint & Static lane on PR #11167, with
-// the mermaid stub below in place; it was 7,275,173 before that stub (measured
-// by a reviewer on PR #11038) and 8,456,076 before the echarts one. Re-measure
-// and lower these two again after any change to the document entry's
-// dependencies — a cap left far above the measurement is a ratchet with enough
-// slack for a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 4_100_000;
-const MAX_DOCUMENT_RUNTIME_BYTES = 4_200_000;
+// Last measured at 4,133,282 bytes by the Lint & Static lane on main at
+// c3023b3e6d. Keep the warning close to that measurement and the hard ceiling
+// close above it — a cap left far above the measurement is a ratchet with
+// enough slack for a whole dependency family to come back unnoticed.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 4_200_000;
+const MAX_DOCUMENT_RUNTIME_BYTES = 4_300_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
@@ -214,6 +213,23 @@ const documentBuildResult = await build({
     ),
   },
 });
+
+// esbuild lowers import.meta to {} under iife, and the export document
+// evaluates the bundle top-level, so any stray import.meta read (e.g.
+// import.meta.env) would throw in every exported file. Tolerate exactly the
+// deliberate guarded read inside the prebuilt web-shell transcript entry and
+// fail on anything else. No logLevel/logOverride here: silencing the warning
+// class would also hide every other warning this build emits, and
+// logOverride 'silent' would empty result.warnings and vacate this check.
+const unexpectedImportMeta = findUnexpectedImportMeta(
+  documentBuildResult.warnings,
+);
+if (unexpectedImportMeta.length > 0) {
+  throw new Error(
+    'export-transcript-document build: unexpected import.meta use in ' +
+      unexpectedImportMeta.join(', '),
+  );
+}
 
 const documentJsBundle = documentBuildResult.outputFiles.find((file) =>
   file.path.endsWith('.js'),
