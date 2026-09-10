@@ -1331,13 +1331,12 @@ export function ChatPane({
       })
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [commands, connection.skills]);
+  const contextUsageAvailable = !shouldBlockComposerSubmit({
+    connectionStatus: connection.status,
+    hasSession: Boolean(connection.sessionId),
+  });
   const handleShowContextUsage = useCallback(() => {
-    if (
-      shouldBlockComposerSubmit({
-        connectionStatus: connection.status,
-        hasSession: Boolean(connection.sessionId),
-      })
-    ) {
+    if (!contextUsageAvailable) {
       return;
     }
     const owner = sessionOwnerGuard.capture();
@@ -1360,14 +1359,7 @@ export function ChatPane({
         if (!owner.isCurrent()) return;
         reportError(error, 'Failed to load context usage');
       });
-  }, [
-    actions,
-    connection.sessionId,
-    connection.status,
-    reportError,
-    sessionOwnerGuard,
-    store,
-  ]);
+  }, [actions, contextUsageAvailable, reportError, sessionOwnerGuard, store]);
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((model) => ({
@@ -1750,9 +1742,15 @@ export function ChatPane({
             onPopQueuedMessages={editLastQueuedPrompt}
             onClearQueuedMessages={clearQueuedPrompts}
             visibleToolbarActions={paneToolbarActions}
-            tokenCount={connection.tokenCount ?? 0}
-            contextWindow={connection.contextWindow ?? 0}
-            onShowContextUsage={handleShowContextUsage}
+            tokenCount={
+              contextUsageAvailable ? (connection.tokenCount ?? 0) : 0
+            }
+            contextWindow={
+              contextUsageAvailable ? (connection.contextWindow ?? 0) : 0
+            }
+            onShowContextUsage={
+              contextUsageAvailable ? handleShowContextUsage : undefined
+            }
             workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
             workspaceTitle={paneWorkspaceCwd}
             workspaceColor={workspaceAccent}

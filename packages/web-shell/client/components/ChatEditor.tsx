@@ -3626,6 +3626,9 @@ export const ChatEditor = memo(
                             {contextWindow > 0 && tokenCount > 0 && (
                               <span
                                 className={styles.contextUsagePercentage}
+                                data-level={getContextUsageLevel(
+                                  (tokenCount / contextWindow) * 100,
+                                )}
                                 aria-hidden="true"
                               >
                                 {((tokenCount / contextWindow) * 100).toFixed(
@@ -3639,6 +3642,14 @@ export const ChatEditor = memo(
                         <TooltipContent
                           side="top"
                           className={styles.contextTooltip}
+                          aria-label={
+                            contextWindow > 0 && tokenCount > 0
+                              ? t('contextUsage.accessibleUsage', {
+                                  used: tokenCount.toLocaleString(),
+                                  total: contextWindow.toLocaleString(),
+                                })
+                              : t('contextUsage.title')
+                          }
                         >
                           <div className={styles.contextTooltipHeader}>
                             <span>{t('contextUsage.title')}</span>

@@ -187,8 +187,6 @@
 .compact .metaLine {
   flex-direction: column;
   gap: 2px;
-  white-space: normal;
-  max-width: none;
 }
 
 .disclosure {

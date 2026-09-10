@@ -7,7 +7,7 @@ import {
 } from './utils/mockDaemon';
 
 for (const theme of ['light', 'dark']) {
-  test(`context details stay readable and keyboard accessible in ${theme}`, async ({
+  test(`@smoke context details stay readable and keyboard accessible in ${theme}`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -87,9 +87,48 @@ for (const theme of ['light', 'dark']) {
         },
       },
     });
+    const surface = page.locator('[data-web-shell-composer-surface]');
+    const composer = page.locator('[data-web-shell-composer-content]');
+    const focusColor =
+      theme === 'dark' ? 'rgb(74, 158, 255)' : 'rgb(11, 102, 195)';
+    for (const trigger of [
+      page.locator('[data-web-shell-mode-button]'),
+      page.locator('[data-web-shell-model-button]'),
+      page.getByTestId('composer-add-menu-trigger'),
+    ]) {
+      await trigger.focus();
+      await expect(composer).toHaveCSS('border-top-color', focusColor);
+      await trigger.press('Enter');
+      await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+      await expect(composer).toHaveCSS('border-top-color', focusColor);
+      await page.keyboard.press('Escape');
+      await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+      await expect(trigger).toBeFocused();
+      await expect(composer).toHaveCSS('border-top-color', focusColor);
+    }
     const usage = page.locator('[data-web-shell-context-usage]');
     const percentage = usage.getByText('60.0%', { exact: true });
     await expect(percentage).toBeVisible();
+    for (const width of [520, 521]) {
+      await surface.evaluate((element, width) => {
+        (element as HTMLElement).style.width = `${width}px`;
+      }, width);
+      if (width === 520) await expect(percentage).toBeHidden();
+      else await expect(percentage).toBeVisible();
+      await expect(
+        page.locator('[data-web-shell-composer-submit]'),
+      ).toBeInViewport();
+      const [surfaceBox, sendBox] = await Promise.all([
+        surface.boundingBox(),
+        page.locator('[data-web-shell-composer-submit]').boundingBox(),
+      ]);
+      expect(sendBox!.x + sendBox!.width).toBeLessThanOrEqual(
+        surfaceBox!.x + surfaceBox!.width,
+      );
+    }
+    await surface.evaluate((element) =>
+      (element as HTMLElement).style.removeProperty('width'),
+    );
     await page.setViewportSize({ width: 500, height: 900 });
     await expect(percentage).toBeHidden();
     await expect(usage).toBeVisible();
@@ -99,8 +138,18 @@ for (const theme of ['light', 'dark']) {
     ).toBeInViewport();
     await page.setViewportSize({ width: 1440, height: 900 });
     await expect(percentage).toBeVisible();
-    await usage.hover();
     const tooltip = page.locator('[data-slot="tooltip-content"]');
+    await page.getByRole('button', { name: 'Ultra wide', exact: true }).focus();
+    await page.keyboard.press('Tab');
+    await expect(usage).toBeFocused();
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip).toContainText('60,000 tokens');
+    expect(contextRequests).toEqual([]);
+    await page.keyboard.press('Escape');
+    await expect(tooltip).toHaveCount(0);
+    await page.getByRole('button', { name: 'Ultra wide', exact: true }).focus();
+    await page.getByRole('button', { name: 'Ultra wide', exact: true }).hover();
+    await usage.hover();
     await expect(tooltip).toContainText('60,000 tokens');
     await expect(tooltip).toContainText('100,000 tokens');
     await expect(tooltip).toContainText(
@@ -125,9 +174,16 @@ for (const theme of ['light', 'dark']) {
     const detailCard = cards.last();
     await expect(detailCard.locator('details[open]')).toHaveCount(4);
     await expect(detailCard.getByText(longName, { exact: true })).toBeVisible();
-    const meter = detailCard.locator('[aria-hidden="true"]').first();
+    await expect(detailCard.getByText(longName, { exact: true })).toHaveCSS(
+      'color',
+      theme === 'dark' ? 'rgb(103, 133, 255)' : 'rgb(0, 51, 255)',
+    );
+    const meter = detailCard.locator('[data-web-shell-context-meter]');
+    await expect(meter).toBeVisible();
     const track = await meter.boundingBox();
     const filled = await meter.locator('span').first().boundingBox();
+    expect(track).not.toBeNull();
+    expect(filled).not.toBeNull();
     expect(Math.round((filled!.width / track!.width) * 100)).toBe(60);
     for (const width of [1440, 700, 390]) {
       await page.setViewportSize({ width, height: 1000 });
@@ -184,13 +240,14 @@ for (const theme of ['light', 'dark']) {
           (element) => element.scrollWidth - element.clientWidth,
         ),
       ).toBeLessThanOrEqual(1);
-      const row = context.locator('[class*="detailRow"]').first();
-      const [name, value] = await Promise.all([
-        row.locator('[title]').boundingBox(),
-        row.locator(':scope > span').last().boundingBox(),
-      ]);
-      expect(name!.x + name!.width).toBeLessThanOrEqual(value!.x);
-      expect(Math.abs(name!.y - value!.y)).toBeLessThanOrEqual(1);
+      for (const row of await context.locator('[class*="detailRow"]').all()) {
+        const [name, value] = await Promise.all([
+          row.locator('[title]').boundingBox(),
+          row.locator(':scope > span').last().boundingBox(),
+        ]);
+        expect(name!.x + name!.width).toBeLessThanOrEqual(value!.x);
+        expect(Math.abs(name!.y - value!.y)).toBeLessThanOrEqual(1);
+      }
     }
     await context.evaluate((element) => {
       (element as HTMLElement).style.removeProperty('width');
@@ -198,5 +255,58 @@ for (const theme of ['light', 'dark']) {
     await page.screenshot({
       path: testInfo.outputPath(`context-${theme}.png`),
     });
+    await page.getByRole('button', { name: 'Toggle right panel' }).click();
+    await expect(panel).toBeHidden();
+    for (const [tokens, level, color] of [
+      [
+        61_000,
+        'warning',
+        theme === 'dark' ? 'rgb(236, 201, 75)' : 'rgb(154, 106, 0)',
+      ],
+      [
+        81_000,
+        'error',
+        theme === 'dark' ? 'rgb(252, 129, 129)' : 'rgb(192, 54, 44)',
+      ],
+    ] as const) {
+      status.usage.totalTokens = tokens;
+      status.usage.breakdown.messages = tokens - 40_000;
+      status.usage.breakdown.freeSpace = 90_000 - tokens;
+      await page
+        .getByRole('button', { name: 'Ultra wide', exact: true })
+        .focus();
+      await expect(tooltip).toHaveCount(0);
+      await daemon.sendEvent({
+        id: tokens,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: { usage: { inputTokens: tokens } },
+          },
+        },
+      });
+      await expect(usage.locator('[data-level]')).toHaveAttribute(
+        'data-level',
+        level,
+      );
+      await expect(usage.locator('[data-level]')).toHaveCSS('color', color);
+      await usage.focus();
+      await expect(tooltip.locator('[data-level]')).toHaveCSS(
+        'background-color',
+        color,
+      );
+      await usage.click();
+      await expect(tooltip).toHaveCount(0);
+      await expect(cards.last().locator('[class*="percentage"]')).toHaveText(
+        `${tokens / 1000}.0%`,
+      );
+      await expect(cards.last().locator('[class*="percentage"]')).toHaveCSS(
+        'color',
+        color,
+      );
+    }
   });
 }

@@ -76,7 +76,11 @@ function ProgressBar({
         ? 'var(--warning-color)'
         : 'var(--agent-blue-500)';
   return (
-    <div className={styles.progress} aria-hidden="true">
+    <div
+      className={styles.progress}
+      data-web-shell-context-meter
+      aria-hidden="true"
+    >
       <span style={{ width: `${usedCount}%`, background: usedColor }} />
       <span
         style={{
@@ -310,7 +314,7 @@ export function ContextUsageMessage({
   return (
     <section
       className={`${styles.panel}${compact ? ` ${styles.compact}` : ''}`}
-      aria-label={t('contextUsage.title')}
+      aria-label={compact ? undefined : t('contextUsage.title')}
     >
       {!compact && (
         <div className={styles.header}>

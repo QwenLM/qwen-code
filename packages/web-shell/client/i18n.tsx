@@ -868,6 +868,8 @@ const EN: Messages = {
   'contextUsage.tokens': 'tokens',
   'contextUsage.usageByCategory': 'Usage by category',
   'contextUsage.used': 'Used',
+  'contextUsage.accessibleUsage': (v) =>
+    `${v?.used} of ${v?.total} tokens used`,
   'contextUsage.viewDetails': 'View details',
   'contextUsage.viewInConversation':
     'Click to view the breakdown in the conversation.',
@@ -4464,6 +4466,7 @@ const ZH: Messages = {
   'contextUsage.tokens': 'tokens',
   'contextUsage.usageByCategory': '按类别统计',
   'contextUsage.used': '已用',
+  'contextUsage.accessibleUsage': (v) => `已用 ${v?.used} / ${v?.total} tokens`,
   'contextUsage.viewDetails': '查看明细',
   'contextUsage.viewInConversation': '点击在对话中查看上下文组成。',
   'daemon.title': 'Daemon 状态',

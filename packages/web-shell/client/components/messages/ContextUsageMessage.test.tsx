@@ -84,7 +84,9 @@ describe('ContextUsageMessage', () => {
     expect(container.textContent).toContain('Context exceeds limit!');
     expect(container.textContent).toContain('Used');
     expect(container.textContent).toContain('Messages');
-    expect(container.querySelector('[aria-hidden="true"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-context-meter]'),
+    ).not.toBeNull();
   });
 
   it.each([false, true])(
@@ -92,7 +94,7 @@ describe('ContextUsageMessage', () => {
     (compact) => {
       const container = render(makeStatus(60, false), compact);
       const spans = Array.from(
-        container.querySelectorAll('[aria-hidden="true"] > span'),
+        container.querySelectorAll('[data-web-shell-context-meter] > span'),
       ) as HTMLSpanElement[];
 
       const [used, free, buffer] = spans;
@@ -112,9 +114,22 @@ describe('ContextUsageMessage', () => {
         'Autocompact buffer',
       ]);
 
+      expect(
+        Array.from(
+          container.querySelectorAll('[class*="row"] [class*="value"]'),
+          (node) => node.textContent,
+        ).slice(0, 3),
+      ).toEqual([
+        '60 tokens (60.0%)',
+        '30 tokens (30.0%)',
+        '10 tokens (10.0%)',
+      ]);
       const first = (root: HTMLElement) =>
-        (root.querySelector('[aria-hidden="true"] > span') as HTMLSpanElement)
-          .style.background;
+        (
+          root.querySelector(
+            '[data-web-shell-context-meter] > span',
+          ) as HTMLSpanElement
+        ).style.background;
       expect(first(render(makeStatus(61, false), compact))).toBe(
         'var(--warning-color)',
       );
@@ -129,8 +144,18 @@ describe('ContextUsageMessage', () => {
     expect(container.querySelector('[class*="percentage"]')?.textContent).toBe(
       '150.0%',
     );
+    expect(
+      container
+        .querySelector('[class*="percentage"]')
+        ?.getAttribute('data-level'),
+    ).toBe('error');
+    expect(
+      render(makeStatus(61, false))
+        .querySelector('[class*="percentage"]')
+        ?.getAttribute('data-level'),
+    ).toBe('warning');
     const segments = container.querySelectorAll<HTMLSpanElement>(
-      '[aria-hidden="true"] > span',
+      '[data-web-shell-context-meter] > span',
     );
     expect(Array.from(segments, (segment) => segment.style.width)).toEqual([
       '100%',
@@ -142,10 +167,16 @@ describe('ContextUsageMessage', () => {
   it('suppresses its own title in compact mode so the panel toolbar is the only heading', () => {
     const compactContainer = render(makeStatus(60, false), true);
     expect(compactContainer.querySelector('[class*="title"]')).toBeNull();
+    expect(compactContainer.querySelector('section[aria-label]')).toBeNull();
     expect(compactContainer.querySelector('[class*="compact"]')).not.toBeNull();
 
     const normalContainer = render(makeStatus(60, false));
     expect(normalContainer.querySelector('[class*="title"]')).not.toBeNull();
+    expect(
+      normalContainer
+        .querySelector('section[aria-label]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Context Usage');
   });
 
   it('wraps full names by default and preserves explicit name limits', () => {
@@ -193,6 +224,8 @@ describe('ContextUsageMessage', () => {
     );
     expect(container.textContent).not.toContain('Messages');
     expect(container.textContent).not.toContain('Used');
-    expect(container.querySelector('[aria-hidden="true"]')).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-context-meter]'),
+    ).toBeNull();
   });
 });

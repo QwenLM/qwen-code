@@ -60,7 +60,8 @@
   padding: 10px;
 }
 
-.container:focus-within .content {
+.container:focus-within .content,
+.container:has([aria-expanded='true']) .content {
   border-color: var(--chat-editor-accent-color);
 }
 
@@ -1711,6 +1712,14 @@
 .contextUsagePercentage {
   display: none;
   font-variant-numeric: tabular-nums;
+}
+
+.contextUsagePercentage[data-level='warning'] {
+  color: var(--warning-color);
+}
+
+.contextUsagePercentage[data-level='error'] {
+  color: var(--error-color);
 }
 
 .contextTooltip {

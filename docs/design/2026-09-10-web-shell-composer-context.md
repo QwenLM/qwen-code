@@ -16,23 +16,30 @@ or public customization options.
 ## Design
 
 - Reduce the default composer minimum height to 116px and show a subtle focus
-  border. Preserve automatic growth, existing maximum heights, attachment
+  border while the editor or its toolbar popup is active. Escape restores the
+  popup trigger focus; choosing an insertion keeps its existing focus action.
+  Preserve automatic growth, existing maximum heights, attachment
   scrolling, and host CSS variables.
 - Show the context percentage beside the existing ring when the composer is
   wider than 520px. Narrow composers keep the ring and its accessible label and
-  tooltip. Both parts invoke the existing context action (`/context`).
+  tooltip. Both parts invoke the existing context action (`/context`). Warning
+  and error percentages use the same severity as the ring. Unavailable split
+  panes suppress stale counts and their unavailable context action.
 - Replace the one-line hover text with a structured tooltip showing occupancy,
   a proportional meter, used tokens, the context-window size, and a localized
   hint that clicking displays usage in the conversation. Hover uses existing
   local counters without fetching context or creating a transcript message.
+  Assistive technology receives a concise localized used/window description.
 - Keep the sidebar overview visible. Align category and detail values to the
   right, allow long names to wrap, and keep token numbers readable.
 - Make tool, memory, and skill detail groups native disclosures in compact mode,
   initially collapsed, with item counts. Keyboard activation reveals the same
   complete, sorted details. Transcript detail groups start expanded and can
-  also be collapsed.
+  also be collapsed. Activating a native summary pauses transcript bottom
+  following so expanding details preserves the reading position.
 - Render transcript cards with the same proportional meter, responsive columns,
-  and complete wrapping names. Show occupancy beside the title. A localized
+  and complete wrapping names in the interface sans-serif font. Show occupancy
+  beside the title; only transcript cards add a named region landmark. A localized
   "View details" button invokes the existing `/context detail` action; read-only
   renderers without a callback retain the command hint. Explicit name length
   overrides remain supported; the default no longer truncates names.
@@ -44,7 +51,8 @@ Keep estimated, unavailable, loading, retry, and over-limit states intact.
 ## Affected files
 
 `ChatEditor.tsx`, `ChatEditor.module.css`, `ContextUsageMessage.tsx`, and
-`ContextUsageMessage.module.css`, localization, plus focused tests and browser
+`ContextUsageMessage.module.css`, the pane availability guard, transcript follow
+guard, add menu focus handling, localization, plus focused tests and browser
 tests under `packages/web-shell/client/`.
 
 ## Validation and acceptance
@@ -56,7 +64,9 @@ Check disclosure activation, counts, complete long names, sorted token values,
 estimated and over-limit readings, hover/focus without requests, and clicking
 the ring followed by "View details". Read-only rendering retains the command
 hint; explicit detail requests start expanded. Test narrow transcript cards in
-both themes.
+both themes. Pin 520/521px composer widths, actual theme colors, keyboard ring
+access, menu focus, and alignment on wrapped rows. Tag the focused browser
+coverage for the PR smoke lane.
 Run build, typecheck, bundle, focused unit and browser tests, then review the
 complete diff. Browser fixtures may supply deterministic context readings;
 report separately from live daemon verification.
