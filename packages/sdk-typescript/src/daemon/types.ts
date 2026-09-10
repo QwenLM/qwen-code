@@ -3881,10 +3881,12 @@ export interface DaemonSessionBtwResult {
  * disappears from pending-prompt snapshots at once and is retained
  * internally — doomed — until its aborted turn settles, so the removal
  * response is the only `removed = true` a client observes), so callers must
- * keep their own idle detection alongside it. A `content` reference the
- * session no longer holds (or an invalid one) never produces this body at
- * all: the request is declined before any verdict with a 410/400
- * `{ error, code }` response.
+ * keep their own idle detection alongside it. For a new admission, a
+ * `content` reference the session no longer holds (or an invalid one) does
+ * not produce this body: the request is declined before the idle verdict
+ * with a 410/400 `{ error, code }` response. A matching same-`messageId`
+ * retry is answered `{ accepted: true }` and a closing session
+ * `{ accepted: false }` first.
  */
 export interface DaemonMidTurnMessageResult {
   accepted: boolean;

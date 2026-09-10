@@ -8799,12 +8799,14 @@ export function registerSessionRoutes(
   // removed promoted message disappears from snapshots at once and is
   // retained internally — doomed — until its aborted turn settles, so the
   // removal response is the only `removed = true` a client ever observes.
-  // A `content` reference the session no longer holds (or an invalid one) is
-  // declined before any verdict: the bridge throws and the error mapping
-  // answers 410/400 with an `{ error, code }` body — no `accepted`, no
-  // `reason`. Accepted requests are owned by the daemon; rejected
-  // requests were not admitted. Synchronous — the bridge only mutates its
-  // in-memory session queues.
+  // For a new admission, a `content` reference the session no longer holds
+  // (or an invalid one) is declined before the idle/queue verdicts: the
+  // bridge throws and the error mapping answers 410/400 with an
+  // `{ error, code }` body — no `accepted`, no `reason`. A same-`messageId`
+  // retry whose payload matches acks idempotently first, and a closing
+  // session is refused reasonless first. Accepted requests are owned by the
+  // daemon; rejected requests were not admitted. Synchronous — the bridge
+  // only mutates its in-memory session queues.
   //
   // Per-message abuse guard. The sibling `/btw` caps its field; without this
   // only the global 10 MB body limit applies. It bounds how much a single

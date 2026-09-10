@@ -596,10 +596,12 @@ export function useQueuedPrompts({
    */
   const syncClaimedSubmittingRowIdsRef = useRef<Set<number>>(new Set());
   /**
-   * Attachment payloads of resubmitted prompts, keyed by the id the daemon
-   * returned. A started event carries only rendered text — the daemon's
-   * placeholder for an attachment-only message — so when the local row is
-   * already gone the echo has to come from here instead.
+   * Payloads a started event cannot reproduce — attachments, or the
+   * reference chips its rendered text drops — keyed by the id the daemon
+   * returned. Written by a resubmission's confirmation head, by the
+   * ordinary discard arm before it issues a removal, and by the claim arm
+   * whose row the sync spliced, so when no payload-complete local row
+   * remains the echo comes from here instead of the event's rendering.
    */
   const pendingEchoByPromptIdRef = useRef<Map<string, QueuedPrompt>>(new Map());
   /**
@@ -624,8 +626,11 @@ export function useQueuedPrompts({
    * confirmation snapshot ever landed, mapped to that row's id. From that
    * return on, no in-flight admission will echo the message, so the
    * settle-time last-chance echo must not defer to a row that merely renders
-   * the same text; the id also lets the settle drop a still-unbound row that
-   * can never bind anymore — a payload-bearing row has no binding route.
+   * the same text; the id also lets the settle drop a still-unbound row: a
+   * payload row that carries text can never bind (the matcher refuses
+   * non-blank text and the started event carries no content), and a
+   * text-less image row that has not bound by settle time has no later
+   * snapshot left to bind from.
    */
   const returnedUnboundPromptIdsRef = useRef<Map<string, number>>(new Map());
 
@@ -711,6 +716,11 @@ export function useQueuedPrompts({
           return false;
         }
         if (!p.serverPromptId) return true;
+        // A binding made at or after this flight's dispatch is invisible to
+        // the flight's snapshot — the daemon had not admitted the prompt yet
+        // — so its absence here proves nothing. Keep the row for a snapshot
+        // that postdates the bind.
+        if ((p.boundAtSeq ?? 0) >= refreshRequestSeqRef.current) return true;
         return serverQueued.some(
           (server) => server.promptId === p.serverPromptId,
         );
@@ -772,6 +782,7 @@ export function useQueuedPrompts({
             midTurnFailedAction: undefined,
             serverPromptId: serverPrompt.promptId,
             serverState: serverPrompt.state,
+            boundAtSeq: refreshRequestSeqRef.current,
           };
           continue;
         }
@@ -828,6 +839,7 @@ export function useQueuedPrompts({
               ...submittingRow,
               serverPromptId: serverPrompt.promptId,
               serverState: serverPrompt.state,
+              boundAtSeq: refreshRequestSeqRef.current,
             };
             continue;
           }
@@ -2207,6 +2219,7 @@ export function useQueuedPrompts({
                       ...item,
                       serverPromptId: result.promptId,
                       serverState: 'queued' as const,
+                      boundAtSeq: refreshRequestSeqRef.current,
                     }
                   : item,
               );
@@ -2241,9 +2254,10 @@ export function useQueuedPrompts({
                 displayedServerPromptIdsRef.current.has(result.promptId) ||
                 pendingStartedByPromptIdRef.current.has(result.promptId);
               if (startedOrCompleted) {
-                if (!settled && !localMessageAppended) {
-                  appendLocalQueuedPrompt(prompt, result.promptId);
-                }
+                // No echo here: a settle means the message already ran and
+                // the settle cleared the displayed guard, and a start is
+                // either already echoed (displayed) or was consumed by the
+                // park consume above — this arm only drops the row.
                 const next = queuedPromptsRef.current.filter(
                   (item) => item.id !== localId,
                 );
@@ -2331,8 +2345,19 @@ export function useQueuedPrompts({
               // The confirming sync attributed this row to an
               // already-displayed prompt with the same rendered text and
               // dropped it — nothing was cleared, so the admitted prompt
-              // stays and the sync's own row carries it. The `.finally`
-              // below issues this path's only refresh.
+              // stays. The row the next snapshot materializes for it is
+              // summary-only and cannot echo, so the started event's source
+              // is the payload this body still holds: stash it under the
+              // daemon's id. The `.finally` below issues this path's only
+              // refresh.
+              pendingEchoByPromptIdRef.current.set(result.promptId, prompt);
+              while (pendingEchoByPromptIdRef.current.size > 200) {
+                const oldestClaimEcho = pendingEchoByPromptIdRef.current
+                  .keys()
+                  .next().value;
+                if (typeof oldestClaimEcho !== 'string') break;
+                pendingEchoByPromptIdRef.current.delete(oldestClaimEcho);
+              }
               if (prompt.onComplete) {
                 settleCompletionCallback(result.promptId, prompt.onComplete);
               }
@@ -2426,6 +2451,7 @@ export function useQueuedPrompts({
             ...localPrompt,
             serverPromptId: result.promptId,
             serverState: 'queued',
+            boundAtSeq: refreshRequestSeqRef.current,
           };
           queuedPromptsRef.current = updated;
           setQueuedPrompts(updated);
@@ -3921,11 +3947,12 @@ export function useQueuedPrompts({
       // id this clear path would otherwise lose — the row has no
       // serverPromptId to DELETE. Hand the id to the deferred clear so the
       // next snapshot that still lists it queued cancels the message the
-      // user just cleared.
+      // user just cleared. The returned-unbound record itself must survive:
+      // the settle-time echo exemption still needs it, and its own cleanup
+      // (the settle, or the size bound) owns the delete.
       for (const prompt of submittingPrompts) {
         for (const [promptId, rowId] of returnedUnboundPromptIdsRef.current) {
           if (rowId === prompt.id) {
-            returnedUnboundPromptIdsRef.current.delete(promptId);
             clearedUnconfirmedPromptIdsRef.current.add(promptId);
             break;
           }

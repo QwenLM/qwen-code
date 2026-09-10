@@ -133,6 +133,13 @@ export interface QueuedPrompt {
   onAdmitted?: () => void;
   serverPromptId?: string;
   serverState?: 'submitting' | 'queued' | 'running';
+  /**
+   * The pending-prompts refresh sequence at the moment this row was bound to
+   * `serverPromptId`. A snapshot from a flight dispatched before the binding
+   * cannot list the prompt, so its absence proves nothing: the sync's
+   * retention filter keeps the row for a snapshot that postdates the bind.
+   */
+  boundAtSeq?: number;
   resubmittedAfterIdleRejection?: boolean;
   midTurnState?: 'submitting' | 'queued';
   midTurnMessageId?: string;
