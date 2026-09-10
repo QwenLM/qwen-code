@@ -162,7 +162,7 @@ function builtInMark(): Element | null {
 
 beforeEach(() => {
   window.localStorage.clear();
-  // Mount above the compact-footer breakpoint (344px): below it the version
+  // Mount above the compact footer breakpoint (344px): below it the version
   // label leaves the row (#11470), and the brand tooltip assertions query
   // that label's title.
   window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '360');
