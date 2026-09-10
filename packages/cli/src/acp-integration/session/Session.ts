@@ -5001,7 +5001,10 @@ export class Session implements SessionContext {
       if (stillOwnsPendingPrompt) {
         this.todoStopGuardDrainAutomaticQueuesWhenIdle = false;
       }
-      if (shouldDrainAutomaticQueues) {
+      // The success path drains after releasePendingSend; mirror that on the
+      // error path so a background-shell completion that queued mid-turn is
+      // not stranded when the turn ends with a provider error.
+      if (shouldDrainAutomaticQueues || stillOwnsPendingPrompt) {
         void this.#drainCronQueue();
         void this.#drainNotificationQueue();
       }
@@ -13445,6 +13448,7 @@ export class Session implements SessionContext {
               toolResult = await invocation.execute(
                 activeToolAbortSignal,
                 onToolProgress,
+                this.config.getShellExecutionConfig(),
               );
               executeReturned = true;
               try {
