@@ -81,6 +81,8 @@ import {
 } from './branch-points.js';
 import { recoverGoalFromRecords } from '../goals/goal-persistence.js';
 import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
+import { getSessionIndexStore } from './session-index/config.js';
+import type { SessionIndexStore } from './session-index/types.js';
 export {
   buildApiHistoryFromConversation,
   type BuildApiHistoryOptions,
@@ -2511,13 +2513,113 @@ export class SessionService {
   }
 
   /**
+   * Serves {@link listSessions} from the session-index sidecar catalog.
+   * Mirrors the scan path's semantics: mtime-desc order, mtime-keyed cursor,
+   * project-membership filtering, and label fields resolved from the same
+   * record/tail extractions (computed at index-sync time).
+   */
+  private async listSessionsWithIndex(
+    indexStore: SessionIndexStore,
+    chatsDir: string,
+    options: {
+      cursor?: string | number;
+      size: number;
+      signal?: AbortSignal;
+    },
+  ): Promise<ListSessionsResult> {
+    const { cursor, size, signal } = options;
+    const parsedCursor = cursor !== undefined ? Number(cursor) : undefined;
+    if (parsedCursor !== undefined && !Number.isFinite(parsedCursor)) {
+      // Scan parity: an unparseable cursor compares false against every
+      // file, so the page is empty rather than restarted from the newest.
+      return { items: [], hasMore: false };
+    }
+    await indexStore.syncDirectory(chatsDir);
+
+    const items: SessionListItem[] = [];
+    let lastProcessedMtime: number | undefined;
+    let hasMoreFiles = false;
+    // Windowed keyset paging: never materialize the whole catalog, even for
+    // very large session populations. 200 rows amortize one SQL round-trip
+    // per page; membership skips simply consume the window.
+    const WINDOW_SIZE = 200;
+    let windowStart: number | null = parsedCursor ?? null;
+
+    outer: for (let guard = 0; ; guard++) {
+      if (guard > 100000) throw new Error('session index pagination runaway');
+      const rows = indexStore.catalogRowsAfterMtime(windowStart, WINDOW_SIZE);
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        if (items.length >= size) {
+          hasMoreFiles = true;
+          break outer;
+        }
+        signal?.throwIfAborted();
+        lastProcessedMtime = row.mtimeMs;
+
+        // Scan parity: files without a readable first record never produce an
+        // item (but still advance the pagination key).
+        if (!row.firstRecordUuid) continue;
+        if (!SESSION_FILE_PATTERN.test(row.fileName)) continue;
+
+        // Mismatched-session parity: the item id and the membership probe use
+        // the id carried by the first record, not the file name.
+        const recordSessionId = row.firstRecordSessionId ?? row.sessionId;
+        if (
+          !(await this.sessionBelongsToCurrentProject(
+            recordSessionId,
+            row.cwd ?? '',
+            signal,
+          ))
+        ) {
+          continue;
+        }
+
+        items.push({
+          sessionId: recordSessionId,
+          cwd: row.cwd ?? '',
+          startTime: row.startTime ?? '',
+          mtime: row.mtimeMs,
+          prompt: row.firstPrompt ?? '',
+          gitBranch: row.gitBranch ?? undefined,
+          filePath: path.join(chatsDir, row.fileName),
+          customTitle: row.customTitle ?? undefined,
+          goalObjective: row.goalObjective ?? undefined,
+          titleSource: (row.titleSource as TitleSource | null) ?? undefined,
+          ...(row.parentSessionId
+            ? { parentSessionId: row.parentSessionId }
+            : {}),
+          ...(row.sourceType ? { sourceType: row.sourceType } : {}),
+          ...(row.sourceId !== null ? { sourceId: row.sourceId } : {}),
+          isArchived: false,
+        });
+      }
+      if (rows.length < WINDOW_SIZE) break;
+      windowStart = rows[rows.length - 1].mtimeMs;
+    }
+    signal?.throwIfAborted();
+
+    const nextCursor =
+      hasMoreFiles && lastProcessedMtime !== undefined
+        ? lastProcessedMtime
+        : undefined;
+
+    return {
+      items,
+      nextCursor,
+      hasMore: hasMoreFiles,
+    };
+  }
+
+  /**
    * Lists sessions for the current project with pagination.
    *
    * Sessions are ordered by file modification time (most recent first).
    * Uses cursor-based pagination with mtime as the cursor.
    *
-   * Only reads the first line of each JSONL file for efficiency.
-   * Files are filtered by UUID pattern first, then by project hash.
+   * Only reads the first line of each JSONL file for efficiency (or, when
+   * the session-index sidecar is enabled, serves the same rows from its
+   * catalog). Files are filtered by UUID pattern first, then by project hash.
    *
    * @param options Pagination options
    * @returns Paginated list of sessions
@@ -2529,6 +2631,31 @@ export class SessionService {
     const chatsDir = this.getChatsDirForState(archiveState);
     const isArchived = archiveState === 'archived';
     signal?.throwIfAborted();
+
+    // Fast path: serve the listing from the session-index sidecar when one
+    // is enabled and healthy. Any provider-side failure falls back to the
+    // scan below; archived listings (rare, small) always scan.
+    if (!isArchived) {
+      const indexStore = await getSessionIndexStore(
+        this.storage.getProjectDir(),
+      );
+      if (indexStore) {
+        try {
+          return await this.listSessionsWithIndex(indexStore, chatsDir, {
+            cursor,
+            size,
+            signal,
+          });
+        } catch (error) {
+          // Abort is caller cancellation, not an index malfunction: never
+          // route it into the scan fallback.
+          if (signal?.aborted) throw error;
+          debugLogger.warn(
+            `session index listing failed, falling back to scan: ${String(error)}`,
+          );
+        }
+      }
+    }
 
     // Get all valid session files (matching UUID pattern) with their stats
     let files: Array<{ name: string; mtime: number }> = [];
