@@ -3779,6 +3779,129 @@ ok(
   (await M.resolveAgentPersona(plainCfg, 'ag_ext_exec')).status === 'resolved',
 );
 
+console.log('\n41. a waiting agent is woken once, not on every later close');
+// A close now @-mentions peers whose runs ended `waiting` (e0f75795cc). The
+// risk in that is repeat wake-ups: if the wait is not acknowledged when it is
+// answered, every later close on the thread wakes the same agent again and
+// burns its turn budget on nothing new.
+//
+// A wait is only legal while something can still wake the thread, so both
+// agents are put mid-turn on the same thread first. The evidence for each
+// step is read from the store, not from a tool's return shape.
+await M.updateWorkspaceAgents(ROOT, (a) => [
+  ...a,
+  { id: 'ag_waiter', name: 'waiter', createdAt: 1 },
+  { id: 'ag_closer', name: 'closer', createdAt: 1 },
+]);
+const wakeThread = await M.createThread(ROOT, {
+  title: 'Wake once',
+  assigneeAgentId: 'ag_waiter',
+});
+const wake_runsFor = async (agentId) =>
+  (await M.readThread(ROOT, wakeThread.id)).runs.filter(
+    (r) => r.agentId === agentId,
+  );
+const wake_runOf = async (agentId, status) =>
+  (await wake_runsFor(agentId)).find((r) => r.status === status);
+const wake_closerTurn = async (text, summary) => {
+  const posted = await M.postMessage(ROOT, wakeThread.id, {
+    from: M.HUMAN_AUTHOR_ID,
+    text,
+  });
+  const run = posted.dispatched.find((r) => r.agentId === 'ag_closer');
+  await M.claimRun(ROOT, { threadId: wakeThread.id, runId: run.id });
+  await asAgent(
+    'ag_closer',
+    wakeThread.id,
+    run.id,
+    wakeThread.rootThreadId,
+    () => new M.ThreadReviewTool(cfg).buildAndExecute({ summary }, sig()),
+  );
+  await M.finishRun(ROOT, wakeThread.id, run.id, { status: 'completed' });
+  return run.id;
+};
+
+const wakeStart = await M.postMessage(ROOT, wakeThread.id, {
+  from: M.HUMAN_AUTHOR_ID,
+  text: 'begin',
+});
+const waiterRun1 = wakeStart.dispatched[0].id;
+await M.claimRun(ROOT, { threadId: wakeThread.id, runId: waiterRun1 });
+const closerFirst = await M.postMessage(ROOT, wakeThread.id, {
+  from: M.HUMAN_AUTHOR_ID,
+  text: '@closer take a look',
+});
+const closerRun1 = closerFirst.dispatched.find(
+  (r) => r.agentId === 'ag_closer',
+).id;
+await M.claimRun(ROOT, { threadId: wakeThread.id, runId: closerRun1 });
+ok(
+  'both agents are mid-turn on the thread, so a wait is legal',
+  (await wake_runOf('ag_waiter', 'running')) !== undefined &&
+    (await wake_runOf('ag_closer', 'running')) !== undefined,
+);
+
+await asAgent(
+  'ag_waiter',
+  wakeThread.id,
+  waiterRun1,
+  wakeThread.rootThreadId,
+  () => new M.ThreadWaitTool(cfg).buildAndExecute({}, sig()),
+);
+await M.finishRun(ROOT, wakeThread.id, waiterRun1, { status: 'completed' });
+ok(
+  "the waiter's run is recorded as waiting",
+  (await wake_runsFor('ag_waiter')).find((r) => r.id === waiterRun1)
+    ?.closeKind === 'waiting',
+  JSON.stringify((await wake_runsFor('ag_waiter')).map((r) => r.closeKind)),
+);
+const waiterRunsBefore = (await wake_runsFor('ag_waiter')).length;
+
+await asAgent(
+  'ag_closer',
+  wakeThread.id,
+  closerRun1,
+  wakeThread.rootThreadId,
+  () =>
+    new M.ThreadReviewTool(cfg).buildAndExecute(
+      { summary: 'first look' },
+      sig(),
+    ),
+);
+await M.finishRun(ROOT, wakeThread.id, closerRun1, { status: 'completed' });
+
+const waiterRunsAfterFirst = await wake_runsFor('ag_waiter');
+ok(
+  'the first close wakes the waiter with a new run',
+  waiterRunsAfterFirst.length === waiterRunsBefore + 1,
+  `${waiterRunsBefore} -> ${waiterRunsAfterFirst.length}`,
+);
+ok(
+  'and its earlier wait is now acknowledged',
+  waiterRunsAfterFirst.find((r) => r.id === waiterRun1)
+    ?.closeAcknowledgedAtSequence !== undefined,
+);
+
+// Drain the woken run first. Left queued, a second wake-up would coalesce into
+// it and the count below would stay flat for the wrong reason.
+const wake_wokenRun = await wake_runOf('ag_waiter', 'queued');
+ok('the wake-up booked a queued run', wake_wokenRun !== undefined);
+await M.claimRun(ROOT, { threadId: wakeThread.id, runId: wake_wokenRun.id });
+await M.finishRun(ROOT, wakeThread.id, wake_wokenRun.id, {
+  status: 'completed',
+});
+ok(
+  'the waiter has nothing queued before the second close',
+  (await wake_runOf('ag_waiter', 'queued')) === undefined,
+);
+
+await wake_closerTurn('@closer one more pass', 'second look');
+ok(
+  'a second close does not wake the waiter again',
+  (await wake_runsFor('ag_waiter')).length === waiterRunsAfterFirst.length,
+  `${waiterRunsAfterFirst.length} -> ${(await wake_runsFor('ag_waiter')).length}`,
+);
+
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
