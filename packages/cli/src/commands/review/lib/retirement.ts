@@ -1042,21 +1042,15 @@ export function scheduleReverseAuditRound(
         fileLists: Set<string>;
         filedFiles: Set<string>;
         /**
-         * One row per audit MEMBER of the round, each with the list it was
-         * launched against. The round-level fold above hides these —
-         * `mergeOutcomes` folds `['unknown', 'dry']` to `'dry'` — and the
-         * narrowing branch needs them: a dry receipt beside an uncertified
-         * sibling launched against the same list is a receipt that predates
-         * whatever that sibling filed (#10136 R20-2). A record no transcript
-         * certified is a member too — it names no outcome, and the round was
-         * still scheduled for it.
+         * One outcome per audit MEMBER of the round. The round-level fold
+         * above hides these — `mergeOutcomes` folds `['unknown', 'dry']` to
+         * `'dry'` — and the narrowing branch needs them: a round holding one
+         * dry receipt beside an uncertified sibling is not a round that
+         * certified the territory (#10136 R20-2). A record no transcript
+         * certified is a member too — it names no outcome of its own, and
+         * the round was still scheduled for it.
          */
-        members: Array<{
-          outcome: AuditOutcome;
-          digest: string;
-          /** Its findings list, when read back from the file; else null. */
-          fileList: string | null;
-        }>;
+        memberOutcomes: AuditOutcome[];
       }
     >
   >();
@@ -1072,32 +1066,23 @@ export function scheduleReverseAuditRound(
       digests: new Set<string>(),
       fileLists: new Set<string>(),
       filedFiles: new Set<string>(),
-      members: [] as Array<{
-        outcome: AuditOutcome;
-        digest: string;
-        fileList: string | null;
-      }>,
+      memberOutcomes: [] as AuditOutcome[],
     };
     entry.outcomes.push(...classificationsByRecord[i].map((c) => c.outcome));
     entry.failures.push(...failuresByRecord[i]);
     for (const c of classificationsByRecord[i]) {
       if (c.filedFile !== undefined) entry.filedFiles.add(c.filedFile);
     }
-    const fileList = rec.findingsFromFile ? rec.findings : null;
     if (classificationsByRecord[i].length === 0) {
       // A record no transcript certified: nothing proves it dry, and the
       // round was scheduled for it — an uncertified member, not an absent
       // one. `outcomes` is left alone, so the fold and the ordinary
       // retirement rule read exactly what they always read.
-      entry.members.push({ outcome: 'unknown', digest: rec.digest, fileList });
+      entry.memberOutcomes.push('unknown');
     } else {
-      for (const c of classificationsByRecord[i]) {
-        entry.members.push({
-          outcome: c.outcome,
-          digest: rec.digest,
-          fileList,
-        });
-      }
+      entry.memberOutcomes.push(
+        ...classificationsByRecord[i].map((c) => c.outcome),
+      );
     }
     entry.digests.add(rec.digest);
     if (rec.findingsFromFile) entry.fileLists.add(rec.findings);
@@ -1118,7 +1103,7 @@ export function scheduleReverseAuditRound(
         digests: [...entry.digests],
         fileLists: [...entry.fileLists],
         filedFiles: [...entry.filedFiles],
-        members: entry.members,
+        memberOutcomes: entry.memberOutcomes,
       }))
       .sort((a, b) => a.round - b.round);
     // The posture narrowing, ruled before retirement so a non-delta chunk
@@ -1195,35 +1180,26 @@ export function scheduleReverseAuditRound(
             )
           );
         });
-        // The within-round analogue of arms 1 and 2 (#10136 R20-2). Every
-        // arm above iterates ROUND-level folds, and `mergeOutcomes` folds
+        // The within-round half of the same doubt (#10136 R20-2). Every arm
+        // above iterates ROUND-level folds, and `mergeOutcomes` folds
         // `['unknown', 'dry']` to `'dry'` — so a round holding one
         // substantive dry receipt beside an uncertified sibling reads as
         // wholly dry, passes the bar above, and is skipped by all three
-        // arms. The sibling's own filing merges into the cumulative list
-        // whatever this module ruled about its receipt, so a dry member
-        // launched against the SAME list — same digest, or the same entry
-        // tokens — was built before it, exactly the evidence arms 1 and 2
-        // rule on one round out. Ruled here, in the narrowing branch:
-        // `mergeOutcomes`' contract is load-bearing for the ordinary
-        // retirement rule, which must keep reading what it always read.
-        const dryMembers = latest.members.filter((m) => m.outcome === 'dry');
-        const staleWithinRound = latest.members.some(
-          (m) =>
-            m.outcome !== 'dry' &&
-            dryMembers.some(
-              (d) =>
-                m.digest === d.digest ||
-                // A list neither member can be compared on (a prompt
-                // fallback names no entries) does not lift the doubt: this
-                // is the narrowing branch, where every refusal in this file
-                // fails toward auditing, and "the two were launched against
-                // different lists" is a claim, not an absence.
-                m.fileList === null ||
-                d.fileList === null ||
-                sameEntrySet(m.fileList, d.fileList),
-            ),
-        );
+        // arms.
+        //
+        // Unlike arms 1 and 2 this asks NO question about the two members'
+        // lists, and deliberately: a finding an auditor files is merged
+        // into the cumulative list before the NEXT round begins, so a
+        // filing by any member of this round post-dates EVERY list this
+        // round was built against — the newer of the two lists included.
+        // "The dry member was launched against a different list" therefore
+        // says nothing here, where across rounds it says the receipt may be
+        // newer. So the bar is the round itself: every member certified
+        // dry, or the chunk stays in the wave. Ruled here, in the narrowing
+        // branch — `mergeOutcomes`' contract is load-bearing for the
+        // ordinary retirement rule, which must keep reading what it always
+        // read.
+        const staleWithinRound = latest.memberOutcomes.some((o) => o !== 'dry');
         if (!staleAgainstYield && !staleWithinRound) {
           narrowed.push({ chunkId, dryRound: latest.round });
           continue;

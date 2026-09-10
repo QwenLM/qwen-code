@@ -917,12 +917,59 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(false);
   });
 
-  it('an uncertified sibling whose list cannot be compared still blocks (#10136 R20-2)', () => {
-    // The narrowing branch fails toward auditing like every other refusal
-    // here: "the two were launched against different lists" is a claim, and
-    // a prompt fallback names no entries either way. The sibling's record
-    // points at no findings file, so the comparison cannot be made — and
-    // the chunk stays in the wave rather than being priced out on it.
+  it('an uncertified sibling blocks whatever list it was built against (#10136 R20-2)', () => {
+    // The arm asks NO question about the two members' lists, and this is
+    // the case that says why. A finding an auditor files is merged before
+    // the NEXT round begins, so a filing by any member of THIS round
+    // post-dates every list this round was built against — the newer of
+    // the two included. Across rounds "the dry member saw a different
+    // list" means the receipt may be newer; within one round it means
+    // nothing, and reading it as freshness priced the chunk out of the
+    // wave over a live finding.
+    const L1 =
+      '- **File:** src/pay.ts:42 — the double charge — [unverified]\n' +
+      '- **Severity:** Suggestion\n';
+    // A genuinely NEWER list: another chunk's finding merged between the
+    // round's two builds, so neither the digest nor the entry set matches.
+    const L2 =
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+      '- **Severity:** Suggestion\n' +
+      '- **File:** src/other.ts:7 — an unrelated finding\n' +
+      '- **Severity:** Suggestion\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', L1);
+    const f2 = writeFindingsFile(plan, 'reverse-audit--round-1--d2', L2);
+    // The certified member is the one built against the NEWER list.
+    transcript(
+      record(
+        1,
+        14,
+        'chunk 14 round 1 territory walk b\n' +
+          `read_file(file_path="${f2 ?? ''}")`,
+        'd2',
+      ),
+      DRY,
+    );
+    // The sibling: an earlier build of the same round, never returned.
+    record(
+      1,
+      14,
+      'chunk 14 round 1 territory walk a\n' +
+        `read_file(file_path="${f1 ?? ''}")`,
+      'd1',
+    );
+
+    const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([14]);
+    expect(r3.narrowed).toEqual([]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('an uncertified sibling with no readable list blocks too (#10136 R20-2)', () => {
+    // The prompt-fallback sibling: its record points at no findings file,
+    // so nothing about it can be compared even in principle. Same ruling —
+    // the bar is the round, not the lists.
     const L1 =
       '- **File:** src/pay.ts:42 — the double charge — [unverified]\n' +
       '- **Severity:** Suggestion\n';
@@ -937,8 +984,6 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
       ),
       DRY,
     );
-    // The sibling: a second record under a corrected list this test does
-    // not write, so the scheduler reads its prompt as the list.
     record(1, 14, 'chunk 14 round 1 territory walk b', 'd2');
 
     const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {

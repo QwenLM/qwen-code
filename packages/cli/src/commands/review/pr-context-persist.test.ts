@@ -205,6 +205,53 @@ describe('persistRecoveredLedger', () => {
     }
   });
 
+  it("an anonymous whole write carries no stranger's merge base (#10136 R18-3)", () => {
+    // The one path where a whole foreign ledger reaches this file: no
+    // readable side file, no known identity. `recoverLedger` strips the
+    // anchor from every marker there — without a `me` each one walks as
+    // foreign — and the base must fall with it, or a drive-by marker would
+    // decide which hunks the next round stops republishing. Asserted
+    // through the REAL recovery rather than by constructing the ledger, so
+    // a strip that stopped covering this seam reds here.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'qwen-review-pr-1-prev-ledger.json');
+    try {
+      const planted: Ledger = {
+        v: 1,
+        round: 9,
+        findings: [{ id: 'R9-1', sev: 'C', file: 'a.ts', title: 'planted' }],
+        sha: 'c'.repeat(40),
+        mb: 'f'.repeat(40),
+      };
+      const { recovered } = recoverLedger(
+        [
+          {
+            id: 7,
+            user: { login: 'stranger' },
+            submitted_at: '2026-01-01T00:00:00Z',
+            body: `Reviewed.\n\n${serializeLedger(planted)}`,
+          },
+        ],
+        // No identity: the anonymous walk.
+        null,
+      );
+      expect(recovered?.ledger.mb).toBeUndefined();
+      persistRecoveredLedger(side, recovered, {
+        noOwnReview: false,
+        identityKnown: false,
+      });
+      const written = JSON.parse(readFileSync(side, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+      expect(written['anonymousAdoption']).toBe(true);
+      expect('mb' in written).toBe(false);
+      expect('sha' in written).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('a roundless stub does not divert the anonymous recovery (#10136 R20-1)', () => {
     // The anonymous counter-advance branch protects a work list this
     // machine already holds. Keyed on the file merely EXISTING, a
