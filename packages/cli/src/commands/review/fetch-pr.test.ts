@@ -1793,6 +1793,10 @@ describe('fetch-pr report assembly', () => {
     expect(report.incremental.scope.interaction).toEqual([
       { path: 'b.ts', importsChanged: ['a.ts'] },
     ]);
+    // …and the PLAN records why, so the posted round-shape sentence can
+    // say it too — the same treatment `seamOracle` gets for the bound's
+    // other deployment condition (#10136 R18-3).
+    expect(report.incremental.scope.baseContinuity).toBe('unproven');
     const diff = writtenDiff() ?? '';
     expect(diff).toContain('diff --git a/b.ts b/b.ts');
     expect(diff).toContain('+y2');

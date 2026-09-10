@@ -3706,6 +3706,13 @@ function fixAuditShapeFacts(planPath: string | undefined): {
    * bound that never executed.
    */
   oracleUnavailable: boolean;
+  /**
+   * The capture recorded that merge-base continuity with the previous
+   * POSTED round could not be proven, so the seam bound never ran and
+   * every interaction file republished in full (#10136 R18-3) — named,
+   * or the sentence below would read as "nothing needed seam-bounding".
+   */
+  baseUnproven: boolean;
 } | null {
   try {
     if (!planPath) return null;
@@ -3764,6 +3771,8 @@ function fixAuditShapeFacts(planPath: string | undefined): {
       wholeFiles,
       oracleUnavailable:
         (scope as { seamOracle?: unknown }).seamOracle === 'unavailable',
+      baseUnproven:
+        (scope as { baseContinuity?: unknown }).baseContinuity === 'unproven',
     };
   } catch {
     return null;
@@ -7860,26 +7869,33 @@ function composeReviewBody(
     fixAudit && fixAudit.oracleUnavailable
       ? ' — but the seam oracle could not resolve a TypeScript parser at ' +
         'run time, so every interaction file republished in full'
-      : fixAudit && fixAudit.seamFiles > 0
-        ? ` (${fixAudit.seamFiles} seam-bounded: ${fixAudit.seamKept} of ${fixAudit.seamTotal} hunk(s) republished` +
-          (fixAudit.wholeFiles > 0
-            ? `; ${fixAudit.wholeFiles} republished whole, every hunk on the seam)`
-            : ')')
-        : fixAudit && fixAudit.wholeFiles > 0
-          ? ` (${fixAudit.wholeFiles} republished whole, every hunk on the seam)`
-          : '';
+      : fixAudit && fixAudit.baseUnproven
+        ? ' — but merge-base continuity with the previous posted round ' +
+          'could not be proven, so the bound never ran and every ' +
+          'interaction file republished in full'
+        : fixAudit && fixAudit.seamFiles > 0
+          ? ` (${fixAudit.seamFiles} seam-bounded: ${fixAudit.seamKept} of ${fixAudit.seamTotal} hunk(s) republished` +
+            (fixAudit.wholeFiles > 0
+              ? `; ${fixAudit.wholeFiles} republished whole, every hunk on the seam)`
+              : ')')
+          : fixAudit && fixAudit.wholeFiles > 0
+            ? ` (${fixAudit.wholeFiles} republished whole, every hunk on the seam)`
+            : '';
   const fixAuditSeamZh =
     fixAudit && fixAudit.oracleUnavailable
       ? '——但接缝 oracle 在运行时无法解析到 TypeScript 解析器，' +
         '所有 interaction 文件均按全量重新发布'
-      : fixAudit && fixAudit.seamFiles > 0
-        ? `（${fixAudit.seamFiles} 个按接缝收窄：重发 ${fixAudit.seamKept}/${fixAudit.seamTotal} 个 hunk` +
-          (fixAudit.wholeFiles > 0
-            ? `；${fixAudit.wholeFiles} 个整体重发，其每个 hunk 都在接缝上）`
-            : '）')
-        : fixAudit && fixAudit.wholeFiles > 0
-          ? `（${fixAudit.wholeFiles} 个整体重发，其每个 hunk 都在接缝上）`
-          : '';
+      : fixAudit && fixAudit.baseUnproven
+        ? '——但无法证明与上一轮已发布轮次之间的 merge base 连续性，' +
+          '限宽未运行，所有 interaction 文件均按全量重新发布'
+        : fixAudit && fixAudit.seamFiles > 0
+          ? `（${fixAudit.seamFiles} 个按接缝收窄：重发 ${fixAudit.seamKept}/${fixAudit.seamTotal} 个 hunk` +
+            (fixAudit.wholeFiles > 0
+              ? `；${fixAudit.wholeFiles} 个整体重发，其每个 hunk 都在接缝上）`
+              : '）')
+          : fixAudit && fixAudit.wholeFiles > 0
+            ? `（${fixAudit.wholeFiles} 个整体重发，其每个 hunk 都在接缝上）`
+            : '';
   const fixAuditShapeBlock: Bi[] = fixAudit
     ? [
         {

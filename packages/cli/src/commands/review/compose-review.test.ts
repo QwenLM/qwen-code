@@ -3186,6 +3186,47 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
     );
   });
 
+  it('names an unproven merge base instead of a bound that kept everything (#10136 R18-3)', () => {
+    // The seam bound has two deployment conditions, and both must be
+    // legible in the POSTED body, not only on the capture's stderr: an
+    // oracle that never resolved (above), and a base no previous posted
+    // round vouched. Silent, this round renders exactly what a round where
+    // the bound ran and kept everything renders.
+    const r = composeReview(
+      rcInput({
+        ...POSTURE,
+        scope: {
+          ...POSTURE.scope,
+          baseContinuity: 'unproven',
+          interaction: [{ path: 'src/b.ts', importsChanged: ['src/a.ts'] }],
+        },
+      }),
+    );
+    expect(r.body).toContain(
+      'merge-base continuity with the previous posted round could not be proven, so the bound never ran and every interaction file republished in full',
+    );
+    expect(r.body).not.toContain('seam-bounded:');
+    expect(r.body).not.toContain('republished whole');
+    const hanBody = (() => {
+      const input = base({ criticalsInline: 1 });
+      input.planPath = coveredPlan(['verify', 'reverse-audit'], {
+        han: true,
+        incremental: {
+          ...POSTURE,
+          scope: {
+            ...POSTURE.scope,
+            baseContinuity: 'unproven',
+            interaction: [{ path: 'src/b.ts', importsChanged: ['src/a.ts'] }],
+          },
+        } as never,
+      });
+      return composeReview(input).body;
+    })();
+    expect(hanBody).toContain(
+      '无法证明与上一轮已发布轮次之间的 merge base 连续性，限宽未运行，所有 interaction 文件均按全量重新发布',
+    );
+  });
+
   it('a census that kept every hunk is named as kept whole, never as a shed (#10136 R1-7)', () => {
     const r = composeReview(
       rcInput({

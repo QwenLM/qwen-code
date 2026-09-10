@@ -1604,6 +1604,20 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
             const total = bounded.reduce((n, e) => n + (e.seam?.total ?? 0), 0);
             const continuityProven =
               prevMergeBase !== null && prevMergeBase === mergeBaseSha;
+            // Named in the PLAN, not only on stderr (#10136 R18-3): the
+            // posted round-shape sentence reads the plan, and a bound that
+            // did not run because no previous round vouched a base is not
+            // "no interaction file needed seam-bounding" — the same
+            // distinction `seamOracle` draws for the other deployment
+            // condition. Recorded only where the bound was actually asked
+            // for and had something to bound.
+            if (
+              !continuityProven &&
+              widened.scope.seamOracle === undefined &&
+              widened.scope.interaction.length > 0
+            ) {
+              anchor.incremental.scope.baseContinuity = 'unproven';
+            }
             writeStderrLine(
               `Critical posture (${postureCause}): fix-audit round shape — ` +
                 `territory fan-out over the delta, ` +

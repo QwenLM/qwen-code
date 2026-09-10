@@ -82,6 +82,18 @@ export interface IncrementalScope {
    * ever runs where a parser resolves.
    */
   seamOracle?: 'unavailable';
+  /**
+   * Set exactly when the seam bound was asked for but the round could not
+   * prove merge-base continuity with the previous POSTED round (#10136
+   * R18-3): every interaction file republished in full with NO census —
+   * byte-identical to the pre-bound widening — and the capture note and
+   * the posted body name the unproven base instead of reading as "no
+   * interaction file needed seam-bounding". The sibling of
+   * `seamOracle`, for the other deployment condition the bound has, and
+   * recorded by the CAPTURE rather than by `widenScope`: continuity is a
+   * fact about two rounds, which the widening cannot see.
+   */
+  baseContinuity?: 'unproven';
 }
 
 export interface WidenedScope {
