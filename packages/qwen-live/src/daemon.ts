@@ -39,7 +39,16 @@ import { MemoryService } from './memory/service.js';
 import { MemoryStoreError } from './memory/store.js';
 import { deriveMemoryBaseUrl } from './memory/config.js';
 import { persistLanguagePreference } from './language-preferences.js';
+import { persistScreenDisplayPreference } from './visual-preferences.js';
 import { liveMessage } from './i18n/messages.js';
+import { MonitorDebugStore } from './proactive/monitor-debug-store.js';
+import { escapeAnsiCtrlCodes } from './realtime/sanitize.js';
+import {
+  MAX_SUBAGENTS_REQUEST_BYTES,
+  parseSubagentsControlRequest,
+  parseSubagentsControlResult,
+  type SubagentsControlResult,
+} from './subagents/types.js';
 
 const HOST_WS_PATH = '/live/host';
 
@@ -88,6 +97,7 @@ export class LiveDaemon {
   private session: LiveSession | undefined;
   private memory: MemoryService | undefined;
   private log: SessionLog | undefined;
+  private monitorDebug: MonitorDebugStore | undefined;
   private discoveryPublished = false;
   private stopping = false;
   private resourcesStopPromise: Promise<void> | undefined;
@@ -115,16 +125,30 @@ export class LiveDaemon {
   }
 
   async start(): Promise<{ port: number; url: string }> {
+    if (this.logger.debugEnabled) {
+      const archive = new MonitorDebugStore((event, details) =>
+        this.logger.debug(`${event} ${JSON.stringify(details)}`),
+      );
+      if (await archive.initialize()) this.monitorDebug = archive;
+    }
     // Fail fast when the default backend is missing or too old — before we
     // take the Host discovery file from anyone. Secondary backends are
     // best-effort: a failure marks them unavailable and startup continues.
     await this.registry.preflight((message) => this.logger.warn(message));
 
+    let memoryBaseUrl = '';
+    try {
+      memoryBaseUrl = deriveMemoryBaseUrl(this.config.realtime.endpoint);
+    } catch {
+      this.logger.warn(
+        'Memory default endpoint unavailable; check realtimeEndpoint or QWEN_LIVE_REALTIME_ENDPOINT.',
+      );
+    }
     this.memory = new MemoryService({
       config: this.config.memory,
       dataDir: this.config.dataDir,
       connection: {
-        baseUrl: deriveMemoryBaseUrl(this.config.realtime.endpoint),
+        baseUrl: memoryBaseUrl,
         apiKey: this.config.realtime.apiKey,
       },
       log: (event, details) =>
@@ -137,6 +161,11 @@ export class LiveDaemon {
       daemonShutdownV1: true,
       getUiLanguage: () => ({ language: this.config.language ?? 'en' }),
       getSubagents: () => this.session?.getSubagentsSnapshot(),
+      subagentsControlV1: true,
+      onScreenDisplayChange: (screenDisplayId) => {
+        this.config.visualInput.screenDisplayId =
+          persistScreenDisplayPreference(this.config.dataDir, screenDisplayId);
+      },
       onLanguageAction: (language) => {
         this.config.language = persistLanguagePreference(
           this.config.dataDir,
@@ -164,6 +193,7 @@ export class LiveDaemon {
       visualInput: {
         source: this.config.visualInput.source,
         mode: this.config.visualInput.mode,
+        screenDisplayId: this.config.visualInput.screenDisplayId ?? 'primary',
         fps: this.config.visualInput.fps,
         cameraWidth: this.config.visualInput.cameraResolution.width,
         cameraHeight: this.config.visualInput.cameraResolution.height,
@@ -220,6 +250,7 @@ export class LiveDaemon {
           : {}),
       },
       proactive: this.config.proactive,
+      monitorDebug: this.monitorDebug,
       memory: this.memory,
       log,
       logger: this.logger,
@@ -269,6 +300,85 @@ export class LiveDaemon {
     return this.stopPromise;
   }
 
+  async stopForProcessExit(): Promise<void> {
+    const errors: unknown[] = [];
+    try {
+      await this.stop();
+    } catch (error) {
+      errors.push(error);
+    }
+    // An exiting process cannot serve a Quit retry. Only release our own lease.
+    try {
+      await this.removeDiscovery();
+    } catch (error) {
+      this.logCleanupFailure('discovery', error);
+      errors.push(error);
+    }
+    if (errors.length)
+      throw new AggregateError(errors, 'Live shutdown cleanup failed.');
+  }
+
+  private async removeDiscovery(): Promise<void> {
+    if (!this.discoveryPublished) return;
+    await removeLiveDiscoveryFile(this.config.discoveryDir, {
+      pid: process.pid,
+      instanceNonce: this.instanceNonce,
+    });
+    this.discoveryPublished = false;
+    this.pendingCleanup?.delete('discovery');
+  }
+
+  private logCleanupFailure(name: string, error: unknown): void {
+    const secrets = [
+      this.token,
+      this.config.realtime.apiKey,
+      process.env[this.config.memory.updater.apiKeyEnv],
+      process.env[this.config.memory.observer.apiKeyEnv],
+      ...this.config.backends.flatMap((backend) =>
+        backend.kind === 'qwen-code'
+          ? [backend.token]
+          : Object.entries(backend.env)
+              .filter(([key]) =>
+                /key|token|secret|password|authorization/iu.test(key),
+              )
+              .map(([, value]) => value),
+      ),
+    ]
+      .filter((value): value is string => Boolean(value))
+      .sort((left, right) => right.length - left.length);
+    const causes: unknown[] = [error];
+    const seen = new Set<unknown>();
+    const messages: string[] = [];
+    while (causes.length && messages.length < 8) {
+      const cause = causes.shift();
+      if (seen.has(cause)) continue;
+      seen.add(cause);
+      let message =
+        cause instanceof Error
+          ? cause.message
+          : typeof cause === 'string'
+            ? cause
+            : 'Unknown cleanup failure';
+      message = message
+        .replace(/\b(?:https?|wss?):\/\/[^\s<>"']+/giu, '[URL omitted]')
+        .replace(
+          /\b(?:Bearer|Basic)\s+[^\s"',;]+/giu,
+          '[redacted authorization]',
+        )
+        .replace(/[\r\n\t]/gu, ' ');
+      for (const secret of secrets)
+        message = message.split(secret).join('[redacted]');
+      messages.push(escapeAnsiCtrlCodes(message).slice(0, 512));
+      if (cause instanceof Error && cause.cause !== undefined)
+        causes.push(cause.cause);
+      if (cause instanceof AggregateError)
+        causes.push(...cause.errors.slice(0, 8));
+    }
+    this.logger.warn(
+      `cleanup of '${name}' failed: ${messages.join('; ').slice(0, 2048)}`,
+    );
+  }
+
   private stopResources(): Promise<void> {
     this.stopping = true;
     this.pendingCleanup ??= new Map<string, () => unknown>([
@@ -281,17 +391,9 @@ export class LiveDaemon {
           () => adaptor.close(),
         ]),
       ['memory', () => this.memory?.close()],
+      ['monitor debug archive', () => this.monitorDebug?.flush()],
       ['log', () => this.log?.close()],
-      [
-        'discovery',
-        () =>
-          this.discoveryPublished
-            ? removeLiveDiscoveryFile(this.config.discoveryDir, {
-                pid: process.pid,
-                instanceNonce: this.instanceNonce,
-              })
-            : undefined,
-      ],
+      ['discovery', () => this.removeDiscovery()],
     ]);
     const pending = this.pendingCleanup;
     this.resourcesStopPromise ??= (async () => {
@@ -304,6 +406,7 @@ export class LiveDaemon {
           await dispose();
           pending.delete(name);
         } catch (error) {
+          this.logCleanupFailure(name, error);
           errors.push(error);
         }
       };
@@ -383,13 +486,7 @@ export class LiveDaemon {
         res.writeHead(401).end();
         return;
       }
-      const nonce = req.headers['x-qwen-live-nonce'];
-      const presented = Buffer.from(typeof nonce === 'string' ? nonce : '');
-      const expected = Buffer.from(this.instanceNonce);
-      if (
-        presented.length !== expected.length ||
-        !timingSafeEqual(presented, expected)
-      ) {
+      if (!this.authorizeInstance(req)) {
         res.writeHead(409).end();
         return;
       }
@@ -398,6 +495,18 @@ export class LiveDaemon {
     }
     if (this.stopping) {
       res.writeHead(503).end();
+      return;
+    }
+    if (route === 'POST /live/subagents') {
+      if (!this.authorize(req)) {
+        res.writeHead(401).end();
+        return;
+      }
+      if (!this.authorizeInstance(req)) {
+        res.writeHead(409).end();
+        return;
+      }
+      void this.serveSubagents(req, res);
       return;
     }
     if (
@@ -416,6 +525,76 @@ export class LiveDaemon {
     }
     res.statusCode = route.startsWith('GET /live/setup') ? 401 : 404;
     res.end();
+  }
+
+  private async serveSubagents(
+    req: IncomingMessage,
+    res: import('node:http').ServerResponse,
+  ): Promise<void> {
+    const reply = (status: number, result: SubagentsControlResult) => {
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(result));
+    };
+    if (req.headers['content-type']?.split(';', 1)[0] !== 'application/json') {
+      reply(415, { type: 'error', code: 'invalid_request' });
+      req.resume();
+      return;
+    }
+    const encoded = await new Promise<string | undefined>((resolve) => {
+      const chunks: Buffer[] = [];
+      let bytes = 0;
+      let finished = false;
+      const finish = (value?: string) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = setTimeout(() => {
+        finish();
+        req.destroy();
+      }, 10_000);
+      timer.unref();
+      req.on('data', (chunk: Buffer) => {
+        if (finished) return;
+        bytes += chunk.length;
+        if (bytes > MAX_SUBAGENTS_REQUEST_BYTES) {
+          reply(413, { type: 'error', code: 'invalid_request' });
+          finish();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on('end', () => finish(Buffer.concat(chunks).toString('utf8')));
+      req.on('error', () => finish());
+      req.on('aborted', () => finish());
+    });
+    if (encoded === undefined || res.destroyed) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(encoded);
+    } catch {
+      reply(400, { type: 'error', code: 'invalid_request' });
+      return;
+    }
+    const action = parseSubagentsControlRequest(parsed);
+    if (!action) {
+      reply(400, { type: 'error', code: 'invalid_request' });
+      return;
+    }
+    if (this.stopping || !this.session) {
+      reply(503, { type: 'error', code: 'unavailable' });
+      return;
+    }
+    try {
+      const result = parseSubagentsControlResult(
+        await this.session.handleSubagentsRequest(action),
+      );
+      if (!result) throw new Error('Invalid subagent management result');
+      reply(200, result);
+    } catch {
+      reply(500, { type: 'error', code: 'action_failed' });
+    }
   }
 
   private async serveQuit(
@@ -466,6 +645,16 @@ export class LiveDaemon {
     if (typeof auth !== 'string' || !auth.startsWith('Bearer ')) return false;
     const presented = Buffer.from(auth.slice('Bearer '.length));
     const expected = Buffer.from(this.token);
+    return (
+      presented.length === expected.length &&
+      timingSafeEqual(presented, expected)
+    );
+  }
+
+  private authorizeInstance(req: IncomingMessage): boolean {
+    const nonce = req.headers['x-qwen-live-nonce'];
+    const presented = Buffer.from(typeof nonce === 'string' ? nonce : '');
+    const expected = Buffer.from(this.instanceNonce);
     return (
       presented.length === expected.length &&
       timingSafeEqual(presented, expected)

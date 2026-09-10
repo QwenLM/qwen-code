@@ -7,6 +7,7 @@ import type { HostAudioEngine } from '../../preload/audio-engine.ts';
 import { HostAudioLifecycle } from '../../preload/audio-lifecycle.ts';
 import * as inputPolicy from '../../preload/audio-input-policy.ts';
 import * as outputQueue from '../../preload/audio-output-queue.ts';
+import * as outputResampler from '../../preload/audio-output-resampler.ts';
 
 const engineSource = ts.transpileModule(
   readFileSync(
@@ -158,6 +159,7 @@ function fixture(contextSampleRate = 48_000) {
     './audio-lifecycle.ts': { HostAudioLifecycle },
     './audio-input-policy.ts': inputPolicy,
     './audio-output-queue.ts': outputQueue,
+    './audio-output-resampler.ts': outputResampler,
   };
   runInNewContext(engineSource, {
     exports,
@@ -236,17 +238,30 @@ describe('Live Host audio engine', () => {
         const context = h.contexts[0];
         assert.equal(Object.hasOwn(context.options, 'sampleRate'), false);
         assert.equal(context.sampleRate, rate);
-        assert.equal(context.buffers.length, 2);
-        assert.equal(context.buffers[0].rate, 24_000);
-        assert.equal(context.buffers[0].data[0], 0.5);
+        assert.equal(context.buffers.length, 3);
+        assert.ok(context.buffers.every((buffer) => buffer.rate === rate));
+        assert.equal(
+          context.buffers.reduce((length, buffer) => length + buffer.length, 0),
+          rate / 5,
+        );
         assert.equal(context.sources[0].connected, context.destination);
         assert.equal(context.sources[0].startedAt, 0.01);
-        assert.equal(context.sources[1].startedAt, 0.11);
+        for (let index = 1; index < context.sources.length; index += 1) {
+          assert.equal(
+            context.sources[index].startedAt,
+            Math.round(
+              context.sources[index - 1].startedAt! * rate +
+                context.buffers[index - 1].length,
+            ) / rate,
+          );
+        }
         assert.equal(h.started.length, 1);
         assert.equal(h.completed.length, 0);
         context.sources[0].onended?.();
         assert.equal(h.completed.length, 0);
         context.sources[1].onended?.();
+        assert.equal(h.completed.length, 0);
+        context.sources[2].onended?.();
         assert.equal(h.completed.length, 1);
         assert.equal(h.completed[0].outputId, identity.outputId);
         const diagnostic = h.diagnostics.find(
@@ -266,6 +281,205 @@ describe('Live Host audio engine', () => {
       }
     });
   }
+
+  it('flushes a tiny output once and rejects late PCM and duplicate markers', async () => {
+    const h = fixture();
+    try {
+      await h.engine.initialize(false);
+      h.engine.setOutputEndMarkerMode(true);
+      const identity = { epoch: 2, outputId: 10 };
+      const bytes = new Uint8Array([0xff, 0, 64, 0xff]);
+      await h.engine.play(bytes.subarray(1, 3), identity);
+      const context = h.contexts[0];
+      assert.equal(context.sources.length, 0);
+      assert.equal(h.started.length, 1);
+      assert.equal(h.completed.length, 0);
+      await h.engine.finishOutputAudio(identity);
+      assert.equal(context.sources.length, 1);
+      assert.deepEqual(Array.from(context.buffers[0].data), [0.5, 0.5]);
+      await h.engine.finishOutputAudio(identity);
+      await h.engine.play(bytes.subarray(1, 3), identity);
+      assert.equal(context.sources.length, 1);
+      assert.equal(h.completed.length, 0);
+      context.sources[0].onended?.();
+      assert.equal(h.completed.length, 1);
+      await h.engine.finishOutputAudio(identity);
+      await h.engine.play(bytes.subarray(1, 3), identity);
+      assert.equal(context.sources.length, 1);
+      assert.equal(h.completed.length, 1);
+    } finally {
+      await h.engine.dispose();
+    }
+  });
+
+  it('waits for a late marker and its retained tail after the sources drain', async () => {
+    const h = fixture(16_000);
+    try {
+      await h.engine.initialize(false);
+      h.engine.setOutputEndMarkerMode(true);
+      const identity = { epoch: 3, outputId: 1 };
+      await h.engine.play(new Uint8Array(960), identity);
+      const context = h.contexts[0];
+      context.sources[0].onended?.();
+      assert.equal(h.completed.length, 0);
+      await h.engine.finishOutputAudio(identity);
+      assert.equal(context.sources.length, 2);
+      assert.equal(h.completed.length, 0);
+      assert.equal(
+        context.buffers.reduce((length, buffer) => length + buffer.length, 0),
+        320,
+      );
+      context.sources[1].onended?.();
+      assert.equal(h.completed.length, 1);
+    } finally {
+      await h.engine.dispose();
+    }
+  });
+
+  it('completes sub-device-sample PCM at its marker without leaving a pending output', async () => {
+    const h = fixture(8_000);
+    try {
+      await h.engine.initialize(false);
+      h.engine.setOutputEndMarkerMode(true);
+      const identity = { epoch: 3, outputId: 2 };
+      await h.engine.play(new Uint8Array([0, 0]), identity);
+      assert.equal(h.contexts[0].sources.length, 0);
+      await h.engine.finishOutputAudio(identity);
+      assert.equal(h.contexts[0].sources.length, 0);
+      assert.equal(h.started.length, 1);
+      assert.equal(h.completed.length, 1);
+    } finally {
+      await h.engine.dispose();
+    }
+  });
+
+  it('clears playback and retained state if scheduling the terminal tail fails', async () => {
+    const h = fixture();
+    try {
+      await h.engine.initialize(false);
+      h.engine.setOutputEndMarkerMode(true);
+      const identity = { epoch: 3, outputId: 3 };
+      await h.engine.play(new Uint8Array([0, 64]), identity);
+      const context = h.contexts[0];
+      context.createBuffer = () => {
+        throw new Error('synthetic-buffer-failure');
+      };
+      await assert.rejects(
+        h.engine.finishOutputAudio(identity),
+        /synthetic-buffer-failure/,
+      );
+      assert.equal(context.state, 'closed');
+      assert.equal(h.completed.length, 0);
+      await h.engine.play(new Uint8Array([0, 0]), identity);
+      await h.engine.finishOutputAudio(identity);
+      assert.deepEqual(Array.from(h.contexts[1].buffers[0].data), [0, 0]);
+      h.contexts[1].sources[0].onended?.();
+      assert.equal(h.completed.length, 1);
+    } finally {
+      await h.engine.dispose();
+    }
+  });
+
+  it('isolates retained audio by both epoch and output identity', async () => {
+    const h = fixture();
+    try {
+      await h.engine.initialize(false);
+      h.engine.setOutputEndMarkerMode(true);
+      const first = { epoch: 3, outputId: 1 };
+      const second = { epoch: 3, outputId: 2 };
+      const nextEpoch = { epoch: 4, outputId: 1 };
+      await h.engine.play(new Uint8Array([0, 64]), first);
+      await h.engine.play(new Uint8Array([0, 224]), second);
+      await h.engine.play(new Uint8Array([0, 0]), nextEpoch);
+      const context = h.contexts[0];
+      assert.equal(context.sources.length, 0);
+      await h.engine.finishOutputAudio(second);
+      await h.engine.finishOutputAudio(first);
+      await h.engine.finishOutputAudio(nextEpoch);
+      assert.deepEqual(
+        context.buffers.map((buffer) => Array.from(buffer.data)),
+        [
+          [-0.25, -0.25],
+          [0.5, 0.5],
+          [0, 0],
+        ],
+      );
+      for (const source of context.sources) source.onended?.();
+      assert.deepEqual(JSON.parse(JSON.stringify(h.completed)), [
+        second,
+        first,
+        nextEpoch,
+      ]);
+    } finally {
+      await h.engine.dispose();
+    }
+  });
+
+  it('discards retained audio and pending finish operations when muted', async () => {
+    const h = fixture();
+    try {
+      await h.engine.initialize(false);
+      h.engine.setOutputEndMarkerMode(true);
+      const identity = { epoch: 5, outputId: 1 };
+      await h.engine.play(new Uint8Array([0, 64]), identity);
+      const staleContext = h.contexts[0];
+      const staleFinish = h.engine.finishOutputAudio(identity);
+      h.engine.setOutputMuted(true);
+      await staleFinish;
+      assert.equal(staleContext.sources.length, 0);
+      assert.equal(staleContext.state, 'closed');
+      assert.equal(h.completed.length, 0);
+      h.engine.setOutputMuted(false);
+      await h.engine.play(new Uint8Array([0, 0]), identity);
+      await h.engine.finishOutputAudio(identity);
+      assert.deepEqual(Array.from(h.contexts[1].buffers[0].data), [0, 0]);
+      h.contexts[1].sources[0].onended?.();
+      assert.equal(h.completed.length, 1);
+    } finally {
+      await h.engine.dispose();
+    }
+  });
+
+  it('preserves the legacy no-marker drain without retaining any samples', async () => {
+    const h = fixture(44_100);
+    try {
+      await h.engine.initialize(false);
+      const identity = { epoch: 6, outputId: 1 };
+      await h.engine.play(new Uint8Array([0, 64]), identity);
+      const context = h.contexts[0];
+      assert.equal(context.buffers.length, 1);
+      assert.equal(context.buffers[0].rate, 24_000);
+      assert.deepEqual(Array.from(context.buffers[0].data), [0.5]);
+      context.sources[0].onended?.();
+      assert.equal(h.completed.length, 1);
+      await h.engine.finishOutputAudio(identity);
+      assert.equal(context.buffers.length, 1);
+    } finally {
+      await h.engine.dispose();
+    }
+  });
+
+  it('clears the new tail state when a mode switch interrupts playback', async () => {
+    const h = fixture();
+    try {
+      await h.engine.initialize(false);
+      h.engine.setOutputEndMarkerMode(true);
+      const identity = { epoch: 7, outputId: 1 };
+      await h.engine.play(new Uint8Array(960), identity);
+      const context = h.contexts[0];
+      h.engine.setOutputEndMarkerMode(false);
+      assert.equal(context.sources[0].stopped, true);
+      assert.equal(h.completed.length, 0);
+      await h.engine.finishOutputAudio(identity);
+      assert.equal(context.buffers.length, 1);
+      await h.engine.play(new Uint8Array([0, 0]), identity);
+      assert.equal(h.contexts[1].buffers[0].rate, 24_000);
+      h.contexts[1].sources[0].onended?.();
+      assert.equal(h.completed.length, 1);
+    } finally {
+      await h.engine.dispose();
+    }
+  });
 
   it('does not acquire a microphone when capture starts muted', async () => {
     const h = fixture();

@@ -34,6 +34,7 @@ import { DEFAULT_PROACTIVE_CONFIG, type ProactiveConfig } from '../config.js';
 import type { LiveVisualCapture } from '../host/live-host-coordinator.js';
 import type { LiveState, LiveVisualInput } from '../host/types.js';
 import type { SessionLog } from '../log/session-log.js';
+import type { SubagentsSnapshot } from '../subagents/types.js';
 import { LiveLogger } from '../logger.js';
 import { resolveMemoryConfig } from '../memory/config.js';
 import { MemoryService } from '../memory/service.js';
@@ -157,6 +158,12 @@ class FakeAdaptor implements BackendAdaptor {
   );
 
   readonly cancel = vi.fn(async (_handle: BackendHandle): Promise<void> => {});
+  readonly cancelJob = vi.fn(
+    async (
+      _handle: BackendHandle,
+      _jobRef: string,
+    ): Promise<'stopping' | 'stopped' | 'not_found'> => 'stopping',
+  );
 
   readonly respondPermission = vi.fn(
     async (
@@ -269,7 +276,7 @@ function createFakeHost(capture: LiveVisualCapture) {
     captureVisualContext: vi.fn(
       async (
         _callerSessionId: string,
-        _options?: { persistAsset?: boolean },
+        _options?: { persistAsset?: boolean; screenScope?: 'display' },
       ): Promise<LiveVisualCapture> => capture,
     ),
   };
@@ -311,6 +318,7 @@ interface StartSessionOptions {
   capture?: LiveVisualCapture;
   proactive?: ProactiveConfig;
   memory?: MemoryService;
+  onSubagentsChanged?: (snapshot: SubagentsSnapshot) => void;
   createProactiveScheduler?: (
     options: ProactiveSchedulerOptions,
   ) => ProactiveSchedulerControl;
@@ -400,6 +408,9 @@ class FakeProactiveScheduler implements ProactiveSchedulerControl {
     (
       _selector: Parameters<ProactiveSchedulerControl['cancelTasks']>[0],
     ): ProactiveTask[] => [CANCELLED_TASK],
+  );
+  readonly cancelTaskById = vi.fn(
+    (_taskId: string): ProactiveTask | undefined => CANCELLED_TASK,
   );
   readonly listTasks = vi.fn((): ProactiveTask[] => this.activeTasks);
   readonly feedAudio = vi.fn((_pcm16: Uint8Array): void => {});
@@ -527,6 +538,9 @@ async function startSession(
     openRealtime,
     ...(options.proactive ? { proactive: options.proactive } : {}),
     ...(options.memory ? { memory: options.memory } : {}),
+    ...(options.onSubagentsChanged
+      ? { onSubagentsChanged: options.onSubagentsChanged }
+      : {}),
     ...(options.createProactiveScheduler
       ? { createProactiveScheduler: options.createProactiveScheduler }
       : {}),
@@ -604,7 +618,1154 @@ async function awaitReceipts(
 
 // -- tests --------------------------------------------------------------------
 
+describe('standalone subagent controls', () => {
+  it('signals unassigned approvals in the summary, getter and page even without a task or call', async () => {
+    const updates: SubagentsSnapshot[] = [];
+    const { session, adaptor, callbacks, realtime } = await startSession(
+      undefined,
+      { onSubagentsChanged: (snapshot) => updates.push(snapshot) },
+    );
+    try {
+      callTool(callbacks, 'session_create', {});
+      await awaitReceipts(realtime, 1);
+      await session.stop({ epoch: 1, callId: 'call-1' });
+      adaptor.queue('s1').push({
+        type: 'permission_request',
+        requestId: 'unassigned',
+        title: 'Real waiting operation',
+        options: PERMISSION_OPTIONS,
+      });
+      await vi.waitFor(() =>
+        expect(session.getSubagentsSnapshot()).toMatchObject({
+          counts: { needsAttention: 0 },
+          tasks: [],
+          pendingUnassignedPermissions: 1,
+        }),
+      );
+      await vi.waitFor(() =>
+        expect(updates.at(-1)?.pendingUnassignedPermissions).toBe(1),
+      );
+      expect(
+        await session.handleSubagentsRequest({ action: 'list' }),
+      ).toMatchObject({
+        type: 'page',
+        page: { snapshot: { pendingUnassignedPermissions: 1 } },
+      });
+      expect(
+        await session.handleSubagentsRequest({
+          action: 'permission',
+          requestHandle: 'req_1',
+          decision: 'deny',
+        }),
+      ).toMatchObject({ outcome: 'denied' });
+      expect(session.getSubagentsSnapshot().pendingUnassignedPermissions).toBe(
+        0,
+      );
+      await vi.waitFor(() =>
+        expect(updates.at(-1)?.pendingUnassignedPermissions).toBe(0),
+      );
+      expect(realtime.speakToUser).not.toHaveBeenCalled();
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it('keeps a real pending permission visible after its terminal task detail is evicted', async () => {
+    const { session, adaptor, callbacks, realtime } = await startSession();
+    try {
+      for (let index = 0; index < 33; index += 1) {
+        const jobRef = `terminal-${index}`;
+        adaptor.promptReceipt = { status: 'accepted', jobRef };
+        callTool(callbacks, 'handoff', { task: `Terminal task ${index}` });
+        await awaitReceipts(realtime, index + 1);
+        if (index === 0)
+          adaptor.queue('s1').push({
+            type: 'permission_request',
+            jobRef,
+            requestId: 'still-pending',
+            title: 'Unresolved file operation',
+            options: PERMISSION_OPTIONS,
+          });
+        adaptor
+          .queue('s1')
+          .push({ type: 'turn_complete', jobRef, summary: 'Finished' });
+        await vi.waitFor(() =>
+          expect(session.getSubagentsSnapshot().counts.completed).toBe(
+            index + 1,
+          ),
+        );
+      }
+      const result = await session.handleSubagentsRequest({
+        action: 'list',
+        selectedId: 'harness:job_1',
+      });
+      expect(result.type).toBe('page');
+      if (result.type !== 'page') throw new Error('No page');
+      expect(result.page.selected).toBeUndefined();
+      expect(result.page.unassignedPermissions).toMatchObject([
+        {
+          requestHandle: 'req_1',
+          backend: 'fake',
+          sessionId: 'session_1',
+          title: 'Unresolved file operation',
+        },
+      ]);
+      expect(
+        await session.handleSubagentsRequest({
+          action: 'permission',
+          requestHandle: 'req_1',
+          decision: 'deny',
+        }),
+      ).toMatchObject({ outcome: 'denied' });
+      expect(adaptor.respondPermission).toHaveBeenCalledExactlyOnceWith(
+        { id: 's1', adaptor: 'fake' },
+        'still-pending',
+        'deny',
+      );
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it('does not invent approvals for filesystem failures or allow an incomplete request', async () => {
+    const { session, adaptor, callbacks, realtime } = await startSession();
+    try {
+      callTool(callbacks, 'handoff', { task: 'Write a file' });
+      await awaitReceipts(realtime, 1);
+      await session.stop({ epoch: 1, callId: 'call-1' });
+      adaptor.queue('s1').push({
+        type: 'turn_error',
+        jobRef: 'p1',
+        error: 'Filesystem denied access',
+      });
+      await vi.waitFor(() =>
+        expect(session.getSubagentsSnapshot().tasks[0]?.status).toBe('failed'),
+      );
+      expect(
+        await session.handleSubagentsRequest({
+          action: 'list',
+          selectedId: 'harness:job_1',
+        }),
+      ).toMatchObject({
+        type: 'page',
+        page: { selected: { permissions: [] }, unassignedPermissions: [] },
+      });
+      adaptor.queue('s1').push({
+        type: 'permission_request',
+        requestId: 'long',
+        title: 'command '.repeat(600),
+        options: PERMISSION_OPTIONS,
+      });
+      await vi.waitFor(async () =>
+        expect(
+          await session.handleSubagentsRequest({ action: 'list' }),
+        ).toMatchObject({
+          type: 'page',
+          page: {
+            unassignedPermissions: [
+              {
+                requestHandle: 'req_1',
+                backend: 'fake',
+                sessionId: 'session_1',
+                titleTruncated: true,
+                choices: [{ decision: 'deny' }],
+              },
+            ],
+          },
+        }),
+      );
+      expect(
+        await session.handleSubagentsRequest({
+          action: 'permission',
+          requestHandle: 'req_1',
+          decision: 'allow',
+        }),
+      ).toMatchObject({ type: 'error', code: 'permission_unavailable' });
+      expect(adaptor.respondPermission).not.toHaveBeenCalled();
+      expect(
+        await session.handleSubagentsRequest({
+          action: 'permission',
+          requestHandle: 'req_1',
+          decision: 'deny',
+        }),
+      ).toMatchObject({ outcome: 'denied' });
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it('stops an exact job once, preserves requested versus terminal state, and rejects stale IDs', async () => {
+    const { session, adaptor, callbacks, realtime } = await startSession();
+    try {
+      callTool(callbacks, 'handoff', { task: 'First task' });
+      await awaitReceipts(realtime, 1);
+      const list = await session.handleSubagentsRequest({
+        action: 'list',
+        selectedId: 'harness:job_1',
+      });
+      expect(list).toMatchObject({
+        type: 'page',
+        page: {
+          selected: { id: 'harness:job_1', canStop: true, permissions: [] },
+        },
+      });
+      const request = { action: 'stop', taskId: 'harness:job_1' } as const;
+      expect(
+        await Promise.all([
+          session.handleSubagentsRequest(request),
+          session.handleSubagentsRequest(request),
+        ]),
+      ).toEqual([
+        { type: 'outcome', outcome: 'stopping', taskId: request.taskId },
+        { type: 'outcome', outcome: 'stopping', taskId: request.taskId },
+      ]);
+      expect(adaptor.cancelJob).toHaveBeenCalledTimes(1);
+      expect(session.getSubagentsSnapshot().tasks[0]?.status).not.toBe(
+        'cancelled',
+      );
+      expect(
+        await session.handleSubagentsRequest({ action: 'list' }),
+      ).toMatchObject({
+        type: 'page',
+        page: {
+          snapshot: { tasks: [{ canStop: false, stopReason: 'stopping' }] },
+        },
+      });
+      adaptor
+        .queue('s1')
+        .push({ type: 'turn_error', jobRef: 'p1', error: 'cancelled' });
+      await vi.waitFor(() =>
+        expect(session.getSubagentsSnapshot().tasks[0]?.status).toBe(
+          'cancelled',
+        ),
+      );
+      const texts = realtime.sendBackendContext.mock.calls.map(
+        ([text]) => text,
+      );
+      expect(texts.filter((text) => text.includes('SUBAGENT_CONTROL'))).toEqual(
+        [
+          '[SUBAGENT_CONTROL harness:job_1] Stop requested. Awaiting backend terminal confirmation.',
+          '[SUBAGENT_CONTROL harness:job_1] Backend confirmed cancellation.',
+        ],
+      );
+      adaptor.promptReceipt = { status: 'accepted', jobRef: 'p2' };
+      callTool(callbacks, 'handoff', { task: 'Replacement task' });
+      await awaitReceipts(realtime, 2);
+      expect(await session.handleSubagentsRequest(request)).toMatchObject({
+        outcome: 'already_ended',
+      });
+      expect(
+        await session.handleSubagentsRequest({
+          action: 'stop',
+          taskId: 'harness:missing',
+        }),
+      ).toMatchObject({ type: 'error', code: 'not_found' });
+      callTool(callbacks, 'session_stop', {
+        job: 'missing',
+        session: 'session_1',
+      });
+      expect((await awaitReceipts(realtime, 3))[2]).toMatchObject({
+        status: 'error',
+      });
+      expect(adaptor.cancelJob).toHaveBeenCalledTimes(1);
+      expect(adaptor.cancel).not.toHaveBeenCalled();
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it('retains complete silent receipts across hangup and a refused resumed transport', async () => {
+    const { session, adaptor, callbacks, realtime } = await startSession();
+    try {
+      callTool(callbacks, 'handoff', { task: 'Offline task' });
+      await awaitReceipts(realtime, 1);
+      await session.stop({ epoch: 1, callId: 'call-1' });
+      await session.handleSubagentsRequest({
+        action: 'stop',
+        taskId: 'harness:job_1',
+      });
+      adaptor
+        .queue('s1')
+        .push({ type: 'turn_error', jobRef: 'p1', error: 'cancelled' });
+      await vi.waitFor(() =>
+        expect(session.getSubagentsSnapshot().tasks[0]?.status).toBe(
+          'cancelled',
+        ),
+      );
+      expect(realtime.sendBackendContext).not.toHaveBeenCalled();
+      realtime.sendBackendContext.mockReturnValue(false);
+      await session.start({
+        epoch: 2,
+        callId: 'call-2',
+        mode: 'resume',
+        visualInput: DEFAULT_VISUAL_INPUT,
+      });
+      expect(realtime.sendBackendContext).toHaveBeenCalled();
+      expect(realtime.speakToUser).not.toHaveBeenCalled();
+      await session.stop({ epoch: 2, callId: 'call-2' });
+      realtime.sendBackendContext.mockClear().mockReturnValue(true);
+      await session.start({
+        epoch: 3,
+        callId: 'call-3',
+        mode: 'resume',
+        visualInput: DEFAULT_VISUAL_INPUT,
+      });
+      expect(
+        realtime.sendBackendContext.mock.calls.map(([text]) => text),
+      ).toEqual([
+        '[SUBAGENT_CONTROL harness:job_1] Stop requested. Awaiting backend terminal confirmation.',
+        '[SUBAGENT_CONTROL harness:job_1] Backend confirmed cancellation.',
+      ]);
+      await session.stop({ epoch: 3, callId: 'call-3' });
+      realtime.sendBackendContext.mockClear();
+      await session.start({
+        epoch: 4,
+        callId: 'call-4',
+        mode: 'resume',
+        visualInput: DEFAULT_VISUAL_INPUT,
+      });
+      expect(realtime.sendBackendContext).not.toHaveBeenCalled();
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it('reports completion racing a stop without claiming cancellation', async () => {
+    const { session, adaptor, callbacks, realtime } = await startSession();
+    try {
+      callTool(callbacks, 'handoff', { task: 'Race task' });
+      await awaitReceipts(realtime, 1);
+      adaptor.cancelJob.mockImplementation(async () => {
+        adaptor.queue('s1').push({
+          type: 'turn_complete',
+          jobRef: 'p1',
+          summary: 'Actually completed',
+        });
+        await delay(10);
+        return 'stopping';
+      });
+      expect(
+        await session.handleSubagentsRequest({
+          action: 'stop',
+          taskId: 'harness:job_1',
+        }),
+      ).toMatchObject({ outcome: 'already_ended' });
+      expect(session.getSubagentsSnapshot().tasks[0]?.status).toBe('completed');
+      expect(
+        realtime.sendBackendContext.mock.calls.map(([text]) => text),
+      ).toEqual([
+        '[SUBAGENT_CONTROL harness:job_1] Stop requested. Awaiting backend terminal confirmation.',
+        '[SUBAGENT_CONTROL harness:job_1] Backend reported completion after the stop request; cancellation was not confirmed.',
+      ]);
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it('keeps real permission choices exact and unassigned requests separate after hangup', async () => {
+    const { session, adaptor, callbacks, realtime } = await startSession();
+    try {
+      callTool(callbacks, 'handoff', { task: 'Permission task' });
+      await awaitReceipts(realtime, 1);
+      await session.stop({ epoch: 1, callId: 'call-1' });
+      const queue = adaptor.queue('s1');
+      queue.push({
+        type: 'permission_request',
+        jobRef: 'p1',
+        requestId: 'real',
+        title: 'Write fixture',
+        options: [
+          { optionId: 'always', kind: 'proceed', escalation: 'always' },
+          { optionId: 'deny', kind: 'reject', escalation: 'once' },
+        ],
+      });
+      queue.push({
+        type: 'permission_request',
+        requestId: 'unassigned',
+        title: 'Unassigned operation',
+        options: [{ optionId: 'unknown', kind: 'other' }],
+      });
+      await vi.waitFor(async () =>
+        expect(
+          await session.handleSubagentsRequest({
+            action: 'list',
+            selectedId: 'harness:job_1',
+          }),
+        ).toMatchObject({
+          type: 'page',
+          page: {
+            selected: {
+              permissions: [
+                {
+                  requestHandle: 'req_1',
+                  choices: [
+                    { decision: 'allow', scope: 'always' },
+                    { decision: 'deny', scope: 'once' },
+                  ],
+                },
+              ],
+            },
+            unassignedPermissions: [{ requestHandle: 'req_2', choices: [] }],
+          },
+        }),
+      );
+      expect(
+        await session.handleSubagentsRequest({
+          action: 'permission',
+          requestHandle: 'req_2',
+          decision: 'allow',
+        }),
+      ).toMatchObject({ type: 'error', code: 'permission_unavailable' });
+      expect(
+        await session.handleSubagentsRequest({
+          action: 'permission',
+          requestHandle: 'req_1',
+          decision: 'deny',
+        }),
+      ).toMatchObject({
+        type: 'outcome',
+        outcome: 'denied',
+        requestHandle: 'req_1',
+      });
+      expect(adaptor.respondPermission).toHaveBeenCalledExactlyOnceWith(
+        { id: 's1', adaptor: 'fake' },
+        'real',
+        'deny',
+      );
+      expect(
+        await session.handleSubagentsRequest({
+          action: 'permission',
+          requestHandle: 'req_1',
+          decision: 'allow',
+        }),
+      ).toMatchObject({ type: 'error', code: 'permission_unavailable' });
+      expect(adaptor.respondPermission).toHaveBeenCalledTimes(1);
+      expect(realtime.speakToUser).not.toHaveBeenCalled();
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it('stops a Proactive ID without touching its same-title replacement', async () => {
+    const { session, callbacks, realtime } = await startSession(undefined, {
+      proactive: DEFAULT_PROACTIVE_CONFIG,
+    });
+    try {
+      const input = {
+        title: 'Timer',
+        duration_sec: 600,
+        reminder_text: 'Ready',
+      };
+      callTool(callbacks, CREATE_PROACTIVE_TIMER_TOOL_NAME, input);
+      await vi.waitFor(() =>
+        expect(realtime.submitFunctionOutput).toHaveBeenCalledTimes(1),
+      );
+      const original = session.getSubagentsSnapshot().tasks[0]!;
+      expect(
+        await session.handleSubagentsRequest({
+          action: 'stop',
+          taskId: original.id,
+        }),
+      ).toMatchObject({ outcome: 'stopped' });
+      callTool(callbacks, CREATE_PROACTIVE_TIMER_TOOL_NAME, input);
+      await vi.waitFor(() =>
+        expect(realtime.submitFunctionOutput).toHaveBeenCalledTimes(2),
+      );
+      expect(
+        await session.handleSubagentsRequest({
+          action: 'stop',
+          taskId: original.id,
+        }),
+      ).toMatchObject({ outcome: 'already_ended' });
+      const replacement = session
+        .getSubagentsSnapshot()
+        .tasks.find((task) => task.id !== original.id);
+      expect(replacement?.status).toBe('monitoring');
+    } finally {
+      session.dispose();
+    }
+  });
+});
+
 describe('runtime review reproductions', () => {
+  it('R2-8 trusts an exact message acknowledgement instead of a conflicting active-ref snapshot in the receipt', async () => {
+    const { session, adaptor, callbacks, realtime, log } = await startSession();
+    try {
+      let finish!: (value: PromptReceipt) => void;
+      adaptor.prompt.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      callTool(callbacks, 'handoff', { task: 'Joined task' });
+      await vi.waitFor(() => expect(adaptor.prompt).toHaveBeenCalledOnce());
+      adaptor.queue('s1').push({
+        type: 'turn_joined',
+        messageId: 'message',
+        jobRef: 'correct-turn',
+      });
+      adaptor.queue('s1').push({
+        type: 'turn_complete',
+        jobRef: 'correct-turn',
+        summary: 'Correct result',
+      });
+      adaptor
+        .queue('s1')
+        .push({ type: 'turn_started', jobRef: 'unrelated-next-turn' });
+      await vi.waitFor(() =>
+        expect(log.write).toHaveBeenCalledWith(
+          'backend.event',
+          expect.objectContaining({
+            type: 'turn_started',
+            jobRef: 'unrelated-next-turn',
+          }),
+        ),
+      );
+      finish({
+        status: 'accepted',
+        joinedActiveTurn: true,
+        joinedMessageId: 'message',
+        jobRef: 'unrelated-next-turn',
+      });
+      await awaitReceipts(realtime, 1);
+      expect(session.getSubagentsSnapshot().counts.completed).toBe(1);
+      expect(session.getSubagentsSnapshot().tasks[0]).toMatchObject({
+        status: 'completed',
+        output: 'Correct result',
+      });
+      callTool(callbacks, 'session_stop', { job: 'job_1' });
+      await awaitReceipts(realtime, 2);
+      expect(adaptor.cancelJob).not.toHaveBeenCalled();
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it.each(['before', 'after'] as const)(
+    'R2-8 follows the exact message ID when an undrained join is promoted %s its receipt',
+    async (timing) => {
+      const { session, adaptor, callbacks, realtime, log } =
+        await startSession();
+      try {
+        let finish!: (value: PromptReceipt) => void;
+        adaptor.prompt.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finish = resolve;
+            }),
+        );
+        callTool(callbacks, 'handoff', { task: 'Promoted task' });
+        await vi.waitFor(() => expect(adaptor.prompt).toHaveBeenCalledOnce());
+        const events = () => {
+          adaptor
+            .queue('s1')
+            .push({ type: 'turn_started', jobRef: 'promoted-message' });
+          adaptor.queue('s1').push({
+            type: 'turn_complete',
+            jobRef: 'promoted-message',
+            summary: 'Promoted result',
+          });
+        };
+        if (timing === 'before') {
+          events();
+          await vi.waitFor(() =>
+            expect(log.write).toHaveBeenCalledWith(
+              'backend.event',
+              expect.objectContaining({ type: 'turn_complete' }),
+            ),
+          );
+        }
+        finish({
+          status: 'accepted',
+          joinedActiveTurn: true,
+          joinedMessageId: 'promoted-message',
+        });
+        await awaitReceipts(realtime, 1);
+        if (timing === 'after') events();
+        await vi.waitFor(() =>
+          expect(session.getSubagentsSnapshot().counts.completed).toBe(1),
+        );
+        expect(session.getSubagentsSnapshot().tasks[0]).toMatchObject({
+          status: 'completed',
+          output: 'Promoted result',
+        });
+      } finally {
+        session.dispose();
+      }
+    },
+  );
+
+  it('R2-8 preserves a promised joined handle after its late acknowledgement aliases an existing task', async () => {
+    const { session, adaptor, callbacks, realtime } = await startSession();
+    try {
+      callTool(callbacks, 'handoff', { task: 'Original task' });
+      await awaitReceipts(realtime, 1);
+      adaptor.promptReceipt = {
+        status: 'accepted',
+        joinedActiveTurn: true,
+        joinedMessageId: 'late-known-join',
+      };
+      callTool(callbacks, 'handoff', { task: 'Additional instruction' });
+      const receipts = await awaitReceipts(realtime, 2);
+      expect(receipts[1]).toMatchObject({ job: 'job_2' });
+      adaptor.queue('s1').push({
+        type: 'turn_joined',
+        messageId: 'late-known-join',
+        jobRef: 'p1',
+      });
+      await vi.waitFor(() =>
+        expect(session.getSubagentsSnapshot().tasks).toHaveLength(1),
+      );
+      expect(session.getSubagentsSnapshot().tasks[0]).toMatchObject({
+        id: 'harness:job_1',
+        request: 'Original task',
+        status: 'running',
+      });
+      callTool(callbacks, 'session_stop', { job: 'job_2' });
+      await awaitReceipts(realtime, 3);
+      expect(adaptor.cancelJob).toHaveBeenCalledWith(
+        { id: 's1', adaptor: 'fake' },
+        'p1',
+      );
+      adaptor
+        .queue('s1')
+        .push({ type: 'turn_error', jobRef: 'p1', error: 'cancelled' });
+      await vi.waitFor(() =>
+        expect(session.getSubagentsSnapshot().counts.cancelled).toBe(1),
+      );
+      expect(session.getSubagentsSnapshot().counts.completed).toBe(0);
+      expect(session.getSubagentsSnapshot().tasks).toHaveLength(1);
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it('R2-8 reuses duplicate message acknowledgements without orphaning the first promised handle', async () => {
+    const { session, adaptor, callbacks, realtime } = await startSession();
+    try {
+      adaptor.promptReceipt = {
+        status: 'accepted',
+        joinedActiveTurn: true,
+        joinedMessageId: 'same-join',
+      };
+      callTool(callbacks, 'handoff', { task: 'First instruction' });
+      await awaitReceipts(realtime, 1);
+      callTool(callbacks, 'handoff', { task: 'Retry same instruction' });
+      const receipts = await awaitReceipts(realtime, 2);
+      expect(receipts[0]).toMatchObject({ job: 'job_1' });
+      expect(receipts[1]).toMatchObject({ job: 'job_1' });
+      adaptor.queue('s1').push({
+        type: 'turn_joined',
+        messageId: 'same-join',
+        jobRef: 'external',
+      });
+      adaptor
+        .queue('s1')
+        .push({ type: 'turn_complete', jobRef: 'external', summary: 'Result' });
+      await vi.waitFor(() =>
+        expect(session.getSubagentsSnapshot().counts.completed).toBe(1),
+      );
+      expect(session.getSubagentsSnapshot().tasks).toHaveLength(1);
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it.each(['before', 'after'] as const)(
+    'R2-8 isolates concurrent message identities when exact signals arrive %s their receipts',
+    async (timing) => {
+      const { session, adaptor, callbacks, realtime, log } =
+        await startSession();
+      try {
+        callTool(callbacks, 'session_create', {});
+        await awaitReceipts(realtime, 1);
+        const finish: Array<(value: PromptReceipt) => void> = [];
+        adaptor.prompt.mockImplementation(
+          () => new Promise<PromptReceipt>((resolve) => finish.push(resolve)),
+        );
+        for (const task of ['First task', 'Second task'])
+          callTool(callbacks, 'handoff', { session: 'session_1', task });
+        await vi.waitFor(() => expect(finish).toHaveLength(2));
+        const signals = () => {
+          for (const suffix of ['one', 'two']) {
+            adaptor.queue('s1').push({
+              type: 'turn_joined',
+              messageId: `message-${suffix}`,
+              jobRef: `ref-${suffix}`,
+            });
+            adaptor.queue('s1').push({
+              type: 'turn_complete',
+              jobRef: `ref-${suffix}`,
+              summary: `Result ${suffix}`,
+            });
+          }
+        };
+        if (timing === 'before') {
+          signals();
+          await vi.waitFor(() =>
+            expect(log.write).toHaveBeenCalledWith(
+              'backend.event',
+              expect.objectContaining({
+                type: 'turn_complete',
+                jobRef: 'ref-two',
+              }),
+            ),
+          );
+        }
+        finish[1]!({
+          status: 'accepted',
+          joinedActiveTurn: true,
+          joinedMessageId: 'message-two',
+        });
+        finish[0]!({
+          status: 'accepted',
+          joinedActiveTurn: true,
+          joinedMessageId: 'message-one',
+        });
+        await awaitReceipts(realtime, 3);
+        if (timing === 'after') signals();
+        await vi.waitFor(() =>
+          expect(session.getSubagentsSnapshot().counts.completed).toBe(2),
+        );
+        expect(
+          session
+            .getSubagentsSnapshot()
+            .tasks.map((task) => [task.request, task.output]),
+        ).toEqual(
+          expect.arrayContaining([
+            ['First task', 'Result one'],
+            ['Second task', 'Result two'],
+          ]),
+        );
+      } finally {
+        session.dispose();
+      }
+    },
+  );
+
+  it.each(['before', 'after'] as const)(
+    'R2-8 rejects conflicting refs for one exact message %s the receipt',
+    async (timing) => {
+      const { session, adaptor, callbacks, realtime, log } =
+        await startSession();
+      try {
+        let finish!: (receipt: PromptReceipt) => void;
+        adaptor.prompt.mockImplementationOnce(
+          () =>
+            new Promise<PromptReceipt>((resolve) => {
+              finish = resolve;
+            }),
+        );
+        callTool(callbacks, 'handoff', { task: 'Join one task' });
+        await vi.waitFor(() => expect(adaptor.prompt).toHaveBeenCalledOnce());
+        const signals = () => {
+          for (const jobRef of ['expected-ref', 'conflicting-ref'])
+            adaptor
+              .queue('s1')
+              .push({ type: 'turn_joined', messageId: 'message', jobRef });
+        };
+        if (timing === 'before') {
+          signals();
+          await vi.waitFor(() =>
+            expect(log.write).toHaveBeenCalledWith(
+              'backend.event',
+              expect.objectContaining({
+                type: 'turn_joined',
+                jobRef: 'conflicting-ref',
+              }),
+            ),
+          );
+        }
+        finish({
+          status: 'accepted',
+          joinedActiveTurn: true,
+          joinedMessageId: 'message',
+        });
+        await awaitReceipts(realtime, 1);
+        if (timing === 'after') signals();
+        adaptor.queue('s1').push({
+          type: 'turn_complete',
+          jobRef: 'conflicting-ref',
+          summary: 'Wrong task',
+        });
+        await vi.waitFor(() =>
+          expect(log.write).toHaveBeenCalledWith(
+            'backend.event',
+            expect.objectContaining({
+              type: 'turn_complete',
+              jobRef: 'conflicting-ref',
+            }),
+          ),
+        );
+        expect(session.getSubagentsSnapshot().counts.completed).toBe(0);
+        adaptor.queue('s1').push({
+          type: 'turn_complete',
+          jobRef: 'expected-ref',
+          summary: 'Expected task',
+        });
+        await vi.waitFor(() =>
+          expect(log.write).toHaveBeenCalledWith(
+            'backend.event',
+            expect.objectContaining({
+              type: 'turn_complete',
+              jobRef: 'expected-ref',
+            }),
+          ),
+        );
+        expect(session.getSubagentsSnapshot().counts.completed).toBe(
+          timing === 'after' ? 1 : 0,
+        );
+        expect(session.getSubagentsSnapshot().tasks[0]?.output).toBe(
+          timing === 'after' ? 'Expected task' : '',
+        );
+      } finally {
+        session.dispose();
+      }
+    },
+  );
+
+  it.each(['matching', 'missing', 'foreign'] as const)(
+    'R2-8 attributes late lifecycle events only with a %s message acknowledgement',
+    async (signal) => {
+      const { session, adaptor, callbacks, realtime } = await startSession();
+      try {
+        adaptor.promptReceipt = {
+          status: 'accepted',
+          joinedActiveTurn: true,
+          joinedMessageId: 'our-message',
+        };
+        callTool(callbacks, 'handoff', { task: 'Join external work' });
+        await awaitReceipts(realtime, 1);
+        if (signal !== 'missing')
+          adaptor.queue('s1').push({
+            type: 'turn_joined',
+            messageId:
+              signal === 'matching' ? 'our-message' : 'foreign-message',
+            jobRef: 'late-external-turn',
+          });
+        adaptor.queue('s1').push({
+          type: 'turn_started',
+          jobRef: 'late-external-turn',
+        });
+        adaptor.queue('s1').push({
+          type: 'turn_complete',
+          jobRef: 'late-external-turn',
+          summary: 'Late external result',
+        });
+        await vi.waitFor(() =>
+          expect(realtime.sendBackendContext).toHaveBeenCalledWith(
+            expect.stringMatching(
+              /^\[COMPLETE (job_1|session_1)\] Late external result$/,
+            ),
+          ),
+        );
+        expect(session.getSubagentsSnapshot().counts.completed).toBe(
+          signal === 'matching' ? 1 : 0,
+        );
+        expect(session.getSubagentsSnapshot().tasks[0]).toMatchObject({
+          status: signal === 'matching' ? 'completed' : 'starting',
+          output: signal === 'matching' ? 'Late external result' : '',
+        });
+      } finally {
+        session.dispose();
+      }
+    },
+  );
+
+  it('R2-8 reuses a known joined turn even when it completes before the ref-less receipt', async () => {
+    const { session, adaptor, callbacks, realtime, log } = await startSession();
+    try {
+      callTool(callbacks, 'handoff', { task: 'Original task' });
+      await awaitReceipts(realtime, 1);
+      let finish!: (value: PromptReceipt) => void;
+      adaptor.prompt.mockImplementationOnce(
+        () =>
+          new Promise<PromptReceipt>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      callTool(callbacks, 'handoff', {
+        session: 'session_1',
+        task: 'Additional instruction',
+      });
+      await vi.waitFor(() => expect(adaptor.prompt).toHaveBeenCalledTimes(2));
+      adaptor.queue('s1').push({
+        type: 'turn_joined',
+        messageId: 'known-join',
+        jobRef: 'p1',
+      });
+      adaptor.queue('s1').push({
+        type: 'turn_complete',
+        jobRef: 'p1',
+        summary: 'Original result',
+      });
+      await vi.waitFor(() =>
+        expect(log.write).toHaveBeenCalledWith(
+          'backend.event',
+          expect.objectContaining({ type: 'turn_complete' }),
+        ),
+      );
+      finish({
+        status: 'accepted',
+        joinedActiveTurn: true,
+        joinedMessageId: 'known-join',
+      });
+      const receipts = await awaitReceipts(realtime, 2);
+      expect(receipts[1]).toMatchObject({ job: 'job_1' });
+      const snapshot = session.getSubagentsSnapshot();
+      expect(snapshot.counts.completed).toBe(1);
+      expect(snapshot.tasks).toHaveLength(1);
+      expect(snapshot.tasks[0]).toMatchObject({
+        request: 'Original task',
+        status: 'completed',
+        output: 'Original result',
+      });
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it('R2-8 does not guess a joined receipt identity from multiple observed refs', async () => {
+    const { session, adaptor, callbacks, realtime, log } = await startSession();
+    try {
+      let finish!: (value: PromptReceipt) => void;
+      adaptor.prompt.mockImplementationOnce(
+        () =>
+          new Promise<PromptReceipt>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      callTool(callbacks, 'handoff', { task: 'Uncertain joined task' });
+      await vi.waitFor(() => expect(adaptor.prompt).toHaveBeenCalledOnce());
+      for (const jobRef of ['earlier', 'later'])
+        adaptor.queue('s1').push({
+          type: 'turn_complete',
+          jobRef,
+          summary: `Result ${jobRef}`,
+        });
+      await vi.waitFor(() =>
+        expect(log.write).toHaveBeenCalledWith(
+          'backend.event',
+          expect.objectContaining({ jobRef: 'later' }),
+        ),
+      );
+      finish({ status: 'accepted', joinedActiveTurn: true });
+      await awaitReceipts(realtime, 1);
+      expect(session.getSubagentsSnapshot().counts.completed).toBe(0);
+      expect(session.getSubagentsSnapshot().tasks[0]).toMatchObject({
+        status: 'starting',
+        output: '',
+      });
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it('R2-8 does not reuse an already completed job from a replay during another joined submission', async () => {
+    const { session, adaptor, callbacks, realtime, log } = await startSession();
+    try {
+      callTool(callbacks, 'handoff', { task: 'Completed earlier' });
+      await awaitReceipts(realtime, 1);
+      adaptor.queue('s1').push({
+        type: 'turn_complete',
+        jobRef: 'p1',
+        summary: 'Earlier result',
+      });
+      await vi.waitFor(() =>
+        expect(session.getSubagentsSnapshot().counts.completed).toBe(1),
+      );
+      let finish!: (value: PromptReceipt) => void;
+      adaptor.prompt.mockImplementationOnce(
+        () =>
+          new Promise<PromptReceipt>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      log.write.mockClear();
+      callTool(callbacks, 'handoff', { task: 'Join a different task' });
+      await vi.waitFor(() => expect(adaptor.prompt).toHaveBeenCalledTimes(2));
+      adaptor.queue('s1').push({
+        type: 'turn_complete',
+        jobRef: 'p1',
+        summary: 'Earlier result',
+      });
+      await vi.waitFor(() =>
+        expect(log.write).toHaveBeenCalledWith(
+          'backend.event',
+          expect.objectContaining({ type: 'turn_complete' }),
+        ),
+      );
+      finish({ status: 'accepted', joinedActiveTurn: true });
+      const receipts = await awaitReceipts(realtime, 2);
+      expect(receipts[1]).toMatchObject({ job: 'job_2' });
+      expect(session.getSubagentsSnapshot().counts.completed).toBe(1);
+      expect(session.getSubagentsSnapshot().tasks).toHaveLength(2);
+      expect(session.getSubagentsSnapshot().tasks[0]).toMatchObject({
+        request: 'Join a different task',
+        status: 'starting',
+        output: '',
+      });
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it('R2-8 does not adopt a sole observed ref after overlapping submissions settle', async () => {
+    const { session, adaptor, callbacks, realtime, log } = await startSession();
+    try {
+      callTool(callbacks, 'session_create', {});
+      await awaitReceipts(realtime, 1);
+      const finish: Array<(value: PromptReceipt) => void> = [];
+      adaptor.prompt.mockImplementation(
+        () => new Promise<PromptReceipt>((resolve) => finish.push(resolve)),
+      );
+      callTool(callbacks, 'handoff', {
+        session: 'session_1',
+        task: 'First request',
+      });
+      callTool(callbacks, 'handoff', {
+        session: 'session_1',
+        task: 'Second request',
+      });
+      await vi.waitFor(() => expect(finish).toHaveLength(2));
+      adaptor.queue('s1').push({
+        type: 'turn_complete',
+        jobRef: 'external-turn',
+        summary: 'Unattributed result',
+      });
+      await vi.waitFor(() =>
+        expect(log.write).toHaveBeenCalledWith(
+          'backend.event',
+          expect.objectContaining({ jobRef: 'external-turn' }),
+        ),
+      );
+      finish[0]!({ status: 'accepted', jobRef: 'known-turn' });
+      await awaitReceipts(realtime, 2);
+      finish[1]!({ status: 'accepted', joinedActiveTurn: true });
+      await awaitReceipts(realtime, 3);
+      expect(session.getSubagentsSnapshot().counts.completed).toBe(0);
+      expect(session.getSubagentsSnapshot().tasks).toHaveLength(2);
+      expect(
+        session
+          .getSubagentsSnapshot()
+          .tasks.every((task) => task.output === ''),
+      ).toBe(true);
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it('R2-8 does not attribute a missing joined receipt to a different queued job that is cancelled', async () => {
+    const { session, adaptor, callbacks, realtime, log } = await startSession();
+    try {
+      callTool(callbacks, 'handoff', { task: 'Running A' });
+      await awaitReceipts(realtime, 1);
+      adaptor.busy = true;
+      adaptor.queue('s1').push({ type: 'turn_started', jobRef: 'p1' });
+      await vi.waitFor(() =>
+        expect(session.getSubagentsSnapshot().tasks[0]?.status).toBe('running'),
+      );
+      adaptor.promptReceipt = { status: 'queued', jobRef: 'p2' };
+      callTool(callbacks, 'handoff', { task: 'Queued B' });
+      await awaitReceipts(realtime, 2);
+      let finish!: (value: PromptReceipt) => void;
+      adaptor.prompt.mockImplementationOnce(
+        () =>
+          new Promise<PromptReceipt>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      callTool(callbacks, 'handoff', { task: 'Join running A' });
+      await vi.waitFor(() => expect(adaptor.prompt).toHaveBeenCalledTimes(3));
+      adaptor.queue('s1').push({
+        type: 'turn_error',
+        jobRef: 'p2',
+        error: 'cancelled',
+      });
+      await vi.waitFor(() =>
+        expect(log.write).toHaveBeenCalledWith(
+          'backend.event',
+          expect.objectContaining({ type: 'turn_error', jobRef: 'p2' }),
+        ),
+      );
+      finish({ status: 'accepted', joinedActiveTurn: true });
+      const receipts = await awaitReceipts(realtime, 3);
+      expect(receipts[2]).toMatchObject({ job: 'job_3' });
+      const snapshot = session.getSubagentsSnapshot();
+      expect(snapshot.tasks).toHaveLength(3);
+      expect(
+        snapshot.tasks.find((task) => task.id === 'harness:job_1'),
+      ).toMatchObject({ status: 'running', request: 'Running A' });
+      expect(
+        snapshot.tasks.find((task) => task.id === 'harness:job_2'),
+      ).toMatchObject({ status: 'cancelled', request: 'Queued B' });
+      expect(
+        snapshot.tasks.find((task) => task.id === 'harness:job_3'),
+      ).toMatchObject({ status: 'starting', request: 'Join running A' });
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it('R2-8 attributes buffered external completion to a joined jobRef-less receipt', async () => {
+    const { session, adaptor, callbacks, realtime, log } = await startSession();
+    try {
+      callTool(callbacks, 'session_create', {});
+      await awaitReceipts(realtime, 1);
+      let finish!: (value: PromptReceipt) => void;
+      adaptor.prompt.mockImplementationOnce(
+        () =>
+          new Promise<PromptReceipt>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      callTool(callbacks, 'handoff', {
+        session: 'session_1',
+        task: 'Join the externally started task',
+      });
+      await vi.waitFor(() => expect(adaptor.prompt).toHaveBeenCalledOnce());
+      adaptor.queue('s1').push({
+        type: 'turn_joined',
+        messageId: 'external-join',
+        jobRef: 'external-turn',
+      });
+      adaptor.queue('s1').push({
+        type: 'turn_complete',
+        jobRef: 'external-turn',
+        summary: 'External result',
+      });
+      await vi.waitFor(() =>
+        expect(log.write).toHaveBeenCalledWith(
+          'backend.event',
+          expect.objectContaining({ type: 'turn_complete' }),
+        ),
+      );
+      finish({
+        status: 'accepted',
+        joinedActiveTurn: true,
+        joinedMessageId: 'external-join',
+      });
+      await awaitReceipts(realtime, 2);
+      await vi.waitFor(() =>
+        expect(realtime.sendBackendContext).toHaveBeenCalledWith(
+          expect.stringMatching(
+            /^\[COMPLETE (job_1|session_1)\] External result$/,
+          ),
+        ),
+      );
+      const snapshot = session.getSubagentsSnapshot();
+      expect(snapshot.counts.completed).toBe(1);
+      expect(snapshot.tasks).toHaveLength(1);
+      expect(snapshot.tasks[0]).toMatchObject({
+        status: 'completed',
+        output: 'External result',
+      });
+    } finally {
+      session.dispose();
+    }
+  });
+
   it.each(['matching', 'missing', 'different', 'rejected', 'throws'] as const)(
     'R1-8 retains buffered external permission and completion for a %s receipt',
     async (outcome) => {
@@ -1648,6 +2809,7 @@ describe('LiveSession', () => {
     await expect(harness.options().captureVision?.()).resolves.toBe(TEST_JPEG);
     expect(host.captureVisualContext).toHaveBeenCalledWith('call-1', {
       persistAsset: false,
+      screenScope: 'display',
     });
 
     let resolveCapture: ((capture: LiveVisualCapture) => void) | undefined;
@@ -1672,6 +2834,89 @@ describe('LiveSession', () => {
     });
     await expect(capturePending).resolves.toBeUndefined();
 
+    session.dispose();
+  });
+
+  it('discards old-display monitor captures and resets vision on selected or resolved display changes', async () => {
+    const harness = createProactiveHarness();
+    const { host, session } = await startSession(undefined, {
+      proactive: DEFAULT_PROACTIVE_CONFIG,
+      createProactiveScheduler: harness.createScheduler,
+    });
+    let finish!: (capture: LiveVisualCapture) => void;
+    host.captureVisualContext.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const pending = harness.options().captureVision?.();
+    const displayId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    session.setVisualSettings({
+      epoch: 1,
+      callId: 'call-1',
+      visualInput: { ...DEFAULT_VISUAL_INPUT, screenDisplayId: displayId },
+    });
+    expect(harness.scheduler.resetVisualSource).toHaveBeenCalledOnce();
+    finish({
+      source: 'screen',
+      screenScope: 'display',
+      displayId,
+      image: TEST_JPEG,
+      width: 1280,
+      height: 720,
+    });
+    await expect(pending).resolves.toBeUndefined();
+    session.setVisualSettings({
+      epoch: 1,
+      callId: 'call-1',
+      visualInput: { ...DEFAULT_VISUAL_INPUT, mode: 'live-feed' },
+    });
+    harness.scheduler.resetVisualSource.mockClear();
+    session.pushImage({
+      epoch: 1,
+      callId: 'call-1',
+      source: 'screen',
+      displayId,
+      image: TEST_JPEG,
+    });
+    session.pushImage({
+      epoch: 1,
+      callId: 'call-1',
+      source: 'screen',
+      displayId: displayId.toUpperCase(),
+      image: TEST_JPEG,
+    });
+    expect(harness.scheduler.resetVisualSource).not.toHaveBeenCalled();
+    session.pushImage({
+      epoch: 1,
+      callId: 'call-1',
+      source: 'screen',
+      displayId: '11111111-2222-3333-4444-555555555555',
+      image: TEST_JPEG,
+    });
+    expect(harness.scheduler.resetVisualSource).toHaveBeenCalledOnce();
+    session.dispose();
+  });
+
+  it('keeps camera monitor snapshots outside display capture', async () => {
+    const harness = createProactiveHarness();
+    const { host, session } = await startSession(undefined, {
+      proactive: DEFAULT_PROACTIVE_CONFIG,
+      createProactiveScheduler: harness.createScheduler,
+      visualInput: { ...DEFAULT_VISUAL_INPUT, source: 'camera' },
+    });
+    host.captureVisualContext.mockResolvedValueOnce({
+      source: 'camera',
+      image: TEST_JPEG,
+      width: 1280,
+      height: 720,
+    });
+    await expect(harness.options().captureVision?.()).resolves.toBe(TEST_JPEG);
+    expect(host.captureVisualContext).toHaveBeenCalledExactlyOnceWith(
+      'call-1',
+      { persistAsset: false },
+    );
     session.dispose();
   });
 
@@ -1720,7 +2965,7 @@ describe('LiveSession', () => {
     await awaitReceipts(realtime, 1);
 
     expect(host.captureVisualContext.mock.calls).toEqual([
-      ['call-1', { persistAsset: false }],
+      ['call-1', { persistAsset: false, screenScope: 'display' }],
       ['call-1', { persistAsset: true }],
     ]);
     session.dispose();
@@ -4632,7 +5877,7 @@ describe('LiveSession', () => {
     ]);
   });
 
-  it('session_stop cancels the backend turn and marks the job cancelled', async () => {
+  it('session_stop targets the exact job and awaits its terminal confirmation', async () => {
     const { adaptor, callbacks, realtime } = await startSession();
 
     callTool(callbacks, 'handoff', { task: 'long task' });
@@ -4641,12 +5886,20 @@ describe('LiveSession', () => {
     callTool(callbacks, 'session_stop', { job: 'job_1' });
     const [, stopReceipt] = await awaitReceipts(realtime, 2);
 
-    expect(adaptor.cancel).toHaveBeenCalledTimes(1);
+    expect(adaptor.cancelJob).toHaveBeenCalledExactlyOnceWith(
+      { id: 's1', adaptor: 'fake' },
+      'p1',
+    );
+    expect(adaptor.cancel).not.toHaveBeenCalled();
     expect(stopReceipt).toMatchObject({
       status: 'cancelling',
       session: 'session_1',
     });
 
+    adaptor
+      .queue('s1')
+      .push({ type: 'turn_error', jobRef: 'p1', error: 'cancelled' });
+    await delay(10);
     callTool(callbacks, 'session_monitor', { job: 'job_1' });
     const [, , monitorReceipt] = await awaitReceipts(realtime, 3);
     expect(monitorReceipt).toMatchObject({
@@ -4678,12 +5931,15 @@ describe('LiveSession', () => {
       'The task to run the tests finished. done: all tests pass',
     );
 
-    queue.push({ type: 'turn_error', jobRef: 'p1', error: 'lint exploded' });
+    adaptor.promptReceipt = { status: 'accepted', jobRef: 'p2' };
+    callTool(callbacks, 'handoff', { task: 'run lint' });
+    await awaitReceipts(realtime, 2);
+    queue.push({ type: 'turn_error', jobRef: 'p2', error: 'lint exploded' });
     await vi.waitFor(() => {
       expect(realtime.sendBackendContext).toHaveBeenCalledTimes(2);
     });
     expect(realtime.sendBackendContext.mock.calls[1]?.[0]).toMatch(
-      /^\[ERROR job_1\]/,
+      /^\[ERROR job_2\]/,
     );
   });
 
@@ -5553,9 +6809,12 @@ describe('LiveSession', () => {
       '/home/user/.qwen-live/config.json',
     );
 
+    adaptor.promptReceipt = { status: 'accepted', jobRef: 'p2' };
+    callTool(callbacks, 'handoff', { task: 'check connection' });
+    await awaitReceipts(realtime, 2);
     queue.push({
       type: 'turn_error',
-      jobRef: 'p1',
+      jobRef: 'p2',
       error: 'Connection refused: 10.0.0.1:4170',
     });
     await vi.waitFor(() => {
@@ -6289,43 +7548,46 @@ describe('LiveSession memory integration', () => {
     expect(realtime.configure).not.toHaveBeenCalled();
   });
 
-  it('uses private on-demand captures for visual memory without persisting an Appshot asset', async () => {
-    const fetcher = vi.fn<typeof fetch>(
-      async () =>
-        new Response(
-          JSON.stringify({
-            choices: [{ message: { content: '用户把眼镜放在书桌旁。' } }],
-          }),
-        ),
-    );
-    const service = await memoryService(
-      { observer: { enabled: true } },
-      fetcher,
-    );
-    const { host, adaptor, realtime } = await startMemory(service, {
-      visualInput: { ...DEFAULT_VISUAL_INPUT, source: 'camera' },
-      capture: {
-        source: 'camera',
-        image: TEST_JPEG,
-        width: 1280,
-        height: 720,
-        screenshotPath: pngPath,
-      },
-    });
-    await vi.waitFor(() =>
-      expect(inspectMemory(service).observations).toHaveLength(1),
-    );
-    expect(host.captureVisualContext).toHaveBeenCalledWith('call-1', {
-      persistAsset: false,
-    });
-    expect(adaptor.prompt).not.toHaveBeenCalled();
-    expect(realtime.pushImage).not.toHaveBeenCalled();
-    expect(realtime.commitInputAudio).not.toHaveBeenCalled();
-    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body));
-    expect(body.messages.at(-1).content[0].image_url.url).toBe(
-      `data:image/jpeg;base64,${TEST_JPEG}`,
-    );
-  });
+  it.each(['screen', 'camera'] as const)(
+    'uses private %s on-demand window/camera captures for visual memory without display scope or persisted asset',
+    async (source) => {
+      const fetcher = vi.fn<typeof fetch>(
+        async () =>
+          new Response(
+            JSON.stringify({
+              choices: [{ message: { content: '用户把眼镜放在书桌旁。' } }],
+            }),
+          ),
+      );
+      const service = await memoryService(
+        { observer: { enabled: true } },
+        fetcher,
+      );
+      const { host, adaptor, realtime } = await startMemory(service, {
+        visualInput: { ...DEFAULT_VISUAL_INPUT, source },
+        capture: {
+          source,
+          image: TEST_JPEG,
+          width: 1280,
+          height: 720,
+          screenshotPath: pngPath,
+        },
+      });
+      await vi.waitFor(() =>
+        expect(inspectMemory(service).observations).toHaveLength(1),
+      );
+      expect(host.captureVisualContext).toHaveBeenCalledWith('call-1', {
+        persistAsset: false,
+      });
+      expect(adaptor.prompt).not.toHaveBeenCalled();
+      expect(realtime.pushImage).not.toHaveBeenCalled();
+      expect(realtime.commitInputAudio).not.toHaveBeenCalled();
+      const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body));
+      expect(body.messages.at(-1).content[0].image_url.url).toBe(
+        `data:image/jpeg;base64,${TEST_JPEG}`,
+      );
+    },
+  );
 
   it('feeds live visual memory before foreground audio starts without requesting snapshots', async () => {
     const fetcher = vi.fn<typeof fetch>(

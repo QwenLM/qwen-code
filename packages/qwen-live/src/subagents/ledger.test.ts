@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SubagentsLedger } from './ledger.js';
 import {
   MAX_SUBAGENTS_SNAPSHOT_BYTES,
+  parseSubagentsControlResult,
   parseSubagentsSnapshot,
 } from './types.js';
 
@@ -64,7 +65,7 @@ describe('SubagentsLedger', () => {
   });
 
   it.each([false, true])(
-    'retains cancelled monitor completion counts when details are evicted (cancel first: %s)',
+    'retains cancelled monitor completion counts outside the first page (cancel first: %s)',
     (cancelFirst) => {
       const ledger = new SubagentsLedger();
       const monitor = {
@@ -90,7 +91,8 @@ describe('SubagentsLedger', () => {
       expect(before.omitted).toBe(9);
       ledger.upsert({ ...monitor, status: 'cancelled' });
       ledger.update(monitor.id, { status: 'cancelled' });
-      expect(ledger.snapshot()).toEqual(before);
+      expect(ledger.snapshot().counts).toEqual(before.counts);
+      expect(ledger.get(monitor.id)?.status).toBe('cancelled');
       ledger.dispose();
     },
   );
@@ -187,6 +189,61 @@ describe('SubagentsLedger', () => {
     expect(parseSubagentsSnapshot(snapshot)).toBeDefined();
   });
 
+  it('retains every active detail and pages them without reordering on output', () => {
+    const ledger = new SubagentsLedger();
+    for (let index = 0; index < 100; index++)
+      ledger.upsert({ ...task(`job:${index}`), createdAt: index });
+    ledger.append('job:0', 'message', 'Oldest task still has its output');
+    const first = ledger.page(0, 'job:0');
+    const second = ledger.page(32);
+    const third = ledger.page(64);
+    const last = ledger.page(96);
+    expect(first.total).toBe(100);
+    expect(first.snapshot.tasks).toHaveLength(32);
+    expect(first.snapshot.omitted).toBe(68);
+    expect(first.selected?.output).toBe('Oldest task still has its output');
+    expect(ledger.get('job:0')?.output).toBe(first.selected?.output);
+    expect(
+      new Set(
+        [first, second, third, last].flatMap((page) =>
+          page.snapshot.tasks.map((value) => value.id),
+        ),
+      ).size,
+    ).toBe(100);
+    const before = first.snapshot.tasks.map((value) => value.id);
+    ledger.append('job:50', 'message', 'More output');
+    expect(ledger.page().snapshot.tasks.map((value) => value.id)).toEqual(
+      before,
+    );
+    for (const page of [first, second, third, last])
+      expect(parseSubagentsControlResult({ type: 'page', page })).toBeDefined();
+    first.selected!.output = 'mutated consumer copy';
+    expect(ledger.get('job:0')?.output).toBe(
+      'Oldest task still has its output',
+    );
+    ledger.dispose();
+  });
+
+  it('evicts only old terminal history, keeps archived counts, and ignores archived terminal replay', () => {
+    const ledger = new SubagentsLedger();
+    ledger.upsert(task('active'));
+    for (let index = 0; index < 40; index++) {
+      const id = `done:${index.toString().padStart(2, '0')}`;
+      ledger.upsert(task(id));
+      ledger.result(id, 'completed', 'done');
+    }
+    const page = ledger.page();
+    expect(page.total).toBe(33);
+    expect(page.snapshot.counts.running).toBe(1);
+    expect(page.snapshot.counts.completed).toBe(40);
+    expect(ledger.get('active')).toBeDefined();
+    expect(ledger.get('done:00')).toBeUndefined();
+    ledger.upsert(task('done:00', 'completed'));
+    ledger.result('done:00', 'completed', 'late replay');
+    expect(ledger.page()).toEqual(page);
+    ledger.dispose();
+  });
+
   it('ignores late output and status replay for completed tasks', () => {
     const ledger = new SubagentsLedger();
     ledger.upsert(task('job:1'));
@@ -218,6 +275,12 @@ describe('SubagentsLedger', () => {
     expect(snapshot.counts.running).toBe(32);
     expect(snapshot.tasks.some((value) => value.outputTruncated)).toBe(true);
     expect(JSON.stringify(snapshot)).not.toContain('\\u001b');
+    const page = ledger.page(0, 'job:0');
+    for (const row of page.snapshot.tasks) {
+      row.canStop = false;
+      row.stopReason = 'unsupported';
+    }
+    expect(parseSubagentsControlResult({ type: 'page', page })).toBeDefined();
   });
 
   it('coalesces updates, publishes latest state and stops timers on disposal', () => {

@@ -85,6 +85,9 @@ function setup(overrides: Partial<LiveHostApi> = {}) {
     setVisualMode: async (value) => {
       calls.push(['mode', value]);
     },
+    setScreenDisplay: async (value) => {
+      calls.push(['display', value]);
+    },
     memoryAction: async (value) => {
       calls.push(['memory', value]);
       return current.memory!;
@@ -176,6 +179,24 @@ function setup(overrides: Partial<LiveHostApi> = {}) {
 }
 
 describe('persistent Live orb and Settings', () => {
+  it('does not ask Screen Live Feed users for accessibility but preserves the On Demand requirement', () => {
+    const h = setup();
+    const state = h.state();
+    h.update({
+      ...state,
+      live: { ...state.live, available: false, state: 'unavailable' },
+      visualInput: { ...state.visualInput!, mode: 'live-feed' },
+      permissions: { ...state.permissions, accessibility: 'denied' },
+    });
+    assert.equal(h.get('[data-permission="accessibility"]').hidden, true);
+    assert.equal(h.get('[data-permission="screenRecording"]').hidden, false);
+    h.update({
+      ...h.state(),
+      visualInput: { ...state.visualInput!, mode: 'on-demand' },
+    });
+    assert.equal(h.get('[data-permission="accessibility"]').hidden, false);
+  });
+
   it('opens the active config with no path argument, without dragging or changing the call', async () => {
     const h = setup();
     h.click('Settings');
@@ -373,6 +394,19 @@ describe('persistent Live orb and Settings', () => {
     });
     assert.equal(h.get('.voice-status-primary').textContent, error);
     assert.equal(h.get('.voice-status-primary').title, error);
+    assert.equal(
+      h.get('.voice-status-primary').closest('[data-live-interactive]'),
+      h.get('.voice-status-primary'),
+    );
+    assert.equal(
+      h.get('.voice-surface').hasAttribute('data-live-interactive'),
+      false,
+    );
+    h.calls.length = 0;
+    h.pointer(h.get('.voice-status-primary'), 'pointerdown', 100, 100);
+    h.pointer(h.get('.voice-status-primary'), 'pointermove', 150, 150);
+    h.pointer(h.get('.voice-status-primary'), 'pointerup', 150, 150);
+    assert.deepEqual(h.calls, []);
     assert.equal(status.classList.contains('error'), true);
     assert.equal(h.get('.voice-status-audio').hidden, false);
     h.update({ ...h.state(), live: baseline.live });
@@ -632,7 +666,14 @@ describe('persistent Live orb and Settings', () => {
       Array.from(
         h.app.querySelectorAll('.settings-body > .settings-field > strong'),
       ).map((element) => element.textContent),
-      ['Audio Source', 'Video Source', 'Capture Mode', 'Language', 'Theme'],
+      [
+        'Audio Source',
+        'Video Source',
+        'Display',
+        'Capture Mode',
+        'Language',
+        'Theme',
+      ],
     );
     const description = h.get('.capture-mode-description');
     const original = description.textContent;

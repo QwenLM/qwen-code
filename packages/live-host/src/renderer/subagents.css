@@ -201,7 +201,10 @@ button:focus-visible,
   font-size: 14px;
 }
 .subagents-close,
-.subagents-back {
+.subagents-back,
+.subagents-stop,
+.subagents-page-button,
+.subagent-permission-choice {
   border: 1px solid var(--live-control-border);
   border-radius: 7px;
   background: var(--live-control-bg);
@@ -210,7 +213,10 @@ button:focus-visible,
   padding: 4px 8px;
 }
 .subagents-close:hover,
-.subagents-back:hover {
+.subagents-back:hover,
+.subagents-stop:hover:not(:disabled),
+.subagents-page-button:hover:not(:disabled),
+.subagent-permission-choice:hover:not(:disabled) {
   background: var(--live-control-hover);
 }
 .subagents-panel > .subagents-counts {
@@ -223,6 +229,7 @@ button:focus-visible,
 .subagents-other-counts,
 .subagents-retention,
 .subagents-error,
+.subagents-feedback,
 .subagents-footer {
   flex: 0 0 auto;
   margin: 0;
@@ -241,6 +248,79 @@ button:focus-visible,
 }
 .subagents-error {
   color: var(--live-error);
+}
+.subagents-feedback {
+  color: var(--live-success);
+}
+.subagents-pagination {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--live-divider);
+}
+.subagents-page-label {
+  min-width: 0;
+  text-align: center;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+  color: var(--live-muted);
+}
+.subagent-row {
+  display: grid;
+}
+.subagent-row > .subagents-stop {
+  justify-self: end;
+  margin: 4px 2px 0;
+}
+.subagent-identity > .subagents-stop {
+  margin-left: 8px;
+}
+.subagents-stop {
+  color: var(--live-warning);
+}
+.subagents-stop-reason,
+.subagents-more-permissions {
+  font-size: 11px;
+  line-height: 17px;
+  color: var(--live-muted);
+  overflow-wrap: anywhere;
+}
+.subagent-permissions,
+.subagent-unassigned {
+  margin: 14px 0;
+  padding: 10px;
+  border: 1px solid var(--live-warning-border);
+  border-radius: 9px;
+  background: var(--live-warning-bg);
+}
+.subagent-permission + .subagent-permission {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--live-divider);
+}
+.subagent-permission-title {
+  max-height: 120px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 6px 0;
+  font-size: 11px;
+  line-height: 17px;
+  user-select: text;
+}
+.subagent-permission-origin {
+  margin: 4px 0;
+  color: var(--live-subtle);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.subagent-permission-choices {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 .subagents-footer {
   margin-top: auto;

@@ -79,7 +79,8 @@ const SESSION_CREATE_TOOL: RealtimeToolDefinition = {
     description:
       'Create a new coding session. Only needed when the user explicitly ' +
       'wants separate parallel workstreams; handoff without a session picks ' +
-      'or creates a sensible default on its own.',
+      'or creates a sensible default on its own. For independent concurrent ' +
+      'tasks, create one session per task and hand off to each returned handle.',
     parameters: {
       type: 'object',
       properties: {
@@ -114,7 +115,8 @@ const HANDOFF_TOOL: RealtimeToolDefinition = {
       "information. Pass the user's own words in `task`; do not rewrite " +
       'them. Returns a receipt immediately — the result arrives later as a ' +
       '[COMPLETE] context message. Targeting a busy session appends the ' +
-      'instruction to its running task (the receipt says how it landed). ' +
+      'instruction to its running task or queues it within that session ' +
+      '(the receipt says how it landed). Use separate sessions for independent parallel work. ' +
       'Before your first tool call in a user turn, say one short neutral ' +
       'sentence about what you are doing; never promise the outcome.',
     parameters: {

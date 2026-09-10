@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_PROACTIVE_CONFIG, type ProactiveConfig } from '../config.js';
 import { Injector } from '../orchestrator/injector.js';
 import { QWEN_REALTIME_LIMITS } from '../realtime/realtime-session.js';
+import { MonitorDebugStore } from './monitor-debug-store.js';
 import {
   formatProactiveEvent,
   parseMonitorAction,
@@ -142,6 +143,7 @@ function createHarness(
       notification?: 'queued' | 'speaking' | 'delivered',
     ) => void;
     debug?: (event: string, details: Record<string, unknown>) => void;
+    monitorDebug?: MonitorDebugStore;
   } = {},
 ): SchedulerHarness {
   const monitors: FakeMonitor[] = [];
@@ -172,6 +174,7 @@ function createHarness(
     },
     onTaskChanged: harnessOptions.onTaskChanged,
     debug: harnessOptions.debug,
+    monitorDebug: harnessOptions.monitorDebug,
     ...(harnessOptions.captureVision
       ? { captureVision: harnessOptions.captureVision }
       : {}),
@@ -200,6 +203,67 @@ function remainingSec(scheduler: ProactiveScheduler): number | undefined {
 }
 
 describe('Proactive event admission size', () => {
+  it('passes the debug archive store to each monitor without enabling it by default', () => {
+    const monitorDebug = new MonitorDebugStore(vi.fn(), 'inert-monitor-debug');
+    const debugHarness = createHarness(config(), { monitorDebug });
+    const regularHarness = createHarness();
+    for (const modalities of [['vision'], ['audio']] as const) {
+      for (const harness of [debugHarness, regularHarness]) {
+        harness.scheduler.createPerceptionMonitor({
+          title: `${modalities[0]} monitor`,
+          modalities: [...modalities],
+          condition: 'change',
+          triggerResponse: 'notify',
+          repeat: true,
+        });
+      }
+    }
+    expect(debugHarness.monitors).toHaveLength(2);
+    expect(regularHarness.monitors).toHaveLength(2);
+    for (const monitor of debugHarness.monitors) {
+      expect(monitor.options.monitorDebug).toBe(monitorDebug);
+    }
+    for (const monitor of regularHarness.monitors) {
+      expect(monitor.options.monitorDebug).toBeUndefined();
+    }
+  });
+
+  it('keeps more than four independent monitors and cancels only the selected ID', () => {
+    const proactive = config();
+    proactive.scheduler.maxConcurrentTasks = 1;
+    const { scheduler, monitors, invalidated, deliveries } =
+      createHarness(proactive);
+    const tasks = Array.from({ length: 40 }, (_, index) =>
+      scheduler.createPerceptionMonitor({
+        title: `Independent ${index}`,
+        modalities: ['vision'],
+        condition: 'change',
+        triggerResponse: 'notify',
+        repeat: true,
+      }),
+    );
+    expect(monitors).toHaveLength(40);
+    monitors[0]!.result(true);
+    expect(deliveries).toHaveLength(1);
+    const original = tasks[0]!;
+    expect(scheduler.cancelTaskById(original.taskId)?.status).toBe('cancelled');
+    expect(monitors[0]!.closed).toBe(true);
+    expect(monitors.slice(1).every((monitor) => !monitor.closed)).toBe(true);
+    expect(invalidated).toHaveLength(1);
+    const replacement = scheduler.createPerceptionMonitor({
+      title: original.title,
+      modalities: ['vision'],
+      condition: 'change',
+      triggerResponse: 'notify',
+      repeat: true,
+    });
+    scheduler.cancelTaskById(original.taskId);
+    expect(
+      scheduler.listTasks().some((task) => task.taskId === replacement.taskId),
+    ).toBe(true);
+    expect(scheduler.listTasks()).toHaveLength(40);
+  });
+
   it.each([
     'summary',
     'combined',

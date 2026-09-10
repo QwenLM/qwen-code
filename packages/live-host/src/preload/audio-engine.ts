@@ -11,6 +11,8 @@ import {
   OutputPlaybackTracker,
   scheduleOutputFrame,
 } from './audio-output-queue.ts';
+import type { OutputFrameAdmission } from './audio-output-queue.ts';
+import { StreamingOutputResampler } from './audio-output-resampler.ts';
 import type { AudioInputDevice } from '../shared/host-api.ts';
 import type { PlaybackIdentity } from '../shared/protocol.ts';
 
@@ -45,6 +47,10 @@ export class HostAudioEngine {
   private outputGeneration = 0;
   private outputQueue: Promise<void> = Promise.resolve();
   private readonly outputPlayback = new OutputPlaybackTracker();
+  private readonly outputResamplers = new Map<
+    string,
+    StreamingOutputResampler
+  >();
   private outputEndMarkerMode = false;
   private outputMuted = false;
   private captureRequested = false;
@@ -275,6 +281,30 @@ export class HostAudioEngine {
         });
         return;
       }
+      const key = this.outputKey(playbackIdentity);
+      const resampler = this.outputResamplers.get(key);
+      try {
+        if (resampler && this.outputContext) {
+          this.outputResamplers.delete(key);
+          const tail = resampler.finish();
+          if (tail.length > 0) {
+            const admission = this.outputPlayback.beginFrame(playbackIdentity);
+            if (admission) {
+              this.scheduleOutput(
+                this.outputContext,
+                tail,
+                this.outputContext.sampleRate,
+                admission,
+                generation,
+                { bytes: 0, tail: true },
+              );
+            }
+          }
+        }
+      } catch (error) {
+        this.clearOutput();
+        throw error;
+      }
       const transition = this.outputPlayback.finish(playbackIdentity);
       if (!transition.accepted) {
         this.onDiagnostic('output_finish_stale', {
@@ -336,9 +366,17 @@ export class HostAudioEngine {
         return;
       }
 
+      const admission = this.outputPlayback.beginFrame(playbackIdentity);
+      if (!admission) {
+        this.onDiagnostic('output_frame_identity_skipped', {
+          epoch: playbackIdentity.epoch,
+          outputId: playbackIdentity.outputId,
+          generation,
+        });
+        return;
+      }
       const samples = frame.byteLength / 2;
-      const audioBuffer = context.createBuffer(1, samples, OUTPUT_SAMPLE_RATE);
-      const channel = audioBuffer.getChannelData(0);
+      const channel = new Float32Array(samples);
       const view = new DataView(
         frame.buffer,
         frame.byteOffset,
@@ -361,61 +399,35 @@ export class HostAudioEngine {
         }
         previous = sample;
       }
-      const schedule = scheduleOutputFrame(
-        context.currentTime,
-        this.outputCursor,
-        audioBuffer.duration,
-      );
-
-      const source = context.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(context.destination);
-      const admission = this.outputPlayback.beginFrame(playbackIdentity);
-      if (!admission) {
-        source.disconnect();
-        this.onDiagnostic('output_frame_identity_skipped', {
-          epoch: playbackIdentity.epoch,
-          outputId: playbackIdentity.outputId,
-          generation,
-        });
-        return;
-      }
-      const capturedOutput = admission.output;
-      source.onended = () => {
-        this.outputSources.delete(source);
-        const transition = this.outputPlayback.endFrame(capturedOutput);
-        this.onDiagnostic('output_source_ended', {
-          generation,
-          currentGeneration: this.outputGeneration,
-          remainingSources: this.outputSources.size,
-        });
-        if (transition.completed) {
-          this.onPlaybackCompleted(transition.completed);
+      let outputSamples: Float32Array = channel;
+      let sampleRate = OUTPUT_SAMPLE_RATE;
+      // Legacy peers cannot mark the end, so retain their per-frame drain path.
+      if (this.outputEndMarkerMode) {
+        const key = this.outputKey(playbackIdentity);
+        let resampler = this.outputResamplers.get(key);
+        if (!resampler) {
+          resampler = new StreamingOutputResampler(
+            OUTPUT_SAMPLE_RATE,
+            context.sampleRate,
+          );
+          this.outputResamplers.set(key, resampler);
         }
-      };
-      this.outputSources.add(source);
-      source.start(schedule.startAt);
-      this.outputCursor = schedule.endAt;
-      if (admission.playbackStarted) {
-        this.onPlaybackStarted(playbackIdentity);
+        outputSamples = resampler.push(channel);
+        sampleRate = context.sampleRate;
       }
-      this.onDiagnostic('output_frame_scheduled', {
-        bytes: frame.byteLength,
-        epoch: playbackIdentity.epoch,
-        outputId: playbackIdentity.outputId,
+      this.scheduleOutput(
+        context,
+        outputSamples,
+        sampleRate,
+        admission,
         generation,
-        contextState: context.state,
-        contextTime: context.currentTime,
-        startAt: schedule.startAt,
-        endAt: schedule.endAt,
-        queuedSeconds: Math.max(0, schedule.endAt - context.currentTime),
-        activeSources: this.outputSources.size,
-        contextSampleRate: context.sampleRate,
-        sourceSampleRate: OUTPUT_SAMPLE_RATE,
-        rms: Math.sqrt(sumSquares / samples),
-        peak,
-        zeroCrossings,
-      });
+        {
+          bytes: frame.byteLength,
+          rms: Math.sqrt(sumSquares / samples),
+          peak,
+          zeroCrossings,
+        },
+      );
     } catch (error) {
       if (generation !== this.outputGeneration) {
         this.onDiagnostic('output_frame_stale', {
@@ -431,6 +443,74 @@ export class HostAudioEngine {
     }
   }
 
+  private outputKey(identity: PlaybackIdentity): string {
+    return `${identity.epoch}:${identity.outputId}`;
+  }
+
+  private scheduleOutput(
+    context: AudioContext,
+    samples: Float32Array,
+    sampleRate: number,
+    admission: OutputFrameAdmission,
+    generation: number,
+    details: AudioDiagnosticDetails,
+  ): void {
+    const capturedOutput = admission.output;
+    const playbackIdentity = capturedOutput.identity;
+    if (samples.length === 0) {
+      this.outputPlayback.endFrame(capturedOutput);
+      if (admission.playbackStarted) {
+        this.onPlaybackStarted(playbackIdentity);
+      }
+      return;
+    }
+    const audioBuffer = context.createBuffer(1, samples.length, sampleRate);
+    audioBuffer.getChannelData(0).set(samples);
+    const schedule = scheduleOutputFrame(
+      context.currentTime,
+      this.outputCursor,
+      audioBuffer.duration,
+      this.outputEndMarkerMode ? context.sampleRate : undefined,
+    );
+    const source = context.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(context.destination);
+    source.onended = () => {
+      this.outputSources.delete(source);
+      source.disconnect();
+      const transition = this.outputPlayback.endFrame(capturedOutput);
+      this.onDiagnostic('output_source_ended', {
+        generation,
+        currentGeneration: this.outputGeneration,
+        remainingSources: this.outputSources.size,
+      });
+      if (transition.completed) {
+        this.onPlaybackCompleted(transition.completed);
+      }
+    };
+    this.outputSources.add(source);
+    source.start(schedule.startAt);
+    this.outputCursor = schedule.endAt;
+    if (admission.playbackStarted) {
+      this.onPlaybackStarted(playbackIdentity);
+    }
+    this.onDiagnostic('output_frame_scheduled', {
+      ...details,
+      epoch: playbackIdentity.epoch,
+      outputId: playbackIdentity.outputId,
+      generation,
+      contextState: context.state,
+      contextTime: context.currentTime,
+      startAt: schedule.startAt,
+      endAt: schedule.endAt,
+      queuedSeconds: Math.max(0, schedule.endAt - context.currentTime),
+      activeSources: this.outputSources.size,
+      contextSampleRate: context.sampleRate,
+      inputSampleRate: OUTPUT_SAMPLE_RATE,
+      sourceSampleRate: sampleRate,
+    });
+  }
+
   clearOutput(): void {
     this.onDiagnostic('output_clear', {
       generation: this.outputGeneration,
@@ -441,6 +521,7 @@ export class HostAudioEngine {
     });
     this.outputGeneration += 1;
     this.outputPlayback.clear();
+    this.outputResamplers.clear();
     for (const source of this.outputSources) {
       try {
         source.stop();
@@ -498,7 +579,7 @@ export class HostAudioEngine {
     const context =
       this.outputContext ??
       new AudioContext({
-        // Keep the device clock; Web Audio resamples the 24 kHz source buffer.
+        // Keep the device clock; changing it can disrupt other apps' audio.
         latencyHint: 'interactive',
       });
     this.outputContext = context;

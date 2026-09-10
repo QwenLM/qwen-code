@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { getStableLiveDiscoveryBaseDir } from './host/discovery.js';
+import { isScreenDisplayId } from './host/screen-display.js';
 import { resolveMemoryConfig, type MemoryConfig } from './memory/config.js';
 import type { LiveLanguage } from './i18n/messages.js';
 import { resolveLiveLanguage } from './language-preferences.js';
@@ -48,6 +49,7 @@ export type VisualResolution = 'native' | { width: number; height: number };
 export interface VisualInputConfig {
   source: VisualInputSource;
   mode: VisualInputMode;
+  screenDisplayId?: string;
   fps: number;
   cameraResolution: Exclude<VisualResolution, 'native'>;
   cameraSnapshotResolution: VisualResolution;
@@ -62,7 +64,8 @@ export interface ProactiveConfig {
   };
   scheduler: {
     evalIntervalSec: number;
-    maxConcurrentTasks: number;
+    /** Legacy config field; no longer limits active monitors. */
+    maxConcurrentTasks?: number;
     maxFailuresPerTask: number;
     repeat: {
       cooldownSec: number;
@@ -130,7 +133,6 @@ export const DEFAULT_PROACTIVE_CONFIG: ProactiveConfig = {
   },
   scheduler: {
     evalIntervalSec: 2,
-    maxConcurrentTasks: 4,
     maxFailuresPerTask: 3,
     repeat: {
       cooldownSec: 3,
@@ -299,13 +301,30 @@ function resolveVisualInput(
   file: Record<string, unknown>,
   configPath: string,
 ): VisualInputConfig {
-  const rawVisualInput = file['visualInput'];
-  if (rawVisualInput !== undefined && !isRecordLike(rawVisualInput)) {
+  const visualInput = strictObject(
+    file['visualInput'],
+    'visualInput',
+    configPath,
+    [
+      'source',
+      'mode',
+      'screenDisplayId',
+      'fps',
+      'cameraResolution',
+      'cameraSnapshotResolution',
+      'liveResolution',
+      'snapshotResolution',
+    ],
+  );
+  const screenDisplayId =
+    visualInput['screenDisplayId'] === undefined
+      ? 'primary'
+      : visualInput['screenDisplayId'];
+  if (!isScreenDisplayId(screenDisplayId)) {
     throw new Error(
-      `Invalid "visualInput" in ${configPath}: expected an object`,
+      `Invalid "visualInput.screenDisplayId" in ${configPath}: expected "primary" or a display UUID`,
     );
   }
-  const visualInput = rawVisualInput ?? {};
   const source =
     str(env['QWEN_LIVE_VISUAL_SOURCE']) ?? visualInput['source'] ?? 'screen';
   if (source !== 'screen' && source !== 'camera') {
@@ -375,6 +394,7 @@ function resolveVisualInput(
   return {
     source,
     mode,
+    screenDisplayId: screenDisplayId.toLowerCase(),
     fps: resolveVisualFps(env, visualInput, configPath),
     cameraResolution,
     cameraSnapshotResolution,
@@ -409,7 +429,7 @@ const PROACTIVE_VISION_KEYS = [
 ] as const;
 const PROACTIVE_AUDIO_KEYS = ['windowSizeSec', 'minEvalDurationSec'] as const;
 
-function proactiveObject(
+function strictObject(
   raw: unknown,
   path: string,
   configPath: string,
@@ -506,37 +526,37 @@ function resolveProactive(
   file: Record<string, unknown>,
   configPath: string,
 ): ProactiveConfig {
-  const proactive = proactiveObject(
+  const proactive = strictObject(
     file['proactive'],
     'proactive',
     configPath,
     PROACTIVE_KEYS,
   );
-  const monitor = proactiveObject(
+  const monitor = strictObject(
     proactive['monitor'],
     'proactive.monitor',
     configPath,
     PROACTIVE_MONITOR_KEYS,
   );
-  const scheduler = proactiveObject(
+  const scheduler = strictObject(
     proactive['scheduler'],
     'proactive.scheduler',
     configPath,
     PROACTIVE_SCHEDULER_KEYS,
   );
-  const repeat = proactiveObject(
+  const repeat = strictObject(
     scheduler['repeat'],
     'proactive.scheduler.repeat',
     configPath,
     PROACTIVE_REPEAT_KEYS,
   );
-  const vision = proactiveObject(
+  const vision = strictObject(
     proactive['vision'],
     'proactive.vision',
     configPath,
     PROACTIVE_VISION_KEYS,
   );
-  const audio = proactiveObject(
+  const audio = strictObject(
     proactive['audio'],
     'proactive.audio',
     configPath,
@@ -611,15 +631,19 @@ function resolveProactive(
         0.05,
         3_600,
       ),
-      maxConcurrentTasks: proactiveNumber(
-        scheduler['maxConcurrentTasks'],
-        DEFAULT_PROACTIVE_CONFIG.scheduler.maxConcurrentTasks,
-        'proactive.scheduler.maxConcurrentTasks',
-        configPath,
-        1,
-        1_024,
-        true,
-      ),
+      ...(scheduler['maxConcurrentTasks'] !== undefined
+        ? {
+            maxConcurrentTasks: proactiveNumber(
+              scheduler['maxConcurrentTasks'],
+              4,
+              'proactive.scheduler.maxConcurrentTasks',
+              configPath,
+              1,
+              1_024,
+              true,
+            ),
+          }
+        : {}),
       maxFailuresPerTask: proactiveNumber(
         scheduler['maxFailuresPerTask'],
         DEFAULT_PROACTIVE_CONFIG.scheduler.maxFailuresPerTask,

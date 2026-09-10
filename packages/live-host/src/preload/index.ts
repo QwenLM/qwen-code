@@ -58,6 +58,7 @@ const api: LiveHostApi = {
   setOutputMuted: (muted) => invoke('live:set-output-muted', muted),
   setVisualSource: (source) => invoke('live:set-visual-source', source),
   setVisualMode: (mode) => invoke('live:set-visual-mode', mode),
+  setScreenDisplay: (id) => invoke('live:set-screen-display', id),
   memoryAction: (action) =>
     ipcRenderer.invoke('live:memory-action', action) as Promise<MemoryState>,
   setLanguage: (language) => invoke('live:set-language', language),

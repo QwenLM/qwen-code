@@ -316,6 +316,7 @@ export class LiveView {
     this.status.setAttribute('aria-live', 'polite');
     place(this.status, OVERLAY_GEOMETRY.status);
     this.statusPrimary.className = 'voice-status-primary';
+    this.statusPrimary.dataset.liveInteractive = '';
     this.statusAudio.className = 'voice-status-audio';
     this.statusAudio.hidden = true;
     this.permissionLink.className = 'permission-link';
@@ -643,7 +644,9 @@ export class LiveView {
         permission === 'microphone' ||
         (state.visualInput?.source === 'camera'
           ? permission === 'camera'
-          : permission !== 'camera');
+          : permission !== 'camera' &&
+            (permission !== 'accessibility' ||
+              state.visualInput?.mode !== 'live-feed'));
       controls.row.hidden = state.connection !== 'ready' || !relevant;
       const granted = state.permissions[permission] === 'granted';
       text(

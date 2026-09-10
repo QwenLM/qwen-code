@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { SubagentsControlResult } from '@qwen-code/qwen-live/subagents';
 import type {
   SubagentsWindowApi,
   SubagentsWindowState,
@@ -24,5 +25,11 @@ const api: SubagentsWindowApi = {
   close: () => ipcRenderer.send('live:subagents:close'),
   openDetail: (id) =>
     ipcRenderer.invoke('live:subagents:detail', id) as Promise<void>,
+  control: (instanceId, request) =>
+    ipcRenderer.invoke(
+      'live:subagents:control',
+      instanceId,
+      request,
+    ) as Promise<SubagentsControlResult>,
 };
 contextBridge.exposeInMainWorld('qwenLiveSubagents', api);

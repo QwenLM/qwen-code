@@ -88,6 +88,8 @@ function fixture() {
     visualInput: undefined,
     visualError: undefined,
     visualReady: false,
+    screenDisplays: [],
+    screenDisplaysError: undefined,
     permissions: {},
     selfChecks: {},
     effectiveLiveStatus: () => ({

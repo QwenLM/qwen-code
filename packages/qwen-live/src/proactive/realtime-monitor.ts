@@ -6,14 +6,19 @@
  * Adapted to TypeScript from qwen-omni-realtime-agent; modified for Qwen Live.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import {
   deriveQwenOmniRealtimeUrl,
   QwenRealtimeError,
+  QWEN_REALTIME_INPUT_SAMPLE_RATE,
   QWEN_REALTIME_LIMITS,
 } from '../realtime/realtime-session.js';
 import type { SocketLike } from '../realtime/socket.js';
+import type {
+  MonitorDebugRecorder,
+  MonitorDebugStore,
+} from './monitor-debug-store.js';
 import {
   parseMonitorAction,
   PROACTIVE_MONITOR_SYSTEM_PROMPT,
@@ -60,6 +65,7 @@ export interface DashScopeRealtimeMonitorOptions {
   modalities: readonly MonitorModality[];
   contextWindowSec: Record<MonitorModality, number>;
   sessionRecycleEvals: number;
+  monitorDebug?: MonitorDebugStore;
 }
 
 export interface DashScopeRealtimeMonitorCallbacks {
@@ -209,6 +215,7 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
   private readonly maxQueuedInputs: number;
   private readonly modalities: ReadonlySet<MonitorModality>;
   private socket: SocketLike | undefined;
+  private debugRecorder: MonitorDebugRecorder | undefined;
   private transportGeneration = 0;
   private ready = false;
   private closed = false;
@@ -228,6 +235,10 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
   private writerQueue: RecentInput[] = [];
   private nextSequence = 0;
   private audioInCurrentBuffer = false;
+  private inputImageFrames = 0;
+  private inputAudioBytes = 0;
+  private lastInputFrameHash: string | undefined;
+  private evaluationSequence = 0;
   private failureSeenTransportGeneration: number | undefined;
   private failureDeliveredTransportGeneration: number | undefined;
   private pendingConnect:
@@ -268,6 +279,15 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
         monitorError('Monitor is closed.', 'monitor_closed', 'protocol'),
       );
     }
+    this.debugRecorder ??= this.options.monitorDebug?.create(
+      {
+        taskId: this.options.taskId,
+        taskGeneration: this.options.taskGeneration,
+        model: this.options.model,
+        modalities: this.options.modalities,
+      },
+      this.options.apiKey,
+    );
     return this.connect();
   }
 
@@ -321,6 +341,7 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
     if (!this.drainWriterQueue() || this.writerQueue.length > 0) return false;
     if (this.socketIsBackpressured()) return false;
     this.evaluationPhase = 'commit_pending';
+    this.evaluationSequence += 1;
     this.activeResponseId = undefined;
     this.deltaText = '';
     this.finalText = '';
@@ -344,6 +365,17 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
       );
       return true;
     }
+    this.debug('proactive.monitor_commit', {
+      evaluation: this.evaluationSequence,
+      imageFrames: this.inputImageFrames,
+      audioBytes: this.inputAudioBytes,
+      audioMs:
+        (this.inputAudioBytes / (QWEN_REALTIME_INPUT_SAMPLE_RATE * 2)) * 1_000,
+      ...(this.lastInputFrameHash
+        ? { lastFrameHash: this.lastInputFrameHash }
+        : {}),
+    });
+    this.resetInputDiagnostics();
     this.audioInCurrentBuffer = false;
     this.armEvaluationTimeout();
     return true;
@@ -354,6 +386,7 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
     this.recentInputs = [];
     this.writerQueue = [];
     this.audioInCurrentBuffer = false;
+    this.resetInputDiagnostics();
     if (this.ready && !this.send({ type: 'input_audio_buffer.clear' })) {
       this.failCurrentTransport(
         monitorError(
@@ -367,6 +400,7 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
 
   close(): void {
     if (this.closed) return;
+    this.debugRecorder?.close();
     const pendingConnect = this.pendingConnect;
     this.closed = true;
     this.ready = false;
@@ -382,6 +416,7 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
     }
     this.recentInputs = [];
     this.writerQueue = [];
+    this.resetInputDiagnostics();
     pendingConnect?.finish(
       monitorError(
         'Monitor was closed while connecting.',
@@ -402,8 +437,10 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
     const old = this.socket;
     this.ready = false;
     this.audioInCurrentBuffer = false;
+    this.resetInputDiagnostics();
     this.writerQueue = [];
     const generation = ++this.transportGeneration;
+    this.debugRecorder?.beginTransport(generation);
     this.socket = undefined;
     try {
       old?.close();
@@ -464,6 +501,7 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
         this.failureSeenTransportGeneration = generation;
         this.ready = false;
         this.needsRecycle = true;
+        this.resetInputDiagnostics();
         if (!settled) {
           finishConnect(error);
           return;
@@ -563,13 +601,19 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
             );
             return;
           }
-          this.debug('proactive.monitor_ready', { generation });
+          this.debug('proactive.monitor_ready', {
+            generation,
+            model: providerMetadata(this.options.model, this.options.apiKey),
+          });
           finishConnect();
           this.callbacks.onReady?.(this.options.taskGeneration);
           return;
         }
         if (type === 'input_audio_buffer.committed') {
           if (this.evaluationPhase !== 'commit_pending') return;
+          this.debug('proactive.monitor_committed', {
+            evaluation: this.evaluationSequence,
+          });
           this.evaluationPhase = 'response_requested';
           if (!this.send({ type: 'response.create' })) {
             const error = monitorError(
@@ -825,14 +869,31 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
         },
         true,
       );
-      if (sent) this.audioInCurrentBuffer = true;
+      if (sent) {
+        this.audioInCurrentBuffer = true;
+        this.inputAudioBytes += input.payload.byteLength;
+      }
       return sent;
     }
     if (!this.audioInCurrentBuffer && !this.appendSilence()) return false;
-    return this.send(
+    const sent = this.send(
       { type: 'input_image_buffer.append', image: input.payload },
       true,
     );
+    if (sent) {
+      const image = Buffer.from(input.payload, 'base64');
+      this.inputImageFrames += 1;
+      this.lastInputFrameHash = createHash('sha256')
+        .update(image)
+        .digest('hex')
+        .slice(0, 16);
+      this.debug('proactive.monitor_image_sent', {
+        sequence: input.sequence,
+        bytes: image.byteLength,
+        frameHash: this.lastInputFrameHash,
+      });
+    }
+    return sent;
   }
 
   private appendSilence(): boolean {
@@ -843,8 +904,17 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
       },
       true,
     );
-    if (sent) this.audioInCurrentBuffer = true;
+    if (sent) {
+      this.audioInCurrentBuffer = true;
+      this.inputAudioBytes += SILENCE_PCM.byteLength;
+    }
     return sent;
+  }
+
+  private resetInputDiagnostics(): void {
+    this.inputImageFrames = 0;
+    this.inputAudioBytes = 0;
+    this.lastInputFrameHash = undefined;
   }
 
   private acceptResponse(message: ProviderMessage): boolean {
@@ -876,8 +946,24 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
       this.needsRecycle = true;
     }
     try {
-      this.finishEvaluation(parseMonitorAction(raw, this.options.monitorMode));
+      const result = parseMonitorAction(raw, this.options.monitorMode);
+      this.debug('proactive.monitor_action', {
+        evaluation: this.evaluationSequence,
+        action:
+          raw.trim() === 'wait'
+            ? 'wait'
+            : result.ignoredAction
+              ? 'function_call'
+              : 'reply',
+        responseChars: raw.length,
+      });
+      this.finishEvaluation(result);
     } catch {
+      this.debug('proactive.monitor_action', {
+        evaluation: this.evaluationSequence,
+        action: 'invalid',
+        responseChars: raw.length,
+      });
       this.needsRecycle = true;
       const error = monitorError(
         'Monitor returned an invalid action.',
@@ -901,6 +987,15 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
     failure?: QwenRealtimeError,
   ): void {
     if (this.evaluationPhase === 'idle') return;
+    this.debugRecorder?.result({
+      evaluation: this.evaluationSequence,
+      transportGeneration: this.transportGeneration,
+      responseId: this.activeResponseId,
+      status: failure || result.error ? 'failed' : 'completed',
+      text: this.finalText || this.deltaText,
+      result,
+      ...(failure ? { failure: failureDebugDetails(failure) } : {}),
+    });
     this.clearEvaluationTimer();
     this.evaluationPhase = 'idle';
     this.activeResponseId = undefined;
@@ -920,8 +1015,12 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
             'protocol',
           )
         : undefined);
-    if (safeResult.error) this.needsRecycle = true;
+    if (safeResult.error) {
+      this.needsRecycle = true;
+      this.resetInputDiagnostics();
+    }
     this.debug('proactive.monitor_result', {
+      evaluation: this.evaluationSequence,
       triggered: safeResult.triggered,
       ...(safeResult.ignoredAction
         ? { ignoredAction: safeResult.ignoredAction }
@@ -1005,6 +1104,7 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
     this.failureSeenTransportGeneration = generation;
     this.ready = false;
     this.needsRecycle = true;
+    this.resetInputDiagnostics();
     if (this.evaluationPhase !== 'idle') {
       this.failureDeliveredTransportGeneration = generation;
       this.finishEvaluation(
@@ -1051,19 +1151,26 @@ export class DashScopeRealtimeMonitor implements ProactiveRealtimeMonitor {
     ) {
       return false;
     }
+    const payload = { event_id: randomUUID(), ...body };
     try {
-      socket.send(JSON.stringify({ event_id: randomUUID(), ...body }));
-      return true;
+      socket.send(JSON.stringify(payload));
     } catch {
       return false;
     }
+    this.debugRecorder?.sent(payload);
+    return true;
   }
 
   private debug(event: string, details: Record<string, unknown>): void {
-    this.callbacks.onDebug?.(event, {
-      taskId: this.options.taskId,
-      taskGeneration: this.options.taskGeneration,
-      ...details,
-    });
+    try {
+      this.callbacks.onDebug?.(event, {
+        taskId: this.options.taskId,
+        taskGeneration: this.options.taskGeneration,
+        transportGeneration: this.transportGeneration,
+        ...details,
+      });
+    } catch {
+      // Diagnostics must not interrupt media delivery or evaluation.
+    }
   }
 }

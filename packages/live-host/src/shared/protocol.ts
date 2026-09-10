@@ -75,6 +75,7 @@ export type MemoryResult =
 export type VisualInput = {
   source: VisualSource;
   mode: VisualMode;
+  screenDisplayId?: string;
   fps: number;
   cameraWidth?: number;
   cameraHeight?: number;
@@ -85,6 +86,17 @@ export type VisualInput = {
   snapshotWidth?: number;
   snapshotHeight?: number;
 };
+
+export function isScreenDisplayId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    (value === 'primary' ||
+      (value.length === 36 &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
+          value,
+        )))
+  );
+}
 
 export type PlaybackIdentity = {
   epoch: number;
@@ -187,6 +199,7 @@ export type LiveStatus = {
 
 export type HostHello = {
   type: 'host.hello';
+  displayCaptureV1?: true;
   subagentsV1?: true;
   protocolVersion: number;
   hostVersion: string;
@@ -236,12 +249,15 @@ export type HostControlMessage =
       epoch: number;
       source: VisualSource;
       image: string;
+      screenScope?: 'display';
+      displayId?: string;
     }
   | {
       type: 'host.visual_settings';
       epoch: number;
       source: VisualSource;
       mode: VisualMode;
+      screenDisplayId?: string;
       permissions: Pick<
         HostPermissions,
         'camera' | 'accessibility' | 'screenRecording'
@@ -253,6 +269,8 @@ export type HostControlMessage =
       requestId: string;
       success: true;
       source: 'screen';
+      screenScope?: 'display';
+      displayId?: string;
       image: string;
       width: number;
       height: number;
@@ -284,6 +302,7 @@ export type DaemonControlMessage =
       protocolVersion: number;
       daemonInstanceNonce: string;
       daemonShutdownV1?: true;
+      displayCaptureV1?: true;
       heartbeatIntervalMs: number;
       epoch: number;
       capabilities?: HostCapabilities;
@@ -291,6 +310,7 @@ export type DaemonControlMessage =
       memory?: MemoryState;
       uiLanguageV1?: UiLanguageState;
       subagentsV1?: SubagentsSnapshot;
+      subagentsControlV1?: true;
       status: LiveStatus;
     }
   | {
@@ -326,6 +346,8 @@ export type DaemonControlMessage =
       requestId: string;
       epoch: number;
       source: VisualSource;
+      screenScope?: 'display';
+      screenDisplayId?: string;
       snapshotWidth?: number;
       snapshotHeight?: number;
       persistAsset?: boolean;
@@ -570,6 +592,8 @@ function parseVisualInput(value: unknown): VisualInput | undefined {
   if (
     (source !== 'screen' && source !== 'camera') ||
     (mode !== 'on-demand' && mode !== 'live-feed') ||
+    (value.screenDisplayId !== undefined &&
+      !isScreenDisplayId(value.screenDisplayId)) ||
     typeof value.fps !== 'number' ||
     !Number.isFinite(value.fps) ||
     value.fps < 0.1 ||
@@ -607,6 +631,9 @@ function parseVisualInput(value: unknown): VisualInput | undefined {
   return {
     source,
     mode,
+    ...(typeof value.screenDisplayId === 'string'
+      ? { screenDisplayId: value.screenDisplayId.toLowerCase() }
+      : {}),
     fps: value.fps,
     ...(typeof cameraWidth === 'number' ? { cameraWidth } : {}),
     ...(typeof cameraHeight === 'number' ? { cameraHeight } : {}),
@@ -658,11 +685,15 @@ export function parseDaemonControlMessage(
       !daemonInstanceNonce ||
       (value.daemonShutdownV1 !== undefined &&
         value.daemonShutdownV1 !== true) ||
+      (value.displayCaptureV1 !== undefined &&
+        value.displayCaptureV1 !== true) ||
       (value.capabilities !== undefined && !capabilities) ||
       (value.visualInput !== undefined && !visualInput) ||
       (value.memory !== undefined && !memory) ||
       (value.uiLanguageV1 !== undefined && !uiLanguageV1) ||
       (value.subagentsV1 !== undefined && !subagentsV1) ||
+      (value.subagentsControlV1 !== undefined &&
+        value.subagentsControlV1 !== true) ||
       !status
     ) {
       return undefined;
@@ -674,6 +705,9 @@ export function parseDaemonControlMessage(
       ...(value.daemonShutdownV1 === true
         ? { daemonShutdownV1: true as const }
         : {}),
+      ...(value.displayCaptureV1 === true
+        ? { displayCaptureV1: true as const }
+        : {}),
       heartbeatIntervalMs: Math.min(
         30_000,
         Math.max(1_000, Number(value.heartbeatIntervalMs)),
@@ -684,6 +718,9 @@ export function parseDaemonControlMessage(
       ...(memory ? { memory } : {}),
       ...(uiLanguageV1 ? { uiLanguageV1 } : {}),
       ...(subagentsV1 ? { subagentsV1 } : {}),
+      ...(value.subagentsControlV1 === true
+        ? { subagentsControlV1: true as const }
+        : {}),
       status,
     };
   }
@@ -810,6 +847,11 @@ export function parseDaemonControlMessage(
       Number.isSafeInteger(value.epoch) &&
       Number(value.epoch) >= 0 &&
       (source === 'screen' || source === 'camera') &&
+      (value.screenScope === undefined ||
+        (value.screenScope === 'display' && source === 'screen')) &&
+      (value.screenDisplayId === undefined ||
+        (value.screenScope === 'display' &&
+          isScreenDisplayId(value.screenDisplayId))) &&
       (!hasSnapshotSize ||
         (Number.isInteger(snapshotWidth) &&
           Number(snapshotWidth) >= MIN_VISUAL_WIDTH &&
@@ -823,6 +865,12 @@ export function parseDaemonControlMessage(
           requestId,
           epoch: Number(value.epoch),
           source,
+          ...(value.screenScope === 'display'
+            ? { screenScope: 'display' as const }
+            : {}),
+          ...(typeof value.screenDisplayId === 'string'
+            ? { screenDisplayId: value.screenDisplayId.toLowerCase() }
+            : {}),
           ...(typeof snapshotWidth === 'number' ? { snapshotWidth } : {}),
           ...(typeof snapshotHeight === 'number' ? { snapshotHeight } : {}),
           ...(typeof persistAsset === 'boolean' ? { persistAsset } : {}),
@@ -843,6 +891,12 @@ export function parseDaemonControlMessage(
 }
 
 export function encodeHostControlMessage(message: HostControlMessage): string {
+  if (
+    message.type === 'host.hello' &&
+    message.displayCaptureV1 !== undefined &&
+    message.displayCaptureV1 !== true
+  )
+    throw new Error('Invalid display capture capability');
   if (
     message.type === 'host.hello' &&
     message.subagentsV1 !== undefined &&
@@ -871,6 +925,11 @@ export function encodeHostControlMessage(message: HostControlMessage): string {
     (!Number.isSafeInteger(message.epoch) ||
       message.epoch < 0 ||
       (message.source !== 'screen' && message.source !== 'camera') ||
+      ((message.screenScope !== undefined || message.displayId !== undefined) &&
+        (message.source !== 'screen' ||
+          message.screenScope !== 'display' ||
+          message.displayId === 'primary' ||
+          !isScreenDisplayId(message.displayId))) ||
       !isValidInputImageFrame(message.image))
   ) {
     throw new Error('Invalid Live Host visual frame');
@@ -881,6 +940,8 @@ export function encodeHostControlMessage(message: HostControlMessage): string {
       message.epoch < 0 ||
       (message.source !== 'screen' && message.source !== 'camera') ||
       (message.mode !== 'on-demand' && message.mode !== 'live-feed') ||
+      (message.screenDisplayId !== undefined &&
+        !isScreenDisplayId(message.screenDisplayId)) ||
       !['granted', 'denied', 'not_determined'].includes(
         message.permissions.camera,
       ) ||
@@ -905,6 +966,16 @@ export function encodeHostControlMessage(message: HostControlMessage): string {
   ) {
     throw new Error('Invalid Live Host visual capture');
   }
+  if (
+    message.type === 'host.visual_capture_result' &&
+    message.success &&
+    message.source === 'screen' &&
+    (message.screenScope !== undefined || message.displayId !== undefined) &&
+    (message.screenScope !== 'display' ||
+      message.displayId === 'primary' ||
+      !isScreenDisplayId(message.displayId))
+  )
+    throw new Error('Invalid Live Host display capture');
   const encoded = JSON.stringify(message);
   if (Buffer.byteLength(encoded, 'utf8') > MAX_CONTROL_FRAME_BYTES) {
     throw new Error('Live Host control frame exceeds the protocol limit');

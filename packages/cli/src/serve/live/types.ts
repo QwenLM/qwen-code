@@ -52,6 +52,7 @@ export type LiveMemoryResult =
 export interface LiveVisualInput {
   source: LiveVisualSource;
   mode: LiveVisualMode;
+  screenDisplayId?: string;
   fps: number;
   cameraWidth?: number;
   cameraHeight?: number;
@@ -150,6 +151,7 @@ export type LivePermissionState = 'granted' | 'denied' | 'not_determined';
 
 export interface LiveHostHello {
   type: 'host.hello';
+  displayCaptureV1?: true;
   protocolVersion: number;
   hostVersion: string;
   bundleId: string;
@@ -215,6 +217,8 @@ export interface LiveHostVisualFrame {
   epoch: number;
   source: LiveVisualSource;
   image: string;
+  screenScope?: 'display';
+  displayId?: string;
 }
 
 export interface LiveHostVisualSettings {
@@ -222,6 +226,7 @@ export interface LiveHostVisualSettings {
   epoch: number;
   source: LiveVisualSource;
   mode: LiveVisualMode;
+  screenDisplayId?: string;
   permissions: {
     camera: LivePermissionState;
     accessibility: LivePermissionState;
@@ -236,6 +241,8 @@ export type LiveHostVisualCaptureResult =
       requestId: string;
       success: true;
       source: 'screen';
+      screenScope?: 'display';
+      displayId?: string;
       image: string;
       width: number;
       height: number;
@@ -301,6 +308,7 @@ export type LiveDaemonMessage =
       protocolVersion: typeof LIVE_HOST_PROTOCOL_VERSION;
       daemonInstanceNonce: string;
       daemonShutdownV1?: true;
+      displayCaptureV1?: true;
       uiLanguageV1?: LiveLanguageState;
       heartbeatIntervalMs: number;
       epoch: number;
@@ -330,6 +338,8 @@ export type LiveDaemonMessage =
       requestId: string;
       epoch: number;
       source: LiveVisualSource;
+      screenScope?: 'display';
+      screenDisplayId?: string;
       snapshotWidth?: number;
       snapshotHeight?: number;
       persistAsset?: boolean;

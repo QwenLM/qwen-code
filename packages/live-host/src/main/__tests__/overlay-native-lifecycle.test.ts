@@ -17,7 +17,7 @@ import { canToggleLive, shouldStopLiveOnToggle } from '../live-state-policy.ts';
 
 type Callback = (...args: unknown[]) => unknown;
 
-function fixture(minimumNativeY?: number) {
+function fixture(minimumNativeY?: number, diagnosticsEnabled = false) {
   const source = readFileSync(new URL('../index.ts', import.meta.url), 'utf8');
   const tree = ts.createSourceFile(
     'index.ts',
@@ -78,6 +78,7 @@ function fixture(minimumNativeY?: number) {
   let quitResolves: (() => void) | undefined;
   let quitRejects: ((error: Error) => void) | undefined;
   const commands: string[] = [];
+  const diagnostics: Array<{ event: string; details: object }> = [];
   const states: HostPublicState[] = [];
   const offsets: Array<{ x: number; y: number }> = [];
   const actions: string[] = [];
@@ -146,6 +147,10 @@ function fixture(minimumNativeY?: number) {
     isLiveLanguage,
     liveMessage,
     language: 'en',
+    screenDisplays: [],
+    screenDisplaysError: undefined,
+    appshotCapture: undefined,
+    refreshScreenDisplays: () => {},
     theme: 'system',
     nativeTheme: { shouldUseDarkColors: true },
     subagents: undefined,
@@ -218,7 +223,8 @@ function fixture(minimumNativeY?: number) {
     readOverlayPosition: () => stored.position,
     saveOverlayPosition: (_path: string, position: { x: number; y: number }) =>
       saved.push({ x: position.x, y: position.y }),
-    writeLiveDiagnostic: () => {},
+    writeLiveDiagnostic: (event: string, details: object) =>
+      diagnostics.push({ event, details }),
     sendRendererCommand: (channel: string, value?: unknown) => {
       commands.push(channel);
       if (channel === 'live:overlay-offset') {
@@ -268,7 +274,7 @@ let visualInput, visualError, visualReady = false;
 const permissions = {}, selfChecks = {};
 const startupInteraction = new StartupInteraction();
 let live = { v: 1, available: true, state: 'idle', shortcut: 'Command+E' };
-const OVERLAY_WIDTH = 384, OVERLAY_HEIGHT = 480, diagnosticsEnabled = false, READINESS_RECONNECT_DEBOUNCE_MS = 2500;
+const OVERLAY_WIDTH = 384, OVERLAY_HEIGHT = 480, diagnosticsEnabled = ${diagnosticsEnabled}, READINESS_RECONNECT_DEBOUNCE_MS = 2500;
 ${functions}
 registerIpc();
 ({ create: (ready = true) => { overlay = createOverlay(); if (ready) overlay.events.get('did-finish-load')?.(); return overlay; }, showOverlay, stopLive,
@@ -309,6 +315,7 @@ registerIpc();
     finishQuit: () => quitResolves?.(),
     failQuit: () => quitRejects?.(new Error('private transport error')),
     commands,
+    diagnostics,
     states,
     offsets,
     actions,
@@ -327,6 +334,31 @@ registerIpc();
 }
 
 describe('native overlay interaction', () => {
+  it('logs current native window movement only in debug mode without repositioning it', () => {
+    const quiet = fixture();
+    const quietWindow = quiet.controls.create();
+    quiet.diagnostics.length = 0;
+    quietWindow.events.get('move')?.();
+    assert.equal(quiet.diagnostics.length, 0);
+
+    const host = fixture(undefined, true);
+    const previous = host.controls.create();
+    const window = host.controls.create();
+    host.diagnostics.length = 0;
+    const moves = window.moves.length;
+    previous.events.get('move')?.();
+    assert.equal(host.diagnostics.length, 0);
+    window.events.get('move')?.();
+    assert.equal(window.moves.length, moves);
+    assert.equal(host.diagnostics.length, 1);
+    const log = host.diagnostics[0];
+    assert.equal(log?.event, 'overlay_native_moved');
+    assert.deepEqual(JSON.parse(JSON.stringify(log?.details)), {
+      bounds: window.getBounds(),
+      offset: { x: 0, y: 0 },
+    });
+  });
+
   it('accepts playback receipts only from the current ready renderer with valid epoch and output identity', () => {
     const host = fixture();
     const window = host.controls.create(false);
@@ -456,6 +488,81 @@ describe('native overlay interaction', () => {
     host.controls.stopLive();
     assert.equal(host.hidden(), 0);
     assert.equal(window.options.height, 480);
+  });
+
+  it('restores the dragged bottom-right position after native re-show clamps the canvas', () => {
+    const host = fixture();
+    const window = host.controls.create();
+    const event = { sender: window.webContents };
+    const layout = host.ipc.get('live:overlay-layout')!;
+    layout(event, 'orb');
+    const drag = host.ipc.get('live:drag-overlay')!;
+    drag(event, 'start', 1000, 700);
+    drag(event, 'end', 1100, 800);
+    const desired = { x: 956, y: 326 };
+    const before = window.getBounds();
+    assert.deepEqual({ x: before.x, y: before.y }, desired);
+    assert.deepEqual(host.saved, [desired]);
+    const moves = window.moves.length;
+    host.controls.showOverlay();
+    assert.equal(window.moves.length, moves);
+
+    window.hide();
+    window.showInactive = () => {
+      window.options.x = 896;
+      window.options.y = 320;
+    };
+    host.controls.showOverlay();
+    assert.deepEqual(window.getBounds(), before);
+    assert.equal(window.moves.length, moves + 1);
+    assert.deepEqual(window.moves.at(-1), desired);
+    assert.equal(host.controls.publicState().overlayOffset?.x, 0);
+    assert.equal(host.controls.publicState().overlayOffset?.y, 0);
+    assert.deepEqual(host.saved, [desired]);
+    const replacement = host.controls.create();
+    layout({ sender: replacement.webContents }, 'orb');
+    assert.deepEqual(replacement.getBounds(), before);
+    assert.deepEqual(host.saved, [desired]);
+  });
+
+  it('preserves an existing native offset and saved drag position when re-show clamps another edge', () => {
+    const host = fixture(33);
+    host.area.y = 33;
+    host.stored.position = { x: 956, y: -97 };
+    const window = host.controls.create();
+    const event = { sender: window.webContents };
+    const layout = host.ipc.get('live:overlay-layout')!;
+    layout(event, 'orb');
+    const drag = host.ipc.get('live:drag-overlay')!;
+    drag(event, 'start', 292, 255);
+    drag(event, 'end', 292, 265);
+    const desired = { x: 956, y: -87 };
+    const before = window.getBounds();
+    assert.equal(before.y, 33);
+    assert.equal(host.controls.publicState().overlayOffset?.y, -120);
+    assert.deepEqual(host.saved, [desired]);
+    const moves = window.moves.length;
+    const offsets = host.offsets.length;
+    host.controls.showOverlay();
+    assert.equal(window.moves.length, moves);
+    assert.equal(host.offsets.length, offsets);
+
+    window.hide();
+    window.showInactive = () => {
+      window.options.x = 896;
+    };
+    host.controls.showOverlay();
+    assert.deepEqual(window.getBounds(), before);
+    assert.equal(window.moves.length, moves + 1);
+    assert.deepEqual(window.moves.at(-1), desired);
+    assert.equal(host.controls.publicState().overlayOffset?.x, 0);
+    assert.equal(host.controls.publicState().overlayOffset?.y, -120);
+    assert.deepEqual(host.saved, [desired]);
+    const replacement = host.controls.create();
+    layout({ sender: replacement.webContents }, 'orb');
+    assert.deepEqual(replacement.getBounds(), before);
+    assert.equal(host.controls.publicState().overlayOffset?.y, -120);
+    assert.deepEqual(host.saved, [desired]);
   });
 
   it('resets the pointer cache before accepting events from a replacement window', () => {

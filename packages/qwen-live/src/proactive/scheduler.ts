@@ -8,6 +8,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { ProactiveConfig } from '../config.js';
+import type { MonitorDebugStore } from './monitor-debug-store.js';
 import {
   QWEN_REALTIME_INPUT_SAMPLE_RATE,
   QWEN_REALTIME_LIMITS,
@@ -83,6 +84,7 @@ export interface ProactiveSchedulerOptions {
     notification?: 'queued' | 'speaking' | 'delivered',
   ) => void;
   captureVision?: () => Promise<string | undefined>;
+  monitorDebug?: MonitorDebugStore;
   createMonitor?: (
     options: DashScopeRealtimeMonitorOptions,
     callbacks: DashScopeRealtimeMonitorCallbacks,
@@ -98,6 +100,7 @@ export interface ProactiveSchedulerControl {
   createTimer(input: CreateTimerInput): ProactiveTask;
   updateTask(input: UpdateTaskInput): ProactiveTask;
   cancelTasks(selector: TaskSelector): ProactiveTask[];
+  cancelTaskById(taskId: string): ProactiveTask | undefined;
   listTasks(): ProactiveTask[];
   feedAudio(pcm16: Uint8Array): void;
   feedImage(jpegBase64: string): void;
@@ -133,9 +136,8 @@ export class ProactiveScheduler implements ProactiveSchedulerControl {
   private readonly diagnosticStates = new Map<string, string>();
 
   constructor(private readonly options: ProactiveSchedulerOptions) {
-    this.manager = new ProactiveTaskManager(
-      options.config.scheduler.maxConcurrentTasks,
-      (task) => this.notifyTask(task),
+    this.manager = new ProactiveTaskManager(undefined, (task) =>
+      this.notifyTask(task),
     );
     this.createMonitor =
       options.createMonitor ??
@@ -233,6 +235,15 @@ export class ProactiveScheduler implements ProactiveSchedulerControl {
     return cancelled;
   }
 
+  cancelTaskById(taskId: string): ProactiveTask | undefined {
+    this.ensureActive();
+    const task = this.manager.cancelById(taskId);
+    if (!task) return undefined;
+    this.cleanupTask(task.taskId);
+    this.invalidateDeliveries(new Set([task.taskId]));
+    return task;
+  }
+
   listTasks(): ProactiveTask[] {
     const pendingCounts = new Map<string, number>();
     for (const { delivery } of this.deliveries.values()) {
@@ -293,6 +304,15 @@ export class ProactiveScheduler implements ProactiveSchedulerControl {
       if (!monitor?.feedImage(jpegBase64)) continue;
       const state = this.evidenceFor(task.taskId);
       this.pruneEvidence(state, capturedAt);
+      const lastFrame = state.vision.at(-1);
+      const continuityGapMs = Math.max(
+        1_000,
+        (3 * 1_000) / this.options.config.vision.fps,
+      );
+      if (lastFrame !== undefined && capturedAt - lastFrame > continuityGapMs) {
+        state.vision = [];
+        state.visionStartedAt = undefined;
+      }
       state.visionStartedAt ??= capturedAt;
       state.vision.push(capturedAt);
     }
@@ -492,6 +512,7 @@ export class ProactiveScheduler implements ProactiveSchedulerControl {
             audio: this.options.config.audio.windowSizeSec,
           },
           sessionRecycleEvals: this.options.config.monitor.sessionRecycleEvals,
+          monitorDebug: this.options.monitorDebug,
         },
         {
           onReady: (taskGeneration) => {

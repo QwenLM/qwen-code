@@ -6,6 +6,7 @@ import { afterEach, describe, it } from 'node:test';
 import {
   AppshotCaptureService,
   validateNativeCapture,
+  validateNativeDisplayCapture,
 } from '../appshot-capture.ts';
 import type { NativeAppshot } from '../native-appshot.ts';
 import {
@@ -15,6 +16,12 @@ import {
 
 const cleanup: string[] = [];
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+const DISPLAY_ID = '11223344-5566-7788-99aa-bbccddeeff00';
+const OTHER_DISPLAY_ID = '11223344-5566-7788-99aa-bbccddeeff11';
+const DISPLAY_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jp1sAAAAASUVORK5CYII=',
+  'base64',
+);
 
 afterEach(async () => {
   await Promise.all(
@@ -33,10 +40,197 @@ function fakeNative(
     requestAccessibility: () => true,
     requestScreenRecording: () => true,
     captureAppshot,
+    listDisplays: () => [],
+    captureDisplay: async () => {
+      throw new Error('not used');
+    },
   };
 }
 
 describe('AppshotCaptureService', () => {
+  it('lists display identities without invoking capture or permission requests', () => {
+    const native = fakeNative(async () => {
+      throw new Error('Appshot should not run');
+    });
+    native.listDisplays = () => [
+      {
+        id: DISPLAY_ID.toUpperCase(),
+        name: '  Studio Display  ',
+        width: 5120,
+        height: 2880,
+        primary: true,
+      },
+    ];
+    native.requestAccessibility = () => {
+      throw new Error('No AX prompt');
+    };
+    native.requestScreenRecording = () => {
+      throw new Error('No recording prompt');
+    };
+    const service = new AppshotCaptureService(undefined, () => native);
+    assert.deepEqual(service.listDisplays(), [
+      {
+        id: DISPLAY_ID,
+        name: 'Studio Display',
+        width: 5120,
+        height: 2880,
+        primary: true,
+      },
+    ]);
+    native.listDisplays = () => [
+      {
+        id: DISPLAY_ID,
+        name: 'Display',
+        width: 5120,
+        height: 2880,
+        primary: true,
+      },
+      {
+        id: DISPLAY_ID.toUpperCase(),
+        name: 'Duplicate',
+        width: 1920,
+        height: 1080,
+        primary: false,
+      },
+    ];
+    assert.throws(() => service.listDisplays(), /host.error.displayList/u);
+    service.dispose();
+  });
+
+  it('captures the exact display with no AX/window fallback and canonical identity', async () => {
+    const selections: string[] = [];
+    const native = fakeNative(async () => {
+      throw new Error('No window fallback');
+    });
+    native.getPermissionState = () => {
+      throw new Error('No AX readiness gate');
+    };
+    native.captureDisplay = async (selection) => {
+      selections.push(selection);
+      return { displayId: DISPLAY_ID.toUpperCase(), screenshot: DISPLAY_PNG };
+    };
+    const service = new AppshotCaptureService(undefined, () => native);
+    assert.deepEqual(
+      await service.captureDisplayFrame(DISPLAY_ID.toUpperCase()),
+      { displayId: DISPLAY_ID, screenshot: DISPLAY_PNG },
+    );
+    assert.deepEqual(await service.captureDisplayFrame(), {
+      displayId: DISPLAY_ID,
+      screenshot: DISPLAY_PNG,
+    });
+    assert.deepEqual(selections, [DISPLAY_ID, 'primary']);
+    await assert.rejects(
+      service.captureDisplayFrame('foreground'),
+      /host.error.displayUnavailable/u,
+    );
+    await assert.rejects(
+      service.captureDisplayFrame(`${DISPLAY_ID}\n`),
+      /host.error.displayUnavailable/u,
+    );
+    await assert.rejects(
+      service.captureDisplayFrame(OTHER_DISPLAY_ID),
+      /host.error.displayUnavailable/u,
+    );
+    assert.equal(selections.length, 3);
+    service.dispose();
+  });
+
+  it('shares one capture queue between display frames and original Appshot, including rejection', async () => {
+    let finish!: () => void;
+    const order: string[] = [];
+    const native = fakeNative(async () => {
+      order.push('window');
+      return {
+        appName: 'Editor',
+        windowId: 1,
+        accessibilityText: '- AXWindow',
+        screenshot: PNG,
+      };
+    });
+    native.captureDisplay = async () => {
+      order.push('display');
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      throw Object.assign(new Error('No display'), {
+        code: 'DISPLAY_UNAVAILABLE',
+      });
+    };
+    const service = new AppshotCaptureService(undefined, () => native);
+    const first = service.captureDisplayFrame(DISPLAY_ID);
+    const second = service.captureFrame();
+    assert.deepEqual(order, ['display']);
+    finish();
+    await assert.rejects(first, /host.error.displayUnavailable/u);
+    assert.equal((await second).appName, 'Editor');
+    assert.deepEqual(order, ['display', 'window']);
+    service.dispose();
+  });
+
+  it('returns localized display errors without leaking native messages', async () => {
+    const native = fakeNative(async () => {
+      throw new Error('No fallback');
+    });
+    const service = new AppshotCaptureService(undefined, () => native);
+    for (const [code, expected] of [
+      ['DISPLAY_PERMISSION', 'runtime.screenPermission'],
+      ['DISPLAY_UNAVAILABLE', 'host.error.displayUnavailable'],
+      ['unknown', 'host.error.displayCapture'],
+    ]) {
+      native.captureDisplay = async () => {
+        throw Object.assign(new Error('private backend detail'), { code });
+      };
+      await assert.rejects(
+        service.captureDisplayFrame(),
+        (error: Error) =>
+          error.message.includes(expected!) &&
+          !error.message.includes('private'),
+      );
+    }
+    service.dispose();
+  });
+
+  it('rejects invalid display PNGs and dimensions before passing them to image decoding', () => {
+    assert.deepEqual(
+      validateNativeDisplayCapture(
+        { displayId: DISPLAY_ID, screenshot: DISPLAY_PNG },
+        'primary',
+      ).screenshot,
+      DISPLAY_PNG,
+    );
+    const oversizedDimensions = Buffer.from(DISPLAY_PNG);
+    oversizedDimensions.writeUInt32BE(1921, 16);
+    for (const screenshot of [
+      PNG,
+      Buffer.alloc(MAX_CAPTURE_ASSET_BYTES + 1),
+      oversizedDimensions,
+    ])
+      assert.throws(
+        () =>
+          validateNativeDisplayCapture(
+            { displayId: DISPLAY_ID, screenshot },
+            DISPLAY_ID,
+          ),
+        /host.error.displayCapture/u,
+      );
+    assert.throws(
+      () =>
+        validateNativeDisplayCapture(
+          { displayId: OTHER_DISPLAY_ID, screenshot: DISPLAY_PNG },
+          DISPLAY_ID,
+        ),
+      /host.error.displayUnavailable/u,
+    );
+    assert.throws(
+      () =>
+        validateNativeDisplayCapture(
+          { displayId: `${DISPLAY_ID}\n`, screenshot: DISPLAY_PNG },
+          'primary',
+        ),
+      /host.error.displayUnavailable/u,
+    );
+  });
+
   it('performs one in-process capture and stores a private PNG', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'qwen-appshot-test-'));
     cleanup.push(directory);

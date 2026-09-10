@@ -21,7 +21,7 @@ describe('live instructions visual routing', () => {
       'Visual input has exactly one selected source and one acquisition mode',
     );
     expect(instructions).toContain(
-      'Source `screen` means the current foreground desktop window. Source `camera` means the physical camera',
+      'Source `screen` uses the entire selected display for Live Feed and Proactive vision monitors; On Demand `appshot` captures the current foreground desktop window. Source `camera` means the physical camera',
     );
     expect(instructions).toContain('Never claim to see the unselected source');
     expect(instructions).toContain(

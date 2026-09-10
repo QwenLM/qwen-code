@@ -181,7 +181,6 @@ describe('runInit', () => {
         monitor: { sessionRecycleEvals: 60 },
         scheduler: {
           evalIntervalSec: 2,
-          maxConcurrentTasks: 4,
           maxFailuresPerTask: 3,
           repeat: {
             cooldownSec: 3,

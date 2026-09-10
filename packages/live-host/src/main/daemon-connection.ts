@@ -7,7 +7,14 @@ import {
   type LiveLanguage,
 } from '@qwen-code/qwen-live/i18n';
 import WebSocket, { type RawData } from 'ws';
-import type { SubagentsSnapshot } from '@qwen-code/qwen-live/subagents';
+import {
+  MAX_SUBAGENTS_CONTROL_BYTES,
+  parseSubagentsControlRequest,
+  parseSubagentsControlResult,
+  type SubagentsControlRequest,
+  type SubagentsControlResult,
+  type SubagentsSnapshot,
+} from '@qwen-code/qwen-live/subagents';
 import {
   LIVE_HOST_BUNDLE_ID,
   LIVE_PROTOCOL_VERSION,
@@ -19,6 +26,7 @@ import {
   encodeInputAudioFrame,
   encodeHostControlMessage,
   isValidInputImageFrame,
+  isScreenDisplayId,
   parseDaemonControlMessage,
   parseMemoryAction,
   type DaemonControlMessage,
@@ -61,11 +69,14 @@ export type ConnectionPhase =
 export type ConnectionSnapshot = {
   phase: ConnectionPhase;
   error?: string;
+  visualSettingsError?: string;
   capabilities?: HostCapabilities;
   visualInput?: VisualInput;
   memory?: MemoryState;
   uiLanguageV1?: UiLanguageState;
   subagentsV1?: SubagentsSnapshot;
+  subagentsControlV1?: true;
+  displayCaptureV1?: true;
   instanceId?: string;
   status?: LiveStatus;
 };
@@ -98,11 +109,15 @@ type ConnectionCallbacks = {
   setShortcut?: (shortcut: string) => { success: boolean; error?: string };
   captureVisual?: (request: {
     source: VisualSource;
+    screenScope?: 'display';
+    screenDisplayId?: string;
     snapshotWidth?: number;
     snapshotHeight?: number;
     persistAsset?: boolean;
   }) => Promise<{
     source: VisualSource;
+    screenScope?: 'display';
+    displayId?: string;
     image: string;
     width: number;
     height: number;
@@ -130,6 +145,9 @@ function visualCaptureResultMessage(
           requestId,
           success: true,
           source: 'screen',
+          ...(result.screenScope === 'display'
+            ? { screenScope: 'display' as const, displayId: result.displayId }
+            : {}),
           image: result.image,
           width: result.width,
           height: result.height,
@@ -197,6 +215,8 @@ export class LiveDaemonConnection {
   private memory: MemoryState | undefined;
   private uiLanguageV1: UiLanguageState | undefined;
   private subagentsV1: SubagentsSnapshot | undefined;
+  private subagentsControlV1: true | undefined;
+  private displayCaptureV1: true | undefined;
   private pendingLanguageRequest:
     | {
         requestId: string;
@@ -217,12 +237,15 @@ export class LiveDaemonConnection {
       }
     | undefined;
   private pendingVisualSelection:
-    | (Pick<VisualInput, 'source' | 'mode'> & { epoch: number })
+    | (Pick<VisualInput, 'source' | 'mode' | 'screenDisplayId'> & {
+        epoch: number;
+      })
     | undefined;
   private snapshot: ConnectionSnapshot = { phase: 'disconnected' };
   private shutdownTarget: LiveDiscoveryRecord | undefined;
   private quitTarget: LiveDiscoveryRecord | undefined;
   private quitPromise: Promise<void> | undefined;
+  private quitRequested = false;
 
   constructor(
     private readonly hostVersion: string,
@@ -240,7 +263,7 @@ export class LiveDaemonConnection {
   }
 
   start(): void {
-    if (this.quitPromise || this.quitTarget) return;
+    if (this.quitRequested) return;
     this.discovery.start();
   }
 
@@ -248,7 +271,7 @@ export class LiveDaemonConnection {
     this.discovery.stop();
     this.cancelReconnect();
     this.closeSocket(1000, 'host stopping');
-    if (!this.quitPromise && !this.quitTarget) {
+    if (!this.quitRequested) {
       this.shutdownTarget = undefined;
       this.publish({ phase: 'disconnected' });
     }
@@ -262,6 +285,7 @@ export class LiveDaemonConnection {
         : undefined;
     const target = this.quitTarget ?? this.shutdownTarget;
     if (target) this.quitTarget = { ...target };
+    this.quitRequested = true;
     this.discovery.stop();
     this.cancelReconnect();
     this.clearHeartbeatTimer();
@@ -300,7 +324,6 @@ export class LiveDaemonConnection {
     if (target) {
       if (!target.token)
         throw new Error(liveMessage('host.error.quitCredentials'));
-      if (this.isShutdownProcessGone(target)) return;
       const url = new URL(buildHostWebSocketUrl(target.url));
       url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
       url.pathname = '/live/quit';
@@ -316,7 +339,12 @@ export class LiveDaemonConnection {
           signal: AbortSignal.timeout(QUIT_TIMEOUT_MS),
         });
       } catch (error) {
-        if (this.isShutdownProcessGone(target)) return;
+        if (
+          (error as { cause?: NodeJS.ErrnoException } | undefined)?.cause
+            ?.code === 'ECONNREFUSED' &&
+          this.isShutdownProcessGone(target)
+        )
+          return;
         throw error;
       }
       if (!response.ok) {
@@ -367,7 +395,7 @@ export class LiveDaemonConnection {
   }
 
   reconnectNow(): void {
-    if (this.quitPromise || this.quitTarget) return;
+    if (this.quitRequested) return;
     this.reconnectPolicy.reset();
     this.cancelReconnect();
     if (!this.currentRecord) return;
@@ -376,7 +404,7 @@ export class LiveDaemonConnection {
   }
 
   forceReconnectNow(): void {
-    if (this.quitPromise || this.quitTarget) return;
+    if (this.quitRequested) return;
     this.reconnectPolicy.reset();
     this.cancelReconnect();
     if (!this.currentRecord) return;
@@ -386,6 +414,100 @@ export class LiveDaemonConnection {
 
   sendAction(action: HostAction): boolean {
     return this.sendControl(action);
+  }
+
+  async requestSubagents(
+    request: SubagentsControlRequest,
+    expectedInstance: string,
+  ): Promise<SubagentsControlResult> {
+    const action = parseSubagentsControlRequest(request);
+    if (!action) return { type: 'error', code: 'invalid_request' };
+    const target = this.currentRecord;
+    const socket = this.socket;
+    if (!target || target.instanceNonce !== expectedInstance)
+      return { type: 'error', code: 'stale_instance' };
+    if (!this.subagentsControlV1) return { type: 'error', code: 'unsupported' };
+    const current = () =>
+      this.currentRecord === target &&
+      this.socket === socket &&
+      socket?.readyState === WebSocket.OPEN &&
+      this.welcomed &&
+      this.snapshot.phase === 'ready' &&
+      !this.quitRequested;
+    if (!target.token || !current())
+      return { type: 'error', code: 'unavailable' };
+    const url = new URL(buildHostWebSocketUrl(target.url));
+    url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
+    url.pathname = '/live/subagents';
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${target.token}`,
+          'x-qwen-live-nonce': target.instanceNonce,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(action),
+        redirect: 'error',
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!current()) {
+        await response.body?.cancel();
+        return { type: 'error', code: 'stale_instance' };
+      }
+      if (
+        !response.body ||
+        Number(response.headers.get('content-length')) >
+          MAX_SUBAGENTS_CONTROL_BYTES
+      ) {
+        await response.body?.cancel();
+        return { type: 'error', code: 'action_failed' };
+      }
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let bytes = 0;
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        bytes += chunk.value.byteLength;
+        if (bytes > MAX_SUBAGENTS_CONTROL_BYTES) {
+          await reader.cancel();
+          return { type: 'error', code: 'action_failed' };
+        }
+        chunks.push(chunk.value);
+      }
+      if (!current()) return { type: 'error', code: 'stale_instance' };
+      if (response.status === 409)
+        return { type: 'error', code: 'stale_instance' };
+      const result = parseSubagentsControlResult(
+        JSON.parse(Buffer.concat(chunks).toString('utf8')),
+      );
+      if (!result || (!response.ok && result.type !== 'error'))
+        return { type: 'error', code: 'action_failed' };
+      if (
+        result.type !== 'error' &&
+        (action.action === 'list'
+          ? result.type !== 'page' ||
+            (result.page.selected !== undefined &&
+              result.page.selected.id !== action.selectedId)
+          : result.type !== 'outcome' ||
+            (action.action === 'stop'
+              ? result.taskId !== action.taskId ||
+                !['stopping', 'stopped', 'already_ended'].includes(
+                  result.outcome,
+                )
+              : result.requestHandle !== action.requestHandle ||
+                result.outcome !==
+                  (action.decision === 'allow' ? 'allowed' : 'denied')))
+      )
+        return { type: 'error', code: 'action_failed' };
+      return result;
+    } catch {
+      return {
+        type: 'error',
+        code: current() ? 'action_failed' : 'stale_instance',
+      };
+    }
   }
 
   requestMemoryAction(action: MemoryAction): Promise<MemoryState> {
@@ -494,8 +616,7 @@ export class LiveDaemonConnection {
     const encoded = encodeInputAudioFrame(epoch, frame);
     if (
       !socket ||
-      this.quitPromise ||
-      this.quitTarget ||
+      this.quitRequested ||
       !this.welcomed ||
       epoch !== this.epoch ||
       socket.readyState !== WebSocket.OPEN ||
@@ -509,11 +630,21 @@ export class LiveDaemonConnection {
     return true;
   }
 
-  sendVisualFrame(source: VisualSource, image: string, epoch: number): boolean {
+  sendVisualFrame(
+    source: VisualSource,
+    image: string,
+    epoch: number,
+    displayId?: string,
+  ): boolean {
     if (
       !this.welcomed ||
       epoch !== this.epoch ||
-      !isValidInputImageFrame(image)
+      !isValidInputImageFrame(image) ||
+      (source === 'screen' &&
+        (!this.displayCaptureV1 ||
+          displayId === 'primary' ||
+          !isScreenDisplayId(displayId))) ||
+      (source === 'camera' && displayId !== undefined)
     ) {
       return false;
     }
@@ -523,6 +654,12 @@ export class LiveDaemonConnection {
         epoch,
         source,
         image,
+        ...(displayId
+          ? {
+              screenScope: 'display' as const,
+              displayId: displayId.toLowerCase(),
+            }
+          : {}),
       });
     } catch {
       return false;
@@ -530,7 +667,7 @@ export class LiveDaemonConnection {
   }
 
   sendVisualSettings(
-    update: Partial<Pick<VisualInput, 'source' | 'mode'>>,
+    update: Partial<Pick<VisualInput, 'source' | 'mode' | 'screenDisplayId'>>,
     epoch: number,
   ): boolean {
     const current =
@@ -541,11 +678,17 @@ export class LiveDaemonConnection {
       !this.welcomed ||
       epoch !== this.epoch ||
       !current ||
-      (update.source === undefined && update.mode === undefined)
+      (update.source === undefined &&
+        update.mode === undefined &&
+        update.screenDisplayId === undefined) ||
+      (update.screenDisplayId !== undefined &&
+        (!this.displayCaptureV1 || !isScreenDisplayId(update.screenDisplayId)))
     ) {
       return false;
     }
     const next = { ...current, ...update };
+    if (next.screenDisplayId)
+      next.screenDisplayId = next.screenDisplayId.toLowerCase();
     const readiness = this.callbacks.getReadiness();
     try {
       const sent = this.sendControl({
@@ -553,6 +696,9 @@ export class LiveDaemonConnection {
         epoch,
         source: next.source,
         mode: next.mode,
+        ...(next.screenDisplayId && this.displayCaptureV1
+          ? { screenDisplayId: next.screenDisplayId }
+          : {}),
         permissions: {
           camera: readiness.permissions.camera,
           accessibility: readiness.permissions.accessibility,
@@ -560,7 +706,14 @@ export class LiveDaemonConnection {
         },
         appshot: readiness.selfChecks.appshot,
       });
-      if (sent) this.pendingVisualSelection = { ...next, epoch };
+      if (sent) {
+        this.pendingVisualSelection = { ...next, epoch };
+        if (this.snapshot.visualSettingsError) {
+          const snapshot = { ...this.snapshot };
+          delete snapshot.visualSettingsError;
+          this.publish(snapshot);
+        }
+      }
       return sent;
     } catch {
       return false;
@@ -585,8 +738,7 @@ export class LiveDaemonConnection {
 
   getConfigFilePath(): string | undefined {
     if (
-      this.quitPromise ||
-      this.quitTarget ||
+      this.quitRequested ||
       !this.welcomed ||
       this.snapshot.phase !== 'ready' ||
       this.socket?.readyState !== WebSocket.OPEN
@@ -596,7 +748,7 @@ export class LiveDaemonConnection {
   }
 
   private handleDiscovery(result: DiscoveryResult): void {
-    if (this.quitPromise || this.quitTarget) return;
+    if (this.quitRequested) return;
     if (result.kind !== 'ready') {
       this.currentRecord = undefined;
       this.currentSignature = '';
@@ -627,7 +779,7 @@ export class LiveDaemonConnection {
   }
 
   private connect(record: LiveDiscoveryRecord): void {
-    if (this.socket || this.quitPromise || this.quitTarget) return;
+    if (this.socket || this.quitRequested) return;
     this.capabilities = undefined;
     this.visualInput = undefined;
     this.pendingVisualSelection = undefined;
@@ -656,6 +808,7 @@ export class LiveDaemonConnection {
       const readiness = this.callbacks.getReadiness();
       this.sendControl({
         type: 'host.hello',
+        displayCaptureV1: true,
         subagentsV1: true,
         protocolVersion: LIVE_PROTOCOL_VERSION,
         hostVersion: this.hostVersion,
@@ -672,7 +825,7 @@ export class LiveDaemonConnection {
     });
 
     socket.on('message', (data, isBinary) => {
-      if (socket !== this.socket || this.quitPromise || this.quitTarget) return;
+      if (socket !== this.socket || this.quitRequested) return;
       if (isBinary) {
         if (!this.welcomed) {
           socket.close(1002, 'audio before welcome');
@@ -732,6 +885,8 @@ export class LiveDaemonConnection {
           this.memory = message.memory;
           this.uiLanguageV1 = message.uiLanguageV1;
           this.subagentsV1 = message.subagentsV1;
+          this.subagentsControlV1 = message.subagentsControlV1;
+          this.displayCaptureV1 = message.displayCaptureV1;
           this.pendingVisualSelection = undefined;
           this.heartbeatIntervalMs = message.heartbeatIntervalMs;
           this.clearHandshakeTimer();
@@ -749,6 +904,8 @@ export class LiveDaemonConnection {
             ...(this.memory ? { memory: this.memory } : {}),
             ...(this.uiLanguageV1 ? { uiLanguageV1: this.uiLanguageV1 } : {}),
             ...(this.subagentsV1 ? { subagentsV1: this.subagentsV1 } : {}),
+            ...(this.subagentsControlV1 ? { subagentsControlV1: true } : {}),
+            ...(this.displayCaptureV1 ? { displayCaptureV1: true } : {}),
             status: message.status,
           });
           break;
@@ -787,7 +944,9 @@ export class LiveDaemonConnection {
                 (this.pendingVisualSelection.source ===
                   message.visualInput.source &&
                   this.pendingVisualSelection.mode ===
-                    message.visualInput.mode))
+                    message.visualInput.mode &&
+                  (this.pendingVisualSelection.screenDisplayId ?? 'primary') ===
+                    (message.visualInput.screenDisplayId ?? 'primary')))
             ) {
               this.pendingVisualSelection = undefined;
             }
@@ -795,6 +954,9 @@ export class LiveDaemonConnection {
           this.publish({
             phase: 'ready',
             instanceId: record.instanceNonce,
+            ...(this.snapshot.visualSettingsError
+              ? { visualSettingsError: this.snapshot.visualSettingsError }
+              : {}),
             ...(this.capabilities
               ? { capabilities: { ...this.capabilities } }
               : {}),
@@ -804,6 +966,8 @@ export class LiveDaemonConnection {
             ...(this.memory ? { memory: this.memory } : {}),
             ...(this.uiLanguageV1 ? { uiLanguageV1: this.uiLanguageV1 } : {}),
             ...(this.subagentsV1 ? { subagentsV1: this.subagentsV1 } : {}),
+            ...(this.subagentsControlV1 ? { subagentsControlV1: true } : {}),
+            ...(this.displayCaptureV1 ? { displayCaptureV1: true } : {}),
             status: message.status,
           });
           break;
@@ -901,13 +1065,19 @@ export class LiveDaemonConnection {
           }
           void this.captureVisual(message);
           break;
-        case 'host.error':
+        case 'host.error': {
+          const visualSettingsError = this.pendingVisualSelection
+            ? (message.message ?? message.code)
+            : this.snapshot.visualSettingsError;
+          this.pendingVisualSelection = undefined;
           this.publish({
             ...this.snapshot,
             phase: this.welcomed ? 'ready' : 'error',
-            error: message.code,
+            error: message.message ?? message.code,
+            ...(visualSettingsError ? { visualSettingsError } : {}),
           });
           break;
+        }
       }
     });
 
@@ -942,12 +1112,7 @@ export class LiveDaemonConnection {
   }
 
   private scheduleReconnect(): void {
-    if (
-      !this.currentRecord ||
-      this.reconnectTimer ||
-      this.quitPromise ||
-      this.quitTarget
-    )
+    if (!this.currentRecord || this.reconnectTimer || this.quitRequested)
       return;
     const delay = this.reconnectPolicy.nextDelayMs();
     if (delay === undefined) {
@@ -978,8 +1143,7 @@ export class LiveDaemonConnection {
     const socket = this.socket;
     if (
       !socket ||
-      this.quitPromise ||
-      this.quitTarget ||
+      this.quitRequested ||
       !canSendHostControlMessage(
         message,
         socket.readyState === WebSocket.OPEN,
@@ -1009,6 +1173,7 @@ export class LiveDaemonConnection {
     request: Extract<DaemonControlMessage, { type: 'host.capture_visual' }>,
   ): Promise<void> {
     const capture = this.callbacks.captureVisual;
+    const socket = this.socket;
     if (!capture) {
       this.sendControl({
         type: 'host.visual_capture_result',
@@ -1019,8 +1184,16 @@ export class LiveDaemonConnection {
       return;
     }
     try {
+      if (request.screenScope === 'display' && !this.displayCaptureV1)
+        throw new Error(liveMessage('runtime.displayCaptureUnsupported'));
       const result = await capture({
         source: request.source,
+        ...(request.screenScope
+          ? {
+              screenScope: request.screenScope,
+              screenDisplayId: request.screenDisplayId ?? 'primary',
+            }
+          : {}),
         ...(request.snapshotWidth !== undefined
           ? { snapshotWidth: request.snapshotWidth }
           : {}),
@@ -1034,10 +1207,32 @@ export class LiveDaemonConnection {
       if (result.source !== request.source) {
         throw new Error(liveText('en', 'host.error.visualWrongSource'));
       }
-      if (!this.welcomed || request.epoch !== this.epoch) return;
+      if (
+        request.screenScope === 'display' &&
+        (result.screenScope !== 'display' ||
+          result.displayId === 'primary' ||
+          !isScreenDisplayId(result.displayId) ||
+          ((request.screenDisplayId ?? 'primary') !== 'primary' &&
+            result.displayId.toLowerCase() !==
+              request.screenDisplayId?.toLowerCase()))
+      )
+        throw new Error(liveMessage('runtime.displayCaptureMismatch'));
+      if (request.screenScope === undefined && result.screenScope !== undefined)
+        throw new Error(liveMessage('runtime.displayCaptureMismatch'));
+      if (
+        !this.welcomed ||
+        request.epoch !== this.epoch ||
+        socket !== this.socket
+      )
+        return;
       this.sendControl(visualCaptureResultMessage(request.requestId, result));
     } catch (error) {
-      if (!this.welcomed || request.epoch !== this.epoch) return;
+      if (
+        !this.welcomed ||
+        request.epoch !== this.epoch ||
+        socket !== this.socket
+      )
+        return;
       const message =
         error instanceof Error && error.message
           ? displayLiveMessage('en', error.message).slice(
@@ -1055,7 +1250,9 @@ export class LiveDaemonConnection {
   }
 
   private closeSocket(code: number, reason: string): void {
+    this.displayCaptureV1 = undefined;
     this.subagentsV1 = undefined;
+    this.subagentsControlV1 = undefined;
     this.rejectLanguageRequest(
       new Error(liveMessage('host.language.disconnected')),
     );
@@ -1077,7 +1274,9 @@ export class LiveDaemonConnection {
   }
 
   private terminateSocket(): void {
+    this.displayCaptureV1 = undefined;
     this.subagentsV1 = undefined;
+    this.subagentsControlV1 = undefined;
     this.rejectLanguageRequest(
       new Error(liveMessage('host.language.disconnected')),
     );

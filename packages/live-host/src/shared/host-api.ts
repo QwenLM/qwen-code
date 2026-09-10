@@ -21,6 +21,14 @@ export type AudioInputDevice = {
   selected: boolean;
 };
 
+export type ScreenDisplay = {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  primary: boolean;
+};
+
 export type OverlayOffset = { x: number; y: number };
 
 export type HostPublicState = {
@@ -38,6 +46,10 @@ export type HostPublicState = {
   quitState?: 'pending' | 'failed';
   overlayOffset?: OverlayOffset;
   visualInput?: VisualInput;
+  screenDisplays?: ScreenDisplay[];
+  canSelectScreenDisplay?: boolean;
+  screenDisplaysError?: string;
+  visualSettingsError?: string;
   memory?: MemoryState;
   subagentsV1?: SubagentsSnapshot;
   live: LiveStatus;
@@ -56,6 +68,7 @@ export type LiveHostApi = {
   setOutputMuted: (muted: boolean) => Promise<void>;
   setVisualSource: (source: VisualSource) => Promise<void>;
   setVisualMode: (mode: VisualMode) => Promise<void>;
+  setScreenDisplay: (id: string) => Promise<void>;
   memoryAction: (action: MemoryAction) => Promise<MemoryState>;
   setLanguage: (language: LiveLanguage) => Promise<void>;
   setTheme: (theme: LiveTheme) => Promise<void>;

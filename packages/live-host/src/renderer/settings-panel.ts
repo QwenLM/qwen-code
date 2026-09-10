@@ -50,6 +50,10 @@ export class SettingsPanel {
     () => void this.run(() => this.api.setVisualMode('live-feed')),
   );
   private readonly device = document.createElement('select');
+  private readonly display = document.createElement('select');
+  private readonly displayField = field('ui.display', this.display);
+  private readonly displayHint = document.createElement('p');
+  private displayKey = '';
   private readonly refresh = button(
     'ui.refresh',
     () => void this.loadDevices(),
@@ -143,6 +147,16 @@ export class SettingsPanel {
       });
     });
     uiLabel(this.refresh, 'ui.refreshAudio');
+    uiLabel(this.display, 'ui.display');
+    this.displayHint.className = 'settings-hint';
+    this.displayHint.id = 'display-capture-hint';
+    this.display.setAttribute('aria-describedby', this.displayHint.id);
+    this.display.addEventListener('change', () => {
+      const id = this.display.value;
+      this.display.value =
+        this.state?.visualInput?.screenDisplayId ?? 'primary';
+      void this.run(() => this.api.setScreenDisplay(id));
+    });
     this.modeDescription.className = 'settings-hint capture-mode-description';
     this.modeDescription.id = 'capture-mode-description';
     this.modeDemand.setAttribute('aria-describedby', this.modeDescription.id);
@@ -155,6 +169,8 @@ export class SettingsPanel {
       config,
       field('ui.audioSource', this.device, this.refresh),
       field('ui.videoSource', this.sourceScreen, this.sourceCamera),
+      this.displayField,
+      this.displayHint,
       field('ui.captureMode', this.modeDemand, this.modeFeed),
       this.modeDescription,
       this.memory.element,
@@ -309,6 +325,50 @@ export class SettingsPanel {
       unavailable ||
       !state.visualInput ||
       state.live.state === 'stopping';
+    this.displayField.hidden = this.displayHint.hidden =
+      state.visualInput?.source !== 'screen';
+    this.display.disabled =
+      visualDisabled ||
+      !state.canSelectScreenDisplay ||
+      Boolean(state.quitState);
+    const selectedDisplay = state.visualInput?.screenDisplayId ?? 'primary';
+    const displays = state.screenDisplays ?? [];
+    const displayKey = JSON.stringify([language, selectedDisplay, displays]);
+    if (displayKey !== this.displayKey) {
+      this.displayKey = displayKey;
+      const primary = document.createElement('option');
+      primary.value = 'primary';
+      primary.textContent = liveText(language, 'ui.primaryDisplay');
+      const options = [primary];
+      for (const item of displays) {
+        const option = document.createElement('option');
+        option.value = item.id;
+        option.textContent = `${item.name} · ${item.width} × ${item.height}`;
+        options.push(option);
+      }
+      if (
+        selectedDisplay !== 'primary' &&
+        !displays.some((item) => item.id === selectedDisplay)
+      ) {
+        const missing = document.createElement('option');
+        missing.value = selectedDisplay;
+        missing.textContent = liveText(language, 'ui.displayMissing', {
+          id: selectedDisplay,
+        });
+        missing.disabled = true;
+        options.push(missing);
+      }
+      this.display.replaceChildren(...options);
+      this.display.value = selectedDisplay;
+    }
+    this.displayHint.textContent = state.screenDisplaysError
+      ? displayLiveMessage(language, state.screenDisplaysError)
+      : liveText(
+          language,
+          state.canSelectScreenDisplay
+            ? 'ui.displayCaptureHint'
+            : 'ui.displayCaptureUnavailable',
+        );
     for (const [control, selected] of [
       [this.sourceScreen, state.visualInput?.source === 'screen'],
       [this.sourceCamera, state.visualInput?.source === 'camera'],
@@ -337,13 +397,19 @@ export class SettingsPanel {
       control.disabled = this.busy || unavailable;
     }
     this.status.textContent =
-      displayLiveMessage(language, this.error) ||
+      displayLiveMessage(
+        language,
+        this.error || state.visualSettingsError || '',
+      ) ||
       (this.busy
         ? liveText(language, 'ui.applying')
         : this.loadingDevices
           ? liveText(language, 'ui.loadingDevices')
           : '');
-    this.status.classList.toggle('error', Boolean(this.error));
+    this.status.classList.toggle(
+      'error',
+      Boolean(this.error || state.visualSettingsError),
+    );
   }
 
   private async openConfigFile(): Promise<void> {

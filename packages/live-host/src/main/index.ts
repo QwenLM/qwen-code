@@ -46,6 +46,7 @@ import {
   isValidInputImageFrame,
   isValidCameraSnapshotAsset,
   fitRealtimeVisualDimensions,
+  isScreenDisplayId,
   parseMemoryAction,
   MAX_INPUT_IMAGE_FRAME_BYTES,
   type HostAction,
@@ -60,6 +61,7 @@ import { isLiveHostDiagnosticsEnabled } from '../shared/diagnostics.ts';
 import type {
   HostPublicPermissions,
   HostPublicState,
+  ScreenDisplay,
 } from '../shared/host-api.ts';
 import type {
   CameraSnapshot,
@@ -151,6 +153,8 @@ const startupInteraction = new StartupInteraction();
 let captureReadyEpoch: number | undefined;
 let liveStartPending = false;
 let visualInput: VisualInput | undefined;
+let screenDisplays: ScreenDisplay[] = [];
+let screenDisplaysError: string | undefined;
 let visualReady = false;
 let visualError: string | undefined;
 let visualCallId: string | undefined;
@@ -333,7 +337,10 @@ function hostReadinessBlocker(): string | undefined {
   if (visualInput?.source === 'camera') {
     if (permissions.camera !== 'granted') return 'camera_permission';
   } else {
-    if (permissions.accessibility !== 'granted')
+    if (
+      visualInput?.mode !== 'live-feed' &&
+      permissions.accessibility !== 'granted'
+    )
       return 'accessibility_permission';
     if (permissions.screenRecording !== 'granted')
       return 'screen_recording_permission';
@@ -341,7 +348,12 @@ function hostReadinessBlocker(): string | undefined {
   if (!selfChecks.audioInput) return 'audio_input';
   if (!selfChecks.audioOutput) return 'audio_output';
   if (!selfChecks.globalShortcut) return 'global_shortcut';
-  if (visualInput?.source !== 'camera' && !selfChecks.appshot) return 'appshot';
+  if (
+    visualInput?.source !== 'camera' &&
+    visualInput?.mode !== 'live-feed' &&
+    !selfChecks.appshot
+  )
+    return 'appshot';
   return undefined;
 }
 
@@ -374,12 +386,25 @@ function cameraPermission(): PermissionState {
   return 'not_determined';
 }
 
-function visualSourceReady(source: VisualSource): boolean {
+function visualSourceReady(
+  source: VisualSource,
+  mode = visualInput?.mode,
+): boolean {
   return source === 'camera'
     ? permissions.camera === 'granted'
-    : permissions.accessibility === 'granted' &&
-        permissions.screenRecording === 'granted' &&
-        selfChecks.appshot;
+    : permissions.screenRecording === 'granted' &&
+        (mode === 'live-feed' ||
+          (permissions.accessibility === 'granted' && selfChecks.appshot));
+}
+
+function refreshScreenDisplays(): void {
+  try {
+    screenDisplays = appshotCapture.listDisplays();
+    screenDisplaysError = undefined;
+  } catch {
+    screenDisplays = [];
+    screenDisplaysError = liveMessage('host.error.displayList');
+  }
 }
 
 function applyPendingVisualSourceChange(): boolean {
@@ -424,6 +449,12 @@ function publicState(): HostPublicState {
     overlayOffset: { ...overlayOffset },
     ...(connection.error ? { connectionError: connection.error } : {}),
     ...(visualInput ? { visualInput: { ...visualInput } } : {}),
+    screenDisplays,
+    canSelectScreenDisplay: connection.displayCaptureV1 === true,
+    ...(screenDisplaysError ? { screenDisplaysError } : {}),
+    ...(connection.visualSettingsError
+      ? { visualSettingsError: connection.visualSettingsError }
+      : {}),
     ...(connection.memory ? { memory: connection.memory } : {}),
     ...(connection.subagentsV1 ? { subagentsV1: connection.subagentsV1 } : {}),
     live: effectiveLiveStatus(),
@@ -440,6 +471,8 @@ function sameVisualInput(
 ): boolean {
   return (
     left?.source === right?.source &&
+    (left?.screenDisplayId ?? 'primary') ===
+      (right?.screenDisplayId ?? 'primary') &&
     left?.mode === right?.mode &&
     left?.fps === right?.fps &&
     left?.cameraWidth === right?.cameraWidth &&
@@ -458,6 +491,7 @@ function publishState(): void {
     connection.phase === 'ready',
     connection.subagentsV1,
     connection.instanceId,
+    connection.subagentsControlV1 === true,
   );
   if (
     overlayReady &&
@@ -491,7 +525,15 @@ function maybeStartStartupInteraction(): void {
 
 function showOverlay(): void {
   if (!overlay || overlay.isDestroyed()) return;
+  const before = overlay.getBounds();
+  const logical = {
+    x: before.x + overlayOffset.x,
+    y: before.y + overlayOffset.y,
+  };
   overlay.showInactive();
+  const after = overlay.getBounds();
+  if (before.x !== after.x || before.y !== after.y)
+    positionOverlay(logical, 'window-shown');
 }
 
 function persistOverlayPosition(): void {
@@ -508,13 +550,55 @@ function persistOverlayPosition(): void {
   }
 }
 
-function clampOverlayToDisplays(): void {
+function handleDisplayChange(
+  reason: 'display-added' | 'display-removed' | 'display-metrics-changed',
+  display: Electron.Display,
+  changedMetrics?: string[],
+): void {
+  const geometryChanged =
+    reason !== 'display-metrics-changed' ||
+    changedMetrics?.some((metric) =>
+      ['bounds', 'workArea', 'scaleFactor', 'rotation'].includes(metric),
+    ) === true;
+  writeLiveDiagnostic('native_display_changed', {
+    reason,
+    displayId: display.id,
+    changedMetrics,
+    bounds: display.bounds,
+    workArea: display.workArea,
+    scaleFactor: display.scaleFactor,
+    rotation: display.rotation,
+    geometryChanged,
+    visualGeneration,
+  });
+  if (geometryChanged) clampOverlayToDisplays(reason);
+}
+
+function clampOverlayToDisplays(reason = 'display-change'): void {
+  if (appshotCapture) refreshScreenDisplays();
+  if (visualInput?.source === 'screen') {
+    visualGeneration++;
+    stopScreenFeed();
+    syncVisualCapture();
+  }
+  publishState();
   subagents?.displaysChanged();
-  subagents?.setDragging(false);
   if (!overlay || overlay.isDestroyed()) return;
+  const bounds = overlay.getBounds();
+  const current = {
+    x: bounds.x + overlayOffset.x,
+    y: bounds.y + overlayOffset.y,
+  };
+  const position = clampOverlayPosition(
+    current,
+    overlayWorkArea(current),
+    OVERLAY_GEOMETRY.bounds[settingsOpen ? 'setup' : overlayLayout],
+  );
+  if (position.x === current.x && position.y === current.y) return;
   if (overlayDrag) persistOverlayPosition();
   overlayDrag = undefined;
-  applyOverlayPosition();
+  subagents?.setDragging(false);
+  positionOverlay(position, reason);
   syncPointerInteractivity();
 }
 
@@ -526,7 +610,7 @@ function overlayWorkArea(point: OverlayPosition): DisplayWorkArea {
   }).workArea;
 }
 
-function applyOverlayPosition(): void {
+function applyOverlayPosition(reason: string): void {
   if (!overlay || overlay.isDestroyed() || !desiredOverlayPosition) return;
   const area = overlayWorkArea(desiredOverlayPosition);
   const visible =
@@ -534,7 +618,7 @@ function applyOverlayPosition(): void {
   const position = hasCustomOverlayPosition
     ? clampOverlayPosition(desiredOverlayPosition, area, visible)
     : overlayPosition(area, visible);
-  positionOverlay(position);
+  positionOverlay(position, reason);
 }
 
 function subagentsAnchor(): DisplayWorkArea | undefined {
@@ -570,7 +654,11 @@ function subagentsHoverRegions(): DisplayWorkArea[] {
   }));
 }
 
-function positionOverlay(position: OverlayPosition, window = overlay): void {
+function positionOverlay(
+  position: OverlayPosition,
+  reason: string,
+  window = overlay,
+): void {
   if (!window || window.isDestroyed()) return;
   const before = window.getBounds();
   if (position.x !== before.x || position.y !== before.y) {
@@ -578,6 +666,15 @@ function positionOverlay(position: OverlayPosition, window = overlay): void {
   }
   const actual = window.getBounds();
   const offset = { x: position.x - actual.x, y: position.y - actual.y };
+  writeLiveDiagnostic('overlay_position', {
+    reason,
+    layout: overlayLayout,
+    settingsOpen,
+    before,
+    requested: position,
+    after: actual,
+    offset,
+  });
   if (offset.x !== overlayOffset.x || offset.y !== overlayOffset.y) {
     overlayOffset = offset;
     if (window === overlay)
@@ -592,7 +689,7 @@ function setOverlayLayout(layout: OverlayLayout): void {
   subagents?.setDragging(false);
   subagents?.dismissPeek();
   overlayLayout = layout;
-  if (overlayReady) applyOverlayPosition();
+  if (overlayReady) applyOverlayPosition('layout-changed');
   syncPointerInteractivity();
 }
 
@@ -633,7 +730,7 @@ function dragOverlay(
     );
     desiredOverlayPosition = position;
     hasCustomOverlayPosition = true;
-    positionOverlay(position);
+    positionOverlay(position, `drag-${phase}`);
     if (phase === 'end') {
       overlayDrag = undefined;
       subagents?.setDragging(false);
@@ -647,7 +744,7 @@ function dismissSettings(): void {
   if (!settingsOpen) return;
   settingsOpen = false;
   subagents?.setBlocked(false);
-  applyOverlayPosition();
+  applyOverlayPosition('settings-dismissed');
   sendRendererCommand('live:settings-dismiss');
   syncPointerInteractivity();
 }
@@ -874,7 +971,9 @@ async function captureScreenFeed(generation: number): Promise<void> {
   }
   screenFeedInFlight = true;
   try {
-    const capture = await appshotCapture.captureFrame();
+    const capture = await appshotCapture.captureDisplayFrame(
+      settings.screenDisplayId ?? 'primary',
+    );
     if (generation !== screenFeedGeneration) return;
     const frame = encodeScreenFrame(
       capture.screenshot,
@@ -886,6 +985,7 @@ async function captureScreenFeed(generation: number): Promise<void> {
       'screen',
       frame.image,
       daemon.getEpoch(),
+      capture.displayId,
     );
     const nextError = sent ? undefined : 'screen_transport_rejected';
     const stateChanged = visualReady !== sent || visualError !== nextError;
@@ -894,9 +994,19 @@ async function captureScreenFeed(generation: number): Promise<void> {
     writeLiveDiagnostic('visual_frame_sent', {
       epoch: daemon.getEpoch(),
       source: 'screen',
+      screenScope: 'display',
+      displayId: capture.displayId,
       width: frame.width,
       height: frame.height,
       bytes: Buffer.byteLength(frame.image, 'base64'),
+      ...(diagnosticsEnabled
+        ? {
+            frameHash: createHash('sha256')
+              .update(Buffer.from(frame.image, 'base64'))
+              .digest('hex')
+              .slice(0, 16),
+          }
+        : {}),
       sent,
     });
     if (stateChanged) publishState();
@@ -919,7 +1029,7 @@ async function captureScreenFeed(generation: number): Promise<void> {
 }
 
 function startScreenFeed(settings: VisualInput): void {
-  const key = `${daemon.getEpoch()}:${settings.fps}:${settings.liveWidth}x${settings.liveHeight}`;
+  const key = `${daemon.getEpoch()}:${settings.screenDisplayId ?? 'primary'}:${settings.fps}:${settings.liveWidth}x${settings.liveHeight}`;
   if (screenFeedTimer && screenFeedKey === key) return;
   stopScreenFeed();
   screenFeedKey = key;
@@ -1349,11 +1459,15 @@ function requestCameraSnapshot(
 
 async function captureOnDemandVisual(request: {
   source: VisualSource;
+  screenScope?: 'display';
+  screenDisplayId?: string;
   snapshotWidth?: number;
   snapshotHeight?: number;
   persistAsset?: boolean;
 }): Promise<{
   source: VisualSource;
+  screenScope?: 'display';
+  displayId?: string;
   image: string;
   width: number;
   height: number;
@@ -1405,6 +1519,49 @@ async function captureOnDemandVisual(request: {
       width: frame.width,
       height: frame.height,
       ...(screenshotPath ? { screenshotPath } : {}),
+    };
+  }
+
+  if (request.screenScope === 'display') {
+    if (
+      request.source !== 'screen' ||
+      request.persistAsset !== false ||
+      permissions.screenRecording !== 'granted' ||
+      (request.screenDisplayId ?? 'primary') !==
+        (visualInput?.screenDisplayId ?? 'primary')
+    )
+      throw new Error(liveMessage('host.error.displayCapture'));
+    const capture = await appshotCapture.captureDisplayFrame(
+      request.screenDisplayId ?? 'primary',
+    );
+    if (epoch !== daemon.getEpoch() || generation !== visualGeneration)
+      throw new Error('stale_visual_capture');
+    const frame = encodeScreenFrame(
+      capture.screenshot,
+      request.snapshotWidth,
+      request.snapshotHeight,
+      true,
+    );
+    if (diagnosticsEnabled) {
+      writeLiveDiagnostic('visual_snapshot_captured', {
+        epoch,
+        source: 'screen',
+        screenScope: 'display',
+        displayId: capture.displayId,
+        width: frame.width,
+        height: frame.height,
+        bytes: Buffer.byteLength(frame.image, 'base64'),
+        frameHash: createHash('sha256')
+          .update(Buffer.from(frame.image, 'base64'))
+          .digest('hex')
+          .slice(0, 16),
+      });
+    }
+    return {
+      source: 'screen',
+      screenScope: 'display',
+      displayId: capture.displayId,
+      ...frame,
     };
   }
 
@@ -1549,8 +1706,12 @@ function registerIpc(): void {
     }
     if (settingsOpen === open) return;
     settingsOpen = open;
+    if (open) {
+      refreshScreenDisplays();
+      publishState();
+    }
     subagents?.setBlocked(open);
-    applyOverlayPosition();
+    applyOverlayPosition(open ? 'settings-opened' : 'settings-closed');
     syncPointerInteractivity();
   });
   ipcMain.handle('live:memory-action', (event, value: unknown) => {
@@ -1697,7 +1858,10 @@ function registerIpc(): void {
     }
     if (source === 'screen') {
       appshotReadiness.refresh();
-      if (permissions.accessibility !== 'granted') {
+      if (
+        visualInput.mode !== 'live-feed' &&
+        permissions.accessibility !== 'granted'
+      ) {
         appshotReadiness.requestPermission('accessibility');
       }
       if (permissions.screenRecording !== 'granted') {
@@ -1725,6 +1889,15 @@ function registerIpc(): void {
     }
     const mode = value as VisualMode;
     const epoch = daemon.getEpoch();
+    if (
+      mode === 'on-demand' &&
+      visualInput.source === 'screen' &&
+      !visualSourceReady('screen', mode)
+    ) {
+      appshotReadiness.requestPermission('accessibility');
+      if (!visualSourceReady('screen', mode))
+        throw new Error(liveMessage('runtime.accessibilityPermission'));
+    }
     try {
       if (!daemon.sendVisualSettings({ mode }, epoch)) throw new Error();
     } catch {
@@ -1732,6 +1905,32 @@ function registerIpc(): void {
       throw new Error(liveMessage('host.error.visualSettingsFailed'));
     }
     writeLiveDiagnostic('visual_mode_requested', { epoch, mode });
+  });
+  ipcMain.handle('live:set-screen-display', (event, id: unknown) => {
+    if (
+      !isTrustedSender(event) ||
+      !rendererEventsEnabled ||
+      quitState !== undefined ||
+      !isScreenDisplayId(id) ||
+      !visualInput ||
+      connection.displayCaptureV1 !== true ||
+      !canChangeLiveVisualInput(live, visualInput, connection.phase === 'ready')
+    )
+      throw new Error(liveMessage('host.error.visualSettingsFailed'));
+    refreshScreenDisplays();
+    const selected = id.toLowerCase();
+    if (
+      selected !== 'primary' &&
+      !screenDisplays.some((display) => display.id === selected)
+    )
+      throw new Error(liveMessage('host.error.displayUnavailable'));
+    if (
+      !daemon.sendVisualSettings(
+        { screenDisplayId: selected },
+        daemon.getEpoch(),
+      )
+    )
+      throw new Error(liveMessage('host.error.visualSettingsFailed'));
   });
   ipcMain.handle(
     'live:request-permission',
@@ -1849,6 +2048,14 @@ function registerIpc(): void {
       epoch: record.epoch,
       source: 'camera',
       bytes: Buffer.byteLength(record.image, 'base64'),
+      ...(diagnosticsEnabled
+        ? {
+            frameHash: createHash('sha256')
+              .update(Buffer.from(record.image, 'base64'))
+              .digest('hex')
+              .slice(0, 16),
+          }
+        : {}),
       sent,
     });
     if (stateChanged) publishState();
@@ -2119,7 +2326,7 @@ function createOverlay(): BrowserWindow {
       webviewTag: false,
     },
   });
-  positionOverlay(position, window);
+  positionOverlay(position, 'window-created', window);
   window.setAlwaysOnTop(true, 'floating');
   window.setVisibleOnAllWorkspaces(true, {
     visibleOnFullScreen: true,
@@ -2128,6 +2335,14 @@ function createOverlay(): BrowserWindow {
   window.setIgnoreMouseEvents(true, { forward: true });
   window.on('blur', () => {
     if (window === overlay) resetOverlayInteraction(true);
+  });
+  window.on('move', () => {
+    if (!diagnosticsEnabled || window !== overlay || window.isDestroyed())
+      return;
+    writeLiveDiagnostic('overlay_native_moved', {
+      bounds: window.getBounds(),
+      offset: { ...overlayOffset },
+    });
   });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', (event) => event.preventDefault());
@@ -2172,7 +2387,7 @@ function createOverlay(): BrowserWindow {
     if (window !== overlay || !rendererLoadHealthy) return;
     overlayRecovery.markReady();
     rendererEventsEnabled = true;
-    applyOverlayPosition();
+    applyOverlayPosition('renderer-ready');
     overlayReady = true;
     sendRendererCommand('live:overlay-offset', overlayOffset);
     syncOutputAudioEndMarkerMode();
@@ -2311,10 +2526,21 @@ void app.whenReady().then(() => {
     baseDirectory: __dirname,
     anchor: subagentsAnchor,
     hoverRegions: subagentsHoverRegions,
+    requestControl: async (request, instanceId) =>
+      daemon?.requestSubagents(request, instanceId) ?? {
+        type: 'error',
+        code: 'unavailable',
+      },
   });
-  screen.on('display-added', clampOverlayToDisplays);
-  screen.on('display-removed', clampOverlayToDisplays);
-  screen.on('display-metrics-changed', clampOverlayToDisplays);
+  screen.on('display-added', (_event, display) => {
+    handleDisplayChange('display-added', display);
+  });
+  screen.on('display-removed', (_event, display) => {
+    handleDisplayChange('display-removed', display);
+  });
+  screen.on('display-metrics-changed', (_event, display, changedMetrics) => {
+    handleDisplayChange('display-metrics-changed', display, changedMetrics);
+  });
   createTray();
 
   shortcut = new LiveGlobalShortcut(globalShortcut, toggleLive, (state) => {
@@ -2337,12 +2563,7 @@ void app.whenReady().then(() => {
     if (pendingVisualSourceChange?.source === 'screen') {
       applyPendingVisualSourceChange();
     }
-    if (
-      visualInput?.source !== 'camera' &&
-      (state.accessibility !== 'granted' ||
-        state.screenRecording !== 'granted' ||
-        !state.appshot)
-    ) {
+    if (visualInput?.source !== 'camera' && !visualSourceReady('screen')) {
       failClosedForReadinessLoss();
     }
     publishState();
@@ -2351,6 +2572,7 @@ void app.whenReady().then(() => {
     }
   });
   appshotCapture = new AppshotCaptureService();
+  refreshScreenDisplays();
 
   daemon = new LiveDaemonConnection(app.getVersion(), {
     onSubagents: (snapshot) => {
@@ -2360,6 +2582,7 @@ void app.whenReady().then(() => {
         connection.phase === 'ready',
         snapshot,
         connection.instanceId,
+        connection.subagentsControlV1 === true,
       );
     },
     getReadiness: () => ({

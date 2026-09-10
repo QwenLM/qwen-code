@@ -100,6 +100,7 @@ button[aria-pressed='true'] {
   pointer-events: none;
 }
 .voice-orb.idle .orb-core,
+.voice-orb.stopping .orb-core,
 .voice-orb.unavailable .orb-core,
 .voice-orb.error .orb-core {
   background:
@@ -226,6 +227,7 @@ button[aria-pressed='true'] {
   color: var(--live-error);
 }
 .voice-status-primary {
+  pointer-events: auto;
   width: 100%;
   max-height: 28px;
   overflow: hidden;
@@ -548,8 +550,9 @@ button[aria-pressed='true'] {
   .voice-controls {
     transition: none;
   }
-  .voice-orb .orb-core,
-  .voice-orb .orb-core::after {
+  .voice-surface .voice-orb .orb-core,
+  .voice-surface .voice-orb .orb-core::after {
     animation: none;
+    transform: none;
   }
 }

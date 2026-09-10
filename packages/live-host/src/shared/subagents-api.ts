@@ -1,5 +1,11 @@
 import type { LiveLanguage } from '@qwen-code/qwen-live/i18n';
-import type { SubagentsSnapshot } from '@qwen-code/qwen-live/subagents';
+import type {
+  SubagentsControlErrorCode,
+  SubagentsControlRequest,
+  SubagentsControlResult,
+  SubagentsPage,
+  SubagentsSnapshot,
+} from '@qwen-code/qwen-live/subagents';
 import type { LiveTheme, ResolvedTheme } from './theme.ts';
 
 export type SubagentsWindowState = {
@@ -8,6 +14,11 @@ export type SubagentsWindowState = {
   language: LiveLanguage;
   connected: boolean;
   snapshot?: SubagentsSnapshot;
+  instanceId?: string;
+  controlsAvailable?: boolean;
+  page?: SubagentsPage;
+  loading?: boolean;
+  pageError?: SubagentsControlErrorCode;
   mode: 'summary' | 'list' | 'detail';
   selectedId?: string;
 };
@@ -21,4 +32,8 @@ export type SubagentsWindowApi = {
   expand: () => Promise<void>;
   close: () => void;
   openDetail: (id: string) => Promise<void>;
+  control: (
+    instanceId: string,
+    request: SubagentsControlRequest,
+  ) => Promise<SubagentsControlResult>;
 };

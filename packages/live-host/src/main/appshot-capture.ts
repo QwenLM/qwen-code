@@ -2,11 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, readdir, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { liveMessage } from '@qwen-code/qwen-live/i18n';
 import { MAX_CAPTURE_ASSET_BYTES } from '../shared/protocol.ts';
 import {
   loadNativeAppshot,
   type NativeAppshot,
   type NativeAppshotCapture,
+  type NativeDisplay,
+  type NativeDisplayCapture,
 } from './native-appshot.ts';
 
 const MAX_APP_NAME_CHARS = 512;
@@ -14,6 +17,14 @@ const MAX_WINDOW_TITLE_CHARS = 2_048;
 const MAX_ACCESSIBILITY_TEXT_CHARS = 32_000;
 const MAX_SCREENSHOT_BYTES = MAX_CAPTURE_ASSET_BYTES;
 const CAPTURE_FILE_TTL_MS = 60_000;
+const DISPLAY_UUID =
+  /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/iu;
+
+function isDisplayUuid(value: unknown): value is string {
+  return (
+    typeof value === 'string' && value.length === 36 && DISPLAY_UUID.test(value)
+  );
+}
 
 export interface AppshotFrame {
   appName: string;
@@ -59,6 +70,43 @@ export function validateNativeCapture(
   };
 }
 
+export function validateNativeDisplayCapture(
+  value: NativeDisplayCapture,
+  requestedDisplay: string,
+): NativeDisplayCapture {
+  if (
+    !value ||
+    !isDisplayUuid(value.displayId) ||
+    (requestedDisplay !== 'primary' &&
+      value.displayId.toLowerCase() !== requestedDisplay.toLowerCase())
+  )
+    throw new Error(liveMessage('host.error.displayUnavailable'));
+  const screenshot = value.screenshot;
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (
+    !(screenshot instanceof Uint8Array) ||
+    screenshot.byteLength < 33 ||
+    screenshot.byteLength > MAX_SCREENSHOT_BYTES ||
+    signature.some((byte, index) => screenshot[index] !== byte)
+  )
+    throw new Error(liveMessage('host.error.displayCapture'));
+  const header = new DataView(
+    screenshot.buffer,
+    screenshot.byteOffset,
+    screenshot.byteLength,
+  );
+  if (
+    header.getUint32(8) !== 13 ||
+    header.getUint32(12) !== 0x49484452 ||
+    header.getUint32(16) < 1 ||
+    header.getUint32(16) > 1920 ||
+    header.getUint32(20) < 1 ||
+    header.getUint32(20) > 1080
+  )
+    throw new Error(liveMessage('host.error.displayCapture'));
+  return { displayId: value.displayId.toLowerCase(), screenshot };
+}
+
 export class AppshotCaptureService {
   private captureTail?: Promise<void>;
   private readonly cleanupTimers = new Map<NodeJS.Timeout, string>();
@@ -69,9 +117,73 @@ export class AppshotCaptureService {
   ) {}
 
   captureFrame(): Promise<AppshotFrame> {
+    return this.queueCapture(() => this.captureFrameNow());
+  }
+
+  listDisplays(): NativeDisplay[] {
+    try {
+      const displays = this.native().listDisplays();
+      if (!Array.isArray(displays)) throw new Error('Invalid display list');
+      const seen = new Set<string>();
+      let primary = false;
+      return displays.map((display) => {
+        if (
+          !display ||
+          !isDisplayUuid(display.id) ||
+          seen.has(display.id.toLowerCase()) ||
+          typeof display.name !== 'string' ||
+          !display.name.trim() ||
+          !Number.isSafeInteger(display.width) ||
+          display.width < 1 ||
+          !Number.isSafeInteger(display.height) ||
+          display.height < 1 ||
+          typeof display.primary !== 'boolean' ||
+          (display.primary && primary)
+        )
+          throw new Error('Invalid display');
+        seen.add(display.id.toLowerCase());
+        primary ||= display.primary;
+        return {
+          ...display,
+          id: display.id.toLowerCase(),
+          name: display.name.trim().slice(0, 256),
+        };
+      });
+    } catch {
+      throw new Error(liveMessage('host.error.displayList'));
+    }
+  }
+
+  captureDisplayFrame(displayId = 'primary'): Promise<NativeDisplayCapture> {
+    return this.queueCapture(async () => {
+      if (displayId !== 'primary' && !isDisplayUuid(displayId))
+        throw new Error(liveMessage('host.error.displayUnavailable'));
+      let capture: NativeDisplayCapture;
+      try {
+        capture = await this.native().captureDisplay(displayId.toLowerCase());
+      } catch (error) {
+        const code =
+          error && typeof error === 'object' && 'code' in error
+            ? error.code
+            : undefined;
+        throw new Error(
+          liveMessage(
+            code === 'DISPLAY_UNAVAILABLE'
+              ? 'host.error.displayUnavailable'
+              : code === 'DISPLAY_PERMISSION'
+                ? 'runtime.screenPermission'
+                : 'host.error.displayCapture',
+          ),
+        );
+      }
+      return validateNativeDisplayCapture(capture, displayId);
+    });
+  }
+
+  private queueCapture<T>(captureNow: () => Promise<T>): Promise<T> {
     const capture = this.captureTail
-      ? this.captureTail.then(() => this.captureFrameNow())
-      : this.captureFrameNow();
+      ? this.captureTail.then(captureNow)
+      : captureNow();
     const tail = capture.then(
       () => undefined,
       () => undefined,

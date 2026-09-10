@@ -144,6 +144,8 @@ function fixture(saved?: LiveTheme, systemDark = false) {
     daemon: { getConfigFilePath: () => undefined },
     overlayReady: true,
     rendererEventsEnabled: true,
+    screenDisplays: [],
+    screenDisplaysError: undefined,
     theme: 'system',
     language: 'zh-CN',
     quitApproved: false,
@@ -300,6 +302,7 @@ describe('native theme ownership and broadcast', () => {
       true,
       undefined,
       'one',
+      false,
     ]);
   });
 

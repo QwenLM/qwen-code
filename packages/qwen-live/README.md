@@ -132,12 +132,16 @@ only ends its Live call and closes Host. If shutdown is not confirmed, the
 orb remains with an error and Quit can retry the same authenticated instance.
 It never redirects a retry to a different discovered daemon.
 Same-instance reconnects retain the authenticated shutdown target, independently
-of the WebSocket. Quit completes only with a matching receipt or an OS process
-probe that proves the original daemon PID no longer exists; 404s, resets and
-connection refusals alone do not prove shutdown. Failed Quit keeps media stopped.
+of the WebSocket. Quit always attempts the authenticated shutdown request. It
+completes only with a matching receipt, or after a refused connection plus an OS
+probe proves the original daemon PID no longer exists; a PID probe alone, HTTP
+errors, resets and timeouts do not prove shutdown. Failed Quit keeps media stopped.
 On cleanup failure the daemon retains only its authenticated shutdown control
 endpoint and discovery, rejecting new work. A retry closes only the resources
-that previously failed; successful cleanup steps are not repeated.
+that previously failed; successful cleanup steps are not repeated. Cleanup logs
+identify the failed resource and bounded, credential-redacted causes. Signal-driven
+process exit instead releases only its own discovery record even if cleanup fails;
+it never removes a replacement daemon's record.
 
 On other platforms: the Live Host app is macOS-only (it needs native
 microphone, global shortcut, and screen capture). Linux/Windows users cannot
@@ -170,8 +174,29 @@ twice. Monitor notification delivery is shown separately from task completion.
 Ending the voice call stops Proactive sampling and retains its terminal
 records. Harness tasks keep running and updating this view without reopening
 audio or the realtime model. Permission requests received while no voice call
-is active remain pending; this read-only view cannot approve, cancel or create
-tasks. Resume voice or use the harness's existing permission UI when needed.
+is active remain pending and can be answered from the task details. The panel
+shows only real backend requests and the scope of each offered Allow / Deny
+choice; it never bypasses a sandbox or invents an approval for an ordinary
+filesystem error. Requests without a confirmed task identity appear separately.
+Their pending count also activates the summary's attention marker. Overlong
+requests require review in the backend before approval; Live still offers Deny
+when the backend supports it.
+For supported Codex ACP sessions, Live selects the advertised **Ask for approval**
+mode before sending work. Unsupported or failed mode selection is logged rather
+than silently claiming manual approval is available. Existing backend sessions
+and global permission settings are not changed.
+
+Use **Stop** on a task row or in its details to stop that exact Harness task or
+monitor. A pending cancellation says **Stopping…** until confirmed; an unknown
+task identity or unsupported backend cannot fall back to stopping a different
+task in the same session. Stop requests and confirmed outcomes are sent to Omni
+as silent text context, queued while it is busy and retained across End call for
+the next call in the same daemon run. **Close** only dismisses the panel.
+
+Live imposes no active Harness/monitor count limit. Independent Harness work
+uses separate sessions; adding instructions to an existing session retains its
+steering/queue semantics. Backend quotas, per-session queue bounds and available
+machine/API resources still apply.
 
 The orb is never resized or moved to fit task windows. The side summary has a
 roughly one-second hover grace period. Expanded lists and details stay open until
@@ -187,9 +212,11 @@ System (default), Light mode and Dark mode. This Host-local preference applies
 to all its surfaces without restarting media or changing daemon settings.
 
 History belongs to the current daemon run, not a cross-restart task archive.
-At most 32 task details and 240 KiB of serialized state are retained for display;
-omitted records/truncated output are labelled and totals still include omitted
-tasks. Original backend text may contain sensitive work content, so the view is
+All active tasks retain bounded details, alongside the latest 32 ended tasks.
+Previous / Next pages contain at most 32 tasks and 240 KiB per snapshot; selected
+details are fetched separately. Omitted records/truncated output are labelled,
+and totals still include omitted tasks. Original backend text may contain
+sensitive work content, so the view is
 local and only the authenticated Host receives it. New task updates are
 capability-negotiated; older Hosts/daemons keep their existing behavior.
 
@@ -212,6 +239,7 @@ with environment variables (`DASHSCOPE_API_KEY`, `QWEN_LIVE_*`) as overrides.
   },
   "visualInput": {
     "source": "screen",
+    "screenDisplayId": "primary",
     "mode": "on-demand",
     "fps": 1,
     "cameraResolution": { "width": 1280, "height": 720 },
@@ -226,7 +254,6 @@ with environment variables (`DASHSCOPE_API_KEY`, `QWEN_LIVE_*`) as overrides.
     },
     "scheduler": {
       "evalIntervalSec": 2,
-      "maxConcurrentTasks": 4,
       "maxFailuresPerTask": 3,
       "repeat": {
         "cooldownSec": 3,
@@ -291,13 +318,20 @@ retires only its own event. Cancelling or updating a task removes all of its
 old queued events. The delivery ACK
 timeout starts when foreground Realtime accepts the announcement and emits
 `response.created`; this prevents a missing Host playback receipt from
-blocking the FIFO forever. `maxConcurrentTasks` limits perception tasks;
-timers do not consume that capacity. Vision and audio retain their own
+blocking the FIFO forever. There is no Live-level monitor admission cap;
+legacy `maxConcurrentTasks` settings are accepted but no longer enforced or
+written by init. Vision and audio retain their own
 `windowSizeSec` and `minEvalDurationSec`, including in a combined monitor and
 after a Monitor connection is recycled. Task-list replies include remaining
 timer duration, reminder content, monitor condition/focus, repeat state, and
 the number of pending notifications. A user request may chain Proactive
 tools, such as listing tasks and then cancelling one, without a new utterance.
+
+Positive visual warm-up can use elapsed observation time for successful captures
+slower than the requested FPS. A capture gap longer than three nominal frame
+intervals (with a one-second tolerance floor) starts a fresh observation period;
+old frames cannot warm a new isolated frame. The default zero warm-up still
+accepts a single fresh frame.
 
 The environment overrides are `QWEN_LIVE_VISUAL_SOURCE`,
 `QWEN_LIVE_VISUAL_MODE`, `QWEN_LIVE_VISUAL_FPS`,
@@ -311,7 +345,10 @@ Set `QWEN_LIVE_PROACTIVE_ENABLED=false` (or `0`) to disable Proactive entirely;
 `true` and `1` enable it. The remaining Proactive parameters are configured in
 `config.json`.
 
-For privacy-safe runtime diagnostics, start the daemon with:
+Unrecognized keys inside `visualInput`, `proactive` and `memory` are rejected;
+a misspelled camera setting does not silently select the default Screen source.
+
+For runtime diagnostics, start the daemon with:
 
 ```bash
 qwen-live --debug
@@ -326,13 +363,64 @@ It does not print API keys, image payloads, raw audio, prompts or transcript con
 Run the Electron Host separately with `--live-debug`, not `--debug` (Electron
 reserves that flag). The Host switch does not enable daemon diagnostics.
 
+For Monitor delivery, match the `frameHash` (first 16 SHA256 hex characters of
+JPEG bytes) across Host capture, daemon capture/frame receipt, and
+`proactive.monitor_image_sent`. Only successful socket writes increment the
+per-commit image/audio counters in `proactive.monitor_commit`; audio totals
+include protocol silence. `proactive.monitor_committed` confirms the provider
+acknowledgement, and `proactive.monitor_action` classifies `wait`, `reply`,
+`function_call` or `invalid` without printing the response text. Native display
+and orb-position events are recorded by the Host switch, so capture loss can
+be distinguished from geometry changes.
+
+**Visual Monitor recordings:** daemon debug mode (also enabled by
+`QWEN_LIVE_LOG_LEVEL=debug`) additionally saves actual Monitor requests under
+`<OS temporary directory>/qwen-live-monitor-debug/`. Normal runs and audio-only
+Monitors do not record media. Each visual Monitor gets a directory, including
+combined audio/visual Monitors; WebSocket recycling stays in the same directory.
+`proactive.monitor_debug_started` prints its absolute path. Each inference logs
+`proactive.monitor_request_saved` with both Monitor and request directories:
+
+```text
+monitor-<creation-time>-<id>/
+  monitor.json
+  requests/000001/
+    request.json
+    image-0001.jpg
+    input.wav
+    response.json
+```
+
+JPEGs are the exact frames successfully sent to the model. The mono 16 kHz
+PCM16 WAV contains the sent audio, including protocol silence. JSON retains
+instructions, event order, audio offsets, frame hashes and the reference to the
+preceding request in that transport; the response file records returned text,
+parsed action or failure. Check preceding requests for the resident conversation
+history. Queued/dropped frames are not presented as sent frames.
+
+These are **sensitive recordings of real screen/camera content, task prompts and,
+for audio/visual Monitors, microphone audio**. Connection credentials are omitted;
+visible or spoken secrets inside media are not redacted. Directories/files are
+owner-only. Debug startup and new Monitor creation keep only the ten most
+recently created Monitor directories; this is not a ten-request or disk-size
+limit. An evicted Monitor keeps running but stops recording and logs skipped
+requests. Disk/permission failures or exceeding the 32 MiB pending-write budget
+disable that recorder and log an incomplete recording without stopping the call.
+Long-running debug Monitors can consume significant disk space; disable debug
+after diagnosis and do not share recordings without reviewing their contents.
+
 For `qwen3.5-omni-plus-realtime` and `qwen3.5-omni-flash-realtime`, the initial
 session explicitly requests mono PCM input at 16 kHz and output at 24 kHz via
 `audio.input.format` / `audio.output.format`, as documented in the
 [DashScope session API](https://help.aliyun.com/zh/model-studio/client-events#26a8302028sjm).
 Older/custom models retain the legacy PCM fields and 24 kHz playback contract.
-Host playback uses a default-device-rate AudioContext and Web Audio resampling,
-not a forced 24 kHz hardware clock. Bluetooth headset microphone activation can
+Host playback uses a default-device-rate AudioContext, not a forced 24 kHz
+hardware clock. With current output-end-marker negotiation, each response is
+continuously band-limited/resampled into device-rate buffers and scheduled at
+integer sample boundaries, avoiding independent chunk-conversion spikes and
+unnecessary gaps. The end marker flushes the short filter tail. Older peers
+without end markers retain the legacy Web Audio conversion
+and drain behavior. Bluetooth headset microphone activation can
 still switch the device into hands-free mode; use a separate/built-in microphone
 while keeping headphones as system output when listening to music or video.
 Input mute releases capture devices without ending the call; Host's status bar
@@ -354,6 +442,12 @@ all backends in `session_list` and can route `handoff` to a specific one by
 name.
 
 ## Memory
+
+If the default Memory HTTP endpoint cannot be derived from `realtimeEndpoint`,
+Live logs a warning and keeps daemon setup and local memory available. Model-backed
+Memory features without their own valid endpoint stay unavailable; explicit
+Memory endpoint settings remain independent. Correct the realtime endpoint and
+restart to restore the shared default.
 
 Memory records final dialogue text, lets the foreground model edit working memory with `omnibio`, consolidates selected facts after the call, and retrieves earlier dialogue or visual observations with `omniretrieve`.
 
@@ -514,6 +608,23 @@ returns its metadata and asset handle through the original
 `function_call_output` continuation; it does not append that snapshot to
 Realtime, commit an audio buffer, or change VAD mode. Pixel-level inspection
 uses the existing handoff path with the returned asset.
+
+Screen Live Feed and visual Proactive monitors capture the **entire selected
+display**, including the desktop, menu bar and Dock, excluding Live Host's own
+windows. Choose **Display** under Video Source in Settings. The selection is
+saved as `visualInput.screenDisplayId` in `config.json`: `primary` (default)
+follows the system's primary display, or a display UUID selects that device.
+An explicitly selected display that is disconnected fails without switching to
+another display. Display changes discard stale captures and reset monitor visual
+buffers. Both continuous and monitor frames use `liveResolution` (720p by
+default), remain aspect-fitted and subject to the existing transport limits;
+full-display coverage does not mean native pixel resolution. No new init prompt
+is needed. Older Hosts must be updated to support full-display capture.
+
+Foreground Screen Appshot and On Demand visual-memory observations keep the
+original front-window capture. Appshot still requires Accessibility and Screen
+Recording; the full-display operation needs only Screen Recording. Screen Live
+Feed therefore does not require Accessibility. Camera behavior is unchanged.
 
 Screen captures may also include Appshot accessibility metadata and a PNG
 handoff asset. Camera source opens a preview/Live Feed stream at

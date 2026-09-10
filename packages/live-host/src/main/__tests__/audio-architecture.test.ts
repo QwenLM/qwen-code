@@ -33,8 +33,9 @@ describe('Live Host audio architecture', () => {
   it('plays provider PCM on the device clock without a second media clock', () => {
     assert.match(
       audioEngine,
-      /context\.createBuffer\(1, samples, OUTPUT_SAMPLE_RATE\)/,
+      /context\.createBuffer\(1, samples\.length, sampleRate\)/,
     );
+    assert.match(audioEngine, /new StreamingOutputResampler\(/);
     assert.match(audioEngine, /source\.connect\(context\.destination\)/);
     assert.doesNotMatch(audioEngine, /sampleRate: OUTPUT_SAMPLE_RATE/);
     assert.doesNotMatch(audioEngine, /private outputDestination:/);

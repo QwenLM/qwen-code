@@ -125,6 +125,38 @@ export class HandleRegistry {
     return this.jobs.get(handle.trim());
   }
 
+  /** Bind an exact join acknowledgement while preserving any promised alias. */
+  bindJoinedJob(
+    handle: string,
+    backend: BackendHandle,
+    jobRef: string,
+  ): JobRecord | undefined {
+    const job = this.resolveJob(handle);
+    if (
+      !job ||
+      !jobRef ||
+      job.backend.adaptor !== backend.adaptor ||
+      job.backend.id !== backend.id ||
+      (job.jobRef !== undefined && job.jobRef !== jobRef)
+    )
+      return undefined;
+    const existing = this.jobByRef(backend, jobRef);
+    if (existing && existing !== job) {
+      if (
+        existing.sessionHandle !== job.sessionHandle ||
+        existing.backend.id !== backend.id ||
+        !['accepted', 'running', 'interrupted'].includes(job.state)
+      )
+        return undefined;
+      for (const [alias, candidate] of this.jobs)
+        if (candidate === job) this.jobs.set(alias, existing);
+      return existing;
+    }
+    job.jobRef = jobRef;
+    this.jobsByRef.set(`${backend.adaptor}:${jobRef}`, job.jobHandle);
+    return job;
+  }
+
   /** Find the job a backend event's jobRef (on its backend) belongs to. */
   jobByRef(backend: BackendHandle, jobRef: string): JobRecord | undefined {
     const handle = this.jobsByRef.get(`${backend.adaptor}:${jobRef}`);

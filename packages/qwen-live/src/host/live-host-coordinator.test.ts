@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { WebSocket } from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -88,6 +89,7 @@ const coordinators: LiveHostCoordinator[] = [];
 function readyHello(overrides: Partial<LiveHostHello> = {}): LiveHostHello {
   return {
     type: 'host.hello',
+    displayCaptureV1: true,
     protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
     hostVersion: '1.0.0',
     bundleId: LIVE_HOST_BUNDLE_ID,
@@ -137,6 +139,299 @@ afterEach(() => {
 });
 
 describe('LiveHostCoordinator', () => {
+  it('requests the selected full display for monitors but keeps Appshot window-scoped', async () => {
+    const displayId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const debug = vi.fn();
+    const value = coordinator({
+      logger: {
+        debug,
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      } as unknown as LiveLogger,
+      visualInput: {
+        source: 'screen',
+        mode: 'on-demand',
+        screenDisplayId: displayId,
+        fps: 1,
+        liveWidth: 1280,
+        liveHeight: 720,
+      },
+    });
+    const socket = connectReady(value);
+    const call = value.start('resume');
+    value.setCoordinator(call.epoch, {
+      workspaceCwd: '/fixture',
+      sessionId: 'coordinator-1',
+    });
+    const capture = value.captureVisualContext('coordinator-1', {
+      persistAsset: false,
+      screenScope: 'display',
+    });
+    const request = socket
+      .messages()
+      .findLast((message) => message.type === 'host.capture_visual');
+    expect(request).toMatchObject({
+      source: 'screen',
+      screenScope: 'display',
+      screenDisplayId: displayId,
+      snapshotWidth: 1280,
+      snapshotHeight: 720,
+      persistAsset: false,
+    });
+    if (!request || request.type !== 'host.capture_visual')
+      throw new Error('Missing capture');
+    const image = Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString('base64');
+    socket.receive({
+      type: 'host.visual_capture_result',
+      requestId: request.requestId,
+      success: true,
+      source: 'screen',
+      screenScope: 'display',
+      displayId: displayId.toUpperCase(),
+      image,
+      width: 1280,
+      height: 720,
+      appName: 'Display',
+      accessibilityText: '',
+    });
+    await expect(capture).resolves.toMatchObject({
+      source: 'screen',
+      screenScope: 'display',
+      displayId,
+    });
+    const captureLog = debug.mock.calls
+      .map(([message]) => String(message))
+      .find((message) => message.startsWith('visual.capture_completed '));
+    const expectedHash = createHash('sha256')
+      .update(Buffer.from(image, 'base64'))
+      .digest('hex')
+      .slice(0, 16);
+    expect(captureLog).toContain(`"frameHash":"${expectedHash}"`);
+    expect(captureLog).not.toContain(image);
+    const window = value.captureVisualContext('coordinator-1', {
+      persistAsset: false,
+    });
+    const windowRequest = socket
+      .messages()
+      .findLast((message) => message.type === 'host.capture_visual');
+    expect(windowRequest).not.toHaveProperty('screenScope');
+    expect(windowRequest).not.toHaveProperty('screenDisplayId');
+    value.stop();
+    await expect(window).rejects.toThrow();
+  });
+
+  it('fails full-display capture against an old Host without silently requesting a window', async () => {
+    const value = coordinator();
+    const socket = connectReady(
+      value,
+      readyHello({ displayCaptureV1: undefined }),
+    );
+    const call = value.start('resume');
+    value.setCoordinator(call.epoch, {
+      workspaceCwd: '/fixture',
+      sessionId: 'coordinator-1',
+    });
+    await expect(
+      value.captureVisualContext('coordinator-1', {
+        screenScope: 'display',
+        persistAsset: false,
+      }),
+    ).rejects.toThrow('full-display');
+    expect(
+      socket
+        .messages()
+        .filter((message) => message.type === 'host.capture_visual'),
+    ).toHaveLength(0);
+  });
+
+  it('requires only Screen Recording for full-display Live Feed and rejects old Host support', () => {
+    const value = coordinator({
+      visualInput: {
+        source: 'screen',
+        mode: 'live-feed',
+        fps: 1,
+        liveWidth: 1280,
+        liveHeight: 720,
+      },
+    });
+    connectReady(
+      value,
+      readyHello({
+        permissions: {
+          microphone: 'granted',
+          camera: 'denied',
+          accessibility: 'denied',
+          screenRecording: 'granted',
+        },
+        selfChecks: {
+          audioInput: true,
+          audioOutput: true,
+          globalShortcut: true,
+          appshot: false,
+        },
+      }),
+    );
+    expect(value.getStatus().available).toBe(true);
+    expect(value.getStatus().requirements).not.toHaveProperty('accessibility');
+    const old = coordinator({
+      visualInput: {
+        source: 'screen',
+        mode: 'live-feed',
+        fps: 1,
+        liveWidth: 1280,
+        liveHeight: 720,
+      },
+    });
+    connectReady(old, readyHello({ displayCaptureV1: undefined }));
+    expect(old.getStatus().blocker).toBe('host_version');
+  });
+
+  it('rejects wrong-display monitor captures and screen feeds lacking matching full-display identity', async () => {
+    const displayId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const otherDisplayId = '11111111-2222-3333-4444-555555555555';
+    const onInputImage = vi.fn();
+    const value = coordinator({
+      visualInput: {
+        source: 'screen',
+        mode: 'on-demand',
+        screenDisplayId: displayId,
+        fps: 1,
+        liveWidth: 1280,
+        liveHeight: 720,
+      },
+      handlers: { onInputImage },
+    });
+    const socket = connectReady(value);
+    const call = value.start('resume');
+    value.setCoordinator(call.epoch, {
+      workspaceCwd: '/fixture',
+      sessionId: 'coordinator-1',
+    });
+    const capture = value.captureVisualContext('coordinator-1', {
+      screenScope: 'display',
+      persistAsset: false,
+    });
+    const request = socket
+      .messages()
+      .findLast((message) => message.type === 'host.capture_visual');
+    if (!request || request.type !== 'host.capture_visual')
+      throw new Error('Missing capture');
+    const image = Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString('base64');
+    socket.receive({
+      type: 'host.visual_capture_result',
+      requestId: request.requestId,
+      success: true,
+      source: 'screen',
+      screenScope: 'display',
+      displayId: otherDisplayId,
+      image,
+      width: 1280,
+      height: 720,
+      appName: 'Display',
+      accessibilityText: '',
+    });
+    await expect(capture).rejects.toThrow();
+    socket.receive({
+      type: 'host.visual_settings',
+      epoch: call.epoch,
+      source: 'screen',
+      mode: 'live-feed',
+      permissions: readyHello().permissions,
+      appshot: true,
+    });
+    socket.receive({
+      type: 'host.visual_frame',
+      epoch: call.epoch,
+      source: 'screen',
+      image,
+    });
+    socket.receive({
+      type: 'host.visual_frame',
+      epoch: call.epoch,
+      source: 'screen',
+      screenScope: 'display',
+      displayId: otherDisplayId,
+      image,
+    });
+    socket.receive({
+      type: 'host.visual_frame',
+      epoch: call.epoch,
+      source: 'screen',
+      screenScope: 'display',
+      displayId,
+      image,
+    });
+    expect(onInputImage).toHaveBeenCalledExactlyOnceWith({
+      epoch: call.epoch,
+      callId: call.callId,
+      source: 'screen',
+      displayId,
+      image,
+    });
+  });
+
+  it('persists explicit display changes while idle, retains selection across mode changes, and fails closed on save errors', () => {
+    const displayId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const onScreenDisplayChange = vi.fn();
+    const value = coordinator({ onScreenDisplayChange });
+    const socket = connectReady(value);
+    const settings = {
+      type: 'host.visual_settings',
+      epoch: 0,
+      source: 'screen',
+      mode: 'on-demand',
+      permissions: readyHello().permissions,
+      appshot: true,
+    };
+    socket.receive({ ...settings, screenDisplayId: displayId });
+    expect(onScreenDisplayChange).toHaveBeenCalledExactlyOnceWith(displayId);
+    socket.receive({ ...settings, source: 'camera', mode: 'live-feed' });
+    expect(socket.messages().at(-1)).toMatchObject({
+      visualInput: {
+        source: 'camera',
+        mode: 'live-feed',
+        screenDisplayId: displayId,
+      },
+    });
+    onScreenDisplayChange.mockImplementationOnce(() => {
+      throw new Error('disk failed');
+    });
+    socket.receive({ ...settings, screenDisplayId: 'primary' });
+    expect(socket.messages().at(-1)).toMatchObject({
+      visualInput: {
+        source: 'camera',
+        mode: 'live-feed',
+        screenDisplayId: displayId,
+      },
+    });
+    expect(socket.messages().at(-2)).toMatchObject({ type: 'host.error' });
+  });
+
+  it('invalidates pending captures on display changes and ignores their late result', async () => {
+    const value = coordinator();
+    const socket = connectReady(value);
+    const call = value.start('resume');
+    value.setCoordinator(call.epoch, {
+      workspaceCwd: '/fixture',
+      sessionId: 'coordinator-1',
+    });
+    const capture = value.captureVisualContext('coordinator-1', {
+      screenScope: 'display',
+      persistAsset: false,
+    });
+    socket.receive({
+      type: 'host.visual_settings',
+      epoch: call.epoch,
+      source: 'screen',
+      mode: 'on-demand',
+      screenDisplayId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      permissions: readyHello().permissions,
+      appshot: true,
+    });
+    await expect(capture).rejects.toThrow('visual settings changed');
+  });
+
   it.each(['success', 'failure'] as const)(
     'R1-7 resets drained-call playback ownership after stop %s',
     async (outcome) => {
@@ -365,6 +660,20 @@ describe('LiveHostCoordinator', () => {
       expect(
         welcome && 'daemonShutdownV1' in welcome
           ? welcome.daemonShutdownV1
+          : undefined,
+      ).toBe(enabled ? true : undefined);
+    }
+  });
+
+  it('advertises subagent management only when the standalone daemon owns the control route', () => {
+    for (const enabled of [false, true]) {
+      const value = coordinator({ subagentsControlV1: enabled });
+      const welcome = connectReady(value)
+        .messages()
+        .find((message) => message.type === 'host.welcome');
+      expect(
+        welcome && 'subagentsControlV1' in welcome
+          ? welcome.subagentsControlV1
           : undefined,
       ).toBe(enabled ? true : undefined);
     }
@@ -779,6 +1088,12 @@ describe('LiveHostCoordinator', () => {
       .find((message) => message.startsWith('visual.frame '));
     expect(visualLog).toContain('"accepted":false');
     expect(visualLog).toContain('"bytes":4');
+    expect(visualLog).toContain(
+      `"frameHash":"${createHash('sha256')
+        .update(Buffer.from(image, 'base64'))
+        .digest('hex')
+        .slice(0, 16)}"`,
+    );
     expect(visualLog).not.toContain(image);
   });
 

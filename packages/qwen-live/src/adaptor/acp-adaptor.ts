@@ -66,6 +66,7 @@ import type {
   BackendCapabilities,
   BackendEvent,
   BackendHandle,
+  CancelJobResult,
   ContentBlock,
   PermissionDecision,
   PermissionOption,
@@ -134,6 +135,7 @@ interface AcpSessionState {
   closed: boolean;
   busy: boolean;
   activeJobRef?: string;
+  cancellingJobRef?: string;
   turnBuffer: string;
   steerQueue: string[];
   pendingPrompts: Array<{ jobRef: string; blocks: ContentBlock[] }>;
@@ -220,14 +222,28 @@ export class AcpAdaptor implements BackendAdaptor {
     const state = this.trackSession(sessionId, this.generation);
     state.label = opts?.label;
     state.cwd = cwd;
-    // qwen-code's ACP sessions default to AUTO approval (silent allows);
-    // the voice product exists to surface permission asks aloud, so pin
-    // the session to the asking mode. Non-qwen agents answer -32601 and
-    // keep their own default.
-    try {
-      await conn.setSessionMode({ sessionId, modeId: 'default' });
-    } catch {
-      /* agent has no set_mode; its default stands */
+    const modes = isRecord(response['modes']) ? response['modes'] : {};
+    const available = Array.isArray(modes['availableModes'])
+      ? modes['availableModes'].filter(isRecord)
+      : [];
+    const askingMode =
+      available.find((mode) => mode['id'] === 'default') ??
+      available.find(
+        (mode) =>
+          mode['id'] === 'read-only' && mode['name'] === 'Ask for approval',
+      );
+    if (askingMode) {
+      try {
+        await conn.setSessionMode({ sessionId, modeId: askingMode['id'] });
+      } catch {
+        this.logger.warn(
+          `[acp ${this.name}] could not select the advertised asking mode; manual approval is not guaranteed`,
+        );
+      }
+    } else {
+      this.logger.warn(
+        `[acp ${this.name}] no supported asking mode was advertised; manual approval is not guaranteed`,
+      );
     }
     // Best effort: qwen-code swaps in live voice instructions when this
     // succeeds; other agents answer -32601 and we simply stay off.
@@ -328,6 +344,38 @@ export class AcpAdaptor implements BackendAdaptor {
       state.queue.push({ type: 'permission_resolved', requestId, byUs: false });
     }
     await conn.cancel({ sessionId: handle.id });
+  }
+
+  async cancelJob(
+    handle: BackendHandle,
+    jobRef: string,
+  ): Promise<CancelJobResult> {
+    const state = this.sessions.get(handle.id);
+    if (
+      handle.adaptor !== this.name ||
+      !state ||
+      state.closed ||
+      state.generation !== this.generation
+    )
+      return 'not_found';
+    const queued = state.pendingPrompts.findIndex(
+      (prompt) => prompt.jobRef === jobRef,
+    );
+    if (queued >= 0) {
+      state.pendingPrompts.splice(queued, 1);
+      state.queue.push({ type: 'turn_error', jobRef, error: 'cancelled' });
+      return 'stopped';
+    }
+    if (!state.busy || state.activeJobRef !== jobRef) return 'not_found';
+    if (state.cancellingJobRef === jobRef) return 'stopping';
+    state.cancellingJobRef = jobRef;
+    try {
+      await this.cancel(handle);
+    } catch (error) {
+      if (state.cancellingJobRef === jobRef) state.cancellingJobRef = undefined;
+      throw error;
+    }
+    return 'stopping';
   }
 
   async respondPermission(
@@ -490,10 +538,17 @@ export class AcpAdaptor implements BackendAdaptor {
     stopReason: string | undefined,
     error?: unknown,
   ): void {
+    if (
+      state.closed ||
+      state.generation !== this.generation ||
+      state.activeJobRef !== jobRef
+    )
+      return;
     state.busy = false;
     const detail = state.turnBuffer.trim();
     state.turnBuffer = '';
     state.activeJobRef = undefined;
+    state.cancellingJobRef = undefined;
     if (error !== undefined) {
       const message =
         error instanceof Error ? error.message : String(error ?? 'failed');

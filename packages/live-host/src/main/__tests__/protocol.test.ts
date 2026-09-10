@@ -31,6 +31,7 @@ import {
   isValidCameraSnapshotAsset,
   isValidOutputAudioFrame,
   parseDaemonControlMessage,
+  isScreenDisplayId,
   type DaemonControlMessage as HostDaemonMessage,
   type HostAction,
   type HostHello,
@@ -124,17 +125,71 @@ const DAEMON_PROTOCOL_TYPES_URL = new URL(
   import.meta.url,
 );
 
-const QWEN_LIVE_PROTOCOL_TYPES_URL = new URL(
-  '../../../../qwen-live/src/host/types.ts',
-  import.meta.url,
-);
-
 const ELECTRON_BUILDER_CONFIG_URL = new URL(
   '../../../electron-builder.yml',
   import.meta.url,
 );
 
+const QWEN_LIVE_PROTOCOL_TYPES_URL = new URL(
+  '../../../../qwen-live/src/host/types.ts',
+  import.meta.url,
+);
+
 describe('Live Host protocol', () => {
+  it('keeps display-scope requests explicit and rejects invalid identities or camera/display combinations', () => {
+    const displayId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const base = {
+      type: 'host.capture_visual',
+      requestId: 'display-1',
+      epoch: 1,
+      source: 'screen',
+      persistAsset: false,
+      screenScope: 'display',
+      screenDisplayId: displayId.toUpperCase(),
+    };
+    assert.deepEqual(parseDaemonControlMessage(JSON.stringify(base)), {
+      ...base,
+      screenDisplayId: displayId,
+    });
+    for (const change of [
+      { screenScope: 'window' },
+      { source: 'camera' },
+      { screenDisplayId: 'screen-2' },
+      { screenDisplayId: displayId + '\n' },
+    ])
+      assert.equal(
+        parseDaemonControlMessage(JSON.stringify({ ...base, ...change })),
+        undefined,
+      );
+    assert.equal(isScreenDisplayId('primary'), true);
+    assert.equal(isScreenDisplayId(displayId.toUpperCase()), true);
+    assert.equal(isScreenDisplayId(displayId + '\n'), false);
+  });
+
+  it('encodes resolved display identity and refuses a primary token or partial display metadata as pixels', () => {
+    const frame = {
+      type: 'host.visual_frame' as const,
+      epoch: 1,
+      source: 'screen' as const,
+      screenScope: 'display' as const,
+      displayId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      image: Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString('base64'),
+    };
+    assert.deepEqual(JSON.parse(encodeHostControlMessage(frame)), frame);
+    assert.throws(() =>
+      encodeHostControlMessage({ ...frame, displayId: 'primary' }),
+    );
+    assert.throws(() =>
+      encodeHostControlMessage({ ...frame, source: 'camera' }),
+    );
+    assert.throws(() =>
+      encodeHostControlMessage({ ...frame, screenScope: undefined }),
+    );
+    assert.throws(() =>
+      encodeHostControlMessage({ ...frame, displayId: undefined }),
+    );
+  });
+
   it('keeps the qwen-live daemon contract byte-identical to the cli copy', async () => {
     // PROTOCOL_TYPE_PARITY type-checks against the cli copy only; the
     // standalone qwen-live daemon validates and emits against its own copy.

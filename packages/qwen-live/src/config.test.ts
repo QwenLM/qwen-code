@@ -42,6 +42,45 @@ afterEach(async () => {
 });
 
 describe('loadConfig', () => {
+  it.each([{ typo: 1 }, { sourc: 'camera', cameraResoluton: 'native' }])(
+    'rejects unknown visual input keys %j',
+    async (visualInput) => {
+      const dataDir = await dataDirWithConfig({
+        realtimeApiKey: 'test',
+        visualInput,
+      });
+      expect(() =>
+        loadConfig({
+          QWEN_LIVE_DATA_DIR: dataDir,
+          QWEN_LIVE_VISUAL_SOURCE: 'camera',
+        }),
+      ).toThrow('unknown key(s):');
+    },
+  );
+
+  it('accepts display UUIDs and normalizes their case', async () => {
+    const dataDir = await dataDirWithConfig({
+      realtimeApiKey: 'test',
+      visualInput: { screenDisplayId: 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE' },
+    });
+    expect(
+      loadConfig({ QWEN_LIVE_DATA_DIR: dataDir }).visualInput.screenDisplayId,
+    ).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+  });
+
+  it.each(['', 'secondary', 1, {}, null, 'primary\n'])(
+    'rejects invalid display identity %j',
+    async (screenDisplayId) => {
+      const dataDir = await dataDirWithConfig({
+        realtimeApiKey: 'test',
+        visualInput: { screenDisplayId },
+      });
+      expect(() => loadConfig({ QWEN_LIVE_DATA_DIR: dataDir })).toThrow(
+        'Invalid "visualInput.screenDisplayId"',
+      );
+    },
+  );
+
   it('applies env over file over built-in defaults', async () => {
     const dataDir = await dataDirWithConfig({
       realtimeApiKey: 'file-key',
@@ -79,6 +118,7 @@ describe('loadConfig', () => {
     expect(envWins.visualInput).toEqual({
       source: 'screen',
       mode: 'on-demand',
+      screenDisplayId: 'primary',
       fps: 3,
       cameraResolution: { width: 1024, height: 576 },
       cameraSnapshotResolution: { width: 1920, height: 1080 },
@@ -94,6 +134,7 @@ describe('loadConfig', () => {
     expect(fileWins.visualInput).toEqual({
       source: 'camera',
       mode: 'live-feed',
+      screenDisplayId: 'primary',
       fps: 2,
       cameraResolution: { width: 1600, height: 900 },
       cameraSnapshotResolution: { width: 3840, height: 2160 },
@@ -111,6 +152,7 @@ describe('loadConfig', () => {
     expect(defaults.visualInput).toEqual({
       source: 'screen',
       mode: 'on-demand',
+      screenDisplayId: 'primary',
       fps: 1,
       cameraResolution: { width: 1280, height: 720 },
       cameraSnapshotResolution: 'native',
@@ -122,7 +164,6 @@ describe('loadConfig', () => {
       monitor: { sessionRecycleEvals: 60 },
       scheduler: {
         evalIntervalSec: 2,
-        maxConcurrentTasks: 4,
         maxFailuresPerTask: 3,
         repeat: {
           cooldownSec: 3,

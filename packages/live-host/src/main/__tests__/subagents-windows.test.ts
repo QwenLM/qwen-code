@@ -4,7 +4,12 @@ import { runInNewContext } from 'node:vm';
 import { describe, it } from 'node:test';
 import ts from 'typescript';
 import * as geometry from '../subagents-position.ts';
-import type { SubagentsSnapshot } from '@qwen-code/qwen-live/subagents';
+import {
+  parseSubagentsControlRequest,
+  type SubagentsControlRequest,
+  type SubagentsControlResult,
+  type SubagentsSnapshot,
+} from '@qwen-code/qwen-live/subagents';
 import type { SubagentsWindowState } from '../../shared/subagents-api.ts';
 
 const snapshot: SubagentsSnapshot = {
@@ -35,6 +40,10 @@ const snapshot: SubagentsSnapshot = {
 };
 function fixture(
   hoverRegions?: Array<{ x: number; y: number; width: number; height: number }>,
+  requestControl?: (
+    request: SubagentsControlRequest,
+    instanceId: string,
+  ) => Promise<SubagentsControlResult>,
 ) {
   type Handler = (...args: unknown[]) => unknown;
   const handlers = new Map<string, Handler>();
@@ -163,6 +172,7 @@ function fixture(
       getCursorScreenPoint: () => ({ ...cursor }),
     },
     ...geometry,
+    parseSubagentsControlRequest,
     join: (...values: string[]) => values.join('/'),
     Date: class extends Date {
       static override now() {
@@ -181,6 +191,7 @@ function fixture(
       connected: boolean,
       snapshot?: SubagentsSnapshot,
       instanceId?: string,
+      controlsAvailable?: boolean,
     ) => void;
     setOrbHovered: (value: boolean) => void;
     setOrbKeyboardHeld: (value: boolean) => void;
@@ -193,6 +204,7 @@ function fixture(
   };
   const controller = new Controller({
     baseDirectory: '/fixture',
+    requestControl,
     anchor: () => anchor,
     ...(hoverRegions ? { hoverRegions: () => hoverRegions } : {}),
   });
@@ -230,6 +242,116 @@ function fixture(
   };
 }
 describe('Subagents native lifecycle', () => {
+  it('coalesces page refreshes, preserves geometry and rejects stale or foreign mutations', async () => {
+    const requests: Array<{
+      request: SubagentsControlRequest;
+      instance: string;
+      resolve: (result: SubagentsControlResult) => void;
+    }> = [];
+    const f = fixture(
+      undefined,
+      (request, instance) =>
+        new Promise((resolve) => {
+          requests.push({ request, instance, resolve });
+        }),
+    );
+    const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+    f.controller.update('en', true, snapshot, 'one', true);
+    f.controller.setOrbHovered(true);
+    const window = f.windows[0]!;
+    window.ready();
+    assert.equal(requests.length, 0);
+    f.invoke('live:subagents:expand', window);
+    assert.equal(requests.length, 1);
+    window.setBounds({ x: 240, y: 150, width: 330, height: 430 });
+    const moves = window.moves.length;
+    for (let revision = 2; revision <= 20; revision++)
+      f.controller.update('en', true, { ...snapshot, revision }, 'one', true);
+    assert.equal(requests.length, 1);
+    requests[0]!.resolve({
+      type: 'page',
+      page: { snapshot, offset: 0, total: 40 },
+    });
+    await settle();
+    assert.equal(requests.length, 2);
+    requests[1]!.resolve({
+      type: 'page',
+      page: { snapshot: { ...snapshot, revision: 20 }, offset: 0, total: 40 },
+    });
+    await settle();
+    assert.equal(f.state(window).page?.total, 40);
+    assert.equal(window.moves.length, moves);
+    const serialize = (value: unknown) =>
+      JSON.parse(JSON.stringify(value)) as unknown;
+    assert.deepEqual(
+      serialize(
+        await f.invoke('live:subagents:control', undefined, 'one', {
+          action: 'stop',
+          taskId: 'harness:1',
+        }),
+      ),
+      { type: 'error', code: 'invalid_request' },
+    );
+    assert.deepEqual(
+      serialize(
+        await f.invoke('live:subagents:control', window, 'old', {
+          action: 'stop',
+          taskId: 'harness:1',
+        }),
+      ),
+      { type: 'error', code: 'stale_instance' },
+    );
+    assert.equal(requests.length, 2);
+    const stopping = f.invoke('live:subagents:control', window, 'one', {
+      action: 'stop',
+      taskId: 'harness:1',
+    });
+    assert.deepEqual(serialize(requests[2]!.request), {
+      action: 'stop',
+      taskId: 'harness:1',
+    });
+    f.controller.update('en', true, snapshot, 'two', true);
+    requests[2]!.resolve({ type: 'outcome', outcome: 'stopping' });
+    assert.deepEqual(serialize(await stopping), {
+      type: 'error',
+      code: 'stale_instance',
+    });
+    assert.equal(f.state(window).page, undefined);
+    assert.equal(window.visible, false);
+    f.controller.dispose();
+  });
+
+  it('discards a page reply after close and keeps controls usable while the voice call is inactive', async () => {
+    let resolvePage: (result: SubagentsControlResult) => void = () => {};
+    const calls: SubagentsControlRequest[] = [];
+    const f = fixture(undefined, async (request) => {
+      calls.push(request);
+      if (request.action === 'list')
+        return await new Promise((resolve) => {
+          resolvePage = resolve;
+        });
+      return { type: 'outcome', outcome: 'denied' };
+    });
+    f.controller.update('en', true, snapshot, 'one', true);
+    f.controller.setOrbHovered(true);
+    const window = f.windows[0]!;
+    window.ready();
+    f.invoke('live:subagents:expand', window);
+    const result = await f.invoke('live:subagents:control', window, 'one', {
+      action: 'permission',
+      requestHandle: 'req_1',
+      decision: 'deny',
+    });
+    assert.equal((result as SubagentsControlResult).type, 'outcome');
+    f.invoke('live:subagents:close', window);
+    resolvePage({ type: 'page', page: { snapshot, offset: 0, total: 1 } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(f.state(window).page, undefined);
+    assert.equal(window.visible, false);
+    assert.equal(calls.length, 2);
+    f.controller.dispose();
+  });
+
   it('does not treat transparent placement padding as a hovered control', () => {
     const f = fixture([{ x: 1800, y: 800, width: 20, height: 20 }]);
     f.controller.update('en', true, snapshot, 'one');

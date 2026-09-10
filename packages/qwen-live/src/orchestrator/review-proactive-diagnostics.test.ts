@@ -137,19 +137,64 @@ function harness(openOverride?: typeof openQwenRealtimeSession) {
         authority: 'direct',
         status: 'completed',
       }),
-    call: (responseId: string, name: string, args: Record<string, unknown>) =>
+    call: (
+      responseId: string,
+      name: string,
+      args: Record<string, unknown> | string,
+    ) =>
       callbacks.onFunctionCall?.({
         callEpoch: 1,
         responseId,
         callId: `review-call-${++nextCallId}`,
         name,
-        arguments: JSON.stringify(args),
+        arguments: typeof args === 'string' ? args : JSON.stringify(args),
         activeTranscript: [],
       }),
   };
 }
 
 describe('PR #11369 proactive diagnostics review reproduction', () => {
+  it.each([
+    ['invalid JSON', 'update_proactive_task', '{oops', '有效的 JSON'],
+    ['non-object JSON', 'update_proactive_task', '[]', 'JSON 对象'],
+    [
+      'selector-less update arguments',
+      'update_proactive_task',
+      { title: 'Changed task' },
+      '仅对紧邻刚创建的任务设置 repeat=true 时可省略目标',
+    ],
+    [
+      'selector-less update without adjacency',
+      'update_proactive_task',
+      { repeat: true },
+      '没有紧邻刚创建的活动任务；请提供 target_title 或 target_title_contains',
+    ],
+    [
+      'selector-less cancel arguments',
+      'cancel_proactive_task',
+      { all: false },
+      '无目标取消必须使用空参数对象',
+    ],
+    [
+      'selector-less cancel without adjacency',
+      'cancel_proactive_task',
+      {},
+      '没有紧邻刚创建的活动任务；请提供 target_title 或 target_title_contains，停止全部任务请使用 all=true',
+    ],
+  ] as const)(
+    'R2-5 keeps the repair hint for %s through the real dispatcher',
+    async (_label, toolName, args, hint) => {
+      const observed = harness();
+      await observed.start();
+      observed.begin('invalid');
+      observed.call('invalid', toolName, args);
+      expect(observed.outputs).toHaveLength(1);
+      expect(observed.outputs[0]).toContain(hint);
+      expect(observed.outputs[0]).not.toContain('提交的信息未通过校验');
+      expect(observed.scheduler.listTasks()).toEqual([]);
+    },
+  );
+
   it('R1-22: classifies the actual oversized-instruction guard as configuration', async () => {
     const createWebSocket = vi.fn(() => {
       throw new Error('Oversized instructions must not create a socket.');

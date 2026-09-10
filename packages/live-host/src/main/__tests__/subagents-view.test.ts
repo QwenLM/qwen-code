@@ -5,6 +5,7 @@ import { JSDOM } from 'jsdom';
 import { liveMessage, liveText } from '@qwen-code/qwen-live/i18n';
 import type {
   SubagentTask,
+  SubagentsControlResult,
   SubagentsSnapshot,
 } from '@qwen-code/qwen-live/subagents';
 import { SubagentsView } from '../../renderer/subagents-view.ts';
@@ -90,6 +91,14 @@ function setup(
     openDetail: async (id) => {
       calls.push(['detail', id]);
     },
+    control: async (instanceId, request) => {
+      calls.push(['control', instanceId, request]);
+      return {
+        type: 'outcome',
+        outcome: 'stopping',
+        ...(request.action === 'stop' ? { taskId: request.taskId } : {}),
+      };
+    },
     ...overrides,
   };
   const view = new SubagentsView(app, api);
@@ -108,6 +117,233 @@ function setup(
 }
 
 describe('Subagents read-only surfaces', () => {
+  it('marks an unassigned backend approval without inventing an active task', () => {
+    const value = snapshot([]);
+    value.counts = {
+      running: 0,
+      completed: 0,
+      needsAttention: 0,
+      failed: 0,
+      cancelled: 0,
+      interrupted: 0,
+    };
+    value.pendingUnassignedPermissions = 1;
+    const h = setup({}, { snapshot: value });
+    assert.equal(h.get('.subagents-summary-waiting').hidden, false);
+    assert.match(
+      h.get('.subagents-summary').getAttribute('aria-label') ?? '',
+      /0 running.*1 waiting/,
+    );
+    h.update({ mode: 'list' });
+    assert.equal(
+      h.get('.subagents-panel [data-count="needsAttention"]').textContent,
+      '1',
+    );
+  });
+
+  it('stops the exact selected task outside the summary page and distinguishes requested from confirmed', async () => {
+    const selected = task({ id: 'harness:40', canStop: true });
+    const h = setup(
+      {},
+      {
+        mode: 'detail',
+        selectedId: selected.id,
+        instanceId: 'daemon-one',
+        controlsAvailable: true,
+        page: { snapshot: snapshot(), offset: 0, total: 40, selected },
+      },
+    );
+    const stop = h.get<HTMLButtonElement>('.subagent-identity .subagents-stop');
+    assert.equal(stop.hidden, false);
+    stop.click();
+    stop.click();
+    await settled();
+    assert.deepEqual(h.calls, [
+      ['control', 'daemon-one', { action: 'stop', taskId: 'harness:40' }],
+    ]);
+    assert.equal(
+      h.get('.subagent-identity .subagent-status').textContent,
+      'Running',
+    );
+    assert.match(
+      h.get('.subagents-feedback').textContent ?? '',
+      /Waiting for the backend/,
+    );
+    h.update({
+      page: {
+        ...h.state.page!,
+        selected: { ...selected, canStop: false, stopReason: 'stopping' },
+      },
+    });
+    assert.equal(stop.disabled, true);
+    assert.equal(stop.textContent, 'Stopping…');
+    h.update({
+      language: 'zh-CN',
+      page: {
+        ...h.state.page!,
+        selected: {
+          ...selected,
+          canStop: false,
+          stopReason: 'ended',
+          status: 'cancelled',
+        },
+      },
+    });
+    assert.equal(stop.hidden, true);
+    assert.equal(h.get('.subagents-feedback').textContent, '任务已停止。');
+    assert.equal(
+      h.get('.subagent-identity .subagent-status').textContent,
+      '已取消',
+    );
+    h.get<HTMLButtonElement>('.subagents-close').click();
+    assert.equal(h.calls.filter(([call]) => call === 'control').length, 1);
+  });
+
+  it('renders real pending decisions with explicit scopes, keeps focus, and sends the request handle', async () => {
+    const selected = task({
+      status: 'waiting',
+      canStop: true,
+      permissions: [
+        {
+          requestHandle: 'req_12',
+          title: '<script>Write file outside project</script>',
+          choices: [
+            { decision: 'allow', scope: 'always' },
+            { decision: 'deny', scope: 'once' },
+          ],
+        },
+      ],
+      permissionsOmitted: 3,
+    });
+    const h = setup(
+      {
+        control: async (instance, request) => {
+          h.calls.push(['control', instance, request]);
+          return {
+            type: 'outcome',
+            outcome: 'allowed',
+            requestHandle: 'req_12',
+          };
+        },
+      },
+      {
+        mode: 'detail',
+        instanceId: 'daemon-one',
+        controlsAvailable: true,
+        selectedId: selected.id,
+        page: { snapshot: snapshot([selected]), offset: 0, total: 1, selected },
+      },
+    );
+    const allow = h.get<HTMLButtonElement>('[data-decision="allow"]');
+    assert.equal(allow.textContent, 'Always allow');
+    assert.equal(h.get('[data-decision="deny"]').textContent, 'Deny once');
+    assert.equal(h.app.querySelector('script'), null);
+    allow.focus();
+    h.update({ language: 'zh-CN' });
+    assert.equal(h.get('[data-decision="allow"]'), allow);
+    assert.equal(document.activeElement, allow);
+    assert.equal(allow.textContent, '始终允许');
+    assert.match(h.get('.subagents-more-permissions').textContent ?? '', /3/);
+    allow.click();
+    await settled();
+    assert.deepEqual(h.calls.at(-1), [
+      'control',
+      'daemon-one',
+      { action: 'permission', requestHandle: 'req_12', decision: 'allow' },
+    ]);
+    assert.equal(
+      h.get('.subagents-feedback').textContent,
+      liveText('zh-CN', 'subagents.outcome.allowed'),
+    );
+    h.update({ connected: false });
+    assert.equal(allow.disabled, true);
+  });
+
+  it('shows unassigned approvals separately and pages retained tasks instead of hiding active details', async () => {
+    const entries = [task({ id: 'harness:33', canStop: true })];
+    const h = setup(
+      {},
+      {
+        mode: 'list',
+        instanceId: 'daemon-one',
+        controlsAvailable: true,
+        page: {
+          snapshot: snapshot(entries),
+          offset: 32,
+          total: 34,
+          unassignedPermissions: [
+            {
+              requestHandle: 'req_2',
+              title: 'Unassigned write',
+              choices: [{ decision: 'deny', scope: 'once' }],
+            },
+          ],
+        },
+      },
+    );
+    assert.match(
+      h.get('.subagent-unassigned').textContent ?? '',
+      /Task identity unconfirmed/,
+    );
+    assert.equal(h.app.querySelector('[data-task-id="task-1"]'), null);
+    assert.equal(h.get('.subagents-page-label').textContent, '33–33 of 34');
+    const denial = h.get<HTMLButtonElement>(
+      '.subagent-unassigned [data-decision="deny"]',
+    );
+    denial.focus();
+    h.update({ language: 'zh-CN' });
+    assert.equal(h.get('.subagent-unassigned [data-decision="deny"]'), denial);
+    assert.equal(document.activeElement, denial);
+    const next = h.get<HTMLButtonElement>(
+      '.subagents-pagination button:nth-of-type(2)',
+    );
+    next.click();
+    await settled();
+    assert.deepEqual(h.calls.at(-1), [
+      'control',
+      'daemon-one',
+      { action: 'list', offset: 33 },
+    ]);
+    assert.equal(h.get('.subagents-retention').hidden, true);
+  });
+
+  it('does not apply late action feedback to a replacement daemon or permanently lock controls after closing', async () => {
+    let finish: (result: SubagentsControlResult) => void = () => {};
+    const selected = task({ canStop: true });
+    const h = setup(
+      {
+        control: () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      },
+      {
+        mode: 'detail',
+        instanceId: 'one',
+        controlsAvailable: true,
+        selectedId: selected.id,
+        page: { snapshot: snapshot([selected]), offset: 0, total: 1, selected },
+      },
+    );
+    h.get<HTMLButtonElement>('.subagent-identity .subagents-stop').click();
+    h.update({ instanceId: 'two' });
+    finish({ type: 'outcome', outcome: 'stopped' });
+    await settled();
+    assert.equal(h.get('.subagents-feedback').hidden, true);
+    const stop = h.get<HTMLButtonElement>('.subagent-identity .subagents-stop');
+    assert.equal(stop.disabled, false);
+    stop.click();
+    h.get<HTMLButtonElement>('.subagents-close').click();
+    finish({ type: 'error', code: 'action_failed' });
+    await settled();
+    h.update({ mode: 'summary' });
+    assert.equal(
+      h.get<HTMLButtonElement>('.subagents-summary').disabled,
+      false,
+    );
+    assert.equal(h.get('.subagents-error').hidden, true);
+  });
+
   it('shows authoritative paired-language counts rather than counting retained tasks', async () => {
     const h = setup();
     const summary = h.get<HTMLButtonElement>('.subagents-summary');

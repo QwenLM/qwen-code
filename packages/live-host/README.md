@@ -163,9 +163,21 @@ monitor 详情仍显示已取消，不伪装成成功；取消的 timer／harnes
 通知排队／送达与任务结束是两个状态。追加到既有后台任务的指令不重复计数。
 
 结束语音后 Proactive 停止采样并保留结束记录，后台 harness 任务继续运行及更新。
-无通话时收到权限请求只登记等待，不新增自动批准；视图不提供批准或取消按钮。
-任务历史只保留本次 daemon 运行，最多展示 32 条详情、总快照上限 240 KiB；
-超限时明确提示省略／截断，总计数仍覆盖省略任务。此功能通过可选能力协商，仅在
+无通话时收到权限请求只登记等待，不新增自动批准；可在任务详情中按后端实际提供的
+范围允许或拒绝，未确认所属任务的请求单独显示。普通文件系统拒绝不会被虚构成授权请求。
+未关联请求也会点亮摘要的待处理标记。描述过长时请到后端完整查看后授权，仍可在这里拒绝。
+Live 为支持的 Codex ACP 新会话选择明确提供的 `Ask for approval` 模式；不改全局权限、
+不关闭沙箱，模式不支持或设置失败时记录警告。
+
+列表和详情提供 `Stop`／`停止`，只停止对应任务；后端尚未确认时显示正在停止，不会提前
+宣称已结束，也不会用旧任务 ID 取消同一会话的新任务。停止请求与最终结果以静默文字
+反馈给主 Omni，前台忙时排队，挂断后保留到本次 daemon 的下一次通话。`Close` 仅关闭面板。
+Live 不再限制活动 Harness／monitor 数量；独立并行的 Harness 任务使用独立会话，
+同一会话保留追加／排队语义，后端自身的队列、配额以及机器和 API 资源限制仍适用。
+
+任务历史只保留本次 daemon 运行；全部活动任务保留有限详情，已结束任务仅保留最近 32 条。
+使用上一页／下一页访问任务，每页最多 32 条，单个快照上限 240 KiB；超限时明确提示
+省略／截断，总计数仍覆盖省略任务。此功能通过可选能力协商，仅在
 支持的独立 Live daemon 连接上显示，不影响旧版 Host 或 WebShell。
 
 Settings 最后一个选项 `Theme`／`主题` 位于 Language 后，支持跟随系统（默认）、浅色和深色。
@@ -209,14 +221,21 @@ camera track 拍摄静态照片；设备不支持时尝试临时调整视频采�
 Camera 高分辨率 JPEG 单独保存为 handoff asset（上限 8 MiB），不通过 Host WebSocket
 传输；后台 Monitor 不调用这条高分辨率拍照路径。`snapshotResolution` 继续用于 Screen。
 
-Screen Live Feed 由内置原生 Appshot 定时采集当前前台窗口。Live Feed 默认缩放到
-1280×720；所有送入 Omni 的 JPEG 和 Host 传输预览受 1080p／190 KiB 上限约束，
+Screen Live Feed 与视觉 Proactive monitor 使用独立的完整显示器采集路径，包含桌面、
+菜单栏、Dock 和其他应用，但排除 Live Host 自身窗口。Settings 的 Video Source 下可选
+`Display`／`显示器`，选择保存到 `config.json` 的 `visualInput.screenDisplayId`。
+默认 `primary` 跟随系统主显示器，也可保存某块显示器的 UUID；明确选择的显示器断开后
+报错，不自动换屏。切换显示器会丢弃过期截图并清空 monitor 旧视觉缓冲。无需重新 init。
+两条持续画面路径都使用 `liveResolution`，默认等比放进 1280×720；完整范围不代表原生像素。
+所有送入 Omni 的 JPEG 和 Host 传输预览受 1080p／190 KiB 上限约束，
 Camera 原图 asset 与 Screen 的 PNG asset 不受该小图上限影响。
+前台 Appshot 工具与 On Demand 视觉记忆仍使用原来的前台窗口截图，不读取整屏；Camera 不变。
 
 停止通话、切换 Source/Mode、daemon 断开或 Host 退出都会清理不再使用的通话采集。
 停止通话后，Camera Source 的可见小窗可以继续显示本地预览，此时不会上传画面；
 切回 Screen、断开 daemon 或退出 Host 会关闭摄像头。
-Camera Source 需要摄像头权限；Screen Source 需要辅助功能和屏幕录制权限。未选中的
+Camera Source 需要摄像头权限；Screen On Demand 的 Appshot 需要辅助功能和屏幕录制权限，
+Screen Live Feed 仅需屏幕录制权限。未选中的
 来源权限不会阻止 Live。通话中切换到尚未授权的来源时，Host 会先保留当前可用来源，
 授权成功后再一次性完成切换；授权取消或失败不会让正在工作的来源提前失效。
 
@@ -234,6 +253,28 @@ npm start -- --live-debug
 
 Proactive 判断、通知排队／播报、harness 任务和 Realtime 生命周期日志由 **daemon** 输出，
 需在另一个终端运行 `qwen-live --debug`。Host 的 `--live-debug` 不会替代 daemon 的日志开关。
+
+排查 monitor 输入时，用 `frameHash`（JPEG 字节的 SHA256 前 16 位）对应 Host 的
+`visual_snapshot_captured`／`visual_frame_sent`、daemon 的截图／帧记录，以及
+`proactive.monitor_image_sent`。后者只表示实际写入模型连接的帧，不把排队当作已发送。
+`proactive.monitor_commit` 显示本次实际发送的图片数、音频字节数和时长（含协议要求的静音），
+`monitor_committed` 表示服务端确认提交，`monitor_action` 区分 wait／reply／function_call／invalid。
+这些日志不包含图像、音频或模型输出原文。
+
+daemon 的 debug 模式另外为视觉 Monitor 保存真实请求，目录为系统临时目录下的
+`qwen-live-monitor-debug/`。每个 Monitor 一个目录，每次推理保存 `request.json`、
+实际送出的 JPEG、含协议静音的 16 kHz `input.wav`，以及结果 `response.json`。
+`proactive.monitor_debug_started` 和 `proactive.monitor_request_saved` 日志给出绝对路径。
+仅 daemon debug 开启；Host 的 `--live-debug` 单独启用不会录制，纯音频 Monitor 也不录制。
+启动及新建 Monitor 时清理，只保留最近创建的 10 个 Monitor（不是最近 10 次请求）。
+被清理的 Monitor 继续运行但停止录制；文件仅当前用户可访问。内容包含真实屏幕／摄像头、
+任务文本和混合 Monitor 的麦克风输入，虽然不保存连接凭据，画面或音频中的秘密不会被脱敏。
+录制失败会单独报错而不影响通话；长时间 debug 可能占用较多磁盘，诊断完请关闭 debug。
+完整格式与清理规则见 [Qwen Live README](../qwen-live/README.md)。
+
+`native_display_changed` 记录原生显示器事件与几何信息；`overlay_position` 记录 Host 主动
+定位的原因及前后坐标，`overlay_native_moved` 记录原生窗口移动。非几何显示器事件不会再
+丢弃正在采集的帧或中断拖拽；真正需要边界修正时才调整小球位置。
 
 ## 内置 Appshot 与来源相关授权
 
@@ -255,9 +296,12 @@ Host 激活后会在 Screen 为当前或待切换来源时定期刷新 Appshot �
 
 ## 音频和 fail-closed
 
-Omni 响应以单声道 16-bit、24 kHz PCM 接收，放入 24 kHz 的 AudioBuffer。
-播放 AudioContext 不指定采样率，使用当前系统输出设备的默认时钟，Web Audio 自动
-重采样至该时钟（如 44.1／48／96 kHz），不强制更改设备采样率、不引入第二个播放时钟。
+Omni 响应以单声道 16-bit、24 kHz PCM 接收。播放 AudioContext 不指定采样率，使用当前
+系统输出设备的默认时钟（如 44.1／48／96 kHz），不强制更改设备采样率。
+当前协商了输出结束标记的连接，对每条响应进行连续、带抗混叠滤波的流式重采样，再放入
+设备采样率的 AudioBuffer，按整数采样点连续排程，避免逐块转换的衔接尖峰及无谓间隙。
+结束标记到达时输出短暂的滤波尾部。未协商结束标记的旧连接保持原有 Web Audio
+逐帧转换和播放排空逻辑，不会等待不存在的标记。
 `--live-debug` 日志中的 `output_context_ready` 显示源／输出上下文采样率及是否重采样。
 
 蓝牙耳机的麦克风被打开时，macOS 可能将耳机切换到免提通话模式，影响同时播放的音乐／视频；

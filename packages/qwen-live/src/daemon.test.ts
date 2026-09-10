@@ -25,7 +25,11 @@ import { LiveLogger } from './logger.js';
 import { LiveSession } from './orchestrator/live-session.js';
 import { MemoryService } from './memory/service.js';
 import { SessionLog } from './log/session-log.js';
-import { parseSubagentsSnapshot } from './subagents/types.js';
+import { MonitorDebugStore } from './proactive/monitor-debug-store.js';
+import {
+  MAX_SUBAGENTS_REQUEST_BYTES,
+  parseSubagentsSnapshot,
+} from './subagents/types.js';
 
 const temporaryDirectories: string[] = [];
 const daemons: LiveDaemon[] = [];
@@ -166,9 +170,180 @@ afterEach(async () => {
       .map((directory) => rm(directory, { recursive: true, force: true })),
   );
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe('LiveDaemon', () => {
+  it.each([false, true])(
+    'keeps local startup available when memory is %s and its default endpoint cannot be derived',
+    async (enabled) => {
+      const config = await testConfig();
+      config.realtime.endpoint =
+        'wss://private-user:private-password@proxy.example.invalid/realtime?token=private-query';
+      config.memory.enabled = enabled;
+      const warn = vi.spyOn(LiveLogger.prototype, 'warn');
+      const daemon = startedDaemon(config);
+      await expect(daemon.start()).resolves.toMatchObject({
+        port: expect.any(Number),
+      });
+      await expect(
+        readDiscoveryRecord(config.discoveryDir),
+      ).resolves.toMatchObject({
+        pid: process.pid,
+      });
+      const memory = (
+        daemon as unknown as {
+          memory: { options: { connection: { baseUrl: string } } };
+        }
+      ).memory;
+      expect(memory.options.connection.baseUrl).toBe('');
+      const warning = warn.mock.calls.map(([message]) => message).join('\n');
+      expect(warning).toContain('Memory default endpoint unavailable');
+      expect(warning).toContain('realtimeEndpoint');
+      for (const secret of [
+        'private-user',
+        'private-password',
+        'private-query',
+      ])
+        expect(warning).not.toContain(secret);
+    },
+  );
+
+  it.each(['debug', 'info'] as const)(
+    'initializes Monitor archives only with %s diagnostics enabled',
+    async (level) => {
+      const initialize = vi
+        .spyOn(MonitorDebugStore.prototype, 'initialize')
+        .mockResolvedValue(true);
+      const flush = vi.spyOn(MonitorDebugStore.prototype, 'flush');
+      const logger = new LiveLogger(level);
+      vi.spyOn(logger, 'debug').mockImplementation(() => undefined);
+      vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+      const daemon = new LiveDaemon(await testConfig(), {
+        registry: new BackendRegistry([
+          { adaptor: fakeAdaptor(), isDefault: true },
+        ]),
+        logger,
+      });
+      daemons.push(daemon);
+      await daemon.start();
+      const session = (
+        daemon as unknown as {
+          session: { options: { monitorDebug?: MonitorDebugStore } };
+        }
+      ).session;
+      expect(initialize).toHaveBeenCalledTimes(level === 'debug' ? 1 : 0);
+      expect(session.options.monitorDebug).toBe(
+        level === 'debug' ? initialize.mock.contexts[0] : undefined,
+      );
+      await daemon.stop();
+      expect(flush).toHaveBeenCalledTimes(level === 'debug' ? 1 : 0);
+    },
+  );
+
+  it('continues startup when debug archive initialization is unavailable', async () => {
+    vi.spyOn(MonitorDebugStore.prototype, 'initialize').mockResolvedValue(
+      false,
+    );
+    const flush = vi.spyOn(MonitorDebugStore.prototype, 'flush');
+    const logger = new LiveLogger('debug');
+    vi.spyOn(logger, 'debug').mockImplementation(() => undefined);
+    vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+    const daemon = new LiveDaemon(await testConfig(), {
+      registry: new BackendRegistry([
+        { adaptor: fakeAdaptor(), isDefault: true },
+      ]),
+      logger,
+    });
+    daemons.push(daemon);
+    await expect(daemon.start()).resolves.toMatchObject({
+      url: expect.any(String),
+    });
+    await daemon.stop();
+    expect(flush).not.toHaveBeenCalled();
+  });
+
+  it('authenticates standalone subagent management by bearer and instance without an active call', async () => {
+    const config = await testConfig();
+    const daemon = startedDaemon(config);
+    const { url } = await daemon.start();
+    const record = await readDiscoveryRecord(config.discoveryDir);
+    const action = vi.spyOn(LiveSession.prototype, 'handleSubagentsRequest');
+    const requestPage = (headers: Record<string, string>) =>
+      fetch(`${url}/live/subagents`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify({ action: 'list' }),
+      });
+    expect((await requestPage({})).status).toBe(401);
+    expect(
+      (
+        await requestPage({
+          ...hostHeaders(record),
+          origin: 'https://untrusted.invalid',
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (await requestPage({ authorization: `Bearer ${record.token}` })).status,
+    ).toBe(409);
+    expect(
+      (
+        await requestPage({
+          ...hostHeaders(record),
+          'x-qwen-live-nonce': 'previous-instance',
+        })
+      ).status,
+    ).toBe(409);
+    expect(action).not.toHaveBeenCalled();
+    const accepted = await requestPage(hostHeaders(record));
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toMatchObject({
+      type: 'page',
+      page: { offset: 0, total: 0, snapshot: { tasks: [] } },
+    });
+    expect(action).toHaveBeenCalledExactlyOnceWith({ action: 'list' });
+  });
+
+  it('rejects malformed or oversized controls without dispatch and returns owned failures', async () => {
+    const config = await testConfig();
+    const daemon = startedDaemon(config);
+    const { url } = await daemon.start();
+    const record = await readDiscoveryRecord(config.discoveryDir);
+    const action = vi.spyOn(LiveSession.prototype, 'handleSubagentsRequest');
+    for (const [body, status] of [
+      ['{', 400],
+      [JSON.stringify({ action: 'stop', taskId: '' }), 400],
+      [JSON.stringify({ action: 'stop', taskId: 'job:1', all: true }), 400],
+      ['x'.repeat(MAX_SUBAGENTS_REQUEST_BYTES + 1), 413],
+    ] as const) {
+      const response = await fetch(`${url}/live/subagents`, {
+        method: 'POST',
+        headers: { ...hostHeaders(record), 'content-type': 'application/json' },
+        body,
+      });
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual({
+        type: 'error',
+        code: 'invalid_request',
+      });
+    }
+    expect(action).not.toHaveBeenCalled();
+    action.mockRejectedValueOnce(
+      new Error('backend credentials must not escape'),
+    );
+    const response = await fetch(`${url}/live/subagents`, {
+      method: 'POST',
+      headers: { ...hostHeaders(record), 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'stop', taskId: 'harness:job_1' }),
+    });
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      type: 'error',
+      code: 'action_failed',
+    });
+  });
+
   it.each(['absolute', 'relative'])(
     'advertises the configuration under a custom %s data directory',
     async (pathType) => {
@@ -233,7 +408,10 @@ describe('LiveDaemon', () => {
     await vi.waitFor(() =>
       expect(
         messages.find((message) => message['type'] === 'host.welcome'),
-      ).toMatchObject({ uiLanguageV1: { language: 'en' } }),
+      ).toMatchObject({
+        uiLanguageV1: { language: 'en' },
+        subagentsControlV1: true,
+      }),
     );
     expect(
       parseSubagentsSnapshot(
@@ -285,6 +463,16 @@ describe('LiveDaemon', () => {
     const config = await testConfig();
     config.visualInput.cameraSnapshotResolution = { width: 3840, height: 2160 };
     config.visualInput.snapshotResolution = { width: 2560, height: 1440 };
+    config.visualInput.screenDisplayId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    await mkdir(config.dataDir, { recursive: true });
+    const previous = {
+      custom: 'preserved',
+      visualInput: { source: 'screen', mode: 'on-demand', fps: 3 },
+    };
+    await writeFile(
+      join(config.dataDir, 'config.json'),
+      JSON.stringify(previous),
+    );
     const daemon = startedDaemon(config);
     const { url, port } = await daemon.start();
     expect(url).toBe(`http://127.0.0.1:${port}`);
@@ -324,7 +512,9 @@ describe('LiveDaemon', () => {
     await expect(welcome).resolves.toMatchObject({
       type: 'host.welcome',
       daemonShutdownV1: true,
+      displayCaptureV1: true,
       visualInput: {
+        screenDisplayId: config.visualInput.screenDisplayId,
         cameraWidth: 1280,
         cameraHeight: 720,
         cameraSnapshotWidth: 3840,
@@ -332,6 +522,38 @@ describe('LiveDaemon', () => {
         snapshotWidth: 2560,
         snapshotHeight: 1440,
       },
+    });
+    const selected = new Promise<void>((resolve) => {
+      socket.on('message', (data) => {
+        const message = JSON.parse(String(data));
+        if (
+          message.type === 'host.state' &&
+          message.visualInput?.screenDisplayId === 'primary'
+        )
+          resolve();
+      });
+    });
+    socket.send(
+      JSON.stringify({
+        type: 'host.visual_settings',
+        epoch: 0,
+        source: 'camera',
+        mode: 'live-feed',
+        screenDisplayId: 'primary',
+        permissions: {
+          camera: 'granted',
+          accessibility: 'granted',
+          screenRecording: 'granted',
+        },
+        appshot: true,
+      }),
+    );
+    await selected;
+    expect(
+      JSON.parse(await readFile(join(config.dataDir, 'config.json'), 'utf8')),
+    ).toEqual({
+      ...previous,
+      visualInput: { ...previous.visualInput, screenDisplayId: 'primary' },
     });
     socket.terminate();
   });
@@ -557,6 +779,7 @@ describe('LiveDaemon', () => {
       const record = await readDiscoveryRecord(config.discoveryDir);
       const dispose = vi.spyOn(LiveSession.prototype, 'dispose');
       const backendClose = vi.spyOn(ownedBackend(daemon), 'close');
+      const warn = vi.spyOn(LiveLogger.prototype, 'warn');
       if (failure === 'session')
         dispose.mockImplementationOnce(() => {
           throw new Error('Simulated session cleanup failure');
@@ -575,6 +798,14 @@ describe('LiveDaemon', () => {
       expect(await response.json()).toEqual({
         error: 'Live shutdown cleanup failed.',
       });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(`Simulated ${failure} cleanup failure`),
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `cleanup of '${failure === 'session' ? 'session' : 'backend:qwen-code'}' failed:`,
+        ),
+      );
       expect(close).toHaveBeenCalledOnce();
       expect(await readDiscoveryRecord(config.discoveryDir)).toEqual(record);
       const blocked = await fetch(`${url}/live/setup`, {
@@ -600,6 +831,79 @@ describe('LiveDaemon', () => {
       await expect(fetch(`${url}/healthz`)).rejects.toThrow();
     },
   );
+
+  it('logs bounded nested cleanup causes without connection credentials', async () => {
+    const config = await testConfig();
+    config.backends[0] = {
+      kind: 'qwen-code',
+      name: 'qwen-code',
+      baseUrl: 'http://127.0.0.1:1',
+      token: 'private-backend-token',
+      isDefault: true,
+    };
+    config.memory.updater.baseUrl =
+      'https://memory.example.invalid/compatible-mode/v1';
+    config.memory.updater.apiKeyEnv = 'TEST_LIVE_MEMORY_KEY';
+    vi.stubEnv('TEST_LIVE_MEMORY_KEY', 'private-memory-key');
+    const daemon = startedDaemon(config);
+    await daemon.start();
+    const record = await readDiscoveryRecord(config.discoveryDir);
+    const warn = vi.spyOn(LiveLogger.prototype, 'warn');
+    const nested = new Error(
+      `SQLite checkpoint failed: ${config.realtime.apiKey} private-backend-token private-memory-key ${record.token} Bearer unconfigured-secret https://private-user:private-password@example.invalid/?token=private-query`,
+    );
+    const failure = new AggregateError(
+      [nested, new Error('x'.repeat(10_000))],
+      'Memory database close failed.',
+    );
+    failure.cause = failure;
+    vi.spyOn(MemoryService.prototype, 'close').mockRejectedValueOnce(failure);
+    await expect(daemon.stop()).rejects.toThrow(
+      'Live shutdown cleanup failed.',
+    );
+    const warning = warn.mock.calls.map(([message]) => message).join('\n');
+    expect(warning).toContain("cleanup of 'memory' failed:");
+    expect(warning).toContain('Memory database close failed.');
+    expect(warning).toContain('SQLite checkpoint failed:');
+    expect(warning).toContain('[redacted]');
+    for (const secret of [
+      config.realtime.apiKey,
+      'private-backend-token',
+      'private-memory-key',
+      record.token,
+      'unconfigured-secret',
+      'private-user',
+      'private-password',
+      'private-query',
+    ])
+      expect(warning).not.toContain(secret);
+    expect(warning.length).toBeLessThan(2100);
+  });
+
+  it('does not remove a different discovery owner while exiting after cleanup failure', async () => {
+    const config = await testConfig();
+    const daemon = startedDaemon(config);
+    await daemon.start();
+    const ownRecord = await readDiscoveryRecord(config.discoveryDir);
+    const replacement = {
+      ...ownRecord,
+      instanceNonce: 'replacement_daemon_instance_0001',
+    };
+    await plantDiscoveryRecord(config.discoveryDir, replacement);
+    vi.spyOn(ownedBackend(daemon), 'close').mockRejectedValueOnce(
+      new Error('Synthetic backend cleanup failure'),
+    );
+    try {
+      await expect(daemon.stopForProcessExit()).rejects.toThrow(
+        'Live shutdown cleanup failed.',
+      );
+      expect(await readDiscoveryRecord(config.discoveryDir)).toEqual(
+        replacement,
+      );
+    } finally {
+      await plantDiscoveryRecord(config.discoveryDir, ownRecord);
+    }
+  });
 
   it('shares a failed stop attempt and permits an explicit retry without re-closing successful resources', async () => {
     const config = await testConfig();

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { WebSocket, type RawData } from 'ws';
 import {
   LIVE_HOST_BUNDLE_ID,
@@ -40,6 +40,7 @@ import {
   type LiveVisualInput,
   type LiveVisualSource,
 } from './types.js';
+import { isScreenDisplayId } from './screen-display.js';
 import { LiveLogger } from '../logger.js';
 import type { SubagentsSnapshot } from '../subagents/types.js';
 import {
@@ -94,7 +95,10 @@ interface LiveCall {
 }
 
 type StandaloneDaemonMessage =
-  | (LiveDaemonMessage & { subagentsV1?: SubagentsSnapshot })
+  | (LiveDaemonMessage & {
+      subagentsV1?: SubagentsSnapshot;
+      subagentsControlV1?: true;
+    })
   | { type: 'host.subagents'; subagentsV1: SubagentsSnapshot };
 type StandaloneHostHello = LiveHostHello & { subagentsV1?: true };
 
@@ -132,6 +136,7 @@ export interface LiveCallHandlers {
     callId: string;
     source: LiveVisualSource;
     image: string;
+    displayId?: string;
   }) => boolean;
   onVisualSettings?: (call: {
     epoch: number;
@@ -148,6 +153,8 @@ export interface LiveHostCoordinatorOptions {
   daemonShutdownV1?: boolean;
   getUiLanguage?: () => LiveLanguageState;
   getSubagents?: () => SubagentsSnapshot | undefined;
+  subagentsControlV1?: boolean;
+  onScreenDisplayChange?: (screenDisplayId: string) => void;
   onLanguageAction?: (
     language: LiveLanguageState['language'],
   ) => LiveLanguageState;
@@ -169,6 +176,8 @@ export interface LiveHostCoordinatorOptions {
 
 export interface LiveVisualCapture {
   source: LiveVisualSource;
+  screenScope?: 'display';
+  displayId?: string;
   image: string;
   width: number;
   height: number;
@@ -181,6 +190,7 @@ export interface LiveVisualCapture {
 interface PendingVisualCapture {
   epoch: number;
   source: LiveVisualSource;
+  screenDisplayId?: string;
   persistAsset: boolean;
   timer: NodeJS.Timeout;
   resolve: (capture: LiveVisualCapture) => void;
@@ -239,6 +249,8 @@ function parseHello(
   if (
     value['type'] !== 'host.hello' ||
     (value['subagentsV1'] !== undefined && value['subagentsV1'] !== true) ||
+    (value['displayCaptureV1'] !== undefined &&
+      value['displayCaptureV1'] !== true) ||
     typeof protocolVersion !== 'number' ||
     !Number.isInteger(protocolVersion) ||
     !isBoundedString(value['hostVersion'], MAX_VERSION_LENGTH) ||
@@ -334,6 +346,16 @@ function isVisualSource(value: unknown): value is LiveVisualSource {
   return value === 'screen' || value === 'camera';
 }
 
+function validDisplayCaptureIdentity(value: Record<string, unknown>): boolean {
+  return (
+    (value['screenScope'] === undefined && value['displayId'] === undefined) ||
+    (value['source'] === 'screen' &&
+      value['screenScope'] === 'display' &&
+      value['displayId'] !== 'primary' &&
+      isScreenDisplayId(value['displayId']))
+  );
+}
+
 function parseVisualFrame(
   value: Record<string, unknown>,
 ): LiveHostVisualFrame | undefined {
@@ -345,6 +367,7 @@ function parseVisualFrame(
     !Number.isSafeInteger(epoch) ||
     epoch < 0 ||
     !isVisualSource(value['source']) ||
+    !validDisplayCaptureIdentity(value) ||
     !isBoundedVisualImage(image)
   ) {
     return undefined;
@@ -354,6 +377,12 @@ function parseVisualFrame(
     epoch,
     source: value['source'],
     image,
+    ...(value['screenScope'] === 'display'
+      ? {
+          screenScope: 'display' as const,
+          displayId: (value['displayId'] as string).toLowerCase(),
+        }
+      : {}),
   };
 }
 
@@ -369,6 +398,8 @@ function parseVisualSettings(
     epoch < 0 ||
     !isVisualSource(value['source']) ||
     (value['mode'] !== 'on-demand' && value['mode'] !== 'live-feed') ||
+    (value['screenDisplayId'] !== undefined &&
+      !isScreenDisplayId(value['screenDisplayId'])) ||
     !isObject(permissions) ||
     !isPermissionState(permissions['camera']) ||
     !isPermissionState(permissions['accessibility']) ||
@@ -382,6 +413,9 @@ function parseVisualSettings(
     epoch,
     source: value['source'],
     mode: value['mode'],
+    ...(typeof value['screenDisplayId'] === 'string'
+      ? { screenDisplayId: value['screenDisplayId'].toLowerCase() }
+      : {}),
     permissions: {
       camera: permissions['camera'],
       accessibility: permissions['accessibility'],
@@ -416,6 +450,7 @@ function parseVisualCaptureResult(
     value['success'] !== true ||
     !isVisualSource(source) ||
     !isBoundedVisualImage(value['image']) ||
+    !validDisplayCaptureIdentity(value) ||
     typeof width !== 'number' ||
     !Number.isSafeInteger(width) ||
     width <= 0 ||
@@ -459,6 +494,12 @@ function parseVisualCaptureResult(
     width,
     height,
     appName: value['appName'] as string,
+    ...(value['screenScope'] === 'display'
+      ? {
+          screenScope: 'display' as const,
+          displayId: (value['displayId'] as string).toLowerCase(),
+        }
+      : {}),
     ...(value['windowTitle']
       ? { windowTitle: value['windowTitle'] as string }
       : {}),
@@ -814,9 +855,10 @@ export class LiveHostCoordinator {
       if (this.visualInput.source === 'camera') {
         requirements.camera = permissionRequirement(hello.permissions.camera);
       } else {
-        requirements.accessibility = permissionRequirement(
-          hello.permissions.accessibility,
-        );
+        if (this.visualInput.mode === 'on-demand')
+          requirements.accessibility = permissionRequirement(
+            hello.permissions.accessibility,
+          );
         requirements.screenRecording = permissionRequirement(
           hello.permissions.screenRecording,
         );
@@ -830,13 +872,17 @@ export class LiveHostCoordinator {
       requirements.globalShortcut = hello.selfChecks.globalShortcut
         ? 'ready'
         : 'unavailable';
-      if (this.visualInput.source === 'screen') {
+      if (
+        this.visualInput.source === 'screen' &&
+        this.visualInput.mode === 'on-demand'
+      ) {
         requirements.appshot = hello.selfChecks.appshot
           ? appshot.state
           : 'unavailable';
       }
     } else if (
       this.visualInput.source === 'screen' &&
+      this.visualInput.mode === 'on-demand' &&
       appshot.state !== 'ready'
     ) {
       requirements.appshot = appshot.state;
@@ -1097,16 +1143,24 @@ export class LiveHostCoordinator {
 
   captureVisualContext(
     callerSessionId: string,
-    options: { persistAsset?: boolean } = {},
+    options: { persistAsset?: boolean; screenScope?: 'display' } = {},
   ): Promise<LiveVisualCapture> {
     const call = this.call;
     const host = this.host;
+    const display =
+      this.visualInput.source === 'screen' && options.screenScope === 'display';
+    if (display && !host?.hello?.displayCaptureV1)
+      return Promise.reject(
+        new Error(this.uiText('runtime.displayCaptureUnsupported')),
+      );
     const sourceReady =
       this.visualInput.source === 'camera'
         ? host?.hello?.permissions.camera === 'granted'
-        : host?.hello?.permissions.accessibility === 'granted' &&
-          host.hello.permissions.screenRecording === 'granted' &&
-          host.hello.selfChecks.appshot;
+        : display
+          ? host?.hello?.permissions.screenRecording === 'granted'
+          : host?.hello?.permissions.accessibility === 'granted' &&
+            host.hello.permissions.screenRecording === 'granted' &&
+            host.hello.selfChecks.appshot;
     if (
       !call ||
       call.coordinator?.sessionId !== callerSessionId ||
@@ -1123,15 +1177,24 @@ export class LiveHostCoordinator {
     }
     const requestId = randomUUID();
     const source = this.visualInput.source;
-    const snapshotWidth =
-      source === 'camera'
+    const screenDisplayId = display
+      ? (this.visualInput.screenDisplayId ?? 'primary')
+      : undefined;
+    const snapshotWidth = display
+      ? this.visualInput.liveWidth
+      : source === 'camera'
         ? this.visualInput.cameraSnapshotWidth
         : this.visualInput.snapshotWidth;
-    const snapshotHeight =
-      source === 'camera'
+    const snapshotHeight = display
+      ? this.visualInput.liveHeight
+      : source === 'camera'
         ? this.visualInput.cameraSnapshotHeight
         : this.visualInput.snapshotHeight;
-    this.debug('visual.capture_requested', { epoch: call.epoch, source });
+    this.debug('visual.capture_requested', {
+      epoch: call.epoch,
+      source,
+      ...(screenDisplayId ? { screenScope: 'display', screenDisplayId } : {}),
+    });
     return new Promise<LiveVisualCapture>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingVisualCaptures.delete(requestId);
@@ -1146,6 +1209,7 @@ export class LiveHostCoordinator {
       this.pendingVisualCaptures.set(requestId, {
         epoch: call.epoch,
         source,
+        ...(screenDisplayId ? { screenDisplayId } : {}),
         persistAsset: options.persistAsset !== false,
         timer,
         resolve,
@@ -1157,6 +1221,9 @@ export class LiveHostCoordinator {
           requestId,
           epoch: call.epoch,
           source,
+          ...(screenDisplayId
+            ? { screenScope: 'display' as const, screenDisplayId }
+            : {}),
           ...(snapshotWidth !== undefined ? { snapshotWidth } : {}),
           ...(snapshotHeight !== undefined ? { snapshotHeight } : {}),
           ...(options.persistAsset !== undefined
@@ -1336,6 +1403,13 @@ export class LiveHostCoordinator {
       return 'camera_permission';
     if (
       this.visualInput.source === 'screen' &&
+      this.visualInput.mode === 'live-feed' &&
+      !hello.displayCaptureV1
+    )
+      return 'host_version';
+    if (
+      this.visualInput.source === 'screen' &&
+      this.visualInput.mode === 'on-demand' &&
       hello.permissions.accessibility !== 'granted'
     )
       return 'accessibility_permission';
@@ -1347,9 +1421,17 @@ export class LiveHostCoordinator {
     if (!hello.selfChecks.audioInput) return 'audio_input';
     if (!hello.selfChecks.audioOutput) return 'audio_output';
     if (!hello.selfChecks.globalShortcut) return 'global_shortcut';
-    if (this.visualInput.source === 'screen' && !hello.selfChecks.appshot)
+    if (
+      this.visualInput.source === 'screen' &&
+      this.visualInput.mode === 'on-demand' &&
+      !hello.selfChecks.appshot
+    )
       return 'appshot';
-    if (this.visualInput.source === 'screen' && appshot.state !== 'ready')
+    if (
+      this.visualInput.source === 'screen' &&
+      this.visualInput.mode === 'on-demand' &&
+      appshot.state !== 'ready'
+    )
       return 'appshot';
     return undefined;
   }
@@ -1649,6 +1731,26 @@ export class LiveHostCoordinator {
       );
       return;
     }
+    if (
+      pending.screenDisplayId &&
+      (message.source !== 'screen' ||
+        message.screenScope !== 'display' ||
+        !message.displayId ||
+        (pending.screenDisplayId !== 'primary' &&
+          message.displayId.toLowerCase() !==
+            pending.screenDisplayId.toLowerCase()))
+    ) {
+      pending.reject(new Error(this.uiText('runtime.displayCaptureMismatch')));
+      return;
+    }
+    if (
+      !pending.screenDisplayId &&
+      message.source === 'screen' &&
+      message.screenScope === 'display'
+    ) {
+      pending.reject(new Error(this.uiText('runtime.displayCaptureMismatch')));
+      return;
+    }
     if (pending.persistAsset && !message.screenshotPath) {
       this.debug('visual.capture_failed', {
         epoch: pending.epoch,
@@ -1663,13 +1765,23 @@ export class LiveHostCoordinator {
     this.debug('visual.capture_completed', {
       epoch: pending.epoch,
       source: message.source,
+      ...(message.source === 'screen' && message.displayId
+        ? { displayId: message.displayId }
+        : {}),
       width: message.width,
       height: message.height,
       bytes: Buffer.byteLength(message.image, 'base64'),
+      frameHash: createHash('sha256')
+        .update(Buffer.from(message.image, 'base64'))
+        .digest('hex')
+        .slice(0, 16),
     });
     pending.resolve({
       source: message.source,
       image: message.image,
+      ...(message.source === 'screen' && message.screenScope === 'display'
+        ? { screenScope: 'display' as const, displayId: message.displayId }
+        : {}),
       width: message.width,
       height: message.height,
       ...(message.source === 'screen'
@@ -1734,6 +1846,10 @@ export class LiveHostCoordinator {
     const memory = this.memoryState();
     this.sendHost({
       type: 'host.welcome',
+      displayCaptureV1: true,
+      ...(this.options.subagentsControlV1
+        ? { subagentsControlV1: true as const }
+        : {}),
       ...(this.host?.hello?.subagentsV1 && this.options.getSubagents
         ? { subagentsV1: this.options.getSubagents() }
         : {}),
@@ -1810,10 +1926,21 @@ export class LiveHostCoordinator {
       call.epoch !== message.epoch ||
       call.state === 'stopping' ||
       this.visualInput.mode !== 'live-feed' ||
-      this.visualInput.source !== message.source
+      this.visualInput.source !== message.source ||
+      (message.source === 'screen' &&
+        (!this.host?.hello?.displayCaptureV1 ||
+          message.screenScope !== 'display' ||
+          !message.displayId ||
+          ((this.visualInput.screenDisplayId ?? 'primary') !== 'primary' &&
+            message.displayId.toLowerCase() !==
+              this.visualInput.screenDisplayId?.toLowerCase())))
     ) {
       return;
     }
+    const frameHash = createHash('sha256')
+      .update(Buffer.from(message.image, 'base64'))
+      .digest('hex')
+      .slice(0, 16);
     try {
       const accepted =
         this.handlers.onInputImage?.({
@@ -1821,17 +1948,21 @@ export class LiveHostCoordinator {
           callId: call.callId,
           source: message.source,
           image: message.image,
+          ...(message.displayId ? { displayId: message.displayId } : {}),
         }) ?? false;
       this.debug('visual.frame', {
         epoch: call.epoch,
         source: message.source,
         bytes: Buffer.byteLength(message.image, 'base64'),
+        frameHash,
         accepted,
       });
     } catch (error) {
       this.debug('visual.frame', {
         epoch: call.epoch,
         source: message.source,
+        bytes: Buffer.byteLength(message.image, 'base64'),
+        frameHash,
         accepted: false,
         reason: error instanceof Error ? error.message : String(error),
       });
@@ -1855,11 +1986,33 @@ export class LiveHostCoordinator {
     }
     const changed =
       this.visualInput.source !== message.source ||
-      this.visualInput.mode !== message.mode;
+      this.visualInput.mode !== message.mode ||
+      (message.screenDisplayId !== undefined &&
+        (this.visualInput.screenDisplayId ?? 'primary').toLowerCase() !==
+          message.screenDisplayId);
+    if (
+      message.screenDisplayId !== undefined &&
+      (this.visualInput.screenDisplayId ?? 'primary').toLowerCase() !==
+        message.screenDisplayId
+    ) {
+      try {
+        this.options.onScreenDisplayChange?.(message.screenDisplayId);
+      } catch {
+        this.sendHostError(
+          'invalid_message',
+          this.uiText('runtime.displaySaveFailed'),
+        );
+        this.broadcastState();
+        return;
+      }
+    }
     this.visualInput = {
       ...this.visualInput,
       source: message.source,
       mode: message.mode,
+      ...(message.screenDisplayId !== undefined
+        ? { screenDisplayId: message.screenDisplayId }
+        : {}),
     };
     if (call && changed) {
       this.rejectPendingVisualCaptures(
@@ -1871,6 +2024,7 @@ export class LiveHostCoordinator {
       epoch: message.epoch,
       source: message.source,
       mode: message.mode,
+      screenDisplayId: this.visualInput.screenDisplayId ?? 'primary',
     });
     if (call && changed) {
       this.handlers.onVisualSettings?.({

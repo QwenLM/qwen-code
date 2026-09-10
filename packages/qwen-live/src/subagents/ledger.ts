@@ -11,6 +11,7 @@ import {
   type SubagentActivity,
   type SubagentStatus,
   type SubagentTask,
+  type SubagentsPage,
   type SubagentsSnapshot,
 } from './types.js';
 
@@ -21,6 +22,9 @@ const TERMINAL = new Set<SubagentStatus>([
   'interrupted',
 ]);
 const OUTPUT_CHARS = 16_384;
+const MAX_TERMINAL_DETAILS = 32;
+// Management decorates page rows after capture with bounded action metadata.
+const SNAPSHOT_BYTES = MAX_SUBAGENTS_SNAPSHOT_BYTES - MAX_SUBAGENT_TASKS * 256;
 
 function clean(value: string, max: number): string {
   const text = stripControlSequences(value);
@@ -126,6 +130,7 @@ export class SubagentsLedger {
       if (event) this.pushEvent(task, event);
     }
     if (!task) this.archiveTerminal(id);
+    this.trimDetails();
     this.changed();
   }
 
@@ -164,6 +169,27 @@ export class SubagentsLedger {
   }
 
   snapshot(): SubagentsSnapshot {
+    return this.page().snapshot;
+  }
+
+  touch(): void {
+    if (!this.closed) this.changed();
+  }
+
+  get(id: string): SubagentTask | undefined {
+    const task = this.details.get(id);
+    return task ? structuredClone(task) : undefined;
+  }
+
+  forgetJoinedTask(id: string): void {
+    if (this.closed || !this.states.has(id)) return;
+    this.details.delete(id);
+    this.states.delete(id);
+    this.monitors.delete(id);
+    this.changed();
+  }
+
+  page(offset = 0, selectedId?: string): SubagentsPage {
     const counts: SubagentsSnapshot['counts'] = { ...this.archived };
     for (const [id, status] of this.states) {
       const completed =
@@ -176,16 +202,19 @@ export class SubagentsLedger {
       if (status === 'interrupted') counts.interrupted += 1;
       if (status === 'waiting') counts.needsAttention += 1;
     }
-    const tasks = [...this.details.values()]
-      .sort(
-        (a, b) =>
-          Number(TERMINAL.has(a.status)) - Number(TERMINAL.has(b.status)) ||
-          b.updatedAt - a.updatedAt,
-      )
-      .map((task) => ({
-        ...task,
-        events: task.events.map((event) => ({ ...event })),
-      }));
+    const sorted = [...this.details.values()].sort(
+      (a, b) =>
+        Number(TERMINAL.has(a.status)) - Number(TERMINAL.has(b.status)) ||
+        b.createdAt - a.createdAt ||
+        a.id.localeCompare(b.id),
+    );
+    const boundedOffset = Math.min(
+      Number.isSafeInteger(offset) && offset >= 0 ? offset : 0,
+      Math.max(0, sorted.length - 1),
+    );
+    const tasks = sorted
+      .slice(boundedOffset, boundedOffset + MAX_SUBAGENT_TASKS)
+      .map((task) => structuredClone(task));
     const snapshot: SubagentsSnapshot = {
       revision: this.revision,
       counts,
@@ -196,7 +225,7 @@ export class SubagentsLedger {
     // when long Unicode/escaped output makes the retained view smaller.
     for (
       let index = tasks.length - 1;
-      this.bytes(snapshot) > MAX_SUBAGENTS_SNAPSHOT_BYTES && index >= 0;
+      this.bytes(snapshot) > SNAPSHOT_BYTES && index >= 0;
       index -= 1
     ) {
       const task = tasks[index]!;
@@ -205,14 +234,17 @@ export class SubagentsLedger {
       task.events = [];
       task.request = clean(task.request, 512);
     }
-    while (
-      this.bytes(snapshot) > MAX_SUBAGENTS_SNAPSHOT_BYTES &&
-      tasks.length
-    ) {
+    while (this.bytes(snapshot) > SNAPSHOT_BYTES && tasks.length) {
       tasks.pop();
       snapshot.omitted += 1;
     }
-    return snapshot;
+    const selected = selectedId ? this.get(selectedId) : undefined;
+    return {
+      snapshot,
+      offset: boundedOffset,
+      total: sorted.length,
+      ...(selected ? { selected } : {}),
+    };
   }
 
   dispose(): void {
@@ -237,13 +269,10 @@ export class SubagentsLedger {
   }
 
   private trimDetails(): void {
-    while (this.details.size > MAX_SUBAGENT_TASKS) {
-      const sorted = [...this.details.values()].sort(
-        (a, b) =>
-          Number(TERMINAL.has(b.status)) - Number(TERMINAL.has(a.status)) ||
-          a.updatedAt - b.updatedAt,
-      );
-      const removed = sorted[0]!;
+    const terminal = [...this.details.values()]
+      .filter((task) => TERMINAL.has(task.status))
+      .sort((a, b) => a.updatedAt - b.updatedAt || a.id.localeCompare(b.id));
+    for (const removed of terminal.slice(0, -MAX_TERMINAL_DETAILS)) {
       this.details.delete(removed.id);
       this.archiveTerminal(removed.id);
     }

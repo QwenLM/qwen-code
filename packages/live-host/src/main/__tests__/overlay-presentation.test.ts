@@ -41,6 +41,24 @@ describe('orb presentation geometry', () => {
     );
   });
 
+  it('lets the full status receive hover and keeps stopping visually idle', () => {
+    assert.match(rule('.voice-status-primary'), /pointer-events:\s*auto/);
+    assert.match(
+      css,
+      /\.voice-orb\.idle \.orb-core,\s*\.voice-orb\.stopping \.orb-core,/,
+    );
+  });
+
+  it('overrides state-specific orb animations and input scaling under reduced motion', () => {
+    const reduced = css.slice(
+      css.indexOf('@media (prefers-reduced-motion: reduce)'),
+    );
+    assert.match(
+      reduced,
+      /\.voice-surface \.voice-orb \.orb-core,\s*\.voice-surface \.voice-orb \.orb-core::after\s*\{\s*animation:\s*none;\s*transform:\s*none;/,
+    );
+  });
+
   it('fits persistent mute indicators below the primary status without increasing the orb bounds', () => {
     assert.match(rule('.voice-status'), /flex-direction:\s*column/);
     assert.match(rule('.voice-status-audio'), /line-height:\s*11px/);

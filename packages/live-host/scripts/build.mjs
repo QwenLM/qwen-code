@@ -66,6 +66,8 @@ execFileSync(
     '-framework',
     'ApplicationServices',
     '-framework',
+    'ColorSync',
+    '-framework',
     'ImageIO',
     '-framework',
     'ScreenCaptureKit',

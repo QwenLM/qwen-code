@@ -80,6 +80,7 @@ function host(overrides: Partial<LiveHostApi> = {}) {
     setOutputMuted: async () => {},
     setVisualSource: async () => {},
     setVisualMode: async () => {},
+    setScreenDisplay: async () => {},
     memoryAction: async () => {
       throw new Error('Theme updates must not change memory');
     },
@@ -123,6 +124,64 @@ function host(overrides: Partial<LiveHostApi> = {}) {
 }
 
 describe('Live Host theme settings', () => {
+  it('offers a persistent display choice without changing Camera or init and retains unavailable selections', async () => {
+    const selections: string[] = [];
+    const h = host({
+      setScreenDisplay: async (id) => {
+        selections.push(id);
+      },
+    });
+    const id = '11223344-5566-7788-99aa-bbccddeeff00';
+    const settings = {
+      source: 'screen',
+      mode: 'live-feed',
+      fps: 1,
+      liveWidth: 1280,
+      liveHeight: 720,
+      screenDisplayId: 'primary',
+    } as const;
+    h.update({
+      visualInput: settings,
+      canSelectScreenDisplay: true,
+      screenDisplays: [
+        {
+          id,
+          name: 'Studio Display',
+          width: 5120,
+          height: 2880,
+          primary: true,
+        },
+      ],
+    });
+    h.get<HTMLButtonElement>('.settings-control').click();
+    await settled();
+    const display = h.get<HTMLSelectElement>('select[aria-label="Display"]');
+    assert.equal(display.value, 'primary');
+    assert.equal(display.options[0]?.textContent, 'Primary display');
+    assert.match(display.options[1]?.textContent ?? '', /Studio Display.*5120/);
+    display.value = id;
+    display.dispatchEvent(new h.dom.window.Event('change', { bubbles: true }));
+    await settled();
+    assert.deepEqual(selections, [id]);
+    assert.equal(display.value, 'primary');
+    h.update({
+      visualInput: { ...settings, screenDisplayId: id },
+      language: 'zh-CN',
+    });
+    assert.equal(display.value, id);
+    assert.equal(display.getAttribute('aria-label'), '显示器');
+    h.update({ screenDisplays: [] });
+    h.update({ visualSettingsError: liveMessage('runtime.displaySaveFailed') });
+    assert.match(
+      h.get('.settings-status').textContent ?? '',
+      /无法保存显示器选择/,
+    );
+    assert.equal(display.value, id);
+    assert.match(display.selectedOptions[0]?.textContent ?? '', /不可用/);
+    h.update({ visualInput: { ...settings, source: 'camera' } });
+    assert.equal(display.closest<HTMLElement>('.settings-field')?.hidden, true);
+  });
+
   it('places Theme after Language, defaults to System and sends each preference', async () => {
     const h = host();
     h.get<HTMLButtonElement>('.settings-control').click();
@@ -202,6 +261,7 @@ describe('Live Host theme settings', () => {
       expand: async () => {},
       close: () => {},
       openDetail: async () => {},
+      control: async () => ({ type: 'error', code: 'unsupported' }),
     });
     cleanup.push(() => view.dispose());
     for (const mode of ['summary', 'list', 'detail'] as const) {

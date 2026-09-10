@@ -68,10 +68,8 @@ export type {
 
 async function main(debug: boolean): Promise<void> {
   const logger = new LiveLogger(debug ? 'debug' : undefined);
-  if (debug) {
-    logger.debug(
-      'diagnostics enabled; media payloads, transcripts, and credentials are omitted',
-    );
+  if (logger.debugEnabled) {
+    logger.debug(liveText(preferredLanguage(), 'cli.debugNotice'));
   }
   // A stray rejection in a background chain (event pump, auto-approval)
   // must be diagnosable, not process-fatal.
@@ -104,7 +102,7 @@ async function main(debug: boolean): Promise<void> {
     shuttingDown = true;
     logger.info(`received ${signal}, shutting down`);
     daemon
-      .stop()
+      .stopForProcessExit()
       .catch((error: unknown) => {
         logger.error(
           `shutdown failed: ${

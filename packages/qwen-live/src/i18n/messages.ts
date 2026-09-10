@@ -139,6 +139,45 @@ export const LIVE_MESSAGES = {
   'ui.refresh': { en: 'Refresh', 'zh-CN': '刷新' },
   'ui.refreshAudio': { en: 'Refresh audio sources', 'zh-CN': '刷新音频来源' },
   'ui.systemDefault': { en: 'System default', 'zh-CN': '系统默认' },
+  'ui.display': { en: 'Display', 'zh-CN': '显示器' },
+  'ui.displayCaptureUnavailable': {
+    en: 'Display selection requires an up-to-date Live daemon and Host.',
+    'zh-CN': '请更新 Live daemon 和 Host，以启用显示器选择。',
+  },
+  'ui.primaryDisplay': { en: 'Primary display', 'zh-CN': '主显示器' },
+  'ui.displayMissing': {
+    en: 'Unavailable display ({id})',
+    'zh-CN': '显示器不可用（{id}）',
+  },
+  'ui.displayCaptureHint': {
+    en: 'Monitor and Live Feed capture the entire selected display, excluding Live Host windows. Appshot still captures the foreground application window.',
+    'zh-CN':
+      'Monitor 和实时画面会采集所选显示器的完整画面，但不包含 Live Host 窗口。Appshot 仍截取前台应用窗口。',
+  },
+  'host.error.displayUnavailable': {
+    en: 'The selected display is unavailable. Reconnect it or choose another display.',
+    'zh-CN': '所选显示器不可用，请重新连接或选择其他显示器。',
+  },
+  'host.error.displayCapture': {
+    en: 'Could not capture the selected display.',
+    'zh-CN': '无法采集所选显示器画面。',
+  },
+  'host.error.displayList': {
+    en: 'Could not list connected displays.',
+    'zh-CN': '无法获取已连接的显示器。',
+  },
+  'runtime.displayCaptureUnsupported': {
+    en: 'Update Live Host to enable full-display capture.',
+    'zh-CN': '请更新 Live Host 以启用完整显示器采集。',
+  },
+  'runtime.displayCaptureMismatch': {
+    en: 'The captured display does not match the selection.',
+    'zh-CN': '采集的显示器与所选显示器不一致。',
+  },
+  'runtime.displaySaveFailed': {
+    en: 'Could not save the selected display. The previous selection is unchanged.',
+    'zh-CN': '无法保存显示器选择，已保留原设置。',
+  },
   'ui.modeFeedHint': {
     en: 'Live Feed sends frames from the selected video source continuously during a call, at your configured FPS and resolution.',
     'zh-CN':
@@ -335,10 +374,15 @@ export const LIVE_MESSAGES = {
     'zh-CN': '- 此选项不可用',
   },
   // INIT_MESSAGES
-  'cli.usage': {
-    en: 'Usage: qwen-live [init] [--debug]\n\nOptions:\n  --debug, -d  Print privacy-safe runtime diagnostics to stderr\n  --help, -h   Show this help',
+  'cli.debugNotice': {
+    en: 'Debug enabled. Foreground diagnostics omit media and credentials, but visual Monitor archives contain real screen/camera frames, audio and prompt/response text. The archive directory is logged when ready; review recordings before sharing.',
     'zh-CN':
-      '用法：qwen-live [init] [--debug]\n\n选项：\n  --debug, -d  向 stderr 输出不含敏感内容的运行诊断日志\n  --help, -h   显示帮助',
+      '已开启 debug。前台诊断日志省略媒体和连接凭据，但视觉 Monitor 归档包含真实屏幕／摄像头画面、音频和提示词／回复文本。归档就绪后会打印目录；分享前请检查敏感内容。',
+  },
+  'cli.usage': {
+    en: 'Usage: qwen-live [init] [--debug]\n\nOptions:\n  --debug, -d  Print diagnostics; save sensitive visual Monitor archives\n  --help, -h   Show this help',
+    'zh-CN':
+      '用法：qwen-live [init] [--debug]\n\n选项：\n  --debug, -d  输出诊断日志，并保存含敏感内容的视觉 Monitor 归档\n  --help, -h   显示帮助',
   },
   'cli.unknownArgument': {
     en: 'Unknown qwen-live argument: {argument}',
@@ -1061,6 +1105,104 @@ export const LIVE_MESSAGES = {
   'subagents.back': { en: 'Back', 'zh-CN': '返回' },
   'subagents.title': { en: 'Subagents', 'zh-CN': '子智能体' },
   'subagents.details': { en: 'Task details', 'zh-CN': '任务详情' },
+  'subagents.stop': { en: 'Stop', 'zh-CN': '停止' },
+  'subagents.stopTask': {
+    en: 'Stop task: {title}',
+    'zh-CN': '停止任务：{title}',
+  },
+  'subagents.stopping': { en: 'Stopping…', 'zh-CN': '正在停止…' },
+  'subagents.stopUnsupported': {
+    en: 'This backend does not support stopping an individual task.',
+    'zh-CN': '此后端不支持单独停止任务。',
+  },
+  'subagents.stopUntracked': {
+    en: 'The backend has not confirmed this task’s identity. Stopping it is unavailable.',
+    'zh-CN': '后端尚未确认此任务的身份，暂时无法安全停止。',
+  },
+  'subagents.previous': { en: 'Previous', 'zh-CN': '上一页' },
+  'subagents.next': { en: 'Next', 'zh-CN': '下一页' },
+  'subagents.page': {
+    en: '{start}–{end} of {total}',
+    'zh-CN': '{start}–{end} / {total}',
+  },
+  'subagents.loading': { en: 'Loading…', 'zh-CN': '正在加载…' },
+  'subagents.retry': { en: 'Retry', 'zh-CN': '重试' },
+  'subagents.permissions': { en: 'Approval required', 'zh-CN': '需要授权' },
+  'subagents.unassignedPermissions': {
+    en: 'Other backend approvals · Task identity unconfirmed',
+    'zh-CN': '其他后端授权 · 尚未确认所属任务',
+  },
+  'subagents.morePermissions': {
+    en: '{count} more pending requests. Resolve these to see the next ones.',
+    'zh-CN': '另有 {count} 项待处理请求，处理后可查看后续请求。',
+  },
+  'subagents.allow': { en: 'Allow', 'zh-CN': '允许' },
+  'subagents.allowOnce': { en: 'Allow once', 'zh-CN': '仅允许本次' },
+  'subagents.allowAlways': { en: 'Always allow', 'zh-CN': '始终允许' },
+  'subagents.deny': { en: 'Deny', 'zh-CN': '拒绝' },
+  'subagents.denyOnce': { en: 'Deny once', 'zh-CN': '仅拒绝本次' },
+  'subagents.denyAlways': { en: 'Always deny', 'zh-CN': '始终拒绝' },
+  'subagents.permissionScope': {
+    en: 'These choices use the scope offered by the backend.',
+    'zh-CN': '这些选项的授权范围由后端提供。',
+  },
+  'subagents.permissionNoChoice': {
+    en: 'This request has no supported decision here. Use the backend’s approval interface.',
+    'zh-CN': '此请求没有可在这里处理的选项，请使用后端的授权界面。',
+  },
+  'subagents.permissionTruncated': {
+    en: 'This request is too long to display in full. Review and approve it in the backend; you can still deny it here.',
+    'zh-CN': '此请求过长，无法完整显示。请在后端查看并授权；仍可在这里拒绝。',
+  },
+  'subagents.outcome.stopping': {
+    en: 'Stop requested. Waiting for the backend to confirm.',
+    'zh-CN': '已请求停止，正在等待后端确认。',
+  },
+  'subagents.outcome.stopped': { en: 'Task stopped.', 'zh-CN': '任务已停止。' },
+  'subagents.outcome.already_ended': {
+    en: 'This task has already ended.',
+    'zh-CN': '此任务已结束。',
+  },
+  'subagents.outcome.allowed': {
+    en: 'Approval sent to the backend.',
+    'zh-CN': '授权已发送给后端。',
+  },
+  'subagents.outcome.denied': {
+    en: 'Denial sent to the backend.',
+    'zh-CN': '拒绝决定已发送给后端。',
+  },
+  'subagents.error.unsupported': {
+    en: 'Update Live to enable task controls.',
+    'zh-CN': '请更新 Live 以启用任务管理。',
+  },
+  'subagents.error.unavailable': {
+    en: 'Task controls are unavailable. Reconnect and retry.',
+    'zh-CN': '任务管理暂不可用，请重新连接后重试。',
+  },
+  'subagents.error.invalid_request': {
+    en: 'Invalid task action. Refresh and retry.',
+    'zh-CN': '任务操作无效，请刷新后重试。',
+  },
+  'subagents.error.not_found': {
+    en: 'This task is no longer available.',
+    'zh-CN': '此任务已不存在。',
+  },
+  'subagents.error.not_stoppable': {
+    en: 'This task cannot be safely stopped from Live.',
+    'zh-CN': '无法从 Live 安全停止此任务。',
+  },
+  'subagents.error.permission_unavailable': {
+    en: 'This approval is no longer pending or the choice is unavailable.',
+    'zh-CN': '此授权请求已处理，或该选项已不可用。',
+  },
+  'subagents.error.action_failed': {
+    en: 'The backend did not confirm this action. Check the task and retry.',
+    'zh-CN': '后端未确认此操作，请检查任务后重试。',
+  },
+  'subagents.error.stale_instance': {
+    en: 'Live restarted. Reopen Subagents before acting.',
+    'zh-CN': 'Live 已重启，请重新打开子智能体面板后操作。',
+  },
   'subagents.openList': { en: 'View subagents', 'zh-CN': '查看子智能体' },
   'subagents.summaryLabel': {
     en: 'View subagents: {running} running, {completed} completed, {waiting} waiting for your input.',
@@ -1107,8 +1249,8 @@ export const LIVE_MESSAGES = {
     'zh-CN': '当前 Live 运行保留的历史中已没有这项任务。',
   },
   'subagents.omitted': {
-    en: '{count} other tasks are outside the retained history.',
-    'zh-CN': '另有 {count} 项任务未保留在历史中。',
+    en: '{count} other tasks are not shown in this view.',
+    'zh-CN': '另有 {count} 项任务未显示在当前视图中。',
   },
   'subagents.history': {
     en: 'Current Live run · Closing this window does not stop tasks.',

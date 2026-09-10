@@ -113,11 +113,23 @@ export function scheduleOutputFrame(
   currentTime: number,
   outputCursor: number,
   duration: number,
+  sampleRate?: number,
 ): OutputFrameSchedule {
-  const startAt = Math.max(
-    currentTime + OUTPUT_START_DELAY_SECONDS,
-    outputCursor,
-  );
+  const candidate =
+    outputCursor > currentTime
+      ? outputCursor
+      : currentTime + OUTPUT_START_DELAY_SECONDS;
+  if (sampleRate !== undefined) {
+    const startFrame =
+      outputCursor > currentTime
+        ? Math.round(candidate * sampleRate)
+        : Math.ceil(candidate * sampleRate);
+    return {
+      startAt: startFrame / sampleRate,
+      endAt: (startFrame + Math.round(duration * sampleRate)) / sampleRate,
+    };
+  }
+  const startAt = candidate;
   const endAt = startAt + duration;
   return { startAt, endAt };
 }

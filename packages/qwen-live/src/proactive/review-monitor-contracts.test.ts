@@ -178,10 +178,18 @@ describe('PR #11369 monitor review reproduction', () => {
       },
     ]);
     expect(debugResults).toEqual([
-      { taskId: 'review-task', taskGeneration: 1, triggered: false },
       {
         taskId: 'review-task',
         taskGeneration: 1,
+        transportGeneration: 1,
+        evaluation: 1,
+        triggered: false,
+      },
+      {
+        taskId: 'review-task',
+        taskGeneration: 1,
+        transportGeneration: 1,
+        evaluation: 2,
         triggered: false,
         ignoredAction: 'function_call',
       },

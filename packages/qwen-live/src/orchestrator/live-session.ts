@@ -17,6 +17,10 @@
  */
 
 import { readFile } from 'node:fs/promises';
+import {
+  pickLeastEscalating,
+  stripControlSequences,
+} from '../adaptor/adaptor-utils.js';
 import type {
   BackendAdaptor,
   BackendEvent,
@@ -73,6 +77,7 @@ import {
   buildProactiveFailureReceipt,
   buildProactiveListReceipt,
   buildProactiveUpdateReceipt,
+  PROACTIVE_ARGUMENT_RULES,
   renderProactiveToolReceipt,
   type ProactiveReceiptOperation,
   type ProactiveToolReceipt,
@@ -107,8 +112,16 @@ import {
 } from '../tools/dispatcher.js';
 import { HandleRegistry, type JobRecord } from '../tools/handles.js';
 import { Injector } from './injector.js';
+import type { MonitorDebugStore } from '../proactive/monitor-debug-store.js';
 import { SubagentsLedger } from '../subagents/ledger.js';
-import type { SubagentStatus, SubagentsSnapshot } from '../subagents/types.js';
+import type {
+  SubagentPermission,
+  SubagentStatus,
+  SubagentTask,
+  SubagentsControlRequest,
+  SubagentsControlResult,
+  SubagentsSnapshot,
+} from '../subagents/types.js';
 
 const DEFAULT_GRACEFUL_STOP_DRAIN_MS = 30_000;
 const MAX_ACCESSIBILITY_CHARS = 8_000;
@@ -178,10 +191,10 @@ function parseProactiveArguments(
       if (typeof parsed === 'string') parsed = JSON.parse(parsed) as unknown;
     }
   } catch {
-    throw new ProactiveArgumentsError('Tool arguments must be valid JSON.');
+    throw new ProactiveArgumentsError(PROACTIVE_ARGUMENT_RULES.invalidJson);
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new ProactiveArgumentsError('Tool arguments must be an object.');
+    throw new ProactiveArgumentsError(PROACTIVE_ARGUMENT_RULES.notObject);
   }
   const args = parsed as Record<string, unknown>;
   const allowed = new Set(
@@ -247,7 +260,7 @@ export interface LiveHostControl {
   }): void;
   captureVisualContext(
     callerSessionId: string,
-    options?: { persistAsset?: boolean },
+    options?: { persistAsset?: boolean; screenScope?: 'display' },
   ): Promise<LiveVisualCapture>;
 }
 
@@ -266,6 +279,7 @@ export interface LiveSessionOptions {
   logger?: LiveLogger;
   openRealtime?: typeof openQwenRealtimeSession;
   proactive?: ProactiveConfig;
+  monitorDebug?: MonitorDebugStore;
   memory?: MemoryService;
   createProactiveScheduler?: (
     options: ProactiveSchedulerOptions,
@@ -296,6 +310,7 @@ interface CallContext {
   speechInProgress: boolean;
   responseInFlight: boolean;
   visualInput: LiveVisualInput;
+  observedDisplayId?: string;
   inputAudioStarted: boolean;
   /** Ignore playback receipts for output cleared by an explicit mute. */
   playbackSuppressed: boolean;
@@ -440,7 +455,22 @@ export class LiveSession {
       events: BackendEvent[];
     }
   >();
+  private readonly joinedTasks = new Map<string, string>();
   private readonly subagents: SubagentsLedger;
+  private readonly stopOperations = new Map<
+    string,
+    Promise<SubagentsControlResult>
+  >();
+  private readonly requestedStops = new Map<
+    string,
+    { accepted: boolean; terminal?: string }
+  >();
+  private readonly permissionOperations = new Map<
+    string,
+    { decision: 'allow' | 'deny'; promise: Promise<SubagentsControlResult> }
+  >();
+  private readonly controlReceipts = new Map<string, string>();
+  private controlReceiptSeq = 0;
   private disposed = false;
   private active?: CallContext;
 
@@ -448,7 +478,9 @@ export class LiveSession {
     this.host = options.host;
     this.registry = options.registry;
     this.log = options.log;
-    this.subagents = new SubagentsLedger(options.onSubagentsChanged);
+    this.subagents = new SubagentsLedger((snapshot) =>
+      options.onSubagentsChanged?.(this.withPendingPermissions(snapshot)),
+    );
     this.logger = options.logger ?? new LiveLogger();
     this.openRealtime = options.openRealtime ?? openQwenRealtimeSession;
     this.createProactiveScheduler =
@@ -505,6 +537,8 @@ export class LiveSession {
           injectSpeech: (text) => this.injectSpeech(context, text),
           injectProactive: (event) => this.injectProactiveEvent(context, event),
           onInjected: (item, spoken) => {
+            if (item.kind === 'control' && item.controlId)
+              this.controlReceipts.delete(item.controlId);
             if (item.kind === 'proactive' && item.deliveryId) {
               context.pendingProactiveDelivery =
                 context.proactiveDeliveries.get(item.deliveryId);
@@ -566,6 +600,7 @@ export class LiveSession {
       if (this.options.proactive?.enabled) {
         context.proactive = this.createProactiveScheduler({
           config: this.options.proactive,
+          monitorDebug: this.options.monitorDebug,
           realtime: {
             endpoint: this.options.realtime.endpoint,
             ...(this.options.realtime.apiKey
@@ -581,7 +616,7 @@ export class LiveSession {
             this.onProactiveTaskFailed(context, task, error),
           onTaskChanged: (task, notification) =>
             this.observeProactive(context, task, notification),
-          captureVision: () => this.captureProactiveVision(context),
+          captureVision: () => this.captureObserverVision(context, 'display'),
           debug: (event, details) => this.debug(event, details),
         });
       }
@@ -600,6 +635,7 @@ export class LiveSession {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
       if (this.active !== context || context.stopping) return;
       context.restoringBackendEvents = false;
+      this.enqueueControlReceipts(context);
       for (const pending of this.broker.pendingUserRequests) {
         this.enqueuePermission(context, pending);
       }
@@ -817,6 +853,7 @@ export class LiveSession {
     callId: string;
     source: LiveVisualSource;
     image: string;
+    displayId?: string;
   }): boolean {
     const context = this.active;
     if (!context || context.epoch !== call.epoch || context.stopping) {
@@ -828,6 +865,8 @@ export class LiveSession {
     ) {
       return true;
     }
+    if (call.source === 'screen' && call.displayId)
+      this.observeDisplay(context, call.displayId);
     context.proactive?.feedImage(call.image);
     context.memory?.feedImage(call.image, call.source);
     if (!context.realtime || !context.inputAudioStarted) {
@@ -854,16 +893,27 @@ export class LiveSession {
     if (!context || context.epoch !== call.epoch || context.stopping) return;
     const sourceChanged =
       context.visualInput.source !== call.visualInput.source;
-    if (sourceChanged || context.visualInput.mode !== call.visualInput.mode) {
+    const displayChanged =
+      (context.visualInput.screenDisplayId ?? 'primary').toLowerCase() !==
+      (call.visualInput.screenDisplayId ?? 'primary').toLowerCase();
+    if (
+      sourceChanged ||
+      displayChanged ||
+      context.visualInput.mode !== call.visualInput.mode
+    ) {
       context.queuedVisualFrame = undefined;
     }
     context.visualInput = { ...call.visualInput };
-    if (sourceChanged) context.proactive?.resetVisualSource();
+    if (sourceChanged || displayChanged) {
+      context.observedDisplayId = undefined;
+      context.proactive?.resetVisualSource();
+    }
     if (sourceChanged) context.memory?.setVisualSource(call.visualInput.source);
     this.debug('visual.settings', {
       epoch: call.epoch,
       source: call.visualInput.source,
       mode: call.visualInput.mode,
+      screenDisplayId: call.visualInput.screenDisplayId ?? 'primary',
     });
     if (context.realtime) this.sendVisualSettings(context);
   }
@@ -874,10 +924,334 @@ export class LiveSession {
     for (const abort of this.backendPumps.values()) abort.abort();
     this.backendPumps.clear();
     this.subagents.dispose();
+    this.joinedTasks.clear();
   }
 
   getSubagentsSnapshot(): SubagentsSnapshot {
-    return this.subagents.snapshot();
+    return this.withPendingPermissions(this.subagents.snapshot());
+  }
+
+  private withPendingPermissions(
+    snapshot: SubagentsSnapshot,
+  ): SubagentsSnapshot {
+    return {
+      ...snapshot,
+      pendingUnassignedPermissions: this.broker.pendingUserRequests.filter(
+        (pending) => !this.permissionTaskId(pending),
+      ).length,
+    };
+  }
+
+  async handleSubagentsRequest(
+    request: SubagentsControlRequest,
+  ): Promise<SubagentsControlResult> {
+    let result: SubagentsControlResult;
+    try {
+      result = await this.dispatchSubagentsRequest(request);
+    } catch {
+      result = { type: 'error', code: 'action_failed' };
+    }
+    this.debug('subagents.control', {
+      action: request.action,
+      ...('taskId' in request ? { taskId: request.taskId } : {}),
+      ...('requestHandle' in request
+        ? { requestHandle: request.requestHandle }
+        : {}),
+      ...(result.type === 'outcome' ? { outcome: result.outcome } : {}),
+      ...(result.type === 'error' ? { code: result.code } : {}),
+    });
+    return result;
+  }
+
+  private async dispatchSubagentsRequest(
+    request: SubagentsControlRequest,
+  ): Promise<SubagentsControlResult> {
+    if (this.disposed) return { type: 'error', code: 'unavailable' };
+    if (request.action === 'list') {
+      const page = this.subagents.page(request.offset, request.selectedId);
+      page.snapshot = this.withPendingPermissions(page.snapshot);
+      page.snapshot.tasks = page.snapshot.tasks.map((task) =>
+        this.decorateSubagent(task),
+      );
+      if (page.selected) {
+        page.selected = this.decorateSubagent(page.selected);
+        const permissions = this.broker.pendingUserRequests.filter(
+          (pending) => this.permissionTaskId(pending) === page.selected!.id,
+        );
+        page.selected.permissions = permissions
+          .slice(0, 8)
+          .map((pending) => this.permissionView(pending));
+        page.selected.permissionsOmitted = Math.max(0, permissions.length - 8);
+      }
+      const unassigned = this.broker.pendingUserRequests.filter(
+        (pending) => !this.permissionTaskId(pending),
+      );
+      page.unassignedPermissions = unassigned
+        .slice(0, 8)
+        .map((pending) => this.permissionView(pending));
+      page.unassignedPermissionsOmitted = Math.max(0, unassigned.length - 8);
+      return { type: 'page', page };
+    }
+    if (request.action === 'permission') {
+      const pending = this.broker.resolveHandle(request.requestHandle);
+      if (
+        !pending ||
+        !this.broker.pendingUserRequests.includes(pending) ||
+        !this.permissionView(pending).choices.some(
+          (choice) => choice.decision === request.decision,
+        )
+      )
+        return { type: 'error', code: 'permission_unavailable' };
+      const existing = this.permissionOperations.get(request.requestHandle);
+      if (existing)
+        return existing.decision === request.decision
+          ? existing.promise
+          : { type: 'error', code: 'permission_unavailable' };
+      const operation = this.respondSubagentPermission(
+        pending,
+        request.decision,
+      );
+      this.permissionOperations.set(request.requestHandle, {
+        decision: request.decision,
+        promise: operation,
+      });
+      try {
+        return await operation;
+      } finally {
+        this.permissionOperations.delete(request.requestHandle);
+      }
+    }
+    const existing = this.stopOperations.get(request.taskId);
+    if (existing) return existing;
+    const operation = this.stopSubagent(request.taskId);
+    this.stopOperations.set(request.taskId, operation);
+    try {
+      return await operation;
+    } finally {
+      this.stopOperations.delete(request.taskId);
+    }
+  }
+
+  private decorateSubagent(task: SubagentTask): SubagentTask {
+    const ended = ['completed', 'failed', 'cancelled'].includes(task.status);
+    const stopping = this.requestedStops.has(task.id);
+    const job =
+      task.kind === 'harness'
+        ? this.handles.resolveJob(task.id.slice('harness:'.length))
+        : undefined;
+    const tracked =
+      task.kind === 'harness'
+        ? Boolean(
+            job?.jobRef &&
+              ['accepted', 'running'].includes(job.state) &&
+              this.handles.resolveSession(job.sessionHandle),
+          )
+        : Boolean(
+            this.active?.proactive
+              ?.listTasks()
+              .some((candidate) => `proactive:${candidate.taskId}` === task.id),
+          );
+    const supported =
+      task.kind === 'proactive' ||
+      Boolean(job && this.adaptorFor(job.backend).cancelJob);
+    const stopReason = ended
+      ? 'ended'
+      : stopping
+        ? 'stopping'
+        : !tracked
+          ? 'untracked'
+          : !supported
+            ? 'unsupported'
+            : undefined;
+    return {
+      ...task,
+      canStop: stopReason === undefined,
+      ...(stopReason ? { stopReason } : {}),
+    };
+  }
+
+  private async stopSubagent(taskId: string): Promise<SubagentsControlResult> {
+    const task = this.subagents.get(taskId);
+    const job = taskId.startsWith('harness:')
+      ? this.handles.resolveJob(taskId.slice('harness:'.length))
+      : undefined;
+    if (job && ['interrupted'].includes(job.state))
+      return { type: 'error', code: 'not_stoppable' };
+    if (job && !['accepted', 'running'].includes(job.state))
+      return { type: 'outcome', outcome: 'already_ended', taskId };
+    if (!task) return { type: 'error', code: 'not_found' };
+    const view = this.decorateSubagent(task);
+    if (view.stopReason === 'ended')
+      return { type: 'outcome', outcome: 'already_ended', taskId };
+    if (view.stopReason === 'stopping')
+      return { type: 'outcome', outcome: 'stopping', taskId };
+    if (!view.canStop) return { type: 'error', code: 'not_stoppable' };
+    if (task.kind === 'proactive') {
+      const cancelled = this.active?.proactive?.cancelTaskById(
+        taskId.slice('proactive:'.length),
+      );
+      if (!cancelled || cancelled.status !== 'cancelled')
+        return { type: 'error', code: 'not_stoppable' };
+      this.queueControlReceipt(
+        taskId,
+        'Stop requested; task cancelled and cleanup completed.',
+      );
+      return { type: 'outcome', outcome: 'stopped', taskId };
+    }
+    if (!job?.jobRef) return { type: 'error', code: 'not_stoppable' };
+    const cancelJob = this.adaptorFor(job.backend).cancelJob;
+    if (!cancelJob) return { type: 'error', code: 'not_stoppable' };
+    const stop = { accepted: false, terminal: undefined as string | undefined };
+    this.requestedStops.set(taskId, stop);
+    this.subagents.touch();
+    try {
+      const result = await cancelJob.call(
+        this.adaptorFor(job.backend),
+        job.backend,
+        job.jobRef,
+      );
+      if (result === 'not_found') {
+        this.requestedStops.delete(taskId);
+        this.subagents.touch();
+        if (stop.terminal) this.queueControlReceipt(taskId, stop.terminal);
+        return stop.terminal
+          ? job.state === 'interrupted'
+            ? { type: 'error', code: 'not_stoppable' }
+            : { type: 'outcome', outcome: 'already_ended', taskId }
+          : { type: 'error', code: 'not_found' };
+      }
+      stop.accepted = true;
+      this.queueControlReceipt(
+        taskId,
+        'Stop requested. Awaiting backend terminal confirmation.',
+      );
+      if (result === 'stopped' && !stop.terminal) {
+        job.state = 'cancelled';
+        this.subagents.result(taskId, 'cancelled', 'cancelled');
+        stop.terminal = 'Backend confirmed cancellation.';
+      }
+      if (stop.terminal) this.finishRequestedStop(taskId, stop.terminal);
+      else this.subagents.update(taskId, {});
+      if (job.state === 'interrupted')
+        return { type: 'error', code: 'not_stoppable' };
+      return {
+        type: 'outcome',
+        outcome: stop.terminal
+          ? job.state === 'cancelled'
+            ? 'stopped'
+            : 'already_ended'
+          : 'stopping',
+        taskId,
+      };
+    } catch {
+      this.requestedStops.delete(taskId);
+      this.subagents.touch();
+      if (stop.terminal) {
+        this.queueControlReceipt(taskId, stop.terminal);
+        return { type: 'error', code: 'action_failed' };
+      }
+      this.queueControlReceipt(
+        taskId,
+        'The stop request could not be confirmed; the task may still be running.',
+      );
+      return { type: 'error', code: 'action_failed' };
+    }
+  }
+
+  private permissionTaskId(pending: PendingPermission): string | undefined {
+    const job = pending.jobRef
+      ? this.handles.jobByRef(pending.backend, pending.jobRef)
+      : undefined;
+    const taskId =
+      job && job.sessionHandle === pending.sessionHandle
+        ? `harness:${job.jobHandle}`
+        : undefined;
+    return taskId && this.subagents.get(taskId) ? taskId : undefined;
+  }
+
+  private permissionView(pending: PendingPermission): SubagentPermission {
+    const title = stripControlSequences(pending.title);
+    const titleTruncated = title.length > 4096;
+    const choices: SubagentPermission['choices'] = [];
+    for (const decision of ['allow', 'deny'] as const) {
+      if (decision === 'allow' && titleTruncated) continue;
+      const option = pickLeastEscalating(
+        pending.options,
+        decision === 'allow' ? 'proceed' : 'reject',
+      );
+      if (option)
+        choices.push({
+          decision,
+          ...(option.escalation ? { scope: option.escalation } : {}),
+        });
+    }
+    return {
+      requestHandle: pending.requestHandle,
+      backend: stripControlSequences(pending.backend.adaptor).slice(0, 256),
+      sessionId: pending.sessionHandle.slice(0, 256),
+      title: title.slice(0, 4096),
+      ...(titleTruncated ? { titleTruncated: true } : {}),
+      choices,
+    };
+  }
+
+  private async respondSubagentPermission(
+    pending: PendingPermission,
+    decision: 'allow' | 'deny',
+  ): Promise<SubagentsControlResult> {
+    try {
+      const outcome = await this.broker.respond(
+        pending.requestHandle,
+        decision,
+      );
+      this.subagents.touch();
+      if (outcome !== 'delivered')
+        return { type: 'error', code: 'permission_unavailable' };
+      const taskId = this.permissionTaskId(pending);
+      if (taskId)
+        this.subagents.update(taskId, { status: 'running', activity: '' });
+      this.active?.injector.retractPermission(
+        this.scopedPermissionId(pending.backend, pending.requestId),
+      );
+      this.queueControlReceipt(
+        taskId ?? pending.requestHandle,
+        `Permission ${pending.requestHandle} ${decision === 'allow' ? 'allowed' : 'denied'} by the user.`,
+      );
+      return {
+        type: 'outcome',
+        outcome: decision === 'allow' ? 'allowed' : 'denied',
+        requestHandle: pending.requestHandle,
+      };
+    } catch {
+      return { type: 'error', code: 'action_failed' };
+    }
+  }
+
+  private queueControlReceipt(taskId: string, text: string): void {
+    const id = `control_${++this.controlReceiptSeq}`;
+    const receipt = `[SUBAGENT_CONTROL ${taskId}] ${text}`;
+    this.controlReceipts.set(id, receipt);
+    const context = this.active;
+    if (context && !context.stopping && context.realtime)
+      context.injector.enqueue({
+        kind: 'control',
+        controlId: id,
+        context: receipt,
+      });
+  }
+
+  private enqueueControlReceipts(context: CallContext): void {
+    for (const [controlId, text] of this.controlReceipts)
+      context.injector.enqueue({ kind: 'control', controlId, context: text });
+  }
+
+  private finishRequestedStop(taskId: string, terminal: string): void {
+    const stop = this.requestedStops.get(taskId);
+    if (!stop) return;
+    stop.terminal = terminal;
+    if (!stop.accepted) return;
+    this.requestedStops.delete(taskId);
+    this.queueControlReceipt(taskId, terminal);
   }
 
   private observeJob(job: JobRecord, status: SubagentStatus): void {
@@ -913,6 +1287,10 @@ export class LiveSession {
         status: 'interrupted',
         activity: liveMessage('subagents.outcomeUnknown'),
       });
+      this.finishRequestedStop(
+        `harness:${job.jobHandle}`,
+        'Task tracking ended without terminal confirmation; the task may still be running.',
+      );
     }
   }
 
@@ -1032,7 +1410,7 @@ export class LiveSession {
       visualSource: context.visualInput.source,
       captureVision: async () => {
         const source = context.visualInput.source;
-        const image = await this.captureProactiveVision(context);
+        const image = await this.captureObserverVision(context);
         return image ? { image, source } : undefined;
       },
     });
@@ -1728,12 +2106,12 @@ export class LiveSession {
           if (!hasSelector) {
             if (Object.keys(args).length !== 1 || args['repeat'] !== true) {
               throw new ProactiveArgumentsError(
-                'An adjacent selector-less update may only set repeat=true.',
+                PROACTIVE_ARGUMENT_RULES.selectorlessUpdateRepeatOnly,
               );
             }
             if (!adjacent) {
               throw new ProactiveArgumentsError(
-                'Selector-less update has no adjacent active task.',
+                PROACTIVE_ARGUMENT_RULES.selectorlessUpdateNoAdjacent,
               );
             }
           }
@@ -1791,12 +2169,12 @@ export class LiveSession {
           if (!hasSelector) {
             if (Object.keys(args).length !== 0) {
               throw new ProactiveArgumentsError(
-                'An adjacent selector-less cancel must have no arguments.',
+                PROACTIVE_ARGUMENT_RULES.selectorlessCancelEmptyOnly,
               );
             }
             if (!adjacent) {
               throw new ProactiveArgumentsError(
-                'Selector-less cancel has no adjacent active task.',
+                PROACTIVE_ARGUMENT_RULES.selectorlessCancelNoAdjacent,
               );
             }
           }
@@ -2039,20 +2417,48 @@ export class LiveSession {
           note: receipt.note ?? 'the session refused the task',
         };
       }
-      // A steer that joined the running turn comes back with that turn's
-      // jobRef: the instruction became part of the EXISTING job. Creating a
-      // second record would orphan the first in 'running' forever (nothing
-      // would ever transition it out).
-      const existing =
-        receipt.jobRef !== undefined
-          ? this.handles.jobByRef(backend, receipt.jobRef)
+      // Match the acknowledged message, never just the next external turn.
+      const joinMessage = receipt.joinedActiveTurn
+        ? receipt.joinedMessageId
+        : undefined;
+      let jobRef = joinMessage ? undefined : receipt.jobRef;
+      const joinedRefs = new Set(
+        pending.events.flatMap((event) =>
+          event.type === 'turn_joined' && event.messageId === joinMessage
+            ? [event.jobRef]
+            : joinMessage && 'jobRef' in event && event.jobRef === joinMessage
+              ? [joinMessage]
+              : [],
+        ),
+      );
+      if (jobRef === undefined && joinMessage && joinedRefs.size === 1) {
+        const candidate = [...joinedRefs][0]!;
+        const owner = this.handles.jobByRef(backend, candidate);
+        if (
+          !owner ||
+          (owner.sessionHandle === handle && owner.backend.id === backend.id)
+        )
+          jobRef = candidate;
+      }
+      const previousJoinHandle = joinMessage
+        ? this.joinedTasks.get(this.joinedTaskKey(backend, joinMessage))
+        : undefined;
+      const previousJoin = previousJoinHandle
+        ? this.handles.resolveJob(previousJoinHandle)
+        : undefined;
+      const existing = previousJoin
+        ? ((jobRef !== undefined
+            ? this.bindJoinedTask(previousJoin.jobHandle, backend, jobRef)
+            : undefined) ?? previousJoin)
+        : jobRef !== undefined
+          ? this.handles.jobByRef(backend, jobRef)
           : undefined;
       const job =
         existing ??
         this.handles.createJob({
           sessionHandle: handle,
           backend,
-          ...(receipt.jobRef !== undefined ? { jobRef: receipt.jobRef } : {}),
+          ...(jobRef !== undefined ? { jobRef } : {}),
           task,
         });
       this.observeJob(
@@ -2063,7 +2469,12 @@ export class LiveSession {
             ? 'running'
             : 'starting',
       );
-      finishSubmission(receipt.jobRef);
+      if (joinMessage && joinedRefs.size <= 1)
+        this.joinedTasks.set(
+          this.joinedTaskKey(backend, joinMessage),
+          job.jobHandle,
+        );
+      finishSubmission(jobRef);
       this.ensurePump(handle, backend);
       const notes = [receipt.note, imageNote].filter(Boolean).join('. ');
       return {
@@ -2132,6 +2543,27 @@ export class LiveSession {
         typeof args['job'] === 'string'
           ? this.handles.resolveJob(args['job'])
           : undefined;
+      if (typeof args['job'] === 'string') {
+        if (!job)
+          return {
+            status: 'error',
+            note: 'unknown job; no task was cancelled.',
+          };
+        const result = await this.handleSubagentsRequest({
+          action: 'stop',
+          taskId: `harness:${job.jobHandle}`,
+        });
+        return result.type === 'outcome'
+          ? {
+              status:
+                result.outcome === 'stopping' ? 'cancelling' : result.outcome,
+              session: job.sessionHandle,
+            }
+          : {
+              status: 'error',
+              note: result.type === 'error' ? result.code : 'action_failed',
+            };
+      }
       const sessionHandle =
         job?.sessionHandle ??
         (typeof args['session'] === 'string' ? args['session'].trim() : '');
@@ -2144,12 +2576,10 @@ export class LiveSession {
         };
       }
       await this.adaptorFor(backend).cancel(backend);
-      if (job) job.state = 'cancelled';
-      if (job)
-        this.subagents.update(`harness:${job.jobHandle}`, {
-          status: 'cancelled',
-          activity: '',
-        });
+      this.queueControlReceipt(
+        sessionHandle,
+        'Session stop requested. Awaiting backend terminal confirmation.',
+      );
       return { status: 'cancelling', session: sessionHandle };
     });
 
@@ -2176,6 +2606,7 @@ export class LiveSession {
         decision,
         note || undefined,
       );
+      this.subagents.touch();
       if (outcome === 'not_found') {
         return {
           status: 'error',
@@ -2185,7 +2616,7 @@ export class LiveSession {
       if (pending) {
         const job = pending.jobRef
           ? this.handles.jobByRef(pending.backend, pending.jobRef)
-          : this.handles.activeJobForSession(pending.sessionHandle);
+          : undefined;
         if (job)
           this.subagents.update(`harness:${job.jobHandle}`, {
             status: 'running',
@@ -2386,6 +2817,25 @@ export class LiveSession {
     this.backendPumps.delete(sessionHandle);
   }
 
+  private joinedTaskKey(backend: BackendHandle, messageId: string): string {
+    return JSON.stringify([backend.adaptor, backend.id, messageId]);
+  }
+
+  private bindJoinedTask(
+    handle: string,
+    backend: BackendHandle,
+    jobRef: string,
+  ): JobRecord | undefined {
+    const joined = this.handles.bindJoinedJob(handle, backend, jobRef);
+    if (joined) {
+      if (joined.state === 'accepted') joined.state = 'running';
+      if (joined.jobHandle !== handle)
+        this.subagents.forgetJoinedTask(`harness:${handle}`);
+      this.observeJob(joined, 'running');
+    }
+    return joined;
+  }
+
   private onBackendEvent(
     sessionHandle: string,
     backend: BackendHandle,
@@ -2395,11 +2845,31 @@ export class LiveSession {
       this.active && !this.active.stopping && this.active.realtime
         ? this.active
         : undefined;
+    const pending = this.pendingSubmissions.get(sessionHandle);
+    if (event.type === 'turn_joined') {
+      const key = this.joinedTaskKey(backend, event.messageId);
+      const handle = this.joinedTasks.get(key);
+      if (!handle) {
+        if (pending && pending.events.length < 128) pending.events.push(event);
+        return;
+      }
+      this.bindJoinedTask(handle, backend, event.jobRef);
+      return;
+    }
+    if ('jobRef' in event && event.jobRef) {
+      // Undrained messages promoted to the prompt FIFO keep their message ID.
+      const promoted = this.joinedTasks.get(
+        this.joinedTaskKey(backend, event.jobRef),
+      );
+      if (promoted) this.bindJoinedTask(promoted, backend, event.jobRef);
+    }
     const observedJob =
       'jobRef' in event && event.jobRef
         ? this.handles.jobByRef(backend, event.jobRef)
-        : this.handles.activeJobForSession(sessionHandle);
-    const pending = this.pendingSubmissions.get(sessionHandle);
+        : event.type === 'permission_request' ||
+            event.type === 'permission_resolved'
+          ? undefined
+          : this.handles.activeJobForSession(sessionHandle);
     const buffered =
       !observedJob &&
       'jobRef' in event &&
@@ -2484,9 +2954,17 @@ export class LiveSession {
       }
       case 'turn_complete': {
         const job = observedJob;
+        if (job && ['done', 'failed', 'cancelled'].includes(job.state)) return;
+        const manuallyStopped = Boolean(id && this.requestedStops.has(id));
         if (job) job.state = 'done';
         if (id)
           this.subagents.result(id, 'completed', event.detail ?? event.summary);
+        if (id)
+          this.finishRequestedStop(
+            id,
+            'Backend reported completion after the stop request; cancellation was not confirmed.',
+          );
+        if (manuallyStopped) return;
         if (!context) return;
         const label = job?.jobHandle ?? sessionHandle;
         const spokenSummary = lastSentence(
@@ -2505,6 +2983,8 @@ export class LiveSession {
       }
       case 'turn_error': {
         const job = observedJob;
+        if (job && ['done', 'failed', 'cancelled'].includes(job.state)) return;
+        const manuallyStopped = Boolean(id && this.requestedStops.has(id));
         if (job)
           job.state = event.error === 'cancelled' ? 'cancelled' : 'failed';
         if (id)
@@ -2513,6 +2993,14 @@ export class LiveSession {
             event.error === 'cancelled' ? 'cancelled' : 'failed',
             event.error,
           );
+        if (id)
+          this.finishRequestedStop(
+            id,
+            event.error === 'cancelled'
+              ? 'Backend confirmed cancellation.'
+              : 'Backend reported failure after the stop request.',
+          );
+        if (manuallyStopped) return;
         if (!context) return;
         const label = job?.jobHandle ?? sessionHandle;
         if (event.error === 'cancelled') {
@@ -2548,6 +3036,7 @@ export class LiveSession {
             allowAutoAnswer: context !== undefined,
           })
           .then((ask) => {
+            this.subagents.touch();
             if (ask.autoAnswered && id)
               this.subagents.update(id, { status: 'running', activity: '' });
             if (
@@ -2582,9 +3071,10 @@ export class LiveSession {
       }
       case 'permission_resolved': {
         const pending = this.broker.onResolved(backend, event.requestId);
+        if (pending) this.subagents.touch();
         const pendingJob = pending?.jobRef
           ? this.handles.jobByRef(backend, pending.jobRef)
-          : observedJob;
+          : undefined;
         if (pendingJob)
           this.subagents.update(`harness:${pendingJob.jobHandle}`, {
             status: 'running',
@@ -2611,8 +3101,12 @@ export class LiveSession {
         // handle entirely and clear the default so
         // resolveHandoffTarget's createSession fall-through rebuilds.
         this.handles.closeSession(sessionHandle);
+        for (const [key, handle] of this.joinedTasks)
+          if (this.handles.resolveJob(handle)?.sessionHandle === sessionHandle)
+            this.joinedTasks.delete(key);
         this.reconcileSubagentSession(sessionHandle);
         this.broker.clearSession(sessionHandle);
+        this.subagents.touch();
         this.observedSessions.delete(sessionHandle);
         if (context?.defaultSessionHandle === sessionHandle) {
           context.defaultSessionHandle = undefined;
@@ -3084,8 +3578,9 @@ export class LiveSession {
     }
   }
 
-  private async captureProactiveVision(
+  private async captureObserverVision(
     context: CallContext,
+    screenScope?: 'display',
   ): Promise<string | undefined> {
     if (
       this.active !== context ||
@@ -3094,33 +3589,55 @@ export class LiveSession {
     ) {
       return undefined;
     }
-    const source = context.visualInput.source;
-    const capture = await this.captureVisualContext(context, false);
+    const visualInput = context.visualInput;
+    const source = visualInput.source;
+    const capture = await this.captureVisualContext(
+      context,
+      false,
+      source === 'screen' ? screenScope : undefined,
+    );
     if (
       this.active !== context ||
       context.stopping ||
       context.visualInput.mode !== 'on-demand' ||
-      context.visualInput.source !== source ||
+      context.visualInput !== visualInput ||
       capture.source !== source
     ) {
       return undefined;
     }
+    if (capture.screenScope === 'display' && capture.displayId)
+      this.observeDisplay(context, capture.displayId);
     return capture.image;
+  }
+
+  private observeDisplay(context: CallContext, displayId: string): void {
+    const normalized = displayId.toLowerCase();
+    if (context.observedDisplayId && context.observedDisplayId !== normalized) {
+      context.queuedVisualFrame = undefined;
+      context.proactive?.resetVisualSource();
+    }
+    context.observedDisplayId = normalized;
   }
 
   private captureVisualContext(
     context: CallContext,
     persistAsset: boolean,
+    screenScope?: 'display',
   ): Promise<LiveVisualCapture> {
+    const visualInput = context.visualInput;
     const beginCapture = () => {
       if (
         this.active !== context ||
         context.stopping ||
-        context.visualInput.mode !== 'on-demand'
+        context.visualInput.mode !== 'on-demand' ||
+        context.visualInput !== visualInput
       ) {
         throw new Error('Visual capture is no longer available.');
       }
-      return this.host.captureVisualContext(context.callId, { persistAsset });
+      return this.host.captureVisualContext(context.callId, {
+        persistAsset,
+        ...(screenScope ? { screenScope } : {}),
+      });
     };
     const capture = context.visualCaptureTail
       ? context.visualCaptureTail.then(beginCapture)

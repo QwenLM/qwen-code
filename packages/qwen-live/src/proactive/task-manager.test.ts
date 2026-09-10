@@ -28,7 +28,7 @@ describe('ProactiveTaskManager', () => {
     expect(narration).toMatchObject({ monitorMode: 'always', repeat: true });
   });
 
-  it('enforces capacity and unique active titles', () => {
+  it('ignores legacy capacity while preserving unique active titles', () => {
     const manager = new ProactiveTaskManager(1);
     manager.createMonitor({
       title: 'Tea',
@@ -45,7 +45,16 @@ describe('ProactiveTaskManager', () => {
         triggerResponse: 'notify',
         repeat: false,
       }),
-    ).toThrow('capacity');
+    ).not.toThrow();
+    for (let index = 0; index < 40; index += 1)
+      manager.createMonitor({
+        title: `Monitor ${index}`,
+        modalities: ['vision'],
+        condition: 'change',
+        triggerResponse: 'notify',
+        repeat: true,
+      });
+    expect(manager.activePerceptionTasks()).toHaveLength(42);
     expect(() =>
       manager.createTimer({
         title: 'tea',
@@ -53,6 +62,17 @@ describe('ProactiveTaskManager', () => {
         reminderText: 'done',
       }),
     ).toThrow('already exists');
+  });
+
+  it('cancels by exact ID without stopping a same-title replacement', () => {
+    const manager = new ProactiveTaskManager();
+    const input = { title: 'Tea', durationSec: 10, reminderText: 'ready' };
+    const original = manager.createTimer(input);
+    expect(manager.cancelById(original.taskId)?.status).toBe('cancelled');
+    const replacement = manager.createTimer(input);
+    expect(manager.cancelById(original.taskId)?.status).toBe('cancelled');
+    expect(manager.cancelById('missing')).toBeUndefined();
+    expect(manager.get(replacement.taskId)?.status).toBe('provisioning');
   });
 
   it('updates and cancels only a unique active title', () => {

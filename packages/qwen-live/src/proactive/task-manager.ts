@@ -171,7 +171,7 @@ export class ProactiveTaskManager {
   private readonly tasks = new Map<string, ProactiveTask>();
 
   constructor(
-    private readonly maxConcurrentPerceptionTasks: number,
+    _legacyMaxConcurrentPerceptionTasks?: number,
     private readonly onChange?: (task: ProactiveTask) => void,
   ) {}
 
@@ -354,6 +354,18 @@ export class ProactiveTaskManager {
       .map((task) => copyTask(task));
   }
 
+  cancelById(taskId: string): ProactiveTask | undefined {
+    const task = this.tasks.get(taskId);
+    if (!task) return undefined;
+    if (!TERMINAL_STATUSES.has(task.status)) {
+      task.status = 'cancelled';
+      task.updatedAt = Date.now();
+      task.generation += 1;
+      this.onChange?.(copyTask(task));
+    }
+    return copyTask(task);
+  }
+
   get(taskId: string): ProactiveTask | undefined {
     const task = this.tasks.get(taskId);
     return task ? copyTask(task) : undefined;
@@ -437,12 +449,6 @@ export class ProactiveTaskManager {
     repeat: boolean;
     monitorMode: ProactiveMonitorMode;
   }): PerceptionTask {
-    const activeCount = this.activePerceptionTasks().length;
-    if (activeCount >= this.maxConcurrentPerceptionTasks) {
-      throw new Error(
-        `Perception task capacity reached (${this.maxConcurrentPerceptionTasks}); cancel an active task first.`,
-      );
-    }
     this.assertUniqueTitle(input.title);
     const now = Date.now();
     const task: PerceptionTask = {

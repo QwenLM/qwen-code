@@ -89,7 +89,10 @@ class FakeConnection implements AcpConnectionLike {
       return Promise.reject(error);
     }
     this.sessionSeq += 1;
-    return Promise.resolve({ sessionId: `acp-${this.sessionSeq}` });
+    return Promise.resolve({
+      sessionId: `acp-${this.sessionSeq}`,
+      modes: { availableModes: [{ id: 'default', name: 'Default' }] },
+    });
   }
 
   prompt(params: Record<string, unknown>): Promise<{ stopReason?: string }> {
@@ -203,6 +206,124 @@ function eventCollector(adaptor: AcpAdaptor, sessionId: string) {
 }
 
 const adaptors: AcpAdaptor[] = [];
+
+describe('AcpAdaptor exact cancellation and asking mode', () => {
+  it('removes queued B without cancelling active A and rejects stale refs', async () => {
+    const connection = new FakeConnection();
+    const adaptor = makeAdaptor(connection);
+    adaptors.push(adaptor);
+    const handle = await adaptor.createSession();
+    const events = eventCollector(adaptor, handle.id);
+    const first = await adaptor.prompt(handle, [{ type: 'text', text: 'A' }]);
+    const second = await adaptor.prompt(handle, [{ type: 'text', text: 'B' }]);
+    const third = await adaptor.prompt(handle, [{ type: 'text', text: 'C' }]);
+    expect(await adaptor.cancelJob(handle, second.jobRef!)).toBe('stopped');
+    expect(await adaptor.cancelJob(handle, second.jobRef!)).toBe('not_found');
+    expect(await adaptor.cancelJob(handle, 'unknown')).toBe('not_found');
+    expect(adaptor.isBusy(handle)).toBe(true);
+    expect(connection.cancelCalls).toEqual([]);
+    connection.update(handle.id, {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'A result' },
+    });
+    connection.settle();
+    await events.waitFor((items) =>
+      items.some(
+        (item) => item.type === 'turn_started' && item.jobRef === third.jobRef,
+      ),
+    );
+    expect(events.events).toContainEqual({
+      type: 'turn_error',
+      jobRef: second.jobRef,
+      error: 'cancelled',
+    });
+    expect(events.events).toContainEqual({
+      type: 'turn_complete',
+      jobRef: first.jobRef,
+      summary: 'A result',
+      detail: 'A result',
+    });
+    expect(await adaptor.cancelJob(handle, first.jobRef!)).toBe('not_found');
+    expect(connection.cancelCalls).toEqual([]);
+    expect(await adaptor.cancelJob(handle, third.jobRef!)).toBe('stopping');
+    expect(await adaptor.cancelJob(handle, third.jobRef!)).toBe('stopping');
+    expect(connection.cancelCalls).toEqual([{ sessionId: handle.id }]);
+    expect(adaptor.isBusy(handle)).toBe(true);
+    connection.settle('cancelled');
+    await events.waitFor((items) =>
+      items.some(
+        (item) => item.type === 'turn_error' && item.jobRef === third.jobRef,
+      ),
+    );
+    expect(adaptor.isBusy(handle)).toBe(false);
+  });
+
+  it('awaits the advertised asking mode before exposing the new session', async () => {
+    const connection = new FakeConnection();
+    let finish!: () => void;
+    vi.spyOn(connection, 'setSessionMode').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = () => resolve({});
+        }),
+    );
+    const adaptor = makeAdaptor(connection);
+    adaptors.push(adaptor);
+    let ready = false;
+    const creating = adaptor.createSession().then((handle) => {
+      ready = true;
+      return handle;
+    });
+    await vi.waitFor(() =>
+      expect(connection.setSessionMode).toHaveBeenCalled(),
+    );
+    expect(ready).toBe(false);
+    expect(connection.promptCalls).toEqual([]);
+    finish();
+    await creating;
+    expect(ready).toBe(true);
+  });
+
+  it.each(['unknown', 'rejected'])(
+    'warns when asking mode negotiation is %s without choosing full access',
+    async (mode) => {
+      const connection = new FakeConnection();
+      if (mode === 'unknown')
+        vi.spyOn(connection, 'newSession').mockResolvedValue({
+          sessionId: 'unknown',
+          modes: {
+            availableModes: [
+              { id: 'read-only', name: 'Read only' },
+              { id: 'agent-full-access', name: 'Full access' },
+            ],
+          },
+        });
+      else
+        vi.spyOn(connection, 'setSessionMode').mockRejectedValue(
+          new Error('unsupported'),
+        );
+      const warn = vi.fn();
+      const adaptor = new AcpAdaptor({
+        name: 'mode-test',
+        command: 'unused',
+        defaultCwd: '/fixture',
+        logger: { warn } as unknown as LiveLogger,
+        connect: connection.connect(),
+      });
+      adaptors.push(adaptor);
+      await adaptor.createSession();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('manual approval is not guaranteed'),
+      );
+      expect(
+        connection.setModeCalls.some(
+          (call) => call['modeId'] === 'agent-full-access',
+        ),
+      ).toBe(false);
+      if (mode === 'unknown') expect(connection.setModeCalls).toEqual([]);
+    },
+  );
+});
 
 afterEach(async () => {
   for (const adaptor of adaptors.splice(0)) await adaptor.close();

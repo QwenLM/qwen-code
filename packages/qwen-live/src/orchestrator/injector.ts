@@ -31,6 +31,7 @@ export type InjectorItemKind =
   | 'permission'
   | 'error'
   | 'speak'
+  | 'control'
   | 'proactive';
 
 export interface InjectorItem {
@@ -44,6 +45,8 @@ export interface InjectorItem {
   requestId?: string;
   /** Stable scheduler delivery id for a queued Proactive announcement. */
   deliveryId?: string;
+  /** Daemon-owned text receipt, acknowledged only after full context delivery. */
+  controlId?: string;
 }
 
 export interface InjectorSink {
@@ -96,6 +99,7 @@ export class Injector {
   private lastProgressAt = new Map<string, number>();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
+  private flushing = false;
 
   constructor(options: InjectorOptions) {
     this.sink = options.sink;
@@ -197,6 +201,15 @@ export class Injector {
   enqueue(item: InjectorItem): boolean {
     if (this.disposed) return false;
     if (
+      item.kind === 'control' &&
+      item.controlId &&
+      this.queue.some(
+        (queued) =>
+          queued.kind === 'control' && queued.controlId === item.controlId,
+      )
+    )
+      return true;
+    if (
       item.kind === 'permission' &&
       item.requestId !== undefined &&
       this.queue.some(
@@ -295,7 +308,8 @@ export class Injector {
       return -1;
     }
     if (
-      this.queue[0]?.kind === 'proactive' &&
+      (this.queue[0]?.kind === 'proactive' ||
+        this.queue[0]?.kind === 'control') &&
       (this.directResponsePending || this.responseRequestPending)
     ) {
       return -1;
@@ -310,11 +324,25 @@ export class Injector {
   }
 
   private poke(): void {
-    if (this.disposed || this.queue.length === 0) return;
+    if (this.disposed || this.flushing || this.queue.length === 0) return;
     const wait = this.windowClosedForMs();
     if (wait < 0) return; // reopened by a state signal later
     if (wait === 0) {
-      this.flush();
+      this.flushing = true;
+      try {
+        while (
+          !this.disposed &&
+          this.queue.length > 0 &&
+          this.windowClosedForMs() === 0
+        ) {
+          const first = this.queue[0];
+          this.flush();
+          if (this.queue[0] === first) break;
+        }
+      } finally {
+        this.flushing = false;
+      }
+      if (this.windowClosedForMs() > 0) this.poke();
       return;
     }
     if (this.timer !== undefined) clearTimeout(this.timer);
@@ -330,14 +358,16 @@ export class Injector {
 
   private flush(): void {
     if (this.queue.length === 0) return;
-    const firstProactive = this.queue.findIndex(
-      (item) => item.kind === 'proactive',
+    const firstIndependent = this.queue.findIndex(
+      (item) => item.kind === 'proactive' || item.kind === 'control',
     );
-    if (firstProactive === 0) {
-      this.flushProactive();
+    if (firstIndependent === 0) {
+      if (this.queue[0]?.kind === 'control') this.flushControl();
+      else this.flushProactive();
       return;
     }
-    const batchEnd = firstProactive < 0 ? this.queue.length : firstProactive;
+    const batchEnd =
+      firstIndependent < 0 ? this.queue.length : firstIndependent;
     const pending = this.queue.slice(0, batchEnd);
     // Permission asks first: the context join is size-capped, and a
     // truncated [PERMISSION] entry would lose the handle the model needs
@@ -417,6 +447,23 @@ export class Injector {
     }
     this.queue.shift();
     this.sink.onInjected?.(item, true);
+  }
+
+  private flushControl(): void {
+    const item = this.queue[0];
+    if (!item || item.kind !== 'control') return;
+    if (!this.sink.injectContext(item.context)) {
+      if (this.timer !== undefined) clearTimeout(this.timer);
+      this.timer = setTimeout(() => {
+        this.timer = undefined;
+        this.poke();
+      }, this.quietGapMs);
+      this.timer.unref?.();
+      return;
+    }
+    this.queue.shift();
+    this.sink.onInjected?.(item, false);
+    this.poke();
   }
 
   private finishProactiveCycleIfComplete(): void {

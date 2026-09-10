@@ -1,7 +1,13 @@
 import { BrowserWindow, ipcMain, screen } from 'electron';
 import { join } from 'node:path';
 import type { LiveLanguage } from '@qwen-code/qwen-live/i18n';
-import type { SubagentsSnapshot } from '@qwen-code/qwen-live/subagents';
+import {
+  parseSubagentsControlRequest,
+  type SubagentsControlRequest,
+  type SubagentsControlResult,
+  type SubagentsPage,
+  type SubagentsSnapshot,
+} from '@qwen-code/qwen-live/subagents';
 import type { SubagentsWindowState } from '../shared/subagents-api.ts';
 import type { LiveTheme, ResolvedTheme } from '../shared/theme.ts';
 import {
@@ -15,6 +21,10 @@ type Options = {
   baseDirectory: string;
   anchor: () => DisplayWorkArea | undefined;
   hoverRegions?: () => readonly DisplayWorkArea[];
+  requestControl?: (
+    request: SubagentsControlRequest,
+    instanceId: string,
+  ) => Promise<SubagentsControlResult>;
 };
 
 export class SubagentsWindows {
@@ -37,6 +47,13 @@ export class SubagentsWindows {
   private outsideSince?: number;
   private disposed = false;
   private instanceId?: string;
+  private controlsAvailable = false;
+  private page?: SubagentsPage;
+  private pageOffset = 0;
+  private pageError?: SubagentsWindowState['pageError'];
+  private pageGeneration = 0;
+  private refreshTask?: Promise<void>;
+  private refreshAgain = false;
 
   constructor(private readonly options: Options) {
     ipcMain.handle('live:subagents:get-state', (event) =>
@@ -83,12 +100,24 @@ export class SubagentsWindows {
       if (
         typeof id !== 'string' ||
         id.length > 128 ||
-        !this.snapshot?.tasks.some((task) => task.id === id)
+        !(this.page?.snapshot ?? this.snapshot)?.tasks.some(
+          (task) => task.id === id,
+        )
       )
         return;
       this.selectedId = id;
       this.openMode('detail');
     });
+    ipcMain.handle(
+      'live:subagents:control',
+      (event, instanceId: unknown, value: unknown) => {
+        if (event.sender !== this.window?.webContents)
+          return { type: 'error', code: 'invalid_request' };
+        const request = parseSubagentsControlRequest(value);
+        if (!request) return { type: 'error', code: 'invalid_request' };
+        return this.control(instanceId, request);
+      },
+    );
   }
 
   update(
@@ -96,6 +125,7 @@ export class SubagentsWindows {
     connected: boolean,
     snapshot?: SubagentsSnapshot,
     instanceId?: string,
+    controlsAvailable = false,
   ): void {
     if (this.disposed) return;
     if (instanceId && this.instanceId !== instanceId) {
@@ -103,14 +133,22 @@ export class SubagentsWindows {
       this.snapshot = undefined;
       this.instanceId = instanceId;
       this.closePanel();
+      this.page = undefined;
     }
+    const refresh =
+      connected &&
+      (!this.connected || this.snapshot?.revision !== snapshot?.revision);
     this.language = language;
     this.connected = connected;
+    this.controlsAvailable =
+      controlsAvailable && Boolean(this.options.requestControl);
+    if (!connected || !this.controlsAvailable) this.invalidatePageRequest();
     if (snapshot) this.snapshot = snapshot;
     else if (connected) this.snapshot = undefined;
     if (!this.isPinned() && (!connected || !snapshot)) this.closePanel();
     this.publish();
     if (this.isPinned() || this.orbHovered) this.show();
+    if (refresh) void this.refreshPage();
   }
 
   setTheme(theme: LiveTheme, appearance: ResolvedTheme): void {
@@ -169,6 +207,7 @@ export class SubagentsWindows {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.invalidatePageRequest();
     this.stopCursorWatch();
     this.window?.destroy();
     for (const channel of [
@@ -176,6 +215,7 @@ export class SubagentsWindows {
       'live:subagents:expand',
       'live:subagents:back',
       'live:subagents:detail',
+      'live:subagents:control',
     ])
       ipcMain.removeHandler(channel);
     for (const channel of [
@@ -203,6 +243,11 @@ export class SubagentsWindows {
       mode: this.mode,
       ...(this.snapshot ? { snapshot: this.snapshot } : {}),
       ...(this.selectedId ? { selectedId: this.selectedId } : {}),
+      ...(this.instanceId ? { instanceId: this.instanceId } : {}),
+      controlsAvailable: this.controlsAvailable,
+      ...(this.page ? { page: this.page } : {}),
+      loading: Boolean(this.refreshTask),
+      ...(this.pageError ? { pageError: this.pageError } : {}),
     };
   }
   private openMode(mode: 'list' | 'detail'): void {
@@ -214,6 +259,98 @@ export class SubagentsWindows {
     this.publish();
     this.window.show();
     this.window.focus();
+    this.invalidatePageRequest();
+    void this.refreshPage();
+  }
+
+  private async control(
+    instanceId: unknown,
+    request: SubagentsControlRequest,
+  ): Promise<SubagentsControlResult> {
+    if (typeof instanceId !== 'string' || instanceId !== this.instanceId)
+      return { type: 'error', code: 'stale_instance' };
+    if (!this.connected || this.disposed)
+      return { type: 'error', code: 'unavailable' };
+    if (!this.controlsAvailable || !this.options.requestControl)
+      return { type: 'error', code: 'unsupported' };
+    if (!this.isPinned()) return { type: 'error', code: 'unavailable' };
+    if (request.action === 'list') {
+      this.pageOffset = request.offset ?? 0;
+      this.invalidatePageRequest();
+      await this.refreshPage();
+      if (instanceId !== this.instanceId)
+        return { type: 'error', code: 'stale_instance' };
+      return this.pageError || !this.page
+        ? { type: 'error', code: this.pageError ?? 'unavailable' }
+        : { type: 'page', page: this.page };
+    }
+    let result: SubagentsControlResult;
+    try {
+      result = await this.options.requestControl(request, instanceId);
+    } catch {
+      result = { type: 'error', code: 'action_failed' };
+    }
+    if (instanceId !== this.instanceId)
+      return { type: 'error', code: 'stale_instance' };
+    void this.refreshPage();
+    return result;
+  }
+
+  private invalidatePageRequest(): void {
+    this.pageGeneration++;
+    this.refreshTask = undefined;
+    this.refreshAgain = false;
+  }
+
+  private refreshPage(): Promise<void> {
+    if (
+      this.disposed ||
+      !this.isPinned() ||
+      !this.connected ||
+      !this.controlsAvailable ||
+      !this.options.requestControl ||
+      !this.instanceId
+    )
+      return Promise.resolve();
+    if (this.refreshTask) {
+      this.refreshAgain = true;
+      return this.refreshTask;
+    }
+    const generation = this.pageGeneration;
+    const instance = this.instanceId;
+    const request: SubagentsControlRequest = {
+      action: 'list',
+      offset: this.pageOffset,
+      ...(this.selectedId ? { selectedId: this.selectedId } : {}),
+    };
+    const task = this.options
+      .requestControl(request, instance)
+      .then((result) => {
+        if (generation !== this.pageGeneration || instance !== this.instanceId)
+          return;
+        if (result.type === 'page') {
+          this.page = result.page;
+          this.pageOffset = result.page.offset;
+          this.pageError = undefined;
+        } else
+          this.pageError =
+            result.type === 'error' ? result.code : 'action_failed';
+      })
+      .catch(() => {
+        if (generation === this.pageGeneration) this.pageError = 'unavailable';
+      })
+      .finally(() => {
+        if (generation !== this.pageGeneration) return;
+        this.refreshTask = undefined;
+        this.publish();
+        if (this.refreshAgain) {
+          this.refreshAgain = false;
+          void this.refreshPage();
+        }
+      });
+    this.refreshTask = task;
+    this.publish();
+    return task;
   }
   private createWindow(): BrowserWindow {
     const window = new BrowserWindow({
@@ -327,6 +464,10 @@ export class SubagentsWindows {
     this.window.setBounds(result.bounds, false);
   }
   private closePanel(): void {
+    this.invalidatePageRequest();
+    this.pageOffset = 0;
+    this.page = undefined;
+    this.pageError = undefined;
     this.stopCursorWatch();
     this.mode = 'summary';
     this.selectedId = undefined;

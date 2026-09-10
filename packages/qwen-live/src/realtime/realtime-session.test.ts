@@ -10,8 +10,6 @@ import { PROACTIVE_SESSION_TOOLS } from '../tools/definitions.js';
 import {
   deriveQwenOmniRealtimeUrl,
   openQwenRealtimeSession,
-  QWEN_REALTIME_INPUT_SAMPLE_RATE,
-  QWEN_REALTIME_OUTPUT_SAMPLE_RATE,
   QWEN_REALTIME_LIMITS,
   REMAIN_SILENT_TOOL_NAME,
   type QwenRealtimeCallbacks,
@@ -314,13 +312,13 @@ describe('realtime-session', () => {
             input: {
               format: {
                 type: 'pcm',
-                sample_rate: QWEN_REALTIME_INPUT_SAMPLE_RATE,
+                sample_rate: 16_000,
               },
             },
             output: {
               format: {
                 type: 'pcm',
-                sample_rate: QWEN_REALTIME_OUTPUT_SAMPLE_RATE,
+                sample_rate: 24_000,
               },
             },
           });

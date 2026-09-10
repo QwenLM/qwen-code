@@ -86,7 +86,7 @@ function fixture() {
       },
     },
     writeLiveDiagnostic: (event: string, details: object) =>
-      diagnostics.push({ event, details }),
+      diagnostics.push({ event, details: { ...details } }),
     systemPreferences: {
       getMediaAccessStatus: () => 'granted',
       askForMediaAccess: () => {
@@ -238,10 +238,12 @@ describe('Host visual readiness review regressions', () => {
     assert.deepEqual(value.calls, [
       { update: { mode: 'on-demand' }, epoch: 7 },
     ]);
-    assert(
-      value.diagnostics.length > 0,
-      'Transport failure should not be silent',
-    );
+    assert.deepEqual(value.diagnostics, [
+      {
+        event: 'visual_mode_rejected',
+        details: { epoch: 7, mode: 'on-demand' },
+      },
+    ]);
     assert.equal(value.controls.mode(), 'live-feed');
   });
 

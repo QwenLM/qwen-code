@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { afterEach, describe, it, mock } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket, WebSocketServer } from 'ws';
+import { liveMessage } from '@qwen-code/qwen-live/i18n';
 import {
   LiveDaemonConnection,
   type ConnectionSnapshot,
@@ -15,6 +16,7 @@ import { BoundedReconnectPolicy } from '../reconnect-policy.ts';
 import {
   LIVE_PROTOCOL_VERSION,
   MAX_SOCKET_BUFFERED_BYTES,
+  encodeOutputAudioFrame,
 } from '../../shared/protocol.ts';
 
 const cleanup: Array<() => Promise<void> | void> = [];
@@ -105,6 +107,7 @@ async function fixture(
     });
   });
   const snapshots: ConnectionSnapshot[] = [];
+  let outputFrames = 0;
   const connection = new LiveDaemonConnection(
     '0.0.6',
     {
@@ -123,7 +126,9 @@ async function fixture(
         },
       }),
       onSnapshot: (snapshot) => snapshots.push(snapshot),
-      onOutputAudio: () => undefined,
+      onOutputAudio: () => {
+        outputFrames++;
+      },
       onOutputAudioFinished: () => undefined,
       onClearOutput: () => undefined,
     },
@@ -150,6 +155,7 @@ async function fixture(
     server,
     stopHttp,
     handshakes: () => handshakes,
+    outputFrames: () => outputFrames,
   };
 }
 
@@ -185,6 +191,10 @@ describe('Host Quit review recovery regressions', () => {
       value: MAX_SOCKET_BUFFERED_BYTES + 1,
     });
     await assert.rejects(value.connection.requestQuit());
+    assert.deepEqual(value.connection.getSnapshot(), {
+      phase: 'error',
+      error: liveMessage('host.error.quitUnconfirmed'),
+    });
     const closed = once(value.peer, 'close');
     value.peer.close(1001, 'fixture disconnection after failed stop');
     await closed;
@@ -194,6 +204,64 @@ describe('Host Quit review recovery regressions', () => {
       'ready',
       `After closed peer: ${JSON.stringify(value.connection.getSnapshot())}`,
     );
+  });
+
+  it('latches a failed shared Quit against late state, errors and media until explicit retry', async () => {
+    const value = await fixture({ standalone: false });
+    const internals = value.connection as unknown as { socket: WebSocket };
+    Object.defineProperty(internals.socket, 'bufferedAmount', {
+      configurable: true,
+      value: MAX_SOCKET_BUFFERED_BYTES + 1,
+    });
+    await assert.rejects(value.connection.requestQuit());
+    const failed = value.connection.getSnapshot();
+    assert.equal(failed.phase, 'error');
+    Reflect.deleteProperty(internals.socket, 'bufferedAmount');
+    const before = [...value.snapshots];
+    for (const message of [
+      {
+        type: 'host.state',
+        epoch: 8,
+        status: {
+          v: 1,
+          available: true,
+          state: 'listening',
+          shortcut: 'Command+E',
+        },
+      },
+      { type: 'host.error', code: 'provider_config' },
+    ]) {
+      value.peer.send(JSON.stringify(message));
+      await delay(20);
+      assert.deepEqual(value.connection.getSnapshot(), failed);
+    }
+    const output = encodeOutputAudioFrame(7, 1, Buffer.alloc(8));
+    assert(output);
+    value.peer.send(output, { binary: true });
+    await delay(20);
+    assert.equal(value.outputFrames(), 0);
+    assert.equal(value.connection.getEpoch(), 7);
+    assert.equal(value.connection.sendAudio(Buffer.alloc(8), 7), false);
+    assert.equal(
+      value.connection.sendAction({
+        type: 'host.action',
+        action: 'toggle',
+        epoch: 7,
+      }),
+      false,
+    );
+    value.connection.start();
+    value.connection.reconnectNow();
+    value.connection.forceReconnectNow();
+    assert.equal(value.handshakes(), 1);
+    assert.deepEqual(value.snapshots, before);
+    const action = once(value.peer, 'message');
+    await value.connection.requestQuit();
+    assert.deepEqual(JSON.parse(String((await action)[0])), {
+      type: 'host.action',
+      action: 'stop',
+      epoch: 7,
+    });
   });
 
   it('still sends a stop frame when retrying the same shared connection', async () => {
@@ -285,6 +353,35 @@ describe('Host Quit review recovery regressions', () => {
     });
   }
 
+  for (const failure of [404, 410, 500, 'reset'] as const) {
+    it(`still attempts authenticated Quit with an absent PID when the live listener returns ${failure}`, async () => {
+      const value = await fixture({
+        handleQuit: (response) => {
+          if (failure === 'reset') response.destroy();
+          else response.writeHead(failure).end('not confirmed');
+        },
+      });
+      const probe = mock.method(process, 'kill', () => {
+        throw Object.assign(new Error('fixture process gone'), {
+          code: 'ESRCH',
+        });
+      });
+      await assert.rejects(value.connection.requestQuit());
+      await assert.rejects(value.connection.requestQuit());
+      assert.equal(value.requests.length, 2);
+      assert(
+        value.requests.every(
+          (request) => request.nonce === value.record.instanceNonce,
+        ),
+      );
+      assert.equal(probe.mock.callCount(), 0);
+      assert.equal(
+        await (await fetch(`${value.record.url}/health`)).text(),
+        'alive',
+      );
+    });
+  }
+
   it('keeps a failed quit unconfirmed when the fixture listener actually disappears', async () => {
     const value = await fixture({
       handleQuit: (response) => response.writeHead(500).end('cleanup failed'),
@@ -297,12 +394,13 @@ describe('Host Quit review recovery regressions', () => {
     assert.equal(value.requests.length, 1);
   });
 
-  it('permits retry to finish only when the original authenticated PID is proven absent', async () => {
+  it('permits retry to finish only after a refused HTTP attempt and an absent original authenticated PID', async () => {
     const value = await fixture({
       handleQuit: (response) => response.writeHead(500).end('cleanup failed'),
     });
     await assert.rejects(value.connection.requestQuit());
     await value.stopHttp();
+    const fetchProbe = mock.method(globalThis, 'fetch');
     const probe = mock.method(
       process,
       'kill',
@@ -315,6 +413,11 @@ describe('Host Quit review recovery regressions', () => {
       },
     );
     await value.connection.requestQuit();
+    assert.equal(fetchProbe.mock.callCount(), 1);
+    assert.equal(
+      String(fetchProbe.mock.calls[0]?.arguments[0]),
+      `${value.record.url}/live/quit`,
+    );
     assert.equal(probe.mock.callCount(), 1);
     assert.equal(value.requests.length, 1);
   });
