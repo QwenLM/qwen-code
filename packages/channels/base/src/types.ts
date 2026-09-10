@@ -40,18 +40,6 @@ export interface GroupConfig {
   groupHistoryLimit?: number;
 }
 
-export interface BlockStreamingChunkConfig {
-  /** Minimum characters before emitting a block. Default: 400. */
-  minChars?: number;
-  /** Force-emit when buffer exceeds this size. Default: 1000. */
-  maxChars?: number;
-}
-
-export interface BlockStreamingCoalesceConfig {
-  /** Emit buffered text after this many ms of inactivity. Default: 1500. */
-  idleMs?: number;
-}
-
 export interface ChannelConfig {
   type: ChannelType;
   token: string;
@@ -66,8 +54,6 @@ export interface ChannelConfig {
   cwd: string;
   approvalMode?: string;
   instructions?: string;
-  /** Only dispatch user messages beginning with this exact prefix. */
-  messagePrefix?: string;
   identity?: ChannelIdentityConfig;
   memoryScope?: ChannelMemoryScopeConfig;
   webhooks?: ChannelWebhookConfig;
@@ -82,13 +68,6 @@ export interface ChannelConfig {
 
   /** Poll interval in ms for polling adapters. Default: 60000. */
   pollInterval?: number;
-
-  /** Enable block streaming — emit completed blocks as separate messages. */
-  blockStreaming?: 'on' | 'off';
-  /** Chunk size bounds for block streaming. */
-  blockStreamingChunk?: BlockStreamingChunkConfig;
-  /** Idle coalescing for block streaming. */
-  blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
 }
 
 export interface Attachment {
@@ -114,33 +93,11 @@ export interface Envelope {
   /** User-authored text to display when `text` contains model-only context. */
   displayText?: string;
   /**
-   * Where `displayText` begins inside `text`, for adapters that compose
-   * the two.
-   *
-   * The prefix filter rewrites the user-authored segment in place. Both
-   * the sender nick and the message body are attacker-controlled on some
-   * platforms, so a nick equal to the body would make a search for
-   * `displayText` land in the sender tag and leave the prefix on the
-   * dispatched message. An adapter that knows where it put the segment
-   * says so here; without it the filter refuses to guess between two
-   * occurrences.
-   */
-  displayTextOffset?: number;
-  /**
-   * The user-authored text with the leading mention run removed, for
-   * adapters whose mention markers the shared prefix matcher cannot read as
-   * one token. Mentions after the prefix stay in place.
-   */
-  messagePrefixText?: string;
-  /** System event, or adapter input whose prefix was already checked. */
-  bypassMessagePrefix?: true;
-  /**
    * `text` is an adapter-synthesized placeholder (`(image)`, `(voice
    * message)`, `(file: …)`) rather than something the user typed.
    *
-   * No user action can put the configured prefix on it, so it bypasses the
-   * prefix filter -- and it is never recorded as quoted group history,
-   * where it would reach the next prompt as if a member had typed it.
+   * It is never recorded as quoted group history, where it would reach
+   * the next prompt as if a member had typed it.
    */
   syntheticText?: true;
   threadId?: string;
@@ -272,6 +229,24 @@ export interface ChannelUserInputRequestContext {
   submitOptionId: string;
   onSettled(listener: (reason: UserInputSettlementReason) => void): () => void;
   respond(response: ChannelUserInputResponse): Promise<boolean>;
+}
+
+export type ChannelPermissionDecision = 'allow_once' | 'allow_always' | 'deny';
+
+export interface ChannelPermissionRequestContext {
+  requestId: string;
+  sessionId: string;
+  runId: string;
+  owner: ChannelPromptOwner;
+  target: SessionTarget;
+  precedingSegmentId?: string;
+  title: string;
+  decisions: Array<{
+    kind: ChannelPermissionDecision;
+    label: string;
+  }>;
+  onSettled(listener: (reason: UserInputSettlementReason) => void): () => void;
+  respond(decision: ChannelPermissionDecision): Promise<boolean>;
 }
 
 export interface ChannelOutputSegmentContext {

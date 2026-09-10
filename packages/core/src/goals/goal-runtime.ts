@@ -62,6 +62,10 @@ import {
   recoverGoalFromRecords,
   type GoalRecoveryRecord,
 } from './goal-persistence.js';
+import type {
+  GoalContinuationTurn,
+  GoalContinuationUsage,
+} from './goal-continuation-prompt.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('GOAL_RUNTIME');
@@ -130,23 +134,9 @@ export class GoalPersistenceUnavailableError extends Error {
 }
 
 export interface GoalTurnHost {
-  startGoalTurn(input: {
-    permit: GoalTurnPermit;
-    continuationContext: string;
-    /**
-     * Set on the first continuation carrying an objective the model has not
-     * been handed before, when it had been handed an earlier one. Hosts pass
-     * it straight to `renderGoalContinuationPrompt`.
-     */
-    objectiveUpdated?: boolean;
-    /**
-     * Set on the one continuation a spent budget still grants: the model is
-     * to hand off, not to keep working. Hosts pass it straight to
-     * `renderGoalContinuationPrompt`.
-     */
-    windDown?: boolean;
-    verifierFeedback?: string;
-  }): Promise<void>;
+  startGoalTurn(
+    input: { permit: GoalTurnPermit } & GoalContinuationTurn,
+  ): Promise<void>;
   preemptGoalTurn(reason: string): void;
 }
 
@@ -584,6 +574,15 @@ export function createGoalRuntime(
     continuationQueued = false;
     const scheduledHost = host;
     const continuationContext = snapshot.goal.objective;
+    // Read here, before the broadcast below hands listeners a snapshot they
+    // may act on: these figures describe the turn being scheduled.
+    const usage: GoalContinuationUsage = {
+      tokensUsed: snapshot.goal.tokensUsed,
+      ...(snapshot.goal.tokenBudget === undefined
+        ? {}
+        : { tokenBudget: snapshot.goal.tokenBudget }),
+      turnCount: snapshot.goal.turnCount,
+    };
     const verifierFeedback = nextVerifierFeedback;
     nextVerifierFeedback = undefined;
     currentTurnFeedback = verifierFeedback;
@@ -653,6 +652,7 @@ export function createGoalRuntime(
         continuationContext,
         ...(objectiveUpdated ? { objectiveUpdated } : {}),
         ...(windDown ? { windDown } : {}),
+        usage,
         ...(verifierFeedback ? { verifierFeedback } : {}),
       });
     } catch {

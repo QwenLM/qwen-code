@@ -1113,14 +1113,12 @@ describe('GithubChannel', () => {
       expect(config.allowedUsers).toEqual(['alice']);
     });
 
-    it('forces final-only delivery and appends the publication policy', () => {
+    it('appends the publication policy', () => {
       const config = makeConfig({
-        blockStreaming: 'on',
         instructions: 'Respond in Chinese.',
       });
       new TestableGithubChannel('test-github', config, makeBridge());
 
-      expect(config.blockStreaming).toBe('off');
       expect(config.instructions).toContain('GitHub publication policy:');
       expect(config.instructions).toContain('<no-reply/>');
       expect(config.instructions).toContain('Respond in Chinese.');
@@ -1461,7 +1459,6 @@ describe('GithubChannel', () => {
       await initWithoutLoop({
         senderPolicy: 'allowlist',
         allowedUsers: ['maintainer', 'bob'],
-        messagePrefix: '/review',
       });
       channel.usePreflight = true;
       mockOctokit.paginate
@@ -1508,12 +1505,11 @@ describe('GithubChannel', () => {
         senderId: 'maintainer',
         threadId: 'pr:99',
         isMentioned: true,
-        bypassMessagePrefix: true,
       });
       expect(channel.inboundEnvelopes[1]).toMatchObject({
         senderId: 'bob',
         threadId: 'pr:99',
-        text: 'check this review note',
+        text: ' /review check this review note',
         isMentioned: true,
       });
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
@@ -1721,8 +1717,8 @@ describe('GithubChannel', () => {
       },
     );
 
-    it('filters each aggregated comment and consumes unmatched comments', async () => {
-      await initWithoutLoop({ messagePrefix: '/review' });
+    it('aggregates ordinary comments and preserves literal slash-prefixed text', async () => {
+      await initWithoutLoop();
       channel.usePreflight = true;
       mockOctokit.paginate
         .mockResolvedValueOnce([
@@ -1745,8 +1741,7 @@ describe('GithubChannel', () => {
 
       expect(channel.inboundEnvelopes).toHaveLength(1);
       expect(channel.inboundEnvelopes[0]).toMatchObject({
-        displayText: '- @bob: inspect this',
-        bypassMessagePrefix: true,
+        displayText: '- @alice: ignore this\n- @bob: /review inspect this',
       });
       expect(channel.cursor.dispatchedComments).toEqual(['C_1001', 'C_1002']);
     });

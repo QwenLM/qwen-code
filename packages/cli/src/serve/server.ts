@@ -168,6 +168,7 @@ import {
   type DaemonWorkspaceService,
   type DaemonWorkspaceServiceDeps,
 } from './workspace-service/index.js';
+import { registerBrandRoutes } from './routes/brand.js';
 import { registerCapabilitiesRoutes } from './routes/capabilities.js';
 import {
   registerWorkspacePermissionsRoutes,
@@ -227,7 +228,10 @@ import {
   deleteDaemonSessionIfOrphan,
   SessionArchiveCoordinator,
 } from './server/session-archive.js';
-import { installSelfOriginStripMiddleware } from './server/self-origin.js';
+import {
+  installSelfOriginStripMiddleware,
+  installRemoteSelfOriginMiddleware,
+} from './server/self-origin.js';
 import {
   createSingleWorkspaceRegistry,
   createWorkspaceSessionOwnerIndex,
@@ -258,6 +262,7 @@ import {
   registerWorkspaceLifecycleRoutes,
   registerWorkspaceQualifiedLifecycleRoutes,
 } from './routes/workspace-lifecycle.js';
+import { resolveMaxRegisteredWorkspaces } from './workspace-inputs.js';
 import {
   registerWorkspaceManagementRoutes,
   type WorkspaceManagementHandle,
@@ -548,6 +553,8 @@ export interface ServeAppDeps {
    */
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
+  /** Advertise only when the injected channel controller enforces this limit. */
+  maxChannelControlWorkspaces?: number;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
   getChannelWorkerControl?: () => ChannelWorkerControlState;
@@ -778,6 +785,22 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  const daemonEnv = deps.daemonEnv ?? process.env;
+  const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
+  const maxRegisteredWorkspaces = resolveMaxRegisteredWorkspaces(
+    opts.maxRegisteredWorkspaces,
+    daemonEnvAtBoot,
+  );
+  opts = { ...opts, maxRegisteredWorkspaces };
+  if (
+    deps.workspaceRegistry &&
+    deps.workspaceRegistry.listAllEntries().filter((entry) => !entry.internal)
+      .length > maxRegisteredWorkspaces
+  ) {
+    throw new Error(
+      `Initial workspace registry exceeds the configured limit of ${maxRegisteredWorkspaces}.`,
+    );
+  }
   const tokenConfigured =
     typeof opts.token === 'string' && opts.token.length > 0;
   if (opts.requireAuth === true && !tokenConfigured) {
@@ -944,8 +967,6 @@ export function createServeApp(
   const primaryRuntimeEnvMetadata =
     injectedWorkspaceRegistry?.primary.env ?? deps.primaryRuntimeEnv;
   const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
-  const daemonEnv = deps.daemonEnv ?? process.env;
-  const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
   const trustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
     workspaceTrusted: true,
   });
@@ -1983,8 +2004,6 @@ export function createServeApp(
   // disable. Re-registering middleware at that point is not an option:
   // Express fixes middleware order when the app is built.
   const originAllowlist = new MutableOriginAllowlist(parsedAllowOrigins);
-  app.use(allowOriginCors(originAllowlist));
-  app.use(hostAllowlist(opts.hostname, getPort));
   const credentials = new CredentialStore(opts.token);
   const authenticate = bearerAuth(credentials);
   const rateLimiter = installRateLimiter(app, opts, daemonLog, {
@@ -1992,6 +2011,34 @@ export function createServeApp(
     workspaceQualifiedAcpEnabled,
   });
 
+  // Access logging and trace-id capture sit ahead of the origin wall and the
+  // same-origin credential check so their 403/401 short-circuits are recorded
+  // like every other reject (the pre-change chain logged them because
+  // bearerAuth ran below the access log). The access log excludes the exact
+  // paths GET /health and POST */heartbeat before attaching its finish
+  // logger, so those liveness probes stay unlogged at any mount position
+  // (HEAD /health and GET /health/ are logged like any request); wall
+  // rejects on those exempt paths are likewise not logged. Capture the
+  // caller trace id BEFORE authenticate / rate limiter / body parser: those
+  // layers short-circuit (401/429/400) before the telemetry middleware ever
+  // runs, and the access log still needs the captured id to join their log
+  // lines (and 404s) with the caller's trace.
+  installAccessLogMiddleware(app, daemonLog);
+  app.use(daemonInboundTraceIdCaptureMiddleware);
+
+  // The loopback Host allowlist stays ahead of the pre-auth health routes so
+  // the DNS-rebinding defense covers them. On non-loopback binds only the
+  // PRIMARY gate is a pass-through (the bearer gate authenticates there);
+  // the Local Control listener keeps its own Host gate whatever the primary
+  // bind is.
+  app.use(hostAllowlist(opts.hostname, getPort));
+
+  installRemoteSelfOriginMiddleware(app, opts.hostname, opts.token);
+  app.use(allowOriginCors(originAllowlist));
+
+  // Pre-auth health sits below the origin wall so matched cross-origin health
+  // probes carry CORS headers. It stays unlogged (path-exempt above), so the
+  // position costs nothing in log volume.
   const healthRoutes = createHealthRoutes({
     opts,
     workspaceRegistry,
@@ -2008,14 +2055,6 @@ export function createServeApp(
     });
     healthRoutes.register(app);
   }
-
-  installAccessLogMiddleware(app, daemonLog);
-
-  // Capture the caller trace id BEFORE authenticate / rate limiter / body
-  // parser: those layers short-circuit (401/429/400) before the telemetry
-  // middleware ever runs, and the access log still needs the captured id
-  // to join their log lines (and 404s) with the caller's trace.
-  app.use(daemonInboundTraceIdCaptureMiddleware);
 
   // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
   // static shell carries no secrets and a browser cannot attach an
@@ -2230,6 +2269,7 @@ export function createServeApp(
     sessionShellCommandEnabled,
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
     getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
+    maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
     getPerfSnapshot: deps.getPerfSnapshot,
     getMetricsSeries: deps.getMetricsSeries,
     getTotalSessionAdmissionSnapshot:
@@ -2257,12 +2297,17 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     workspaceRegistry,
     permissionPolicy: primaryBridge.permissionPolicy,
+    maxRegisteredWorkspaces,
+    maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
     maxSessionsPerWorkspace: opts.maxSessions,
     maxTotalSessions: opts.maxTotalSessions,
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
     sessionRestoreTimeoutMs,
     languageCodes,
     daemonEnv: daemonEnvAtBoot,
+  });
+  registerBrandRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
   });
 
   if (liveVoiceSurfaceAvailable) {
@@ -2632,6 +2677,7 @@ export function createServeApp(
 
   // Dynamic workspace registration.
   const workspaceManagementHandle = registerWorkspaceManagementRoutes(app, {
+    maxRegisteredWorkspaces,
     workspaceRegistry,
     mutate,
     safeBody,

@@ -45,6 +45,18 @@ describe('validateAuthMethod', () => {
     expect(validateAuthMethod(AuthType.USE_OPENAI)).toBeNull();
   });
 
+  it('validates USE_OPENAI_RESPONSES with the default OpenAI API key', () => {
+    process.env['OPENAI_API_KEY'] = 'fake-key';
+
+    expect(validateAuthMethod(AuthType.USE_OPENAI_RESPONSES)).toBeNull();
+  });
+
+  it('reports the OpenAI API key requirement for USE_OPENAI_RESPONSES', () => {
+    expect(validateAuthMethod(AuthType.USE_OPENAI_RESPONSES)).toBe(
+      "Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the 'OPENAI_API_KEY' environment variable.",
+    );
+  });
+
   it('should return an error message for USE_OPENAI if no API key is available', () => {
     expect(validateAuthMethod(AuthType.USE_OPENAI)).toBe(
       "Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the 'OPENAI_API_KEY' environment variable.",
