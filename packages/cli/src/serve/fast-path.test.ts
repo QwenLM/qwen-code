@@ -1643,6 +1643,155 @@ describe('serve fast path environment bootstrap', () => {
     expect(settings.advanced?.runtimeOutputDir).toBe('.qwen-runtime');
   });
 
+  it('retains unrelated boot settings when workspace startup channels are malformed', () => {
+    useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-invalid-channels-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        context: { fileName: 'CUSTOM.md' },
+        policy: { permissionStrategy: 'consensus', consensusQuorum: 3 },
+        advanced: { runtimeOutputDir: '.runtime' },
+        serve: { channels: 'telegram' },
+      }),
+    );
+    const settings = loadServeFastPathSettings(tempWorkspace);
+    expect(settings.context?.fileName).toBe('CUSTOM.md');
+    expect(settings.policy?.permissionStrategy).toBe('consensus');
+    expect(settings.advanced?.runtimeOutputDir).toBe('.runtime');
+  });
+
+  it('loads startup channels from workspace settings only', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-startup-channels-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ serve: { channels: ['discord'] } }),
+    );
+
+    expect(loadServeFastPathSettings(tempWorkspace).serve).toBeUndefined();
+
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+
+    expect(loadServeFastPathSettings(tempWorkspace).serve).toEqual({
+      channels: ['telegram'],
+    });
+  });
+
+  it('ignores malformed user startup channels without dropping other scopes', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-user-channels-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        context: { fileName: 'USER.md' },
+        serve: { channels: 'telegram' },
+      }),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+
+    const settings = loadServeFastPathSettings(tempWorkspace);
+
+    expect(settings.context?.fileName).toBe('USER.md');
+    expect(settings.serve).toEqual({ channels: ['telegram'] });
+  });
+
+  it.each([
+    {
+      label: 'unknown',
+      userEnabled: true,
+      systemEnabled: true,
+      rule: undefined,
+      loads: false,
+    },
+    {
+      label: 'trusted',
+      userEnabled: true,
+      systemEnabled: true,
+      rule: TrustLevel.TRUST_FOLDER,
+      loads: true,
+    },
+    {
+      label: 'untrusted',
+      userEnabled: true,
+      systemEnabled: true,
+      rule: TrustLevel.DO_NOT_TRUST,
+      loads: false,
+    },
+    {
+      label: 'system enables trust',
+      userEnabled: false,
+      systemEnabled: true,
+      rule: undefined,
+      loads: false,
+    },
+    {
+      label: 'system disables trust',
+      userEnabled: true,
+      systemEnabled: false,
+      rule: undefined,
+      loads: true,
+    },
+  ])(
+    'loads startup channels using effective trust: $label',
+    ({ userEnabled, systemEnabled, rule, loads }) => {
+      const qwenHome = useTempQwenHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-startup-trust-')),
+      );
+      mkdirSync(join(tempWorkspace, '.qwen'));
+      writeFileSync(
+        join(qwenHome, 'settings.json'),
+        JSON.stringify({ security: { folderTrust: { enabled: userEnabled } } }),
+      );
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = join(
+        qwenHome,
+        'system.json',
+      );
+      process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'] = join(
+        qwenHome,
+        'system-defaults.json',
+      );
+      writeFileSync(
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'],
+        JSON.stringify({
+          security: { folderTrust: { enabled: systemEnabled } },
+        }),
+      );
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+        qwenHome,
+        'trustedFolders.json',
+      );
+      writeFileSync(
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+        JSON.stringify(rule ? { [tempWorkspace]: rule } : {}),
+      );
+      writeFileSync(
+        join(tempWorkspace, '.qwen', 'settings.json'),
+        JSON.stringify({ serve: { channels: ['telegram'] } }),
+      );
+
+      expect(loadServeFastPathSettings(tempWorkspace).serve).toEqual(
+        loads ? { channels: ['telegram'] } : undefined,
+      );
+    },
+  );
+
   it('ignores stale legacy keys in current-version settings files', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
