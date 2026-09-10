@@ -48,6 +48,7 @@ vi.mock('../../i18n', () => ({
   }),
 }));
 
+import { Terminal } from '@xterm/xterm';
 import {
   releaseDetachedWebTerminal,
   releaseWebTerminal,
@@ -386,5 +387,18 @@ describe('TerminalPanel', () => {
 
     expect(terminal.blur).toHaveBeenCalledOnce();
     expect(ws.send).not.toHaveBeenCalled();
+  });
+
+  it('passes a visible selection background to xterm in the light theme', () => {
+    // xterm falls back to white rgba(255,255,255,0.3) for an unset
+    // selectionBackground, which blends into the white terminal background
+    // and leaves text selection invisible in the light theme.
+    render();
+
+    expect(Terminal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        theme: expect.objectContaining({ selectionBackground: '#bdd8fe' }),
+      }),
+    );
   });
 });
