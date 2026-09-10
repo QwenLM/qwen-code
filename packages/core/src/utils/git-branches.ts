@@ -9,6 +9,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { isValidGitSha, isValidRefName } from './gitDirect.js';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('GIT_BRANCHES');
 
 const execFileAsync = promisify(execFile);
 
@@ -445,6 +448,10 @@ export async function gitCreateBranch(
     args.push(startPoint);
   }
   args.push('--');
+  // The commit the new branch starts from: the resolved startPoint when
+  // given, otherwise the current HEAD. Rollback deletes the ref only while it
+  // still points here, so commits a failing post-checkout hook created on the
+  // new branch are never discarded.
   const expectedTip = (
     await runGit(
       cwd,
@@ -506,6 +513,9 @@ export async function gitCreateBranch(
       }
 
       if (!expectedTip) {
+        debugLogger.warn(
+          `gitCreateBranch: keeping branch "${name}" because its starting tip could not be verified`,
+        );
         throw new GitBranchRollbackError(
           'branch_preserved_after_hook',
           `restored "${restoreTarget}"; branch "${name}" was not deleted because its starting tip could not be verified`,
@@ -536,6 +546,9 @@ export async function gitCreateBranch(
           ).catch(() => '')
         ).trim();
         if (branchTip && branchTip !== expectedTip) {
+          debugLogger.warn(
+            `gitCreateBranch: keeping branch "${name}" because it contains commits created after checkout (likely by a failing post-checkout hook)`,
+          );
           throw new GitBranchRollbackError(
             'branch_preserved_after_hook',
             `restored "${restoreTarget}"; branch "${name}" was not deleted because its ref changed`,

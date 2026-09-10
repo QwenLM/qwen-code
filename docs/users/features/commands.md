@@ -36,7 +36,7 @@ These commands help you save, restore, and summarize work progress.
 
 > [!note]
 >
-> Opening an HTML export loads the renderer for that exact Qwen Code version from `unpkg.com`. If the version has not been published or the renderer cannot be reached, the file shows a load error. Markdown, JSON, and JSONL exports remain self-contained.
+> Opening an HTML export loads the renderer and stylesheet for that exact Qwen Code version from `unpkg.com`. If the version has not been published or either asset cannot be reached, the file shows a load error. Markdown, JSON, and JSONL exports remain self-contained.
 
 > [!note]
 >
@@ -757,12 +757,11 @@ qwen sessions list --json | jq .
 
 #### `qwen sessions ps`
 
-Lists the interactive Qwen Code sessions running on this machine right
-now. `sessions list` walks saved transcripts ("what have I worked on");
-this walks the live-process registry ("what is running at this moment").
-Records left behind by a killed session are swept as they are found.
-Headless sessions (`qwen -p`) do not register with the live-process
-registry, so they are not shown.
+Lists the Qwen Code sessions registered on this machine right now.
+`sessions list` walks saved transcripts ("what have I worked on"); this
+walks the live-process registry ("what is running at this moment").
+Records left behind by a killed session are swept as they are found. A
+one-shot `qwen -p` run never registers, so it is never shown.
 
 **Flags:**
 
@@ -772,7 +771,19 @@ registry, so they are not shown.
 
 **Human-readable output (default):**
 
-A table with columns: NAME, PID, AGE, DIRECTORY.
+A table with columns: NAME, KIND, PID, AGE, DIRECTORY.
+
+KIND says what registered the session — `tui` for someone at a terminal,
+`external` for a program that is not a Qwen Code session at all (a voice
+front-end, a relay), and `headless` or `serve` for a session another
+program drives. Several `serve` or `headless` rows can share one PID: a
+`qwen --acp` child hosts all its sessions in one process — `serve` when
+the daemon spawned it, `headless` when a client is driving it directly —
+and each of them registers separately. It is a self-report, like NAME and DIRECTORY: every field
+here was written by the process it describes, and nothing about what a
+session is allowed to do depends on it. See
+[Cross-Session Protocol](./cross-session-protocol.md) for the record
+format and for how to register a program of your own.
 
 **JSON output (`--json`):**
 
@@ -781,7 +792,7 @@ object with fields:
 
 ```
 schemaVersion, pid, procStart, pidNs, sessionId, cwd, name, startedAt,
-qwenVersion, ipcPath (when peer messaging is available)
+qwenVersion, kind, ipcPath (when peer messaging is available)
 ```
 
 Nothing else is written to stdout — an empty listing prints nothing at
@@ -871,14 +882,50 @@ session registry rather than deriving it.
 
 The `send_message` call only confirms the message was handed to the other
 session. What became of it arrives later as a receipt: if it was held,
-declined, refused, expired, or misaddressed (the address changed hands —
-list the agents again) — or released after a hold — a notice appears in
-the sending session's transcript (`Message to <name>: …`). Declined and
-refused are different answers: declined means someone reviewed the
-message and said no, while refused means that session's
-`agents.crossSessionInbound` is `refuse` and nobody saw it at all. The
-model that sent it is not told; if the other session replies, the reply
-arrives as a cross-session message.
+declined, refused, dropped, expired, or misaddressed (the address changed
+hands — list the agents again) — or released after a hold — a notice
+appears in the sending session's transcript (`Message to <name>: …`).
+Declined, refused and dropped are three different answers: declined means
+someone reviewed the message and said no, refused means that session's
+`agents.crossSessionInbound` is `refuse` and nobody saw it at all, and
+dropped means its inbox turned the message away before any of that (see
+below). The first drop is answered at once and the rest are folded into a
+receipt every few seconds, each naming the messages it stands for, so a
+run of them costs a handful of lines rather than one line each. The model that
+sent it is not told; if the other session replies, the reply arrives as a
+cross-session message.
+
+### Flood protection
+
+A session accepts up to 30 messages at once from one sender and then one
+every two seconds, and up to 32 at once from all senders together and
+then one a second. The second limit exists because a sender names itself:
+rotating that name gets a fresh allowance from the first limit but not
+from the second. It is barely above the first because every accepted
+message draws a receipt, and a session can only have so many of those
+going out at once. A message from another session that repeats that
+sender's previous message word for word within 30 seconds is also turned
+away — a model looping on one sentence mints a fresh message id every
+time, so the text is what catches it. Messages from a script the session
+started and from a trusted controller are exempt from the repeat check,
+because a hook reporting the same line twice is reporting two facts and a
+person saying "continue" twice means it twice; both are still subject to
+the rate limits. Finally, a message that is accepted but cannot be queued
+because the session already has 50 waiting is turned away too.
+
+A message turned away this way is never held, never shown to the model,
+and leaves no record, so the sender can try again later and land. The
+receiving session says so in its transcript at most once a minute per
+sender, with a count of what that line stands for. The sending session
+gets one receipt naming every message the burst cost it, and its
+transcript says to fold what still matters into one later message rather
+than re-sending.
+
+The sending side does not wait to find out. Each session tracks what it
+has sent to each address and refuses a send that the receiver would
+drop, so the model is told to batch before the message is written rather
+than after — and the receiver never spends a connection on a message it
+was going to turn away.
 
 ### Inbox authentication and scripted injection
 
@@ -904,7 +951,10 @@ recognized as the session's own rather than as another session's.
 
 Give every injection a fresh `msgId`. The receiving gate remembers the
 ids it has already settled, so a hook that reuses one is delivered the
-first time and silently deduplicated on every run after that.
+first time and silently deduplicated on every run after that. Repeating
+the same _text_ is fine — the repeat check above does not apply to a
+session's own processes — but the rate limits do apply, so a hook in a
+loop is dropped like any other flood.
 
 An injected message still goes through the inbound gate and is marked as
 not coming from the user, but the gate knows it came from the session's
@@ -979,3 +1029,40 @@ on your behalf.
 Anyone who holds the token can send as that controller, so treat it like
 any other credential: give it to one program, keep it out of shared
 config, and revoke it when that program is done.
+
+### Sessions a program drives over ACP
+
+Any `qwen --acp` child registers each session it hosts — as `serve` when
+the daemon spawned the process, as `headless` when an editor or another
+client is driving `qwen --acp` directly — and the session appears in
+`qwen sessions ps` and in another session's `list_agents` like any
+other. It can send: its model can call `send_message` to reach a terminal
+you have open. Several of them share one process and one inbox, so a
+sender has to name the session it means — every Qwen Code session does
+that automatically.
+
+Messages sent _to_ one are refused rather than held. Holding is a
+question put to a person, and nobody is watching a held-message list on a
+driven session's behalf; a sender is told at once instead of
+waiting out an expiry. Where a held message should surface for those
+sessions is not settled yet.
+
+A session registers only while its own settings have
+`agents.crossSessionMessaging` on. With it off it stays invisible,
+because the only reason to list a session nobody can message would be to
+advertise an address that never answers.
+
+### Programs that are not Qwen Code sessions
+
+Everything above works between sessions, but nothing in it is specific to
+one. A program that writes a registry record for itself and binds an
+inbox the same way is listed by `qwen sessions ps` and by `list_agents`,
+can be addressed by name from `send_message`, and receives delivery
+receipts for what it sends — a voice front-end, a relay, a build watcher.
+It should record `kind: "external"` so a listing can say what it is.
+
+[Cross-Session Protocol](./cross-session-protocol.md) is the contract for
+writing one: the record schema and how liveness is judged, the socket
+paths and framing, the auth line, every frame field, the receipt states
+and their transitions, and what a receiver does with a message before its
+model sees it.

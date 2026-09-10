@@ -1,5 +1,4 @@
 import {
-  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -26,6 +25,7 @@ import {
 } from '../../utils/composerTag';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from './Markdown';
+import { LinkifiedText } from './LinkifiedText';
 import { useWebShellCustomization } from '../../customization';
 import type {
   ComposerTagClickHandler,
@@ -159,7 +159,9 @@ function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
       <div className={styles.scheduledTaskId}>
         {t('scheduledTasks.runContext.taskId')}: <code>{run.id}</code>
       </div>
-      <div className={styles.scheduledTaskPrompt}>{run.prompt}</div>
+      <div className={styles.scheduledTaskPrompt}>
+        <LinkifiedText text={run.prompt} />
+      </div>
     </div>
   );
 }
@@ -191,7 +193,7 @@ function DefaultUserMessageContent({
     <>
       {segments.map((segment, index) =>
         segment.type === 'text' ? (
-          <Fragment key={index}>{segment.text}</Fragment>
+          <LinkifiedText key={index} text={segment.text} />
         ) : (
           <ReadonlyComposerTag
             composerTagIcons={composerTagIcons}
@@ -289,9 +291,11 @@ export const UserMessage = memo(function UserMessage({
       parseUserMessageContent,
       '[WebShell] failed to parse user message content',
     );
-    if (!parts) return content;
+    if (!parts) return <LinkifiedText text={content} />;
     return parts.map((part, index) => {
-      if (part.type === 'text') return part.text;
+      if (part.type === 'text') {
+        return <LinkifiedText key={index} text={part.text} />;
+      }
       return (
         <ReadonlyComposerTag
           key={`${part.tag.id}-${index}`}

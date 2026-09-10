@@ -1915,6 +1915,16 @@ describe('standalone release packaging', () => {
           ),
         ),
       ).toBe(false);
+      expect(
+        existsSync(
+          path.join(
+            extractDir,
+            'qwen-code',
+            'lib',
+            'export-transcript-document.css',
+          ),
+        ),
+      ).toBe(false);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
       restoreMinimalDist(createdDist);
@@ -2460,7 +2470,15 @@ describe('standalone release packaging', () => {
     expect(releaseStepScript).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
-    expect(releaseWorkflow).toContain('vars.OPENTUI_PREVIEW_RELEASE_ENABLED');
+    // Pin the operator, not just the variable name: these two sites are the
+    // build-time decision, and an assertion that accepts either comparison
+    // lets the flavor's default polarity flip without the suite noticing.
+    expect(releaseWorkflow).toContain(
+      "vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true'",
+    );
+    expect(releaseStepScript).toContain(
+      '[[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]',
+    );
     expect(releaseStepScript).toContain('--include-opentui-preview');
     expect(releaseWorkflow).not.toContain('package:installation-assets');
     expect(releaseWorkflow).not.toContain('verify_node_checksum()');
@@ -2482,7 +2500,14 @@ describe('standalone release packaging', () => {
     expect(ossWorkflow).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
-    expect(ossWorkflow).toContain('vars.OPENTUI_PREVIEW_RELEASE_ENABLED');
+    // The sync workflow can be re-dispatched for any tag, and its steps come
+    // from the default branch while the checkout and the assets come from that
+    // tag, so it derives the flavor from the archives the release actually
+    // shipped. A repository variable describes the default branch instead, and
+    // asking a pre-flavor tag for preview archives fails the sync.
+    expect(ossWorkflow).not.toContain('vars.OPENTUI_PREVIEW_RELEASE_ENABLED');
+    expect(ossWorkflow).toContain('dist/standalone/*-opentui-preview.*');
+    expect(ossWorkflow).toContain('steps.flavor.outputs.preview_args');
     expect(ossWorkflow).toContain('--include-opentui-preview');
     expect(ossWorkflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_ID');
     expect(ossWorkflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_SECRET');
@@ -4600,6 +4625,10 @@ function ensureMinimalDist({
     writeFileSync(
       path.join(distPath, 'export-transcript-document.js'),
       'window.QwenExportRenderer = true;\n',
+    );
+    writeFileSync(
+      path.join(distPath, 'export-transcript-document.css'),
+      'body{color:red}\n',
     );
     writeFileSync(
       path.join(distPath, 'postinstall.js'),
