@@ -2015,6 +2015,16 @@ export class LlmChat {
     | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
     | null = null;
 
+  /**
+   * The first closed finish reason the in-flight `processStreamResponse`
+   * observed, if any. On a tool-result continuation the finish reason is
+   * deferred off the yielded chunks and re-emitted only on success, so on
+   * a failed attempt the send loop's `lastFinishReason` never sees the
+   * close; this side channel is what the continuation veto consults
+   * instead. Reset per attempt alongside `lastFinishReason`.
+   */
+  private lastObservedClosedFinishReason: string | undefined;
+
   private readonly imagePayloadStore = new InMemoryImagePayloadStore();
 
   /**
@@ -3360,6 +3370,7 @@ export class LlmChat {
             );
 
             lastFinishReason = undefined;
+            self.lastObservedClosedFinishReason = undefined;
             for await (const chunk of stream) {
               if (hasCandidateOutput(chunk)) {
                 streamYieldedChunk = true;
@@ -3602,10 +3613,16 @@ export class LlmChat {
             // tail into durable history. MAX_TOKENS stays continuable: it
             // marks a *truncated* answer, the exact shape this arm exists
             // for.
+            // The yielded finish reason governs when one reached the
+            // caller; when the tool-result deferral stripped it from the
+            // yielded chunks, the close survives only in what
+            // processStreamResponse observed.
+            const attemptFinishReason =
+              lastFinishReason ?? self.lastObservedClosedFinishReason;
             const canContinueAfterStreamCut =
               isRetryableStreamCut &&
-              (lastFinishReason === undefined ||
-                !CLOSED_FINISH_REASONS.has(lastFinishReason)) &&
+              (attemptFinishReason === undefined ||
+                !CLOSED_FINISH_REASONS.has(attemptFinishReason)) &&
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
@@ -3656,8 +3673,8 @@ export class LlmChat {
               debugLogger.warn('Transport stream retry not taken', {
                 retryPath: 'stream',
                 retryDecision:
-                  lastFinishReason !== undefined &&
-                  CLOSED_FINISH_REASONS.has(lastFinishReason)
+                  attemptFinishReason !== undefined &&
+                  CLOSED_FINISH_REASONS.has(attemptFinishReason)
                     ? 'skipped_terminal_finish_reason'
                     : streamYieldedContentChunk
                       ? 'skipped_after_content'
@@ -5364,6 +5381,11 @@ export class LlmChat {
             candidate.finishReason !== undefined &&
             CLOSED_FINISH_REASONS.has(candidate.finishReason),
         )?.finishReason;
+        // Mirror onto the instance: the tool-result deferral below strips
+        // the reason from the yielded chunk, and a failed attempt never
+        // re-emits it — without this the send loop's continuation veto is
+        // blind to a close on exactly that path.
+        this.lastObservedClosedFinishReason ??= closedFinishReason;
 
         if (isValidResponse(chunk)) {
           const candidate = chunk.candidates?.[0];
@@ -5643,17 +5665,30 @@ export class LlmChat {
       closedFinishReason !== undefined &&
       contentText
     ) {
-      debugLogger.warn(
-        'Accepting completed answer despite trailing stream failure.',
-        {
-          finishReason: closedFinishReason,
-          error:
-            streamError instanceof Error
-              ? streamError.message
-              : String(streamError),
-        },
-      );
-      streamError = null;
+      // Only the failure classes the transport recovery gates admit can be
+      // swallowed here. Anything else reached this point precisely because
+      // no recovery arm owns it, so nulling it would certify an outcome the
+      // turn did not have: a user cancel would be converted into a
+      // completion, a throttling StreamContentError would never reach the
+      // rate-limit retry, and the pipeline's own InvalidStreamError would
+      // bypass the invalid-stream retry budget.
+      const trailingErrorClassification = classifyRetryError(streamError);
+      if (
+        isRetryableStreamTransportError(trailingErrorClassification) ||
+        isRetryableStatuslessUpstreamError(trailingErrorClassification)
+      ) {
+        debugLogger.warn(
+          'Accepting completed answer despite trailing stream failure.',
+          {
+            finishReason: closedFinishReason,
+            error:
+              streamError instanceof Error
+                ? streamError.message
+                : String(streamError),
+          },
+        );
+        streamError = null;
+      }
     }
 
     // Deferred until after the throw sites below so a protocol-tag leak
