@@ -1087,6 +1087,11 @@ describe('bundled review skill', () => {
     expect(step).toContain(
       'fix-delta: snapshot <tree> of <root> — fingerprint <hex>; pass it back as --fingerprint on --since',
     );
+    // The channel the line arrives on, named: an orchestrator that
+    // captures only stdout would otherwise lose the fingerprint and walk
+    // into the "Never recompute it from the file" prohibition with no
+    // recovery path.
+    expect(step).toContain('prints one line on stderr');
     expect(step).toContain('that fingerprint is yours to keep');
     expect(step).toContain(
       '--since ' +
