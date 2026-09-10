@@ -71,12 +71,26 @@ an existing SDK session.
 
 Native Host registration is native-side product setup, not a Chrome-extension
 operation. On macOS and Linux, the first Browser runtime initialization
-idempotently installs the launcher and manifests for existing Google Chrome,
-Chrome for Testing, and Chromium profile roots. It refuses to overwrite
+checks Google Chrome, Chrome for Testing, and Chromium's standard `Default`
+and `Profile N` profiles for the Qwen extension. It reads the extension's
+registration in `Secure Preferences` or `Preferences` and confirms that its
+manifest exists, supporting both packaged and unpacked installations. Leftover
+extension directories alone do not count as an installed extension. If the
+extension is not found, initialization reports how to install it without
+writing Native Host files. After detection, initialization idempotently
+installs the launcher and manifests for existing browser roots. A configured
+`QWEN_BROWSER_USE_SOCKET_PATH` keeps using its externally managed setup.
+
+Installing the Qwen Chrome extension opts into this automatic local setup on
+first use. The launcher and Native Messaging registrations persist after
+Qwen exits. The installer refuses to overwrite
 foreign files: a conflicting launcher aborts initialization, while a
 conflicting browser manifest is skipped. Running
 `node <skill-base>/runtime/scripts/native-host-setup.js uninstall` removes
-files owned by Browser Use. Only a missing file is treated as absent; other
+files owned by Browser Use; `status` checks them and `install` explicitly
+registers them. To prevent automatic registration on a later Browser Use
+initialization, also uninstall the Chrome extension. Only a missing file is
+treated as absent; other
 read failures abort the operation without overwriting the unreadable file. The
 Chrome extension only opens the registered host
 through `connectNative()`.

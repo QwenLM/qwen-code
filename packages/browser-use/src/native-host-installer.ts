@@ -5,11 +5,13 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { Dirent } from 'node:fs';
 import {
   access,
   chmod,
   mkdir,
   readFile,
+  readdir,
   rename,
   rm,
   writeFile,
@@ -37,6 +39,61 @@ export interface NativeHostInstallResult {
   launcherPath: string;
   manifestPaths: string[];
   skippedForeignPaths: string[];
+}
+
+export async function isChromeExtensionInstalled(
+  options: NativeHostInstallOptions,
+): Promise<boolean> {
+  for (const manifestPath of resolveOptions(options).manifestPaths) {
+    const browserRoot = dirname(dirname(manifestPath));
+    let profiles: Dirent[];
+    try {
+      profiles = await readdir(browserRoot, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    for (const profile of profiles) {
+      if (
+        !profile.isDirectory() ||
+        !/^(Default|Profile \d+)$/.test(profile.name)
+      ) {
+        continue;
+      }
+      const profilePath = join(browserRoot, profile.name);
+      for (const file of ['Secure Preferences', 'Preferences']) {
+        const contents = await readExistingFile(join(profilePath, file));
+        if (contents === null) continue;
+        let preferences: {
+          extensions?: {
+            settings?: Record<string, { path?: unknown }>;
+          };
+        } | null;
+        try {
+          preferences = JSON.parse(contents) as typeof preferences;
+        } catch {
+          continue;
+        }
+        const extension =
+          preferences?.extensions?.settings?.[CHROME_EXTENSION_ID];
+        if (extension === undefined) continue;
+        if (
+          typeof extension?.path === 'string' &&
+          extension.path.length > 0 &&
+          (await pathExists(
+            join(
+              resolve(profilePath, 'Extensions', extension.path),
+              'manifest.json',
+            ),
+          ))
+        ) {
+          return true;
+        }
+        break;
+      }
+    }
+  }
+  return false;
 }
 
 export async function installChromeNativeHost(

@@ -10,6 +10,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   installChromeNativeHost,
+  isChromeExtensionInstalled,
   statusChromeNativeHost,
   uninstallChromeNativeHost,
 } from './native-host-installer.js';
@@ -25,6 +26,148 @@ afterEach(() => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+describe('Chrome extension installation detection', () => {
+  it.each(['darwin', 'linux'] as const)(
+    'finds packaged extensions in a secondary profile on %s',
+    async (platform) => {
+      const fixture = createFixture();
+      const browserRoot = createBrowserProfile(
+        fixture.homeDir,
+        platform,
+        'chrome',
+      );
+      const profile = path.join(browserRoot, 'Profile 2');
+      const extensionPath = path.join(CHROME_EXTENSION_ID, '1.0.0_0');
+      writeExtensionPreferences(profile, 'Secure Preferences', extensionPath);
+      const installedPath = path.join(profile, 'Extensions', extensionPath);
+      fs.mkdirSync(installedPath, { recursive: true });
+      fs.writeFileSync(path.join(installedPath, 'manifest.json'), '{}');
+
+      await expect(
+        isChromeExtensionInstalled({ ...fixture, platform }),
+      ).resolves.toBe(true);
+      expect(fs.existsSync(path.join(fixture.homeDir, '.qwen'))).toBe(false);
+      expect(
+        fs.existsSync(path.join(browserRoot, 'NativeMessagingHosts')),
+      ).toBe(false);
+    },
+  );
+
+  it.each(['chrome', 'chrome-for-testing', 'chromium'] as const)(
+    'finds an unpacked extension through %s preferences',
+    async (browser) => {
+      const fixture = createFixture();
+      const browserRoot = createBrowserProfile(
+        fixture.homeDir,
+        'darwin',
+        browser,
+      );
+      const extensionPath = path.join(fixture.homeDir, 'unpacked extension');
+      fs.mkdirSync(extensionPath, { recursive: true });
+      fs.writeFileSync(path.join(extensionPath, 'manifest.json'), '{}');
+      writeExtensionPreferences(
+        path.join(browserRoot, 'Default'),
+        'Preferences',
+        extensionPath,
+      );
+
+      await expect(
+        isChromeExtensionInstalled({ ...fixture, platform: 'darwin' }),
+      ).resolves.toBe(true);
+    },
+  );
+
+  it.each([
+    'no profile',
+    'no extension',
+    'other extension',
+    'leftover files',
+    'missing files',
+    'invalid preferences',
+  ])('does not confirm installation with %s', async (scenario) => {
+    const fixture = createFixture();
+    if (scenario !== 'no profile') {
+      const browserRoot = createBrowserProfile(
+        fixture.homeDir,
+        'darwin',
+        'chrome',
+      );
+      const profile = path.join(browserRoot, 'Default');
+      const extensionPath = path.join(fixture.homeDir, 'unpacked extension');
+      fs.mkdirSync(extensionPath, { recursive: true });
+      if (scenario !== 'missing files') {
+        fs.writeFileSync(path.join(extensionPath, 'manifest.json'), '{}');
+      }
+      writeExtensionPreferences(profile, 'Preferences', extensionPath);
+      if (scenario === 'no extension' || scenario === 'leftover files') {
+        fs.writeFileSync(path.join(profile, 'Preferences'), '{}');
+      }
+      if (scenario === 'leftover files') {
+        const leftover = path.join(
+          profile,
+          'Extensions',
+          CHROME_EXTENSION_ID,
+          '1.0.0_0',
+        );
+        fs.mkdirSync(leftover, { recursive: true });
+        fs.writeFileSync(path.join(leftover, 'manifest.json'), '{}');
+      }
+      if (scenario === 'other extension') {
+        fs.writeFileSync(
+          path.join(profile, 'Preferences'),
+          JSON.stringify({
+            extensions: { settings: { other: { path: extensionPath } } },
+          }),
+        );
+      }
+      if (scenario === 'invalid preferences') {
+        fs.writeFileSync(path.join(profile, 'Preferences'), '{');
+      }
+    }
+
+    await expect(
+      isChromeExtensionInstalled({ ...fixture, platform: 'darwin' }),
+    ).resolves.toBe(false);
+  });
+
+  it('uses Secure Preferences ahead of an older Preferences entry', async () => {
+    const fixture = createFixture();
+    const profile = path.join(
+      createBrowserProfile(fixture.homeDir, 'darwin', 'chrome'),
+      'Default',
+    );
+    const extensionPath = path.join(fixture.homeDir, 'old extension');
+    fs.mkdirSync(extensionPath, { recursive: true });
+    fs.writeFileSync(path.join(extensionPath, 'manifest.json'), '{}');
+    writeExtensionPreferences(profile, 'Preferences', extensionPath);
+    writeExtensionPreferences(
+      profile,
+      'Secure Preferences',
+      '/missing/extension',
+    );
+
+    await expect(
+      isChromeExtensionInstalled({ ...fixture, platform: 'darwin' }),
+    ).resolves.toBe(false);
+  });
+});
+
+function writeExtensionPreferences(
+  profile: string,
+  file: string,
+  extensionPath: string,
+): void {
+  fs.mkdirSync(profile, { recursive: true });
+  fs.writeFileSync(
+    path.join(profile, file),
+    JSON.stringify({
+      extensions: {
+        settings: { [CHROME_EXTENSION_ID]: { path: extensionPath } },
+      },
+    }),
+  );
+}
 
 describe('Chrome Native Host installer', () => {
   it('installs the manifest for an existing macOS Chrome profile', async () => {
@@ -243,7 +386,7 @@ function createBrowserProfile(
   homeDir: string,
   platform: 'darwin' | 'linux',
   browser: 'chrome' | 'chrome-for-testing' | 'chromium',
-): void {
+): string {
   const roots =
     platform === 'darwin'
       ? {
@@ -257,5 +400,7 @@ function createBrowserProfile(
           'chrome-for-testing': '.config/google-chrome-for-testing',
           chromium: '.config/chromium',
         };
-  fs.mkdirSync(path.join(homeDir, roots[browser]), { recursive: true });
+  const root = path.join(homeDir, roots[browser]);
+  fs.mkdirSync(root, { recursive: true });
+  return root;
 }

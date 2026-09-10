@@ -10,6 +10,7 @@ import { ChromeExtensionTransport } from './bridge/index.js';
 import { DEFAULT_CHROME_DOCUMENTATION } from './core/chrome-runtime-documentation.js';
 import {
   installChromeNativeHost,
+  isChromeExtensionInstalled,
   nativeHostInstallHome,
 } from './native-host-installer.js';
 import { PlaywrightRuntime } from './playwright/playwright-runtime.js';
@@ -21,12 +22,20 @@ export async function createBrowserBackend(): Promise<BrowserBackend> {
     !process.env['QWEN_BROWSER_USE_SOCKET_PATH'] &&
     (process.platform === 'darwin' || process.platform === 'linux')
   ) {
-    await installChromeNativeHost({
+    const options = {
       homeDir: nativeHostInstallHome(),
       nativeHostPath: fileURLToPath(
         new URL('./native-host.js', import.meta.url),
       ),
-    });
+    };
+    if (!(await isChromeExtensionInstalled(options))) {
+      throw new Error(
+        'Could not find an installed Qwen Code Chrome extension. ' +
+          'Install the Qwen Code Chrome extension at chrome://extensions ' +
+          '(Developer mode > Load unpacked), then retry Browser Use.',
+      );
+    }
+    await installChromeNativeHost(options);
   }
   return new PlaywrightRuntime({
     bridge: new ChromeExtensionTransport(),
