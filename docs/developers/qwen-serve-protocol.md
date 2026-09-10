@@ -2805,17 +2805,43 @@ Response:
 
 The `202` response acknowledges admission, not Agent completion. Observe the
 session SSE stream after `lastEventId` and correlate `turn_complete` or
-`turn_error` by `promptId`. `turn_complete.data.stopReason` may be `end_turn`,
-`cancelled`, `max_tokens`, `error`, or `length`.
+`turn_error` by `promptId`.
+
+`turn_complete.data.stopReason` carries the ACP `StopReason` the agent
+returned — `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` or
+`cancelled`. The daemon can also emit `cancelled` for a prompt aborted without
+the agent running it, including queued-prompt removal, caller disconnect, or
+drain/teardown; that value does not prove the agent ran the prompt. **Treat the
+field as an open string**: it is typed `string` on the wire, the ACP set can
+grow, and a client that exhaustively switches on it will break on the next
+addition.
+
+Two daemon-side outcomes do **not** arrive on this field. A turn that fails
+inside the daemon — deadline expiry, teardown flush, child crash — is published
+as a `turn_error` event, never as a `turn_complete` stopReason. Its `data`
+always carries `message`; `code` is present only when the daemon classified the
+failure (deadline expiry → `prompt_deadline_exceeded`, teardown flush →
+`channel_closed`, `session_closed`, `session_killed` or `daemon_shutdown`), and
+the frame for a prompt rejected because the ACP child died mid-request carries
+neither `code` nor `errorKind`. Treat both as optional and branch on `message`.
+
+A turn recovered from persisted history after a restart is not re-published on
+the stream at all; it surfaces in `promptTerminals[]` in the
+`POST /session/:id/load` response body — as
+`{ terminal: "completed", stopReason: "reconstructed_from_transcript" }` when
+the persisted tail shows the turn finished, or
+`{ terminal: "interrupted", code: "daemon_lost" }` with **no** `stopReason` when
+the daemon died mid-turn. Match the entry by `promptId` and branch on
+`terminal`; `promptTerminals` is omitted from the response entirely when the
+ledger holds no evidence for the session.
 
 If the HTTP client disconnects mid-prompt, the daemon sends an ACP `cancel` notification to the agent, which winds the prompt down with `stopReason: "cancelled"`.
 
 When `prompt_absolute_deadline` is advertised, `deadlineMs` may shorten the
 configured server deadline. Expiry emits a correlated `turn_error` with
-`errorKind: "prompt_deadline_exceeded"`. The deadline releases the caller
-without killing the agent; if the agent later settles, turn-status polls for
-that `promptId` return the settled transcript outcome instead of the deadline
-error.
+`code: "prompt_deadline_exceeded"`. The deadline releases the caller without
+killing the agent; if the agent later settles, turn-status polls for that
+`promptId` return the settled transcript outcome instead of the deadline error.
 
 ### `POST /session/:id/cancel`
 
