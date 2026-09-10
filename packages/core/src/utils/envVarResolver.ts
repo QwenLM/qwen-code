@@ -20,6 +20,15 @@ import { isInternalSecretEnvVar } from './sanitize-child-env.js';
  * Session-ID placeholders are also reserved for per-request custom header
  * expansion, including bare, braced, and case-insensitive spellings.
  *
+ * Substituted values are inserted VERBATIM — never quoted or escaped for any
+ * downstream syntax. A placeholder that sits inside a shell string (e.g. a hook
+ * or MCP `command` of the form `bash -c "server --filter \"$FILTER\""`) hands
+ * the shell whatever the variable holds, so a value containing `"`, `` ` `` or
+ * `$(` changes the command that runs rather than the argument it receives.
+ * Callers that splice the result into a shell string are responsible for their
+ * own quoting; prefer passing values through `args`/`env` where no shell parses
+ * them.
+ *
  * @param value - The string that may contain environment variable placeholders
  * @returns The string with environment variables resolved
  *

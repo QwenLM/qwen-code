@@ -3976,6 +3976,32 @@ describe('loadCliConfig with --mcp-config', () => {
     });
   });
 
+  // Same document, same placeholders, whichever way it is supplied: settings
+  // scopes and project `.mcp.json` both expand `$VAR`/`${VAR}`, so
+  // `--mcp-config` must too. Shipping the literal placeholder as an auth header
+  // surfaces as an opaque 401 from the server (issue #11499).
+  it('expands ${VAR} and $VAR in --mcp-config servers', async () => {
+    vi.stubEnv('MCPCONFIG_TEST_TOKEN', 'super-secret');
+    vi.stubEnv('MCPCONFIG_TEST_HOST', 'mcp.example.test');
+    const mcpConfig = JSON.stringify({
+      mcpServers: {
+        'cli-server': {
+          httpUrl: 'https://${MCPCONFIG_TEST_HOST}/mcp',
+          headers: { Authorization: 'Bearer $MCPCONFIG_TEST_TOKEN' },
+        },
+      },
+    });
+    process.argv = ['node', 'script.js', '--mcp-config', mcpConfig];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv);
+
+    const mcpServers = config.getMcpServers() ?? {};
+    expect(mcpServers['cli-server']).toEqual({
+      httpUrl: 'https://mcp.example.test/mcp',
+      headers: { Authorization: 'Bearer super-secret' },
+    });
+  });
+
   it('should parse inline JSON without wrapper', async () => {
     const mcpConfig = JSON.stringify({
       'direct-server': { url: 'http://localhost:8080' },

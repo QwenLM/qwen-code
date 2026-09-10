@@ -25,6 +25,16 @@ export const MCP_APPROVALS_FILENAME = 'mcpApprovals.json';
  * bound to `hash` — the canonical hash of the exact config the user reviewed. If
  * `.mcp.json` is later edited, the live hash no longer matches and the server is
  * treated as `pending` again (see issue #4615).
+ *
+ * "The exact config the user reviewed" means the config AFTER `$VAR` / `${VAR}`
+ * expansion, because that is what the dialog renders and what the transport will
+ * actually use. So the binding is to the effective config, not to the bytes of
+ * `.mcp.json`: rotating a referenced env var re-opens the approval even though
+ * the file is untouched. That is the intended trade-off, not an oversight —
+ * hashing the unexpanded text would leave an approval valid while
+ * `${MCP_HOST}` silently re-pointed the approved server at a different
+ * endpoint, which is precisely the substitution this gate exists to catch.
+ * The re-prompt is the cost of that guarantee; the approval dialog states it.
  */
 export type McpApprovalStatus = 'approved' | 'rejected';
 

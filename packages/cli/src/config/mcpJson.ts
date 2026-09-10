@@ -16,6 +16,104 @@ import stripJsonComments from 'strip-json-comments';
 /** Project-scoped MCP config filename, read from the workspace root. */
 export const PROJECT_MCP_FILENAME = '.mcp.json';
 
+/**
+ * Fields whose values are expanded for `$VAR` / `${VAR}`. Deliberately an
+ * ALLOWLIST of transport fields — the ones that decide what gets executed or
+ * connected to, i.e. the only ones a checked-in `.mcp.json` needs a secret in.
+ *
+ * Metadata (`description`, `extensionName`, `includeTools`, …) is left verbatim:
+ * it was never expanded before this loader learned to expand anything, a `$`
+ * there is far likelier to be literal text than a placeholder, and those two
+ * fields in particular are exactly what `hashMcpServerConfig` treats as
+ * non-behavioral — expanding them would make a cosmetic label able to pull a
+ * value out of the environment for no benefit.
+ */
+const ENV_EXPANDED_TRANSPORT_FIELDS = [
+  // stdio
+  'command',
+  'args',
+  'env',
+  'cwd',
+  // sse / streamable http
+  'url',
+  'httpUrl',
+  'headers',
+  // websocket
+  'tcp',
+  // OAuth: `clientSecret` is exactly the kind of value a checked-in file has to
+  // reference rather than embed, and every settings scope already expands it.
+  'oauth',
+] as const;
+
+/**
+ * Maximum object/array nesting accepted for a single server entry. A real
+ * server config nests two or three levels (`env`, `headers`, `args`); this cap
+ * is generous by orders of magnitude and exists only to keep a hostile or
+ * generated `.mcp.json` from reaching recursive consumers — `resolveEnvVarsInObject`
+ * and the `JSON.stringify` inside `hashMcpServerConfig` are both recursive and
+ * blow the call stack with `RangeError` well before any legitimate config does.
+ * Exceeding it is reported through `errors` and the entry is skipped, so a
+ * pathological file degrades one server instead of crashing `qwen`,
+ * `qwen mcp list` and `qwen mcp approve`.
+ */
+export const MAX_MCP_SERVER_CONFIG_DEPTH = 64;
+
+/**
+ * Whether `root` nests objects/arrays deeper than `maxDepth`.
+ *
+ * Iterative on purpose: a recursive depth probe would itself overflow on the
+ * input it is meant to reject. `seen` guards against a cyclic graph — JSON.parse
+ * output cannot be cyclic, but this helper must not depend on its only caller's
+ * provenance.
+ */
+function exceedsMaxDepth(root: unknown, maxDepth: number): boolean {
+  const stack: Array<{ value: unknown; depth: number }> = [
+    { value: root, depth: 1 },
+  ];
+  const seen = new Set<object>();
+  while (stack.length > 0) {
+    const { value, depth } = stack.pop()!;
+    if (value === null || typeof value !== 'object') {
+      continue;
+    }
+    if (depth > maxDepth) {
+      return true;
+    }
+    if (seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    const children = Array.isArray(value) ? value : Object.values(value);
+    for (const child of children) {
+      stack.push({ value: child, depth: depth + 1 });
+    }
+  }
+  return false;
+}
+
+/**
+ * Expand `$VAR` / `${VAR}` in the transport fields of one server entry, leaving
+ * every other field byte-identical. Returns the input unchanged when it has no
+ * expandable field, so untouched entries keep their object identity.
+ */
+function resolveTransportEnvVars(config: MCPServerConfig): MCPServerConfig {
+  const source = config as unknown as Record<string, unknown>;
+  let resolved: Record<string, unknown> | undefined;
+  for (const field of ENV_EXPANDED_TRANSPORT_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(source, field)) {
+      continue;
+    }
+    const original = source[field];
+    const value = resolveEnvVarsInObject(original);
+    if (value === original) {
+      continue;
+    }
+    resolved ??= { ...source };
+    resolved[field] = value;
+  }
+  return (resolved ?? config) as unknown as MCPServerConfig;
+}
+
 export interface LoadProjectMcpServersResult {
   /**
    * Servers declared in `.mcp.json`, each tagged `scope: 'project'`. These are
@@ -42,6 +140,20 @@ export interface LoadProjectMcpServersResult {
  * `$VAR` / `${VAR}` placeholders are expanded with the same resolver every
  * settings scope uses, so a checked-in `.mcp.json` can reference a secret
  * instead of embedding it.
+ *
+ * This is deliberately NOT full parity with a settings scope. `loadSettings`
+ * hands the whole document to the resolver, so every string in it expands;
+ * here only {@link ENV_EXPANDED_TRANSPORT_FIELDS} does. A `.mcp.json` is
+ * repository-supplied, and expanding a cosmetic `description` or a provenance
+ * `extensionName` buys nothing while widening what a committed file can pull
+ * out of the environment — so this loader expands the fields that decide what
+ * runs and what it connects to, and leaves the rest byte-identical.
+ *
+ * A server entry nested deeper than {@link MAX_MCP_SERVER_CONFIG_DEPTH} is
+ * reported via `errors` and skipped instead of being handed to the recursive
+ * resolver, and any unexpected throw while processing one entry is likewise
+ * demoted to an `errors` line. One hostile entry therefore costs that one
+ * server, never the process.
  *
  * Deliberately NO `getHomeEnvFallbackVars()` here, unlike `loadSettings`.
  * Settings need that fallback because they resolve before `loadEnvironment()`
@@ -106,14 +218,35 @@ export function loadProjectMcpServers(
       errors.push(`${filePath}: server "${name}" is not an object — skipped`);
       continue;
     }
-    // `.mcp.json` is the Claude Code convention, so entries may use Claude's
-    // `type`-based transport shape; normalize them to Qwen's field-based shape.
-    servers[name] = {
-      ...normalizeClaudeMcpServer(
-        resolveEnvVarsInObject(value as MCPServerConfig),
-      ),
-      scope: 'project',
-    };
+    if (exceedsMaxDepth(value, MAX_MCP_SERVER_CONFIG_DEPTH)) {
+      errors.push(
+        `${filePath}: server "${name}" nests deeper than ` +
+          `${MAX_MCP_SERVER_CONFIG_DEPTH} levels — skipped`,
+      );
+      continue;
+    }
+    try {
+      // `.mcp.json` is the Claude Code convention, so entries may use Claude's
+      // `type`-based transport shape; normalize them to Qwen's field-based shape.
+      servers[name] = {
+        ...normalizeClaudeMcpServer(
+          resolveTransportEnvVars(value as MCPServerConfig),
+        ),
+        scope: 'project',
+      };
+    } catch (e) {
+      // Last-resort net so no single entry can take down startup: the depth cap
+      // above already covers the known stack-overflow path, but this loader is
+      // reached by `qwen`, `qwen mcp list` and `qwen mcp approve` alike and must
+      // stay total. "Never throws" is this function's stated contract — see the
+      // `errors` field above and the malformed-file paragraph in its docstring,
+      // both of which predate this guard; the parse `try/catch` already applies
+      // it to the whole-file case, and this extends it per entry.
+      errors.push(
+        `${filePath}: server "${name}" could not be processed: ` +
+          `${(e as Error).message} — skipped`,
+      );
+    }
   }
 
   return { servers, path: filePath, errors };
