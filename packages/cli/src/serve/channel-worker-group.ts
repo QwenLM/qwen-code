@@ -23,6 +23,7 @@ import { ChannelDeliveryError } from '../runtime/channel-delivery-ipc.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
+import { assertChannelControlWorkspaceCapacity } from './channel-control-capacity.js';
 
 /** A channel worker snapshot annotated with its owning workspace. */
 export interface ChannelWorkerGroupSnapshot extends ChannelWorkerSnapshot {
@@ -173,6 +174,9 @@ function startupFailureDetails(error: unknown): {
 export function createChannelWorkerGroup(
   opts: CreateChannelWorkerGroupOptions,
 ): ChannelWorkerGroup {
+  assertChannelControlWorkspaceCapacity(
+    opts.groups.map((group) => group.workspaceCwd),
+  );
   let generation = 0;
   let entries = new Map<string, ChannelWorkerGroupEntry>();
   const groupsByWorkspace = new Map(
@@ -581,6 +585,13 @@ export function createChannelWorkerGroup(
             }
           }
         }
+        // Failed rollback can retain both the previous and candidate owners.
+        assertChannelControlWorkspaceCapacity([
+          ...entries.keys(),
+          ...groupsByWorkspace.keys(),
+          ...Array.from(pendingEntries, (entry) => entry.workspaceCwd),
+          ...targets.keys(),
+        ]);
         const unchanged = new Map<string, ChannelWorkerGroupEntry>();
         const oldAffected: ChannelWorkerGroupEntry[] = [];
         const newEntries: ChannelWorkerGroupEntry[] = [];
@@ -805,6 +816,12 @@ export function createChannelWorkerGroup(
       if (entries.has(workspaceCwd)) return;
       const target = groupsByWorkspace.get(workspaceCwd);
       if (!target) return;
+      assertChannelControlWorkspaceCapacity([
+        ...entries.keys(),
+        ...groupsByWorkspace.keys(),
+        ...Array.from(pendingEntries, (entry) => entry.workspaceCwd),
+        target.workspaceCwd,
+      ]);
       const entry = createEntry(target);
       entries.set(workspaceCwd, entry);
       if (!groupStarted || stopping) {
