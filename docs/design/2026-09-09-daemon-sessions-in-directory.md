@@ -1,5 +1,7 @@
 # Daemon-managed sessions in the session registry
 
+[English](2026-09-09-daemon-sessions-in-directory.md) | [简体中文](2026-09-09-daemon-sessions-in-directory.zh-CN.md)
+
 Status: implemented alongside this document. Lets a session `qwen serve`
 drives be discovered and addressed like any other, and lets it send.
 
@@ -68,10 +70,17 @@ naming a session this process does not hold, or naming none, is answered
 descriptors by the session count and buy nothing, since the frame
 already carries the discriminator.
 
-**Exclude self by session id alone.** The address is no longer evidence
-of identity, so it is out of the test. A twin — the same session id under
-a second process, which `qwen --resume` creates — is still excluded,
-because that is what the id catches.
+**Exclude self by session id, re-read on a shared address.** The
+address is no longer evidence of identity, so it is out of the filter.
+A twin — the same session id under a second process, which
+`qwen --resume` creates — is still excluded, because that is what the id
+catches. One window remains: the id filter reads this session's record
+before the directory, and a re-id patch (`/clear`, or the re-assert a
+misaddressed frame triggers) can land in between, re-admitting this
+session's own record under its new id. The address does not move on a
+re-id, so a peer on this session's own inbox is checked against a fresh
+read of the record before it is believed to be a sibling — on the send
+path and in `list_agents` alike.
 
 **Inbound is refused, not held.** A hold is a question put to a person,
 and nobody is watching a held-message list on a daemon-managed session's
@@ -80,16 +89,28 @@ to learn nothing. `refused` says so immediately. Where a held message
 _should_ surface for these sessions — the ACP client, the daemon's own
 API — is a real question, and answering it is separate work.
 
-**Register only when messaging is on.** The interactive UI registers
-unconditionally, because its record also answers "what is running right
-now". A daemon-managed session's record exists to be addressed; with
-messaging off, registering one would put a name in every peer's listing
-that can be addressed and never answered.
+**Register when the session's own settings turn messaging on.** The
+interactive UI registers unconditionally, because its record also
+answers "what is running right now". A hosted session's record exists
+to be addressed; with messaging off, registering one would put a name
+in every peer's listing that can be addressed and never answered. The
+decision is read from the session's own `LoadedSettings`, not the
+process's startup settings: one process can host sessions from more
+than one workspace, and each appears in the directory — or stays
+invisible — by what its own settings say.
 
 **Bind on the first session, close on every exit.** The inbox is bound by
 the first session that needs one — an ACP process with no session has
-nothing to advertise. Closing is registered as exit cleanup and also runs
-from the two teardown methods, because a bare signal reaches neither.
+nothing to advertise. A bind that fails is not "started": the next
+hosted session retries, and a late success fans the address out to every
+record the process already wrote. Closing is registered as exit cleanup
+and also runs from the two teardown methods, because a bare signal
+reaches neither; once closed it stays closed, so a retry cannot
+resurrect the socket after teardown. In `disposeSessions` the close is
+awaited after the generation aborts — a slow drain must not keep a
+running turn executing tools once the client is gone — and before the
+record teardown, because the address clear it fans out is a patch the
+records must still be there for.
 
 The transport is imported statically, on purpose. Its own imports all
 sit inside the agent's existing static closure, so lazy-loading it saves
@@ -99,10 +120,13 @@ modules the ACP fast path must not load (iconv-lite's encoding tables) in
 a chunk the agent then imports statically — the startup bundle closure
 check exists to catch exactly that.
 
-**The process's own settings, captured once.** `this.settings` on the
-agent is re-pointed at whichever session is being handled. Whether to
-bind an inbox is a question about the process, so it is answered from the
-settings the process started with, captured at construction.
+**One bind per process, a decision per session.** The inbox is bound
+once for the process and shared by every session it hosts — but whether
+a session registers at all is that session's own call, read from the
+settings its workspace loaded. `this.settings` on the agent is
+re-pointed at whichever session is being handled, so the decision is
+threaded through `createAndStoreSession` explicitly rather than read
+from a process-wide capture.
 
 ## Trade-offs
 
@@ -128,7 +152,8 @@ itself. It labels a listing; nothing reads it to decide anything.
 - `packages/core/src/config/config.ts` — remembering a session's slot and
   passing it to every registry write.
 - `packages/core/src/ipc/peer-send.ts` — reading the sending session's
-  own record, and excluding self by id.
+  own record, excluding self by id with a fresh-read recheck on a shared
+  address, and pacing sends per inbox address.
 - `packages/core/src/tools/list-agents.ts`, `send-message.ts` — passing
   the slot through.
 - `packages/core/src/ipc/inbound-gate.ts`,

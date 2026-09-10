@@ -1421,6 +1421,30 @@ describe('listLiveSessions', () => {
     ]);
   });
 
+  it('ignores a record whose zero-padded filename parses to its pid', async () => {
+    // The agreement check parses the pid out of the filename; without a
+    // canonical-form requirement `007` parses to 7 and a name this code
+    // never wrote passes a guard whose stated job is to reject it — and
+    // a passing name reaches the sweep's unlink. Linux masks this (its
+    // pidNs is never null), so the namespace read is spied to the value
+    // every other platform returns, and the filename grammar decides.
+    vi.spyOn(processLiveness, 'readPidNamespaceId').mockReturnValue(null);
+    // Live PID arm: the phantom is listed as a live session. Dead PID
+    // arm: the sweep unlinks a file this code never wrote.
+    const alive = await writeRaw(
+      `0${process.pid}.json`,
+      liveBody({ pidNs: null }),
+    );
+    const dead = await writeRaw(
+      `0${DEAD_PID}.json`,
+      liveBody({ pid: DEAD_PID, pidNs: null }),
+    );
+
+    expect(await listLiveSessions()).toEqual([]);
+    await expect(fs.stat(alive)).resolves.toBeDefined();
+    await expect(fs.stat(dead)).resolves.toBeDefined();
+  });
+
   it('never opens a file that is not named <pid>.json', async () => {
     await writeRaw('2026-planning-notes.json', { hello: 'world' });
     await writeRaw('notes.txt', 'nope');

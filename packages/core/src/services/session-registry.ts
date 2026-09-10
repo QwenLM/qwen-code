@@ -128,8 +128,14 @@ const TEMP_FILENAME = /^\d+(-[0-9a-f]{8})?\.json\.[0-9a-f]{12}\.tmp$/;
 /** The PID a record filename is keyed by, or null if it is not ours. */
 function pidOfRecordFilename(name: string): number | null {
   if (!RECORD_FILENAME.test(name)) return null;
-  const pid = Number.parseInt(name.split(/[-.]/)[0]!, 10);
-  return Number.isInteger(pid) && pid > 0 ? pid : null;
+  const digits = name.split(/[-.]/)[0]!;
+  const pid = Number.parseInt(digits, 10);
+  // Canonical decimal form only: `007` parses to 7, but this code never
+  // writes a padded name, so one that passes here belongs to something
+  // else — and a passing name reaches the sweep's unlink.
+  return Number.isInteger(pid) && pid > 0 && String(pid) === digits
+    ? pid
+    : null;
 }
 
 /** Younger temps may belong to a writer mid-rename — leave them alone. */

@@ -274,10 +274,12 @@ export const MAX_PACED_TARGETS = 256;
  * fails, the tool result says to batch, and the receiver never spends a
  * connection on a message it was going to drop.
  *
- * Keyed by socket path rather than by name, with the session id retained
- * in the value. The path is what an inbox is and what the receiver meters
- * by (`from` is the mirror image of this key), while the id detects a new
- * session that reused the same path and therefore owns a fresh bucket.
+ * Keyed by socket path rather than by name, and by path alone. The path
+ * is what an inbox is and what the receiver meters by (`from` is the
+ * mirror image of this key), and several sessions can share one inbox:
+ * re-minting the bucket when the addressed session id changes would let
+ * a sender alternating between siblings reset its allowance on every
+ * send, and forget the bodies the receiver still remembers.
  *
  * A mirror can only ever be approximate: this session is not the only one
  * sending, and the receiver's bucket is shared. It is deliberately no
@@ -295,7 +297,6 @@ interface PacedBody {
 }
 
 interface PacedTarget {
-  sessionId: string;
   tokens: number;
   lastRefill: number;
   /** Sends in the current burst, for the message the refusal carries. */
@@ -320,19 +321,13 @@ interface PacedTarget {
 
 const pacedTargets = new Map<string, PacedTarget>();
 
-function pacedTargetFor(
-  ipcPath: string,
-  sessionId: string,
-  now: number,
-): PacedTarget {
+function pacedTargetFor(ipcPath: string, now: number): PacedTarget {
   const existing = pacedTargets.get(ipcPath);
-  if (existing?.sessionId === sessionId) {
+  if (existing !== undefined) {
     pacedTargets.delete(ipcPath);
     pacedTargets.set(ipcPath, existing);
     return existing;
   }
-  const generation = (existing?.generation ?? -1) + 1;
-  pacedTargets.delete(ipcPath);
   while (pacedTargets.size >= MAX_PACED_TARGETS) {
     let victim: string | undefined;
     for (const [candidate, target] of pacedTargets) {
@@ -353,13 +348,12 @@ function pacedTargetFor(
     pacedTargets.delete(victim);
   }
   const fresh: PacedTarget = {
-    sessionId,
     tokens: PEER_ADMISSION_LIMITS.bucketCapacity,
     lastRefill: now,
     sentInBurst: 0,
     burstStartedAt: now,
     bodies: [],
-    generation,
+    generation: 0,
   };
   pacedTargets.set(ipcPath, fresh);
   return fresh;
@@ -391,7 +385,6 @@ export function setSendPacerClockForTest(
  */
 function reservePacerToken(
   ipcPath: string,
-  sessionId: string,
   body: string,
   messageId: string,
 ):
@@ -400,7 +393,7 @@ function reservePacerToken(
   | { ok: false; repeat?: false; sentInBurst: number } {
   const now = pacerNow();
   const wallNow = pacerWallNow();
-  const target = pacedTargetFor(ipcPath, sessionId, now);
+  const target = pacedTargetFor(ipcPath, now);
   target.tokens = refillBucket(
     target.tokens,
     target.lastRefill,
@@ -682,6 +675,18 @@ export async function sendToPeer(
   }
 
   const peer = resolved.peer;
+  // This session's own record can be patched — a /clear re-id, or the
+  // re-assert a misaddressed inbound frame triggers — between the two
+  // reads above, and the stale id filter then keeps it under its new
+  // id. The reply address does not move on a re-id, so a peer on this
+  // session's own inbox is checked against a fresh read before it is
+  // believed to be a sibling.
+  if (peer.ipcPath === self.ipcPath) {
+    const fresh = await readOwnSessionRecord(options.slot);
+    if (fresh !== null && fresh.sessionId === peer.sessionId) {
+      return { kind: 'self', name: self.name };
+    }
+  }
   // The address the ledger remembers is the one list_agents would print:
   // a receipt that names an address which re-resolves ambiguous — or that
   // the listing never showed — sends the model in circles.
@@ -730,7 +735,6 @@ export async function sendToPeer(
   });
   const reservation = reservePacerToken(
     peer.ipcPath,
-    peer.sessionId,
     options.message,
     frame.msgId,
   );
@@ -740,8 +744,8 @@ export async function sendToPeer(
       peer,
       address,
       reason: reservation.repeat
-        ? `that exact message went to that session within the last ${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} seconds, and its ` +
-          'inbox turns away a repeat before anyone reads it, so this one was not sent. ' +
+        ? `that exact message went to that inbox within the last ${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} seconds, and it ` +
+          'turns away a repeat before anyone reads it, so this one was not sent. ' +
           'Say something different, or wait for a reply rather than re-sending.'
         : reservation.sentInBurst === 0
           ? 'that session inbox is still over its rate limit, so this message was not sent. Wait a little before sending more.'

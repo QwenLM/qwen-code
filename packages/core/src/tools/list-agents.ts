@@ -72,11 +72,25 @@ class ListAgentsInvocation extends BaseToolInvocation<
     // sibling of this session from the listing.
     const slot = this.config.getSessionRegistrySlot();
     const self = await getOwnPeerIdentity(slot);
-    const peers = self
+    let peers = self
       ? (await listMessageablePeers()).filter(
           (peer) => peer.sessionId !== self.sessionId,
         )
       : [];
+    if (self && peers.some((peer) => peer.ipcPath === self.ipcPath)) {
+      // The id filter above can read this session's record from before
+      // a re-id patch landed (/clear, or a peer-driven re-assert); the
+      // address does not move on a re-id, so an entry on this session's
+      // own inbox is re-read before it is advertised as a sibling.
+      // sendToPeer applies the same re-read before sending.
+      const fresh = await getOwnPeerIdentity(slot);
+      if (fresh) {
+        peers = peers.filter(
+          (peer) =>
+            peer.ipcPath !== self.ipcPath || peer.sessionId !== fresh.sessionId,
+        );
+      }
+    }
 
     // send_message claims some addresses before it looks at peers — the
     // broadcast keyword, and with a team active the leader handle, the

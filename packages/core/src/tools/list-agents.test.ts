@@ -360,6 +360,27 @@ describe('ListAgentsTool — peer sessions', () => {
     ]);
   });
 
+  it('excludes this session when its record carries a freshly patched id', async () => {
+    // A /clear re-id patches this session's record in place; landing
+    // between the two reads, the stale id filter no longer recognizes
+    // it. The reply address does not move on a re-id, so the entry is
+    // re-read before it is advertised as a sibling.
+    getOwnPeerIdentity
+      .mockResolvedValueOnce(SELF)
+      .mockResolvedValue({ ...SELF, sessionId: 's2' });
+    listMessageablePeers.mockResolvedValue([
+      peerRow({
+        sessionId: 's2',
+        ref: 'bbb222',
+        name: 'self-00',
+        ipcPath: '/tmp/self.sock',
+      }),
+    ]);
+    // No peers left: the roster falls back to the plain-text empty case.
+    const result = await run();
+    expect(result.llmContent).toContain('no other Qwen Code session');
+  });
+
   it('excludes a differently named twin of this session', async () => {
     // `qwen --resume <id>` from another directory: same session id under
     // a second process. sendToPeer refuses it as self, so advertising it

@@ -3498,17 +3498,10 @@ class QwenAgent implements Agent {
    * on a daemon-managed session's behalf; a sender is told so at once
    * instead of waiting out an expiry.
    */
-  /**
-   * The settings this process started with.
-   *
-   * `this.settings` is re-pointed at whichever session is being handled,
-   * so it cannot answer a question about the process. Cross-session
-   * messaging is one of those: one inbox is bound per process, and
-   * whether to bind it is settled once, here.
-   */
-  private readonly startupSettings: LoadedSettings;
-  private peerMessagingEnabled = false;
   private peerMessagingStart: Promise<PeerMessaging | null> | null = null;
+  // Set by closePeerMessaging: a retry must not resurrect an inbox after
+  // teardown ran.
+  private peerMessagingClosed = false;
   /**
    * Sessions already given a record. A session is published once, but a
    * reload can hand the same id back through the same path, and two
@@ -4563,19 +4556,17 @@ class QwenAgent implements Agent {
   }
 
   /**
-   * Bind one inbox for every session this process hosts, when the user
-   * turned cross-session messaging on.
+   * Bind the one inbox every session this process hosts shares.
    *
    * Not awaited: binding a socket must not delay the first prompt, and a
    * session published before it resolves still registers — the address
    * is patched into every record when it arrives (`publishInboxAddress`).
    */
   private startPeerMessaging(): void {
-    if (this.startupSettings.merged.agents?.crossSessionMessaging !== true) {
-      return;
-    }
     if (this.peerMessagingStart) return;
-    this.peerMessagingEnabled = true;
+    // A closed inbox stays closed: teardown runs on every exit path, and
+    // a session registered after it must not resurrect the socket.
+    if (this.peerMessagingClosed) return;
     // Imported statically on purpose. The transport's own imports are all
     // inside this file's existing static closure, so lazy-loading it buys
     // nothing — and a dynamic import of the core barrel turns it into a
@@ -4593,15 +4584,34 @@ class QwenAgent implements Agent {
           getPolicySetting: () => 'refuse',
           updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
             this.publishInboxAddress(ipcPath, ipcToken),
-          ownsSessionId: (id) => this.sessions.has(id),
-          reassertSessionRecord: (id) => this.reassertSessionRecord(id),
+          ownsSessionId: (id) => {
+            // The map key froze when the session was published, while
+            // the record a sender reads follows the Config's live id —
+            // /clear swaps the id under a running session. Test both, so
+            // a frame pinned to either spelling is answered by the
+            // session that holds it.
+            const wanted = normalizeSessionIdForLookup(id);
+            return (
+              this.sessions.has(wanted) ||
+              [...this.sessions.values()].some(
+                (session) =>
+                  normalizeSessionIdForLookup(
+                    session.getConfig().getSessionId(),
+                  ) === wanted,
+              )
+            );
+          },
         });
+        // A bind that could not start is not "started": the next hosted
+        // session retries rather than the process staying dark until exit.
+        if (messaging === null) this.peerMessagingStart = null;
         return messaging;
       } catch (error) {
         debugLogger.error(
           '[ACP] cross-session messaging failed to start:',
           error,
         );
+        this.peerMessagingStart = null;
         return null;
       }
     })();
@@ -4609,6 +4619,7 @@ class QwenAgent implements Agent {
 
   /** Close the inbox and stop advertising it. Safe to call more than once. */
   async closePeerMessaging(): Promise<void> {
+    this.peerMessagingClosed = true;
     const pending = this.peerMessagingStart;
     if (!pending) return;
     this.peerMessagingStart = null;
@@ -4627,19 +4638,27 @@ class QwenAgent implements Agent {
   /**
    * Give a newly published session a registry record of its own.
    *
-   * Only when messaging is on. A record with no inbox behind it would put
-   * a name in every peer's listing that can be addressed and never
-   * answered, which is worse than not appearing at all — the interactive
-   * UI registers unconditionally because its record also answers "what is
-   * running right now", a question nobody asks of a session a daemon is
-   * driving.
+   * Only when that session's own settings turn messaging on. A record
+   * with no inbox behind it would put a name in every peer's listing
+   * that can be addressed and never answered, which is worse than not
+   * appearing at all — the interactive UI registers unconditionally
+   * because its record also answers "what is running right now", a
+   * question nobody asks of a session a daemon is driving.
    */
-  private registerHostedSession(sessionId: string, config: Config): void {
+  private registerHostedSession(
+    sessionId: string,
+    config: Config,
+    settings: LoadedSettings,
+  ): void {
+    // Each session's own settings decide: one process can host sessions
+    // from more than one workspace, and a record exists to be addressed,
+    // so it is written only when that session's settings turn messaging
+    // on. The process's startup settings answer for nobody else.
+    if (settings.merged.agents?.crossSessionMessaging !== true) return;
     // Bound by the first session that needs it rather than at startup: an
     // ACP process with no session has nothing to advertise and nobody to
     // receive for, and this is also the first moment the agent exists.
     this.startPeerMessaging();
-    if (!this.peerMessagingEnabled) return;
     if (this.registeredSessions.has(sessionId)) return;
     this.registeredSessions.add(sessionId);
     config.trackSessionRegistration(
@@ -4686,25 +4705,7 @@ class QwenAgent implements Agent {
     );
   }
 
-  /**
-   * Re-assert the record of the session a misaddressed frame named.
-   *
-   * The sender's directory may be stale, or the record may be — a patch
-   * skipped in an fd-pressure window leaves it naming an id this session
-   * no longer holds, and every later send would be refused the same way.
-   * Only the named session's record is touched: the siblings' records
-   * have nothing to do with the frame that arrived.
-   */
-  private async reassertSessionRecord(sessionId?: string): Promise<void> {
-    if (sessionId === undefined) return;
-    await this.sessions
-      .get(sessionId)
-      ?.getConfig()
-      .reassertSessionRegistryRecord();
-  }
-
   async disposeSessions(): Promise<void> {
-    await this.closePeerMessaging();
     this.activeWorkReporter?.dispose();
     this.activeWorkReporter = undefined;
     for (const generation of this.generationControllers.values()) {
@@ -4715,6 +4716,12 @@ class QwenAgent implements Agent {
       controller.abort();
     }
     this.workspaceGenerationControllers.clear();
+    // After the aborts, so a slow inbox drain cannot keep a running turn
+    // executing tools after the client is gone; ahead of the record
+    // teardown below, because the close's address clear is a patch the
+    // records must still be there for (the ordering
+    // finishManagedShutdown states).
+    await this.closePeerMessaging();
     await Promise.allSettled(
       [...this.sessions.entries()].map(([sessionId, session]) =>
         this.discardStoredSessionIfCurrent(sessionId, session, {
@@ -4741,8 +4748,6 @@ class QwenAgent implements Agent {
     private readonly externalToolGuardProviderAttached = false,
     private readonly conversationsRuntimeProvenance = false,
   ) {
-    // Before anything re-points `this.settings` at a session's own.
-    this.startupSettings = settings;
     // Pool kill switch via env var so operators can A/B compare or
     // roll back without rebuilding. `run-qwen-serve.ts` sets this when
     // `--no-mcp-pool` is passed at daemon startup.
@@ -14715,7 +14720,7 @@ class QwenAgent implements Agent {
         );
       }
       this.sessions.set(sessionId, session);
-      this.registerHostedSession(sessionId, config);
+      this.registerHostedSession(sessionId, config, settings);
       // The session boots converged on the mode its settings derived; later
       // reloads track convergence from here. Restricted sessions derive
       // DEFAULT, mirroring the fold the reload loop applies to them.

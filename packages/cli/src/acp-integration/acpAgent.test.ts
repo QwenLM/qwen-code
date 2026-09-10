@@ -38,9 +38,16 @@ const { mockRunExitCleanup, mockRegisterCleanup } = vi.hoisted(() => ({
   mockRunExitCleanup: vi.fn().mockResolvedValue(undefined),
   mockRegisterCleanup: vi.fn(),
 }));
-const mockRegisterSession = vi.hoisted(() =>
-  vi.fn().mockResolvedValue({ registered: true, slot: 'ab12cd34' }),
-);
+const mockRegisterSession = vi.hoisted(() => {
+  let next = 0;
+  return vi.fn().mockImplementation(() => {
+    next += 1;
+    return Promise.resolve({
+      registered: true,
+      slot: next.toString(16).padStart(8, '0'),
+    });
+  });
+});
 const mockPeerMessagingStart = vi.hoisted(() => vi.fn());
 vi.mock('../peerMessaging/peer-messaging.js', () => ({
   PeerMessaging: {
@@ -4925,6 +4932,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     it('gives each hosted session a record of its own, and the shared inbox address', async () => {
       const innerConfig = await setupSessionMocks('hosted-a');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
       const { agent, agentPromise } =
         await bootInitializedAcpAgent(messagingOn());
       // The inbox is bound by the first session that needs one, so the
@@ -4973,6 +4981,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       process.env['QWEN_CODE_SERVE'] = '1';
       try {
         await setupSessionMocks('hosted-serve');
+        vi.mocked(loadSettings).mockReturnValue(messagingOn());
         const { agent, agentPromise } =
           await bootInitializedAcpAgent(messagingOn());
         await agent.newSession({ cwd: '/tmp', mcpServers: [] });
@@ -5009,6 +5018,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     it("removes a session's record when the session goes", async () => {
       const innerConfig = await setupSessionMocks('hosted-gone');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
       const { agent, agentPromise } =
         await bootInitializedAcpAgent(messagingOn());
       await agent.newSession({ cwd: '/tmp', mcpServers: [] });
@@ -5021,6 +5031,165 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       // Left behind, the record would keep advertising a session that is
       // gone until this process exits.
       expect(innerConfig.unregisterSessionRegistry).toHaveBeenCalled();
+    });
+
+    it('answers for the id the record advertises after a /clear swap', async () => {
+      // The sessions map is keyed by the id as it was at publication,
+      // while the record a sender reads follows the Config's live id —
+      // /clear swaps it under a running session. Ownership must be
+      // judged against both, or every frame pinned to the advertised id
+      // is answered misaddressed from then on.
+      const innerConfig = await setupSessionMocks('hosted-a');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      const options = mockPeerMessagingStart.mock.calls[0]![0] as {
+        ownsSessionId: (id: string) => boolean;
+      };
+
+      vi.mocked(innerConfig.getSessionId).mockReturnValue('hosted-clear-2');
+
+      expect(options.ownsSessionId('hosted-clear-2')).toBe(true);
+      // The frozen publication key still answers: a skipped /clear patch
+      // leaves the record advertising it.
+      expect(options.ownsSessionId('hosted-a')).toBe(true);
+      expect(options.ownsSessionId('someone-else')).toBe(false);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it("registers nothing when the session's own settings turn messaging off, whatever the process started with", async () => {
+      // Startup settings on, session settings off: the per-setting
+      // contract the docs state is about the session, and a session that
+      // turned messaging off must not appear in any peer's listing.
+      await setupSessionMocks('hosted-off');
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      expect(mockPeerMessagingStart).not.toHaveBeenCalled();
+      expect(mockRegisterSession).not.toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('registers a session whose own settings turn messaging on, whatever the process started with', async () => {
+      // The mirror case: startup settings off, session settings on. The
+      // bind fires for the first session that needs one; it is not
+      // settled once for the process at boot.
+      await setupSessionMocks('hosted-on');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } = await bootInitializedAcpAgent(
+        makeSessionSettings(),
+      );
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      expect(mockRegisterSession).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'hosted-on', slot: 'own' }),
+      );
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('retries the inbox bind for the next session after a failed start', async () => {
+      mockPeerMessagingStart.mockResolvedValue(null);
+      await setupSessionMocks('hosted-retry-a');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() =>
+        expect(mockPeerMessagingStart).toHaveBeenCalledTimes(1),
+      );
+
+      // The failed bind is not "started": the next hosted session tries
+      // again rather than the process staying dark until exit.
+      await setupSessionMocks('hosted-retry-b');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() =>
+        expect(mockPeerMessagingStart).toHaveBeenCalledTimes(2),
+      );
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('does not retry the bind once the inbox has been closed', async () => {
+      mockPeerMessagingStart.mockResolvedValue(null);
+      await setupSessionMocks('hosted-closed-a');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() =>
+        expect(mockPeerMessagingStart).toHaveBeenCalledTimes(1),
+      );
+
+      await (
+        agent as unknown as { closePeerMessaging(): Promise<void> }
+      ).closePeerMessaging();
+
+      await setupSessionMocks('hosted-closed-b');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      // A retry must not resurrect an inbox after teardown ran.
+      expect(mockPeerMessagingStart).toHaveBeenCalledTimes(1);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('aborts in-flight generations before waiting on the inbox drain', async () => {
+      // The close can hang on a slow drain; a running turn must not keep
+      // executing tools after the client is gone while it waits.
+      let releaseClose: () => void = () => {};
+      const close = vi.fn().mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseClose = resolve;
+          }),
+      );
+      mockPeerMessagingStart.mockResolvedValue({ close });
+      const innerConfig = await setupSessionMocks('hosted-drain');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+
+      const internals = agent as unknown as {
+        generationControllers: Map<
+          string,
+          { sessionId: string; controller: AbortController }
+        >;
+        disposeSessions: () => Promise<void>;
+      };
+      const controller = new AbortController();
+      internals.generationControllers.set('req-1', {
+        sessionId: 'hosted-drain',
+        controller,
+      });
+
+      const disposed = internals.disposeSessions();
+      await vi.waitFor(() => expect(controller.signal.aborted).toBe(true));
+      expect(close).toHaveBeenCalled();
+      // The record teardown still waits for the drain: the address clear
+      // is a patch the records must still be there for.
+      expect(innerConfig.unregisterSessionRegistry).not.toHaveBeenCalled();
+
+      releaseClose();
+      await disposed;
+      expect(innerConfig.unregisterSessionRegistry).toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
     });
   });
 

@@ -177,13 +177,11 @@ export interface PeerMessagingOptions {
     status: PeerDeliveryStatus,
   ) => SettledPeerReceipt | undefined;
   /**
-   * Re-assert a registry record. Called when a frame arrives pinned to a
-   * session id this process does not hold, because the record — not only
-   * the sender's directory — may be the stale side. Given the id the
-   * frame named, so a process hosting several sessions can re-assert the
-   * right record rather than all of them.
+   * Re-assert this session's registry record. Called when a frame arrives
+   * pinned to a session id this process does not hold, because the record
+   * — not only the sender's directory — may be the stale side.
    */
-  reassertSessionRecord?: (sessionId?: string) => Promise<void>;
+  reassertSessionRecord?: () => Promise<void>;
   /**
    * This session's current id. A getter, not a value: /clear and /resume
    * swap the id under a running process, and a frame pinned to the id a
@@ -258,9 +256,7 @@ export class PeerMessaging {
     msgId: string,
     status: PeerDeliveryStatus,
   ) => SettledPeerReceipt | undefined = settleSentPeerMessage;
-  private reassertSessionRecord:
-    | ((sessionId?: string) => Promise<void>)
-    | null = null;
+  private reassertSessionRecord: (() => Promise<void>) | null = null;
   private drainMirror: (ipcPath: string) => void = drainSendPacer;
   private forgetMirror: (
     ipcPath: string,
@@ -910,7 +906,7 @@ export class PeerMessaging {
           frame.replyToken,
         );
       }
-      void this.reassertSessionRecord?.(frame.toSessionId).catch((error) => {
+      void this.reassertSessionRecord?.().catch((error) => {
         debugLogger.debug(
           `re-asserting the session record failed: ${
             error instanceof Error ? error.message : String(error)
