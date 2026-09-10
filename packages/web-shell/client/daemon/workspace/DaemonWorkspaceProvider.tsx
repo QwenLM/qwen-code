@@ -16,6 +16,7 @@ import {
 import type { DaemonBrand, DaemonCapabilities } from '@qwen-code/sdk/daemon';
 import { DaemonClient, DaemonHttpError } from '@qwen-code/sdk/daemon';
 import { createDaemonWorkspaceActions } from './actions.js';
+import { setBoundedMapEntry } from '../../utils/bounded-map.js';
 import type {
   DaemonWorkspaceContextValue,
   DaemonWorkspaceProviderProps,
@@ -26,6 +27,51 @@ import type {
 const DaemonWorkspaceContext = createContext<
   DaemonWorkspaceContextValue | undefined
 >(undefined);
+
+// Module-copy marker for diagnosing "must be used within" failures. When the
+// page ends up with two copies of this module (a Vite dev module-graph hiccup,
+// a host bundling both web-shell entries), each copy has its own
+// DaemonWorkspaceContext, so a consumer resolved to one copy reads no provider
+// even though a provider from the other copy is mounted. The registry records
+// which module copies rendered a provider — and whether they produced a
+// context value — so the strict hook's error can say which case it hit. The
+// id carries the module URL so the message points at the offending chunk; the
+// esbuild iife build for export documents lowers import.meta to {}, hence the
+// guarded fallback. Diagnostic only — the context itself is never shared.
+const moduleUrl =
+  typeof import.meta.url === 'string' && import.meta.url
+    ? import.meta.url
+    : 'web-shell/DaemonWorkspaceProvider';
+const moduleInstanceId = `${moduleUrl}#${Math.random().toString(36).slice(2, 8)}`;
+
+type ProviderCopyState =
+  // Rendered, but never produced a context value (e.g. autoConnect={false}).
+  | 'rendered'
+  // Produced a context value at least once. Terminal state for the copy: a
+  // discarded or unmounted render keeps it, and the guard's wording hedges.
+  | 'provided';
+
+const PROVIDER_REGISTRY_KEY = '__qwenWebShellDaemonWorkspaceProviderCopies';
+// Hot re-evaluation mints a fresh id per save; cap so a long dev session
+// cannot grow the breadcrumb (or the error message) without bound.
+const MAX_TRACKED_PROVIDER_COPIES = 8;
+
+function providerCopyRegistry(): Map<string, ProviderCopyState> {
+  const scope = globalThis as typeof globalThis & {
+    [PROVIDER_REGISTRY_KEY]?: Map<string, ProviderCopyState>;
+  };
+  return (scope[PROVIDER_REGISTRY_KEY] ??= new Map());
+}
+
+function recordProviderCopy(id: string, provided: boolean): void {
+  const registry = providerCopyRegistry();
+  const next: ProviderCopyState =
+    provided || registry.get(id) === 'provided' ? 'provided' : 'rendered';
+  // Re-recording moves the entry to the newest position, so the cap evicts
+  // stale copies (e.g. from hot re-evaluations whose provider is gone),
+  // never a live one — a live provider re-records on every render.
+  setBoundedMapEntry(registry, id, next, MAX_TRACKED_PROVIDER_COPIES);
+}
 
 // Module-level sentinel for deferred-disposal StrictMode guard.
 // See the useEffect cleanup in DaemonWorkspaceProvider for details.
@@ -52,6 +98,9 @@ export function DaemonWorkspaceProvider({
   transport,
   children,
 }: DaemonWorkspaceProviderProps) {
+  // Render-phase so the breadcrumb exists before any child can throw, and
+  // recorded even when no client is built (autoConnect={false}).
+  recordProviderCopy(moduleInstanceId, false);
   const client = useMemo(
     () =>
       autoConnect ? new DaemonClient({ baseUrl, token, transport }) : undefined,
@@ -356,6 +405,7 @@ export function DaemonWorkspaceProvider({
 
   const contextValue = useMemo<DaemonWorkspaceContextValue | undefined>(() => {
     if (!client) return undefined;
+    recordProviderCopy(moduleInstanceId, true);
     return {
       client,
       token,
@@ -397,8 +447,30 @@ export function DaemonWorkspaceProvider({
 export function useDaemonWorkspace(): DaemonWorkspaceContextValue {
   const context = useContext(DaemonWorkspaceContext);
   if (!context) {
+    const registry = providerCopyRegistry();
+    const ownState = registry.get(moduleInstanceId);
+    const foreignIds = [...registry.keys()].filter(
+      (id) => id !== moduleInstanceId,
+    );
+    const detail =
+      foreignIds.length > 0
+        ? `a DaemonWorkspaceProvider rendered from module copy ` +
+          `${foreignIds.join(', ')}, but this hook resolved module copy ` +
+          `${moduleInstanceId} — the page holds duplicate copies of the ` +
+          `DaemonWorkspaceProvider module`
+        : ownState === 'provided'
+          ? 'a DaemonWorkspaceProvider from this module copy has rendered, ' +
+            'so this consumer is outside its live subtree, that provider ' +
+            'has unmounted, or it currently has no active client ' +
+            '(autoConnect is false)'
+          : ownState === 'rendered'
+            ? 'a DaemonWorkspaceProvider from this module copy has rendered ' +
+              'without an active client (e.g. autoConnect is false), or ' +
+              'has since unmounted, so it provides no workspace context'
+            : 'no DaemonWorkspaceProvider has rendered in this page';
     throw new Error(
-      'useDaemonWorkspace must be used within DaemonWorkspaceProvider',
+      `useDaemonWorkspace must be used within DaemonWorkspaceProvider ` +
+        `(${detail})`,
     );
   }
   return context;

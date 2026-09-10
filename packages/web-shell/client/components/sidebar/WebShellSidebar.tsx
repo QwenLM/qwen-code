@@ -4209,8 +4209,13 @@ export function WebShellSidebar({
       ) : session.branch ? (
         <GitBranchIcon aria-label={session.branch.name} />
       ) : null;
-      const scheduledTaskIcon = isScheduledTaskSession(session) ? (
-        <CalendarClockIcon aria-label={t('sidebar.scheduledTasks')} />
+      const scheduledTaskMarker = isScheduledTaskSession(session) ? (
+        <span
+          className={styles.sessionSourceIcon}
+          data-web-shell-scheduled-task-session
+        >
+          <CalendarClockIcon aria-label={t('sidebar.scheduledTasks')} />
+        </span>
       ) : null;
       const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
       const withDetails = (row: ReactElement) => (
@@ -4265,17 +4270,6 @@ export function WebShellSidebar({
               measureSessionTitleScroll(event.currentTarget)
             }
           >
-            {scheduledTaskIcon && (
-              <span className={styles.sessionStatusSlot}>
-                <span
-                  className={styles.sessionSourceIcon}
-                  data-web-shell-scheduled-task-session
-                  title={t('sidebar.scheduledTasks')}
-                >
-                  {scheduledTaskIcon}
-                </span>
-              </span>
-            )}
             {isEditing ? (
               <form
                 className={styles.renameForm}
@@ -4313,6 +4307,7 @@ export function WebShellSidebar({
                   : undefined
               }
             >
+              {scheduledTaskMarker}
               {gitIcon && (
                 <span className={styles.sessionGitIcon}>{gitIcon}</span>
               )}
@@ -4483,28 +4478,14 @@ export function WebShellSidebar({
           }}
         >
           <span className={styles.sessionStatusSlot}>
-            {scheduledTaskIcon ? (
-              <span
-                className={styles.sessionSourceIcon}
-                data-web-shell-scheduled-task-session
-                title={t('sidebar.scheduledTasks')}
-              >
-                {scheduledTaskIcon}
-              </span>
-            ) : null}
             {completedUnread ? (
               <span
-                className={cx(
-                  styles.sessionStatusDot,
-                  Boolean(scheduledTaskIcon) && styles.sessionStatusDotOverlay,
-                )}
+                className={styles.sessionStatusDot}
                 data-web-shell-session-completed-unread
                 aria-hidden="true"
               />
             ) : null}
-            {session.hasActivePrompt &&
-            !scheduledTaskIcon &&
-            !completedUnread ? (
+            {session.hasActivePrompt && !completedUnread ? (
               <span
                 className={cx(
                   styles.sessionStatusDot,
@@ -4513,13 +4494,13 @@ export function WebShellSidebar({
                 data-web-shell-session-running
                 aria-hidden="true"
               />
-            ) : sessionWorkActive && !scheduledTaskIcon && !completedUnread ? (
+            ) : sessionWorkActive && !completedUnread ? (
               <span
                 className={styles.sessionStatusDot}
                 data-web-shell-session-active-work
                 aria-hidden="true"
               />
-            ) : activityUnknown && !scheduledTaskIcon && !completedUnread ? (
+            ) : activityUnknown && !completedUnread ? (
               <span
                 className={styles.sessionStatusUnknown}
                 aria-label={t('sidebar.activityUnknown')}
@@ -4576,6 +4557,7 @@ export function WebShellSidebar({
                     : undefined
                 }
               >
+                {scheduledTaskMarker}
                 {attention && (
                   <span
                     className={cx(
