@@ -277,6 +277,7 @@ vi.mock('@qwen-code/channel-base', async () => {
     },
     sanitizeLogText: real.sanitizeLogText,
     sanitizeSenderName: real.sanitizeSenderName,
+    startsWithMessagePrefix: real.startsWithMessagePrefix,
     // Real, for the same reason as sanitizeSenderName: the chat-record
     // formatter's injection defence is this exact helper, and a stub would
     // let the DM path regress with the suite green.
@@ -4484,7 +4485,7 @@ describe('DingtalkChannel chat records', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: 'can you see this?',
+        text: '@DingTalkTest can you see this?',
         referencedText:
           '[Chat record: Group chat history] Alice: first message\nBob: [message]',
       }),
@@ -5803,7 +5804,7 @@ describe('DingtalkChannel quoted media', () => {
         chatbotUserId: 'bot-1',
         isInAtList: true,
         text: {
-          content: `@DingTalkTest ${replyText}`,
+          content: replyText,
           isReplyMsg: true,
           repliedMsg: {
             msgId: `media-${msgType}`,
@@ -6386,7 +6387,7 @@ describe('DingtalkChannel quoted media', () => {
   // where `extractContent` generates `(audio)` / `(file: name)` itself. On the
   // quoted path `envelope.text` is the user's own reply, so a reply reading
   // exactly like a placeholder was blanked and the agent got an attachment
-  // with no prompt. A group `@Bot (audio)` arrives here as exactly `(audio)`.
+  // with no prompt. The native callback can already omit the bot mention.
   it.each([
     ['audio', {}, '(audio)'],
     ['video', {}, '(video)'],
@@ -6916,7 +6917,7 @@ describe('DingtalkChannel sender attribution', () => {
     );
   });
 
-  it('passes mention-stripped text with platform format characters to base', () => {
+  it('preserves ambiguous mentions with platform format characters', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
@@ -6950,7 +6951,7 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '查看记忆\u200b',
+        text: '@qwen-code 查看记忆\u200b',
         isGroup: true,
         isMentioned: true,
       }),
@@ -6991,14 +6992,14 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '\u200b查看记忆',
+        text: '@qwen-code\u200b查看记忆',
         isGroup: true,
         isMentioned: true,
       }),
     );
   });
 
-  it('preserves @ in git URLs and emails when stripping bot mention (#7402)', () => {
+  it('preserves an unverified mention and @ in git URLs (#7402)', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
@@ -7034,7 +7035,7 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '重复： git@example.com:group/repo.git',
+        text: '@qwen-code 重复： git@example.com:group/repo.git',
         isMentioned: true,
       }),
     );
@@ -7075,7 +7076,7 @@ describe('DingtalkChannel sender attribution', () => {
     ).handleInbound;
 
     // When the bot @mention is not in the text (DingTalk already stripped it),
-    // the regex must NOT eat the @ in the git URL.
+    // the @ in the git URL must remain intact.
     expect(handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
         text: '重复： git@example.com:group/repo.git',
@@ -7251,7 +7252,7 @@ describe('DingtalkChannel sender attribution', () => {
     expect(envelope).not.toHaveProperty('mentionedMemberIds');
   });
 
-  it('returns context only when text is empty after mention stripping', () => {
+  it('returns context only when DingTalk omits the bot mention', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({

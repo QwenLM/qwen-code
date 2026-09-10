@@ -16,6 +16,7 @@ import {
   sanitizeLogText,
   sanitizePromptText,
   sanitizeSenderName,
+  startsWithMessagePrefix,
   truncateUtf16Units,
 } from '@qwen-code/channel-base';
 import {
@@ -92,6 +93,7 @@ interface DingTalkRichTextPart {
   text?: string;
   downloadCode?: string;
   atName?: string;
+  atUserId?: string;
 }
 
 interface DingTalkMessageContent {
@@ -4005,6 +4007,7 @@ export class DingtalkChannel extends ChannelBase {
    */
   private extractContent(data: DingTalkMessageData): {
     text: string;
+    displayText?: string;
     downloadCodes: string[];
     mediaType?: 'image' | 'file' | 'audio' | 'video';
     fileName?: string;
@@ -4019,17 +4022,44 @@ export class DingtalkChannel extends ChannelBase {
         return { text: '', downloadCodes: [], syntheticText: false };
       }
       let text = '';
+      let displayText = '';
+      let isLeading = true;
       const codes: string[] = [];
       for (const part of richText) {
         const partType = part.type || 'text';
         if (partType === 'text' && part.text) {
           text += part.text;
-        } else if (partType === 'picture' && part.downloadCode) {
-          codes.push(part.downloadCode);
+          displayText += part.text;
+          isLeading &&= !part.text.trim();
+        } else if (partType === 'at') {
+          const label = part.text || `@${part.atName || part.atUserId || ''} `;
+          const mention = label.startsWith('@') ? label : `@${label} `;
+          displayText += mention;
+          // isInAtList alone provides neither the bot's name nor its span.
+          // Only a leading, identified entity is safe to omit for commands.
+          if (
+            !(
+              data.conversationType === '2' &&
+              data.isInAtList &&
+              typeof data.chatbotUserId === 'string' &&
+              data.chatbotUserId &&
+              part.atUserId === data.chatbotUserId &&
+              isLeading
+            )
+          ) {
+            text += mention;
+            isLeading = false;
+          }
+        } else {
+          isLeading = false;
+          if (partType === 'picture' && part.downloadCode) {
+            codes.push(part.downloadCode);
+          }
         }
       }
       return {
         text: text.trim() || (codes.length > 0 ? '(image)' : ''),
+        displayText: displayText.trim() || (codes.length > 0 ? '(image)' : ''),
         downloadCodes: codes,
         mediaType: codes.length > 0 ? 'image' : undefined,
         syntheticText: text.trim().length === 0 && codes.length > 0,
@@ -4311,30 +4341,19 @@ export class DingtalkChannel extends ChannelBase {
 
       // Extract text and media info from message
       const content = this.extractContent(data);
-      let cleanText = content.text;
-
-      // Strip first @mention (the bot) from text, keep other @mentions intact.
-      // Anchor to start-of-string so @ symbols inside URLs or emails
-      // (e.g. git@host:path) are not accidentally stripped (#7402).
-      if (isMentioned) {
-        cleanText = cleanText.replace(/^\s*@[^\s\p{Cf}]+/u, '').trim();
-      }
 
       // Extract quoted message context
       const quoted = this.extractQuotedContext(data);
 
       const chatId = conversationId || sessionWebhook;
 
-      // After stripping the bot @mention, cleanText may legitimately be empty
-      // (user pinged the bot with no other text). Don't fall back to the
-      // original text in that case — it would re-introduce the @mention.
-      const messageText = isMentioned ? cleanText : cleanText || content.text;
       // Carry mention targets as a structured envelope field (like
       // referencedText) so ChannelBase renders the marker after prompt
       // sanitization and slash-command parsing sees the body alone.
       const mentionedMemberIds = isGroup ? collectNonBotMentionIds(data) : [];
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';
+      const messagePrefix = this.config.messagePrefix?.trim();
 
       const envelope: Envelope = {
         channelName: this.name,
@@ -4344,7 +4363,23 @@ export class DingtalkChannel extends ChannelBase {
         ...(isGroup && conversationTitle
           ? { chatName: conversationTitle }
           : {}),
-        text: messageText,
+        // The prefix filter replaces displayText within text before dispatch.
+        text: messagePrefix
+          ? (content.displayText ?? content.text)
+          : content.text,
+        ...(content.displayText !== undefined
+          ? { displayText: content.displayText }
+          : {}),
+        ...(messagePrefix
+          ? {
+              messagePrefixText: startsWithMessagePrefix(
+                content.text.trim(),
+                messagePrefix,
+              )
+                ? content.text
+                : '',
+            }
+          : {}),
         ...(content.syntheticText ? { syntheticText: true as const } : {}),
         ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
         isGroup,
