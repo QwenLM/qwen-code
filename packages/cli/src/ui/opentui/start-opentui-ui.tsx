@@ -42,6 +42,7 @@ import { createRoot, useKeyboard, useTerminalDimensions } from '@opentui/react';
 import type { PartListUnion } from '@google/genai';
 import {
   createDebugLogger,
+  initShellAstParser,
   isDebugLogFileEnabled,
   registerSession,
   SessionEndReason,
@@ -316,6 +317,17 @@ export async function startOpenTuiUI(
   initializationResult: InitializationResult,
   options: StartOpenTuiUIOptions = {},
 ): Promise<boolean> {
+  // The renderer's constructor installs a bare `globalThis.window` to hang its
+  // requestAnimationFrame shim on. web-tree-sitter's UMD wrapper probes
+  // `window.document.currentScript` when it is first evaluated, so evaluating
+  // it after that point throws — and the parser latches that failure
+  // permanently, silently downgrading permission rules, read-only detection
+  // and command-safety classification to their fallbacks for the whole
+  // session. Warm it while `window` is still undefined.
+  await initShellAstParser().catch((err) => {
+    debugLogger.warn('Shell AST parser warm-up failed:', err);
+  });
+
   let renderer: CliRenderer;
   try {
     renderer = await createCliRenderer({ exitOnCtrlC: false, useMouse: true });
