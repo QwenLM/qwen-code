@@ -26,6 +26,7 @@ import type {
   DaemonAuthProviderInstallRequest,
   DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
+  DaemonBrand,
   DaemonCapabilities,
   DaemonCreateAgentRequest,
   DaemonArchiveSessionsResult,
@@ -1212,6 +1213,29 @@ export class DaemonClient {
         ? restoreTimeoutMs
         : undefined;
     return capabilities;
+  }
+
+  /**
+   * The Web Shell's product name and logo, resolved by the daemon from the
+   * operator settings scopes (system defaults, user, system). Workspace
+   * settings never contribute. An empty object means the client should use its
+   * built-in brand.
+   *
+   * Separate from `capabilities()` because that envelope's contract is that
+   * clients probe by connecting rather than reading ambient settings into it.
+   * A daemon that supports it advertises the `web_shell_brand` feature tag, so
+   * callers can preflight instead of relying on the 404 an older daemon returns;
+   * either way, treat branding as optional and fall back rather than fail.
+   */
+  async brand(): Promise<DaemonBrand> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/brand`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /brand');
+        return (await res.json()) as DaemonBrand;
+      },
+    );
   }
 
   /**

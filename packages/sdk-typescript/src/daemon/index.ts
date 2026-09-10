@@ -550,6 +550,7 @@ export type {
   DaemonWorkspaceRemovalResult,
   DaemonAvailableCommand,
   DaemonArchiveSessionsResult,
+  DaemonBrand,
   DaemonCapabilities,
   DaemonContextCategoryBreakdown,
   DaemonContextFileScope,

@@ -396,6 +396,37 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('brand', () => {
+    it('GETs /brand with the bearer header and returns the body', async () => {
+      const brand = {
+        name: 'QiuQiu Code',
+        logoDataUri: 'data:image/svg+xml,%3Csvg%2F%3E',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, brand));
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret-token',
+        fetch,
+      });
+
+      await expect(client.brand()).resolves.toEqual(brand);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toBe('http://daemon/brand');
+      expect(calls[0]?.method).toBe('GET');
+      expect(calls[0]?.headers['authorization']).toBe('Bearer secret-token');
+    });
+
+    it('rejects on a daemon too old to have the route', async () => {
+      // Callers swallow this and fall back to their built-in brand, so it must
+      // reject rather than resolve `{}` — resolving would report "no brand
+      // configured" for a daemon that was never successfully asked.
+      const { fetch } = recordingFetch(() => jsonResponse(404, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.brand()).rejects.toBeInstanceOf(DaemonHttpError);
+    });
+  });
+
   describe('capabilities', () => {
     it('GETs /capabilities and returns the v1 envelope', async () => {
       const envelope = {
