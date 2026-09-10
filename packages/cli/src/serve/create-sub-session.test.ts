@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
@@ -440,7 +441,7 @@ describe('sub-session launcher', () => {
 
   it('assigns the selected group inside the resolved runtime storage', async () => {
     const fake = makeFakeBridge();
-    const runtimeBaseDir = '/tmp/scheduled-task-runtime';
+    const runtimeBaseDir = path.resolve('/tmp/scheduled-task-runtime');
     let assignedRuntimeBaseDir: string | undefined;
     updateSessionOrganization.mockImplementationOnce(async () => {
       assignedRuntimeBaseDir = Storage.getRuntimeBaseDir();
@@ -495,7 +496,7 @@ describe('sub-session launcher', () => {
     const fake = makeFakeBridge({
       sendPromptRejects: 'child disappeared during init',
     });
-    const runtimeBaseDir = '/tmp/scheduled-task-runtime';
+    const runtimeBaseDir = path.resolve('/tmp/scheduled-task-runtime');
     let transcriptRemovalRuntimeBaseDir: string | undefined;
     const removeSession = vi
       .spyOn(SessionService.prototype, 'removeSession')
@@ -534,7 +535,7 @@ describe('sub-session launcher', () => {
     const fake = makeFakeBridge({
       sendPromptRejects: 'child disappeared during init',
     });
-    const runtimeBaseDir = '/tmp/scheduled-task-runtime';
+    const runtimeBaseDir = path.resolve('/tmp/scheduled-task-runtime');
     let transcriptRemovalRuntimeBaseDir: string | undefined;
     const removeSession = vi
       .spyOn(SessionService.prototype, 'removeSession')
@@ -577,7 +578,7 @@ describe('sub-session launcher', () => {
 
   it('rejects a scheduled-task run when its selected model is not applied', async () => {
     const fake = makeFakeBridge({ modelApplied: false });
-    const runtimeBaseDir = '/tmp/scheduled-task-runtime';
+    const runtimeBaseDir = path.resolve('/tmp/scheduled-task-runtime');
     let transcriptRemovalRuntimeBaseDir: string | undefined;
     const removeSession = vi
       .spyOn(SessionService.prototype, 'removeSession')
@@ -615,6 +616,26 @@ describe('sub-session launcher', () => {
     } finally {
       removeSession.mockRestore();
     }
+  });
+
+  it('keeps a non-scheduled sub-session on the default model when selection fails', async () => {
+    const fake = makeFakeBridge({ modelApplied: false });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await expect(
+      launcher.launch({
+        prompt: 'run the task',
+        completion: 'sent',
+        model: 'missing-model',
+        callerSessionId: 'caller-1',
+      }),
+    ).resolves.toEqual({ sessionId: 'sub-1' });
+
+    expect(fake.prompts).toHaveLength(1);
+    expect(fake.closes).toEqual([]);
   });
 
   it('bounds rollback when a spawned child does not answer close', async () => {
@@ -664,7 +685,7 @@ describe('sub-session launcher', () => {
 
   it('removes an isolated scheduled-task transcript in its runtime', async () => {
     const fake = makeFakeBridge({ modelApplied: false });
-    const runtimeBaseDir = '/tmp/scheduled-task-runtime';
+    const runtimeBaseDir = path.resolve('/tmp/scheduled-task-runtime');
     let transcriptRemovalRuntimeBaseDir: string | undefined;
     const removeSession = vi
       .spyOn(SessionService.prototype, 'removeSession')

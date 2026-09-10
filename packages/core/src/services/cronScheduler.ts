@@ -1426,7 +1426,19 @@ export class CronScheduler {
         },
       );
     } catch (error) {
+      // Symmetric with the !restored exit: release the consumed snapshot so
+      // the retained state can't pin the reload GC for the rest of this
+      // process's life. The re-fire guard (pendingRemoval) stays.
+      this.restorablePerRunOneShots.delete(taskId);
+      this.consumedPerRunOneShots.delete(taskId);
+      this.consumedPerRunRemovalGenerations.delete(taskId);
       this.restoredPerRunOneShots.delete(taskId);
+      // eslint-disable-next-line no-console -- operator-facing breadcrumb for a silently destroyed one-shot
+      console.warn(
+        `CronScheduler: could not restore scheduled one-shot task ${taskId} ` +
+          `after its run failed to dispatch — the task may be gone from ` +
+          `disk with no recorded run.`,
+      );
       throw error;
     }
     if (!restored) {

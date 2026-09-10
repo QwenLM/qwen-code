@@ -899,7 +899,15 @@ export function createSubSessionLauncher(
       }
       spawnedSession = sub;
       const sessionId = sub.sessionId;
-      if (!standalone && info.model && sub.modelApplied === false) {
+      // Fail closed only for scheduled-task runs; every other caller keeps
+      // the bridge's best-effort contract (warn and stay on the agent's
+      // default model rather than tearing down the spawned session).
+      if (
+        !standalone &&
+        isScheduledTaskRunSource(info) &&
+        info.model &&
+        sub.modelApplied === false
+      ) {
         throw new Error(`sub-session model selection failed: ${info.model}`);
       }
       if (isolatedWorkspace && !standalone) {

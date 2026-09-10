@@ -308,11 +308,10 @@ async function readTaskDeletionGenerations(
     entries?: unknown;
   };
   if (
-    (parsed.version !== 1 && parsed.version !== 2) ||
-    !Array.isArray(parsed.entries) ||
-    (parsed.version === 2 &&
-      (!Number.isSafeInteger(parsed.watermark) ||
-        (parsed.watermark as number) < 0))
+    parsed.version !== 2 ||
+    !Number.isSafeInteger(parsed.watermark) ||
+    (parsed.watermark as number) < 0 ||
+    !Array.isArray(parsed.entries)
   ) {
     throw new Error(`Invalid scheduled-task deletion state: ${statePath}`);
   }
@@ -332,8 +331,7 @@ async function readTaskDeletionGenerations(
     generations.set(entry[0], entry[1]);
     maximumGeneration = Math.max(maximumGeneration, entry[1]);
   }
-  const watermark =
-    parsed.version === 2 ? (parsed.watermark as number) : maximumGeneration;
+  const watermark = parsed.watermark as number;
   if (watermark < maximumGeneration) {
     throw new Error(`Invalid scheduled-task deletion state: ${statePath}`);
   }

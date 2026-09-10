@@ -583,7 +583,8 @@ describe('cronTasksFile', () => {
       await fs.writeFile(
         statePath,
         JSON.stringify({
-          version: 1,
+          version: 2,
+          watermark: 1,
           entries: Array.from({ length: 10_000 }, (_, index) => [
             `old-${index}`,
             1,
@@ -605,6 +606,20 @@ describe('cronTasksFile', () => {
       expect(state.entries).toHaveLength(10_000);
       expect(state.entries.at(-1)).toEqual(['old-0', 3]);
       expect(state.watermark).toBe(3);
+    });
+
+    it('rejects a deletion sidecar without a v2 watermark', async () => {
+      const statePath = `${getCronFilePath(tmpDir)}.deletions`;
+      await writeCronTasks(tmpDir, []);
+      await fs.mkdir(path.dirname(statePath), { recursive: true });
+      await fs.writeFile(
+        statePath,
+        JSON.stringify({ version: 1, entries: [] }),
+      );
+
+      await expect(removeCronTasks(tmpDir, ['task-1'])).rejects.toThrow(
+        'Invalid scheduled-task deletion state',
+      );
     });
 
     it('shares deletion generations across module instances', async () => {

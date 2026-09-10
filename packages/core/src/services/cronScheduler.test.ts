@@ -1454,7 +1454,15 @@ describe('CronScheduler', () => {
     it('keeps a restored one-shot through the watcher debounce without a missed fire', async () => {
       const createdAt = Date.now();
       const target = new Date(createdAt + 120_000);
-      const cron = `${target.getMinutes()} ${target.getHours()} ${target.getDate()} ${target.getMonth() + 1} *`;
+      // Keep the fire minute off :00/:30 — those marks arm the one-shot
+      // early jitter (computeJitter reads the wall clock, not Date.now()),
+      // which can make the startup load classify the task as missed
+      // depending on when the test runs.
+      const minute =
+        target.getMinutes() % 30 === 0
+          ? target.getMinutes() + 1
+          : target.getMinutes();
+      const cron = `${minute} ${target.getHours()} ${target.getDate()} ${target.getMonth() + 1} *`;
       const firedAt = nextFireTime(cron, new Date(createdAt)).getTime();
       await writeCronTasks(tmpDir, [
         {
@@ -1584,57 +1592,66 @@ describe('CronScheduler', () => {
     });
 
     it('pauses a failed one-shot across future ticks, reloads and restarts', async () => {
-      const original: DurableCronTask = {
-        ...diskTask('once-future-minute'),
-        cron: '* * * * *',
-        recurring: false,
-        sessionId: 'session-1',
-        sessionMode: 'per_run',
-      };
-      await writeCronTasks(tmpDir, [original]);
-      await scheduler.enableDurable('session-1');
-      const fired: CronJob[] = [];
-      let restoration: Promise<boolean> | undefined;
-      scheduler.start((job) => {
-        fired.push(job);
-        restoration = scheduler.restoreConsumedOneShot(job.id);
-      });
-      const firedAt = nextFireTime(
-        original.cron,
-        new Date(original.createdAt),
-      ).getTime();
-      scheduler.tick(new Date(firedAt + 1000));
-      expect(await restoration).toBe(true);
-      scheduler.tick(new Date(firedAt + 61_000));
-      expect(fired).toHaveLength(1);
-      await (
-        scheduler as unknown as {
-          loadFileTasks(handleMissed: boolean): Promise<void>;
-        }
-      ).loadFileTasks(false);
-      scheduler.tick(new Date(firedAt + 61_000));
-      expect(fired).toHaveLength(1);
-      expect(await readCronTasks(tmpDir)).toEqual([
-        {
-          ...original,
-          enabled: false,
-          lastFiredAt: firedAt,
-          runs: [
-            { at: firedAt, kind: 'scheduled', sessionDispatchFailed: true },
-          ],
-        },
-      ]);
-      await settle(scheduler);
-      const restarted = new CronScheduler(tmpDir);
-      const now = vi.spyOn(Date, 'now').mockReturnValue(firedAt + 121_000);
+      // Pinned inside the early-jitter hazard window (minute 29): a cron
+      // whose minute field never lands on :00/:30 keeps the one-shot jitter
+      // at zero even there. computeJitter reads the wall clock
+      // (new Date()), so a Date.now spy alone cannot defuse it.
+      vi.useFakeTimers();
       try {
-        restarted.start((job) => fired.push(job));
-        await restarted.enableDurable('session-1');
-        restarted.tick(new Date(firedAt + 121_000));
+        vi.setSystemTime(new Date(2026, 0, 15, 10, 29, 59));
+        const original: DurableCronTask = {
+          ...diskTask('once-future-minute'),
+          cron: '31,32,33 * * * *',
+          recurring: false,
+          sessionId: 'session-1',
+          sessionMode: 'per_run',
+        };
+        await writeCronTasks(tmpDir, [original]);
+        await scheduler.enableDurable('session-1');
+        const fired: CronJob[] = [];
+        let restoration: Promise<boolean> | undefined;
+        scheduler.start((job) => {
+          fired.push(job);
+          restoration = scheduler.restoreConsumedOneShot(job.id);
+        });
+        const firedAt = nextFireTime(
+          original.cron,
+          new Date(original.createdAt),
+        ).getTime();
+        scheduler.tick(new Date(firedAt + 1000));
+        expect(await restoration).toBe(true);
+        scheduler.tick(new Date(firedAt + 61_000));
         expect(fired).toHaveLength(1);
+        await (
+          scheduler as unknown as {
+            loadFileTasks(handleMissed: boolean): Promise<void>;
+          }
+        ).loadFileTasks(false);
+        scheduler.tick(new Date(firedAt + 61_000));
+        expect(fired).toHaveLength(1);
+        expect(await readCronTasks(tmpDir)).toEqual([
+          {
+            ...original,
+            enabled: false,
+            lastFiredAt: firedAt,
+            runs: [
+              { at: firedAt, kind: 'scheduled', sessionDispatchFailed: true },
+            ],
+          },
+        ]);
+        await settle(scheduler);
+        const restarted = new CronScheduler(tmpDir);
+        try {
+          vi.setSystemTime(firedAt + 121_000);
+          restarted.start((job) => fired.push(job));
+          await restarted.enableDurable('session-1');
+          restarted.tick(new Date(firedAt + 121_000));
+          expect(fired).toHaveLength(1);
+        } finally {
+          await settle(restarted);
+        }
       } finally {
-        await settle(restarted);
-        now.mockRestore();
+        vi.useRealTimers();
       }
     });
 
@@ -1761,28 +1778,44 @@ describe('CronScheduler', () => {
     });
 
     it('does not restore after its bound session is deleted while the task is consumed', async () => {
-      const original: DurableCronTask = {
-        ...diskTask('once-session-delete'),
-        cron: '* * * * *',
-        recurring: false,
-        sessionId: 'session-1',
-        sessionMode: 'per_run',
-      };
-      await writeCronTasks(tmpDir, [original]);
-      await scheduler.enableDurable('session-1');
-      scheduler.start(() => {});
-      const fireAt = nextFireTime(original.cron, new Date(original.createdAt));
-      scheduler.tick(new Date(fireAt.getTime() + 1000));
-      await (scheduler as unknown as { pendingPersist: Promise<void> })
-        .pendingPersist;
-      expect(await readCronTasks(tmpDir)).toEqual([]);
+      // Pinned inside the early-jitter hazard window (minute 29): a cron
+      // whose minute field never lands on :00/:30 keeps the one-shot jitter
+      // at zero even there, so the fire — not a wall-clock accident — is
+      // what consumes the task.
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date(2026, 0, 15, 10, 29, 59));
+        const original: DurableCronTask = {
+          ...diskTask('once-session-delete'),
+          cron: '31,32,33 * * * *',
+          recurring: false,
+          sessionId: 'session-1',
+          sessionMode: 'per_run',
+        };
+        await writeCronTasks(tmpDir, [original]);
+        await scheduler.enableDurable('session-1');
+        const fired: CronJob[] = [];
+        scheduler.start((job) => fired.push(job));
+        const fireAt = nextFireTime(
+          original.cron,
+          new Date(original.createdAt),
+        );
+        scheduler.tick(new Date(fireAt.getTime() + 1000));
+        expect(fired).toHaveLength(1);
+        expect(fired[0]?.missed).toBeUndefined();
+        await (scheduler as unknown as { pendingPersist: Promise<void> })
+          .pendingPersist;
+        expect(await readCronTasks(tmpDir)).toEqual([]);
 
-      await updateCronTasks(tmpDir, (tasks) => tasks, {
-        deletionIds: ['session:session-1'],
-      });
+        await updateCronTasks(tmpDir, (tasks) => tasks, {
+          deletionIds: ['session:session-1'],
+        });
 
-      expect(await scheduler.restoreConsumedOneShot(original.id)).toBe(false);
-      expect(await readCronTasks(tmpDir)).toEqual([]);
+        expect(await scheduler.restoreConsumedOneShot(original.id)).toBe(false);
+        expect(await readCronTasks(tmpDir)).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('does not restore after a cross-process delete follows a failed fire removal', async () => {
@@ -1861,6 +1894,60 @@ describe('CronScheduler', () => {
       ).loadFileTasks(true);
       scheduler.tick(new Date(fireAt.getTime() + 2000));
       expect(fires).toBe(1);
+    });
+
+    it('releases the consumed snapshot when the restore write fails after the removal landed', async () => {
+      const original: DurableCronTask = {
+        ...diskTask('once-restore-fails-after-removal'),
+        cron: '7 18 * * *',
+        recurring: false,
+        sessionId: 'session-1',
+        sessionMode: 'per_run',
+      };
+      await writeCronTasks(tmpDir, [original]);
+      await scheduler.enableDurable('session-1');
+      scheduler.start(() => {});
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const fireAt = nextFireTime(original.cron, new Date(original.createdAt));
+      scheduler.tick(new Date(fireAt.getTime() + 1000));
+      await (scheduler as unknown as { pendingPersist: Promise<void> })
+        .pendingPersist;
+      // The fire's removal write landed: the consumed one-shot is gone.
+      expect(await readCronTasks(tmpDir)).toEqual([]);
+
+      // Only the restore write fails (the mock writes through, then throws).
+      updateGate.fail = Object.assign(new Error('ENOSPC: disk full'), {
+        code: 'ENOSPC',
+      });
+      try {
+        await expect(
+          scheduler.restoreConsumedOneShot(original.id),
+        ).rejects.toThrow('ENOSPC');
+      } finally {
+        updateGate.fail = null;
+      }
+
+      const internals = scheduler as unknown as {
+        restorablePerRunOneShots: Map<string, unknown>;
+        consumedPerRunOneShots: Set<string>;
+        consumedPerRunRemovalGenerations: Map<string, unknown>;
+        restoredPerRunOneShots: Set<string>;
+        pendingRemoval: Set<string>;
+      };
+      // The failed restore releases the consumed state symmetrically so the
+      // reload GC is not pinned for the rest of the process's life...
+      expect(internals.restorablePerRunOneShots.has(original.id)).toBe(false);
+      expect(internals.consumedPerRunOneShots.has(original.id)).toBe(false);
+      expect(internals.consumedPerRunRemovalGenerations.has(original.id)).toBe(
+        false,
+      );
+      expect(internals.restoredPerRunOneShots.has(original.id)).toBe(false);
+      // ...while the re-fire guard survives.
+      expect(internals.pendingRemoval.has(original.id)).toBe(true);
+      // ...and the loss leaves an operator-facing breadcrumb.
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(original.id));
+      warn.mockRestore();
     });
 
     // Settle + tear down a second scheduler sharing this tmpDir, so its
