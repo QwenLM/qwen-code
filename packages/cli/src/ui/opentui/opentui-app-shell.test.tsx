@@ -312,6 +312,27 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.loadingProps?.['streaming']).toBe(true);
   });
 
+  it('hides the footer while the composer’s completion list is open', async () => {
+    renderApp();
+    await settle();
+    expect(screen.getByText('footer')).toBeTruthy();
+
+    const onVisibilityChange = mocks.state.inputProps?.[
+      'onSuggestionsVisibilityChange'
+    ] as (visible: boolean) => void;
+    act(() => {
+      onVisibilityChange(true);
+    });
+    await settle();
+    expect(screen.queryByText('footer')).toBeNull();
+
+    act(() => {
+      onVisibilityChange(false);
+    });
+    await settle();
+    expect(screen.getByText('footer')).toBeTruthy();
+  });
+
   it('builds one host, and one dispatcher, across re-renders', async () => {
     const props = {
       config: CONFIG,

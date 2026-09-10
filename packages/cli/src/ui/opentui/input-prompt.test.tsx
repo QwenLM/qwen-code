@@ -1047,12 +1047,36 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
   async function renderWithCommands(
     commands: unknown[],
     onSubmit: (text: string) => void = () => {},
+    onSuggestionsVisibilityChange?: (visible: boolean) => void,
   ) {
     mocks.state.slashCommands = commands;
-    render(<OpenTuiInputPrompt onSubmit={onSubmit} userMessages={[]} />);
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={onSubmit}
+        userMessages={[]}
+        onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
+      />,
+    );
     // Let loadInteractiveCommands resolve into commandsRef.
     await act(async () => {});
   }
+
+  it('publishes completion-list visibility so the shell can hide the footer', async () => {
+    const seen: boolean[] = [];
+    await renderWithCommands(
+      [{ name: 'help', description: 'Show help', kind: 'built-in' }],
+      () => {},
+      (visible) => seen.push(visible),
+    );
+    await typeText('/he');
+    expect(seen).toContain(true);
+
+    // Tab fills `/help `, which matches nothing, so the list closes again.
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'tab', sequence: '\t' }));
+    });
+    expect(seen[seen.length - 1]).toBe(false);
+  });
 
   it('Enter fills the highlighted candidate instead of submitting `/he`', async () => {
     const submitted: string[] = [];
@@ -1265,10 +1289,11 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
 });
 
 describe('OpenTuiInputPrompt approval-mode indicator', () => {
-  // The mode text is the only on-screen proof an auto-accept mode took
-  // effect, and the OpenTUI interactive e2e leg's readiness poll greps the
-  // terminal for it. Asserted through the same translation call the component
-  // makes, so a non-English locale cannot flip the pin.
+  // ink's InputPrompt uses its status text only as an aria-label, never as a
+  // visible row, and this renderer has no aria surface — so the composer owns
+  // only the prefix glyph. The readable mode name belongs to the footer
+  // (OpenTuiFooter, through formatApprovalModeName), which is how ink splits
+  // it between InputPrompt and AutoAcceptIndicator.
   const renderWithMode = (approvalMode: ApprovalMode) =>
     render(
       <OpenTuiInputPrompt
@@ -1279,33 +1304,47 @@ describe('OpenTuiInputPrompt approval-mode indicator', () => {
     );
 
   it.each<[ApprovalMode, string]>([
-    [ApprovalMode.YOLO, 'YOLO mode'],
-    [ApprovalMode.AUTO_EDIT, 'Accepting edits'],
-    [ApprovalMode.AUTO, 'Auto mode'],
-  ])('draws the %s status text', (approvalMode, key) => {
+    [ApprovalMode.YOLO, '*'],
+    [ApprovalMode.AUTO_EDIT, '>'],
+    [ApprovalMode.AUTO, '>'],
+    [ApprovalMode.PLAN, '>'],
+    [ApprovalMode.DEFAULT, '>'],
+  ])('draws the %s prefix', (approvalMode, prefix) => {
     renderWithMode(approvalMode);
-    expect(screen.getByText(t(key))).toBeTruthy();
+    expect(screen.getByText(prefix)).toBeTruthy();
   });
 
-  it.each<ApprovalMode>([ApprovalMode.PLAN, ApprovalMode.DEFAULT])(
-    'draws no status text for %s, matching ink',
-    (approvalMode) => {
-      renderWithMode(approvalMode);
-      for (const key of ['YOLO mode', 'Accepting edits', 'Auto mode']) {
-        expect(screen.queryByText(t(key))).toBeNull();
-      }
-    },
-  );
+  it.each<ApprovalMode>([
+    ApprovalMode.YOLO,
+    ApprovalMode.AUTO_EDIT,
+    ApprovalMode.AUTO,
+    ApprovalMode.PLAN,
+    ApprovalMode.DEFAULT,
+  ])('draws no visible mode name for %s, matching ink', (approvalMode) => {
+    renderWithMode(approvalMode);
+    for (const key of [
+      'YOLO mode',
+      'Accepting edits',
+      'Auto mode',
+      'plan mode',
+      'Ask permissions',
+      'Shell mode',
+    ]) {
+      expect(screen.queryByText(t(key))).toBeNull();
+    }
+  });
 
-  it('replaces the status text with Shell mode while shell mode is active (R1-16)', () => {
+  it('replaces the prefix with ! while shell mode is active (R1-16)', () => {
     render(
       <OpenTuiInputPrompt
         onSubmit={() => {}}
         userMessages={[]}
+        approvalMode={ApprovalMode.YOLO}
         shellModeActive
       />,
     );
-    expect(screen.getByText(t('Shell mode'))).toBeTruthy();
+    expect(screen.getByText('!')).toBeTruthy();
+    expect(screen.queryByText('*')).toBeNull();
   });
 });
 

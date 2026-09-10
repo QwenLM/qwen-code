@@ -104,6 +104,8 @@ vi.mock('./live-turn.js', () => ({
   useOpenTuiLiveTurn: () => ({
     items: [],
     streaming: false,
+    streamingCharsRef: { current: 0 },
+    isReceivingContent: false,
     waitingCalls: [],
     queueLength: 0,
     popQueue: () => null,

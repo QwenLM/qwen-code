@@ -38,6 +38,7 @@ import {
   useState,
   useSyncExternalStore,
   type ReactNode,
+  type RefObject,
 } from 'react';
 import type { Config, Logger, ApprovalMode } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
@@ -140,6 +141,10 @@ export interface OpenTuiAppProps {
   // --- Batch 6: live-turn + confirmation wiring ---------------------------
   /** A live model turn is in flight (composer Esc interrupts, footer spins). */
   streaming?: boolean;
+  /** Live output-character count behind the indicator's token estimate. */
+  streamingCharsRef?: RefObject<number>;
+  /** False while waiting on the API (↑), true once content arrives (↓). */
+  isReceivingContent?: boolean;
   /** Aborts the in-flight turn (Esc while streaming). */
   onInterrupt?: () => void;
   approvalMode?: ApprovalMode;
@@ -201,6 +206,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onToggleVim,
     updateNotice,
     streaming,
+    streamingCharsRef,
+    isReceivingContent,
     onInterrupt,
     approvalMode,
     queueLength,
@@ -233,6 +240,13 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     useTerminalDimensions();
   const toggleShellMode = useCallback(
     () => setShellModeActive((active) => !active),
+    [],
+  );
+  // ink's Composer hides the footer while the completion list is open; the
+  // list lives inside the composer, so its visibility is lifted here.
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const onSuggestionsVisibilityChange = useCallback(
+    (visible: boolean) => setShowSuggestions(visible),
     [],
   );
   const runShellCommand = useCallback(
@@ -801,7 +815,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           />
         ) : (
           <>
-            <OpenTuiLoadingIndicator streaming={Boolean(streaming)} />
+            <OpenTuiLoadingIndicator
+              streaming={Boolean(streaming)}
+              streamingCharsRef={streamingCharsRef}
+              isReceivingContent={isReceivingContent}
+            />
             <OpenTuiInputPrompt
               onSubmit={(text, imagePaths) => {
                 void onSubmit(text, imagePaths);
@@ -820,16 +838,20 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               onPromptSuggestionAbort={onPromptSuggestionAbort}
               shellModeActive={shellModeActive}
               onToggleShellMode={toggleShellMode}
+              onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
             />
           </>
         )}
-        <OpenTuiFooter
-          config={config}
-          streaming={Boolean(streaming)}
-          approvalMode={approvalMode}
-          queueLength={queueLength}
-          sessionName={host.sessionName}
-        />
+        {!dialog && !activeModal && !activeToolCall && !showSuggestions ? (
+          <OpenTuiFooter
+            config={config}
+            streaming={Boolean(streaming)}
+            approvalMode={approvalMode}
+            queueLength={queueLength}
+            sessionName={host.sessionName}
+            shellModeActive={shellModeActive}
+          />
+        ) : null}
       </box>
     </OpenTuiErrorBoundary>
   );

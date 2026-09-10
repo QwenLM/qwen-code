@@ -67,7 +67,6 @@ import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import type { Suggestion } from '../utils/suggestions.js';
 import { cpLen, toCodePoints } from '../utils/textUtils.js';
-import { t } from '../../i18n/index.js';
 import { C } from './theme.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
 import { InputHistory } from './input-history.js';
@@ -152,23 +151,18 @@ function buildCompletionContext(
 const DEFAULT_PLACEHOLDER = '  Type your message or @path/to/file';
 const ESCAPE_ARM_HINT = 'Press Esc again to clear.';
 
-/** Approval-mode chrome exactly like InputPrompt's statusColor/statusText. */
+/** Approval-mode chrome exactly like InputPrompt's statusColor/prefix. */
 function promptChrome(approvalMode: ApprovalMode | undefined): {
   prefix: string;
   color?: string;
-  statusText?: string;
 } {
   switch (approvalMode) {
     case ApprovalMode.AUTO_EDIT:
-      return {
-        prefix: '>',
-        color: C.yellow,
-        statusText: t('Accepting edits'),
-      };
+      return { prefix: '>', color: C.yellow };
     case ApprovalMode.AUTO:
-      return { prefix: '>', color: C.accent, statusText: t('Auto mode') };
+      return { prefix: '>', color: C.accent };
     case ApprovalMode.YOLO:
-      return { prefix: '*', color: C.red, statusText: t('YOLO mode') };
+      return { prefix: '*', color: C.red };
     case ApprovalMode.PLAN:
     case ApprovalMode.DEFAULT:
       return { prefix: '>' };
@@ -214,6 +208,12 @@ export interface InputPromptProps {
   shellModeActive?: boolean;
   /** U-33: toggles shell mode (empty-buffer `!`, ink InputPrompt parity). */
   onToggleShellMode?: () => void;
+  /**
+   * Completion-dropdown visibility, lifted for the shell: ink's Composer hides
+   * the footer while the suggestion list is open, and here the footer is a
+   * sibling of the composer rather than a child of it.
+   */
+  onSuggestionsVisibilityChange?: (visible: boolean) => void;
 }
 
 export function OpenTuiInputPrompt(props: InputPromptProps) {
@@ -235,6 +235,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     onPromptSuggestionAbort,
     shellModeActive = false,
     onToggleShellMode,
+    onSuggestionsVisibilityChange,
   } = props;
 
   const { width } = useTerminalDimensions();
@@ -330,11 +331,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       ? (followupState.suggestion ?? promptSuggestion ?? null)
       : null;
 
-  // Shell mode overrides the approval chrome (ink InputPrompt order: `!`
-  // wins over the approval-mode prefix and replaces its status text with
-  // "Shell mode" — the only signal that Enter now executes shell commands).
+  // Shell mode overrides the approval chrome (ink InputPrompt order: `!` wins
+  // over the approval-mode prefix). The label itself lives in the footer, as
+  // ink's ShellModeIndicator does.
   const chrome = shellModeActive
-    ? { prefix: '!', color: C.accent, statusText: t('Shell mode') }
+    ? { prefix: '!', color: C.accent }
     : promptChrome(approvalMode);
   const borderColor = chrome.color ?? C.accent;
 
@@ -1129,6 +1130,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   );
   const showDropdown =
     loadingSuggestions || (suggestions.length > 0 && visible.length > 0);
+  useEffect(() => {
+    onSuggestionsVisibilityChange?.(showDropdown);
+  }, [showDropdown, onSuggestionsVisibilityChange]);
 
   // Slash-mode labels share one half-width command column, exactly like the
   // ink SuggestionsDisplay.
@@ -1229,11 +1233,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             </text>
           )}
         </box>
-      )}
-      {/* No "(shift + tab to cycle)" suffix like ink's AutoAcceptIndicator:
-          nextApprovalMode is not bound to any key in this renderer yet. */}
-      {chrome.statusText && (
-        <text fg={chrome.color ?? C.dim}>{chrome.statusText}</text>
       )}
       {escapeArmed && <text fg={C.dim}>{ESCAPE_ARM_HINT}</text>}
     </box>

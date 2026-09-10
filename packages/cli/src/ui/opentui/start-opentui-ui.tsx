@@ -289,6 +289,8 @@ function OpenTuiEntryApp({
       updateNotice={updateNotice}
       availableTerminalHeight={height}
       streaming={live.streaming}
+      streamingCharsRef={live.streamingCharsRef}
+      isReceivingContent={live.isReceivingContent}
       onInterrupt={interrupt}
       approvalMode={config.getApprovalMode()}
       queueLength={live.queueLength}
