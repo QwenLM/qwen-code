@@ -566,12 +566,14 @@ export function useQueuedPrompts({
   const holdQueuedPromptsLocallyRef = useRef(holdQueuedPromptsLocally);
   const refreshRequestSeqRef = useRef(0);
   /**
-   * The in-flight pending-prompts GET, if any. Refreshes are single-flight
-   * per session: concurrent callers share the snapshot instead of bumping
-   * the sequence number, which two re-awaiting submit bodies would
-   * otherwise use to invalidate each other forever. `seq` is the dispatch
-   * sequence so a caller confirming a state it just changed can refuse to
-   * join a flight older than that change.
+   * The in-flight pending-prompts GET, if any. At most one GET per session
+   * is in flight: a caller that finds one waits it out rather than
+   * dispatching beside it, then takes exactly one fresh snapshot — or joins
+   * a flight dispatched after its own `notBefore` anchor, which is what
+   * keeps two re-awaiting submit bodies from invalidating each other
+   * forever. `seq` is the dispatch sequence: the wait path joins only a
+   * newer flight, and the `finally` clears this ref only while it still
+   * holds that dispatch.
    */
   const inflightRefreshRef = useRef<{
     sessionId: string;
@@ -609,10 +611,12 @@ export function useQueuedPrompts({
   const clearedUnconfirmedPromptIdsRef = useRef<Set<string>>(new Set());
   /**
    * Started events that arrived while the prompt's removal was in flight.
-   * The event cannot be honoured yet (a successful removal means the prompt
-   * never ran), but the removal may still fail — a started prompt is not
-   * removable — so the failure arm replays from here instead of dropping the
-   * message from the transcript.
+   * The event cannot be honoured yet: a removal that succeeds means the
+   * daemon either never dispatched the prompt or aborted the turn the user
+   * asked to cancel. The removal can still come back not-removed (the id
+   * absent, or already removed by another client while the doomed prompt
+   * runs on to settle), so the failure arm replays from here instead of
+   * dropping the message from the transcript.
    */
   const startedDuringRemovalRef = useRef<Map<string, string>>(new Map());
   /**
@@ -973,8 +977,12 @@ export function useQueuedPrompts({
         pendingStartedByPromptIdRef.current.delete(promptId);
         // The settle clears the displayed marker below; this marker is what
         // the prompt's own submit body re-reads to know the echo happened,
-        // so a still-pending body must not echo it again.
-        appendedBeforeResponsePromptIdsRef.current.add(promptId);
+        // so a still-pending body must not echo it again. A body that
+        // already returned unbound has no remaining read of it — skip the
+        // write rather than leave an entry nothing will ever prune.
+        if (!returnedUnboundPromptIdsRef.current.has(promptId)) {
+          appendedBeforeResponsePromptIdsRef.current.add(promptId);
+        }
         if (full) {
           appendLocalQueuedPrompt(full, promptId);
         } else {
@@ -1113,7 +1121,13 @@ export function useQueuedPrompts({
                   removingServerPromptIdsRef.current.delete(clearedPromptId);
                 })
                 .then((removed) => {
-                  if (!removed) {
+                  if (removed) {
+                    // The daemon confirmed the removal: the prompt never
+                    // ran, so a start parked inside the flight and the
+                    // stashed payload are both dead weight.
+                    startedDuringRemovalRef.current.delete(clearedPromptId);
+                    pendingEchoByPromptIdRef.current.delete(clearedPromptId);
+                  } else {
                     if (clearedCallback) {
                       settleCompletionCallback(
                         clearedPromptId,
@@ -2000,7 +2014,9 @@ export function useQueuedPrompts({
             // A row with attachments is still unbound while this snapshot is
             // applied, and that state suppresses materializing every other
             // queued prompt in it, so this is not the body's sync: let the
-            // `.finally` refresh re-apply the snapshot once the row is bound.
+            // `.finally` refresh re-apply the snapshot once the row stops
+            // being an unbound attachment submission — whether it bound,
+            // echoed and dropped, or was removed.
             refreshedInBody =
               refresh.status === 'refreshed' &&
               (prompt.images?.length ?? 0) === 0 &&
@@ -2138,6 +2154,7 @@ export function useQueuedPrompts({
                 })
                 .then((removed) => {
                   if (removed) {
+                    startedDuringRemovalRef.current.delete(result.promptId);
                     pendingEchoByPromptIdRef.current.delete(result.promptId);
                     const next = queuedPromptsRef.current.filter(
                       (item) => item.serverPromptId !== result.promptId,
@@ -2145,10 +2162,12 @@ export function useQueuedPrompts({
                     queuedPromptsRef.current = next;
                     setQueuedPrompts(next);
                   } else {
-                    // The removal failed, so the prompt really did run: the
-                    // replay echoes it, and its callback must still fire —
-                    // every sibling send path settles it, and a callback
-                    // dropped here never fires at turn_complete.
+                    // The removal came back not-removed — the id is absent,
+                    // or another client already removed it while the doomed
+                    // prompt runs on to settle — so a start may have parked
+                    // for a prompt that really did run: the replay echoes
+                    // it, and the callback must still be registered or no
+                    // terminal event will ever fire it.
                     if (prompt.onComplete) {
                       settleCompletionCallback(
                         result.promptId,
@@ -2276,9 +2295,9 @@ export function useQueuedPrompts({
             // Bind by the id the daemon returned, not by rendered text:
             // identical resubmissions carrying attachments suppress both the
             // text binding and the materialization, and the fall-through
-            // below echoes a message the daemon still holds queued.
+            // below echoes a message the daemon still holds queued. The
+            // settled-or-removing case already returned above.
             const queuedInSnapshot =
-              !settledOrRemoving &&
               !startedSinceSnapshot &&
               refresh.pendingPrompts.some(
                 (p) => p.promptId === result.promptId && p.state === 'queued',
@@ -2312,11 +2331,27 @@ export function useQueuedPrompts({
               // The confirming sync attributed this row to an
               // already-displayed prompt with the same rendered text and
               // dropped it — nothing was cleared, so the admitted prompt
-              // stays and the sync's own row carries it.
+              // stays and the sync's own row carries it. The `.finally`
+              // below issues this path's only refresh.
               if (prompt.onComplete) {
                 settleCompletionCallback(result.promptId, prompt.onComplete);
               }
-              if (!refreshedInBody) void refreshPendingPrompts(targetSessionId);
+              return;
+            }
+            // The row can also be gone because the prompt already ran: a
+            // sync bound it and the started event's echo dropped the bound
+            // row, leaving no marker this body consumes. Client-side
+            // evidence of a start or settle licenses no cancellation — the
+            // DELETE would abort a live turn.
+            if (
+              displayedServerPromptIdsRef.current.has(result.promptId) ||
+              settledServerPromptIdsRef.current.has(result.promptId) ||
+              pendingStartedByPromptIdRef.current.has(result.promptId) ||
+              completedPromptIdsRef.current.has(result.promptId)
+            ) {
+              if (prompt.onComplete) {
+                settleCompletionCallback(result.promptId, prompt.onComplete);
+              }
               return;
             }
             // The removal can still come back not-removed — the id may be
@@ -2339,38 +2374,50 @@ export function useQueuedPrompts({
                 pendingEchoByPromptIdRef.current.delete(oldestEcho);
               }
             }
+            // The removal owns the prompt from here: a start landing inside
+            // the DELETE flight must park like every sibling removal path,
+            // so the outcome — not the event — decides whether it echoes.
+            removingServerPromptIdsRef.current.add(result.promptId);
             sessionActions
               .removePendingPrompt(result.promptId, {
                 sessionId: targetSessionId,
               })
               .then(
-                (removeResult) => {
-                  if (removeResult.removed) {
-                    pendingEchoByPromptIdRef.current.delete(result.promptId);
-                  } else {
-                    // The removal failed, so the prompt may still run and
-                    // settle: register the callback now or no terminal event
-                    // will ever fire it. The success arm stays silent — a
-                    // removed prompt is a cancellation.
-                    if (prompt.onComplete) {
-                      settleCompletionCallback(
-                        result.promptId,
-                        prompt.onComplete,
-                      );
-                    }
-                    void refreshPendingPrompts(targetSessionId);
-                  }
-                },
-                () => {
+                (removeResult) => removeResult.removed,
+                () => false,
+              )
+              // Clearing the flag before acting on the outcome matters: a
+              // re-sync that runs while the id is still marked as being
+              // removed skips the very prompt a failed removal left behind.
+              .finally(() => {
+                removingServerPromptIdsRef.current.delete(result.promptId);
+              })
+              .then((removed) => {
+                if (removed) {
+                  // The daemon confirmed the removal: the prompt never ran
+                  // to completion, so the parked start and the stashed
+                  // payload are both dead weight.
+                  startedDuringRemovalRef.current.delete(result.promptId);
+                  pendingEchoByPromptIdRef.current.delete(result.promptId);
+                } else {
+                  // The removal came back not-removed — the id is absent, or
+                  // already removed by another client while the doomed
+                  // prompt runs on to settle — so a start may have parked
+                  // for a prompt that really did run: replay it, and
+                  // register the callback either way, since no terminal
+                  // event fires a callback that was never registered. The
+                  // success arm stays silent — a removed prompt is a
+                  // cancellation.
                   if (prompt.onComplete) {
                     settleCompletionCallback(
                       result.promptId,
                       prompt.onComplete,
                     );
                   }
+                  replayStartedDuringRemoval(result.promptId);
                   void refreshPendingPrompts(targetSessionId);
-                },
-              );
+                }
+              });
             return;
           }
           const updated = [...current];
@@ -3243,6 +3290,7 @@ export function useQueuedPrompts({
         }
         completionCallbacksRef.current.delete(target.serverPromptId);
         pendingEchoByPromptIdRef.current.delete(target.serverPromptId);
+        startedDuringRemovalRef.current.delete(target.serverPromptId);
         // The confirming snapshot must post-date the DELETE: the fence
         // default refuses to join a GET dispatched before it, which would
         // re-list the prompt and keep the row its own removal deleted.
@@ -3869,6 +3917,20 @@ export function useQueuedPrompts({
       const submittingIds = new Set(
         submittingPrompts.map((prompt) => prompt.id),
       );
+      // A row whose submit body already returned unbound carries a daemon
+      // id this clear path would otherwise lose — the row has no
+      // serverPromptId to DELETE. Hand the id to the deferred clear so the
+      // next snapshot that still lists it queued cancels the message the
+      // user just cleared.
+      for (const prompt of submittingPrompts) {
+        for (const [promptId, rowId] of returnedUnboundPromptIdsRef.current) {
+          if (rowId === prompt.id) {
+            returnedUnboundPromptIdsRef.current.delete(promptId);
+            clearedUnconfirmedPromptIdsRef.current.add(promptId);
+            break;
+          }
+        }
+      }
       const remaining = queuedPromptsRef.current.filter(
         (prompt) => !submittingIds.has(prompt.id),
       );
@@ -3922,6 +3984,7 @@ export function useQueuedPrompts({
             if (result.removed) {
               completionCallbacksRef.current.delete(promptId);
               pendingEchoByPromptIdRef.current.delete(promptId);
+              startedDuringRemovalRef.current.delete(promptId);
               return;
             }
             failedPrompts.push(prompt);

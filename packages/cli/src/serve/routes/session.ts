@@ -8799,7 +8799,10 @@ export function registerSessionRoutes(
   // removed promoted message disappears from snapshots at once and is
   // retained internally — doomed — until its aborted turn settles, so the
   // removal response is the only `removed = true` a client ever observes.
-  // Accepted requests are owned by the daemon; rejected
+  // A `content` reference the session no longer holds (or an invalid one) is
+  // declined before any verdict: the bridge throws and the error mapping
+  // answers 410/400 with an `{ error, code }` body — no `accepted`, no
+  // `reason`. Accepted requests are owned by the daemon; rejected
   // requests were not admitted. Synchronous — the bridge only mutates its
   // in-memory session queues.
   //
