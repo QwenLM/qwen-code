@@ -19,7 +19,10 @@ import {
 import {
   createGoalCheckpointVerifier,
   GoalCheckpointClaimBudgetError,
+  GoalCheckpointClaimCountError,
   GoalCheckpointClaimLengthError,
+  GoalCheckpointProofKindError,
+  GoalCheckpointSourceRefError,
   GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
   GOAL_CHECKPOINT_VERIFIER_REQUEST_BYTE_LIMIT,
   GoalCheckpointVerifierInputTooLargeError,
@@ -335,7 +338,7 @@ describe('createGoalCheckpointVerifier', () => {
     expect(generateText).toHaveBeenCalledTimes(2);
   });
 
-  it('does not retry an unusable result the budget did not cause', async () => {
+  it('does not retry an answer that is not JSON at all', async () => {
     const { config, generateText } = configForReplies(
       'not json at all',
       claimsOfBytes(120),
@@ -416,6 +419,275 @@ describe('createGoalCheckpointVerifier', () => {
       createGoalCheckpointVerifier(config)(input()),
     ).rejects.toBeInstanceOf(InvalidGoalCheckpointError);
     expect(generateText).toHaveBeenCalledOnce();
+  });
+
+  const FENCE = '```';
+
+  const retryNote = (
+    generateText: ReturnType<typeof vi.fn>,
+    attempt: number,
+  ): string => {
+    const request = generateText.mock.calls[attempt]![0] as Parameters<
+      BaseLlmClient['generateText']
+    >[0];
+    return request.contents[0]?.parts?.[1]?.text ?? '';
+  };
+
+  it('reads a reply wrapped in a markdown fence', async () => {
+    // Endpoints that never receive response_format often fence the JSON.
+    // Rejecting it spent a stall on an answer whose claims were fine.
+    const body = claimsOfBytes(120);
+    for (const reply of [
+      `${FENCE}json\n${body}\n${FENCE}`,
+      `${FENCE}\n${body}\n${FENCE}`,
+      `  ${FENCE}JSON\n${body}\n${FENCE}\n`,
+    ]) {
+      const { config, generateText } = configForReplies(reply);
+      const result = await createGoalCheckpointVerifier(config)(input());
+      expect(result.claims).toHaveLength(1);
+      expect(generateText).toHaveBeenCalledOnce();
+    }
+
+    // Only a fence around the whole reply is removed, and what it wraps must
+    // still be JSON.
+    expect(() =>
+      parseGoalCheckpointVerifierText(
+        `Here you go:\n${FENCE}json\n${body}\n${FENCE}`,
+      ),
+    ).toThrow(/invalid JSON/);
+    expect(() =>
+      parseGoalCheckpointVerifierText(`${FENCE}json\nnot json\n${FENCE}`),
+    ).toThrow(/invalid JSON/);
+  });
+
+  it('retries once when the answer holds more claims than one checkpoint may', async () => {
+    const tooMany = GOAL_CHECKPOINT_CLAIM_LIMIT + 4;
+    const { config, generateText } = configForReplies(
+      claimsOfTexts(Array.from({ length: tooMany }, (_, i) => `fact ${i}`)),
+      claimsOfBytes(120),
+    );
+
+    const result = await createGoalCheckpointVerifier(config)(input());
+
+    expect(result.claims).toHaveLength(1);
+    expect(generateText).toHaveBeenCalledTimes(2);
+    const note = retryNote(generateText, 1);
+    expect(note).toContain(`returned ${tooMany} claims`);
+    expect(note).toContain(`at most ${GOAL_CHECKPOINT_CLAIM_LIMIT} claims`);
+    // Merging is how a model gets under the count, and merging across proof
+    // kinds is exactly what the next check would reject.
+    expect(note).toContain('different proofKind');
+    expect(verifierDebug).toHaveBeenCalledWith(
+      'Retrying goal checkpoint verifier after too many claims',
+      { claimCount: tooMany, limitClaims: GOAL_CHECKPOINT_CLAIM_LIMIT },
+    );
+  });
+
+  it('retries once when claims cite ids that were not in the request', async () => {
+    const { config, generateText } = configForReplies(
+      JSON.stringify({
+        claims: [
+          {
+            proofKind: 'external_fact',
+            claim: 'The suite passed.',
+            sourceRefs: ['tool-1', 'tool-9'],
+          },
+          {
+            proofKind: 'external_fact',
+            claim: 'Lint passed.',
+            sourceRefs: ['tool-9', 'made-up'],
+          },
+        ],
+      }),
+      claimsOfBytes(120),
+    );
+
+    const result = await createGoalCheckpointVerifier(config)(input());
+
+    expect(result.claims).toHaveLength(1);
+    expect(generateText).toHaveBeenCalledTimes(2);
+    const note = retryNote(generateText, 1);
+    // Every unknown id across the reply, once each, so one retry can fix all.
+    expect(note).toContain('tool-9, made-up');
+    expect(note).toContain('previousClaims[].id');
+    expect(note).toContain('evidence[].uuid');
+    expect(verifierDebug).toHaveBeenCalledWith(
+      'Retrying goal checkpoint verifier after claims cited unknown sources',
+      { unknownRefCount: 2 },
+    );
+  });
+
+  it('retries once when a claim changes the proof kind of its source', async () => {
+    const { config, generateText } = configForReplies(
+      JSON.stringify({
+        claims: [
+          {
+            proofKind: 'user_input',
+            claim: 'The suite passed.',
+            sourceRefs: ['tool-1'],
+          },
+        ],
+      }),
+      claimsOfBytes(120),
+    );
+
+    const result = await createGoalCheckpointVerifier(config)(input());
+
+    expect(result.claims).toHaveLength(1);
+    expect(generateText).toHaveBeenCalledTimes(2);
+    const note = retryNote(generateText, 1);
+    expect(note).toContain('claim 1 used proofKind "user_input"');
+    expect(note).toContain('tool-1 has proofKind "external_fact"');
+    expect(verifierDebug).toHaveBeenCalledWith(
+      'Retrying goal checkpoint verifier after a claim changed its source proof kind',
+      { claimIndex: 0 },
+    );
+  });
+
+  it('accepts a claim that carries a previous claim forward under its proof kind', async () => {
+    const { config, generateText } = configForReplies(
+      JSON.stringify({
+        claims: [
+          {
+            proofKind: 'user_input',
+            claim: 'The user approved the change.',
+            sourceRefs: ['checkpoint-1:1'],
+          },
+          {
+            proofKind: 'external_fact',
+            claim: 'The suite passed.',
+            sourceRefs: ['tool-1'],
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      createGoalCheckpointVerifier(config)(input()),
+    ).resolves.toMatchObject({
+      claims: [{ sourceRefs: ['checkpoint-1:1'] }, { sourceRefs: ['tool-1'] }],
+    });
+    expect(generateText).toHaveBeenCalledOnce();
+  });
+
+  it('spends one corrective attempt in total, whatever the second answer gets wrong', async () => {
+    const { config, generateText } = configForReplies(
+      claimsOfTexts(
+        Array.from(
+          { length: GOAL_CHECKPOINT_CLAIM_LIMIT + 1 },
+          (_, i) => `fact ${i}`,
+        ),
+      ),
+      JSON.stringify({
+        claims: [
+          { proofKind: 'external_fact', claim: 'x', sourceRefs: ['tool-9'] },
+        ],
+      }),
+      claimsOfBytes(120),
+    );
+
+    await expect(
+      createGoalCheckpointVerifier(config)(input()),
+    ).rejects.toBeInstanceOf(GoalCheckpointSourceRefError);
+    expect(generateText).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports a reply over the claim limit as its own error, carrying the count', () => {
+    let thrown: unknown;
+    try {
+      parseGoalCheckpointVerifierText(
+        claimsOfTexts(
+          Array.from(
+            { length: GOAL_CHECKPOINT_CLAIM_LIMIT + 1 },
+            (_, i) => `fact ${i}`,
+          ),
+        ),
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(GoalCheckpointClaimCountError);
+    expect(thrown).toBeInstanceOf(InvalidGoalCheckpointError);
+    expect((thrown as GoalCheckpointClaimCountError).claimCount).toBe(
+      GOAL_CHECKPOINT_CLAIM_LIMIT + 1,
+    );
+  });
+
+  it('checks sources only when it is told what they are', () => {
+    // Parsing alone has no request to check ids against; the verifier passes
+    // the request's sources, and materialization still checks them after.
+    const unknown = JSON.stringify({
+      claims: [
+        { proofKind: 'user_input', claim: 'x', sourceRefs: ['nowhere'] },
+      ],
+    });
+    expect(parseGoalCheckpointVerifierText(unknown).claims).toHaveLength(1);
+
+    const sources = new Map([['tool-1', 'external_fact' as const]]);
+    expect(() => parseGoalCheckpointVerifierText(unknown, sources)).toThrow(
+      GoalCheckpointSourceRefError,
+    );
+
+    let thrown: unknown;
+    try {
+      parseGoalCheckpointVerifierText(
+        JSON.stringify({
+          claims: [
+            { proofKind: 'user_input', claim: 'x', sourceRefs: ['tool-1'] },
+          ],
+        }),
+        sources,
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(GoalCheckpointProofKindError);
+    expect(thrown).toBeInstanceOf(InvalidGoalCheckpointError);
+    expect(thrown).toMatchObject({
+      claimIndex: 0,
+      sourceRef: 'tool-1',
+      claimedProofKind: 'user_input',
+      sourceProofKind: 'external_fact',
+    });
+  });
+
+  it('keeps a runaway model-written id out of the error message and the note', async () => {
+    const runaway = 'x'.repeat(5_000);
+    const { config, generateText } = configForReplies(
+      JSON.stringify({
+        claims: [
+          {
+            proofKind: 'external_fact',
+            claim: 'x',
+            sourceRefs: [runaway],
+          },
+        ],
+      }),
+      JSON.stringify({
+        claims: [
+          {
+            proofKind: 'external_fact',
+            claim: 'x',
+            sourceRefs: [runaway],
+          },
+        ],
+      }),
+    );
+
+    let thrown: unknown;
+    try {
+      await createGoalCheckpointVerifier(config)(input());
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(GoalCheckpointSourceRefError);
+    // The full id stays on the error for an investigation; the message the
+    // Goal record keeps and the note sent back to the model are bounded.
+    expect((thrown as GoalCheckpointSourceRefError).unknownRefs).toEqual([
+      runaway,
+    ]);
+    expect((thrown as Error).message.length).toBeLessThan(300);
+    expect(retryNote(generateText, 1).length).toBeLessThan(1_000);
   });
 
   it('reports the overrun rather than a request-too-large when the note does not fit', async () => {

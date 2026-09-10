@@ -21,6 +21,7 @@ import {
   GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
   GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT,
   isGoalEvidenceProofKind,
+  type GoalEvidenceProofKind,
 } from './goal-protocol.js';
 
 /**
@@ -138,6 +139,60 @@ export class GoalCheckpointClaimLengthError extends InvalidGoalCheckpointError {
   }
 }
 
+/**
+ * A well-formed checkpoint carrying more claims than one checkpoint may hold.
+ *
+ * Retryable for the same reason the byte and length overruns are: `maxItems`
+ * is stripped from the emitted schema, so the bound reaches the model only as
+ * prose, and only a retry can name the count it actually returned.
+ */
+export class GoalCheckpointClaimCountError extends InvalidGoalCheckpointError {
+  constructor(readonly claimCount: number) {
+    super(
+      `Goal checkpoint verifier returned ${claimCount} claims, over the ${GOAL_CHECKPOINT_CLAIM_LIMIT}-claim limit`,
+    );
+    this.name = 'GoalCheckpointClaimCountError';
+  }
+}
+
+/**
+ * Claims that cite ids the verifier was never given.
+ *
+ * `materializeGoalEvidenceCheckpoint` rejects the same answer one step later,
+ * after the call has returned and no correction is possible. Checked here, a
+ * model that invented or mistyped an id can be told which ones and cite the
+ * real ones instead.
+ */
+export class GoalCheckpointSourceRefError extends InvalidGoalCheckpointError {
+  constructor(readonly unknownRefs: readonly string[]) {
+    super(
+      `Goal checkpoint verifier claims cite ${unknownRefs.length} unknown ${
+        unknownRefs.length === 1 ? 'source' : 'sources'
+      }: ${unknownRefs.slice(0, 5).map(displayReference).join(', ')}`,
+    );
+    this.name = 'GoalCheckpointSourceRefError';
+  }
+}
+
+/**
+ * A claim whose proof kind differs from a source it cites -- the other
+ * faithfulness rule `materializeGoalEvidenceCheckpoint` only enforces once
+ * the call has already returned.
+ */
+export class GoalCheckpointProofKindError extends InvalidGoalCheckpointError {
+  constructor(
+    readonly claimIndex: number,
+    readonly sourceRef: string,
+    readonly claimedProofKind: GoalEvidenceProofKind,
+    readonly sourceProofKind: GoalEvidenceProofKind,
+  ) {
+    super(
+      `Goal checkpoint verifier claim ${claimIndex + 1} changes the proof kind of source ${displayReference(sourceRef)} from ${sourceProofKind} to ${claimedProofKind}`,
+    );
+    this.name = 'GoalCheckpointProofKindError';
+  }
+}
+
 export class GoalCheckpointVerifierInputTooLargeError extends Error {
   constructor(readonly byteLength: number) {
     super(
@@ -182,12 +237,35 @@ function verifierContents(
   return [{ role: 'user', parts }];
 }
 
+/**
+ * A reply wrapped in one markdown fence, the shape endpoints that never
+ * receive `response_format` commonly return. Only a fence around the whole
+ * reply matches; prose before or after it is left for `JSON.parse` to reject.
+ */
+const FENCED_REPLY =
+  /^\s*```(?:json)?[ \t]*\r?\n?([\s\S]*?)\r?\n?[ \t]*```\s*$/i;
+
+function stripMarkdownFence(text: string): string {
+  const match = FENCED_REPLY.exec(text);
+  return match ? match[1]! : text;
+}
+
+/**
+ * Parses and bounds a checkpoint verifier reply.
+ *
+ * `sources` maps every id the request offered (previous claim ids and evidence
+ * uuids) to its proof kind. When given, the reply is also held to the
+ * faithfulness rules `materializeGoalEvidenceCheckpoint` enforces, so a
+ * violation surfaces while a corrective attempt is still possible rather than
+ * after the call has returned.
+ */
 export function parseGoalCheckpointVerifierText(
   text: string,
+  sources?: ReadonlyMap<string, GoalEvidenceProofKind>,
 ): GoalCheckpointVerificationResult {
   let value: unknown;
   try {
-    value = JSON.parse(text);
+    value = JSON.parse(stripMarkdownFence(text));
   } catch {
     throw new InvalidGoalCheckpointError(
       'Goal checkpoint verifier returned invalid JSON',
@@ -197,12 +275,17 @@ export function parseGoalCheckpointVerifierText(
     !isRecord(value) ||
     !hasOnlyKeys(value, ['claims']) ||
     !Array.isArray(value['claims']) ||
-    value['claims'].length === 0 ||
-    value['claims'].length > GOAL_CHECKPOINT_CLAIM_LIMIT
+    value['claims'].length === 0
   ) {
     throw new InvalidGoalCheckpointError(
       'Goal checkpoint verifier returned invalid claims',
     );
+  }
+  // Its own class, like the length and budget overruns: `maxItems` never
+  // reaches the model, and only the measured count can change a
+  // `temperature: 0` answer on the retry.
+  if (value['claims'].length > GOAL_CHECKPOINT_CLAIM_LIMIT) {
+    throw new GoalCheckpointClaimCountError(value['claims'].length);
   }
   const claims = value['claims'].map((claim, index) =>
     parseClaim(claim, index),
@@ -219,7 +302,60 @@ export function parseGoalCheckpointVerifierText(
   if (claimBytes > GOAL_CHECKPOINT_CLAIM_MAX_BYTES) {
     throw new GoalCheckpointClaimBudgetError(claimBytes);
   }
+  if (sources) assertClaimSources(claims, sources);
   return { claims };
+}
+
+/**
+ * The two faithfulness rules `materializeGoalEvidenceCheckpoint` applies to
+ * every claim: each cited id must be one the request offered, and a claim must
+ * keep the proof kind of every source it cites. Unknown ids are collected
+ * across the whole reply so one retry note can name all of them.
+ */
+function assertClaimSources(
+  claims: readonly GoalCheckpointVerifierClaim[],
+  sources: ReadonlyMap<string, GoalEvidenceProofKind>,
+): void {
+  const unknownRefs = [
+    ...new Set(
+      claims.flatMap((claim) =>
+        claim.sourceRefs.filter((reference) => !sources.has(reference)),
+      ),
+    ),
+  ];
+  if (unknownRefs.length > 0) {
+    throw new GoalCheckpointSourceRefError(unknownRefs);
+  }
+  for (const [index, claim] of claims.entries()) {
+    for (const reference of claim.sourceRefs) {
+      const sourceProofKind = sources.get(reference)!;
+      if (sourceProofKind !== claim.proofKind) {
+        throw new GoalCheckpointProofKindError(
+          index,
+          reference,
+          claim.proofKind,
+          sourceProofKind,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Every id a checkpoint request offers, with its proof kind, built the way
+ * `materializeGoalEvidenceCheckpoint` builds its source map.
+ */
+function checkpointSources(
+  input: GoalCheckpointVerifierInput,
+): Map<string, GoalEvidenceProofKind> {
+  const sources = new Map<string, GoalEvidenceProofKind>();
+  for (const claim of input.previousClaims) {
+    sources.set(claim.id, claim.proofKind);
+  }
+  for (const record of input.evidence) {
+    sources.set(record.uuid, record.proofKind);
+  }
+  return sources;
 }
 
 /**
@@ -241,6 +377,55 @@ function claimLengthRetryNote(
   return `Your previous answer was rejected: claim ${claimIndex + 1} was ${characterLength} characters, over the ${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS}-character limit for a single claim. Return the same coverage with every individual claim at or under ${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS} characters and all claims together at or under ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} UTF-8 bytes. Split the over-long claim into as few additional claims as the budget allows, without exceeding ${GOAL_CHECKPOINT_CLAIM_LIMIT} claims in one checkpoint, or compress it, rather than dropping facts. Reply with the JSON object only.`;
 }
 
+/** Longest model-written id echoed back in an error message or a retry note. */
+const DISPLAYED_REFERENCE_MAX_CHARACTERS = 80;
+
+/** Most unknown ids one retry note names. */
+const NOTE_UNKNOWN_REFERENCE_LIMIT = 20;
+
+/**
+ * A model-written id as it is shown back, bounded by code point: the id is
+ * the model's own output and can be anything, including a runaway string.
+ */
+function displayReference(reference: string): string {
+  const codePoints = [...reference];
+  return codePoints.length <= DISPLAYED_REFERENCE_MAX_CHARACTERS
+    ? reference
+    : `${codePoints.slice(0, DISPLAYED_REFERENCE_MAX_CHARACTERS - 1).join('')}…`;
+}
+
+/**
+ * What a model is told after it returned more claims than one checkpoint may
+ * hold. Merging is the way under the count, so the note also names the merge
+ * the next check would reject.
+ */
+function claimCountRetryNote(claimCount: number): string {
+  return `Your previous answer was rejected: it returned ${claimCount} claims, over the limit of ${GOAL_CHECKPOINT_CLAIM_LIMIT} claims in one checkpoint. Return the same coverage in at most ${GOAL_CHECKPOINT_CLAIM_LIMIT} claims by merging claims that cite overlapping sources, never merging claims with different proofKind values, and keep all claims together at or under ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} UTF-8 bytes with every claim at or under ${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS} characters. Merge facts rather than dropping them. Reply with the JSON object only.`;
+}
+
+/**
+ * What a model is told after its claims cited ids the request never offered.
+ */
+function sourceRefRetryNote(unknownRefs: readonly string[]): string {
+  const shown = unknownRefs
+    .slice(0, NOTE_UNKNOWN_REFERENCE_LIMIT)
+    .map(displayReference)
+    .join(', ');
+  const more =
+    unknownRefs.length > NOTE_UNKNOWN_REFERENCE_LIMIT
+      ? ` and ${unknownRefs.length - NOTE_UNKNOWN_REFERENCE_LIMIT} more`
+      : '';
+  return `Your previous answer was rejected: sourceRefs cited ids that are not in the request: ${shown}${more}. Cite only ids given in the request, exactly as written: previousClaims[].id to carry a previous claim forward, evidence[].uuid for new evidence. Drop a claim only if no id in the request supports it. Keep at most ${GOAL_CHECKPOINT_CLAIM_LIMIT} claims within ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} UTF-8 bytes. Reply with the JSON object only.`;
+}
+
+/**
+ * What a model is told after a claim took a proof kind its source does not
+ * have.
+ */
+function proofKindRetryNote(error: GoalCheckpointProofKindError): string {
+  return `Your previous answer was rejected: claim ${error.claimIndex + 1} used proofKind "${error.claimedProofKind}", but its source ${displayReference(error.sourceRef)} has proofKind "${error.sourceProofKind}". Every claim must use the proofKind of each source it cites; split a claim whose sources have different proofKind values instead of relabelling it. Keep at most ${GOAL_CHECKPOINT_CLAIM_LIMIT} claims within ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} UTF-8 bytes. Reply with the JSON object only.`;
+}
+
 interface CorrectiveRetry {
   note: string;
   debugMessage: string;
@@ -248,13 +433,43 @@ interface CorrectiveRetry {
 }
 
 /**
- * The unusable results one corrective attempt can fix: exactly the bounds the
- * wire strips from the emitted schema. The system prompt states the static
- * bounds, but the retry supplies the measured overrun needed to change a
- * deterministic answer. Everything else stays single-shot -- a malformed or
- * unfaithful answer is not something restating the request fixes.
+ * The unusable results one corrective attempt can fix, each carrying the
+ * measured violation a note can name: the bounds the wire strips from the
+ * emitted schema (claim count, per-claim length, aggregate bytes), and the two
+ * faithfulness rules no schema can express (cited ids must come from the
+ * request, and a claim keeps its sources' proof kind). The system prompt
+ * states all of them, but only the measured violation changes a
+ * `temperature: 0` answer. Everything else stays single-shot -- a reply that
+ * is not JSON, lacks the claims shape, or carries an empty claim is not
+ * something restating the request fixes.
  */
 function correctiveRetryFor(error: unknown): CorrectiveRetry | undefined {
+  if (error instanceof GoalCheckpointClaimCountError) {
+    return {
+      note: claimCountRetryNote(error.claimCount),
+      debugMessage: 'Retrying goal checkpoint verifier after too many claims',
+      debugPayload: {
+        claimCount: error.claimCount,
+        limitClaims: GOAL_CHECKPOINT_CLAIM_LIMIT,
+      },
+    };
+  }
+  if (error instanceof GoalCheckpointSourceRefError) {
+    return {
+      note: sourceRefRetryNote(error.unknownRefs),
+      debugMessage:
+        'Retrying goal checkpoint verifier after claims cited unknown sources',
+      debugPayload: { unknownRefCount: error.unknownRefs.length },
+    };
+  }
+  if (error instanceof GoalCheckpointProofKindError) {
+    return {
+      note: proofKindRetryNote(error),
+      debugMessage:
+        'Retrying goal checkpoint verifier after a claim changed its source proof kind',
+      debugPayload: { claimIndex: error.claimIndex },
+    };
+  }
   if (error instanceof GoalCheckpointClaimBudgetError) {
     return {
       note: claimBudgetRetryNote(error.byteLength),
@@ -299,9 +514,10 @@ export function createGoalCheckpointVerifier(
       : timeoutController.signal;
 
     try {
-      // At most one corrective retry, and only for the bounds the emitted
-      // schema cannot get onto the wire. Every other unusable result stays
+      // At most one corrective retry, and only for the violations a note can
+      // name (see `correctiveRetryFor`). Every other unusable result stays
       // single-shot, and both attempts share the one ceiling armed above.
+      const sources = checkpointSources(input);
       let retry: CorrectiveRetry | undefined;
       let retryCause: unknown;
       for (;;) {
@@ -331,7 +547,7 @@ export function createGoalCheckpointVerifier(
           // class and message the verifier's own tests assert on.
         });
         try {
-          return parseGoalCheckpointVerifierText(result.text);
+          return parseGoalCheckpointVerifierText(result.text, sources);
         } catch (error) {
           const corrective =
             retry === undefined ? correctiveRetryFor(error) : undefined;
