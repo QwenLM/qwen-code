@@ -23,6 +23,7 @@ import {
   type SubagentExecutorCore,
 } from '@qwen-code/qwen-code-core/subagentRuntime';
 import {
+  assertExternalAgentSpawnPlatformSupported,
   isExpectedExternalAgentCleanupExit,
   isUnprovenExternalAgentTreeExit,
 } from './acp-subagent-executor.js';
@@ -152,6 +153,7 @@ async function runCodex(
     turnId = observed;
   };
   lines.on('line', (line) => {
+    if (terminal && pending.size === 0) return;
     try {
       const frame = object(JSON.parse(line));
       if (typeof frame['method'] !== 'string') {
@@ -163,6 +165,7 @@ async function runCodex(
         else reply.resolve(object(frame['result']));
         return;
       }
+      if (terminal) return;
       const method = frame['method'];
       const parameters = object(frame['params'] ?? {});
       if (frame['id'] !== undefined) {
@@ -280,8 +283,10 @@ async function runCodex(
       throw new Error('Codex completed without a final answer.');
     return answer;
   };
+  let completedAnswer: string | undefined;
   try {
-    return await Promise.race([run(), failure]);
+    completedAnswer = await Promise.race([run(), failure]);
+    return completedAnswer;
   } finally {
     clearTimeout(initTimer);
     clearTimeout(executionTimer);
@@ -307,7 +312,12 @@ async function runCodex(
             });
           }
         } else if (!isExpectedExternalAgentCleanupExit(error)) {
-          throw new Error(`Codex cleanup failed: ${detail}`);
+          throw new Error(
+            `Codex cleanup failed: ${detail}` +
+              (completedAnswer === undefined
+                ? ''
+                : `\n\nCompleted Codex answer:\n${completedAnswer}`),
+          );
         }
       })
       .finally(() => {
@@ -331,6 +341,7 @@ class CodexSubagentExecutor implements SubagentExecutor {
   private durationMs = 0;
 
   constructor(private readonly params: ExternalAgentExecutorParams) {
+    assertExternalAgentSpawnPlatformSupported();
     if (params.spec.kind !== 'codex')
       throw new Error('Expected a Codex executor.');
     if (!params.runtimeContext.isTrustedFolder())
@@ -350,9 +361,9 @@ class CodexSubagentExecutor implements SubagentExecutor {
     switch (params.approvalMode ?? 'default') {
       case 'default':
       case 'plan':
+      case 'auto':
         this.sandbox = 'read-only';
         break;
-      case 'auto':
       case 'auto-edit':
         this.sandbox = 'workspace-write';
         break;

@@ -15,7 +15,11 @@ import type { Content, Part, PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
 import { ToolNames } from '../tool-names.js';
-import { type Config, ApprovalMode } from '../../config/config.js';
+import {
+  Config,
+  ApprovalMode,
+  deriveApprovalModeConfig,
+} from '../../config/config.js';
 import { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
@@ -216,6 +220,7 @@ describe('AgentTool', () => {
       isAgentTeamEnabled: vi.fn().mockReturnValue(false),
       isTodoWriteEnabled: vi.fn().mockReturnValue(true),
       getApprovalMode: vi.fn().mockReturnValue('default'),
+      getSessionApprovalMode: Config.prototype.getSessionApprovalMode,
       getSessionWorkflowPlanRevision: vi.fn().mockReturnValue(undefined),
       getModel: vi.fn().mockReturnValue('parent-model'),
       getContentGeneratorConfig: vi.fn().mockReturnValue({
@@ -6163,6 +6168,96 @@ describe('AgentTool', () => {
           expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledTimes(
             1,
           );
+        }
+      },
+    );
+
+    it.each([
+      ['codex', ApprovalMode.DEFAULT, undefined, ApprovalMode.DEFAULT],
+      ['codex', ApprovalMode.AUTO, undefined, ApprovalMode.AUTO],
+      ['codex', ApprovalMode.PLAN, undefined, ApprovalMode.PLAN],
+      ['codex', ApprovalMode.AUTO_EDIT, undefined, ApprovalMode.AUTO_EDIT],
+      ['codex', ApprovalMode.YOLO, undefined, ApprovalMode.YOLO],
+      ['codex', ApprovalMode.DEFAULT, 'auto-edit', ApprovalMode.AUTO_EDIT],
+      ['codex', ApprovalMode.AUTO, 'auto-edit', ApprovalMode.AUTO_EDIT],
+      ['codex', ApprovalMode.AUTO, 'yolo', ApprovalMode.YOLO],
+      ['codex', ApprovalMode.AUTO, 'default', ApprovalMode.DEFAULT],
+      ['codex', ApprovalMode.YOLO, 'default', ApprovalMode.YOLO],
+      ['acp', ApprovalMode.DEFAULT, undefined, ApprovalMode.AUTO_EDIT],
+      [undefined, ApprovalMode.DEFAULT, undefined, ApprovalMode.AUTO_EDIT],
+    ] as const)(
+      'resolves %s parent=%s override=%s to %s at the child runtime',
+      async (kind, parentMode, approvalMode, expectedMode) => {
+        vi.mocked(config.getApprovalMode).mockReturnValue(parentMode);
+        Object.assign(config, { getPrePlanMode: () => ApprovalMode.DEFAULT });
+        vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+          ...bgSubagent,
+          approvalMode,
+          executor: kind ? { kind, command: kind } : undefined,
+        });
+        const result = await (agentTool as AgentToolWithProtectedMethods)
+          .createInvocation({
+            description: 'Permission test',
+            prompt: 'Inspect',
+            subagent_type: 'monitor',
+            run_in_background: false,
+          })
+          .execute();
+        expect(partToString(result.llmContent)).toContain('Monitor done');
+        const childConfig = vi.mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0]?.[1];
+        expect(childConfig?.getApprovalMode()).toBe(expectedMode);
+      },
+    );
+
+    it.each([
+      [
+        ApprovalMode.DEFAULT,
+        ApprovalMode.AUTO_EDIT,
+        undefined,
+        ApprovalMode.DEFAULT,
+      ],
+      [
+        ApprovalMode.DEFAULT,
+        ApprovalMode.YOLO,
+        undefined,
+        ApprovalMode.DEFAULT,
+      ],
+      [ApprovalMode.AUTO, ApprovalMode.AUTO_EDIT, undefined, ApprovalMode.AUTO],
+      [ApprovalMode.YOLO, ApprovalMode.AUTO_EDIT, undefined, ApprovalMode.YOLO],
+      [
+        ApprovalMode.DEFAULT,
+        ApprovalMode.AUTO_EDIT,
+        'auto-edit',
+        ApprovalMode.AUTO_EDIT,
+      ],
+    ] as const)(
+      'keeps nested Codex inside session=%s despite intermediate=%s (override=%s)',
+      async (sessionMode, intermediateMode, approvalMode, expectedMode) => {
+        vi.mocked(config.getApprovalMode).mockReturnValue(sessionMode);
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+          ...bgSubagent,
+          approvalMode,
+          executor: { kind: 'codex', command: 'codex' },
+        });
+        const intermediate = deriveApprovalModeConfig(config, intermediateMode);
+        try {
+          const nestedTool = new AgentTool(intermediate.config);
+          const result = await (nestedTool as AgentToolWithProtectedMethods)
+            .createInvocation({
+              description: 'Nested permission test',
+              prompt: 'Inspect',
+              subagent_type: 'monitor',
+              run_in_background: false,
+            })
+            .execute();
+          expect(partToString(result.llmContent)).toContain('Monitor done');
+          const childConfig = vi.mocked(mockSubagentManager.createAgentHeadless)
+            .mock.calls[0]?.[1];
+          expect(childConfig?.getApprovalMode()).toBe(expectedMode);
+        } finally {
+          intermediate.cleanup();
         }
       },
     );

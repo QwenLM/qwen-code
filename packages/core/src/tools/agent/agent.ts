@@ -2974,9 +2974,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
 
       // Resolve the subagent's permission mode before creating it
+      const isCodex = subagentConfig.executor?.kind === 'codex';
+      const parentApprovalMode = isCodex
+        ? this.config.getSessionApprovalMode()
+        : this.config.getApprovalMode();
+      // Codex has no Qwen classifier: native writes need an explicit grant,
+      // not an intermediate subagent's implicit auto-edit or fork yolo mode.
       const resolvedMode = resolveSubagentApprovalMode(
-        this.config.getApprovalMode(),
-        subagentConfig.approvalMode,
+        isCodex && parentApprovalMode === ApprovalMode.AUTO
+          ? ApprovalMode.DEFAULT
+          : parentApprovalMode,
+        subagentConfig.approvalMode ??
+          (isCodex ? parentApprovalMode : undefined),
         this.config.isTrustedFolder(),
       );
       const resolvedApprovalMode = permissionModeToApprovalMode(resolvedMode);

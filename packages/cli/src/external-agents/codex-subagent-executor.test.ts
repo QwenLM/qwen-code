@@ -33,7 +33,12 @@ let thread;
 let task;
 let descendant;
 let interaction;
-const send = (value) => process.stdout.write(JSON.stringify(value) + '\n');
+let batch;
+const send = (value) => {
+  const line = JSON.stringify(value) + '\n';
+  if (batch !== undefined) batch += line;
+  else process.stdout.write(line);
+};
 const reply = (id, result) => send({id, result});
 const notify = (method, params) => send({method, params: {threadId:'thread', ...params}});
 const finish = () => {
@@ -67,6 +72,29 @@ createInterface({input:process.stdin}).on('line', line => {
     if (scenario === 'missing-reply') {
       finish();
       return process.stdout.end();
+    }
+    if (scenario.startsWith('terminal-')) {
+      batch = '';
+      const delayedReply = scenario.startsWith('terminal-before-reply');
+      if (!delayedReply) reply(frame.id, {turn:{id:'turn'}});
+      finish();
+      const trailing = {
+        'terminal-blank': '\n',
+        'terminal-invalid': 'invalid json\n',
+        'terminal-request': JSON.stringify({id:101,method:'future/request'}) + '\n',
+        'terminal-foreign': JSON.stringify({method:'turn/completed',params:{threadId:'thread',turn:{id:'foreign',status:'completed'}}}) + '\n',
+        'terminal-overwrite': JSON.stringify({method:'item/completed',params:{threadId:'thread',turnId:'turn',item:{type:'agentMessage',phase:'final_answer',text:'overwritten'}}}) + '\n',
+      };
+      batch += trailing[scenario] ?? '';
+      if (scenario === 'terminal-before-reply-notification') notify('item/completed', {
+        turnId:'foreign',item:{type:'agentMessage',phase:'final_answer',text:'overwritten'}
+      });
+      if (delayedReply) reply(frame.id, {
+        turn:{id:scenario === 'terminal-before-reply-invalid' ? 'foreign' : 'turn'}
+      });
+      process.stdout.write(batch);
+      batch = undefined;
+      return;
     }
     reply(frame.id, {turn:{id:'turn'}});
     if (scenario.startsWith('slow-')) {
@@ -179,12 +207,25 @@ function injectCleanupError(message: string): void {
   });
 }
 
+it('rejects Windows before spawning with an actionable platform error', async () => {
+  const options = params();
+  const platform = process.platform;
+  Object.defineProperty(process, 'platform', { value: 'win32' });
+  try {
+    await expect(create(options)).rejects.toThrow(
+      /POSIX-only.*macOS\/Linux.*WSL/,
+    );
+  } finally {
+    Object.defineProperty(process, 'platform', { value: platform });
+  }
+});
+
 // These subprocess fixtures require POSIX signals and process-group cleanup.
 describe.skipIf(process.platform === 'win32')('Codex subagent executor', () => {
   it.each([
     ['default', 'read-only'],
     ['plan', 'read-only'],
-    ['auto', 'workspace-write'],
+    ['auto', 'read-only'],
     ['auto-edit', 'workspace-write'],
     ['yolo', 'danger-full-access'],
   ])(
@@ -219,6 +260,24 @@ describe.skipIf(process.platform === 'win32')('Codex subagent executor', () => {
       expect(finish).toHaveBeenCalledWith(
         expect.objectContaining({ terminateReason: AgentTerminateMode.GOAL }),
       );
+    },
+  );
+
+  it.each([
+    'terminal-blank',
+    'terminal-invalid',
+    'terminal-request',
+    'terminal-foreign',
+    'terminal-overwrite',
+    'terminal-before-reply',
+    'terminal-before-reply-notification',
+  ])(
+    'preserves a completed answer with %s output in one batch',
+    async (scenario) => {
+      const executor = await create(params(scenario));
+      await executor.execute(context());
+      expect(executor.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      expect(JSON.parse(executor.getFinalText()).task.threadId).toBe('thread');
     },
   );
 
@@ -264,6 +323,7 @@ describe.skipIf(process.platform === 'win32')('Codex subagent executor', () => {
     ['durable', /ephemeral/],
     ['close', /closed before completion/],
     ['missing-reply', /closed before completion/],
+    ['terminal-before-reply-invalid', /another turn/],
     ['unknown-request', /unsupported interaction/],
   ])('fails %s instead of publishing success', async (scenario, error) => {
     const executor = await create(params(scenario));
@@ -401,6 +461,10 @@ describe.skipIf(process.platform === 'win32')('Codex subagent executor', () => {
     const executor = await create();
     await expect(executor.execute(context())).rejects.toThrow(message);
     expect(executor.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+    const [, answer] = executor
+      .getFinalText()
+      .split('\n\nCompleted Codex answer:\n');
+    expect(JSON.parse(answer).task.threadId).toBe('thread');
   });
 
   it('bounds output draining when an exited root leaves an open pipe', async () => {

@@ -55,23 +55,34 @@ transcripts and user-facing task controls keep the baseline implementation.
 ## Permissions and lifecycle
 
 Native builtins require a trusted workspace and are unavailable in safe mode.
-Codex uses the effective approval mode resolved by the manager's existing rules:
-default/plan maps to read-only, auto/auto-edit to workspace-write, and yolo to
-native sandbox bypass. Ordinary trusted sessions resolve to auto; a trusted
-default-mode parent without an agent override resolves to auto-edit. Other
-effective modes fail before startup. Approval requests and human
-input are denied; native tool permissions are not Qwen tool-rule enforcement.
+Both executors support macOS/Linux (including WSL); native Windows launches fail
+before spawning with platform guidance.
+
+Agent resolves Codex permissions before the manager constructs the executor.
+Read the live session mode through derived Config layers, including nested,
+worktree and resumed agents; intermediate Qwen auto-edit or fork yolo modes do
+not grant native access. Only the Codex definition or the session can grant it.
+Without an agent override, Codex inherits the session mode without the in-process
+auto-edit fallback: default/plan/auto map to read-only. Native execution does not
+use Qwen's AUTO classifier. Workspace writes and unattended workspace commands
+require an explicit agent or session auto-edit grant; yolo grants native sandbox
+bypass. A session already in auto-edit or yolo retains precedence over a stricter
+agent definition. Other effective modes fail before startup. Approval requests
+and human input are denied; native tool permissions are not Qwen tool-rule
+enforcement. Qwen and ACP retain their existing permission resolution.
 
 Validate the initialization response, ephemeral thread acknowledgment, associated
 thread/turn IDs and successful terminal result. Missing answers, wrong-turn
-results and protocol errors cannot count as success. Initialization has a
-10-second deadline; optional `runConfig.max_time_minutes` bounds execution.
+results and protocol errors before completion cannot count as success. After a
+terminal notification, freeze notifications and answers while still validating
+any outstanding turn/start reply; trailing output cannot replace the result.
+Initialization has a 10-second deadline; optional `runConfig.max_time_minutes` bounds execution.
 Already cancelled calls do not start a product. Cancellation, timeout and failure
 release pending requests and await process cleanup before the executor returns.
 After root exit, output draining is limited to 10 seconds. A completed answer
 survives cancellation during cleanup, with the task still marked cancelled.
-Cleanup failures propagate to the shared lifecycle, except the initial
-process-tree snapshot race: as in ACP, it reports an unproven-tree diagnostic
+Genuine cleanup failures propagate as errors with any validated completed answer
+retained in the error text, except the initial process-tree snapshot race: as in ACP, it reports an unproven-tree diagnostic
 without replacing the task outcome. Cancellation does not undo workspace edits.
 
 ## Validation and acceptance
