@@ -23,6 +23,7 @@ import {
 } from './agent-transcript.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
+import { SubagentError, SubagentErrorCode } from '../subagents/types.js';
 import { AgentEventEmitter } from './runtime/agent-events.js';
 import { getCurrentAgentDepth } from './runtime/agent-context.js';
 import { AgentHeadless } from './runtime/agent-headless.js';
@@ -459,6 +460,61 @@ describe('BackgroundAgentResumeService', () => {
     ).toBeUndefined();
   });
 
+  it.each(['persisted', 'definition', 'legacy-model', 'legacy-flags'] as const)(
+    'blocks cold external resume using %s provenance',
+    async (provenance) => {
+      const sessionId = 'session-external';
+      const agentId = 'external-agent';
+      writeAgentMeta(getAgentMetaPath(tempDir, sessionId, agentId), {
+        agentId,
+        agentType: 'researcher',
+        description: 'External task',
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: new Date().toISOString(),
+        status: 'running',
+        ...(provenance === 'persisted' ? { executor: 'acp' as const } : {}),
+        ...(provenance === 'legacy-model'
+          ? { model: 'external-acp:claude' }
+          : {}),
+        ...(provenance === 'legacy-flags'
+          ? { persistedCliFlags: { model: 'external-acp:claude' } }
+          : {}),
+      });
+      fs.writeFileSync(
+        getAgentJsonlPath(tempDir, sessionId, agentId),
+        JSON.stringify({
+          uuid: 'u1',
+          sessionId,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'External task' }] },
+        }) + '\n',
+      );
+      const { service, subagentManager } = createService();
+      if (provenance === 'definition') {
+        subagentManager.loadSubagent.mockResolvedValue({
+          name: 'researcher',
+          color: 'cyan',
+          model: undefined,
+          approvalMode: undefined,
+          executor: { kind: 'acp', command: 'claude' },
+        } as Awaited<ReturnType<typeof subagentManager.loadSubagent>>);
+      }
+      const recovered = await service.loadPausedBackgroundAgents(sessionId);
+      expect(recovered[0]?.resumeBlockedReason).toContain(
+        'External subagent session cannot be restored',
+      );
+      expect(await service.resumeBackgroundAgent(agentId)).toBeUndefined();
+      // Recheck provenance at execution time, not only during discovery.
+      recovered[0]!.resumeBlockedReason = undefined;
+      expect(await service.resumeBackgroundAgent(agentId)).toBeUndefined();
+      expect(registry.get(agentId)?.resumeBlockedReason).toContain(
+        'External subagent session cannot be restored',
+      );
+      expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+    },
+  );
+
   it('preserves model on recovered paused agents for per-model caps', async () => {
     const sessionId = 'session-model';
     const agentId = 'agent-model';
@@ -629,6 +685,55 @@ describe('BackgroundAgentResumeService', () => {
       resumeBlockedReason: 'Subagent "deleted-agent" is no longer available.',
     });
     expect(subagentManager.loadSubagent).toHaveBeenCalledWith('deleted-agent');
+  });
+
+  it('keeps a paused agent listed when its same-named definition now fails the executor guard (R12-3)', async () => {
+    const sessionId = 'session-executor-refusal';
+    const agentId = 'agent-executor-refusal';
+    writeAgentMeta(getAgentMetaPath(tempDir, sessionId, agentId), {
+      agentId,
+      agentType: 'researcher',
+      description:
+        'Background task whose same-named definition now fails to load',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      getAgentJsonlPath(tempDir, sessionId, agentId),
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'task' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    const { service, subagentManager } = createService();
+    // The R10-2/R11 executor refusal makes loadSubagent THROW for a same-named
+    // file that failed to load. resolveResumeTarget must convert that throw into
+    // the existing "unavailable" shape so discovery keeps the row listed with a
+    // resumeBlockedReason — otherwise the per-sidecar catch swallows it into a
+    // debug-only warning and the row vanishes from /tasks. Removing the try/catch
+    // turns this red (recovered is empty).
+    subagentManager.loadSubagent.mockRejectedValue(
+      new SubagentError(
+        'Agent file /test/project/.qwen/agents/researcher.md has an invalid executor block: it declares an executor but failed to load.',
+        SubagentErrorCode.INVALID_CONFIG,
+        'researcher',
+      ),
+    );
+    const recovered = await service.loadPausedBackgroundAgents(sessionId);
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]?.resumeBlockedReason).toContain(
+      'invalid executor block',
+    );
   });
 
   it('keeps paused tasks resumable when they only carry a stale lastError', async () => {
