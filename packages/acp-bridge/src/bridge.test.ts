@@ -6845,151 +6845,191 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('stops refetching the persisted page when a question arrives mid-fetch', async () => {
-    let pendingAnswer: Promise<unknown> | undefined;
-    let reopening = false;
-    let questionRegistered = false;
-    const handle = makeChannel({
-      loadSessionImpl: () => ({
+  it.each([
+    {
+      label: 'question',
+      sessionSuffix: 'question',
+      toolCall: {
+        toolCallId: 'q-mid-fetch',
+        title: 'Ask user 1 question',
         _meta: {
-          'qwen.session.loadReplay': {
-            v: 1,
-            updates: [
-              {
-                sessionUpdate: 'user_message_chunk',
-                content: { type: 'text', text: 'initial prompt' },
-              },
-            ],
-          },
+          toolName: 'ask_user_question',
+          qwenInteractionKind: 'user_question',
+          qwenQuestions: [{ question: 'Continue?' }],
         },
-      }),
-      extMethodImpl: async (method, params) => {
-        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
-          throw new Error(`unexpected extMethod ${method}`);
-        }
-        if (reopening && pendingAnswer === undefined) {
-          // The question arrives while the reopened load's transcript fetch
-          // is in flight: publish + registration land before the page
-          // returns. Read the session id from the request itself — reading
-          // the later-declared `loaded` binding here would be a TDZ hazard
-          // if a cold load ever fetched a page.
-          pendingAnswer = (
-            handle.agentConnection as unknown as {
-              requestPermission(p: unknown): Promise<unknown>;
-            }
-          ).requestPermission({
-            sessionId: String(params['sessionId']),
-            toolCall: {
-              toolCallId: 'q-mid-fetch',
-              title: 'Ask user 1 question',
-              _meta: {
-                toolName: 'ask_user_question',
-                qwenInteractionKind: 'user_question',
-                qwenQuestions: [{ question: 'Continue?' }],
-              },
-            },
-            options: [
-              { optionId: 'proceed_once', name: 'Submit', kind: 'allow_once' },
-              { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
-            ],
-          });
-          await vi.waitFor(() =>
-            expect(
-              bridge.getSessionSummary(String(params['sessionId']))
-                ?.isWaitingForUserQuestion,
-            ).toBe(true),
-          );
-          // Recorded outside the production catch: a failed precondition
-          // inside this mock would otherwise be swallowed by
-          // refreshedReplayFieldsFor's catch and leave the test green
-          // without ever exercising the guarded path.
-          questionRegistered = true;
-        }
-        return {
-          v: 1,
-          sessionId: params['sessionId'],
-          events: [
-            {
-              v: 1,
-              type: 'session_update',
-              data: {
-                sessionUpdate: 'user_message_chunk',
-                content: { type: 'text', text: 'persisted tail' },
-                _meta: { 'qwen.session.recordId': 'record-persisted' },
-              },
-            },
-          ],
-          hasMore: false,
-        };
       },
-    });
-    // Count only the refreshed-load loop's fetches (identified by the
-    // requested page size); the pagination-anchor backfill fetches with a
-    // different fixed limit and must not be attributed to the guard.
-    const loopTranscriptFetches = () =>
-      handle.agent.extMethodCalls.filter(
-        (call) =>
-          call.method === SERVE_STATUS_EXT_METHODS.sessionTranscript &&
-          (call.params as { limit?: number }).limit === 100,
-      ).length;
-    const bridge = makeBridge({ channelFactory: async () => handle.channel });
-    const loaded = await bridge.loadSession({
-      sessionId: 'persisted-mid-fetch-question',
-      workspaceCwd: WS_A,
-      historyReplay: 'response',
-      historyPageSize: 100,
-    });
+      options: [
+        { optionId: 'proceed_once', name: 'Submit', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+      ],
+      waitFlag: 'isWaitingForUserQuestion' as const,
+      voteOptionId: 'proceed_once',
+      payloadMarks: ['Continue?', 'proceed_once'],
+    },
+    {
+      // The loop-exit break is kind-agnostic: a plain tool approval arriving
+      // mid-fetch must stop the retry exactly like a question does.
+      label: 'tool permission',
+      sessionSuffix: 'permission',
+      toolCall: {
+        toolCallId: 'perm-mid-fetch',
+        title: 'Run command',
+        kind: 'execute',
+      },
+      options: [
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+      ],
+      waitFlag: 'isWaitingForPermission' as const,
+      voteOptionId: 'allow',
+      payloadMarks: ['Run command', 'allow'],
+    },
+  ])(
+    'stops refetching the persisted page when a $label arrives mid-fetch',
+    async (variant) => {
+      let pendingAnswer: Promise<unknown> | undefined;
+      let reopening = false;
+      let interactionRegistered = false;
+      const handle = makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              updates: [
+                {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'initial prompt' },
+                },
+              ],
+            },
+          },
+        }),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+            throw new Error(`unexpected extMethod ${method}`);
+          }
+          if (reopening && pendingAnswer === undefined) {
+            // The interaction arrives while the reopened load's transcript
+            // fetch is in flight: publish + registration land before the
+            // page returns. Read the session id from the request itself —
+            // reading the later-declared `loaded` binding here would be a
+            // TDZ hazard if a cold load ever fetched a page.
+            pendingAnswer = (
+              handle.agentConnection as unknown as {
+                requestPermission(p: unknown): Promise<unknown>;
+              }
+            ).requestPermission({
+              sessionId: String(params['sessionId']),
+              toolCall: variant.toolCall,
+              options: variant.options,
+            });
+            await vi.waitFor(() =>
+              expect(
+                bridge.getSessionSummary(String(params['sessionId']))?.[
+                  variant.waitFlag
+                ],
+              ).toBe(true),
+            );
+            // Recorded outside the production catch: a failed precondition
+            // inside this mock would otherwise be swallowed by
+            // refreshedReplayFieldsFor's catch and leave the test green
+            // without ever exercising the guarded path.
+            interactionRegistered = true;
+          }
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'persisted tail' },
+                  _meta: { 'qwen.session.recordId': 'record-persisted' },
+                },
+              },
+            ],
+            hasMore: false,
+          };
+        },
+      });
+      // Count only the refreshed-load loop's fetches (identified by the
+      // requested page size); the pagination-anchor backfill fetches with a
+      // different fixed limit and must not be attributed to the guard.
+      const loopTranscriptFetches = () =>
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_STATUS_EXT_METHODS.sessionTranscript &&
+            (call.params as { limit?: number }).limit === 100,
+        ).length;
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const loaded = await bridge.loadSession({
+        sessionId: `persisted-mid-fetch-${variant.sessionSuffix}`,
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
 
-    // Premise: the cold load issues no fetch, so the one fetch asserted
-    // below belongs to the reopened load.
-    expect(loopTranscriptFetches()).toBe(0);
-    reopening = true;
-    const reopened = await bridge.loadSession({
-      sessionId: loaded.sessionId,
-      workspaceCwd: WS_A,
-      clientId: 'client-reopen',
-      historyReplay: 'response',
-      historyPageSize: 100,
-    });
+      // Premise: the cold load issues no fetch, so the one fetch asserted
+      // below belongs to the reopened load.
+      expect(loopTranscriptFetches()).toBe(0);
+      reopening = true;
+      const reopened = await bridge.loadSession({
+        sessionId: loaded.sessionId,
+        workspaceCwd: WS_A,
+        clientId: 'client-reopen',
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
 
-    expect(questionRegistered).toBe(true);
-    // Exactly one fetch: the interaction arrived mid-fetch, so the loop
-    // leaves instead of re-fetching a page that cannot contain it.
-    expect(loopTranscriptFetches()).toBe(1);
-    // The fetched page was discarded, not spliced in front of the journal.
-    expect(
-      [
-        ...(reopened.compactedReplay ?? []),
-        ...(reopened.liveJournal ?? []),
-      ].some((event) => JSON.stringify(event.data).includes('persisted tail')),
-    ).toBe(false);
+      expect(interactionRegistered).toBe(true);
+      // Exactly one fetch: the interaction arrived mid-fetch, so the loop
+      // leaves instead of re-fetching a page that cannot contain it.
+      expect(loopTranscriptFetches()).toBe(1);
+      // The fetched page was discarded, not spliced in front of the journal.
+      expect(
+        [
+          ...(reopened.compactedReplay ?? []),
+          ...(reopened.liveJournal ?? []),
+        ].some((event) =>
+          JSON.stringify(event.data).includes('persisted tail'),
+        ),
+      ).toBe(false);
 
-    const frame = (reopened.liveJournal ?? []).find(
-      (event) => event.type === 'permission_request',
-    );
-    expect(frame).toBeDefined();
-    expect(JSON.stringify(frame?.data)).toContain('Continue?');
-    expect(JSON.stringify(frame?.data)).toContain('proceed_once');
-    const frameRequestId = (frame?.data as { requestId?: string } | undefined)
-      ?.requestId;
-    expect(frameRequestId).toBeDefined();
-    const registryRequestId = bridge.getSessionSummary(loaded.sessionId)
-      ?.pendingInteractions?.[0]?.requestId;
-    expect(frameRequestId).toBe(registryRequestId);
+      const frame = (reopened.liveJournal ?? []).find(
+        (event) => event.type === 'permission_request',
+      );
+      expect(frame).toBeDefined();
+      for (const mark of variant.payloadMarks) {
+        expect(JSON.stringify(frame?.data)).toContain(mark);
+      }
+      const frameRequestId = (frame?.data as { requestId?: string } | undefined)
+        ?.requestId;
+      expect(frameRequestId).toBeDefined();
+      const registryRequestId = bridge.getSessionSummary(loaded.sessionId)
+        ?.pendingInteractions?.[0]?.requestId;
+      expect(frameRequestId).toBe(registryRequestId);
 
-    expect(
-      bridge.respondToSessionPermission(
-        loaded.sessionId,
-        frameRequestId!,
-        { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
-        { clientId: reopened.clientId },
-      ),
-    ).toBe(true);
-    await expect(pendingAnswer).resolves.toEqual({
-      outcome: { outcome: 'selected', optionId: 'proceed_once' },
-    });
-    await bridge.shutdown();
-  });
+      expect(
+        bridge.respondToSessionPermission(
+          loaded.sessionId,
+          frameRequestId!,
+          {
+            outcome: {
+              outcome: 'selected',
+              optionId: variant.voteOptionId,
+            },
+          },
+          { clientId: reopened.clientId },
+        ),
+      ).toBe(true);
+      await expect(pendingAnswer).resolves.toEqual({
+        outcome: { outcome: 'selected', optionId: variant.voteOptionId },
+      });
+      await bridge.shutdown();
+    },
+  );
 
   it('keeps the current turn error when refreshing from persisted history', async () => {
     const handle = makeChannel({
