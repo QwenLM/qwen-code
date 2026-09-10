@@ -21,7 +21,7 @@
   border-radius: 12px;
   margin: 0;
   cursor: text;
-  --chat-editor-min-height: 140px;
+  --chat-editor-min-height: 116px;
   --chat-editor-max-height: min(350px, 40vh);
   --chat-editor-input-min-height: 44px;
   --chat-editor-input-max-height: 300px;
@@ -45,7 +45,7 @@
   z-index: 2;
   display: flex;
   box-sizing: border-box;
-  min-height: var(--chat-editor-min-height, 140px);
+  min-height: var(--chat-editor-min-height, 116px);
   max-height: var(--chat-editor-max-height, min(350px, 40vh));
   flex-direction: column;
   overflow: visible;
@@ -58,6 +58,10 @@
 
 .editorShell[data-web-shell-compact-composer] .content {
   padding: 10px;
+}
+
+.container:focus-within .content {
+  border-color: var(--chat-editor-accent-color);
 }
 
 .container[data-image-drag-active] .content {
@@ -1702,6 +1706,85 @@
 .contextUsageBtn {
   flex-shrink: 0;
   padding: 0 4px;
+}
+
+.contextUsagePercentage {
+  display: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.contextTooltip {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  width: 280px;
+  max-width: calc(100vw - 24px);
+  padding: 12px;
+  white-space: normal;
+}
+
+.contextTooltipHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 600;
+}
+
+.contextTooltipHeader strong {
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.contextTooltipMeter {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--border);
+}
+
+.contextTooltipMeter > span {
+  display: block;
+  height: 100%;
+  background: var(--agent-blue-500);
+}
+
+.contextTooltipMeter > span[data-level='warning'] {
+  background: var(--warning-color);
+}
+
+.contextTooltipMeter > span[data-level='error'] {
+  background: var(--error-color);
+}
+
+.contextTooltipStats {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 12px;
+  margin: 0;
+}
+
+.contextTooltipStats dt,
+.contextTooltipHint {
+  color: var(--muted-foreground);
+}
+
+.contextTooltipStats dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.contextTooltipHint {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+@container (min-width: 521px) {
+  .contextUsagePercentage {
+    display: inline;
+  }
 }
 
 .contextRingTrack {

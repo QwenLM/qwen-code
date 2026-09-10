@@ -868,6 +868,9 @@ const EN: Messages = {
   'contextUsage.tokens': 'tokens',
   'contextUsage.usageByCategory': 'Usage by category',
   'contextUsage.used': 'Used',
+  'contextUsage.viewDetails': 'View details',
+  'contextUsage.viewInConversation':
+    'Click to view the breakdown in the conversation.',
   'daemon.title': 'Daemon Status',
   'daemon.details.loading': 'Loading diagnostics...',
   'daemon.details.failed': 'Failed to load diagnostics.',
@@ -4461,6 +4464,8 @@ const ZH: Messages = {
   'contextUsage.tokens': 'tokens',
   'contextUsage.usageByCategory': '按类别统计',
   'contextUsage.used': '已用',
+  'contextUsage.viewDetails': '查看明细',
+  'contextUsage.viewInConversation': '点击在对话中查看上下文组成。',
   'daemon.title': 'Daemon 状态',
   'daemon.details.loading': '正在加载诊断信息...',
   'daemon.details.failed': '诊断信息加载失败。',

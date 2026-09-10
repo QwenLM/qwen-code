@@ -922,6 +922,7 @@ describe('ChatEditor context usage ring', () => {
     const button = ring(container)!;
     expect(button).not.toBeNull();
     expect(button.getAttribute('aria-label')).toBe('34.3% context used');
+    expect(button.textContent).toBe('34.3%');
     const liveVoice = container.querySelector(
       '[data-testid="live-voice-button"]',
     )!;
@@ -984,7 +985,17 @@ describe('ChatEditor context usage ring', () => {
       ring(container)!.focus();
     });
 
-    expect(document.body.textContent).toContain('53.6k / 1.0M tokens (5.4%)');
+    const tooltip = document.querySelector('[data-slot="tooltip-content"]')!;
+    expect(tooltip.textContent).toContain('Context Usage');
+    expect(tooltip.textContent).toContain('5.4%');
+    expect(tooltip.textContent).toContain('53,600 tokens');
+    expect(tooltip.textContent).toContain('1,000,000 tokens');
+    expect(tooltip.textContent).toContain(
+      'Click to view the breakdown in the conversation.',
+    );
+    expect(
+      tooltip.querySelector<HTMLElement>('[data-level]')?.style.width,
+    ).toBe('5.36%');
     const arrow = document.querySelector<SVGElement>(
       '[data-slot="tooltip-arrow"]',
     );
@@ -1025,6 +1036,7 @@ describe('ChatEditor context usage ring', () => {
 
     const button = ring(container)!;
     expect(button.getAttribute('aria-label')).toBe('150.0% context used');
+    expect(button.textContent).toBe('150.0%');
     const arc = button.querySelectorAll('circle')[1];
     expect(arc.getAttribute('stroke-dashoffset')).toBe('0');
   });
