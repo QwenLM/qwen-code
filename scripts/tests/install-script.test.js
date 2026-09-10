@@ -1915,6 +1915,16 @@ describe('standalone release packaging', () => {
           ),
         ),
       ).toBe(false);
+      expect(
+        existsSync(
+          path.join(
+            extractDir,
+            'qwen-code',
+            'lib',
+            'export-transcript-document.css',
+          ),
+        ),
+      ).toBe(false);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
       restoreMinimalDist(createdDist);
@@ -4615,6 +4625,10 @@ function ensureMinimalDist({
     writeFileSync(
       path.join(distPath, 'export-transcript-document.js'),
       'window.QwenExportRenderer = true;\n',
+    );
+    writeFileSync(
+      path.join(distPath, 'export-transcript-document.css'),
+      'body{color:red}\n',
     );
     writeFileSync(
       path.join(distPath, 'postinstall.js'),
