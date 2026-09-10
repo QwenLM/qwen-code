@@ -562,6 +562,44 @@ describe('the move out of the mounted directory', () => {
       ),
     ).toBe(true);
   });
+
+  it('clears loudly, never fatally, when the legacy delete is wedged (R32-4)', () => {
+    // The legacy name is the one entry the clear path touches inside the
+    // directory reviewed code can write, and it is deleted AFTER the trusted
+    // lease is already released. `force` swallows ENOENT only: a mode-500
+    // directory planted at that name throws EACCES, and an open handle on
+    // Windows throws the same. Thrown, it leaves `runCleanup` — pinned by
+    // its own tests as never throwing — reporting failure over a release
+    // that succeeded, with every retry re-throwing.
+    const root = createRepository();
+    const worktree = join(root, '.qwen', 'tmp', 'review-pr-1');
+    createReviewWorktreeLease({
+      sessionId: 'session-a',
+      promptId: 'prompt-a',
+      target: 'pr-1',
+      repositoryRoot: root,
+      worktreePath: worktree,
+      branch: 'qwen-review/pr-1',
+    });
+    const trusted = reviewLeasePath(root, 'pr-1');
+    const legacy = join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json');
+    // The mirror the acquisition just wrote is what the wedge sits on. The
+    // fs seam, not `chmod`: this suite runs as root in CI images, where mode
+    // bits stop nothing.
+    expect(existsSync(legacy)).toBe(true);
+    fsMockState.failRmOn = legacy;
+
+    expect(() => clearReviewWorktreeLease(root, 'pr-1')).not.toThrow();
+
+    // The order the finding is about: the trusted lease was released first,
+    // so a throw here would have stranded the release half-reported.
+    expect(existsSync(trusted)).toBe(false);
+    expect(existsSync(legacy)).toBe(true);
+    const warnings = stdioSpy.writeStderrLineSafe.mock.calls.map(([m]) => m);
+    expect(
+      warnings.some((m) => m.includes(legacy) && m.includes('EBUSY')),
+    ).toBe(true);
+  });
 });
 
 describe('a pre-move lease file at the legacy path (R30-7)', () => {
@@ -620,6 +658,76 @@ describe('a pre-move lease file at the legacy path (R30-7)', () => {
         (m) => m.includes(legacy) && m.includes('older-build-session'),
       ),
     ).toBe(true);
+  });
+
+  it('neutralises the displaced session id before it reaches a terminal (R32-3)', () => {
+    // The id is parsed out of a file in the one directory reviewed code can
+    // write, and the warning interpolates it. Unneutralised, a newline in it
+    // forges a second stderr line — a `::error::` workflow command of its
+    // own under Actions — and a raw ESC is an SGR sequence that repaints the
+    // rest of the operator's terminal.
+    const root = createRepository();
+    const worktreePath = join(root, '.qwen', 'tmp', 'review-pr-1');
+    const legacy = writeLegacyLease({
+      sessionId: 'older-build-session\n::error::forged\u001b[31m\u202ereversed',
+      promptId: 'older-prompt',
+      target: 'pr-1',
+      repositoryRoot: root,
+      worktreePath,
+      branch: 'qwen-review/pr-1',
+    });
+
+    createReviewWorktreeLease({
+      sessionId: 'newer-build-session',
+      promptId: 'newer-prompt',
+      target: 'pr-1',
+      repositoryRoot: root,
+      worktreePath,
+      branch: 'qwen-review/pr-1',
+    });
+
+    const warnings = stdioSpy.writeStderrLineSafe.mock.calls.map(([m]) => m);
+    const displacement = warnings.find((m: string) => m.includes(legacy));
+    expect(displacement).toBeDefined();
+    // Every dangerous class the id carried is gone...
+    expect(displacement).not.toContain('\n');
+    expect(displacement).not.toContain('\r');
+    expect(displacement).not.toContain('\u001b');
+    expect(displacement).not.toContain('\u202e');
+    // ...and no forged line stands on its own.
+    expect(displacement!.startsWith('::error::')).toBe(false);
+    // ...while the warning still names the run it displaced, which is what
+    // an operator recognises it by.
+    expect(displacement).toContain('older-build-session');
+  });
+
+  it('bounds the displaced session id — a name, not a payload (R32-3)', () => {
+    const root = createRepository();
+    const worktreePath = join(root, '.qwen', 'tmp', 'review-pr-1');
+    const legacy = writeLegacyLease({
+      sessionId: 'x'.repeat(5_000),
+      promptId: 'older-prompt',
+      target: 'pr-1',
+      repositoryRoot: root,
+      worktreePath,
+      branch: 'qwen-review/pr-1',
+    });
+
+    createReviewWorktreeLease({
+      sessionId: 'newer-build-session',
+      promptId: 'newer-prompt',
+      target: 'pr-1',
+      repositoryRoot: root,
+      worktreePath,
+      branch: 'qwen-review/pr-1',
+    });
+
+    const displacement = stdioSpy.writeStderrLineSafe.mock.calls
+      .map(([m]) => m as string)
+      .find((m: string) => m.includes(legacy));
+    expect(displacement).toBeDefined();
+    expect(/x{200,}/.test(displacement!)).toBe(false);
+    expect(displacement).toContain('…');
   });
 
   it('is invisible to the gate read — the found-at answer is the new path or nothing', () => {

@@ -28,6 +28,7 @@ import {
   LEASE_PREFIX,
   REVIEW_TMP_DIR,
   REVIEW_LEASE_DIR,
+  inertPath,
   reviewBranch,
 } from '../commands/review/lib/paths.js';
 
@@ -133,7 +134,28 @@ export function clearReviewWorktreeLease(
   // acquisition-side wedge shape); `force` because absence is the common
   // case. Deletion only — the mirror in `createReviewWorktreeLease` is the
   // sole legacy write path.
-  rmSync(legacyLeasePath(root, target), { force: true, recursive: true });
+  //
+  // Fenced, because this is the only removal in the clear path that touches
+  // the directory reviewed code can still write, and it runs AFTER the
+  // trusted lease above is already gone. `force` swallows ENOENT and nothing
+  // else: a mode-500 directory planted at the legacy name (the wedge two of
+  // this file's own tests stage) makes the unlink throw EACCES, and an open
+  // handle on Windows does the same non-adversarially. Thrown, it leaves
+  // `clearReviewWorktreeLease` — and `runCleanup`, whose tests pin it as
+  // never throwing — reporting failure over a cleanup that succeeded, with
+  // every retry re-throwing on a file no message names. Loud instead, the
+  // same contract the mirror write carries.
+  const legacy = legacyLeasePath(root, target);
+  try {
+    rmSync(legacy, { force: true, recursive: true });
+  } catch (error) {
+    writeStderrLineSafe(
+      `warning: could not remove the pre-move review lease at ${legacy} ` +
+        `(${(error as NodeJS.ErrnoException).code ?? error}); the trusted ` +
+        `lease for ${target} is released, but a build from before the lease ` +
+        `move will keep seeing this one until it is deleted by hand.`,
+    );
+  }
 }
 
 /**
@@ -296,12 +318,29 @@ function mirrorLeaseAtLegacyPath(
   if (displaced && displaced.sessionId !== sessionId) {
     writeStderrLineSafe(
       `warning: replaced the pre-move review lease for ${target} at ` +
-        `${legacy} (recorded session ${displaced.sessionId}) — if a ` +
+        `${legacy} (recorded session ${inertSessionId(displaced.sessionId)}) — if a ` +
         `pre-move build is still reviewing ${target} on this machine, its ` +
         `worktree is no longer protected; otherwise this was residue or a ` +
         `plant, and it is gone.`,
     );
   }
+}
+
+/**
+ * The displaced session id, made inert for a terminal.
+ *
+ * It is parsed out of a file in the one directory reviewed code can write, so
+ * it reaches stderr the way every other workspace-controlled value in this
+ * repo does: through `inertPath`, which flattens control characters (a raw
+ * ESC is an SGR sequence; a newline forges a second line — a `::error::`
+ * workflow command of its own, in CI), the invisible formatting characters
+ * that survive it, and the line separators. Bounded too: the warning names
+ * the id so an operator can recognise the displaced run, and an id longer
+ * than that is not a name, it is a payload.
+ */
+function inertSessionId(id: string): string {
+  const inert = inertPath(id);
+  return inert.length > 120 ? `${inert.slice(0, 120)}…` : inert;
 }
 
 /** A skipped mirror is mount weather: loud, never fatal (R29-5). */

@@ -531,6 +531,20 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
   // had already completed. `status === 128` stays on the rmSync-fallback path
   // above (git answered, the answer was "not a working tree", and the
   // fallback owns it); a null prune means nobody answered.
+  //
+  // A refusal is one of those nulls, not a fourth shape: `gitProbe` answers a
+  // refused launch directory with `{status: null, refusal}`, so it is already
+  // inside `couldNotRun` for the arm it landed on. What it must NOT do is
+  // speak for the OTHER arm. Each probe re-asks `launchDirRefusal()` from
+  // scratch, so the two can disagree — `kernelCwd()`'s `/bin/pwd` spawn
+  // hitting EAGAIN or its own timeout on one call and not the other is
+  // enough — and an ungated `refusal !== null` disjunct then published
+  // `freed: false` over a release the other arm had completed: a `remove`
+  // that answered 0 with a refused prune, or a refused `remove` whose
+  // follow-up prune cleared the stale registration over the rmSync'd path.
+  // That is the same miskeying the paragraph above records as measured and
+  // fixed for the null-status arm, on the refusal arm. So the refusal only
+  // ever supplies the REASON for a `couldNotRun` verdict; it never makes one.
   const couldNotRun = removed?.status !== 0 && pruned.status === null;
   const stillThere = existsSync(worktreePath);
   // A path that IS gone but a release that did not happen: git never ran, so
@@ -539,10 +553,9 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
   // remove worktree <path>: undefined`.
   return worktreeReleaseResult(
     existed,
-    stillThere || (existed && (refusal !== null || couldNotRun)),
+    stillThere || (existed && couldNotRun),
     removeError ??
-      refusalError(refusal) ??
-      (couldNotRun ? couldNotRunError() : undefined),
+      (couldNotRun ? (refusalError(refusal) ?? couldNotRunError()) : undefined),
   );
 }
 

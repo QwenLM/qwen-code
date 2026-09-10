@@ -1079,17 +1079,27 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `refusing to create a review worktree: ${freshUntrusted}`,
       );
     }
-    // The DESTINATION's ancestors too (R27-9): `cleanStale` is not proof the
-    // parent of `wt` is real — `releaseWorktree` DECLINES the sweep when a
-    // symlink sits at an ancestor (`git.ts`), prints a line, and leaves the
-    // link standing. `mkdirSync(dirname(wt))` would then create THROUGH the
-    // link and `git worktree add wt ref` would create and check out the PR's
-    // code at the link's target — outside the review temp dir, where
-    // `mountRootFor` answers null and the build/test phase runs unsandboxed
-    // in a directory the planter chose. The same question releaseWorktree
-    // asks, at the same dirname, outside the rollback try for the same
-    // reason as the gate above.
-    const wtRedirected = redirectedAncestor(dirname(resolve(wt)));
+    // The DESTINATION itself, and its ancestors (R27-9): `cleanStale` is not
+    // proof the path of `wt` is real — `releaseWorktree` DECLINES the sweep
+    // when a symlink sits at an ancestor (`git.ts`), prints a line, and
+    // leaves the link standing. `mkdirSync(dirname(wt))` would then create
+    // THROUGH the link and `git worktree add wt ref` would create and check
+    // out the PR's code at the link's target — outside the review temp dir,
+    // where `mountRootFor` answers null and the build/test phase runs
+    // unsandboxed in a directory the planter chose. Outside the rollback try
+    // for the same reason as the gate above.
+    //
+    // The walk starts AT `wt`, not at its parent. A link at the leaf is the
+    // cheaper plant of the two: `releaseWorktree` unlinks one it can reach,
+    // but `cleanStale` only WARNS when that release reports `freed: false`
+    // (an EACCES on `.qwen/tmp` is enough) and runs on to here, and `git
+    // worktree add` through a leaf link creates and checks out at the link's
+    // target — measured on git 2.43, exit 0 with the tree in the external
+    // directory. `redirectedAncestor` lstats its first component before any
+    // stop test, so asking at the leaf adds it to the same walk at no cost:
+    // a real directory or an absent path there is not a link, and the walk
+    // proceeds to the ancestors exactly as before.
+    const wtRedirected = redirectedAncestor(resolve(wt));
     if (wtRedirected !== null) {
       throw new Error(
         `refusing to create a review worktree at ${wt}: ${wtRedirected} is ` +

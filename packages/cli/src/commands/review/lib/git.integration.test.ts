@@ -375,6 +375,79 @@ describe('releaseWorktree', () => {
     },
   );
 
+  itWhereShExists(
+    'reports freed when the remove answered 0 and only the prune was REFUSED (R32-2)',
+    () => {
+      // The refusal arm of the miskeying the two cases above pin for the
+      // null-status arm. Each probe re-asks `launchDirRefusal()` from
+      // scratch, so the two can disagree — and the disjunct that forced
+      // `freed: false` on `removed?.refusal ?? pruned.refusal` was NOT gated
+      // on "neither arm cleared the registration", while `couldNotRun`
+      // beside it was. So a refusal landing on either probe negated a
+      // release the other had completed.
+      //
+      // Staged with real git and no mocks: the launch directory is inside a
+      // `.qwen/tmp` spelling, so the gate consults the kernel; the shim
+      // renames that directory out from under the process AFTER the remove
+      // has answered 0, which splits the cached spelling from the kernel's
+      // and refuses the prune alone. The mirror direction (a refused remove
+      // whose follow-up prune clears the registration) is the same
+      // expression with the arms swapped.
+      // The launch directory is a LINKED worktree under the marker, which
+      // is the geometry the gate is written for: a plain directory in the
+      // main checkout is refused outright by the common-dir question, so the
+      // remove would never reach git at all.
+      const launch = join(repo, '.qwen', 'tmp', 'launch-wt');
+      git('worktree', 'add', '-q', '--detach', launch, 'HEAD');
+      git('worktree', 'add', '-q', 'wt', '-b', 'topic');
+
+      const shimDir = join(repo, 'git-shim-rename');
+      mkdirSync(shimDir, { recursive: true });
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+        encoding: 'utf8',
+      }).trim();
+      writeFileSync(
+        join(shimDir, 'git'),
+        `#!/bin/sh\n` +
+          `if [ "$1" = worktree ] && [ "$2" = remove ]; then\n` +
+          `  ${realGit} "$@"; st=$?\n` +
+          `  mv "${launch}" "${join(repo, '.qwen', 'tmp', 'renamed')}"\n` +
+          `  exit $st\n` +
+          `fi\n` +
+          `exec ${realGit} "$@"\n`,
+        { mode: 0o755 },
+      );
+
+      const savedPath = process.env['PATH'];
+      let got: ReturnType<typeof releaseWorktree> | undefined;
+      process.chdir(launch);
+      try {
+        process.env['PATH'] = `${shimDir}:${savedPath}`;
+        got = releaseWorktree(join(repo, 'wt'));
+      } finally {
+        process.env['PATH'] = savedPath;
+        process.chdir(repo);
+      }
+
+      // The premise, pinned rather than assumed: the prune really was
+      // REFUSED (a launch-dir verdict), not merely unable to run — otherwise
+      // this case would be re-testing the null-status arm above.
+      process.chdir(join(repo, '.qwen', 'tmp', 'renamed'));
+      try {
+        expect(gitProbe('worktree', 'prune').refusal).toBeTruthy();
+      } finally {
+        process.chdir(repo);
+      }
+
+      expect(got).toEqual({ existed: true, freed: true, reason: undefined });
+      // Ground truth, not the verdict's word: `remove` cleared the
+      // registration itself, so the release the refusal used to negate had
+      // in fact completed.
+      expect(fwd(git('worktree', 'list'))).not.toContain(fwd(join(repo, 'wt')));
+      expect(() => git('branch', '-D', 'topic')).not.toThrow();
+    },
+  );
+
   it('degrades through the result — never throws — when the cwd is deleted mid-release', () => {
     // The never-throws contract starts before the first git call: `resolve`
     // of the RELATIVE path production callers pass reads the cwd, and so does

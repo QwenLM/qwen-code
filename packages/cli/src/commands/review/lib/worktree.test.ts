@@ -11,7 +11,7 @@
 // every review produces are gitignored.
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   appendFileSync,
   chmodSync,
@@ -1971,6 +1971,48 @@ describe('discardWorktree', () => {
     expect(readdirSync(join(common, 'worktrees')).length).toBe(1);
   });
 
+  it('sweeps the registration git counter-suffixed on a basename collision (R32-12)', () => {
+    // `get_preferred_worktree_name` appends a counter whenever
+    // `<common>/worktrees/<basename>` is already taken, so two trees sharing
+    // a basename register as `wt` and `wt1` — the shape the nested/dogfood
+    // geometry produces (an inner review's `review-pr-N` beside the outer
+    // one), and one a leftover from a crashed run makes MORE likely, not
+    // less. Narrowing the reverse scan to the bare basename skipped `wt1`,
+    // the entry this tree actually owns, leaving it behind after `rmSync`
+    // had taken the directory: the "missing but already registered" wedge
+    // this function exists to prevent, and one re-running cleanup cannot
+    // clear.
+    const first = join(repo, 'a', 'wt');
+    const second = join(repo, 'b', 'wt');
+    git(repo, 'worktree', 'add', '--detach', '-q', first, 'HEAD');
+    git(repo, 'worktree', 'add', '--detach', '-q', second, 'HEAD');
+    const common = git(
+      repo,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    );
+    // The premise, pinned rather than assumed: git really did suffix the id,
+    // so this case is about the scan's grammar and not about the fixture.
+    expect(readdirSync(join(common, 'worktrees')).sort()).toEqual([
+      'wt',
+      'wt1',
+    ]);
+    // The shape the reverse scan exists for: the tree's own pointer is
+    // unreadable, so `adminDirOf` answers null and `worktree remove` fails.
+    writeFileSync(join(second, '.git'), 'not a gitfile\n');
+
+    discardWorktree(repo, second);
+
+    // Its own registration is gone; the sibling that legitimately holds the
+    // bare basename is untouched...
+    expect(readdirSync(join(common, 'worktrees'))).toEqual(['wt']);
+    // ...and the path is reusable, which is what the wedge took away.
+    expect(() =>
+      git(repo, 'worktree', 'add', '--detach', '-q', second, 'HEAD'),
+    ).not.toThrow();
+  });
+
   it('drops only its OWN registration, never a sibling worktree', () => {
     // The prune this replaced was repo-wide: it deregistered any entry whose
     // directory was momentarily absent — another shard's `worktree add`
@@ -3005,6 +3047,119 @@ describe('untrustedGitfile', () => {
       expect(untrustedRepositoryFrom(tree, mount)).toContain(
         'does not point back',
       );
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses a borrowed entry whose owner is relinked one LAYER UP in the nested geometry (R32-10)',
+    () => {
+      // R28-14's shape, moved one layer out. The containment test that gates
+      // the `redirectedAncestor` walk was bounded by the DEEPEST review temp
+      // root — the one `mountRootFor` cut the mount at — while the location
+      // question two above is deliberately widened to the OUTERMOST. So a
+      // sibling of the OUTER worktree, replaced by a link to this tree, sat
+      // outside the containment test, the walk never ran, and the realpath
+      // round trip agreed with the link and admitted the entry. The writer is
+      // the one the widening exists for: the outer review's containerized
+      // phase held the outer `.qwen/tmp` read-write.
+      const { repo, tree: outer } = pipelineTree();
+      const inner = join(outer, '.qwen', 'tmp', 'review-pr-2');
+      mkdirSync(dirname(inner), { recursive: true });
+      execFileSync(
+        'git',
+        ['worktree', 'add', '-q', '--detach', inner, 'HEAD'],
+        { cwd: outer },
+      );
+      // The mount root is the INNER layer's, which is what `mountRootFor`
+      // answers for this tree — injected so the case is about the gate and
+      // not the platform's mount arithmetic.
+      const innerMount = () => join(outer, '.qwen', 'tmp');
+      // The honest nested layout admits — without this control a gate that
+      // refuses everything passes too.
+      expect(untrustedGitfile(inner, innerMount)).toBeNull();
+
+      // The sibling lives one layer UP, beside the OUTER worktree, and its
+      // admin entry is legitimate.
+      const upSibling = join(repo, '.qwen', 'tmp', 'review-pr-up');
+      execFileSync(
+        'git',
+        ['worktree', 'add', '-q', '--detach', upSibling, 'HEAD'],
+        { cwd: repo },
+      );
+      const borrowed = adminEntryOf(upSibling);
+      rmSync(upSibling, { recursive: true, force: true });
+      symlinkSync(inner, upSibling);
+      overwriteGitfile(join(inner, '.git'), `gitdir: ${borrowed}\n`);
+
+      expect(untrustedGitfile(inner, innerMount)).toContain(
+        "a different tree's admin entry",
+      );
+      expect(untrustedRepositoryFrom(inner, innerMount)).toContain(
+        "a different tree's admin entry",
+      );
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses when git cannot answer the common-dir question at all (R33-3)',
+    () => {
+      // Question 2 is the ONLY one of the three that sees `gitdir:
+      // <repo>/.git`: question 1 passes (the entry is outside the mount) and
+      // question 3 passes (a main repository has no `gitdir` backpointer to
+      // read). Flattening the `RevParse` taxonomy made every no-answer from
+      // that one spawn — a timeout, a spawn failure, a git too old for
+      // `--path-format` — read as "no objection", so the pointer this
+      // question exists to refuse was certified whenever git went quiet.
+      const { repo, tree, mount } = pipelineTree();
+      overwriteGitfile(join(tree, '.git'), `gitdir: ${join(repo, '.git')}\n`);
+      // With git answering, the shape is refused by name.
+      expect(untrustedGitfile(tree, mount)).toContain('own common dir');
+
+      // The same pointer, with `--path-format` rejected the way git < 2.31
+      // rejects it. `--absolute-git-dir` still answers, so question 1 runs
+      // exactly as before and only question 2 goes quiet.
+      const shimDir = join(repo, 'git-shim-old');
+      mkdirSync(shimDir, { recursive: true });
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+        encoding: 'utf8',
+      }).trim();
+      writeFileSync(
+        join(shimDir, 'git'),
+        `#!/bin/sh\n` +
+          `for a in "$@"; do\n` +
+          `  case "$a" in --path-format=*)\n` +
+          `    echo "error: unknown option \\\`$a'" >&2; exit 129;; esac\n` +
+          `done\n` +
+          `exec ${realGit} "$@"\n`,
+        { mode: 0o755 },
+      );
+      const savedPath = process.env['PATH'];
+      try {
+        process.env['PATH'] = `${shimDir}:${savedPath}`;
+        // The premise, pinned rather than assumed: the shim really does
+        // reject the one spawn while the other still answers — otherwise
+        // this case would be green for the wrong reason.
+        const askCommonDir = spawnSync(
+          'git',
+          ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+          { cwd: tree, encoding: 'utf8' },
+        );
+        expect(askCommonDir.status).toBe(129);
+        const askGitDir = spawnSync(
+          'git',
+          ['rev-parse', '--absolute-git-dir'],
+          { cwd: tree, encoding: 'utf8' },
+        );
+        expect(askGitDir.status).toBe(0);
+        expect(untrustedGitfile(tree, mount)).toContain(
+          'could not resolve its own common dir',
+        );
+        expect(untrustedRepositoryFrom(tree, mount)).toContain(
+          'could not resolve its own common dir',
+        );
+      } finally {
+        process.env['PATH'] = savedPath;
+      }
     },
   );
 

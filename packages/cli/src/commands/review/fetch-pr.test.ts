@@ -1367,6 +1367,38 @@ describe('fetch-pr report assembly', () => {
       expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalled();
     });
 
+    it('refuses the step-4 create when the link sits AT the worktree path (R32-11)', async () => {
+      // The ancestor arm asked `dirname(wt)` and never `wt` itself, so a link
+      // planted at the destination — the cheaper plant of the two — walked
+      // straight through it. `releaseWorktree` unlinks a leaf link it can
+      // reach, but `cleanStale` only WARNS when the release reports
+      // `freed: false` (an EACCES on `.qwen/tmp` is enough) and runs on to
+      // here; `mkdirSync(dirname(wt))` is then a no-op on the real parent and
+      // `git worktree add wt ref` creates and checks out THROUGH the link —
+      // measured on git 2.43, exit 0 with the tree in the external directory.
+      const wt = join(process.cwd(), '.qwen', 'tmp', 'review-pr-42');
+      const linkStat = {
+        isSymbolicLink: () => true,
+        isFile: () => false,
+      };
+      producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+        if (String(path) === wt) return linkStat;
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+
+      await expect(reportFor({})).rejects.toThrow(
+        /refusing to create a review worktree at .*is a symlink/,
+      );
+      expect(producerMocks.mkdirSync).not.toHaveBeenCalled();
+      expect(producerMocks.git).not.toHaveBeenCalledWith(
+        'worktree',
+        'add',
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalled();
+    });
+
     it('clears the lease when the worktree add fails', async () => {
       producerMocks.git.mockImplementation((...args: string[]) => {
         if (args[0] === 'worktree') throw new Error('disk full');

@@ -367,15 +367,23 @@ function resolvedGitDir(cwd: string): RevParse {
 }
 
 /**
- * The common dir of the repository `cwd` resolves to, or null when git does
- * not answer.
+ * The common dir of the repository `cwd` resolves to, WITH the kind of
+ * no-answer a null was.
  *
  * One value per invocation, like every other `rev-parse` in this file: a
  * combined answer would have to be split on a newline, and a POSIX path may
  * carry one.
+ *
+ * The taxonomy is carried rather than flattened, for the reason `RevParse`'s
+ * own docstring gives: dropping it made question 2 read a timeout, an
+ * EMFILE/ENOMEM spawn failure or a git too old for `--path-format` as "no
+ * objection" — and question 2 is the ONLY one that sees `gitdir: <repo>/.git`
+ * (question 1 passes, the entry being outside the mount; question 3 passes,
+ * a main repository having no `gitdir` backpointer to read). So a silent
+ * question 2 certified the shape it exists to refuse.
  */
-function resolvedCommonDir(cwd: string): string | null {
-  return revParse(cwd, '--path-format=absolute', '--git-common-dir').value;
+function resolvedCommonDir(cwd: string): RevParse {
+  return revParse(cwd, '--path-format=absolute', '--git-common-dir');
 }
 
 /**
@@ -449,11 +457,13 @@ function revParse(cwd: string, ...flags: string[]): RevParse {
  *   linked worktree's admin entry is always `<common>/worktrees/<id>` — which
  *   is why `resetScratchTree` already refuses the same equality.
  *
- * git not answering the second question is not a refusal: it answered the
- * first one from the same directory with the same sanitized environment, and
- * the location question has already spoken. The realistic case is a git too old
- * for `--path-format`, and this pipeline's scratch and residue routes already
- * require it — so that host has no working review inside a mount either way.
+ * git not answering the second question IS a refusal — the one exception
+ * being git's own "not a git repository", which is the caller's error path to
+ * own. Reading every other no-answer as "no objection" was measured to admit
+ * `gitdir: <repo>/.git` outright, because question 2 is the only one of the
+ * three that can see that shape; a host whose git is too old for
+ * `--path-format` has no working review inside a mount either way, so
+ * refusing there costs nothing that was working.
  *
  * `expectedOwner` is the tree the entry must OWN: the tree root itself from
  * `untrustedGitfile`, git's own `--show-toplevel` answer from
@@ -475,7 +485,20 @@ function untrustedPointer(
     return 'resolves to an admin entry inside the review temp dir, where the reviewed code can rewrite it';
   }
   const common = resolvedCommonDir(dir);
-  if (common !== null && common === gitDir) {
+  if (common.value === null && !common.notARepository) {
+    // git was ASKED and did not answer — a timeout, a spawn failure, a git
+    // too old for `--path-format`. Not the same as "git ran and said this is
+    // no repository", which is the caller's own error path and passes here.
+    // Failing open on the first was the mis-classification `RevParse` exists
+    // to prevent: it is the arm that lets `gitdir: <repo>/.git` through, and
+    // one `rev-parse` losing a race with a 30 s timeout is not evidence.
+    return (
+      'git could not resolve its own common dir from this tree, so whether ' +
+      "the pointer names the main repository instead of a linked worktree's " +
+      'admin entry is unknown'
+    );
+  }
+  if (common.value !== null && common.value === gitDir) {
     return (
       "resolves to the repository's own common dir rather than a linked " +
       "worktree's admin entry, so every command through it acts on the main " +
@@ -540,8 +563,22 @@ function untrustedPointer(
   // canonicalising comparison agree with itself — measured, the admitted
   // pointer then wrote the sibling's index — so the redirect is refused
   // before anything resolves through it.
-  if (ownerSpelled === root || isSubpath(root, ownerSpelled)) {
-    const redirect = redirectedAncestor(ownerSpelled, root);
+  //
+  // The boundary is the OUTERMOST review temp root on `root`'s own path, the
+  // same widening `adminEntryInsideReviewTmp` applies two questions above and
+  // for the same reason: `mountRootFor` cuts at the DEEPEST `.qwen/tmp`, but
+  // in the nested geometry the OUTER review's containerized phase held the
+  // enclosing `.qwen/tmp` read-write. Bounded at the deepest root, an owner
+  // spelling one layer up — a sibling of the outer worktree, relinked at this
+  // tree — sat outside the containment test, `redirectedAncestor` was never
+  // called, and the realpath round trip then agreed with the link and
+  // admitted the borrowed entry (measured: commands through it moved the
+  // sibling's index, not this tree's). Widening costs the honest layouts
+  // nothing for the reason given there — git writes a linked worktree's admin
+  // entry under the MAIN repository, outside every layer.
+  const writableRoot = outermostReviewTmpRoot(root);
+  if (ownerSpelled === writableRoot || isSubpath(writableRoot, ownerSpelled)) {
+    const redirect = redirectedAncestor(ownerSpelled, writableRoot);
     if (redirect !== null) {
       return (
         "resolves to a different tree's admin entry — the owner its gitdir " +
@@ -1567,9 +1604,24 @@ function dropWorktreeRegistration(
     return; // No linked worktrees at all.
   }
   const wanted = samePath(tree);
+  // git's own id grammar, not the bare basename. `get_preferred_worktree_name`
+  // appends a counter whenever `<common>/worktrees/<basename>` is already
+  // taken — verified on git 2.43, three adds of a tree named `wt` produce
+  // `wt`, `wt1`, `wt2` — and the trees this pipeline's nested geometry builds
+  // collide by basename exactly that way (an inner review's `review-pr-N`
+  // beside the outer one). Matching `id !== ownId` alone skipped the entry
+  // this tree actually owns and left the registration standing after `rmSync`
+  // had taken the tree, which is the "missing but already registered" wedge
+  // this function exists to prevent — and the counter suffix is MORE likely
+  // in the leftover-from-a-crashed-run state the scan is for, not less. The
+  // `gitdir`-names-this-path and named-tree-is-gone narrowings below still
+  // carry the "never somebody else's worktree" half on their own.
   const ownId = basename(resolve(tree));
+  const ownIdPattern = new RegExp(
+    `^${ownId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\d*$`,
+  );
   for (const id of ids) {
-    if (id !== ownId) continue;
+    if (!ownIdPattern.test(id)) continue;
     try {
       const gitdir = readFileSync(join(dir, id, 'gitdir'), 'utf8').trim();
       const named = dirname(gitdir);
