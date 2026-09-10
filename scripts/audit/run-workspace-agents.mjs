@@ -856,7 +856,7 @@ const startFor = async (title) => {
   const id = bk2.dispatched[0].id;
   const got = await M.claimRun(ROOT, { threadId: th.id, runId: id });
   if (!got) throw new Error(`could not claim ${title} for ${agentId}`);
-  return { th, runId: id, agentId };
+  return { th, runId: id, agentId, name: `w${agentSeq}` };
 };
 
 const d1 = await startFor('Delegating');
@@ -871,6 +871,7 @@ const created = await asAgent(
         title: 'Sub-task',
         body: 'the smaller half',
         acceptanceCriteria: 'It compiles',
+        assignee: d1.name,
       },
       sig(),
     ),
@@ -899,7 +900,10 @@ const again2 = await asAgent(
   d1.runId,
   d1.th.rootThreadId,
   () =>
-    new M.ThreadCreateTool(cfg).buildAndExecute({ title: 'Sub-task' }, sig()),
+    new M.ThreadCreateTool(cfg).buildAndExecute(
+      { title: 'Sub-task', assignee: d1.name },
+      sig(),
+    ),
 );
 ok(
   'splitting the same title twice reuses the first',
@@ -1286,7 +1290,7 @@ const budgetChild = await asAgent(
   budgetParent.th.rootThreadId,
   () =>
     new M.ThreadCreateTool(cfg).buildAndExecute(
-      { title: 'Inheriting bit' },
+      { title: 'Inheriting bit', assignee: budgetParent.name },
       sig(),
     ),
 );
@@ -1299,8 +1303,12 @@ const inheritor = (await M.listThreads(ROOT)).threads.find(
   (t) => t.parentThreadId === budgetParent.th.id,
 );
 ok(
+  // Not an exact number: `thread_create` now requires an assignee, and
+  // assigning books a run, which is itself an agent-triggered turn. What the
+  // assertion is for is that the child starts from the parent's count rather
+  // than resetting to zero — pinning 7 pinned the booking behaviour too.
   'the child starts from the parent count, not from zero',
-  inheritor?.autoTurnsUsed === 7,
+  inheritor !== undefined && inheritor.autoTurnsUsed >= 7,
   String(inheritor?.autoTurnsUsed),
 );
 ok(
@@ -1403,7 +1411,10 @@ ok(
 // thread-tools: an empty title is refused rather than making a nameless
 // sub-thread nobody can find again.
 const emptyTitle = await M.runWithAgentRunContext(scopedFrame, () =>
-  new M.ThreadCreateTool(cfg).buildAndExecute({ title: '   ' }, sig()),
+  new M.ThreadCreateTool(cfg).buildAndExecute(
+    { title: '   ', assignee: 'w1' },
+    sig(),
+  ),
 );
 ok('a blank sub-thread title is refused', Boolean(emptyTitle.error));
 
@@ -3050,6 +3061,69 @@ ok(
   M.view
     .summariseWorkspaceWork([p5Row('t-done2', 'done')])
     .finished[0].owner.kind === 'local',
+);
+
+console.log('\n36. Host pickup selection (added after the lease work)');
+// `pickupRunForHost` is a second selection path beside the dispatcher's
+// `selectCandidates`. The dispatcher refuses terminal threads via
+// `isThreadTerminal`; this checks whether the Host path agrees.
+await M.updateWorkspaceAgents(ROOT, (a) => [
+  ...a,
+  {
+    id: 'ag_hosted',
+    name: 'hosted',
+    createdAt: 1,
+    execution: { mode: 'managed-host', hostIds: ['host-x'] },
+  },
+]);
+const hostedThread = await M.createThread(ROOT, {
+  title: 'Work on a finished thread',
+  assigneeAgentId: 'ag_hosted',
+});
+const hostedPost = await M.postMessage(ROOT, hostedThread.id, {
+  from: M.HUMAN_AUTHOR_ID,
+  text: 'go',
+});
+ok(
+  'the hosted agent has a queued run',
+  hostedPost.dispatched.length === 1,
+  JSON.stringify(hostedPost.dispatched.map((r) => r.status)),
+);
+const beforeDone = await M.pickupRunForHost(ROOT, 'host-x');
+ok(
+  'a Host can pick up work on a live thread',
+  beforeDone !== undefined,
+  JSON.stringify(beforeDone && Object.keys(beforeDone)),
+);
+// Release it, then mark the thread terminal WITHOUT retiring the run, which is
+// the state any future "mark terminal" path could leave behind.
+if (beforeDone?.lease) {
+  await M.releaseRunLease(ROOT, {
+    threadId: hostedThread.id,
+    runId: beforeDone.runId ?? hostedPost.dispatched[0].id,
+    leaseId: beforeDone.lease.leaseId,
+  });
+}
+const hostedLive = await M.readThread(ROOT, hostedThread.id);
+await M.writeThread(ROOT, {
+  ...hostedLive,
+  status: 'done',
+  runs: hostedLive.runs.map((r) =>
+    r.status === 'running' ? { ...r, status: 'queued', lease: undefined } : r,
+  ),
+});
+const afterDone = await M.pickupRunForHost(ROOT, 'host-x');
+ok(
+  'the dispatcher refuses to select work on a terminal thread',
+  !M.selectCandidates(
+    await M.readWorkspaceAgents(ROOT),
+    (await M.listThreads(ROOT)).threads,
+  ).some((c) => c.thread.id === hostedThread.id),
+);
+ok(
+  'and the Host pickup path agrees with it',
+  afterDone === undefined,
+  afterDone ? `picked up ${JSON.stringify(afterDone.threadId ?? '')}` : '',
 );
 
 await fs.rm(tmp, { recursive: true, force: true });

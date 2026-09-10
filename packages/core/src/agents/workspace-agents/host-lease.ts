@@ -38,6 +38,7 @@ import {
   type RunCloseRequest,
 } from './run-lifecycle.js';
 import {
+  isThreadTerminal,
   threadPriorityRank,
   type RunLease,
   type Thread,
@@ -304,8 +305,12 @@ export async function pickupRunForHost(
         })),
       )
       .find(
-        ({ run, agent }) =>
+        ({ thread, run, agent }) =>
           agent !== undefined &&
+          // Same rule the dispatcher applies. A thread that went terminal
+          // while a Host held it must not have that hold extended: the work
+          // is over, and renewing would keep a worker busy on it.
+          !isThreadTerminal(thread.status) &&
           run.status === 'running' &&
           run.lease?.hostId === hostId &&
           run.lease.attempt === run.attempts &&
@@ -345,6 +350,12 @@ export async function pickupRunForHost(
           agent: WorkspaceAgent;
         } =>
           candidate.agent !== undefined &&
+          // The dispatcher's `selectCandidates` refuses terminal threads; this
+          // is the second selection path and has to agree with it. Without
+          // this a Host is handed work on a thread whose caller cancelled it
+          // or whose owner marked it done — observed, not theorised: the audit
+          // harness picked up such a run before this line existed.
+          !isThreadTerminal(candidate.thread.status) &&
           ((candidate.run.status === 'queued' &&
             isAgentAddressable(candidate.agent)) ||
             (candidate.run.status === 'running' &&
