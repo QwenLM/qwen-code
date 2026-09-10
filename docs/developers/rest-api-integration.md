@@ -13,18 +13,19 @@ This page is the entry point. The full route reference is
 Six ways to build on the daemon, separated by one question — **how much of the
 front end do you own?**
 
-| Path                                 | You own                           | Status                                                                                                                                                                                                     |
-| ------------------------------------ | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| daemon + bundled Web Shell           | nothing — use it as shipped       | ships today ([user guide](../users/qwen-serve.md))                                                                                                                                                         |
-| daemon `--no-web` + your own UI      | the entire front end              | ships today — **this page**                                                                                                                                                                                |
-| daemon + branded Web Shell           | branding, not code                | not built ([#11357](https://github.com/QwenLM/qwen-code/issues/11357))                                                                                                                                     |
-| daemon + self-hosted Web Shell build | the front-end build               | not built ([#11358](https://github.com/QwenLM/qwen-code/issues/11358))                                                                                                                                     |
-| daemon via SDK `DaemonClient`        | client code, never raw HTTP       | ships today ([TS](./sdk-typescript.md), [Java](./sdk-java.md)) — the [Python SDK](./sdk-python.md) is process-transport-only and has no daemon client, so a Python integration drives path 2 over raw HTTP |
-| daemon via MCP bridge                | nothing — another agent drives it | ships as `qwen-serve-mcp` in `@qwen-code/sdk`                                                                                                                                                              |
+| Path                                 | You own                           | Status                                                                                                                                                                                                                         |
+| ------------------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| daemon + bundled Web Shell           | nothing — use it as shipped       | ships today ([user guide](../users/qwen-serve.md))                                                                                                                                                                             |
+| daemon `--no-web` + your own UI      | the entire front end              | ships today — **this page**                                                                                                                                                                                                    |
+| daemon + branded Web Shell           | branding, not code                | not built ([#11357](https://github.com/QwenLM/qwen-code/issues/11357))                                                                                                                                                         |
+| daemon + self-hosted Web Shell build | the front-end build               | not built ([#11358](https://github.com/QwenLM/qwen-code/issues/11358))                                                                                                                                                         |
+| daemon via SDK `DaemonClient`        | client code, never raw HTTP       | ships today ([TS](./sdk-typescript.md), [Java](./sdk-java.md)) — the [Python SDK](./sdk-python.md) is process-transport-only and has no daemon client, so a Python integration drives path 2 over raw HTTP                     |
+| daemon via MCP bridge                | nothing — another agent drives it | ships as `qwen-serve-mcp` in `@qwen-code/sdk` — see the [bridge README](../../packages/sdk-typescript/src/daemon-mcp/serve-bridge/README.md); `QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE` optionally permits global-scope write mutations |
 
 Headless `qwen -p` and ACP over stdio for editors are separate integration
-paths. Channels and extensions can also run through the daemon; their own
-guides cover those surfaces.
+paths. Channels and extensions can also run through the daemon; see the
+[channel guide](../users/features/channels/overview.md) and
+[Extension reference](./qwen-serve-protocol.md#extension-management-v2-wire-contract).
 
 ## Two things to know before designing
 
@@ -32,28 +33,30 @@ guides cover those surfaces.
 processes and brokers between them and HTTP. It runs the CLI entry script under
 the same Node binary, using `QWEN_CLI_ENTRY` or otherwise `process.argv[1]`.
 An embedding Node backend must point `QWEN_CLI_ENTRY` at the installed Qwen CLI
-entry script; there is no `qwen` lookup on `PATH`.
+entry script; there is no `qwen` lookup on `PATH`. A missing entry point surfaces
+as `MissingCliEntryError`.
 
-In steady state there is **one child per active workspace runtime**, not one per session. Every
-session in a workspace multiplexes onto that child and shares its process, OAuth
-state, file cache and hierarchy-memory parse. So the fault domain is the
-workspace: if the child exits, every session multiplexed onto it is torn down
-together. Size the container for the daemon plus one child per registered
-workspace, with headroom for overlapping old and replacement children during
-channel swaps. When sessions must fail independently, run separate daemons —
+In steady state there is **one child per active workspace runtime**, not one per
+session. Every session in a workspace multiplexes onto that child and shares its
+process, OAuth state, file cache and hierarchy-memory parse. So the fault domain
+is the workspace: if the child exits, every session multiplexed onto it is torn
+down together. Size the container for the daemon plus one child per registered
+workspace, with headroom for one extra child per runtime during a channel swap.
+When sessions must fail independently, run separate daemons —
 `--max-sessions` caps concurrency, not blast radius.
 
-**Authentication is single-operator.** The runtime bearer token grants API authority,
-and a trusted loopback caller gets full authority including code execution as
-the daemon user. There is no per-end-user principal model. If you are putting
+**Authentication is single-operator.** The runtime bearer token grants the
+whole bearer-gated API, and a trusted loopback caller gets full authority
+including code execution as the daemon user. There is no per-end-user principal
+model. If you are putting
 this behind a multi-user product, your backend owns user identity and must not
 hand the daemon token to browsers. Containerised and multi-tenant deployment
 are explicitly deferred — see "v0.16-alpha known limits" in the
 [user guide](../users/qwen-serve.md).
 
-Configured channel webhook ingress uses its own `x-qwen-webhook-secret`
-authentication before bearer authentication; `--require-auth` does not make
-that ingress require the runtime bearer token.
+Configured channel webhook ingress (`POST /channels/:channelName/webhooks/:source`)
+uses its own `x-qwen-webhook-secret` authentication before bearer
+authentication; it is inert until a channel webhook source is configured.
 
 ## Start the daemon
 
@@ -65,11 +68,10 @@ qwen serve --no-web --require-auth \
   --workspace /srv/project
 ```
 
-`--no-web` preserves the routes listed below, but disables Web Shell assets
-and dependent surfaces, including macOS live voice and the MCP app sandbox.
-Pass the
-token by environment rather than `--token`, which is readable by any local user
-through `/proc/<pid>/cmdline`.
+`--no-web` preserves the routes listed below, but disables Web Shell assets and
+dependent surfaces: on macOS the `/live/*` routes and `/live/host` socket, and on
+every platform `GET /mcp-app-sandbox`. Pass the token by environment rather than
+`--token`, which is readable by any local user through `/proc/<pid>/cmdline`.
 
 The Bash examples below pass the Authorization header through a file descriptor
 using the shell's `printf` builtin, keeping the token out of curl's arguments.
@@ -121,15 +123,17 @@ These are the ones a REST integration needs. Treat the rest as internal.
 
 ### Read-only workspace context
 
-| Route                                                                                                      | Purpose                                                                                                                        |
-| ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| [`GET /file`](./qwen-serve-protocol.md#get-file) · [`/file/bytes`](./qwen-serve-protocol.md#get-filebytes) | Read a file, or a byte range                                                                                                   |
-| `GET /stat` · `GET /list` · `GET /glob`                                                                    | Path metadata, directory listing, glob — _no dedicated sections yet_                                                           |
-| `GET /workspace/tools`                                                                                     | Tools reported by the live ACP child; an empty list without a child is not a capability inventory — _no dedicated section yet_ |
+| Route                                                                                                      | Purpose                                                                                                                                                          |
+| ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`GET /file`](./qwen-serve-protocol.md#get-file) · [`/file/bytes`](./qwen-serve-protocol.md#get-filebytes) | Read a file, or a byte range                                                                                                                                     |
+| `GET /stat` · `GET /list` · `GET /glob`                                                                    | Path metadata, directory listing, glob — _no dedicated sections yet_                                                                                             |
+| `GET /workspace/tools`                                                                                     | Tools reported by the live ACP child; without one, the response has `acpChannelLive: false`, `tools: []`, and a `not_started` error — _no dedicated section yet_ |
 
-> **Reference coverage.** Routes marked as lacking a dedicated section may be
-> mentioned only in passing or absent from the protocol reference.
-> Closing that is tracked in
+> **Reference coverage.** 17 of the 25 routes above have dedicated sections.
+> Of the 8 marked otherwise, some are mentioned only in passing and three are
+> absent entirely: `GET /session/:id/pending-prompts`,
+> `POST /session/:id/permission/:requestId`, and `GET /workspace/tools`.
+> Closing that gap is tracked in
 > [#11359](https://github.com/QwenLM/qwen-code/issues/11359).
 
 ## Minimal flow
@@ -173,8 +177,9 @@ curl -N http://daemon:4170/session/$SID/events \
 Each `data:` line is a full envelope on one line; the envelope's `type` matches
 the `event:` line.
 
-Replay is limited by the event ring and a per-subscription byte budget. If the
-stream emits `state_resync_required`, recover through `POST /session/:id/load`
+Replay is limited by `--event-ring-size` and a fixed 8 MiB per-subscription byte
+budget. If the stream emits `state_resync_required` with
+`reason: "replay_budget_exceeded"`, recover through `POST /session/:id/load`
 instead of treating the replay as complete.
 
 **4. Prompt.** `202` means admitted, not finished. Correlate `turn_complete` /
@@ -221,13 +226,13 @@ curl -sX POST http://daemon:4170/session/$SID/permission/$REQUEST_ID \
 
 ## Operations
 
-| Concern          | Where                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Concurrency caps | `--max-sessions`, `--max-total-sessions`; over-cap creates return `503` with `Retry-After`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Rate limiting    | `--rate-limit` plus the per-class `--rate-limit-*` flags                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| Idle cleanup     | `--session-idle-timeout-ms`; keep alive with `POST /session/:id/heartbeat`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Memory           | `--child-heap-mode` is observe-only. `--memory-budget-mb` controls the adaptive live-journal growth pool for `POST /session/:id/load`, not SSE replay; pinning either `--max-journal-bytes` or `--max-journal-events` disables growth. Neither flag sizes children or refuses spawns, nor governs their actual heap ceiling (`--max-old-space-size`, derived from host memory). See [Configuration](./daemon/17-configuration.md) for budget calculation. SSE replay is separately bounded by `--event-ring-size` and a byte budget; an omitted tail produces `state_resync_required` with `reason: "replay_budget_exceeded"` |
-| Prompt deadlines | `--prompt-deadline-ms`; expiry emits `turn_error`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Errors           | [Error taxonomy](./daemon/18-error-taxonomy.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| Observability    | [Observability](./daemon/19-observability.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| Full flag list   | [Configuration](./daemon/17-configuration.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Concern          | Where                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Concurrency caps | `--max-sessions`, `--max-total-sessions`; over-cap creates return `503` with `Retry-After`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Rate limiting    | `--rate-limit` plus the per-class `--rate-limit-*` flags                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Idle cleanup     | `--session-idle-timeout-ms`; keep alive with `POST /session/:id/heartbeat`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Memory           | `--child-heap-mode` is observe-only. `--memory-budget-mb` controls the adaptive live-journal growth pool for `POST /session/:id/load`, not SSE replay; pinning either `--max-journal-bytes` or `--max-journal-events` disables growth. Neither flag sizes children or refuses spawns, nor governs their actual heap ceiling (`--max-old-space-size`, derived from host memory). See [Configuration](./daemon/17-configuration.md) for budget calculation. SSE replay is separately bounded by `--event-ring-size` and a fixed 8 MiB per-subscription budget; an omitted tail produces `state_resync_required` with `reason: "replay_budget_exceeded"` |
+| Prompt deadlines | `--prompt-deadline-ms`; expiry emits `turn_error`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Errors           | [Error taxonomy](./daemon/18-error-taxonomy.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Observability    | [Observability](./daemon/19-observability.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Full flag list   | [Configuration](./daemon/17-configuration.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
