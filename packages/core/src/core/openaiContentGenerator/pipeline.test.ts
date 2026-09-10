@@ -45,6 +45,12 @@ import {
 import { setToolCallPreparations } from '../tool-call-preparation.js';
 import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
 import { runInForkContext } from '../../tools/agent/fork-subagent.js';
+import { findProviderById } from '../../providers/all-providers.js';
+import {
+  buildInstallPlan,
+  resolveBaseUrl,
+} from '../../providers/provider-config.js';
+import { DeepSeekOpenAICompatibleProvider } from './provider/deepseek.js';
 
 // Mock dependencies
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
@@ -2051,6 +2057,159 @@ describe('ContentGenerationPipeline', () => {
         expect(apiCall.reasoning_effort).toBe(expectedEffort);
         expect(apiCall.thinking).toEqual(expectedThinking);
         expect(apiCall.reasoning).toBeUndefined();
+      },
+    );
+
+    it.each([
+      ['moonshot', 'kimi-k3', 'max', undefined, true],
+      ['moonshot', 'kimi-k2.7-code', undefined, undefined, true],
+      ['moonshot', 'kimi-k2.7-code-highspeed', undefined, undefined, true],
+      ['moonshot', 'kimi-k2.6', undefined, 'thinking', false],
+      ['deepseek', 'deepseek-v4-pro', 'low', 'thinking', false],
+      ['deepseek', 'deepseek-v4-flash', 'low', 'thinking', false],
+      ['alibabaStandard', 'qwen3.8-max', 'low', 'reasoning_effort', false],
+      [
+        'alibabaStandard',
+        'qwen3.8-max-0902',
+        'medium',
+        'reasoning_effort',
+        false,
+      ],
+      ['alibabaStandard', 'qwen3.8-flash', 'xhigh', 'reasoning_effort', false],
+      ['alibabaStandard', 'qwen3.7-plus', undefined, 'enable_thinking', false],
+      ['alibabaStandard', 'deepseek-v4-pro', 'high', 'enable_thinking', false],
+      ['alibabaStandard', 'deepseek-v4-pro', 'max', 'enable_thinking', false],
+      [
+        'alibabaStandard',
+        'deepseek-v4-flash',
+        'high',
+        'enable_thinking',
+        false,
+      ],
+      [
+        'alibabaStandard',
+        'deepseek-v4-pro-0813',
+        'low',
+        'enable_thinking',
+        false,
+      ],
+      [
+        'alibabaStandard',
+        'deepseek-v4-flash-0731',
+        'low',
+        'enable_thinking',
+        false,
+      ],
+      ['alibabaStandard', 'kimi-k3', 'low', undefined, true],
+      ['alibabaStandard', 'kimi-k2.7-code', undefined, undefined, true],
+      ['alibabaStandard', 'kimi-k2.6', undefined, 'enable_thinking', false],
+      ['token-plan', 'qwen3.8-max', 'low', undefined, true],
+      ['token-plan', 'qwen3.8-max-preview', 'medium', undefined, true],
+      ['token-plan', 'qwen3.8-flash', 'low', 'reasoning_effort', false],
+      ['token-plan', 'deepseek-v4-pro-0813', 'low', 'enable_thinking', false],
+      ['coding-plan', 'qwen3.5-plus', undefined, 'enable_thinking', false],
+      ['coding-plan', 'kimi-k2.5', undefined, 'enable_thinking', false],
+    ] as const)(
+      'sends installed %s / %s reasoning through the real provider hook',
+      async (providerId, model, effort, disableField, mandatory) => {
+        const preset = findProviderById(providerId)!;
+        const baseUrl = resolveBaseUrl(preset);
+        const installed = buildInstallPlan(preset, {
+          baseUrl,
+          apiKey: 'test-key',
+          modelIds: [model],
+        }).modelProviders![0].models[0];
+        expect(installed.capabilities?.reasoning).toBeDefined();
+
+        for (const mode of ['enabled', 'disabled', 'side-query'] as const) {
+          mockContentGeneratorConfig = {
+            ...mockContentGeneratorConfig,
+            ...installed.generationConfig,
+            authType: AuthType.USE_OPENAI,
+            model,
+            baseUrl,
+            enableCacheControl: false,
+            reasoning:
+              mode === 'disabled' ? false : effort ? { effort } : undefined,
+          };
+          mockCliConfig = {
+            ...mockCliConfig,
+            getResolvedModelConfig: vi.fn().mockReturnValue(installed),
+            getContentGeneratorConfig: () => mockContentGeneratorConfig,
+            getCliVersion: () => 'test',
+          } as unknown as Config;
+          const Provider =
+            providerId === 'moonshot'
+              ? DefaultOpenAICompatibleProvider
+              : providerId === 'deepseek'
+                ? DeepSeekOpenAICompatibleProvider
+                : DashScopeOpenAICompatibleProvider;
+          const provider = new Provider(
+            mockContentGeneratorConfig,
+            mockCliConfig,
+          );
+          vi.spyOn(provider, 'buildClient').mockReturnValue(mockClient);
+          pipeline = new ContentGenerationPipeline({
+            ...mockConfig,
+            provider,
+            cliConfig: mockCliConfig,
+            contentGeneratorConfig: mockContentGeneratorConfig,
+          });
+          (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+            { role: 'user', content: 'Hello' },
+          ]);
+          (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+            new GenerateContentResponse(),
+          );
+          (mockClient.chat.completions.create as Mock).mockResolvedValue({
+            id: 'r',
+            choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+          });
+          await pipeline.execute(
+            {
+              model,
+              contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+              ...(mode === 'side-query'
+                ? { config: { thinkingConfig: { includeThoughts: false } } }
+                : {}),
+            },
+            'preset-test',
+          );
+          const wire = (
+            mockClient.chat.completions.create as Mock
+          ).mock.calls.at(-1)![0];
+          expect(wire.reasoning).toBeUndefined();
+          if (mode === 'enabled') {
+            expect(wire.reasoning_effort).toBe(effort);
+            if (
+              providerId === 'alibabaStandard' &&
+              model === 'deepseek-v4-pro'
+            ) {
+              expect(wire.enable_thinking).toBeUndefined();
+              expect(wire.thinking).toBeUndefined();
+            }
+          } else if (!mandatory) {
+            expect(wire.reasoning_effort).toBe(
+              disableField === 'reasoning_effort' ? 'none' : undefined,
+            );
+            expect(wire.enable_thinking).toBe(
+              disableField === 'enable_thinking' ? false : undefined,
+            );
+            expect(wire.thinking).toEqual(
+              disableField === 'thinking' ? { type: 'disabled' } : undefined,
+            );
+          } else {
+            expect(wire.reasoning_effort).not.toBe('none');
+            expect(wire.enable_thinking).not.toBe(false);
+            expect(wire.thinking?.type).not.toBe('disabled');
+          }
+          if (
+            providerId === 'moonshot' ||
+            disableField === 'reasoning_effort'
+          ) {
+            expect(wire.enable_thinking).toBeUndefined();
+          }
+        }
       },
     );
 

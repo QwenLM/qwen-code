@@ -38,7 +38,7 @@ import {
   parseLedger,
   serializeLedger,
 } from './lib/ledger.js';
-import { countInlineFindings } from './lib/inline-counts.js';
+import { countInlineFindings, readClaimHead } from './lib/inline-counts.js';
 import {
   aboveChurnBar,
   CHURN_MIN_FRESH,
@@ -62,6 +62,11 @@ import {
   type ComposeReviewResult,
   type DeferredEntry,
   type PrBodyFetcher,
+  FIXED_BY_MAX,
+  INLINE_SUGGESTIONS_CLAUSE,
+  DOWNGRADE_REASON_MAX_CHARS,
+  bodyCriticalClaim,
+  escapeTagOpeners,
 } from './compose-review.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -739,6 +744,109 @@ describe('composeReview — the C/S table', () => {
     expect(r.body).toContain('whole-PR blocker X');
     expect(r.body).toContain('could not confirm');
     expect(r.body).toContain('- R2-1 stale guard — already reported');
+  });
+
+  it('no model-text channel can open a raw HTML element over the rest of the body (#9940 review, round 30 reverse audit)', () => {
+    // A list item bounds a `<details>` at its `</li>`, but NOT a RAWTEXT
+    // element — `<textarea>`, `<style>`, `<script>` run to a close tag
+    // that never comes and take the footer with them. The disclosure
+    // paragraphs are not even list items.
+    for (const tag of ['details', 'textarea', 'style', 'script']) {
+      for (const field of [
+        'cannotTellCriticals',
+        'suggestionsDroppedAsDuplicates',
+        'unreviewedDimensions',
+        'uncoverableChunks',
+      ]) {
+        const r = composeReview(
+          {
+            planPath: plan(),
+            modelId: 'm',
+            bodyCriticals: ['a real blocker nobody should lose'],
+            [field]: [`the fold's <${tag}> element is left open`],
+          } as unknown as ComposeReviewInput,
+          '0.21.2',
+          true,
+        );
+        expect(r.body).not.toContain(`<${tag}>`);
+        expect(r.body).toContain(`&lt;${tag}`);
+        expect(r.body).toContain('a real blocker nobody should lose');
+        expect(r.body).toContain('via Qwen Code /review');
+      }
+    }
+    // A backticked tag still reads as code in every one of them.
+    for (const field of [
+      'cannotTellCriticals',
+      'suggestionsDroppedAsDuplicates',
+      'unreviewedDimensions',
+    ]) {
+      const r = composeReview(
+        {
+          planPath: plan(),
+          modelId: 'm',
+          [field]: ['`<details>` stays'],
+        } as unknown as ComposeReviewInput,
+        '0.21.2',
+        true,
+      );
+      expect(r.body).toContain('`<details>` stays');
+    }
+  });
+
+  it('a downgrade reason too big for the budget does not evict the shorter ones after it (#9940 review, round 30 reverse audit)', () => {
+    const r = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          // Four fit (1606 of 2000); the fifth would overrun, the short
+          // one after it still fits.
+          downgradeReasons: [
+            ...Array.from({ length: 5 }, (_, i) =>
+              String.fromCharCode(97 + i).repeat(400),
+            ),
+            'self-PR',
+          ],
+        },
+      }),
+    );
+    expect(r.body).toContain('self-PR');
+  });
+
+  it('a model-written blocker cannot open a raw HTML element over the rest of the body (#9940 review, round 30)', () => {
+    // One ordinary sentence of review prose naming a tag without
+    // backticks: the entry is a top-level paragraph, so the unclosed
+    // element swallowed every later paragraph — the second blocker and
+    // the footer among them. Per entry is the right unit: a code span
+    // cannot cross the blank line between two entries.
+    for (const attribution of [true, false]) {
+      const r = composeReview(
+        {
+          planPath: plan(),
+          modelId: 'm',
+          bodyCriticals: [
+            "the fold's <details> element is left open when the cut lands inside it",
+            'second blocker nobody would see',
+          ],
+        },
+        '0.21.2',
+        attribution,
+      );
+      expect(r.body).toContain('&lt;details');
+      expect(r.body).not.toContain("fold's <details>");
+      expect(r.body).toContain('second blocker nobody would see');
+      // A backticked tag in blocker prose still reads as code.
+      const span = composeReview(
+        {
+          planPath: plan(),
+          modelId: 'm',
+          bodyCriticals: ['`<details>` stays'],
+        },
+        '0.21.2',
+        attribution,
+      );
+      expect(span.body).toContain('`<details>` stays');
+    }
   });
 
   it('attribution on: a comment-wrapped forged footer strips like an unwrapped one — only the canonical footer posts', () => {
@@ -2363,6 +2471,58 @@ describe('composeReview — presubmit downgrades', () => {
     expect(verdictLine(r)).toContain('a presubmit check failed');
   });
 
+  it("the downgrade sentence escapes over the JOIN — an odd backtick run in one reason cannot free the next reason's tag opener (#9940 review, round 30)", () => {
+    // The reasons render as ONE paragraph, so backtick runs pair across
+    // the `; `. Escaped per reason, `<details>` sat inside a code span of
+    // its own fragment and was left live; joined, the run re-paired the
+    // other way and the opener went out unescaped — one `<details>` in a
+    // top-level paragraph folds every later paragraph (the blockers, the
+    // disclosures, the footer) into a collapsed triangle.
+    const r = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['CI failing: `build', 'head drift in `<details>`'],
+        },
+      }),
+    );
+    expect(r.body).toContain('⚠️ Downgraded from Request changes to Comment');
+    expect(r.body).toContain('&lt;details');
+    expect(r.body).not.toContain('<details');
+    // A reason whose span pairs within itself keeps its `<` — the escape
+    // reads the spans the render reads, not one span rule per fragment.
+    const paired = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['head drift in `<details>`', 'self-PR'],
+        },
+      }),
+    );
+    expect(paired.body).toContain('`<details>`');
+    // The 2000-point total is charged against the string that POSTS: the
+    // escape's `&lt;` expansion happens over the join, so pricing the
+    // fragments let the posted run overrun the budget by ~41%.
+    const many = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          // Openers OUTSIDE any code span: each `<` grows to `&lt;` when
+          // the join is escaped, which pricing the fragments never saw.
+          downgradeReasons: Array.from({ length: 8 }, () => '<a>'.repeat(120)),
+        },
+      }),
+    );
+    const run = /Downgraded from Request changes to Comment: ([^\n]*)\./.exec(
+      many.body,
+    );
+    expect(run).not.toBeNull();
+    expect([...run![1]!].length).toBeLessThanOrEqual(2000);
+  });
+
   it('a downgraded Approve never certifies "no blockers" in the same body (the downgrade names failing CI two clauses earlier)', () => {
     const r = composeReview(
       base({
@@ -3255,7 +3415,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr()).toContain(
-        'VOLUME: 2 inline comment(s) this round (2 reported for the first time)',
+        'VOLUME: 2 comment(s) this round (2 reported for the first time)',
       );
 
       // With a recorded predecessor the previous round rides along.
@@ -3270,7 +3430,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr()).toContain(
-        'VOLUME: 2 inline comment(s) this round (2 reported for the first time) (previous round: 9)',
+        'VOLUME: 2 comment(s) this round (2 reported for the first time) (previous round: 9)',
       );
 
       // A CONVERGED predecessor: zero is a recorded value, not an absence.
@@ -3288,7 +3448,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr()).toContain(
-        'VOLUME: 2 inline comment(s) this round (2 reported for the first time) (previous round: 0)',
+        'VOLUME: 2 comment(s) this round (2 reported for the first time) (previous round: 0)',
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -3998,7 +4158,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       });
       // The total ROSE — this is exactly the input the old window fired on.
       expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
-        '6 inline comment(s) this round (4 reported for the first time) (previous round: 5)',
+        '6 comment(s) this round (4 reported for the first time) (previous round: 5)',
       );
       expect(
         stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
@@ -4076,7 +4236,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
-        '3 inline comment(s) this round (0 reported for the first time) (previous round: 5)',
+        '3 comment(s) this round (0 reported for the first time) (previous round: 5)',
       );
       expect(
         stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
@@ -6167,11 +6327,13 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       cappedBy: [],
       downgraded: false,
       floorEnforced: [],
+      floorEnforcedEntries: [],
       postedInline: 0,
       postedFresh: 0,
       downgradedFrom: null,
       remediation: [],
       deferredCount: 0,
+      fixedFindings: [],
       bodyTrim: {
         sections: 0,
         deferralList: false,
@@ -6285,6 +6447,1489 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       'Verdict: Approve — low signal: none of the 11 review agents reported ' +
         'a finding on a non-trivial diff (642 source diff lines)',
     );
+  });
+});
+
+// `fixedFindings` decides nothing in the verdict — a fixed entry weighs
+// nothing by its absence from every findings channel — but it rides the
+// result for `submit`'s thread lifecycle, so the boundary validates its
+// shape: one acceptance table for the state JSON and the artifact read-back.
+describe('composeReview — fixedFindings', () => {
+  it('passes valid rulings through, unchanged by the verdict', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [
+          { id: 'R1-2', by: 'the guard rewrite' },
+          { id: 'R2-7' },
+        ],
+      }),
+    );
+    expect(r.event).toBe('APPROVE');
+    expect(r.fixedFindings).toEqual([
+      { id: 'R1-2', by: 'the guard rewrite' },
+      { id: 'R2-7' },
+    ]);
+  });
+
+  it('reads absent and null as no rulings', () => {
+    expect(composeReview(base({})).fixedFindings).toEqual([]);
+    expect(
+      composeReview(base({ fixedFindings: null as never })).fixedFindings,
+    ).toEqual([]);
+  });
+
+  it('trims and caps `by` — the clause becomes a one-line PR reply', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [{ id: 'R1-2', by: `  ${'x'.repeat(300)}  ` }],
+      }),
+    );
+    expect(r.fixedFindings[0]!.by).toHaveLength(240);
+  });
+
+  it('caps `by` by code point — the cut never orphans a surrogate pair', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [{ id: 'R1-2', by: `${'x'.repeat(239)}😀tail` }],
+      }),
+    );
+    const by = r.fixedFindings[0]!.by!;
+    expect([...by]).toHaveLength(240);
+    expect(by.endsWith('😀')).toBe(true);
+  });
+
+  it('refuses a non-array field', () => {
+    expect(() =>
+      composeReview(base({ fixedFindings: 'R1-2' as never })),
+    ).toThrow(/`fixedFindings` must be an array/);
+  });
+
+  it('refuses an entry with no ledger id — a ruling must name what it retires', () => {
+    for (const id of [
+      'not-a-ledger-id',
+      'R1-2 extra',
+      '',
+      42,
+      undefined,
+      // The serializer's bounds beside its shape (#9940 review, round
+      // 14): an over-long id is one the normalizer would cut (a cut id
+      // is a different id), a round of 0 or past LEDGER_MAX_ROUND names
+      // an entry no ledger can hold — `isLedgerFinding` refuses all of
+      // them, so a ruling naming one could never retire a real entry.
+      'R1-' + '9'.repeat(30),
+      'R0-1',
+      'R999999-1',
+      // Non-canonical spellings the shape tolerates but no entry carries:
+      // every join is raw-string equality, so `R01-2` retires nothing and
+      // slips past the two-way refusal beside a still-standing `R1-2`
+      // (#9940 review, round 25).
+      'R01-2',
+      'R1-02',
+      'R1-0',
+    ] as const) {
+      // A leading-zero spelling of a real shape is refused with the
+      // canonical spelling named; every other shape with the bounds.
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id } as never] })),
+      ).toThrow(/carries no ledger id|spells its id non-canonically/);
+    }
+  });
+
+  it('refuses a `by` that is not one non-empty line', () => {
+    expect(() =>
+      composeReview(base({ fixedFindings: [{ id: 'R1-2', by: '' }] })),
+    ).toThrow(/ONE non-empty line/);
+    expect(() =>
+      composeReview(
+        base({ fixedFindings: [{ id: 'R1-2', by: 'line one\nline two' }] }),
+      ),
+    ).toThrow(/ONE non-empty line/);
+    expect(() =>
+      composeReview(base({ fixedFindings: [{ id: 'R1-2', by: 7 as never }] })),
+    ).toThrow(/ONE non-empty line/);
+    // U+2028 and U+2029 are line breaks to the reader that matters: jq's
+    // `[^\n]` admits them, so a `by` carrying one made the census read the
+    // posted note as a note while this side read it as a finding (#9940
+    // review, round 31 reverse audit).
+    for (const brk of ['\u2028', '\u2029']) {
+      expect(() =>
+        composeReview(
+          base({ fixedFindings: [{ id: 'R1-2', by: `one${brk}two` }] }),
+        ),
+      ).toThrow(/ONE non-empty line/);
+    }
+  });
+
+  it('strips a severity marker off a `by` the indentation would have hidden (#9940 review, round 31 reverse audit)', () => {
+    // `severityOf` reads no marker off an indented line — it is code
+    // there — but the cap takes `prose.trim()` and the reply builder trims
+    // again, so the indentation is gone by the time it posts and the
+    // marker went out live under attribution on.
+    for (const lead of ['    ', '\t', ' \t ']) {
+      const r = composeReview(
+        base({
+          fixedFindings: [
+            { id: 'R1-2', by: `${lead}**[Critical]** the auth check` },
+          ],
+        }),
+      );
+      expect(r.fixedFindings).toEqual([{ id: 'R1-2', by: 'the auth check' }]);
+    }
+  });
+
+  it('refuses a `by` that renders as nothing — the reply must say what fixed it (#9940 review, round 14)', () => {
+    // A comment-only clause, and a Cf run `.trim()` keeps: either posts
+    // `R<id> fixed by` with no visible account, on the thread the same
+    // pass resolves — the body-Criticals boundary already refuses the
+    // identical texts through the same renders-as-nothing rule.
+    expect(() =>
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: '<!-- the guard rewrite -->' }],
+        }),
+      ),
+    ).toThrow(/ONE non-empty line/);
+    expect(() =>
+      composeReview(
+        base({ fixedFindings: [{ id: 'R1-2', by: '\u200b'.repeat(3) }] }),
+      ),
+    ).toThrow(/ONE non-empty line/);
+    // Residue AHEAD of visible text stays admitted, like everywhere else.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: '<!-- x --> the guard rewrite' }],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2', by: '<!-- x --> the guard rewrite' }]);
+  });
+
+  it('refuses a `by` the EXIT strips to nothing — a bare severity marker (#9940 review, round 21)', () => {
+    // `submit` posts the reply through the attribution-off strip chain
+    // and the footer strip, so the gate projects through the same exit
+    // closure the body-Criticals boundary uses (`rendersAsNothingAtExit`):
+    // a bare marker renders as prose to the plain test and as nothing at
+    // the exit — under attribution off the reply posted bare `R1-2 fixed`
+    // beside a resolve, under attribution on the machine marker posted
+    // verbatim.
+    for (const by of ['**[Critical]**', '**[Suggestion]**: ']) {
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by }] })),
+      ).toThrow(/ONE non-empty line/);
+    }
+  });
+
+  it('refuses a `by` carrying the comment-marker grammar or an unterminated comment; strips a leading severity marker (#9940 review, audit)', () => {
+    // The marker grammar would end the attribution-off reply and make
+    // presubmit read the fixed ruling as a posted finding carrying its
+    // id — a re-post carrier for the id the ruling retires.
+    expect(() =>
+      composeReview(
+        base({
+          fixedFindings: [
+            { id: 'R1-2', by: 'the rewrite <!-- qwen-review critical -->' },
+          ],
+        }),
+      ),
+    ).toThrow(/comment-marker grammar/);
+    // An unterminated comment swallows the footer appended after the clause.
+    expect(() =>
+      composeReview(
+        base({ fixedFindings: [{ id: 'R1-2', by: 'the real parser <!--' }] }),
+      ),
+    ).toThrow(/never closes/);
+    // A balanced comment beside visible text is still admitted.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: 'the <!-- note --> real parser' }],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2', by: 'the <!-- note --> real parser' }]);
+    // `by` is prose: a leading severity marker is machine grammar the reply
+    // would post verbatim under attribution on — stripped, like every
+    // posted body strips it; a marker-only clause still refuses.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: '**[Critical]** the real parser' }],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2', by: 'the real parser' }]);
+  });
+
+  it('renders the clause-less body variant beside the body whenever the opener carries the inline-Suggestions clause (#9940 review, audit 3)', () => {
+    const withSuggestion = composeReview(base({ suggestionsInline: 1 }));
+    expect(withSuggestion.body).toContain(INLINE_SUGGESTIONS_CLAUSE.en);
+    expect(withSuggestion.bodyWithoutInlineClause).toBeDefined();
+    expect(withSuggestion.bodyWithoutInlineClause).not.toContain(
+      INLINE_SUGGESTIONS_CLAUSE.en,
+    );
+    expect(withSuggestion.bodyWithoutInlineClause).not.toContain(
+      INLINE_SUGGESTIONS_CLAUSE.zh,
+    );
+    // The variant differs from the body by the clause alone.
+    expect(
+      withSuggestion.body
+        .replace(` ${INLINE_SUGGESTIONS_CLAUSE.en}`, '')
+        .replace(` ${INLINE_SUGGESTIONS_CLAUSE.zh}`, '')
+        .replace(`${INLINE_SUGGESTIONS_CLAUSE.en} `, '')
+        .replace(`${INLINE_SUGGESTIONS_CLAUSE.zh} `, ''),
+    ).toBe(withSuggestion.bodyWithoutInlineClause);
+    expect(composeReview(base({})).bodyWithoutInlineClause).toBeUndefined();
+  });
+
+  it('the clause-less variant is the body minus the clause at EVERY budget rung — one render decides both (#9940 review, audit 4)', () => {
+    let sawFold = false;
+    for (const size of [1000, 32384, 32390, 32400, 63706, 64740, 65000]) {
+      // `base()` rewrites the plan file; the Han plan must be written AFTER.
+      const input = base({
+        suggestionsInline: 1,
+        criticalsInline: 1,
+        bodyCriticals: ['C'.repeat(size)],
+        presubmit: { downgradeRequestChanges: true, downgradeReasons: ['x'] },
+      });
+      input.planPath = coveredPlan(undefined, { han: true });
+      const r = composeReview(input);
+      sawFold ||= r.body.includes('<details>');
+      const variant = r.bodyWithoutInlineClause;
+      expect(variant).toBeDefined();
+      // Same fold, same sections, same cut — the variant differs by the
+      // clause (and the space that joined it) alone.
+      expect(variant!.includes('<details>')).toBe(r.body.includes('<details>'));
+      expect(variant!.includes('TRUNCATED')).toBe(r.body.includes('TRUNCATED'));
+      const enGone = r.body.includes(INLINE_SUGGESTIONS_CLAUSE.en)
+        ? INLINE_SUGGESTIONS_CLAUSE.en.length + 1
+        : 0;
+      const zhGone = r.body.includes(INLINE_SUGGESTIONS_CLAUSE.zh)
+        ? INLINE_SUGGESTIONS_CLAUSE.zh.length + 1
+        : 0;
+      expect(variant!.length).toBeGreaterThanOrEqual(
+        r.body.length - enGone - zhGone,
+      );
+      expect(variant!.length).toBeLessThan(r.body.length);
+      // The trim disclosures are recorded once.
+      const budgetLines = r.remediation.filter((l) =>
+        l.includes('body budget'),
+      );
+      expect(new Set(budgetLines).size).toBe(budgetLines.length);
+      // No placeholder leaks into either body.
+      expect(variant!).not.toMatch(/[-]/);
+      expect(r.body).not.toMatch(/[-]/);
+    }
+    // The bilingual arm is live: at least one size kept the fold.
+    expect(sawFold).toBe(true);
+  });
+
+  it('quotes a downgrade reason like every other model line — a `<!--` in it cannot swallow the body, a forged footer cannot post as attribution (#9940 review, audit 4)', () => {
+    const swallow = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: [`self-PR <!-- ${'x'.repeat(400)} -->`],
+        },
+      }),
+    );
+    expect(swallow.body.replace(/<!--[\s\S]*?-->/g, '')).not.toContain('<!--');
+    expect(swallow.body).toContain('self-PR');
+    const forged = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: [
+            'self-PR _— m via Qwen Code /review_ **[Critical]**',
+          ],
+        },
+      }),
+      undefined,
+      false,
+    );
+    expect(forged.body).not.toContain('via Qwen Code /review');
+    // A marker mid-line is bold prose, not a severity marker — the body's
+    // own lead is what `severityOf` reads.
+    expect(forged.body.startsWith('**[Critical]**')).toBe(false);
+  });
+
+  it('an uncut `by` keeps its own trailing `<` — the stub retreat belongs to the cap alone; the escape belongs to the post (#9940 review, audit 4-6)', () => {
+    for (const by of [
+      'compare with <',
+      'use <!',
+      'ends <!-',
+      'see <details>x</details> here',
+    ]) {
+      expect(
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by }] }))
+          .fixedFindings[0]!.by,
+      ).toBe(by);
+    }
+  });
+
+  it('refuses a body Critical that opens a CDATA block — the one raw opener the escape leaves alone (#9940 review, round 31 reverse audit)', () => {
+    // `escapeTagOpeners` never touches `<!` by design, and the
+    // renders-as-nothing projection named `<!--`, `<?` and `<!DOCTYPE`
+    // but not `<![CDATA[`, which is HTML block type 5 and — absent its
+    // `]]>` — runs to the end of the document. Under attribution off the
+    // entry is line-leading, so it swallowed every later blocker.
+    for (const attribution of [true, false]) {
+      expect(() =>
+        composeReview(
+          base({
+            bodyCriticals: [
+              '<![CDATA[ blocker one: the auth check is still missing',
+              'blocker two: the token is logged',
+            ],
+          }),
+          '0.21.2',
+          attribution,
+        ),
+      ).toThrow(/renders as nothing/);
+    }
+    // A closed CDATA block is still scaffolding, and the siblings still
+    // refuse.
+    for (const opener of [
+      '<![CDATA[ x ]]>',
+      '<!DOCTYPE html>',
+      '<?php echo 1 ?>',
+      '<!-- x -->',
+    ]) {
+      expect(() => composeReview(base({ bodyCriticals: [opener] }))).toThrow(
+        /renders as nothing/,
+      );
+    }
+  });
+
+  it("a construct's own backticks are not span delimiters — leftmost-first, the way CommonMark resolves them (#9940 review, round 31 reverse audit)", () => {
+    // Code spans, autolinks and raw HTML have the SAME precedence and are
+    // resolved leftmost-first, so a construct that starts earlier consumes
+    // the backtick inside it. Scanning for spans first and for `<` second
+    // read that backtick as a delimiter, and the phantom span sheltered a
+    // live RAWTEXT opener over the rest of the body.
+    for (const [text, escaped] of [
+      ['<ht:`> <textarea> `', '<ht:`> &lt;textarea> `'],
+      ['<a`b@x.test> <textarea> `', '<a`b@x.test> &lt;textarea> `'],
+      // The `<!` family carries the same rule — MID-LINE, where the
+      // construct exists at all. At the start of a line's content the
+      // opener is escaped first (the HTML-block cell below), which
+      // dissolves the construct and hands its backticks back to the span
+      // rule; the renderer agrees, so both readings stay safe.
+      // `<!A` + a backtick is NOT a declaration — cmark-gfm forms one only
+      // for `<!` + UPPERCASE letters + whitespace — so the construct does
+      // not exist, the two backticks pair, and the tag between them is
+      // code. Escaping it wrote a literal `&lt;` into a code span, which a
+      // reader sees verbatim (#9940 review, round 10 reverse audit).
+      ['x <!A`> <textarea> `', 'x <!A`> <textarea> `'],
+      ['x <![CDATA[`]]> <textarea> `', 'x <![CDATA[`]]> &lt;textarea> `'],
+      ['x <!-- ` --> <textarea> `', 'x <!-- ` --> &lt;textarea> `'],
+      [
+        'the retry helper at <http://x.test/`> and <textarea> ` never clears it',
+        'the retry helper at <http://x.test/`> and &lt;textarea> ` never clears it',
+      ],
+      // …and the other direction: a span that starts FIRST consumes the
+      // autolink inside it, and the tag after the span is still escaped.
+      ['`<http://x/` and <b>', '`<http://x/` and &lt;b>'],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // End to end: the second blocker and the footer survive.
+    const r = composeReview(
+      base({
+        bodyCriticals: [
+          'the retry helper at <http://x.test/`> and <textarea> ` never clears it',
+          'the auth check is still missing',
+        ],
+      }),
+    );
+    expect(r.body).toContain('&lt;textarea');
+    expect(r.body).toContain('the auth check is still missing');
+    expect(r.body).toContain('via Qwen Code /review');
+  });
+
+  it('never reads `<?` as an autolink — `?` is a legal e-mail local part, the block rule is not (#9940 review, round 31 reverse audit)', () => {
+    expect(escapeTagOpeners('<?x@y.test> the auth check is missing')).toBe(
+      '&lt;?x@y.test> the auth check is missing',
+    );
+    // A real e-mail autolink is still one.
+    expect(escapeTagOpeners('mail <dev@example.com> now')).toBe(
+      'mail <dev@example.com> now',
+    );
+  });
+
+  it('folds a disclosure part before escaping it — a line ending of ANY kind, or the per-line escape invents a span (#9940 review, round 31 reverse audit)', () => {
+    // `collapseEntry` used to fold on LF only, so a lone interior CR
+    // reached the escape as two lines: a backtick on each paired into a
+    // span the renderer never forms, and the `<details>` between them went
+    // out live over the rest of the body.
+    for (const brk of ['\r', '\n', '\r\n']) {
+      for (const field of ['unreviewedDimensions', 'uncoverableChunks']) {
+        const r = composeReview(
+          {
+            planPath: plan(),
+            modelId: 'm',
+            bodyCriticals: ['a real blocker'],
+            [field]: [`a \` b${brk}c \` <details> \` d`],
+          } as unknown as ComposeReviewInput,
+          '0.21.2',
+          true,
+        );
+        expect(r.body).toContain('&lt;details');
+        expect(r.body).not.toContain('<details');
+        expect(r.body).toContain('a real blocker');
+        expect(r.body).toContain('via Qwen Code /review');
+      }
+    }
+    // The Chinese half interpolates the same model text and is escaped and
+    // folded on the same terms — the fold's own `<details>` is the only
+    // raw one the bilingual body may carry.
+    for (const brk of ['\r', '\n']) {
+      const bi = composeReview(
+        {
+          planPath: plan({ han: true }),
+          modelId: 'm',
+          bodyCriticals: ['a real blocker'],
+          unreviewedDimensions: [`a \` b${brk}c \` <textarea> \` d`],
+        } as unknown as ComposeReviewInput,
+        '0.21.2',
+        true,
+      );
+      expect(bi.body).toContain('<details>\n<summary>中文说明</summary>');
+      expect(bi.body).toContain('&lt;textarea');
+      expect(bi.body).not.toContain('<textarea');
+      expect((bi.body.match(/<details>/g) ?? []).length).toBe(1);
+    }
+  });
+
+  it('escapeTagOpeners — tag openers go inert; code spans, autolinks, comparisons and comment grammar stay (#9940 review, audit 5 and 6)', () => {
+    for (const [text, escaped] of [
+      ['see <details>x</details> here', 'see &lt;details>x&lt;/details> here'],
+      ['a < b and b > c', 'a < b and b > c'],
+      ['use <! and <!-', 'use <! and <!-'],
+      [
+        'typed the map as `Map<string, number>`',
+        'typed the map as `Map<string, number>`',
+      ],
+      ['check ``a<b` `` first', 'check ``a<b` `` first'],
+      [
+        'see <https://ci.example/run/1> and <mailto:a@b.co>',
+        'see <https://ci.example/run/1> and <mailto:a@b.co>',
+      ],
+      ['mail <dev@example.com>', 'mail <dev@example.com>'],
+      ['<?php echo 1 ?> and </div>', '&lt;?php echo 1 ?> and &lt;/div>'],
+      ['`unclosed <b>', '`unclosed &lt;b>'],
+      // A 4-run opener with no 4-run closer is literal — the tag between
+      // it and a 3-run pair is raw HTML and goes inert (CommonMark 6.1).
+      [
+        'repro: ````md <details> ``` more',
+        'repro: ````md &lt;details> ``` more',
+      ],
+      ['````md <b>x</b>```` done <i>', '````md <b>x</b>```` done &lt;i>'],
+      ['a ``x` <b>y</b> `` z <b>', 'a ``x` <b>y</b> `` z &lt;b>'],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // Linear on a hundred thousand characters of runs and openers.
+    for (const text of [
+      '`x`<a'.repeat(20000),
+      '` '.repeat(50000),
+      '`<a`x` '.repeat(14000),
+      '``'.concat('`x`'.repeat(30000)),
+      // 800k unpaired runs: ~0.2 s scanning the `<` positions once,
+      // ~8 s re-scanning to the end of the line per run (#9940 review,
+      // round 31 reverse audit measured 1.9 s at half this length).
+      '` '.repeat(800000),
+      '<a '.concat('` '.repeat(800000)),
+      // The unterminated-opener shapes the `skipsFrom` memo exists for: a
+      // per-opener search ran to the end of the line each time, and the
+      // backtick corpus above never touches it (measured 4 minutes on the
+      // first of these without the memo, #9940 review, round 31 reverse
+      // audit).
+      '<!--'.repeat(200000),
+      '<![CDATA['.repeat(100000),
+      '<!A'.repeat(200000),
+    ]) {
+      const t0 = performance.now();
+      escapeTagOpeners(text);
+      // The duration IS the property here, so it keeps asserting on the
+      // shared pool at a multiple that a quadratic regression still
+      // overruns (measured 0.18 s linear against 7.6 s quadratic).
+      expectWithinLatencyBudget(performance.now() - t0, 2000, {
+        poolMultiplier: 20,
+      });
+    }
+    // The transform is ONE LINE AT A TIME — every channel folds to a line
+    // before it gets here (`ingestEntryList` for the entry channels, the
+    // `\s+` normalisation for downgrade reasons, `collapseEntry` for the
+    // `Not reviewed:` disclosures, compose's refusal of a line break in
+    // `by`), so there is no block structure to model and none is
+    // modelled. Per-line is NOT a safe fallback for a multi-line string —
+    // it PAIRS backticks the renderer keeps apart and so escapes LESS (the
+    // fold cell above is exactly that shape letting a `<details>` out).
+    // The rows below are the shapes where the second line's runs do not
+    // pair, which is why escaping still happens in them (#9940 review,
+    // round 31 reverse audit).
+    for (const [text, escaped] of [
+      ['`<details>\n\nfoo` bar', '`&lt;details>\n\nfoo` bar'],
+      ['`<details>\nfoo` bar', '`&lt;details>\nfoo` bar'],
+      ['`<details>\r\rfoo` bar', '`&lt;details>\r\rfoo` bar'],
+      ['- a ` b\n- c <textarea> ` d', '- a ` b\n- c &lt;textarea> ` d'],
+      ['# h ` x\np <details> ` q', '# h ` x\np &lt;details> ` q'],
+      [
+        'The `foo callback returns early.\n<details> and `bar` too\n\nrest',
+        'The `foo callback returns early.\n&lt;details> and `bar` too\n\nrest',
+      ],
+      ['`\n<details>`', '`\n&lt;details>`'],
+      ['<?x ?>\n\t<details> tail', '&lt;?x ?>\n\t&lt;details> tail'],
+      ['x\n\n    <indented>\n\ny <z>', 'x\n\n    &lt;indented>\n\ny &lt;z>'],
+      // The line terminators themselves are preserved exactly.
+      ['a <b>\r\nc <d>\re <f>\ng', 'a &lt;b>\r\nc &lt;d>\re &lt;f>\ng'],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // Backslash escapes run BEFORE the code-span rule and take exactly one
+    // backtick: the run OPENS as the `n - 1` left over (nothing at n = 1)
+    // and CLOSES at its full `n`, because escapes do not work inside a
+    // span. Skipping such a run outright let an opener reach past it;
+    // treating it as ordinary made a span CommonMark ends earlier — both
+    // sheltered a live element (#9940 review, round 31 reverse audits).
+    for (const [text, escaped] of [
+      ['`foo\\`bar<details>`', '`foo\\`bar&lt;details>`'],
+      [
+        'The literal is `a\\`b<details>` — note the backslash.',
+        'The literal is `a\\`b&lt;details>` — note the backslash.',
+      ],
+      ['\\``x`y``<details>`', '\\``x`y``&lt;details>`'],
+      ['a \\\\`<b>` c', 'a \\\\`<b>` c'],
+      [
+        'write \\` then <textarea> then ` here',
+        'write \\` then &lt;textarea> then ` here',
+      ],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // A `<!` at the START of a line's CONTENT opens a CommonMark HTML
+    // BLOCK — type 2 (`<!--`), type 4 (`<!` + a letter), type 5
+    // (`<![CDATA[`) — and a block is passed through RAW: the inline phase
+    // never runs inside it, so the code span and the backslash escape
+    // this pass reads to decide an opener is inert are not there. A body
+    // Critical posted under `review.attribution: false` IS a top-level
+    // line, and `formatCannotTell`/the duplicate list put their text at a
+    // list item's content start, so all three channels could open one
+    // (#9940 review, round 31 reverse audit). Every other block opener is
+    // a `<` whose next character this pass already escapes.
+    for (const [text, escaped] of [
+      ['<!D> y `<details>` z', '&lt;!D> y `<details>` z'],
+      ['<!D> y \\<details> z', '&lt;!D> y \\<details> z'],
+      ['<!DOCTYPE html> `<details>` x', '&lt;!DOCTYPE html> `<details>` x'],
+      ['<![CDATA[]]>`<details>`', '&lt;![CDATA[]]>`<details>`'],
+      ['<!A`> <textarea> `', '&lt;!A`> <textarea> `'],
+      ['<![CDATA[`]]> <textarea> `', '&lt;![CDATA[`]]> <textarea> `'],
+      ['<!-- ` --> <textarea> `', '&lt;!-- ` --> <textarea> `'],
+      // The rest of the line is RESCANNED — the arm escapes one `<` and
+      // hands the remainder back to the inline pass. Returning the
+      // remainder unscanned left every later opener live, and every other
+      // row here has an already-inert tail, so this is the row that says
+      // the recursion happens (#9940 review, round 31 reverse audit).
+      ['<!D> y <details> z', '&lt;!D> y &lt;details> z'],
+      [
+        '<!DOCTYPE html> and <textarea> then prose',
+        '&lt;!DOCTYPE html> and &lt;textarea> then prose',
+      ],
+      // cmark strips a BOM at DOCUMENT position 0, which turns a `<!`
+      // behind it into a line-leading HTML block while a raw read sees it
+      // mid-line. Escaping it costs nothing anywhere else.
+      [
+        '\ufeff<!ENTITY <details> is open',
+        '\ufeff&lt;!ENTITY &lt;details> is open',
+      ],
+      // Container prefixes are part of the line, not of its content.
+      ['  - <!D> y `<details>` z', '  - &lt;!D> y `<details>` z'],
+      ['> <!D> `<details>` q', '> &lt;!D> `<details>` q'],
+      ['1. <!D> `<details>` q', '1. &lt;!D> `<details>` q'],
+      ['> - <!D> `<details>` q', '> - &lt;!D> `<details>` q'],
+      // …and a prefix drawn from anything else means the `<!` is mid-line
+      // and opens no block, so the construct stands and its own backticks
+      // are not delimiters.
+      ['x <!D> y `<details>` z', 'x <!D> y `<details>` z'],
+      [
+        '**[Critical]** <!D> y `<details>` z',
+        '**[Critical]** <!D> y `<details>` z',
+      ],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // A `<!` construct that never terminates ON THIS LINE is not a
+    // construct: CommonMark leaves the text as text, so what follows it is
+    // LIVE. Skipping to the end of the line on the strength of an opener
+    // alone let a `<details>` out of four channels at once — both Critical
+    // lists, the duplicate-drop list and a ruling note's `by` (#9940
+    // review, round 31 reverse audit).
+    for (const [text, escaped] of [
+      ['x <![CDATA[ y <details> z', 'x <![CDATA[ y &lt;details> z'],
+      ['x <!-- y <details> z', 'x <!-- y &lt;details> z'],
+      ['x <!A y <details z', 'x <!A y &lt;details z'],
+      // Terminated, so the construct really does consume the opener: a
+      // declaration ends at the FIRST `>`, which is `<details>`'s own.
+      ['x <!A y <details> z', 'x <!A y <details> z'],
+      ['x <![CDATA[ y ]]> <details> z', 'x <![CDATA[ y ]]> &lt;details> z'],
+      ['x <!--<details>--> <b>', 'x <!--<details>--> &lt;b>'],
+      // `<!-->` and `<!--->` close on their own dashes, so the search for
+      // the terminator starts at `i + 2` — from `i + 4` it ran past them.
+      ['x <!--> <details> y', 'x <!--> &lt;details> y'],
+      ['x <!---> <details> y', 'x <!---> &lt;details> y'],
+      // The abbreviated comment ends at index 4; a later `-->` on the same
+      // line is a different token, and reaching it swallowed the opener
+      // between the two.
+      ['x <!--> <details> --> y', 'x <!--> &lt;details> --> y'],
+      ['x <!---> <details> --> y', 'x <!---> &lt;details> --> y'],
+      // A backslash-escaped `<` opens nothing — no comment, no
+      // declaration, no autolink — and is inert already. Reading it as a
+      // construct start skipped the rest of the line (same round).
+      ['x \\<!a<details> y', 'x \\<!a&lt;details> y'],
+      // Even backslashes, so the `<` is live — but `<!a` is lowercase and
+      // carries no whitespace, so cmark-gfm forms no declaration and the
+      // `<details>` behind it is a REAL element. This row asserted the
+      // opposite, which is to say it pinned a live `<details>` (#9940
+      // review, round 10 reverse audit).
+      ['x \\\\<!a<details> y', 'x \\\\<!a&lt;details> y'],
+      ['\\<https://x.test/> <b>', '\\<https://x.test/> &lt;b>'],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // The rows round 31 named as its acceptance criterion: a fence that
+    // interrupts a paragraph, and a fenced block between the two halves of
+    // a would-be span. Per line neither pairs, so the opener after them is
+    // escaped.
+    for (const [text, escaped] of [
+      ['a ` x\n~~~\n`\n~~~\n<b> and ` y', 'a ` x\n~~~\n`\n~~~\n&lt;b> and ` y'],
+      [
+        'x `a\n```\ncode\n```\n\ny <details> `b',
+        'x `a\n```\ncode\n```\n\ny &lt;details> `b',
+      ],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // The `<!` family and the GFM autolink literal, decided against
+    // cmark-gfm (GitHub's own renderer) and an HTML5 parser rather than
+    // against the CommonMark prose: what the renderer FORMS and what the
+    // HTML parser HIDES are two different spans, and the escape owes the
+    // INTERSECTION. Eight of these rows post a live `<details>` under the
+    // spec-prose reading — the one container GitHub's tagfilter does not
+    // neutralise, so it folds every later blocker and the footer into
+    // itself (#9940 review, round 10 reverse audit).
+    for (const [text, escaped] of [
+      // A CDATA section is passed through raw, but the HTML parser closes
+      // the bogus comment at the FIRST `>`; everything after it is live.
+      [
+        'the fixture <![CDATA[ if (a > b) <details> ]]> is wrong',
+        'the fixture <![CDATA[ if (a > b) &lt;details> ]]> is wrong',
+      ],
+      // A comment also closes at `--!>`, earlier than its `-->`.
+      [
+        'it writes <!-- open --!> then <details> --> here',
+        'it writes <!-- open --!> then &lt;details> --> here',
+      ],
+      // …but `--!>` alone forms nothing: without a `-->` cmark reads the
+      // text as literal, so the rule is "require `-->`, then end at the
+      // earlier of the two", not "end at `--!>`".
+      [
+        'it writes <!-- open <details> --!> here',
+        'it writes <!-- open &lt;details> --!> here',
+      ],
+      // The comment text may not END with `-`, so `--->` is no terminator
+      // and the construct does not form.
+      [
+        'it writes <!--<details>---> here',
+        'it writes <!--&lt;details>---> here',
+      ],
+      // `<!-->` and `<!--->` close on their own dashes.
+      [
+        'a <!--> <details> b <!---> <div> c',
+        'a <!--> &lt;details> b <!---> &lt;div> c',
+      ],
+      // An inline declaration is `<!`, letters, WHITESPACE, `[^>]*`, `>`.
+      // Without the whitespace cmark forms nothing.
+      [
+        'the DTD line <!ENTITY<details> is open',
+        'the DTD line <!ENTITY&lt;details> is open',
+      ],
+      // …and the letters must be UPPERCASE.
+      [
+        'the DTD line <!entity <details> is open',
+        'the DTD line <!entity &lt;details> is open',
+      ],
+      // ONE line-wide flag: an unterminated `<!--` makes cmark read a
+      // LATER `<![CDATA[` — and a later `<!X ` — as literal text too, so a
+      // memo per construct let the second one be skipped and the tag
+      // inside it went out live. The `>` has to sit BEHIND the tag for the
+      // row to tell the two apart: in front of it, the bogus comment ends
+      // before the tag either way.
+      [
+        'x <!-- open <![CDATA[ a <details> b > c ]]> y',
+        'x <!-- open <![CDATA[ a &lt;details> b > c ]]> y',
+      ],
+      ['z <!---<!A <div> q', 'z <!---<!A &lt;div> q'],
+      // …and with no failed construct in front of it the same CDATA DOES
+      // form, and its bogus comment really does hide the tag. (Guard.)
+      [
+        'x <![CDATA[ a <details> b > c ]]> y',
+        'x <![CDATA[ a <details> b > c ]]> y',
+      ],
+      [
+        'x <!-- open <![CDATA[ a > b <details> ]]> y',
+        'x <!-- open <![CDATA[ a > b &lt;details> ]]> y',
+      ],
+      // A GFM autolink literal is an INLINE construct resolved
+      // leftmost-first, and it runs PAST a backtick: the code span this
+      // pass believed in never forms.
+      [
+        'the spec at https://x.test/api`<details>` is wrong',
+        'the spec at https://x.test/api`&lt;details>` is wrong',
+      ],
+      // The same run swallows a backslash escape.
+      [
+        'the spec at https://x.test/api\\<details> is wrong',
+        'the spec at https://x.test/api\\&lt;details> is wrong',
+      ],
+      // The run is consumed to WHITESPACE, not to the `<` that ends it in
+      // the renderer: escaping that `<` makes it `&lt;`, which is not a
+      // `<` any more, so on the POSTED text the URL keeps going.
+      [
+        'see www.z.test/a<details>b and stop',
+        'see www.z.test/a&lt;details>b and stop',
+      ],
+      // An ASCII letter in front means there is no literal at all, so the
+      // backticks DO pair and the tag is code.
+      [
+        'see xhttp://q.test/`<details>` and stop',
+        'see xhttp://q.test/`<details>` and stop',
+      ],
+      // A code span that OPENS BEFORE the URL still wins the race — which
+      // is why the link start is a scan event and not a mask applied ahead
+      // of the pass.
+      [
+        'see `http://x.test/<details>` and stop',
+        'see `http://x.test/<details>` and stop',
+      ],
+      // A CDATA section with no `]]>` is not a construct at all.
+      ['x <![CDATA[ y <details> z', 'x <![CDATA[ y &lt;details> z'],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // cmark-gfm's own grammars, not approximations of them: what the
+    // renderer FORMS, what the HTML parser HIDES and what the renderer's own
+    // code-span scanner PAIRS are three different questions, and guessing any
+    // of them wrong in EITHER direction posts a live element — believing in a
+    // construct the renderer does not form steals a backtick from the
+    // delimiter pool and shifts every later pairing (#9940 review, round 11
+    // reverse audit).
+    for (const [text, escaped] of [
+      // cmark's CDATA scanner is
+      //   "<![CDATA[" ( [^\]] | "]" [^\]] | "]]" [^>] )* "]]>"
+      // and NOT "is there a `]]>` later". An array index inside the section
+      // puts a third `]` in front of the terminator, so it does not form.
+      [
+        'the fixture <![CDATA[<details>arr[0]]]> is mis-parsed',
+        'the fixture <![CDATA[&lt;details>arr[0]]]> is mis-parsed',
+      ],
+      // …and five brackets DO form one again (k ≡ 2 mod 3). (Guard: reddens
+      // if the grammar is approximated by "the character before `]]>` is not
+      // a `]`".)
+      ['x <![CDATA[<details>]]]]]> y', 'x <![CDATA[<details>]]]]]> y'],
+      // `ftp://` is a GFM autolink literal too, and all three schemes are
+      // matched case-INSENSITIVELY.
+      [
+        'the spec at ftp://x.test/api`<details>` is wrong',
+        'the spec at ftp://x.test/api`&lt;details>` is wrong',
+      ],
+      [
+        'the spec at HTTP://x.test/api\\<details> is wrong',
+        'the spec at HTTP://x.test/api\\&lt;details> is wrong',
+      ],
+      // `www.` is NOT. (Guard: reddens if the schemes are written as one
+      // `/…/i` regex, which would also match `WWW.`.)
+      [
+        'see WWW.z.test/`<details>` and stop',
+        'see WWW.z.test/`<details>` and stop',
+      ],
+      // The block phase strips block-quote markers before the inline phase
+      // runs, so the boundary a `www.` literal is tested against is the one
+      // before the line's CONTENT: `>www.z.test/p` links and eats the
+      // backslash behind it, `-www.z.test/p` does not link at all.
+      ['>www.z.test/p\\<details> here', '>www.z.test/p\\&lt;details> here'],
+      ['>>www.z.test/p\\<details>', '>>www.z.test/p\\&lt;details>'],
+      ['-www.z.test/p\\<details>', '-www.z.test/p\\<details>'],
+      // `http://` with no domain is no link, so the `<!--` inside what this
+      // pass used to treat as a URL run is a real construct again, it fails,
+      // and it poisons the `<!X ` that follows.
+      [
+        'x http://<!--q <!D d<details> is the bug',
+        'x http://<!--q <!D d&lt;details> is the bug',
+      ],
+      // The part of a CDATA section's RAW span the HTML parser has stopped
+      // hiding (first `>` … `]]>`) is RAW TEXT: no backtick in it is a
+      // delimiter, so the code span this pass believed in never formed.
+      [
+        'the fixture <![CDATA[cmd > out `x]]> and the <details> wrapper` is wrong',
+        'the fixture <![CDATA[cmd > out `x]]> and the &lt;details> wrapper` is wrong',
+      ],
+      // The same tail exists on a comment closed at `--!>`.
+      [
+        'it writes <!-- a --!>` --> <details>` there',
+        'it writes <!-- a --!>` --> &lt;details>` there',
+      ],
+      // …and the HTML tokenizer's comment-end is not cmark's: it closes at
+      // the first `-->` SUBSTRING, with no mod-3 arithmetic. (Guard.)
+      ['c<!-----><details>--> here', 'c<!----->&lt;details>--> here'],
+      // Only a failed COMMENT poisons the `<!` family in cmark. Poisoning on
+      // a failed declaration too REFUSED a comment cmark still formed, and
+      // the refused construct's backticks rejoined the delimiter pool.
+      [
+        'the DTD <!A<!--`--> and <details>` is open',
+        'the DTD <!A<!--`--> and &lt;details>` is open',
+      ],
+      [
+        'the DTD <!--`--> and <details>` is open',
+        'the DTD <!--`--> and &lt;details>` is open',
+      ],
+      // cmark validates the domain: the first character after `://` must be
+      // alphanumeric, and a `_` in either of the last two labels refuses it.
+      [
+        'see http://` `<details>` and stop',
+        'see http://` `&lt;details>` and stop',
+      ],
+      [
+        'the host http://a_b.c` `<details>` is wrong',
+        'the host http://a_b.c` `&lt;details>` is wrong',
+      ],
+      // Three labels put the `_` out of reach and the link forms. (Guard:
+      // reddens if the rule is written as "no `_` at all".)
+      [
+        'the host http://a_b.c.d`<details>` is wrong',
+        'the host http://a_b.c.d`&lt;details>` is wrong',
+      ],
+      // An unmatched `[` suppresses the literal — a STACK, not the preceding
+      // character — and a closed `[]` clears it.
+      [
+        'see [http://y.test/` `<details>` and stop',
+        'see [http://y.test/` `&lt;details>` and stop',
+      ],
+      [
+        'see [x] http://y.test/`<details>` and stop',
+        'see [x] http://y.test/`&lt;details>` and stop',
+      ],
+      // cmark's code-span scanner carries a memo a SUCCESSFUL scan
+      // overwrites, so the spans it forms are a strict SUBSET of the spec's.
+      // The leading unmatched run arms it; one backtick instead of two and it
+      // never arms.
+      ['a ``b` `c`<details>` here', 'a ``b` `c`&lt;details>` here'],
+      ['a `b` `c`<details>` here', 'a `b` `c`&lt;details>` here'],
+      // MAXBACKTICKS is 80: cmark refuses to open a span on a longer run,
+      // so the tag between two runs of 81 is NOT in a span and is live,
+      // while at 80 it is code.
+      [
+        `a ${'`'.repeat(81)}<details>${'`'.repeat(81)} here`,
+        `a ${'`'.repeat(81)}&lt;details>${'`'.repeat(81)} here`,
+      ],
+      [
+        `a ${'`'.repeat(80)}<details>${'`'.repeat(80)} here`,
+        `a ${'`'.repeat(80)}<details>${'`'.repeat(80)} here`,
+      ],
+      // Autolinks are tried BEFORE the `<!` family, as cmark does: `!` and
+      // `-` are legal e-mail local-part characters, so `<!--@t>` is a mailto
+      // autolink and the comment never forms.
+      ['`<!--@t><div>--> here', '`<!--@t>&lt;div>--> here'],
+      // An inline link's DESTINATION is raw characters, so a backtick in it
+      // is not a delimiter either.
+      ['see [x](a`b) <details>` here', 'see [x](a`b) &lt;details>` here'],
+      // A reference link's LABEL is not: MEASURED against cmark-gfm, a
+      // backtick inside `[a`b][c]`, `[x][a`b]`, `[a`b]` or a link
+      // reference definition's own label is an ordinary code-span
+      // delimiter, and the tag it pairs over is code. Ordinary text is
+      // what this pass already reads them as, so nothing special is
+      // needed — the rows are here because two audits reasoned the other
+      // way and neither could build a counterexample (#9940 review,
+      // rounds 11 and 12).
+      ['see [a`b][c] and <details>` here', 'see [a`b][c] and <details>` here'],
+      ['see [x][a`b] <details>` here', 'see [x][a`b] <details>` here'],
+      ['see [a`b] <details>` here', 'see [a`b] <details>` here'],
+      ['[a`b]: /u <details>` here', '[a`b]: /u <details>` here'],
+      // …and the `_` rule reaches the LAST label too, not only the one
+      // before it: `http://a.b_c` does not link, so the backticks pair and
+      // the tag between them is live.
+      [
+        'the host http://a.b_c` `<details>` is wrong',
+        'the host http://a.b_c` `&lt;details>` is wrong',
+      ],
+      // Only a failed COMMENT poisons the family — a failed CDATA must not,
+      // or the comment behind it is refused and its backticks rejoin the
+      // delimiter pool.
+      [
+        'z <![CDATA[x <!--`--> and <details>` is open',
+        'z <![CDATA[x <!--`--> and &lt;details>` is open',
+      ],
+      // A `<!--` in a construct's RAW TAIL is an HTML comment that runs to
+      // the END OF THE DOCUMENT: it leaks no element at all, so an
+      // element scan misses it, and it takes every later blocker and the
+      // footer with it.
+      [
+        'x <![CDATA[a><!--]]> and the auth check',
+        'x <![CDATA[a>&lt;!--]]> and the auth check',
+      ],
+      // The URL run ends where cmark ends it — space, tab, LF, CR or `<` —
+      // and NOT at `\s`: thirteen further characters (U+00A0, U+3000,
+      // U+2028, U+FEFF, U+000B…) cut the run short while the renderer's ran
+      // on, and the text past the cut was read as ordinary inline while
+      // cmark was still carrying it as a raw URL.
+      [
+        'pre www.z.test/p\u3000\\<select> post',
+        'pre www.z.test/p\u3000\\&lt;select> post',
+      ],
+      [
+        'pre www.z.test/p\v`<select>` post',
+        'pre www.z.test/p\v`&lt;select>` post',
+      ],
+      [
+        'see [](a\u3000``)<summary>`` here',
+        'see [](a\u3000``)&lt;summary>`` here',
+      ],
+      // …and a space really does end it, so the backslash past it is a
+      // real escape and needs none of ours. (Guard.)
+      [
+        'see www.z.test/p q\\<details> and stop',
+        'see www.z.test/p q\\<details> and stop',
+      ],
+      // The `www.` alternative of the link-start regex, in the second-order
+      // shape that pins it: the literal eats the delimiter in front of the
+      // tag, so without it the tag goes out live.
+      [
+        'see www.z.test/`<details>` and stop',
+        'see www.z.test/`&lt;details>` and stop',
+      ],
+      [
+        'see www.z.test/\\<details> and stop',
+        'see www.z.test/\\&lt;details> and stop',
+      ],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // A link reference definition's angle-bracket destination survives —
+    // the autolink skip is context-free.
+    expect(escapeTagOpeners('[a]: <http://x.test/p>')).toBe(
+      '[a]: <http://x.test/p>',
+    );
+    // One row of a table is not a table: with no delimiter row the pipes
+    // are text, the backticks pair, and the tag between them is code.
+    expect(escapeTagOpeners('| ` c1 | <script>bad()</script> ` |')).toBe(
+      '| ` c1 | <script>bad()</script> ` |',
+    );
+  });
+
+  it('every model-written channel reaches the escape as ONE line — the invariant the per-line escape rests on (#9940 review, round 12 reverse audit)', () => {
+    // `escapeTagOpeners` models CommonMark INLINE structure only. That is
+    // correct exactly while every channel folds its text to ONE LINE before
+    // posting it — and the fold is not one primitive. `collapseEntry` and
+    // `collapseToLine` carry the entry, disclosure and duplicate-drop
+    // legs; the downgrade reasons have their own `\s+` pass; the deferral
+    // leg is held TWICE, by a `collapse` pass and by `mdField`'s
+    // line-ending strip (lib/md-field.ts), and either alone holds it —
+    // MEASURED: break only one and the row is still folded; the bare CR
+    // reaches the POSTED LINE only with both broken. Two more legs are
+    // held twice: cannot-tell by `collapseEntry` AND `collapseToLine`, and
+    // the RELOCATION exit THREE times — `collapseToLine` at
+    // `toDeferredEntries` and again inside `boundDeferredLine`, then
+    // `mdField`. Breaking any two of the three still leaves it folded.
+    //
+    // So THREE rows cannot redden on a SINGLE-site regression — a property
+    // of the code, not a gap here — and the other five do redden on theirs
+    // (all eight measured). Do not read a double-held row as a sentinel
+    // for its own folds; it is here for the channel, not for them.
+    //
+    // The two rows asserted inert as a CODE SPAN get there differently.
+    // The deferral LIST line is `- ${mdField(entry)}` and never reaches
+    // `escapeTagOpeners` at all; the relocation line does reach it, and
+    // comes back unchanged because the escape reads `mdField`'s backtick
+    // span correctly. The fold is what all eight share, and it is what
+    // this case is about.
+    //
+    // Three producers push into `bodyCriticals` AFTER `ingestEntryList`
+    // has run, and that is how a channel gets missed: `scriptLintGate`'s
+    // push, which for a while did not fold; a Critical deferral's
+    // RELOCATION exit, which a `Suggestion` row never reaches (armed
+    // below); and the non-convergence Critical, which is this module's own
+    // fixed prose and carries no line break to fold. The gate's push is
+    // the one this case does not arm — it needs a report fixture beside
+    // the plan — and it is pinned by `folds its own entry`. A producer
+    // outside these still owes a case.
+    const multiline = [
+      'the retry helper\n<div class="w"> and `x\nnever clears it',
+      'the retry helper\r\n<div class="w"> and `x\r\nnever clears it',
+      'the retry helper\r<div class="w"> and `x\rnever clears it',
+    ];
+    const carries = (body: string, where: string, escapes = true) => {
+      // Split on `\n` ONLY, so a surviving bare `\r` stays INSIDE the
+      // matched line where the next assertion can see it. Splitting on the
+      // folds' own set here would consume the very break under test, and
+      // counting lines proves nothing on its own: the filter keeps the
+      // entry's first physical line whatever happened to the rest.
+      const lines = body
+        .split('\n')
+        .filter(
+          (l) =>
+            l.includes('retry helper') && !l.includes('qwen-review-ledger'),
+        );
+      expect([where, lines.length]).toEqual([where, 1]);
+      // The head and the TAIL of the entry on the SAME line, and no break
+      // left inside it. That is the fold, stated as the reader sees it: an
+      // LF that survives puts the tail on another line, a bare CR that
+      // survives stays in this one — and the per-line escape then decides
+      // each half on its own and can post a tag the renderer holds live
+      // (compose-review.ts records that happening). `&amp;lt;` was asserted
+      // here before and could not fail: the escape only ever writes
+      // `&lt;`, so the only body that trips it is one a model wrote with
+      // those characters already in it.
+      expect([where, lines[0]!.includes('never clears it')]).toEqual([
+        where,
+        true,
+      ]);
+      expect([where, /[\r\n]/.test(lines[0]!)]).toEqual([where, false]);
+      // Inert by ESCAPE on the prose channels; the deferral line is a code
+      // span, where the renderer already holds the tag and an escape would
+      // show the reader a literal `&lt;`.
+      expect([
+        where,
+        escapes
+          ? lines[0]!.includes('&lt;div class="w">')
+          : /^[^`]*`[^`]*<div class="w">[^`]*`[^`]*$/.test(lines[0]!),
+      ]).toEqual([where, true]);
+    };
+    for (const text of multiline) {
+      carries(
+        composeReview(base({ bodyCriticals: [text, 'blocker two'] })).body,
+        'bodyCriticals',
+      );
+      carries(
+        composeReview(base({ cannotTellCriticals: [text] })).body,
+        'cannotTellCriticals',
+      );
+      carries(
+        composeReview(
+          base({
+            suggestionsInline: 1,
+            suggestionsDroppedAsDuplicates: [text],
+          }),
+        ).body,
+        'suggestionsDroppedAsDuplicates',
+      );
+      carries(
+        composeReview(base({ uncoverableChunks: [text] })).body,
+        'uncoverableChunks',
+      );
+      carries(
+        composeReview(base({ unreviewedDimensions: [text] })).body,
+        'unreviewedDimensions',
+      );
+      carries(
+        composeReview(
+          base({
+            criticalsInline: 1,
+            presubmit: {
+              downgradeRequestChanges: true,
+              downgradeReasons: [text],
+            },
+          }),
+        ).body,
+        'downgradeReasons',
+      );
+      carries(
+        composeReview(
+          base({
+            suggestionsInline: 1,
+            deferredSuggestions: [
+              {
+                file: 'a.ts',
+                line: 1,
+                source: 'review',
+                severity: 'Suggestion',
+                title: text,
+              },
+            ],
+          }),
+        ).body,
+        'deferredSuggestions',
+        false,
+      );
+      // The deferral channel has a SECOND exit: a Critical relocates into
+      // `bodyCriticals` — another producer that joins after
+      // `ingestEntryList` has run, and the one this case would otherwise
+      // miss, since a `Suggestion` never reaches it.
+      carries(
+        composeReview(
+          base({
+            suggestionsInline: 1,
+            deferredSuggestions: [
+              {
+                file: 'a.ts',
+                line: 1,
+                source: 'review',
+                severity: 'Critical',
+                title: text,
+              },
+            ],
+          }),
+        ).body,
+        'deferredSuggestions (relocated)',
+        false,
+      );
+      // A ruling note's `by` does not fold — it REFUSES, because the note
+      // is one posted line and a folded `by` would misquote the author.
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by: text }] })),
+      ).toThrow(/must be ONE non-empty line/);
+    }
+    // A quoted FENCE is refused rather than folded on the two Critical
+    // channels: folding it would join the delimiters onto one line and
+    // silently change what the author quoted.
+    const fenced =
+      'the retry helper\n```\n<div class="w">\n```\nnever clears it';
+    for (const input of [
+      { bodyCriticals: [fenced, 'blocker two'] },
+      { cannotTellCriticals: [fenced] },
+    ]) {
+      expect(() => composeReview(base(input))).toThrow(
+        /quotes a code fence its one-line render cannot carry/,
+      );
+    }
+  });
+
+  it('a raw `<![CDATA[ … > … <details> … ]]>` does not fold the rest of the body away (#9940 review, round 10 reverse audit)', () => {
+    // The unit rows pin the escape; this pins what the escape is FOR. The
+    // HTML parser closes the bogus comment at the first `>`, so under the
+    // spec-prose reading the `<details>` was a live element and the second
+    // blocker and the footer rendered INSIDE its fold.
+    for (const attribution of [true, false]) {
+      const r = composeReview(
+        base({
+          bodyCriticals: [
+            'the XML fixture <![CDATA[ if (a > b) <details> ]]> is mis-parsed',
+            'blocker two: the token is logged in plaintext',
+          ],
+        }),
+        '0.21.2',
+        attribution,
+      );
+      expect(r.body).toContain('&lt;details');
+      expect(r.body).not.toContain('<details> ]]>');
+      expect(r.body).toContain('blocker two: the token is logged in plaintext');
+    }
+  });
+
+  it('opensUnclosedComment — the linear form agrees with the closed-comment-removal reference on generated grammar (#9940 review, audit 4)', () => {
+    // Closed comments are MASKED, not deleted: deleting joined `<!` to a
+    // following `-->` into grammar no renderer sees.
+    const reference = (text: string): boolean =>
+      text
+        .replace(/<!--(?:>|->|[\s\S]*?-->)/g, (m) => ' '.repeat(m.length))
+        .includes('<!--');
+    // Reached through the gate: a refused `by` is one the reference refuses.
+    const linear = (text: string): boolean => {
+      try {
+        composeReview(
+          base({ fixedFindings: [{ id: 'R1-2', by: `a ${text} z` }] }),
+        );
+        return false;
+      } catch (e) {
+        return /never closes/.test(String(e));
+      }
+    };
+    let seed = 20260905;
+    const rand = (): number => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    const atoms = ['<!--', '-->', '<!', '--', '>', '-', 'a', ' '];
+    for (let i = 0; i < 300; i++) {
+      const len = 1 + Math.floor(rand() * 6);
+      const text = Array.from(
+        { length: len },
+        () => atoms[Math.floor(rand() * atoms.length)]!,
+      ).join('');
+      expect({ text, unclosed: linear(text) }).toEqual({
+        text,
+        unclosed: reference(`a ${text} z`),
+      });
+    }
+  });
+
+  it('bodyCriticalClaim and the ledger builder read the one-line entry channel through ONE head — indentation is not a block there (#9940 review, round 28)', () => {
+    for (const entry of [
+      '    R1-2: the guard is still missing',
+      '**[Critical]**:\n\n    R1-2: code',
+      '**[Critical]**: R1-2: the guard',
+    ]) {
+      expect(bodyCriticalClaim(entry).id).toBe('R1-2');
+      expect(
+        buildLedger(5, [], [entry], { ids: new Set(['R1-2']), complete: true })
+          .findings[0]!.id,
+      ).toBe('R1-2');
+    }
+    // The one-line entry posts trimmed: indented four columns it rendered
+    // as code inside its list item.
+    const r = composeReview(
+      base({ bodyCriticals: ['    R1-2: the guard is still missing'] }),
+    );
+    expect(r.body).toContain('R1-2: the guard is still missing');
+    expect(r.body).not.toContain('    R1-2: the guard');
+  });
+
+  it('caps the downgrade-reason LIST too, disclosing what it left out, and makes tag openers inert (#9940 review, audit 5)', () => {
+    const many = composeReview(
+      base({
+        criticalsInline: 1,
+        suggestionsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: Array.from(
+            { length: 300 },
+            (_, i) => `r${i} ${'w'.repeat(390)}`,
+          ),
+        },
+      }),
+    );
+    expect(many.bodyTrim.truncated).toBe(false);
+    expect(many.body).toContain(INLINE_SUGGESTIONS_CLAUSE.en);
+    expect(many.body).not.toContain('r299 ');
+    expect(
+      many.remediation.some((l) => /downgrade reasons: \d+ of 300/.test(l)),
+    ).toBe(true);
+    const html = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: [
+            `${'x'.repeat(360)}<details><summary>s</summary>hidden hidden hidden hidden</details> more`,
+          ],
+        },
+      }),
+    );
+    expect(html.body).not.toContain('<details><summary>');
+    expect(html.body).toContain('&lt;details>');
+  });
+
+  it('a downgrade reason is one line of prose — a fence or `<!DOCTYPE` in it cannot reach a line start (#9940 review, audit 6)', () => {
+    const r = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: [
+            'x\n```\ncode',
+            'y\n<!DOCTYPE z',
+            'w\n\n# heading',
+          ],
+        },
+      }),
+    );
+    // `<!` is comment/declaration grammar the escape leaves alone; mid-line
+    // and unclosed it is literal text.
+    expect(r.body).toContain('x ``` code; y <!DOCTYPE z; w # heading');
+    expect(r.body).not.toMatch(/^```/m);
+    expect(r.body).not.toMatch(/^# heading/m);
+  });
+
+  it('reasons past the list budget are disclosed only where the sentence renders (#9940 review, audit 6)', () => {
+    const kept = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeApprove: true,
+          downgradeReasons: [
+            ...Array.from({ length: 5 }, () => 'r'.repeat(400)),
+            'f',
+          ],
+        },
+      }),
+    );
+    expect(kept.event).toBe('REQUEST_CHANGES');
+    expect(kept.remediation.some((l) => l.includes('downgrade reasons'))).toBe(
+      false,
+    );
+    // Downgraded, everything fitting: nothing to disclose either.
+    const fits = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['a', 'b'],
+        },
+      }),
+    );
+    expect(fits.downgraded).toBe(true);
+    expect(fits.remediation.some((l) => l.includes('downgrade reasons'))).toBe(
+      false,
+    );
+  });
+
+  it('`<!-->` and `<!--->` are empty comments, not unclosed openers (#9940 review, audit 5)', () => {
+    for (const by of ['fixed via <!--> retry', 'fixed via <!---> retry']) {
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by }] })),
+      ).not.toThrow();
+    }
+  });
+
+  it('caps a downgrade reason at DOWNGRADE_REASON_MAX_CHARS code points, disclosing the cut (#9940 review, audit 3)', () => {
+    const r = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['r'.repeat(DOWNGRADE_REASON_MAX_CHARS + 500)],
+        },
+      }),
+    );
+    expect(r.body).toContain(`${'r'.repeat(DOWNGRADE_REASON_MAX_CHARS)}…`);
+    expect(r.body).not.toContain('r'.repeat(DOWNGRADE_REASON_MAX_CHARS + 1));
+  });
+
+  it('refuses a `by` whose attribution-off EXIT would post the marker grammar — the gate reads the exit projection too (#9940 review, audit 2)', () => {
+    // A forged footer span splitting `<!-` from `- qwen-review …` carries
+    // no marker as written; the exit's footer-span strip joins the two
+    // halves and the posted reply read as a finding carrying its id.
+    expect(() =>
+      composeReview(
+        base({
+          fixedFindings: [
+            {
+              id: 'R1-2',
+              by: 'x <!-_— model via Qwen Code /review (v1)_- qwen-review critical -->',
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/comment-marker grammar/);
+    // A non-canonical id spelling is refused with a message naming the
+    // canonical one.
+    expect(() =>
+      composeReview(base({ fixedFindings: [{ id: 'R02-3' }] })),
+    ).toThrow(/write R2-3/);
+    // A cap landing inside `<!--` leaves no `<!-` stub either.
+    const r = composeReview(
+      base({
+        fixedFindings: [{ id: 'R1-2', by: `${'x'.repeat(237)} <!-- c -->` }],
+      }),
+    );
+    expect(r.fixedFindings[0]!.by).toBe('x'.repeat(237));
+    // A cap cut landing right after `qwen-review` inside a comment the
+    // gate passed (`<!-- qwen-reviewer -->` carries no marker) would leave
+    // the marker's opening on the attribution-off exit — the capped
+    // clause degrades to a by-less ruling.
+    const tail = '<!-_— model via Qwen Code /review (v1)_- qwen-review';
+    const capped = composeReview(
+      base({
+        fixedFindings: [
+          {
+            id: 'R1-2',
+            by: `${'x'.repeat(FIXED_BY_MAX - [...tail].length - 1)} ${tail}er -->`,
+          },
+        ],
+      }),
+    );
+    expect(capped.fixedFindings).toEqual([{ id: 'R1-2' }]);
+  });
+
+  it('the unclosed-comment gate reads openers, not counts — `--> <!--` is refused; a cap leaves no `<` stub (#9940 review, audit 3)', () => {
+    for (const by of [
+      'the switch to the real parser --> <!-- see thread',
+      '<!-- a --> b --> <!-- c',
+    ]) {
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by }] })),
+      ).toThrow(/never closes/);
+    }
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: `${'a'.repeat(239)}<!-- b -->` }],
+        }),
+      ).fixedFindings[0]!.by,
+    ).toBe('a'.repeat(239));
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [
+            { id: 'R1-2', by: `x --> ${'a'.repeat(230)}<!-- b -->` },
+          ],
+        }),
+      ).fixedFindings[0]!.by,
+    ).toBe(`x --> ${'a'.repeat(230)}`);
+  });
+
+  it('a cap that lands inside a comment retreats to before it — no dangling `<!--` (#9940 review, audit)', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [
+          { id: 'R1-2', by: `the rewrite <!-- ${'c'.repeat(300)} --> landed` },
+        ],
+      }),
+    );
+    expect(r.fixedFindings).toEqual([{ id: 'R1-2', by: 'the rewrite' }]);
+  });
+
+  it('degrades a `by` whose visible tail sits past the cap to a by-less ruling (#9940 review, round 21)', () => {
+    // The gate ran on the clause as written — visible `fixed it` at the
+    // end — and the cap then cut exactly that tail off, leaving forty
+    // complete `&nbsp;` entities: the invisible-only reply the gate
+    // refuses. The cut is the tool's, not the model's, so the ruling
+    // degrades to the by-less form (`R<id> fixed`) instead of refusing.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: '&nbsp;'.repeat(40) + 'fixed it' }],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2' }]);
+    // A long comment ahead of the text slices into an UNTERMINATED
+    // comment — the same invisible-only shape.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [
+            { id: 'R1-2', by: `<!-- ${'c'.repeat(250)} --> the guard rewrite` },
+          ],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2' }]);
+    // The ordinary cap keeps a visible clause, capped (the sibling cells
+    // above pin the length and the code-point cut).
+    expect(
+      composeReview(
+        base({ fixedFindings: [{ id: 'R1-2', by: 'x'.repeat(300) }] }),
+      ).fixedFindings[0]!.by,
+    ).toHaveLength(240);
+  });
+
+  it('refuses a non-object entry', () => {
+    expect(() =>
+      composeReview(base({ fixedFindings: ['R1-2'] as never })),
+    ).toThrow(/is not an object/);
+  });
+
+  it('keeps the FIRST ruling per id — a duplicate would reply and resolve twice', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [
+          { id: 'R1-2', by: 'the guard rewrite' },
+          { id: 'R1-2', by: 'the revert' },
+          { id: 'R2-7' },
+        ],
+      }),
+    );
+    expect(r.fixedFindings).toEqual([
+      { id: 'R1-2', by: 'the guard rewrite' },
+      { id: 'R2-7' },
+    ]);
   });
 });
 
@@ -6638,7 +8283,7 @@ describe('a standing gate Critical enters the posting set exactly once (#9526)',
   // re-derives the same Critical from the report. `buildLedger` keys by
   // claimed id and the regenerated copy claims none, so it minted a second
   // id beside the carried one and the pair compounded every round.
-  function gateFixture() {
+  function gateFixture(code = 'SC2086') {
     const dir = mkdtempSync(join(tmpdir(), 'compose-gate-once-'));
     const diffPath = join(dir, 'the.diff');
     writeFileSync(
@@ -6669,7 +8314,7 @@ describe('a standing gate Critical enters the posting set exactly once (#9526)',
             findings: [
               {
                 line: 1,
-                code: 'SC2086',
+                code,
                 level: 'info',
                 message: 'quote the variable',
                 inDiff: true,
@@ -6688,6 +8333,30 @@ describe('a standing gate Critical enters the posting set exactly once (#9526)',
     );
     return { dir, planPath };
   }
+
+  it('folds its own entry — this channel joins bodyCriticals after the shared fold has run (#9940 review, round 31 reverse audit)', () => {
+    // `f.line` and `f.code` are interpolated RAW out of a side file the
+    // review agent can rewrite, and `structurallyValidReport` only checks
+    // plain-objectness. Unfolded, a fenced block in `code` reached the
+    // per-line escape as several lines and the reader saw a literal
+    // `&amp;lt;` inside the fence.
+    const { dir, planPath } = gateFixture(
+      'SC1\n```\n<div class="w">\n```\nrest',
+    );
+    try {
+      const line = scriptLintGate(planPath).criticals[0]!;
+      expect(line).not.toMatch(/[\r\n\u2028\u2029]/);
+      expect(line).toContain('SC1 ``` <div class="w"> ``` rest');
+      // One line in, one line out — and on one line the two fence runs are
+      // an ordinary code span, which is what makes the `<` between them
+      // inert without an escape. Unfolded they opened a real fenced
+      // block, and the escape inside it rendered a literal `&amp;lt;` to
+      // the reader.
+      expect(escapeTagOpeners(line)).toBe(line);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('does not compound the work-list or the body across rounds', () => {
     const { dir, planPath } = gateFixture();
@@ -7637,6 +9306,27 @@ describe('buildLedger', () => {
         title: '`src/d.ts` unanchorable blocker',
       },
     ]);
+  });
+
+  it('records the minted id per drafted comment, aligned by index (#9940)', () => {
+    // `draftedIds` is the stamp `submit` applies before posting: the id at
+    // a marked slot equals the ledger entry's id, an unmarked slot stays
+    // undefined, and a carried id reads through unchanged.
+    const l = buildLedger(
+      3,
+      [
+        { path: 'src/a.ts', line: 12, body: '**[Critical]** double free' },
+        { path: 'src/x.ts', line: 1, body: 'no marker — not a finding' },
+        {
+          path: 'src/b.ts',
+          line: 4,
+          body: '**[Suggestion]** R1-2: still stands',
+        },
+      ],
+      [],
+    );
+    expect(l.draftedIds).toEqual(['R3-1', undefined, 'R1-2']);
+    expect(l.findings.map((f) => f.id)).toEqual(['R3-1', 'R1-2']);
   });
 
   it('flags the real file spelled like a stand-in, not the stand-in', () => {
@@ -14686,6 +16376,41 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(marker.closed).toEqual([{ r: 11, id: 'R10-2', f: 'src/auth.ts' }]);
   });
 
+  it('reads a SOURCE tag before the id on the deferral channel — the re-post join is the head-slot read (#9940 review, round 15)', () => {
+    // The join reads the id through the head-slot tokeniser's own id
+    // (`readClaimHead(title).id`), so a title leading with a source tag
+    // (`[probe] R10-1: …`) still names the claim it re-posts; the anchored
+    // read over `.stripped` kept the source tag at position 0 and saw no
+    // id — `repostUnidentified` then withheld EVERY closure of the round,
+    // the truly vanished sibling included. The axis-tag twin below cannot
+    // pin this: axis tags are stripped from `.stripped`, source tags are
+    // not.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/f.ts', title: 'sparse wedge' },
+          { id: 'R10-2', sev: 'C', file: 'src/other.ts', title: 'token leak' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/f.ts',
+          line: 8,
+          source: 'probe',
+          severity: 'Critical',
+          title: '[probe] R10-1: sparse wedge',
+        },
+      ],
+    });
+    const marker = parseLedger(r.body)!;
+    expect(marker.closed).toEqual([{ r: 11, id: 'R10-2', f: 'src/other.ts' }]);
+  });
+
   it('mints no closure for a Critical re-voiced as a floor-stripped Suggestion', () => {
     // The floor reroute strips a drafted Suggestion that RE-VOICES a
     // previous Critical back to the deferral channel: the claim leaves the
@@ -16229,6 +17954,36 @@ describe('composeReview — the decided-stop re-rule', () => {
     expect(line).not.toMatch(/NOT available:\s*$/);
   });
 
+  it('binds a padded-id cache and its dispositions to the canonical claim id (#9940 review, round 28)', () => {
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'padded',
+        ledger: [
+          {
+            id: 'R01-1',
+            severity: 'Critical',
+            status: 'open',
+            title: 'the mechanism still fires — re-read at HEAD',
+          },
+        ],
+      }),
+      stopReRule: { dispositions: [{ id: 'R01-1', ruling: 'still-stands' }] },
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    // Two spellings of one id are one disposition — refused as a duplicate.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'padded-dup' }),
+        stopReRule: {
+          dispositions: [
+            { id: 'R1-1', ruling: 'still-stands' },
+            { id: 'R01-1', ruling: 'still-stands' },
+          ],
+        },
+      }),
+    ).toThrow(/duplicate disposition for R01-1 \(R1-1\)/);
+  });
+
   it('refuses a decided-stop plan composed WITHOUT stopReRule', () => {
     // The mirror of the forged-flag refusal above: a stop plan walked
     // through the regular floors would compose a non-blocking artifact,
@@ -17596,6 +19351,45 @@ describe('floor enforcement — the Critical arm (#10291)', () => {
     for (const e of entries) {
       expect(e.title).not.toContain('via Qwen Code /review');
     }
+  });
+
+  it('floorEnforcedReroute records a code-led body as quoted code — its title carries no id the readers never read (#9940 review, round 28)', () => {
+    const { entries } = floorEnforcedReroute('critical', false, 3, [
+      {
+        path: 'a.ts',
+        line: 3,
+        body: '**[Suggestion]**\n\n    R1-2: quoted fixture line',
+      },
+    ]);
+    expect(entries).toHaveLength(1);
+    expect(readClaimHead(entries[0]!.title).id).toBeUndefined();
+    expect(entries[0]!.title).toContain('R1-2: quoted fixture line');
+
+    // …and when the claim-line sentinel is '' because the code block's
+    // FIRST line is trim-empty — indented, but whitespace only — the guard
+    // must still fire: it used to read that physical line while
+    // `collapseToLine` drops the segment, so the NEXT line's ledger id led
+    // the title. A title claiming an id the claim-line read cannot see is
+    // what the repost join then refuses the whole post over (#9940 review,
+    // round 31).
+    for (const blank of ['    \u00a0', '    \ufeff', '    \u3000', '    \f']) {
+      const blankLed = floorEnforcedReroute('critical', false, 3, [
+        {
+          path: 'a.ts',
+          line: 3,
+          body: `**[Suggestion]**\n\n${blank}\n    R1-2: quoted fixture line`,
+        },
+      ]);
+      expect(blankLed.entries).toHaveLength(1);
+      expect(readClaimHead(blankLed.entries[0]!.title).id).toBeUndefined();
+      expect(blankLed.entries[0]!.title).toContain('R1-2: quoted fixture line');
+    }
+    // A body whose claim line IS readable keeps its id at the front — the
+    // guard fires on the sentinel, not on every rerouted entry.
+    const readable = floorEnforcedReroute('critical', false, 3, [
+      { path: 'a.ts', line: 3, body: '**[Suggestion]** R1-2: a plain claim' },
+    ]);
+    expect(readClaimHead(readable.entries[0]!.title).id).toBe('R1-2');
   });
 
   it('deferrableFindingsInline counts the tagged Critical the floor would move — and only that one', () => {

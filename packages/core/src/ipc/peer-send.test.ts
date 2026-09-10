@@ -12,7 +12,10 @@ const readOwnSessionRecord = vi.fn();
 const listMessageablePeers = vi.fn();
 const sendPeerFrame = vi.fn();
 
-vi.mock('../services/session-registry.js', () => ({
+vi.mock('../services/session-registry.js', async () => ({
+  ...(await vi.importActual<typeof import('../services/session-registry.js')>(
+    '../services/session-registry.js',
+  )),
   readOwnSessionRecord: (...args: unknown[]) => readOwnSessionRecord(...args),
 }));
 vi.mock('./uds-client.js', async () => {
@@ -72,6 +75,7 @@ function peer(
     ref,
     cwd,
     pid: 100,
+    kind: 'tui',
     ipcPath: `/tmp/${sessionId}.sock`,
     startedAt: 1_000,
   };
@@ -256,6 +260,49 @@ describe('sendToPeer', () => {
       });
       expect(outcome).toEqual({ kind: 'self', name: 'self-00' });
     }
+    expect(sendPeerFrame).not.toHaveBeenCalled();
+  });
+
+  it("delivers to a sibling session that shares this session's inbox", async () => {
+    // A process hosting several sessions binds one inbox for all of
+    // them, so a sibling's reply address is this session's own. It is
+    // still a different session with its own id — excluding by address
+    // would hide every sibling of the sending session from it.
+    const sibling = { ...peer('sibling', 'app-ab'), ipcPath: '/tmp/self.sock' };
+    listMessageablePeers.mockResolvedValue([sibling]);
+
+    const outcome = await sendToPeer({
+      target: 'app-ab',
+      message: 'hi',
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+
+    expect(outcome).toMatchObject({ kind: 'sent', address: 'app-ab' });
+    const [socketPath, frame] = sendPeerFrame.mock.calls[0];
+    expect(socketPath).toBe('/tmp/self.sock');
+    expect(frame.toSessionId).toBe('sibling');
+  });
+
+  it("re-reads a peer on this session's own inbox before believing it a sibling", async () => {
+    // A patch to this session's own record — a /clear re-id, or the
+    // re-assert a misaddressed inbound frame triggers — can land between
+    // the own-record read and the directory read, and the stale id
+    // filter then keeps this session's own record under its new id.
+    // The address does not move on a re-id, so the entry is checked
+    // against a fresh read before it is believed to be a sibling.
+    readOwnSessionRecord.mockResolvedValueOnce({ ...SELF, sessionId: 's1' });
+    readOwnSessionRecord.mockResolvedValue({ ...SELF, sessionId: 's2' });
+    listMessageablePeers.mockResolvedValue([
+      { ...peer('s2', 'self-00', '/w/self'), ipcPath: '/tmp/self.sock' },
+    ]);
+
+    const outcome = await sendToPeer({
+      target: 'self-00',
+      message: 'hi',
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+
+    expect(outcome).toEqual({ kind: 'self', name: 'self-00' });
     expect(sendPeerFrame).not.toHaveBeenCalled();
   });
 
@@ -1083,13 +1130,51 @@ describe('the mirror and the receiver disagreeing', () => {
     }
   });
 
-  it('starts a fresh mirror conversation when the session id changes', async () => {
+  it('keeps one mirror per inbox address when the session id changes', async () => {
+    // Several sessions can share one inbox, and the receiver meters by
+    // the address a frame arrives on — so a new session id under the
+    // same address neither refills the bucket nor forgets the bodies,
+    // or alternating between siblings would reset both on every send.
     expect((await send('same body')).kind).toBe('sent');
     listMessageablePeers.mockResolvedValue([
       { ...target, sessionId: 'p2', ref: peerRef('p2') },
     ]);
 
-    expect((await send('same body')).kind).toBe('sent');
+    const repeat = await send('same body');
+    expect(repeat.kind).toBe('failed');
+    expect(repeat.kind === 'failed' && repeat.reason).toContain(
+      'turns away a repeat',
+    );
+  });
+
+  it('paces two sessions behind one inbox as one destination', async () => {
+    const siblingA = { ...peer('sa', 'app-aa'), ipcPath: '/tmp/shared.sock' };
+    const siblingB = { ...peer('sb', 'app-bb'), ipcPath: '/tmp/shared.sock' };
+    listMessageablePeers.mockResolvedValue([siblingA, siblingB]);
+    const sendTo = (name: string, message: string) =>
+      sendToPeer({ target: name, message, approvalMode: ApprovalMode.DEFAULT });
+
+    // The duplicate window is shared: a body one sibling just received
+    // is a repeat when addressed to the other.
+    expect((await sendTo('app-aa', 'same body')).kind).toBe('sent');
+    const repeat = await sendTo('app-bb', 'same body');
+    expect(repeat.kind).toBe('failed');
+    expect(repeat.kind === 'failed' && repeat.reason).toContain(
+      'turns away a repeat',
+    );
+
+    // And the rate budget is shared: a burst exhausted against one
+    // sibling leaves nothing for the other.
+    for (
+      let index = 0;
+      index < PEER_ADMISSION_LIMITS.bucketCapacity - 1;
+      index++
+    ) {
+      expect((await sendTo('app-aa', `burst ${index}`)).kind).toBe('sent');
+    }
+    const over = await sendTo('app-bb', 'one too many');
+    expect(over.kind).toBe('failed');
+    expect(over.kind === 'failed' && over.reason).toContain('rate limit');
   });
 
   it('does not un-drain the mirror with a refund that lands after the drain', async () => {

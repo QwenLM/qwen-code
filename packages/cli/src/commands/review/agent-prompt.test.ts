@@ -11,6 +11,7 @@
 // is in the prompt, the read call is in the prompt, and the agent is not handed a
 // sentence to recite when it finds nothing.
 
+import { readWorkflowBatches } from './lib/workflow-batch.js';
 import { SHELL_TOOL_MAX_TIMEOUT_MS } from './lib/build-budget.js';
 import {
   describe,
@@ -48,7 +49,6 @@ import {
   DEADLINE_ENV,
   RESERVE_ENV,
   COMPOSE_FLOOR_ENV,
-  TOOL_CONCURRENCY_ENV,
   readBudgetStop,
   readRoundStamps,
   stampRound,
@@ -4791,7 +4791,7 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
   afterEach(() => {
     delete process.env[DEADLINE_ENV];
     delete process.env[RESERVE_ENV];
-    delete process.env[TOOL_CONCURRENCY_ENV];
+    delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
     process.exitCode = undefined;
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
@@ -5245,7 +5245,7 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     // round runs two waves and the pair three, so round 2 pays 3/2 of the
     // round estimate — and the gate refuses it when the reserve plus that
     // does not fit, even though round 1 (one estimate) just admitted.
-    process.env[TOOL_CONCURRENCY_ENV] = '2';
+    process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '2';
     process.env[RESERVE_ENV] = '600';
     process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 3000);
     const plan = call('reverse-audit', { 'all-chunks': true, round: 1 });
@@ -5264,7 +5264,7 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
   });
 
   it('admits the 3B pair when the reserve plus the pair wall fits', () => {
-    process.env[TOOL_CONCURRENCY_ENV] = '2';
+    process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '2';
     process.env[RESERVE_ENV] = '600';
     process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 3400);
     const plan = call('reverse-audit', { 'all-chunks': true, round: 1 });
@@ -5350,7 +5350,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       // carries (#9259), on the describe that actually needs it.
       DEADLINE_ENV,
       RESERVE_ENV,
-      TOOL_CONCURRENCY_ENV,
+      'QWEN_CODE_MAX_TOOL_CONCURRENCY',
     ]) {
       SAVED[k] = process.env[k];
     }
@@ -5358,7 +5358,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     process.env['QWEN_CODE_SESSION_ID'] = 'S1';
     delete process.env[DEADLINE_ENV];
     delete process.env[RESERVE_ENV];
-    delete process.env[TOOL_CONCURRENCY_ENV];
+    delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
     mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
   });
   afterEach(() => {
@@ -7817,6 +7817,29 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
     }
   });
 
+  it('emits the fix-audit prompt as a batch manifest for emit-workflow', () => {
+    // Step 6B dispatches the auditor the way every other recorded wave
+    // goes out: `--batch` writes the manifest, `emit-workflow --batch`
+    // selects the recorded prompt unchanged — no hand-carried block.
+    const { plan, findings, hunks, dir } = setup({});
+    try {
+      handler({ plan, role: 'fix-audit', findings, hunks, batch: true });
+      const calls = (writeStdoutLine as unknown as Mock).mock.calls;
+      expect(calls).toHaveLength(1);
+      const file = join(dir, 'batch.json');
+      writeFileSync(file, calls[0][0]);
+      const agents = readWorkflowBatches(plan, [file]);
+      expect(agents).toHaveLength(1);
+      expect(agents[0].key).toMatch(/^fix-audit--[0-9a-f]{12}$/);
+      expect(agents[0].prompt).toBe(
+        readRecordedPrompts(plan).get(agents[0].key),
+      );
+      expect(agents[0].prompt).toContain('## What you are auditing');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('marks a fixed finding no hunk corroborates, and leaves the matched one alone', () => {
     // `fixed` says an edit landed; the hunks are the edits that landed. The
     // default artifact marks f1 AND f3 fixed while HUNKS touches only
@@ -8213,4 +8236,78 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
       }
     },
   );
+});
+
+describe('agent-prompt --batch', () => {
+  let dir: string;
+  let plan: string;
+  let findings: string;
+  const run = (args: Record<string, unknown>) =>
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      batch: true,
+      ...args,
+    });
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubEnv(DEADLINE_ENV, '');
+    dir = mkdtempSync(join(tmpdir(), 'agent-prompt-batch-'));
+    plan = join(dir, 'plan.json');
+    findings = join(dir, 'findings.md');
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, srcDiffLines: 1000, diffLines: 1200 }),
+    );
+    writeFileSync(findings, '');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    process.exitCode = 0;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  function selected() {
+    const calls = vi.mocked(writeStdoutLine).mock.calls;
+    expect(calls).toHaveLength(1);
+    const file = join(dir, 'batch.json');
+    writeFileSync(file, calls[0][0]);
+    return readWorkflowBatches(plan, [file]);
+  }
+  it('emits the recorded verifier with its findings pointer intact', () => {
+    writeFileSync(findings, 'A candidate finding to verify');
+    run({ role: 'verify', findings });
+    const agents = selected();
+    expect(agents).toHaveLength(1);
+    expect(agents[0].key).toMatch(/^verify--/);
+    expect(agents[0].prompt).toContain('.findings.md');
+    expect(agents[0].prompt).toBe(readRecordedPrompts(plan).get(agents[0].key));
+  });
+  it('emits all admitted audit chunks and preserves the round stamp', () => {
+    run({ role: 'reverse-audit', 'all-chunks': true, findings, round: 1 });
+    const agents = selected();
+    expect(agents.map((a) => a.key)).toHaveLength(3);
+    expect(agents.every((a) => a.key.startsWith('reverse-audit--chunk-'))).toBe(
+      true,
+    );
+    expect(readRoundStamps(plan)).toHaveLength(1);
+  });
+  it('emits the whole initial roster without selecting older records', () => {
+    run({ roster: true });
+    const agents = selected();
+    expect(agents.length).toBeGreaterThan(3);
+    expect(new Set(agents.map((a) => a.key))).toEqual(
+      new Set(readRecordedPrompts(plan).keys()),
+    );
+  });
+  it('emits no manifest when the verifier budget refuses admission', () => {
+    writeFileSync(findings, 'A candidate finding to verify');
+    vi.stubEnv(DEADLINE_ENV, String(Math.floor(Date.now() / 1000) + 1));
+    run({ role: 'verify', findings });
+    expect(process.exitCode).toBe(4);
+    expect(writeStdoutLine).not.toHaveBeenCalled();
+    expect(readRecordedPrompts(plan).size).toBe(0);
+  });
+  it('rejects incomplete custom specialist blocks', () => {
+    expect(() => run({ 'whole-diff': true })).toThrow(/complete role/);
+    expect(writeStdoutLine).not.toHaveBeenCalled();
+  });
 });
