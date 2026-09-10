@@ -2386,6 +2386,7 @@ export class Config {
   private goalRuntimeReady: Promise<GoalRuntime> | undefined;
   /** A `propose_goal` approval waiting for its turn to end; see PendingGoalProposal. */
   private pendingGoalProposal: PendingGoalProposal | undefined;
+  private goalProposalApprovalController: AbortController | undefined;
   /**
    * A Goal restore held back because the session writer is not accepting
    * writes yet. Settled by {@link startPendingGoalRestore} once the
@@ -2475,6 +2476,8 @@ export class Config {
    */
   private externalAgentExecutor?: ExternalAgentExecutor;
   private readonly modelProposedGoals: ModelProposedGoalsMode;
+  private goalProposalHostSupported = false;
+  private goalProposalTurnKey: string | undefined;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
@@ -7333,6 +7336,9 @@ export class Config {
       this.manualPlanExitNoticeEventState = noticeEvent;
     }
     if (mode === ApprovalMode.PLAN && fromMode !== ApprovalMode.PLAN) {
+      if (!isDerivedConfig(this)) {
+        this.goalProposalApprovalController?.abort();
+      }
       this.prePlanMode = fromMode;
       noticeEvent.version++;
       noticeEvent.kind = 'clear';
@@ -8141,6 +8147,27 @@ export class Config {
     return this.modelProposedGoals;
   }
 
+  setGoalProposalHostSupported(supported: boolean): void {
+    this.goalProposalHostSupported = supported;
+  }
+
+  getGoalProposalHostSupported(): boolean {
+    return this.goalProposalHostSupported;
+  }
+
+  setGoalProposalTurnKey(turnKey: string | undefined): boolean {
+    if (this.goalProposalTurnKey === turnKey) return false;
+    this.goalProposalTurnKey = turnKey;
+    return true;
+  }
+
+  isGoalProposalAvailable(): boolean {
+    return (
+      resolveInteractionMode(this) === 'interactive' ||
+      (this.goalProposalHostSupported && this.goalProposalTurnKey !== undefined)
+    );
+  }
+
   hasPendingGoalProposal(): boolean {
     return this.pendingGoalProposal !== undefined;
   }
@@ -8148,7 +8175,14 @@ export class Config {
   /** Parks a `propose_goal` approval until the proposing turn ends. */
   setPendingGoalProposal(proposal: PendingGoalProposal): boolean {
     if (this.pendingGoalProposal) return false;
-    this.pendingGoalProposal = proposal;
+    this.goalProposalApprovalController = new AbortController();
+    if (this.approvalMode === ApprovalMode.PLAN) {
+      this.goalProposalApprovalController.abort();
+    }
+    this.pendingGoalProposal = {
+      ...proposal,
+      approvalSignal: this.goalProposalApprovalController.signal,
+    };
     return true;
   }
 
@@ -8989,6 +9023,8 @@ export class Config {
       ),
     );
     // An approval belongs to the session that produced it.
+    this.goalProposalApprovalController?.abort();
+    this.goalProposalApprovalController = undefined;
     this.pendingGoalProposal = undefined;
     if (!this.chatRecordingService) {
       this.goalRuntime = undefined;
@@ -9732,7 +9768,8 @@ export class Config {
       // keep the text hand-off (`/goal set …`) that /goal-draft prints.
       if (
         this.getModelProposedGoals() !== 'disabled' &&
-        resolveInteractionMode(this) === 'interactive'
+        (resolveInteractionMode(this) === 'interactive' ||
+          this.goalProposalHostSupported)
       ) {
         await registerLazy(ToolNames.PROPOSE_GOAL, async () => {
           const { ProposeGoalTool } = await import('../goals/goal-tools.js');
