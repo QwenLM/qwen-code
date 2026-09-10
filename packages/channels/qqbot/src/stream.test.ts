@@ -210,7 +210,7 @@ describe('complete request responses', () => {
       onResponseProgress(channel, 'test-chat', 'Partial output', 's-1');
       onResponseProgress(channel, 'test-chat', complete, 's-1');
       await vi.advanceTimersByTimeAsync(5000);
-      expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+      expect(mockSendQQMessage).toHaveBeenCalledTimes(detailed ? 1 : 0);
       await onResponseComplete(channel, 'test-chat', complete, 's-1');
       expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
       expect(mockSendQQMessage.mock.calls[0][3].markdown.content).toBe(
@@ -237,6 +237,61 @@ describe('complete request responses', () => {
     expect(
       mockSendQQMessage.mock.calls.map((call) => call[3].markdown.content),
     ).toEqual(['First complete answer', 'Second complete answer']);
+  });
+  it('sends only the last complete response in final-only mode', async () => {
+    const channel = makeChannel({ outputMode: 'final_only' });
+    onResponseProgress(channel, 'test-chat', 'first', 's-1');
+    (
+      channel as unknown as {
+        onToolCall: (chatId: string, event: { sessionId: string }) => void;
+      }
+    ).onToolCall('test-chat', { sessionId: 's-1' });
+    onResponseProgress(channel, 'test-chat', 'second', 's-1');
+    await onResponseComplete(channel, 'test-chat', 'second', 's-1');
+    expect(
+      mockSendQQMessage.mock.calls.map((call) => call[3].markdown.content),
+    ).toEqual(['second']);
+  });
+  it('retries failed progress at the head of the delivery queue', async () => {
+    const channel = makeChannel({ bufferFlushLength: 10 });
+    mockSendQQMessage
+      .mockResolvedValueOnce(mockResponse(false, 429))
+      .mockResolvedValue(mockResponse(true));
+    onResponseProgress(channel, 'test-chat', 'AAAAAAAAAA', 's-1');
+    onResponseProgress(channel, 'test-chat', 'AAAAAAAAAABBBBBBBBBB', 's-1');
+    await onResponseComplete(
+      channel,
+      'test-chat',
+      'AAAAAAAAAABBBBBBBBBB',
+      's-1',
+    );
+    expect(
+      mockSendQQMessage.mock.calls.map((call) => call[3].markdown.content),
+    ).toEqual(['AAAAAAAAAA', 'AAAAAAAAAA', 'BBBBBBBBBB']);
+  });
+  it('reserves source-label space in progress flushes', async () => {
+    const channel = makeChannel({ bufferFlushLength: 32 });
+    const text = 'x'.repeat(30);
+    for (let length = 1; length <= text.length; length++) {
+      onResponseProgress(channel, 'test-chat', text.slice(0, length), 's-1', {
+        segmentId: 'segment-1',
+        sourceLabel: '[review_*]',
+      });
+    }
+    await onResponseComplete(
+      channel,
+      'test-chat',
+      text,
+      's-1',
+      '[review_*]',
+      'segment-1',
+    );
+    expect(mockSendQQMessage).toHaveBeenCalled();
+    expect(
+      mockSendQQMessage.mock.calls.every(
+        (call) => call[3].markdown.content.length <= 32,
+      ),
+    ).toBe(true);
   });
   it('delivers progress before its passive reply context expires', async () => {
     const channel = makeChannel({ bufferFlushLength: 4096 });

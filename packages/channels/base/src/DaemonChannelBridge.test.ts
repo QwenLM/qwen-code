@@ -5086,9 +5086,8 @@ describe('channel background lifecycle contract', () => {
     'preserves the main answer when a %s notification runs tools before prompt resolution',
     async (kind) => {
       const bridge = new DaemonChannelBridge({
-        createSession: async () => {
-          throw new Error('unused');
-        },
+        cwd: '/repo',
+        sessionFactory: vi.fn(),
       });
       const internal = bridge as unknown as {
         handleSessionUpdate: (sessionId: string, params: unknown) => void;

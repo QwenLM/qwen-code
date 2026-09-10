@@ -698,6 +698,15 @@ describe('ChannelBase', () => {
       (bridge as unknown as EventEmitter).emit('textChunk', 's-1', text);
       (bridge as unknown as EventEmitter).emit('responseBoundary', 's-1');
     }
+    it('suppresses a final no-reply sentinel instead of delivering an earlier boundary', async () => {
+      const ch = createChannel({ outputMode: 'final_only' });
+      const run = await begin(ch);
+      boundary('PREAMBLE');
+      run.finish('[NO_REPLY]');
+      await run.turn;
+      expect(output(ch)).toEqual([]);
+    });
+
     it('opens the next segment during tool work and streams into it before completion', async () => {
       const ch = createChannel({ outputMode: 'process_and_result' });
       const run = await begin(ch);
@@ -1123,6 +1132,33 @@ describe('ChannelBase', () => {
       expect(await ch.cancelPromptForTest('s-1')).toBe(true);
       await run.turn;
       expect(ch.taskEvents.at(-1)?.type).toBe('cancelled');
+    });
+
+    it('does not skip a loop after detailed output has already started delivery', async () => {
+      const ch = createChannel({ outputMode: 'process_and_result' });
+      ch.proactiveSupported = true;
+      const run = await begin(ch, 'loop');
+      ch.dispatchBackgroundTask(task('a'));
+      run.finish('MAIN');
+      await tick();
+      expect(output(ch)).toEqual(['MAIN']);
+      expect(await ch.cancelPromptForTest('s-1')).toBe(true);
+      await expect(run.turn).resolves.toBe('MAIN');
+    });
+
+    it('emits a terminal lifecycle event when a session dies with background work', async () => {
+      const ch = createChannel();
+      const run = await begin(ch);
+      ch.dispatchBackgroundTask(task('a'));
+      (bridge as unknown as EventEmitter).emit('sessionDied', {
+        sessionId: 's-1',
+      });
+      expect(ch.taskEvents.at(-1)).toMatchObject({
+        type: 'cancelled',
+        reason: 'dropped',
+      });
+      run.finish('ignored');
+      await run.turn;
     });
 
     it.each(['final_only', 'process_and_result'] as const)(
@@ -12416,6 +12452,10 @@ describe('ChannelBase', () => {
       ch.setBridge(newBridge);
       resolvePrompt('done');
       await inbound;
+
+      expect(
+        (oldBridge as unknown as EventEmitter).listenerCount('textChunk'),
+      ).toBe(0);
 
       (oldBridge as unknown as EventEmitter).emit(
         'textChunk',

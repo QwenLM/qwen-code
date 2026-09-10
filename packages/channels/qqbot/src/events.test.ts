@@ -1588,6 +1588,35 @@ describe('群管理事件', () => {
         ).progressStates.has('session-progress'),
       ).toBe(false);
     });
+
+    it('keeps the active prompt marker when removing one group in single-session scope', () => {
+      const ch = makeChannel({ sessionScope: 'single' });
+      const internals = ch as unknown as {
+        onPromptStart: (chatId: string, sessionId: string) => void;
+        onResponseProgress: (
+          chatId: string,
+          text: string,
+          sessionId: string,
+          segment: { messageId: string; segmentId: string },
+        ) => void;
+        activePromptSessions: Set<string>;
+      };
+      internals.onPromptStart('group-progress', 'shared-session');
+      internals.onResponseProgress(
+        'group-progress',
+        'partial',
+        'shared-session',
+        { messageId: 'message-progress', segmentId: 'segment-progress' },
+      );
+
+      (ch as unknown as QQChannelRaw)['handleGroupDelRobot']({
+        group_openid: 'group-progress',
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      } satisfies GroupDelRobotEvent);
+
+      expect(internals.activePromptSessions.has('shared-session')).toBe(true);
+    });
   });
 
   describe('handleGroupMsgToggle', () => {

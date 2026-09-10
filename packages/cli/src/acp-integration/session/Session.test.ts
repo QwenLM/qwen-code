@@ -556,6 +556,8 @@ describe('Session', () => {
   };
   let mockMonitorRegistry: {
     setNotificationCallback: ReturnType<typeof vi.fn>;
+    setStatusChangeCallback: ReturnType<typeof vi.fn>;
+    clearStatusChangeCallback: ReturnType<typeof vi.fn>;
     getAll: ReturnType<typeof vi.fn>;
     get: ReturnType<typeof vi.fn>;
   };
@@ -804,6 +806,8 @@ describe('Session', () => {
     };
     mockMonitorRegistry = {
       setNotificationCallback: vi.fn(),
+      setStatusChangeCallback: vi.fn(),
+      clearStatusChangeCallback: vi.fn(),
       getAll: vi.fn().mockReturnValue([]),
       get: vi.fn().mockImplementation((monitorId: string) =>
         (
@@ -2973,6 +2977,62 @@ describe('Session', () => {
         }),
       ),
     );
+  });
+
+  it('completes channel-owned workflow notification executions', async () => {
+    const workflow = {
+      id: 'wf_channel',
+      kind: 'workflow',
+      runId: 'wf_channel',
+      status: 'running',
+      abortController: new AbortController(),
+    } as unknown as core.WorkflowTask;
+    mockWorkflowRunRegistry.get.mockReturnValue(workflow);
+    const statusCallback = mockWorkflowRunRegistry.setStatusChangeCallback.mock
+      .calls[0][0] as (entry: core.WorkflowTask) => void;
+    mockChat.sendMessageStream = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        statusCallback(workflow);
+        return createEmptyStream();
+      })
+      .mockImplementation(() => createEmptyStream());
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start workflow' }],
+      _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+    });
+    workflow.status = 'completed';
+    mockWorkflowRunRegistry.setCompletionCallback.mock.calls[0][0](
+      'Workflow completed.',
+      '<task-notification/>',
+      { runId: workflow.runId, status: 'completed' },
+    );
+
+    await vi.waitFor(() => {
+      const completion = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(
+          ([params]) =>
+            params.update._meta?.['backgroundTask'] as
+              | {
+                  taskId?: string;
+                  executionId?: string;
+                  notificationComplete?: boolean;
+                }
+              | undefined,
+        )
+        .find(
+          (task) =>
+            task?.taskId === workflow.runId && task.notificationComplete,
+        );
+      expect(completion).toMatchObject({
+        taskId: workflow.runId,
+        executionId: expect.any(String),
+        notificationComplete: true,
+      });
+    });
   });
 
   it('adds terminal workflow status changes to the session history cache', () => {
@@ -12013,57 +12073,100 @@ describe('Session', () => {
       });
     });
 
-    it('attaches structured monitor metadata with event and dropped-line counts', async () => {
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue(createEmptyStream());
-      mockMonitorRegistry.getAll.mockReturnValue([
-        { id: 'monitor-1', description: 'logs', droppedLines: 3 },
-      ]);
+    it.each([true, false])(
+      'attaches structured monitor metadata and completes only channel-owned notifications (%s)',
+      async (channel) => {
+        const monitor = {
+          id: 'monitor-1',
+          kind: 'monitor',
+          monitorId: 'monitor-1',
+          description: 'logs',
+          droppedLines: 3,
+          status: 'running',
+          abortController: new AbortController(),
+        } as unknown as core.MonitorTask;
+        mockMonitorRegistry.getAll.mockReturnValue([monitor]);
+        const statusCallback = mockMonitorRegistry.setStatusChangeCallback.mock
+          .calls[0][0] as (entry: core.MonitorTask) => void;
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(() => {
+            statusCallback(monitor);
+            return createEmptyStream();
+          })
+          .mockImplementation(() => createEmptyStream());
 
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'start monitor' }],
-      });
-
-      const callback = mockMonitorRegistry.setNotificationCallback.mock
-        .calls[0][0] as (
-        displayText: string,
-        modelText: string,
-        meta: {
-          monitorId: string;
-          status: string;
-          eventCount?: number;
-          toolUseId?: string;
-        },
-      ) => void;
-
-      callback(
-        'Monitor "logs" completed. (5 events, 3 lines dropped due to throttling)',
-        '<task-notification><kind>monitor</kind></task-notification>',
-        { monitorId: 'monitor-1', status: 'completed', eventCount: 5 },
-      );
-
-      await vi.waitFor(() => {
-        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        await session.prompt({
           sessionId: 'test-session-id',
-          update: expect.objectContaining({
-            sessionUpdate: 'agent_message_chunk',
-            _meta: expect.objectContaining({
-              source: 'background_notification',
-              backgroundTask: expect.objectContaining({
-                taskId: 'monitor-1',
-                status: 'completed',
-                kind: 'monitor',
-                description: 'logs',
-                eventCount: 5,
-                droppedLines: 3,
+          prompt: [{ type: 'text', text: 'start monitor' }],
+          ...(channel ? { _meta: { [CHANNEL_PROMPT_META_KEY]: true } } : {}),
+        });
+        monitor.status = 'completed';
+
+        const callback = mockMonitorRegistry.setNotificationCallback.mock
+          .calls[0][0] as (
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            status: string;
+            eventCount?: number;
+            toolUseId?: string;
+          },
+        ) => void;
+
+        callback(
+          'Monitor "logs" completed. (5 events, 3 lines dropped due to throttling)',
+          '<task-notification><kind>monitor</kind></task-notification>',
+          { monitorId: 'monitor-1', status: 'completed', eventCount: 5 },
+        );
+
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: expect.objectContaining({
+              sessionUpdate: 'agent_message_chunk',
+              _meta: expect.objectContaining({
+                source: 'background_notification',
+                backgroundTask: expect.objectContaining({
+                  taskId: 'monitor-1',
+                  status: 'completed',
+                  kind: 'monitor',
+                  description: 'logs',
+                  eventCount: 5,
+                  droppedLines: 3,
+                }),
               }),
             }),
-          }),
+          });
         });
-      });
-    });
+        await vi.waitFor(() => {
+          const completions = vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.map(
+              ([params]) =>
+                params.update._meta?.['backgroundTask'] as
+                  | {
+                      taskId?: string;
+                      executionId?: string;
+                      notificationComplete?: boolean;
+                    }
+                  | undefined,
+            )
+            .filter(
+              (task) =>
+                task?.taskId === 'monitor-1' && task.notificationComplete,
+            );
+          expect(completions).toHaveLength(channel ? 1 : 0);
+          if (channel) {
+            expect(completions[0]).toMatchObject({
+              executionId: expect.any(String),
+              notificationComplete: true,
+            });
+          }
+        });
+      },
+    );
 
     it('attaches structured shell metadata from the shell registry entry', async () => {
       mockChat.sendMessageStream = vi

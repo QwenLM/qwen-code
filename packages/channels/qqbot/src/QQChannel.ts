@@ -95,6 +95,7 @@ interface QQProgressState {
   buffer: string;
   timer: ReturnType<typeof setTimeout> | null;
   delivery: Promise<void>;
+  pending: string[];
   replyContext?: QQReplyContext;
   sourceLabel?: string;
 }
@@ -1078,10 +1079,18 @@ export class QQChannel extends ChannelBase {
         buffer: '',
         timer: null,
         delivery: Promise.resolve(),
+        pending: [],
         ...(replyContext ? { replyContext } : {}),
         ...(segment?.sourceLabel ? { sourceLabel: segment.sourceLabel } : {}),
       };
       this.progressStates.set(sessionId, state);
+    }
+    if (this.config.outputMode !== 'process_and_result') {
+      state.segmentId = segment?.segmentId;
+      state.rawText = text;
+      state.buffer = text;
+      state.sourceLabel ??= segment?.sourceLabel;
+      return;
     }
     if (state.segmentId !== segment?.segmentId) {
       this.flushProgress(sessionId, state);
@@ -1095,10 +1104,7 @@ export class QQChannel extends ChannelBase {
     state.buffer += delta;
     state.sourceLabel ??= segment?.sourceLabel;
     if (state.timer) clearTimeout(state.timer);
-    if (
-      state.buffer.length >=
-      (this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH)
-    ) {
+    if (state.buffer.length >= this.progressBufferLimit(state)) {
       this.flushProgress(sessionId, state);
       return;
     }
@@ -1113,30 +1119,42 @@ export class QQChannel extends ChannelBase {
     if (state.timer) clearTimeout(state.timer);
     state.timer = null;
     const text = state.buffer;
-    if (!text) return;
     state.buffer = '';
-    state.delivery = state.delivery
-      .then(() =>
-        this.sendMessageWithReplyContext(
-          state.chatId,
-          text,
-          state.replyContext,
-          state.sourceLabel,
-        ),
-      )
-      .catch((error: unknown) => {
-        if (this.progressStates.get(sessionId) === state) {
-          state.buffer = text + state.buffer;
+    if (text) state.pending.push(text);
+    if (state.pending.length === 0) return;
+    state.delivery = state.delivery.then(async () => {
+      while (state.pending.length > 0) {
+        try {
+          await this.sendMessageWithReplyContext(
+            state.chatId,
+            state.pending[0]!,
+            state.replyContext,
+            state.sourceLabel,
+          );
+          state.pending.shift();
+        } catch (error) {
+          process.stderr.write(
+            `[QQ:${this.name}] progress delivery failed: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 200)}\n`,
+          );
+          break;
         }
-        process.stderr.write(
-          `[QQ:${this.name}] progress delivery failed: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 200)}\n`,
-        );
-      });
+      }
+    });
+  }
+
+  private progressBufferLimit(state: QQProgressState): number {
+    const configured =
+      this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH;
+    if (!state.sourceLabel) return configured;
+    const labelOverhead =
+      this.formatMarkdownAttributedText('x', state.sourceLabel).length - 1;
+    return Math.max(1, configured - labelOverhead);
   }
 
   override onToolCall(_chatId: string, event: ToolCallEvent): void {
     const state = this.progressStates.get(event.sessionId);
-    if (state) this.flushProgress(event.sessionId, state);
+    if (state && this.config.outputMode === 'process_and_result')
+      this.flushProgress(event.sessionId, state);
   }
 
   protected override async onResponseComplete(
@@ -1150,7 +1168,7 @@ export class QQChannel extends ChannelBase {
       this.onResponseProgress(chatId, fullText, sessionId, segment);
       this.flushProgress(sessionId, state);
       await state.delivery;
-      const remaining = state.buffer;
+      const remaining = state.pending.join('') + state.buffer;
       this.progressStates.delete(sessionId);
       if (remaining) {
         await this.sendMessageWithReplyContext(
@@ -2773,7 +2791,6 @@ export class QQChannel extends ChannelBase {
       if (state.timer) clearTimeout(state.timer);
       if (this.config.sessionScope === 'single') {
         this.progressStates.delete(sessionId);
-        this.activePromptSessions.delete(sessionId);
       } else {
         this.onSessionDied(sessionId);
       }

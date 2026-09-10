@@ -59,6 +59,7 @@ import type {
   WorkflowApproval,
   WorkflowSnapshot,
   WorkflowTask,
+  MonitorTask,
   BranchPoint,
   BackgroundStatusChangeCallback,
   AdmissibleNotification,
@@ -1499,6 +1500,11 @@ interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   channelExecution?: { executionId: string };
 }
 
+interface ChannelNotificationExecution {
+  executionId: string;
+  controller: AbortController;
+}
+
 /**
  * Projects a queued notification onto the slice the shared admission rule
  * reads. `interim` marks a monitor pulse, which the rule evicts before a
@@ -2102,6 +2108,10 @@ export class Session implements SessionContext {
     string,
     ChannelBackgroundExecution
   >();
+  private readonly channelNotificationExecutions = new Map<
+    string,
+    ChannelNotificationExecution
+  >();
   /**
    * Notifications lost to queue overflow since the last drain. Reported as one
    * summary on the next notification turn rather than per loss, so an overflow
@@ -2147,6 +2157,7 @@ export class Session implements SessionContext {
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: BackgroundStatusChangeCallback | undefined;
+  #monitorStatusChangeCallback: ((entry?: MonitorTask) => void) | undefined;
   #workflowStatusChangeCallback: ((entry?: WorkflowTask) => void) | undefined;
   private workflowHistory: WorkflowSnapshot[];
   /**
@@ -4327,6 +4338,12 @@ export class Session implements SessionContext {
       this.#statusChangeCallback = undefined;
     }
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
+    if (this.#monitorStatusChangeCallback) {
+      this.config
+        .getMonitorRegistry()
+        .clearStatusChangeCallback(this.#monitorStatusChangeCallback);
+      this.#monitorStatusChangeCallback = undefined;
+    }
     const shellRegistry = this.config.getBackgroundShellRegistry();
     shellRegistry.setNotificationCallback(undefined);
     if (this.#shellStatusChangeCallback) {
@@ -9714,6 +9731,10 @@ export class Session implements SessionContext {
     );
 
     const monitorRegistry = this.config.getMonitorRegistry();
+    this.#monitorStatusChangeCallback = (entry) => {
+      if (entry) this.#observeChannelNotificationTask(entry);
+    };
+    monitorRegistry.setStatusChangeCallback(this.#monitorStatusChangeCallback);
     monitorRegistry.setNotificationCallback((displayText, modelText, meta) => {
       if (meta.status === 'running') {
         return;
@@ -9810,7 +9831,10 @@ export class Session implements SessionContext {
     const workflowRegistry = this.config.getWorkflowRunRegistry();
     this.#workflowStatusChangeCallback = (entry) => {
       this.#activeWorkChanged();
-      if (entry) this.#rememberWorkflowHistory(entry);
+      if (entry) {
+        this.#observeChannelNotificationTask(entry);
+        this.#rememberWorkflowHistory(entry);
+      }
     };
     workflowRegistry.setStatusChangeCallback(
       this.#workflowStatusChangeCallback,
@@ -9912,9 +9936,43 @@ export class Session implements SessionContext {
         : undefined;
   }
 
+  #observeChannelNotificationTask(
+    entry: Pick<
+      MonitorTask | WorkflowTask,
+      'id' | 'kind' | 'status' | 'abortController'
+    > & { ownerAgentId?: string },
+  ): void {
+    if (entry.status !== 'running') return;
+    const key = `${entry.kind}:${entry.id}`;
+    const current = this.channelNotificationExecutions.get(key);
+    if (current?.controller === entry.abortController) return;
+    const owner = this.#channelTaskOwner(entry.ownerAgentId);
+    if (!owner) {
+      this.channelNotificationExecutions.delete(key);
+      return;
+    }
+    this.channelNotificationExecutions.set(key, {
+      executionId: randomUUID(),
+      controller: entry.abortController,
+    });
+  }
+
   #channelNotificationExecution(
     item: BackgroundNotificationQueueItem,
   ): QueuedBackgroundNotification['channelExecution'] {
+    if (item.kind === 'monitor' || item.kind === 'workflow') {
+      const observed = this.channelNotificationExecutions.get(
+        `${item.kind}:${item.taskId}`,
+      );
+      const task =
+        item.kind === 'monitor'
+          ? this.config.getMonitorRegistry().get(item.taskId)
+          : this.config.getWorkflowRunRegistry().get(item.taskId);
+      if (!observed || observed.controller !== task?.abortController) {
+        return undefined;
+      }
+      return { executionId: observed.executionId };
+    }
     const observed = this.#channelExecutionForNotification(item);
     const task =
       item.kind === 'shell'

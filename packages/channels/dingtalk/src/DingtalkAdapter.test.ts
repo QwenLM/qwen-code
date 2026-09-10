@@ -8787,6 +8787,64 @@ describe('DingtalkChannel outbound file delivery', () => {
     );
   });
 
+  it('keeps streamed marker history when cumulative progress restarts', async () => {
+    const channel = createChannel();
+    const closeOutput = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          replaceOutput: () => void;
+          closeOutput: typeof closeOutput;
+        };
+      }
+    ).interactionPresenter = { replaceOutput: () => {}, closeOutput };
+    const context = segment();
+    getProgressHook(channel)(
+      'cid123',
+      '[FILE: /workspace/a.txt]\nfirst',
+      'session-1',
+      context,
+    );
+    getProgressHook(channel)('cid123', 'second', 'session-1', context);
+    await getCompleteHook(channel)('cid123', 'second', 'session-1', context);
+    expect(closeOutput.mock.calls[0]?.[1]).toBe(
+      'second\n[File delivery unavailable]',
+    );
+  });
+
+  it('does not recount an extended cumulative marker after a segment change', async () => {
+    const channel = createChannel();
+    const closeOutput = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          replaceOutput: () => void;
+          closeOutput: typeof closeOutput;
+        };
+      }
+    ).interactionPresenter = { replaceOutput: () => {}, closeOutput };
+    const first = segment('segment-1');
+    const text = '[FILE: /workspace/a.txt]\nfirst';
+    getProgressHook(channel)('cid123', text, 'session-1', first);
+    await getOutputSegmentEndHook(channel)(
+      'cid123',
+      'session-1',
+      first,
+      'response_boundary',
+    );
+    const next = { ...first, segmentId: 'segment-2' };
+    getProgressHook(channel)('cid123', `${text} second`, 'session-1', next);
+    await getCompleteHook(channel)(
+      'cid123',
+      `${text} second`,
+      'session-1',
+      next,
+    );
+    expect(closeOutput.mock.calls.at(-1)?.[1]).not.toContain(
+      '[File delivery unavailable]',
+    );
+  });
+
   it('discards segment projectors on terminal segment ends', async () => {
     const channel = createChannel();
     for (const [index, reason] of (
@@ -8870,6 +8928,17 @@ describe('DingtalkChannel outbound file delivery', () => {
     channel.onSessionDied('session-1');
     expect(projectors.size).toBe(1);
     expect([...projectors.values()][0]!.sessionId).toBe('session-2');
+  });
+
+  it('discards status projectors when the bridge disconnects', () => {
+    const channel = createChannel();
+    getProgressHook(channel)('cid123', 'chunk', 'session-1', segment());
+    const projectors = (
+      channel as unknown as { fileProjectors: Map<string, unknown> }
+    ).fileProjectors;
+    expect(projectors.size).toBe(1);
+    channel.onBridgeDisconnected();
+    expect(projectors.size).toBe(0);
   });
 
   it('drops the status projector on the terminal lifecycle event', () => {

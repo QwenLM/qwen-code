@@ -895,9 +895,20 @@ describe('MonitorRegistry', () => {
       const cb = vi.fn();
       registry.setStatusChangeCallback(cb);
       registry.register(createEntry({ monitorId: 'a' }));
-      registry.setStatusChangeCallback(undefined);
+      registry.clearStatusChangeCallback(cb);
       registry.complete('a', 0);
       expect(cb).toHaveBeenCalledTimes(1); // register only
+    });
+
+    it('does not clear a replacement status callback', () => {
+      const first = vi.fn();
+      const replacement = vi.fn();
+      registry.setStatusChangeCallback(first);
+      registry.setStatusChangeCallback(replacement);
+      registry.clearStatusChangeCallback(first);
+      registry.register(createEntry({ monitorId: 'a' }));
+      expect(first).not.toHaveBeenCalled();
+      expect(replacement).toHaveBeenCalledTimes(1);
     });
 
     it('callback failure does not poison the registry', () => {

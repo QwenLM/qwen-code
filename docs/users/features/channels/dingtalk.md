@@ -131,7 +131,10 @@ The channel editor presents these options as **仅最终结果** and **过程与
 {
   "channels": {
     "my-dingtalk": {
-      "outputMode": "final_only"
+      "type": "dingtalk",
+      "clientId": "your-client-id",
+      "clientSecret": "your-client-secret",
+      "outputMode": "process_and_result"
     }
   }
 }

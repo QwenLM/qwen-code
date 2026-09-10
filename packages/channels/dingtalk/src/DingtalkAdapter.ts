@@ -957,6 +957,7 @@ export class DingtalkChannel extends ChannelBase {
       segmentId: string;
       rawText: string;
       safeText: string;
+      discardedMarkerCount: number;
     }
   >();
   constructor(
@@ -1458,17 +1459,21 @@ export class DingtalkChannel extends ChannelBase {
   private async prepareReplyOutput(
     chatId: string,
     text: string,
-    streamed?: OutboundFileProjector,
+    streamed?: {
+      projector: OutboundFileProjector;
+      discardedMarkerCount: number;
+    },
   ): Promise<string> {
     return this.prepareFileOutput(
       text,
       (file, mediaId) => this.sendSessionFile(chatId, file, mediaId),
-      streamed,
+      streamed?.projector,
       () => {
         if (!this.resolveSessionWebhook(chatId)) {
           throw new Error('DingTalk session webhook unavailable');
         }
       },
+      streamed?.discardedMarkerCount,
     );
   }
 
@@ -1477,9 +1482,11 @@ export class DingtalkChannel extends ChannelBase {
     send: (file: ValidatedFile, mediaId: string) => Promise<void>,
     streamed?: OutboundFileProjector,
     preflight?: () => void,
+    discardedMarkerCount = 0,
   ): Promise<string> {
     const projection = projectFileText(text);
-    const streamedMarkers = streamed ? streamed.result('').markerCount : 0;
+    const streamedMarkers =
+      discardedMarkerCount + (streamed ? streamed.result('').markerCount : 0);
     if (projection.markerCount > 0 || streamedMarkers > 0) {
       process.stderr.write(
         `[DingTalk:${this.name}] file markers projected (final=${projection.markerCount}, streamed=${streamedMarkers})\n`,
@@ -2419,6 +2426,7 @@ export class DingtalkChannel extends ChannelBase {
    * the sessions on a fresh bridge.
    */
   override onBridgeDisconnected(): void {
+    this.fileProjectors.clear();
     for (const [sessionId, keys] of this.sessionReactionKeys) {
       this.sessionReactionKeys.delete(sessionId);
       for (const { messageId, chatId } of keys.values()) {
@@ -2688,24 +2696,23 @@ export class DingtalkChannel extends ChannelBase {
         segmentId: segment.segmentId,
         rawText: '',
         safeText: '',
+        discardedMarkerCount: 0,
       };
       this.fileProjectors.set(segment.runId, state);
     }
-    if (state.segmentId !== segment.segmentId) {
-      state.segmentId = segment.segmentId;
+    const segmentChanged = state.segmentId !== segment.segmentId;
+    if (segmentChanged && !text.startsWith(state.rawText)) {
+      state.rawText = '';
+      state.safeText = '';
+    } else if (!text.startsWith(state.rawText)) {
+      state.discardedMarkerCount += state.projector.result('').markerCount;
+      state.projector = new OutboundFileProjector();
       state.rawText = '';
       state.safeText = '';
     }
-    if (!text.startsWith(state.rawText)) {
-      state.projector = new OutboundFileProjector();
-      state.rawText = text;
-      state.safeText = state.projector.append(text);
-    } else {
-      state.safeText += state.projector.append(
-        text.slice(state.rawText.length),
-      );
-      state.rawText = text;
-    }
+    state.segmentId = segment.segmentId;
+    state.safeText += state.projector.append(text.slice(state.rawText.length));
+    state.rawText = text;
     this.interactionPresenter?.replaceOutput(segment, state.safeText);
   }
 
@@ -2716,7 +2723,7 @@ export class DingtalkChannel extends ChannelBase {
     segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
     const streamed = segment
-      ? this.fileProjectors.get(segment.runId)?.projector
+      ? this.fileProjectors.get(segment.runId)
       : undefined;
     if (segment) this.fileProjectors.delete(segment.runId);
     const outgoingText = await this.prepareReplyOutput(chatId, text, streamed);

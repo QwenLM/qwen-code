@@ -2420,8 +2420,8 @@ export class FeishuChannel extends ChannelBase {
 
       // Preserve the @sender prefix before cleanupCard can delete msgToSenderName
       cardState.atPrefix = this.msgToSenderName.get(targetInboundMsgId) || '';
-      // Set cancelling synchronously so progress callbacks cannot race cleanup.
-      // can detect the stop intent even before cancelSession resolves.
+      // Set cancelling synchronously so progress callbacks running before
+      // cancelSession resolves can see the stop intent and cannot race cleanup.
       // This replaces the old stopped=true which caused chunk loss on cancel failure.
       cardState.cancelling = true;
 

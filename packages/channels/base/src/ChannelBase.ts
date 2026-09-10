@@ -395,6 +395,8 @@ type ActivePrompt = {
   cancelRequested?: Promise<boolean>;
   /** Set once response delivery to the platform has begun; past this point a cancel can no longer suppress the turn's output. */
   deliveryStarted?: boolean;
+  /** Set once any complete output has begun delivery. */
+  outputDelivered?: boolean;
   /** Set for loop prompts, whose messageId is an internal job id — adapter
    *  hooks must not receive it (their contract is platform message ids). */
   loopPrompt?: boolean;
@@ -800,8 +802,12 @@ export abstract class ChannelBase {
     prompt: ActivePrompt,
     text: string,
   ): void {
-    if (!text.trim() || text.trim() === '[NO_REPLY]' || prompt.cancelled)
+    if (!text.trim() || prompt.cancelled) return;
+    if (text.trim() === '[NO_REPLY]') {
+      prompt.latestOutput = undefined;
+      prompt.latestDelivery = undefined;
       return;
+    }
     prompt.latestOutput = text;
     const detailed = this.config.outputMode === 'process_and_result';
     const delivery = { started: false };
@@ -813,6 +819,7 @@ export abstract class ChannelBase {
         if (prompt.cancelled || prompt.backgroundGroup?.failure) return;
         if (detailed) {
           delivery.started = true;
+          prompt.outputDelivered = true;
           this.markFinalDeliveryStarted(prompt);
           if (prompt.proactiveTarget)
             await this.pushProactive(prompt.proactiveTarget, text);
@@ -2662,7 +2669,7 @@ export abstract class ChannelBase {
         // Once delivery started the run counts as completed — a cancel settling
         // during/after the send must not convert a delivered run into a skip
         // (a one-shot loop would stay enabled and deliver twice).
-        if (!promptState.deliveryStarted) {
+        if (!promptState.deliveryStarted && !promptState.outputDelivered) {
           await this.settleCancelRequested(promptState);
           if (promptState.cancelled) {
             throw new ChannelLoopSkippedError(
@@ -2685,7 +2692,7 @@ export abstract class ChannelBase {
         // `cancelled` here — it would suppress the failed emit while the
         // /cancel handler (seeing deliveryStarted) declines to emit its own
         // terminal, leaving the task with no terminal event at all.
-        if (!promptState.deliveryStarted) {
+        if (!promptState.deliveryStarted && !promptState.outputDelivered) {
           await this.settleCancelRequested(promptState);
         }
         if (err instanceof ChannelLoopSkippedError && !promptState.cancelled) {
@@ -2969,7 +2976,7 @@ export abstract class ChannelBase {
         releaseHeldChunks();
         outputText = '';
         await this.finishRequestOutput(sessionId, promptState, response);
-        if (!promptState.deliveryStarted) {
+        if (!promptState.deliveryStarted && !promptState.outputDelivered) {
           await this.settleCancelRequested(promptState);
           if (promptState.cancelled) {
             throw new ChannelLoopSkippedError(
@@ -2986,7 +2993,7 @@ export abstract class ChannelBase {
         }
         return response;
       } catch (err) {
-        if (!promptState.deliveryStarted) {
+        if (!promptState.deliveryStarted && !promptState.outputDelivered) {
           await this.settleCancelRequested(promptState);
         }
         if (err instanceof ChannelLoopSkippedError && !promptState.cancelled) {
@@ -3296,7 +3303,7 @@ export abstract class ChannelBase {
     for (const group of this.backgroundGroups.values()) {
       if (group.sessionId === sessionId) {
         group.prompt.cancelled = true;
-        this.forgetBackgroundGroup(group);
+        this.emitTaskCancellation(group.prompt, sessionId, 'dropped');
       }
     }
     this.cancelBtw(sessionId);
