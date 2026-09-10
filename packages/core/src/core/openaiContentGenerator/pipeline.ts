@@ -30,6 +30,10 @@ import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
 import {
+  getGptReasoningCapabilities,
+  isReasoningEffortPlaceholder,
+} from '../reasoning-effort.js';
+import {
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
 } from '../modalityDefaults.js';
@@ -101,6 +105,9 @@ function applyConfiguredReasoningEffort(
   const effort = capabilities.efforts.find(
     (candidate) => candidate === reasoning['effort'],
   );
+  // GPT flattens after raw overrides merge in the provider.
+  if (effort && getGptReasoningCapabilities(loose['model'] as string))
+    return request;
   const { effort: _drop, ...rest } = reasoning;
   const next = { ...loose };
   if (Object.keys(rest).length > 0) next['reasoning'] = rest;
@@ -974,9 +981,12 @@ export class ContentGenerationPipeline {
     const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
       this.contentGeneratorConfig,
     );
-    const thinkingMandatory =
+    const explicitThinkingMandatory =
       reasoningCapabilities?.canDisable === false ||
       this.requiresThinking(model);
+    const thinkingMandatory =
+      explicitThinkingMandatory ||
+      getGptReasoningCapabilities(model)?.thinkingMandatory === true;
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
@@ -1059,6 +1069,16 @@ export class ContentGenerationPipeline {
       if ('reasoning_effort' in typed && typed['reasoning_effort'] !== 'none') {
         delete typed['reasoning_effort'];
       }
+      const gptReasoning = getGptReasoningCapabilities(model);
+      if (
+        gptReasoning &&
+        !reasoningCapabilities &&
+        !gptReasoning.thinkingMandatory &&
+        !thinkingMandatory &&
+        !isOpenRouterHostname(this.contentGeneratorConfig)
+      ) {
+        typed['reasoning_effort'] = 'none';
+      }
       // DeepSeek V4+ defaults `thinking.type` to `'enabled'`, so removing
       // the effort knob alone leaves thinking on. Emit the explicit
       // `thinking: { type: 'disabled' }` shape from DeepSeek's API spec.
@@ -1140,12 +1160,12 @@ export class ContentGenerationPipeline {
     // they are opaque parameters that do not put the request in thinking
     // mode (GLM reads `thinking.enabled`, DeepSeek `thinking.type`), and
     // dropping `required` there only degrades their forced-tool side
-    // queries. `thinkingMandatory` stays ungated: it is explicit
+    // queries. `explicitThinkingMandatory` stays ungated: it is explicit
     // "thinking is on" knowledge, model-agnostic by design.
     if (
       isDashScope &&
       typed['tool_choice'] === 'required' &&
-      (thinkingMandatory ||
+      (explicitThinkingMandatory ||
         (isQwenFamilyWireModel(model) &&
           (typed['enable_thinking'] === true ||
             (thinkingBudget != null && typed['enable_thinking'] !== false) ||
@@ -1154,7 +1174,7 @@ export class ContentGenerationPipeline {
     ) {
       debugLogger.debug(
         'DashScope: dropping tool_choice=required while thinking is enabled',
-        { model, reasoningEffort, thinkingBudget, thinkingMandatory },
+        { model, reasoningEffort, thinkingBudget, explicitThinkingMandatory },
       );
       delete typed['tool_choice'];
     }
@@ -1253,6 +1273,21 @@ export class ContentGenerationPipeline {
     // So `prompt + max_tokens ≤ window` holds for samplingParams users too,
     // matching the Anthropic path.
     if (configSamplingParams !== undefined) {
+      const rawEffort = {
+        ...configSamplingParams,
+        ...this.contentGeneratorConfig.extra_body,
+      }['reasoning_effort'];
+      const samplingParams =
+        getGptReasoningCapabilities(
+          request.model || this.contentGeneratorConfig.model,
+        ) &&
+        configSamplingParams['reasoning'] === undefined &&
+        (isReasoningEffortPlaceholder(
+          configSamplingParams['reasoning_effort'],
+        ) ||
+          isReasoningEffortPlaceholder(rawEffort))
+          ? { ...this.buildReasoningConfig(request), ...configSamplingParams }
+          : configSamplingParams;
       const requestMaxTokens = request.config?.maxOutputTokens;
       const maxTokens =
         reconcileMaxTokens(configSamplingParams.max_tokens, requestMaxTokens) ??
@@ -1266,8 +1301,8 @@ export class ContentGenerationPipeline {
       // max_completion_tokens must not leak the provider key unclamped.
       return clampProviderOutputBudgetKeys(
         maxTokens !== undefined
-          ? { ...configSamplingParams, max_tokens: maxTokens }
-          : { ...configSamplingParams },
+          ? { ...samplingParams, max_tokens: maxTokens }
+          : { ...samplingParams },
         requestMaxTokens,
       );
     }
@@ -1308,7 +1343,7 @@ export class ContentGenerationPipeline {
     //   - deepseek-reasoner — thinking is enabled by default and cannot be disabled
     //   - glm-4.7 — thinking is enabled by default; can be disabled via `extra_body.thinking.enabled`
     //   - kimi-k2-thinking — thinking is enabled by default and cannot be disabled
-    //   - gpt-5.x series — thinking is enabled by default; can be disabled via `reasoning.effort`
+    //   - gpt-5.x / gpt-6-astra — defaults and disable support depend on the model
     //   - qwen3 series — model-dependent; emitted as `enable_thinking: false`
     //                           on DashScope endpoints when reasoning is disabled
     //

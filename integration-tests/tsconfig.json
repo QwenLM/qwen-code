@@ -63,6 +63,9 @@
       "@qwen-code/qwen-code-core/conversationsRuntimeMarker": [
         "../packages/core/src/utils/conversations-runtime-marker.ts"
       ],
+      "@qwen-code/qwen-code-core/subagentRuntime": [
+        "../packages/core/src/subagent-runtime.ts"
+      ],
       "@qwen-code/qwen-code-core/storage": [
         "../packages/core/src/config/storage.ts"
       ],
