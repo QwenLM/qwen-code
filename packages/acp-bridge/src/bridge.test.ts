@@ -436,12 +436,18 @@ describe('createAcpSessionBridge', () => {
       // than idle, and graded `partial` — the channel did negotiate, it just
       // has not spoken yet, which is not the same as `none`.
       expect(bridge.activeWork).toBe(true);
+      expect(bridge.getSessionSummary(session.sessionId).activeWorkState).toBe(
+        'unknown',
+      );
       expect(reportingGrade(bridge)).toBe('partial');
 
       await sendActiveWorkSnapshot(handle, 1, [
         { sessionId: session.sessionId, holds: [] },
       ]);
       expect(bridge.activeWork).toBe(false);
+      expect(bridge.getSessionSummary(session.sessionId).activeWorkState).toBe(
+        'idle',
+      );
       expect(reportingGrade(bridge)).toBe('full');
 
       // Prompts are a daemon-owned fact: no child report is involved.
@@ -450,6 +456,9 @@ describe('createAcpSessionBridge', () => {
         prompt: [{ type: 'text', text: 'start background work' }],
       });
       expect(bridge.activeWork).toBe(true);
+      expect(bridge.getSessionSummary(session.sessionId).activeWorkState).toBe(
+        'active',
+      );
       prompt.resolve({ stopReason: 'end_turn' });
       await running;
       expect(bridge.activeWork).toBe(false);
@@ -465,11 +474,47 @@ describe('createAcpSessionBridge', () => {
       // Unsupported must not behave like unknown: an older child would
       // otherwise pin every session as permanently busy and unreapable.
       expect(bridge.activeWork).toBe(false);
+      expect(bridge.getSessionSummary(session.sessionId).activeWorkState).toBe(
+        'unsupported',
+      );
       expect(reportingGrade(bridge)).toBe('none');
       expect(bridge.activeWorkCoverage.oldestCoveredReportAt).toBeNull();
 
       await bridge.detachClient(session.sessionId, session.clientId);
       await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+
+      await bridge.shutdown();
+    });
+
+    it('applies a snapshot received before session registration', async () => {
+      const newSessionStarted = deferred<void>();
+      const releaseNewSession = deferred<void>();
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        newSessionImpl: async () => {
+          newSessionStarted.resolve();
+          await releaseNewSession.promise;
+          return { sessionId: 'registering' };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const spawning = bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await newSessionStarted.promise;
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: 'registering', holds: [agentHold('a1')] },
+      ]);
+      releaseNewSession.resolve();
+      const session = await spawning;
+
+      expect(bridge.getSessionSummary(session.sessionId).activeWorkState).toBe(
+        'active',
+      );
+      await sendActiveWorkSnapshot(handle, 2, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      expect(bridge.getSessionSummary(session.sessionId).activeWorkState).toBe(
+        'idle',
+      );
 
       await bridge.shutdown();
     });
@@ -3148,6 +3193,11 @@ describe('createAcpSessionBridge', () => {
       );
       await bridge.releaseManagedConversationBinding(sessionId, expectation);
       expect(artifactUpsertWorkspaceRoots).toEqual([]);
+      await bridge.getSessionSources(sessionId);
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: 'qwen/session/sources/list',
+        params: { sessionId },
+      });
       const deferredArtifactId = stableSessionArtifactId(
         sessionId,
         'url:https://example.com/deferred-artifact',
@@ -21891,6 +21941,66 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it.each(['yolo', 123, undefined])(
+      'forwards only a string expected Plan execution policy (%s)',
+      async (expectedPlanExecutionMode) => {
+        const { bridge, session, conn } = await setupForPermission();
+        const subAbort = new AbortController();
+        const events = bridge
+          .subscribeEvents(session.sessionId, {
+            signal: subAbort.signal,
+          })
+          [Symbol.asyncIterator]();
+        try {
+          const pending = (
+            conn as unknown as {
+              requestPermission(p: unknown): Promise<unknown>;
+            }
+          ).requestPermission({
+            sessionId: session.sessionId,
+            toolCall: {
+              toolCallId: 'exit-plan',
+              title: 'Exit plan mode',
+              _meta: { toolName: 'exit_plan_mode' },
+            },
+            options: [
+              {
+                optionId: 'restore_previous',
+                name: 'Approve',
+                kind: 'allow_once',
+              },
+            ],
+          });
+          const event = await events.next();
+          const { requestId } = event.value!.data as { requestId: string };
+          expect(
+            bridge.respondToSessionPermission(
+              session.sessionId,
+              requestId,
+              {
+                outcome: { outcome: 'selected', optionId: 'restore_previous' },
+                expectedPlanExecutionMode,
+                answers: { '0': 'Keep answers too' },
+                ignored: true,
+              } as RequestPermissionResponse,
+              { clientId: session.clientId },
+            ),
+          ).toBe(true);
+          const response = await pending;
+          expect(response).toEqual({
+            outcome: { outcome: 'selected', optionId: 'restore_previous' },
+            answers: { '0': 'Keep answers too' },
+            ...(typeof expectedPlanExecutionMode === 'string'
+              ? { expectedPlanExecutionMode }
+              : {}),
+          });
+        } finally {
+          subAbort.abort();
+          await bridge.shutdown();
+        }
+      },
+    );
+
     it('forwards session-scoped permission answers without arbitrary metadata', async () => {
       const { bridge, session, conn } = await setupForPermission();
 
@@ -26148,6 +26258,301 @@ describe('createAcpSessionBridge', () => {
       shellSpy.mockRestore();
     });
   });
+
+  it('preserves DAC plan policies through controls, notifications and reconnect snapshots', async () => {
+    let currentMode = 'plan';
+    let planExecutionMode: string | undefined = 'yolo';
+    let reconcileMode: string | undefined;
+    let connection: AgentSideConnection;
+    const controls: Array<Record<string, unknown>> = [];
+    const factory: ChannelFactory = async () => {
+      const { clientStream, agentStream } = createInMemoryChannel();
+      const modes = () => ({
+        currentModeId: currentMode,
+        availableModes: [],
+        _meta: { planExecutionMode },
+      });
+      const agent = new FakeAgent({
+        newSessionImpl: (params) =>
+          Promise.resolve({ sessionId: `sess:${params.cwd}`, modes: modes() }),
+        extMethodImpl: (method, params) => {
+          if (method === SERVE_STATUS_EXT_METHODS.sessionContext) {
+            if (reconcileMode) {
+              planExecutionMode = reconcileMode;
+              reconcileMode = undefined;
+            }
+            return Promise.resolve({ state: { modes: modes() } });
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+            const control = params as Record<string, unknown>;
+            controls.push(control);
+            const previous = currentMode;
+            currentMode = control['planMode']
+              ? 'plan'
+              : String(control['mode']);
+            planExecutionMode = control['planMode']
+              ? String(control['mode'])
+              : undefined;
+            return Promise.resolve({
+              previous,
+              current: currentMode,
+              planExecutionMode,
+            });
+          }
+          return Promise.resolve({});
+        },
+      });
+      connection = new AgentSideConnection(() => agent as Agent, agentStream);
+      return {
+        stream: clientStream,
+        exited: new Promise<
+          | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+          | undefined
+        >(() => {}),
+        kill: async () => {},
+        killSync: () => {},
+      };
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const events = bridge
+      .subscribeEvents(session.sessionId, {
+        snapshot: true,
+        signal: abort.signal,
+      })
+      [Symbol.asyncIterator]();
+    const nextMode = async () => {
+      for (;;) {
+        const event = await events.next();
+        if (event.done) throw new Error('Mode stream ended');
+        if (event.value.type === 'approval_mode_changed')
+          return event.value.data;
+      }
+    };
+    try {
+      expect((await events.next()).value?.data).toMatchObject({
+        currentApprovalMode: 'plan',
+        planExecutionMode: 'yolo',
+      });
+      expect(bridge.getDaemonStatusSnapshot().sessions[0]).toMatchObject({
+        currentApprovalMode: 'plan',
+        planExecutionMode: 'yolo',
+      });
+      await expect(
+        bridge.setSessionApprovalMode(session.sessionId, ApprovalMode.DEFAULT, {
+          persist: false,
+          planMode: true,
+        }),
+      ).resolves.toMatchObject({ mode: 'plan', planExecutionMode: 'default' });
+      expect(controls).toEqual([
+        { sessionId: session.sessionId, mode: 'default', planMode: true },
+      ]);
+      expect(await nextMode()).toMatchObject({
+        next: 'plan',
+        planExecutionMode: 'default',
+      });
+      const reconnect = bridge
+        .subscribeEvents(session.sessionId, {
+          snapshot: true,
+          signal: abort.signal,
+        })
+        [Symbol.asyncIterator]();
+      expect((await reconnect.next()).value?.data).toMatchObject({
+        currentApprovalMode: 'plan',
+        planExecutionMode: 'default',
+      });
+      reconcileMode = 'yolo';
+      await bridge.setSessionApprovalMode(
+        session.sessionId,
+        ApprovalMode.DEFAULT,
+        {
+          persist: false,
+          planMode: true,
+        },
+      );
+      expect(await nextMode()).toMatchObject({
+        next: 'plan',
+        planExecutionMode: 'default',
+      });
+      expect(await nextMode()).toMatchObject({
+        next: 'plan',
+        planExecutionMode: 'yolo',
+      });
+      await connection!.extNotification('qwen/notify/session/mode-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        currentModeId: 'plan',
+        planExecutionMode: 'auto-edit',
+      });
+      expect(await nextMode()).toMatchObject({
+        next: 'plan',
+        planExecutionMode: 'auto-edit',
+      });
+      expect(bridge.getDaemonStatusSnapshot().sessions[0]).toMatchObject({
+        currentApprovalMode: 'plan',
+        planExecutionMode: 'auto-edit',
+      });
+      await bridge.setSessionApprovalMode(
+        session.sessionId,
+        ApprovalMode.AUTO_EDIT,
+        {
+          persist: false,
+          planMode: false,
+        },
+      );
+      const exited = await nextMode();
+      expect(exited).toMatchObject({ next: 'auto-edit' });
+      expect(exited).not.toHaveProperty('planExecutionMode');
+      expect(bridge.getDaemonStatusSnapshot().sessions[0]).toMatchObject({
+        currentApprovalMode: 'auto-edit',
+      });
+      expect(bridge.getDaemonStatusSnapshot().sessions[0]).not.toHaveProperty(
+        'planExecutionMode',
+      );
+    } finally {
+      abort.abort();
+      await bridge.shutdown();
+    }
+  });
+
+  it.each([true, false])(
+    'keeps peer Plan and execution state unchanged when persisting DAC planMode=%s',
+    async (planMode) => {
+      const modesById = new Map<
+        string,
+        {
+          currentModeId: string;
+          availableModes: [];
+          _meta: { planExecutionMode: string | undefined };
+        }
+      >();
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const agent = new FakeAgent({
+          newSessionImpl: () => {
+            const index = modesById.size;
+            const sessionId = `dac-persist-${index}`;
+            const modes = {
+              currentModeId: index === 1 ? 'plan' : 'auto-edit',
+              availableModes: [] as [],
+              _meta: { planExecutionMode: index === 1 ? 'default' : undefined },
+            };
+            modesById.set(sessionId, modes);
+            return Promise.resolve({ sessionId, modes });
+          },
+          extMethodImpl: (method, params) => {
+            const control = params as Record<string, unknown>;
+            const modes = modesById.get(String(control['sessionId']));
+            if (method === SERVE_STATUS_EXT_METHODS.sessionContext)
+              return Promise.resolve({ state: { modes } });
+            if (
+              method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode &&
+              modes
+            ) {
+              const previous = modes.currentModeId;
+              modes.currentModeId = control['planMode']
+                ? 'plan'
+                : String(control['mode']);
+              modes._meta.planExecutionMode = control['planMode']
+                ? String(control['mode'])
+                : undefined;
+              return Promise.resolve({
+                previous,
+                current: modes.currentModeId,
+                planExecutionMode: modes._meta.planExecutionMode,
+              });
+            }
+            return Promise.resolve({});
+          },
+        });
+        new AgentSideConnection(() => agent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const persistApprovalMode = vi.fn(async () => {});
+      const bridge = makeBridge({
+        channelFactory: factory,
+        persistApprovalMode,
+      });
+      const sessions = [];
+      for (let index = 0; index < 3; index++) {
+        sessions.push(
+          await bridge.spawnOrAttach({
+            workspaceCwd: WS_A,
+            sessionScope: 'thread',
+          }),
+        );
+      }
+      expect(new Set(sessions.map((session) => session.sessionId)).size).toBe(
+        3,
+      );
+      const abort = new AbortController();
+      const modeEvents: unknown[][] = [[], [], []];
+      const collecting = sessions.map(async (session, index) => {
+        for await (const event of bridge.subscribeEvents(session.sessionId, {
+          signal: abort.signal,
+        })) {
+          if (event.type === 'approval_mode_changed')
+            modeEvents[index]!.push(event.data);
+        }
+      });
+      try {
+        await expect(
+          bridge.setSessionApprovalMode(
+            sessions[0]!.sessionId,
+            ApprovalMode.YOLO,
+            { planMode, persist: true },
+          ),
+        ).resolves.toMatchObject({
+          mode: planMode ? 'plan' : 'yolo',
+          persisted: true,
+        });
+        expect(persistApprovalMode).toHaveBeenCalledWith(
+          WS_A,
+          ApprovalMode.YOLO,
+        );
+        for (const index of [1, 2]) {
+          const snapshot = bridge
+            .subscribeEvents(sessions[index]!.sessionId, {
+              snapshot: true,
+              signal: abort.signal,
+            })
+            [Symbol.asyncIterator]();
+          const event = (await snapshot.next()).value;
+          expect(event?.type).toBe('session_snapshot');
+          expect(event?.data).toMatchObject({
+            currentApprovalMode: index === 1 ? 'plan' : 'auto-edit',
+          });
+          if (index === 1)
+            expect(event?.data).toMatchObject({ planExecutionMode: 'default' });
+          else expect(event?.data).not.toHaveProperty('planExecutionMode');
+        }
+        await vi.waitFor(() => expect(modeEvents[0]).toHaveLength(1));
+        expect(modeEvents[0]![0]).toMatchObject({
+          next: planMode ? 'plan' : 'yolo',
+          persisted: true,
+        });
+        if (planMode)
+          expect(modeEvents[0]![0]).toMatchObject({
+            planExecutionMode: 'yolo',
+          });
+        else expect(modeEvents[0]![0]).not.toHaveProperty('planExecutionMode');
+        expect(modeEvents.slice(1)).toEqual([[], []]);
+      } finally {
+        abort.abort();
+        await Promise.all(collecting);
+        await bridge.shutdown();
+      }
+    },
+  );
 
   describe('setSessionApprovalMode (#4175 Wave 4 PR 17)', () => {
     /**

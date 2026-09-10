@@ -22,18 +22,20 @@ import {
   isTieredEffortWireModel,
 } from '../../modalityDefaults.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
-import { clampReasoningEffort } from '../../reasoning-effort.js';
+import {
+  clampReasoningEffort,
+  parseModelReasoningCapabilities,
+} from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
 /**
- * Tiers the qwen3.8-max family accepts in `reasoning_effort`. This family's
- * ladder stops at `xhigh`, and a `max` above it is rejected with a 400 that
- * then repeats on every later request in the session. Declaring the supported
- * subset lets `clampReasoningEffort` cap the tier the same way the Anthropic
- * generator caps tiers its model lacks.
+ * Legacy input ladder for routes without an explicit reasoning capability.
+ * DashScope accepts high/max as xhigh aliases; configured presets expose only
+ * native low/medium/xhigh choices. Keep this fallback's clamp and warning for
+ * existing unconfigured routes.
  */
 const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [
   'low',
@@ -58,8 +60,9 @@ export function selectDashScopeThinkingKnob(
   extraBody: Record<string, unknown> | undefined,
   samplingParams: Record<string, unknown> | undefined,
   reasoningEffort: unknown,
+  tieredModel = isTieredEffortWireModel(model),
 ): DashScopeThinkingKnobSelection | undefined {
-  if (!isTieredEffortWireModel((model ?? '').toLowerCase())) {
+  if (!tieredModel) {
     return undefined;
   }
 
@@ -322,7 +325,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       maxRetries,
       defaultHeaders,
       ...(runtimeOptions || {}),
-      fetch: buildSessionAwareFetch(runtimeOptions?.fetch, this.cliConfig),
+      fetch: buildSessionAwareFetch(
+        runtimeOptions?.fetch,
+        this.cliConfig,
+        this.contentGeneratorConfig.customHeaders,
+      ),
     });
   }
 
@@ -377,9 +384,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     // Apply output token limits using parent class logic.
     const requestWithTokenLimits = this.applyOutputTokenLimit(request);
 
-    const isTieredQwenModel = isTieredEffortWireModel(
-      this.resolveWireModel(request.model),
-    );
+    const isTieredQwenModel = this.isTieredEffortModel(request.model);
     const extraBody = isTieredQwenModel
       ? withoutNullishThinkingKnobs(this.contentGeneratorConfig.extra_body)
       : this.contentGeneratorConfig.extra_body;
@@ -415,6 +420,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
           extraBody,
           requestParams,
           qwenEffortConfig['reasoning_effort'],
+          isTieredQwenModel,
         )
       : undefined;
 
@@ -523,7 +529,25 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       dropped.add(key);
     }
     this.warnConflictingKnobDrop(model, reasoningEffort, [...dropped]);
+    this.flattenGptReasoningEffort(merged);
     return merged as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+  }
+
+  private getConfiguredReasoning(model: string | undefined) {
+    const { authType, baseUrl } = this.contentGeneratorConfig;
+    const wireModel = model ?? this.contentGeneratorConfig.model;
+    const reasoning = authType
+      ? this.cliConfig.getResolvedModelConfig?.(authType, wireModel, baseUrl)
+          ?.capabilities.reasoning
+      : undefined;
+    return parseModelReasoningCapabilities(reasoning);
+  }
+
+  private isTieredEffortModel(model: string | undefined): boolean {
+    return isTieredEffortWireModel(
+      model ?? this.contentGeneratorConfig.model,
+      this.getConfiguredReasoning(model),
+    );
   }
 
   private resolveWireModel(model: string | undefined): string {
@@ -547,7 +571,13 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       return {};
     }
     const wireModel = this.resolveWireModel(model);
-    if (isTieredEffortWireModel(wireModel)) {
+    if (this.isTieredEffortModel(model)) {
+      const configured = this.getConfiguredReasoning(model);
+      if (configured && !configured.toggleOnly) {
+        return configured.efforts.includes(reasoning.effort)
+          ? { reasoning_effort: reasoning.effort }
+          : {};
+      }
       return { reasoning_effort: this.clampTieredEffort(reasoning.effort) };
     }
     if (isQwenFamilyWireModel(wireModel)) {
@@ -557,13 +587,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   /**
-   * Cap a configured tier at what the qwen3.8-max family actually accepts.
-   * This family does not take `max`, and the rejection is a 400 on every
-   * subsequent request rather than a one-off, so the tier is clamped to the
-   * strongest supported tier and reported once. Only the
-   * configured `reasoning.effort` passes through here: an explicit
-   * `extra_body` / `samplingParams` `reasoning_effort` is a documented
-   * verbatim override and is merged after this, so it still ships unchanged.
+   * Preserve the legacy clamp for a route without an explicit capability.
+   * Only the unified reasoning.effort preference reaches this fallback;
+   * extra_body and samplingParams remain verbatim provider overrides.
    */
   private clampTieredEffort(effort: ReasoningEffort): ReasoningEffort {
     const clamped = clampReasoningEffort(effort, DASHSCOPE_TIERED_EFFORTS);
@@ -610,7 +636,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (!isQwenFamilyWireModel(wireModel)) {
       return [];
     }
-    const isTieredEffortModel = isTieredEffortWireModel(wireModel);
+    const isTieredEffortModel = this.isTieredEffortModel(model);
     if (
       isTieredEffortModel &&
       selectedThinkingKnob?.field === 'enable_thinking' &&

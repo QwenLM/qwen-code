@@ -25,6 +25,7 @@ interface ToolApprovalProps {
   request: PermissionRequest;
   onConfirm: (id: string, selectedOption: string) => void | Promise<void>;
   variant?: 'inline' | 'floating';
+  disabled?: boolean;
   /**
    * Whether this approval should pull keyboard focus to its safe-default option
    * when it becomes the topmost (visible) one — on appearance, or when a panel/
@@ -37,6 +38,7 @@ interface ToolApprovalProps {
    */
   keyboardActive?: boolean;
   planTodos?: readonly TodoItem[];
+  planExecutionMode?: string;
   generateContent?: SessionContentGenerator;
 }
 
@@ -225,17 +227,31 @@ export function ToolApproval({
   request,
   onConfirm,
   variant = 'inline',
+  disabled = false,
   keyboardActive = true,
   planTodos = [],
+  planExecutionMode,
   generateContent,
 }: ToolApprovalProps) {
   const { t } = useI18n();
   const isAgent = isAgentTool(request.toolName);
-  const displayOptions = useMemo(
-    () => prepareDisplayOptions(request.options),
-    [request.options],
-  );
   const isExitPlanApproval = isExitPlanApprovalRequest(request);
+  const hasPlanExecutionMode =
+    isExitPlanApproval && planExecutionMode !== undefined;
+  const displayOptions = useMemo(
+    () =>
+      prepareDisplayOptions(
+        hasPlanExecutionMode
+          ? request.options.filter(
+              (option) =>
+                option.id === 'restore_previous' ||
+                option.kind === 'reject_once' ||
+                option.kind === 'reject_always',
+            )
+          : request.options,
+      ),
+    [request.options, hasPlanExecutionMode],
+  );
   const showsPlanWorkflow = planTodos.length > 0 && isExitPlanApproval;
   const safeDefaultIndex = useMemo(
     () => getSafeDefaultIndex(displayOptions, isAgent),
@@ -255,7 +271,12 @@ export function ToolApproval({
       if (key) keyCount.set(key, (keyCount.get(key) ?? 0) + 1);
     }
     return (option: PermissionRequest['options'][number]) => {
-      if (showsPlanWorkflow) {
+      if (hasPlanExecutionMode && option.id === 'restore_previous') {
+        return t('approval.option.executePlan', {
+          mode: t(`mode.label.${planExecutionMode}`),
+        });
+      }
+      if (showsPlanWorkflow || hasPlanExecutionMode) {
         // An exit_plan_mode approval emits two `allow_once` options, so this
         // cannot relabel by kind alone: `restore_previous` restores the
         // pre-plan approval mode (YOLO if the user entered plan from YOLO)
@@ -276,7 +297,13 @@ export function ToolApproval({
       if (key && keyCount.get(key) === 1) return t(key);
       return option.label || (key ? t(key) : '');
     };
-  }, [displayOptions, showsPlanWorkflow, t]);
+  }, [
+    displayOptions,
+    showsPlanWorkflow,
+    hasPlanExecutionMode,
+    planExecutionMode,
+    t,
+  ]);
   const [selected, setSelected] = useState(safeDefaultIndex);
   const requestRef = useRef(request);
   requestRef.current = request;
@@ -319,7 +346,7 @@ export function ToolApproval({
 
   const confirm = useCallback(
     (optionId: string) => {
-      if (submittedRef.current) return;
+      if (disabled || submittedRef.current) return;
       submittedRef.current = true;
       const requestId = requestRef.current.id;
       const submission = onConfirm(requestId, optionId);
@@ -336,7 +363,7 @@ export function ToolApproval({
         });
       }
     },
-    [onConfirm],
+    [onConfirm, disabled],
   );
 
   const focusOption = useCallback((index: number) => {
@@ -465,7 +492,7 @@ export function ToolApproval({
       className={
         variant === 'floating'
           ? `${styles.approval} ${styles.floating}${
-              showsPlanWorkflow ? ` ${styles.floatingWorkflow}` : ''
+              isExitPlanApproval ? ` ${styles.floatingWorkflow}` : ''
             }`
           : styles.approval
       }
@@ -560,6 +587,7 @@ export function ToolApproval({
                 isSelected ? styles.optionActive : ''
               }`}
               data-web-shell-permission-option
+              disabled={disabled}
               data-option-id={option.id}
               tabIndex={isSelected ? 0 : -1}
               role="radio"

@@ -67,6 +67,7 @@ export {
   runOutsideAgentContext,
 } from './agents/runtime/agent-context.js';
 export * from './core/reasoning-effort.js';
+export { isOpenRouterHostname } from './core/openaiContentGenerator/provider/openrouter.js';
 export * from './core/coreToolScheduler.js';
 export * from './core/permissionFlow.js';
 export * from './core/permission-helpers.js';
@@ -368,8 +369,10 @@ export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/session-reference-service.js';
 export * from './ipc/inbound-gate.js';
+export * from './ipc/peer-admission.js';
 export * from './ipc/peer-controllers.js';
 export * from './ipc/peer-directory.js';
+export * from './ipc/peer-drop-reports.js';
 export * from './ipc/peer-envelope.js';
 export * from './ipc/peer-frames.js';
 export * from './ipc/peer-routing.js';
@@ -463,6 +466,7 @@ export { escapeXml } from './utils/xml.js';
 export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
+export * from './agents/background-notification-queue.js';
 export * from './services/web-terminal-registry.js';
 export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-snapshot.js';
@@ -828,3 +832,6 @@ export {
   type StartupEventSink,
   type StartupEventAttrs,
 } from './utils/startupEventSink.js';
+
+export * from './services/session-sources.js';
+export { RecordSourceTool } from './tools/record-source.js';

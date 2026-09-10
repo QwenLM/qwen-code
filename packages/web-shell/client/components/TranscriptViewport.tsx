@@ -20,7 +20,9 @@ import { Button } from './ui/button';
 import { GlobalTurnNavigation } from './GlobalTurnNavigation';
 import styles from './TranscriptViewport.module.css';
 import { useTranscriptViewport } from '../hooks/useTranscriptViewport';
+import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import { useI18n } from '../i18n';
+import { SESSION_TIMELINE_MIN_VISIBLE_ENTRIES } from '../constants/sessions';
 
 interface ReadingAnchor {
   source: string;
@@ -49,8 +51,10 @@ export const TranscriptViewport = forwardRef<
     !props.hideSessionTimeline &&
     (viewport.navigation.mode === 'ready' ||
       viewport.navigation.mode === 'loading') &&
-    viewport.navigation.effectiveTurnCount > 0;
+    viewport.navigation.effectiveTurnCount >=
+      SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
   const root = useRef<HTMLDivElement>(null);
+  const navigationVisible = useChatNavigationVisible(root, globalNavigation);
   const list = useRef<MessageListHandle>(null);
   const anchor = useRef<ReadingAnchor | undefined>(undefined);
   const entryDirection = useRef<'older' | 'newer'>('older');
@@ -59,6 +63,15 @@ export const TranscriptViewport = forwardRef<
   const appliedTarget = useRef<number | undefined>(undefined);
   const scrollIntent = useRef(0);
   const restoring = useRef(false);
+  const loadFrame = useRef<number | undefined>(undefined);
+  useLayoutEffect(
+    () => () => {
+      if (loadFrame.current !== undefined)
+        cancelAnimationFrame(loadFrame.current);
+      loadFrame.current = undefined;
+    },
+    [viewKey],
+  );
   useLayoutEffect(() => {
     if (historical || loading) onCanScrollToBottomChange?.(true);
   }, [historical, loading, onCanScrollToBottomChange]);
@@ -114,6 +127,12 @@ export const TranscriptViewport = forwardRef<
       offset: row.getBoundingClientRect().top - top,
     };
   }, [historical, pin, rows, scroller, toolSources]);
+  const captureRef = useRef(capture);
+  captureRef.current = capture;
+  const refreshAnchor = () => {
+    // Virtual rows may not exist when the scroll event starts the request.
+    anchor.current = captureRef.current() ?? anchor.current;
+  };
   useImperativeHandle(
     ref,
     () => ({
@@ -206,12 +225,31 @@ export const TranscriptViewport = forwardRef<
   }, [messages, viewKey, historical, viewport.target, capture, rows, scroller]);
 
   const load = (direction: 'older' | 'newer') => {
-    anchor.current = capture();
-    entryDirection.current = direction;
-    void viewport.load(direction);
+    if (loadFrame.current !== undefined) return;
+    const intent = scrollIntent.current;
+    let remaining = 8;
+    const loadWhenVisible = () => {
+      loadFrame.current = undefined;
+      if (intent !== scrollIntent.current) return;
+      const saved = capture();
+      // A scroll event can arrive before the virtualized rows mount. Loading
+      // without an anchor would leave no reading position to restore.
+      if (!saved) {
+        if (--remaining > 0)
+          loadFrame.current = requestAnimationFrame(loadWhenVisible);
+        return;
+      }
+      anchor.current = saved;
+      entryDirection.current = direction;
+      void viewport.load(direction, refreshAnchor);
+    };
+    loadWhenVisible();
   };
   const handleScrollIntent = () => {
     scrollIntent.current += 1;
+    if (loadFrame.current !== undefined)
+      cancelAnimationFrame(loadFrame.current);
+    loadFrame.current = undefined;
     viewport.cancelSelection();
     if (!loading) anchor.current = undefined;
     restoring.current = false;
@@ -258,11 +296,12 @@ export const TranscriptViewport = forwardRef<
       data-history-viewport={historical ? 'historical' : 'live'}
     >
       {globalNavigation && (
-        <div className={styles.navigation}>
+        <div className={styles.navigation} hidden={!navigationVisible}>
           <GlobalTurnNavigation
             state={viewport.navigation}
             store={viewport.store}
             onSelect={(ordinal) => {
+              handleScrollIntent();
               anchor.current = undefined;
               void viewport.selectOrdinal(ordinal);
             }}
@@ -270,7 +309,7 @@ export const TranscriptViewport = forwardRef<
         </div>
       )}
       <div
-        className="relative flex min-h-0 min-w-0 flex-1 flex-col"
+        className="flex min-h-0 min-w-0 flex-1 flex-col"
         onWheelCapture={(event) => {
           handleScrollIntent();
           loadAtEdge(event.deltaY < 0 ? 'older' : 'newer');
@@ -297,81 +336,83 @@ export const TranscriptViewport = forwardRef<
           loadAtEdge();
         }}
       >
-        {(loading || viewport.error) && (
-          <div className="absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded-lg border bg-background px-3 py-1 text-xs text-muted-foreground">
-            {loading && (
-              <span role="status">{t('history.loadingEarlier')}</span>
-            )}
-            {viewport.error && (
-              <span role="alert">
-                {t('history.viewError')}{' '}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    anchor.current = capture();
-                    viewport.retry();
-                  }}
-                >
-                  {t('history.retry')}
-                </Button>
-              </span>
-            )}
-          </div>
-        )}
-        <MessageList
-          {...props}
-          key={viewport.viewKey}
-          ref={list}
-          messages={viewport.messages}
-          hideSessionTimeline={
-            historical || globalNavigation || props.hideSessionTimeline
-          }
-          {...(viewport.historical
-            ? {
-                frozenViewport: true,
-                hasOlderHistory: false,
-                onLoadOlderHistory: undefined,
-                historyCapacityReached: false,
-                historyPaginationError: false,
-                loadingOlderHistory: false,
-                onCanScrollToBottomChange: undefined,
-                firstTurnMetrics: undefined,
-                sessionKey: viewport.viewKey,
-                pendingApproval: null,
-                loadingTranscript: false,
-                catchingUp: false,
-                isResponding: false,
-                transcriptActivity: undefined,
-                onReloadTranscript: undefined,
-                transcriptReloadPaused: true,
-                onEditUserMessage: undefined,
-                onShowContextDetail: undefined,
-                onBranchSession: undefined,
-                onRetryClick: undefined,
-                onRetryFailedPrompt: undefined,
-                showRetryHint: false,
-                failedPromptMessageId: undefined,
-                tailContent: undefined,
-                welcomeHeader: undefined,
-                activeTurnStartedAt: undefined,
-                turnFileChanges: undefined,
-                turnArtifacts: undefined,
-                turnScheduledTasks: undefined,
-                generateContent: undefined,
-              }
-            : {})}
-        />
-        {historical && !onCanScrollToBottomChange && (
-          <Button
-            className="absolute bottom-3 left-1/2 -translate-x-1/2"
-            variant="outline"
-            size="sm"
-            onClick={returnToLive}
-          >
-            {t('history.returnLatest')}
-          </Button>
-        )}
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          {(loading || viewport.error) && (
+            <div className="absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded-lg border bg-background px-3 py-1 text-xs text-muted-foreground">
+              {loading && (
+                <span role="status">{t('history.loadingEarlier')}</span>
+              )}
+              {viewport.error && (
+                <span role="alert">
+                  {t('history.viewError')}{' '}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      anchor.current = capture();
+                      viewport.retry(refreshAnchor);
+                    }}
+                  >
+                    {t('history.retry')}
+                  </Button>
+                </span>
+              )}
+            </div>
+          )}
+          <MessageList
+            {...props}
+            key={viewport.viewKey}
+            ref={list}
+            messages={viewport.messages}
+            hideSessionTimeline={
+              historical || globalNavigation || props.hideSessionTimeline
+            }
+            {...(viewport.historical
+              ? {
+                  frozenViewport: true,
+                  hasOlderHistory: false,
+                  onLoadOlderHistory: undefined,
+                  historyCapacityReached: false,
+                  historyPaginationError: false,
+                  loadingOlderHistory: false,
+                  onCanScrollToBottomChange: undefined,
+                  firstTurnMetrics: undefined,
+                  sessionKey: viewport.viewKey,
+                  pendingApproval: null,
+                  loadingTranscript: false,
+                  catchingUp: false,
+                  isResponding: false,
+                  transcriptActivity: undefined,
+                  onReloadTranscript: undefined,
+                  transcriptReloadPaused: true,
+                  onEditUserMessage: undefined,
+                  onShowContextDetail: undefined,
+                  onBranchSession: undefined,
+                  onRetryClick: undefined,
+                  onRetryFailedPrompt: undefined,
+                  showRetryHint: false,
+                  failedPromptMessageId: undefined,
+                  tailContent: undefined,
+                  welcomeHeader: undefined,
+                  activeTurnStartedAt: undefined,
+                  turnFileChanges: undefined,
+                  turnArtifacts: undefined,
+                  turnScheduledTasks: undefined,
+                  generateContent: undefined,
+                }
+              : {})}
+          />
+          {historical && !onCanScrollToBottomChange && (
+            <Button
+              className="absolute bottom-3 left-1/2 -translate-x-1/2"
+              variant="outline"
+              size="sm"
+              onClick={returnToLive}
+            >
+              {t('history.returnLatest')}
+            </Button>
+          )}
+        </div>
       </div>
     </div>
   );
