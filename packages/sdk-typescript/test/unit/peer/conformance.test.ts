@@ -210,6 +210,9 @@ describe.skipIf(noUnixSockets)('peer endpoint ↔ Qwen Code session', () => {
         (r) => r.status === 'dropped' && r.dropReason === 'rate-limited',
       ),
     ).toBe(true);
+    expect(receipts.map((r) => r.msgId).sort()).toEqual(
+      [first!, ...rest].map((frame) => frame.msgId).sort(),
+    );
   });
 
   it('receives what a Qwen Code session sends, and its receipt reads back there', async () => {
@@ -262,9 +265,13 @@ describe.skipIf(noUnixSockets)('peer endpoint ↔ Qwen Code session', () => {
     });
 
     const trusted = await startEndpoint({ controllerToken: token });
-    await trusted.send({ to: 'core-tui', content: 'go' });
+    // Holding the token is not presenting it.
+    await trusted.send({ to: 'core-tui', content: 'plain' });
     await vi.waitFor(() => expect(core.arrivals).toHaveLength(1));
-    expect(core.arrivals[0]).toMatchObject({
+    expect(core.arrivals[0]).toMatchObject({ auth: 'peer' });
+    await trusted.send({ to: 'core-tui', content: 'go', controller: true });
+    await vi.waitFor(() => expect(core.arrivals).toHaveLength(2));
+    expect(core.arrivals[1]).toMatchObject({
       auth: 'controller',
       controller: { label: 'voice-bridge' },
     });
@@ -273,8 +280,9 @@ describe.skipIf(noUnixSockets)('peer endpoint ↔ Qwen Code session', () => {
       name: 'forged',
       controllerToken: `qpc_${'0'.repeat(64)}`,
     });
-    await forged.send({ to: 'core-tui', content: 'go' });
-    expect(core.arrivals).toHaveLength(1);
+    await forged.send({ to: 'core-tui', content: 'go', controller: true });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(core.arrivals).toHaveLength(2);
   });
 
   it('parses every line the way a Qwen Code session does', () => {
@@ -444,6 +452,19 @@ describe.skipIf(noUnixSockets)('peer endpoint ↔ Qwen Code session', () => {
       sessionId: 'newer',
       schemaVersion: 2,
     });
+    if (process.platform === 'linux') {
+      const [boot, ticks] = readProcStartToken(process.pid)!.split(':');
+      plant(`${process.pid}-0000000e.json`, {
+        ...base,
+        sessionId: 'reused-pid',
+        procStart: `${boot}:${Number(ticks) + 1}`,
+      });
+      plant(`${process.pid}-0000000f.json`, {
+        ...base,
+        sessionId: 'no-namespace',
+        pidNs: null,
+      });
+    }
     plant(`${dead}.json`, {
       ...base,
       sessionId: 'dead',
@@ -478,6 +499,9 @@ describe.skipIf(noUnixSockets)('peer endpoint ↔ Qwen Code session', () => {
       'bidi\u202eoverride\u200bzero-width',
       'x'.repeat(250),
       '\u{1F600}'.repeat(45),
+      '\u{1F600}'.repeat(250),
+      'voice\u{E0041}\u{E0042}bridge',
+      'a\u180eb\ufff9c',
       '',
     ];
     for (const value of awkward) {

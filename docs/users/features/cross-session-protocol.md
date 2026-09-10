@@ -8,9 +8,12 @@ connection, and what it sends back. Everything here is what the code
 does today at schema version 1 and frame version 1; the last section
 says what may change and how you will know.
 
-For a Node program, `@qwen-code/sdk/peer` implements this page: it depends
-on nothing but Node, and its tests run it against Qwen Code's own
-implementation in both directions. Use it, or read on to write your own.
+For a Node program, `@qwen-code/sdk/peer` implements the joining side of
+this page — the record, the inbox, the auth line, frames and receipts — with
+nothing but Node, and its tests run it against Qwen Code's own implementation
+in both directions. It applies none of §6 to its own inbox: a program that
+needs rate limits, holds or a duplicate window applies them itself. Use it, or
+read on to write your own.
 
 Every value that crosses a process boundary is untrusted on arrival and
 validated by the reader. Where this page says a field "must" have some
@@ -78,8 +81,10 @@ able to receive receipts — writes the same record for itself: its own
 mints (any UUID), `kind: "external"`, a `name` (yours, or derived the
 same way; it is flattened to one line and bounded when displayed), and
 `ipcPath` + `ipcToken` for an inbox it binds itself (§2). On Linux,
-`procStart` and `pidNs` are required: every reader compares `pidNs` with
-its own, so a record without one is never listed — and never swept. Write
+`pidNs` is required: every reader compares it with its own, so a record
+without one is never listed — and never swept. `procStart` is required too,
+for a different reason: without it a reader falls back to plain PID liveness
+and cannot tell a recycled PID from the process that wrote the record. Write
 to a temp file in the same directory and `rename` over the target; create
 the file 0600; refuse to write through a symlink. If `<pid>.json` already
 holds something you cannot prove was left by an earlier process with your

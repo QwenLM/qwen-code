@@ -334,6 +334,18 @@ async function writeAtomically(
 }
 
 /**
+ * Registrations in this process, one at a time.
+ *
+ * Claiming the PID-keyed name is a read and then a rename. Two claims that
+ * overlap inside one process would both find the name free and both take
+ * it, the second silently replacing the first and leaving that endpoint in
+ * no file at all. In sequence, the second finds the first's record and
+ * mints a name of its own. Other processes cannot collide on the name: it
+ * is keyed by this PID.
+ */
+let registrations: Promise<unknown> = Promise.resolve();
+
+/**
  * Publish `record` for this process and return where it went.
  *
  * The PID-keyed `<pid>.json` is the name every reader understands, so it is
@@ -342,7 +354,17 @@ async function writeAtomically(
  * this PID number, by a newer schema — the record goes to a freshly minted
  * `<pid>-<8 hex>.json` instead of overwriting something that may be live.
  */
-export async function writeOwnRecord(
+export function writeOwnRecord(
+  dir: string,
+  record: SessionRecord,
+): Promise<string> {
+  const run = () => claimAndWrite(dir, record);
+  const written = registrations.then(run, run);
+  registrations = written.catch(() => {});
+  return written;
+}
+
+async function claimAndWrite(
   dir: string,
   record: SessionRecord,
 ): Promise<string> {

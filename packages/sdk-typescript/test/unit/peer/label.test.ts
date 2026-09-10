@@ -48,3 +48,19 @@ describe('labels', () => {
     expect(deriveSessionName('/', 'id')).toMatch(/^session-[0-9a-f]{2}$/);
   });
 });
+
+describe('labels — by category and by code point', () => {
+  it('collapses format characters by category, including blocks nobody lists', () => {
+    expect(flattenPeerLabel('voice\u{E0041}\u{E0042}bridge')).toBe(
+      'voice bridge',
+    );
+    expect(flattenPeerLabel('a\u180eb')).toBe('a b');
+    expect(flattenPeerLabel('a\ufff9b')).toBe('a b');
+  });
+
+  it('caps a label in code points, never splitting a surrogate pair', () => {
+    const points = Array.from(flattenPeerLabel('\u{1F600}'.repeat(250)));
+    expect(points).toHaveLength(MAX_LABEL_CHARS);
+    expect(points.at(-2)).toBe('\u{1F600}');
+  });
+});

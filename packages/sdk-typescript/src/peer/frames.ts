@@ -51,17 +51,13 @@ export type PeerModeClass = 'bypass' | 'prompting';
 /** Which wall a `dropped` message met. */
 export type PeerDropReason = 'rate-limited' | 'duplicate' | 'queue-full';
 
-/** What became of a message on the receiving side. */
-export type PeerDeliveryStatus =
-  | 'held'
-  | 'denied'
-  | 'refused'
-  | 'expired'
-  | 'delivered'
-  | 'misaddressed'
-  | 'dropped';
-
-export const PEER_DELIVERY_STATUSES: readonly PeerDeliveryStatus[] = [
+/**
+ * What became of a message on the receiving side.
+ *
+ * The one list of them: the type is derived from it, so the set the parser
+ * accepts cannot drift from the set the type names.
+ */
+export const PEER_DELIVERY_STATUSES = [
   'held',
   'denied',
   'refused',
@@ -69,7 +65,9 @@ export const PEER_DELIVERY_STATUSES: readonly PeerDeliveryStatus[] = [
   'delivered',
   'misaddressed',
   'dropped',
-];
+] as const;
+
+export type PeerDeliveryStatus = (typeof PEER_DELIVERY_STATUSES)[number];
 
 export interface PeerUserFrame {
   msgV: number;

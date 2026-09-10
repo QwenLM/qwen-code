@@ -164,3 +164,43 @@ describe('advertisablePeerAddress and suggestPeerNames', () => {
     expect(suggestPeerNames(peers, '')).toEqual([]);
   });
 });
+
+describe('directory — twins and contested names', () => {
+  it('adds the ref to a suggestion whose name another session shares', () => {
+    const first = entry('app', 's1');
+    const second = entry('app', 's2');
+    const peers = [first, second, entry('docs', 's3')];
+    expect(suggestPeerNames(peers, 'ap').sort()).toEqual(
+      [`app [${first.ref}]`, `app [${second.ref}]`].sort(),
+    );
+  });
+
+  it('drops a twin that does not answer before picking the newest, so a dead copy never shadows a live one', async () => {
+    const peers = await reachableEntries(
+      [
+        record({ ipcPath: '/tmp/alive.sock', startedAt: 1 }),
+        record({ ipcPath: '/tmp/dead.sock', startedAt: 2 }),
+      ],
+      async (socketPath) =>
+        socketPath === '/tmp/alive.sock' ? 'alive' : 'dead',
+    );
+    expect(peers.map((peer) => peer.ipcPath)).toEqual(['/tmp/alive.sock']);
+  });
+
+  it('keeps both twins when asked not to collapse them, which makes the name ambiguous', async () => {
+    const peers = await reachableEntries(
+      [
+        record({ ipcPath: '/tmp/a.sock', startedAt: 1 }),
+        record({ ipcPath: '/tmp/b.sock', startedAt: 2 }),
+      ],
+      async () => 'alive',
+      { collapseTwins: false },
+    );
+    expect(peers).toHaveLength(2);
+    expect(resolvePeerTarget(peers, 'alpha').kind).toBe('ambiguous');
+    expect(peers.map((peer) => advertisablePeerAddress(peer, peers))).toEqual([
+      undefined,
+      undefined,
+    ]);
+  });
+});

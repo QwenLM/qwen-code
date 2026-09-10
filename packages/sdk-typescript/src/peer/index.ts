@@ -71,7 +71,7 @@ export {
   PeerSendError,
   SEND_TIMEOUT_MS,
   isLocalIpcPath,
-  probePeerSocket,
+  probePeerSocketVerdict,
   sendPeerFrame,
   type PeerSocketVerdict,
   type SendPeerFrameOptions,

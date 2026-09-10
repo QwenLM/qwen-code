@@ -246,3 +246,71 @@ describe('resolveQwenHome', () => {
     expect(resolveQwenHome('rel/home')).toBe(path.resolve('rel/home'));
   });
 });
+
+describe('writeOwnRecord — defensive paths', () => {
+  it('gives overlapping registrations in one process a record each', async () => {
+    const [a, b] = await Promise.all([
+      writeOwnRecord(dir, ownRecord({ sessionId: 'a' })),
+      writeOwnRecord(dir, ownRecord({ sessionId: 'b' })),
+    ]);
+    expect(a).not.toBe(b);
+    expect([path.basename(a), path.basename(b)]).toContain(
+      `${process.pid}.json`,
+    );
+    expect(JSON.parse(fs.readFileSync(a, 'utf8')).sessionId).toBe('a');
+    expect(JSON.parse(fs.readFileSync(b, 'utf8')).sessionId).toBe('b');
+    expect(
+      (await readLiveSessionRecords(dir)).map((r) => r.sessionId).sort(),
+    ).toEqual(['a', 'b']);
+  });
+
+  it.runIf(isPosix)(
+    'tightens a registry directory that already existed',
+    async () => {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.chmodSync(dir, 0o755);
+      await writeOwnRecord(dir, ownRecord());
+      expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
+    },
+  );
+
+  it.runIf(isPosix && process.getuid?.() !== 0)(
+    'does not replace a record it merely failed to read',
+    async () => {
+      const shared = plant(
+        `${process.pid}.json`,
+        ownRecord({ sessionId: 'unreadable' }),
+      );
+      fs.chmodSync(shared, 0o000);
+      let written: string;
+      try {
+        written = await writeOwnRecord(dir, ownRecord());
+      } finally {
+        fs.chmodSync(shared, 0o600);
+      }
+      expect(path.basename(written)).not.toBe(`${process.pid}.json`);
+      expect(JSON.parse(fs.readFileSync(shared, 'utf8')).sessionId).toBe(
+        'unreadable',
+      );
+    },
+  );
+
+  it.runIf(isLinux)(
+    'skips a live PID whose start token does not match, and a record without a namespace',
+    async () => {
+      const [boot, ticks] = readProcStartToken(process.pid)!.split(':');
+      plant(`${process.pid}-eeeeeeee.json`, {
+        ...ownRecord({ sessionId: 'reused-pid' }),
+        procStart: `${boot}:${Number(ticks) + 1}`,
+      });
+      plant(`${process.pid}-ffffffff.json`, {
+        ...ownRecord({ sessionId: 'no-namespace' }),
+        pidNs: null,
+      });
+      await writeOwnRecord(dir, ownRecord({ sessionId: 'own' }));
+      expect(
+        (await readLiveSessionRecords(dir)).map((r) => r.sessionId),
+      ).toEqual(['own']);
+    },
+  );
+});

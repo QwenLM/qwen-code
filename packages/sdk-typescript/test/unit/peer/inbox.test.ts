@@ -208,3 +208,117 @@ describe.skipIf(noUnixSockets)('startPeerInbox', () => {
     ).rejects.toMatchObject({ code: 'bind-failed' });
   });
 });
+
+describe.skipIf(noUnixSockets)('startPeerInbox — defensive paths', () => {
+  let root: string;
+  const opened: PeerInbox[] = [];
+  const servers: net.Server[] = [];
+
+  beforeEach(() => {
+    root = makeTempRoot();
+  });
+
+  afterEach(async () => {
+    await Promise.all(opened.splice(0).map((inbox) => inbox.close()));
+    for (const server of servers.splice(0)) server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  async function open(socketPath: string, frames: PeerFrame[] = []) {
+    const inbox = await startPeerInbox({
+      socketPath,
+      requiredToken: TOKEN,
+      onFrame: (frame) => frames.push(frame),
+      keepAlive: false,
+    });
+    opened.push(inbox);
+    return inbox;
+  }
+
+  it('leaves the permissions of a directory a caller chose alone', async () => {
+    const deploy = path.join(root, 'deploy');
+    fs.mkdirSync(deploy);
+    fs.chmodSync(deploy, 0o755);
+    const inbox = await open(path.join(deploy, 'agent.sock'));
+    expect(fs.statSync(deploy).mode & 0o777).toBe(0o755);
+    expect(fs.statSync(inbox.socketPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('tightens a socket directory that already existed', async () => {
+    const socks = path.join(root, 'qwen-socks');
+    fs.mkdirSync(socks);
+    fs.chmodSync(socks, 0o755);
+    await open(path.join(socks, 'inbox.sock'));
+    expect(fs.statSync(socks).mode & 0o777).toBe(0o700);
+  });
+
+  it('refuses a directory that is a symlink', async () => {
+    const real = path.join(root, 'real');
+    fs.mkdirSync(real);
+    const link = path.join(root, 'link');
+    fs.symlinkSync(real, link);
+    await expect(open(path.join(link, 'inbox.sock'))).rejects.toMatchObject({
+      code: 'bind-failed',
+      message: expect.stringContaining('not a directory'),
+    });
+  });
+
+  it('fails rather than take a live name when no sibling name fits', async () => {
+    const dir = path.join(root, 's');
+    fs.mkdirSync(dir);
+    const room =
+      MAX_SOCKET_PATH_BYTES - Buffer.byteLength(path.join(dir, '.sock'));
+    const requested = path.join(dir, `${'n'.repeat(room)}.sock`);
+    expect(Buffer.byteLength(requested)).toBe(MAX_SOCKET_PATH_BYTES);
+    const occupant = net.createServer();
+    servers.push(occupant);
+    await new Promise<void>((resolve) => occupant.listen(requested, resolve));
+    await expect(open(requested)).rejects.toMatchObject({
+      code: 'bind-failed',
+      message: expect.stringContaining('no sibling name fits'),
+    });
+  });
+
+  it('drops an over-long line at once, not at the line deadline', async () => {
+    const frames: PeerFrame[] = [];
+    const inbox = await startPeerInbox({
+      socketPath: path.join(root, 'long.sock'),
+      requiredToken: TOKEN,
+      onFrame: (frame) => frames.push(frame),
+      keepAlive: false,
+    });
+    opened.push(inbox);
+    const started = Date.now();
+    await dial(
+      inbox.socketPath,
+      buildAuthLine(TOKEN) + 'x'.repeat(MAX_FRAME_CHARS + 16),
+      { end: false },
+    );
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(frames).toEqual([]);
+  });
+
+  it('closes promptly while a connection is still open', async () => {
+    const inbox = await open(path.join(root, 'idle.sock'));
+    const idle = net.connect({ path: inbox.socketPath });
+    idle.on('error', () => {});
+    await new Promise<void>((resolve) => idle.on('connect', resolve));
+    const started = Date.now();
+    await inbox.close();
+    expect(Date.now() - started).toBeLessThan(2_000);
+    idle.destroy();
+  });
+
+  it('offers no candidate path on Windows', async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      expect(resolveInboxCandidates()).toEqual([]);
+      await expect(
+        startPeerInbox({ requiredToken: TOKEN, onFrame: () => {} }),
+      ).rejects.toMatchObject({ code: 'unsupported-platform' });
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
+  });
+});

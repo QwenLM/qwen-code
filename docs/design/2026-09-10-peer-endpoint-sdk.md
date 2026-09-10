@@ -51,9 +51,9 @@ page publishes to Qwen Code's constants. A disagreement there means one of
 the implementations, or the page, is wrong.
 
 **Its own subpath, Node only.** `@qwen-code/sdk/peer` is a separate entry,
-like the transports entry. The default and daemon entries are bundled for
-browsers and must stay free of Node built-ins; this module needs sockets and
-the filesystem.
+like the transports entry. The daemon entries are bundled for browsers, where
+the endpoint's sockets cannot exist, and the default entry is what every
+`query()` user loads; the endpoint is opt-in for both.
 
 **The shared record name when it is free.** An endpoint publishes
 `<pid>.json`, the name every Qwen Code build with a registry can read. When
@@ -61,7 +61,8 @@ that name is held — by another endpoint in the same process, by a record from
 another namespace or machine that collides on the PID, by a newer schema — it
 publishes a minted `<pid>-<8 hex>.json` rather than overwrite something that
 may be live. Only a record provably left by an earlier process with the same
-PID is replaced.
+PID is replaced. Claims inside one process run one at a time, so two
+endpoints starting together cannot both take the shared name.
 
 **It finds, receives, sends and tracks — nothing more.** The inbox accepts
 exactly one token, the endpoint's own. It keeps none of the review machinery
@@ -76,11 +77,21 @@ applies the page's liveness rules, but never removes a record or a socket
 file. Clearing out dead sessions is left to Qwen Code sessions; a program
 that merely joined has no business removing other processes' files.
 
-**Trust comes only from a controller token.** A program has no review class
-it can honestly assert, so what it sends is held for review by default. The
-user grants delivery by minting a controller token, which the endpoint
-presents in place of the recipient's own token. The record's `kind` and
-`name` buy nothing, and the documentation says so.
+**The controller token travels only where the caller sends it.** A program
+has no review class it can honestly assert, so what it sends is held for
+review by default. The user grants delivery by minting a controller token,
+and the endpoint presents it in place of the recipient's own token — but only
+on sends marked `controller: true`. The token works against every session in
+the home and cannot be re-read from anywhere, since only its hash is stored,
+while addresses resolve from records any program running as the user can
+write; presenting it on every send would hand it to whoever published a
+record answering to a name. On a marked send, two records for one session id
+and name are ambiguous instead of collapsing to the newer, so a copied record
+cannot quietly take the grant. The receiving session's
+`agents.crossSessionInbound` setting still outranks the grant, and a
+`fromMode` that matches the receiver's review class also delivers without
+review — the documentation states both, and that `kind` and `name` buy
+nothing.
 
 **Its lifetime follows the program.** The open inbox keeps the process
 running, as a server would. Closing removes the record and the socket, and an
@@ -98,9 +109,11 @@ that readers could neither trust nor ever clear away.
 Implementing the page from its text found two rules it left implicit. Both
 are now stated in "Writing your own record":
 
-- On Linux, `procStart` and `pidNs` are required. Every reader compares a
-  record's `pidNs` with its own, so a record without one is never listed and
-  never swept.
+- On Linux, `pidNs` is required: every reader compares a record's `pidNs`
+  with its own, so a record without one is never listed and never swept.
+  `procStart` is required too, for a different reason: without it a reader
+  falls back to plain PID liveness and cannot tell a recycled PID from the
+  process that wrote the record.
 - When `<pid>.json` is already taken, a writer replaces it only when it can
   prove the file was left by an earlier process with the same PID — same
   `pidNs`, same boot id, different start ticks — and otherwise writes
@@ -127,8 +140,8 @@ the endpoint on anything else it covers.
 - A public-surface test that pins the subpath's exports and its
   `package.json` entry.
 - The build checks that the bundle stays within its budget and contains no
-  runtime dependency, and that its declarations reference no internal
-  package.
+  runtime dependency, and that none of its emitted declarations references an
+  internal package; those checks have tests of their own.
 
 ## Follow-ups
 

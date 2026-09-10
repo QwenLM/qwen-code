@@ -8,17 +8,19 @@
  * A program's place among the Qwen Code sessions running as this user.
  *
  * Starting an endpoint binds an inbox and publishes a session record, so
- * the program shows up in `qwen sessions ps` and in every session's
- * `list_agents`, can be addressed by name from `send_message`, and can
- * address sessions the same way. It also keeps a small ledger of what it
- * sent, so the receipts that come back can be read as state changes rather
- * than as a stream of unrelated notices.
+ * the program shows up in `qwen sessions ps`, and in the `list_agents` of
+ * every session that has `agents.crossSessionMessaging` on — which is also
+ * what lets those sessions address it by name from `send_message`. It can
+ * address sessions the same way. It keeps a small ledger of what it sent,
+ * so the receipts that come back read as state changes rather than as a
+ * stream of unrelated notices.
  *
  * What the endpoint is trusted to do is not decided here. A message it
- * sends to a session is held for that session's user to review unless the
- * connection presents a controller token the user minted for this program
- * (`qwen sessions controllers add`). Nothing in the record — its `kind`, its
- * `name` — changes that.
+ * sends is held for the receiving session's user to review unless the send
+ * presents a controller token the user minted (`controller: true`), or its
+ * `fromMode` claims the receiver's own review class — and the receiver's
+ * `agents.crossSessionInbound` setting outranks both. Nothing in the record,
+ * its `kind` or its `name`, changes that.
  */
 
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -70,6 +72,12 @@ export const MAX_TRACKED_SENDS = 200;
  */
 export const MAX_REMEMBERED_MESSAGES = 200;
 
+/** Every controller token a user mints starts with this. */
+const CONTROLLER_TOKEN_PREFIX = 'qpc_';
+
+/** Longer than any token a receiving session will even consider. */
+const MAX_CONTROLLER_TOKEN_CHARS = 256;
+
 export interface PeerEndpointOptions {
   /**
    * What sessions call this program. Flattened to one line and cut to 40
@@ -86,12 +94,26 @@ export interface PeerEndpointOptions {
   version?: string;
   /** The Qwen home to join. Default `QWEN_HOME`, else `~/.qwen`. */
   qwenHome?: string;
-  /** Bind the inbox exactly here instead of choosing a path. */
+  /**
+   * Bind the inbox here instead of choosing a path. If something live
+   * already answers there, a sibling `<name>-<8 hex>.sock` is bound instead;
+   * {@link PeerEndpoint.ipcPath} is the address actually published.
+   */
   socketPath?: string;
   /**
-   * A controller token minted with `qwen sessions controllers add`. When
-   * set, every send presents it, and sessions deliver what this program
-   * sends without holding it for review.
+   * A controller token minted with `qwen sessions controllers add`.
+   *
+   * Presented only on sends marked `controller: true`. The token works
+   * against every session in the Qwen home, and addresses are resolved from
+   * records any program running as this user can write, so a send presents
+   * it to whichever process's record answers to the address. Mark only the
+   * sends meant to direct a session.
+   *
+   * A controller send is delivered without review unless the receiving
+   * session's own `agents.crossSessionInbound` setting says `hold` or
+   * `refuse` — that outranks the grant. It is for Qwen Code sessions:
+   * another peer endpoint's inbox accepts only its own token, so a
+   * controller send to one is dropped unread.
    */
   controllerToken?: string;
   /**
@@ -133,7 +155,10 @@ export interface PeerReceipt {
   address: string;
   status: PeerDeliveryStatus;
   previous: PeerDeliveryStatus | 'pending';
-  /** Free text the recipient wrote for a person. Never parse it. */
+  /**
+   * Text the recipient wrote for a person, flattened to one line and
+   * bounded like every other label. Never parse it.
+   */
   reason?: string;
   dropReason?: PeerDropReason;
 }
@@ -157,9 +182,18 @@ export interface PeerSendOptions {
   content: string;
   priority?: PeerMessagePriority;
   /**
-   * The review class to assert. A program that is not a coding session has
-   * no honest value to give; leave it out, and use a controller token to be
-   * delivered without review.
+   * Present this endpoint's controller token instead of the recipient's own
+   * token; see {@link PeerEndpointOptions.controllerToken}. While marked, an
+   * address that two records answer to — one session id and name published
+   * twice — is ambiguous rather than resolved to the newer record, so a
+   * copied record cannot quietly take the send.
+   */
+  controller?: boolean;
+  /**
+   * The review class to assert. The recipient compares it with its own and
+   * delivers without review when they match, and nothing authenticates the
+   * claim. A program that is not a coding session has no honest value to
+   * give; leave it out.
    */
   fromMode?: PeerModeClass;
 }
@@ -169,7 +203,11 @@ export type PeerSendResult =
   /** The address names this endpoint. */
   | { kind: 'self' }
   | { kind: 'not-found'; suggestions: string[] }
-  /** The address could mean several sessions; retry with one of these. */
+  /**
+   * The address could mean several sessions; retry with one of these. A
+   * session no address can select on its own is left out, so the list is
+   * empty when nothing tells the candidates apart.
+   */
   | { kind: 'ambiguous'; matches: string[] }
   | {
       kind: 'failed';
@@ -243,6 +281,11 @@ interface TrackedSend {
 /** Turn a send failure into something a caller can act on. */
 export function describeSendFailure(error: unknown): string {
   if (error instanceof PeerSendError) {
+    // This process's own ceiling, reached before anything was dialed: it
+    // says nothing about the session the send was for.
+    if (error.local) {
+      return 'this program already has too many sends in flight, so nothing was written to that session; retry once some settle';
+    }
     switch (error.code) {
       case 'ENOENT':
       case 'ECONNREFUSED':
@@ -257,6 +300,21 @@ export function describeSendFailure(error: unknown): string {
     }
   }
   return describeError(error);
+}
+
+/**
+ * The shape a receiving session will consider as a controller token. An
+ * empty value — the usual result of an unset environment variable — or a
+ * value without the prefix can never authenticate, and presenting it would
+ * get the send dropped unread while it still reported `sent`.
+ */
+function isPresentableControllerToken(token: string): boolean {
+  return (
+    token.startsWith(CONTROLLER_TOKEN_PREFIX) &&
+    token.length > CONTROLLER_TOKEN_PREFIX.length &&
+    token.length <= MAX_CONTROLLER_TOKEN_CHARS &&
+    !/\s/.test(token)
+  );
 }
 
 export class PeerEndpoint {
@@ -329,11 +387,21 @@ export class PeerEndpoint {
         'a peer endpoint needs a session id that is not blank',
       );
     }
+    if (
+      options.controllerToken !== undefined &&
+      !isPresentableControllerToken(options.controllerToken)
+    ) {
+      throw new PeerEndpointError(
+        'invalid-controller-token',
+        'controllerToken must be a token minted with `qwen sessions controllers add`, which starts with qpc_; an empty value usually means the variable holding it is unset',
+      );
+    }
 
-    // On Linux a record without both of these is worse than none: readers
-    // cannot tell it from another namespace's, so they never list it and
-    // never clear it away. They are re-read once because the first read
-    // can land on a moment of descriptor pressure.
+    // On Linux a record without both of these is worse than none: without
+    // the namespace readers never list it or clear it away, and without the
+    // start token they cannot tell this process from a later one that
+    // inherits its PID. Re-read once, because the first read can land on a
+    // moment of descriptor pressure.
     let procStart = readProcStartToken(process.pid);
     let pidNs = readPidNamespaceId();
     if (
@@ -407,7 +475,7 @@ export class PeerEndpoint {
    */
   async list(): Promise<PeerSessionSummary[]> {
     this.assertOpen();
-    const peers = this.othersIn(await this.directory());
+    const peers = this.othersIn(await this.directory(true));
     return peers.flatMap((peer) => {
       const address = advertisablePeerAddress(peer, peers);
       return address === undefined ? [] : [summarize(peer, address)];
@@ -423,7 +491,18 @@ export class PeerEndpoint {
    */
   async send(options: PeerSendOptions): Promise<PeerSendResult> {
     this.assertOpen();
-    const directory = await this.directory();
+    const controller = options.controller === true;
+    const controllerToken = this.options.controllerToken;
+    if (controller && controllerToken === undefined) {
+      throw new PeerEndpointError(
+        'invalid-controller-token',
+        'a controller send needs an endpoint started with a controllerToken',
+      );
+    }
+    const directory = await this.directory(!controller);
+    // close() may have run while the directory was read. A send that went
+    // out anyway would carry a reply address that no longer exists.
+    this.assertOpen();
     const peers = this.othersIn(directory);
     const resolved = resolvePeerTarget(peers, options.to);
 
@@ -441,13 +520,15 @@ export class PeerEndpoint {
       };
     }
     if (resolved.kind === 'ambiguous') {
+      // Only addresses that select one session are worth retrying with; a
+      // session none can select is left out rather than advertised under a
+      // string that resolves straight back here.
       return {
         kind: 'ambiguous',
-        matches: resolved.matches.map(
-          (peer) =>
-            advertisablePeerAddress(peer, peers) ??
-            `${peer.name} [${peer.ref}]`,
-        ),
+        matches: resolved.matches.flatMap((peer) => {
+          const address = advertisablePeerAddress(peer, peers);
+          return address === undefined ? [] : [address];
+        }),
       };
     }
 
@@ -477,7 +558,7 @@ export class PeerEndpoint {
       ...(options.priority !== undefined ? { priority: options.priority } : {}),
       ...(options.fromMode !== undefined ? { fromMode: options.fromMode } : {}),
     });
-    const authToken = this.options.controllerToken ?? peer.ipcToken;
+    const authToken = controller ? controllerToken : peer.ipcToken;
     // Tracked before the write: a recipient that is slow to read can still
     // receipt a frame whose send timed out here.
     this.track(frame.msgId, summary.address);
@@ -574,8 +655,14 @@ export class PeerEndpoint {
     }
   }
 
-  private async directory(): Promise<PeerDirectoryEntry[]> {
-    return reachableEntries(await readLiveSessionRecords(this.registryDir));
+  private async directory(
+    collapseTwins: boolean,
+  ): Promise<PeerDirectoryEntry[]> {
+    return reachableEntries(
+      await readLiveSessionRecords(this.registryDir),
+      undefined,
+      { collapseTwins },
+    );
   }
 
   /**
@@ -655,7 +742,12 @@ export class PeerEndpoint {
       address: entry.address,
       status: frame.status,
       previous: entry.state,
-      ...(frame.reason !== undefined ? { reason: frame.reason } : {}),
+      // Written by whatever answered, and bound for a person: flattened
+      // like every other label that crosses in, so it cannot carry escape
+      // sequences or a megabyte of text into a terminal or a prompt.
+      ...(frame.reason !== undefined
+        ? { reason: flattenPeerLabel(frame.reason) }
+        : {}),
       ...(frame.dropReason !== undefined
         ? { dropReason: frame.dropReason }
         : {}),

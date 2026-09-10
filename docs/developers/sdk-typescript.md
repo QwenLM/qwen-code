@@ -189,17 +189,17 @@ This option always creates a new thread session and is not an idempotent attach.
 
 `@qwen-code/sdk/peer` lets a program that is not a Qwen Code session join the
 sessions running as the same user on the same machine — a voice front-end, a
-relay, a build watcher. The program shows up in `qwen sessions ps` and in every
-session's `list_agents`, sessions can message it by name with `send_message`,
-and it can message them back. It runs on Node only and needs nothing beyond
-Node itself.
+relay, a build watcher. The program shows up in `qwen sessions ps`, and in the
+`list_agents` of every session that has `agents.crossSessionMessaging` turned
+on — which is also what lets those sessions message it by name with
+`send_message`. It can message them back. It runs on Node only and needs
+nothing beyond Node itself.
 
 ```typescript
 import { PeerEndpoint } from '@qwen-code/sdk/peer';
 
 const endpoint = await PeerEndpoint.start({
   name: 'voice-bridge',
-  controllerToken: process.env['QWEN_CONTROLLER_TOKEN'],
   onMessage: (message) =>
     console.log(`${message.fromName}: ${message.content}`),
 });
@@ -219,17 +219,46 @@ if (session) {
 await endpoint.close();
 ```
 
+A message like that is held for the session's user to review. To direct a
+session without that review, mint a controller token with
+`qwen sessions controllers add --label voice-bridge`, give it to the endpoint,
+and mark the sends that should present it:
+
+```typescript
+const endpoint = await PeerEndpoint.start({
+  name: 'voice-bridge',
+  controllerToken: process.env['QWEN_CONTROLLER_TOKEN'],
+});
+await endpoint.send({
+  to: 'my-app-3f',
+  content: 'run the tests',
+  controller: true,
+});
+```
+
 Things to know:
 
-- A session has an inbox — and so appears in `list()` — only while its
-  `agents.crossSessionMessaging` setting is on. The setting is off by default.
-- A message from a program is held for the session's user to review unless the
-  program presents a controller token. Mint one with
-  `qwen sessions controllers add --label voice-bridge` and pass it as
-  `controllerToken`. Nothing else — not `kind`, not `name` — gets a message
-  delivered without review.
-- Without `onMessage`, every message sent to the endpoint is answered
-  `refused`.
+- A session has an inbox only while its `agents.crossSessionMessaging` setting
+  is on, and the setting is off by default. Without it the session does not
+  appear in `list()`, and its own `list_agents` and `send_message` cannot see
+  or reach the program either. `qwen sessions ps` lists the program regardless.
+- A message is delivered without review in exactly two cases: the send
+  presents a controller token (`controller: true`), or its `fromMode` names the
+  receiving session's own review class. `fromMode` is a claim nothing
+  authenticates, so a program that is not a coding session should leave it
+  out. Nothing in the record — not `kind`, not `name` — buys delivery. The
+  receiving session's `agents.crossSessionInbound` setting outranks both:
+  `hold` or `refuse` there wins over a controller token.
+- Mark only the sends meant to direct a session. Addresses are resolved from
+  records any program running as you can write, so a controller send presents
+  the token to whichever process's record answers to that address. A
+  controller send to another peer endpoint is dropped unread, because an
+  endpoint's inbox accepts only its own token.
+- The endpoint's inbox applies none of the protections a Qwen Code session
+  applies to its own: no rate limit, no holds, and no duplicate window beyond
+  the last 200 messages it answered. Every message is answered `delivered` and
+  handed to `onMessage` as it arrives, so apply your own limits there if you
+  need them. Without `onMessage`, every message is answered `refused`.
 - Call `close()` before exiting, including from your own signal handlers. A
   process killed without closing leaves its record behind until a Qwen Code
   session lists the directory and sees the process is gone.

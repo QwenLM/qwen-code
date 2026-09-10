@@ -31,7 +31,7 @@ describe('@qwen-code/sdk/peer — opt-in peer surface', () => {
       'buildUserFrame',
       'buildDeliveryStatusFrame',
       'sendPeerFrame',
-      'probePeerSocket',
+      'probePeerSocketVerdict',
       'startPeerInbox',
       'readLiveSessionRecords',
       'resolveQwenHome',
@@ -53,10 +53,27 @@ describe('@qwen-code/sdk/peer — opt-in peer surface', () => {
     expectTypeOf<PeerEndpointOptions['name']>().toEqualTypeOf<string>();
   });
 
-  it('stays out of the default and daemon entries, which ship to browsers', () => {
+  // An import of the peer module, in any of the forms a module specifier
+  // can take: `../peer`, `./peer/frames.js`, `@qwen-code/sdk/peer`. Prose
+  // that merely mentions the word does not count.
+  const isPeerImport = (source: string) =>
+    /from\s+['"][^'"]*\/peer(?:\/[^'"]*)?['"]/.test(source);
+
+  it('recognises every form a peer import can take', () => {
+    expect(isPeerImport("export * from '../peer';")).toBe(true);
+    expect(isPeerImport("import { x } from './peer/frames.js';")).toBe(true);
+    expect(isPeerImport("import { x } from '@qwen-code/sdk/peer';")).toBe(true);
+    expect(isPeerImport("import { x } from './session.js';")).toBe(false);
+    expect(isPeerImport('// talks to a peer/relay')).toBe(false);
+  });
+
+  it('stays out of the default and daemon entries', () => {
+    // The daemon entries are bundled for browsers, where the endpoint's
+    // sockets cannot exist; the default entry is what every query() user
+    // loads. The endpoint is opt-in for both.
     for (const entry of ['src/index.ts', 'src/daemon/index.ts']) {
-      expect(readFileSync(join(packageRoot, entry), 'utf8')).not.toContain(
-        'peer/',
+      expect(isPeerImport(readFileSync(join(packageRoot, entry), 'utf8'))).toBe(
+        false,
       );
     }
   });
@@ -65,10 +82,10 @@ describe('@qwen-code/sdk/peer — opt-in peer surface', () => {
     const pkg = JSON.parse(
       readFileSync(join(packageRoot, 'package.json'), 'utf8'),
     ) as { exports: Record<string, Record<string, string>> };
-    const entry = pkg.exports['./peer'];
-    expect(entry).toBeDefined();
-    expect(entry['types']).toBe('./dist/peer/index.d.ts');
-    expect(entry['import']).toBe('./dist/peer/index.js');
-    expect(entry['require']).toBe('./dist/peer/index.cjs');
+    expect(pkg.exports['./peer']).toEqual({
+      types: './dist/peer/index.d.ts',
+      import: './dist/peer/index.js',
+      require: './dist/peer/index.cjs',
+    });
   });
 });

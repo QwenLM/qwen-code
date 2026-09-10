@@ -11,6 +11,9 @@
  * - `invalid-kind`: the kind is not lowercase ASCII letters, digits and
  *   dashes of at most 16 characters starting with a letter.
  * - `invalid-session-id`: the session id is blank.
+ * - `invalid-controller-token`: the controller token is not a token a
+ *   session would consider — empty, or without the `qpc_` prefix — or a
+ *   controller send was asked of an endpoint started without one.
  * - `unsupported-platform`: this platform has no UNIX domain sockets the
  *   endpoint knows how to place.
  * - `bind-failed`: no candidate socket path could be bound.
@@ -21,6 +24,7 @@ export type PeerEndpointErrorCode =
   | 'invalid-name'
   | 'invalid-kind'
   | 'invalid-session-id'
+  | 'invalid-controller-token'
   | 'unsupported-platform'
   | 'bind-failed'
   | 'registry-unwritable'

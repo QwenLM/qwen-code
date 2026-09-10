@@ -14,7 +14,7 @@
  * the wrong session cannot be taken back.
  */
 
-import { probePeerSocket, type PeerSocketVerdict } from './client.js';
+import { probePeerSocketVerdict, type PeerSocketVerdict } from './client.js';
 import { flattenPeerLabel, peerRef } from './label.js';
 import type { SessionRecord } from './registry.js';
 
@@ -59,13 +59,19 @@ export function toDirectoryEntry(
  * advertises one inbox in all their records, and asking once per record
  * would open that many connections to one socket on every lookup.
  *
- * Then one entry per (session id, name) is kept, the newest: resuming a
- * session in a second terminal runs the same id under another process, and
- * two identical entries would make every address for it ambiguous.
+ * Then, unless `collapseTwins` is false, one entry per (session id, name) is
+ * kept, the newest: resuming a session in a second terminal runs the same id
+ * under another process, and two identical entries would make every address
+ * for it ambiguous. The collapse also means a copied record shadows the
+ * original, so a caller about to present a credential turns it off and
+ * treats the pair as the ambiguity it is.
  */
 export async function reachableEntries(
   records: readonly SessionRecord[],
-  probe: (socketPath: string) => Promise<PeerSocketVerdict> = probePeerSocket,
+  probe: (
+    socketPath: string,
+  ) => Promise<PeerSocketVerdict> = probePeerSocketVerdict,
+  options: { collapseTwins?: boolean } = {},
 ): Promise<PeerDirectoryEntry[]> {
   const candidates = records
     .map(toDirectoryEntry)
@@ -77,9 +83,12 @@ export async function reachableEntries(
       ),
     ),
   );
+  const reachable = candidates.filter(
+    (entry) => verdicts.get(entry.ipcPath) === 'alive',
+  );
+  if (options.collapseTwins === false) return reachable;
   const newest = new Map<string, PeerDirectoryEntry>();
-  for (const entry of candidates) {
-    if (verdicts.get(entry.ipcPath) !== 'alive') continue;
+  for (const entry of reachable) {
     const key = `${entry.sessionId}\0${entry.name}`;
     const seen = newest.get(key);
     if (!seen || entry.startedAt > seen.startedAt) newest.set(key, entry);

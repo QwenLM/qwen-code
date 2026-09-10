@@ -17,6 +17,10 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import esbuild from 'esbuild';
 import { serveBridgeBinBuildOptions } from './serve-bridge-bin-build-options.js';
+import {
+  assertPeerBundle,
+  assertPeerDeclarations,
+} from './peer-build-assertions.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -31,12 +35,6 @@ const MAX_TRANSPORTS_BROWSER_BUNDLE_BYTES = 48 * 1024;
 // Measured with `npm run build && wc -c dist/daemon/transcript.js`.
 // Baseline for the initial projection implementation is ~66 KiB.
 const MAX_TRANSCRIPT_BROWSER_BUNDLE_BYTES = 192 * 1024;
-// `@qwen-code/sdk/peer` is Node-only and built from Node's own modules, so it
-// is budgeted on its own. Measured with `npm run build && wc -c dist/peer/*`:
-// about 24 KiB (esm) and 25 KiB (cjs) at introduction. The headroom is for
-// growth, not for a dependency slipping in — `assertPeerBundle` checks that
-// separately.
-const MAX_PEER_BUNDLE_BYTES = 40 * 1024;
 
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });
@@ -252,7 +250,7 @@ for (const [format, outfile] of [
   });
   assertPeerBundle(outfile);
 }
-assertPeerDeclaration(join(rootDir, 'dist', 'peer', 'index.d.ts'));
+assertPeerDeclarations(join(rootDir, 'dist', 'peer'));
 
 // Build serve-bridge CLI bin entry. The options — including the absence of a
 // hashbang `banner`, see `serveBridgeBinBuildOptions` — are shared with the
@@ -335,39 +333,6 @@ function assertTranscriptBundle(filePath) {
     );
   }
   assertNoNodeBuiltins(filePath, 'Browser daemon transcript bundle');
-}
-
-// The peer subpath is the contract's standalone implementation: a bundle that
-// pulls in the SDK's other dependencies, or Qwen Code's own sources, would no
-// longer be one.
-function assertPeerBundle(filePath) {
-  const size = statSync(filePath).size;
-  if (size > MAX_PEER_BUNDLE_BYTES) {
-    throw new Error(
-      `Peer bundle ${filePath} is ${size} bytes; expected <= ${MAX_PEER_BUNDLE_BYTES}`,
-    );
-  }
-  const contents = readFileSync(filePath, 'utf8');
-  const forbidden = [
-    '@modelcontextprotocol',
-    'zod',
-    'qwen-code-core',
-    'acp-bridge',
-  ];
-  const found = forbidden.find((token) => contents.includes(token));
-  if (found) {
-    throw new Error(`Peer bundle ${filePath} contains a dependency: ${found}`);
-  }
-}
-
-function assertPeerDeclaration(filePath) {
-  const contents = readFileSync(filePath, 'utf8');
-  const found = ['@qwen-code/qwen-code-core', '@qwen-code/acp-bridge'].find(
-    (token) => contents.includes(token),
-  );
-  if (found) {
-    throw new Error(`Peer declaration leaks an internal dependency: ${found}`);
-  }
 }
 
 function assertTranscriptDeclaration(filePath) {

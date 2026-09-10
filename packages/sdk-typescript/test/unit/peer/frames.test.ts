@@ -10,11 +10,13 @@ import {
   buildDeliveryStatusFrame,
   buildUserFrame,
   canonicalizeMsgId,
+  describeDeliveryStatus,
   encodePeerFrame,
   isPeerMsgId,
   MAX_DROPPED_MSG_IDS,
   parsePeerAuthLine,
   parsePeerFrame,
+  PEER_DELIVERY_STATUSES,
   type PeerControlFrame,
   type PeerUserFrame,
 } from '../../../src/peer/frames.js';
@@ -210,5 +212,22 @@ describe('frame builders', () => {
 
   it('compares ids with dashes stripped and case folded', () => {
     expect(canonicalizeMsgId('AB-cd-EF')).toBe('abcdef');
+  });
+});
+
+describe('describeDeliveryStatus', () => {
+  it('says something different for every status, and tells a sender when not to re-send', () => {
+    const texts = PEER_DELIVERY_STATUSES.map(describeDeliveryStatus);
+    expect(new Set(texts).size).toBe(PEER_DELIVERY_STATUSES.length);
+    expect(describeDeliveryStatus('refused')).toMatch(/do not re-send/i);
+    expect(describeDeliveryStatus('denied')).toMatch(/declined/);
+    expect(describeDeliveryStatus('denied')).not.toMatch(/re-send/i);
+    expect(describeDeliveryStatus('held')).toMatch(/review/);
+    expect(describeDeliveryStatus('expired')).toMatch(/not delivered/);
+    expect(describeDeliveryStatus('delivered')).toMatch(/was delivered/);
+    expect(describeDeliveryStatus('misaddressed')).toMatch(
+      /look the recipient up again/i,
+    );
+    expect(describeDeliveryStatus('dropped')).toMatch(/unsent/);
   });
 });

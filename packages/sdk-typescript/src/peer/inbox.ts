@@ -25,7 +25,7 @@ import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { isLocalIpcPath, probePeerSocket } from './client.js';
+import { isLocalIpcPath, probePeerSocketVerdict } from './client.js';
 import { describeError, PeerEndpointError } from './errors.js';
 import {
   MAX_FRAME_CHARS,
@@ -65,7 +65,11 @@ const SOCKET_MODE = 0o600;
 const NONCE_DIRNAME = new RegExp(`^${SOCKET_DIR_NAME}-[0-9a-f]{16}$`);
 
 export interface PeerInboxOptions {
-  /** Bind exactly here instead of walking the candidate paths. */
+  /**
+   * Bind here instead of walking the candidate paths. If something live
+   * already answers there, a sibling `<name>-<8 hex>.sock` is bound instead;
+   * the returned inbox's `socketPath` is the address actually bound.
+   */
   socketPath?: string;
   /** The token a connection's first line must present. */
   requiredToken: string;
@@ -184,7 +188,10 @@ async function bindAt(
   const dropDirIfOurs = () =>
     ownsDir ? fs.rmdir(dir).catch(() => {}) : Promise.resolve();
 
-  await fs.mkdir(dir, { recursive: true, mode: SOCKET_DIR_MODE });
+  const created = await fs.mkdir(dir, {
+    recursive: true,
+    mode: SOCKET_DIR_MODE,
+  });
   try {
     // mkdir and chmod both follow a symlink, and a shared temp directory is
     // somewhere another user can create this name first. Insist on a real
@@ -195,7 +202,18 @@ async function bindAt(
     if (uid !== undefined && stats.uid !== uid) {
       throw new Error(`${dir} belongs to uid ${stats.uid}, not ${uid}`);
     }
-    await fs.chmod(dir, SOCKET_DIR_MODE);
+    // Tightened only when it is a directory inboxes keep for themselves —
+    // one this call created, or one named for sockets. A directory a caller
+    // chose for its socket keeps its own permissions: the socket's 0600 is
+    // the access control, and taking traversal away from a shared directory
+    // would break whatever else lives there.
+    if (
+      created !== undefined ||
+      ownsDir ||
+      path.basename(dir) === SOCKET_DIR_NAME
+    ) {
+      await fs.chmod(dir, SOCKET_DIR_MODE);
+    }
   } catch (error) {
     await dropDirIfOurs();
     throw error;
@@ -206,7 +224,7 @@ async function bindAt(
   // `dead` takes a sibling name instead: unlinking a live socket would make
   // its owner silently unreachable.
   let target = requested;
-  if ((await probePeerSocket(target)) !== 'dead') {
+  if ((await probePeerSocketVerdict(target)) !== 'dead') {
     const sibling = siblingSocketPath(target);
     if (sibling === null) {
       await dropDirIfOurs();

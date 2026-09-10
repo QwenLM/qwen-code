@@ -39,13 +39,21 @@ export const MAX_CONCURRENT_SENDS = 64;
 let inFlightSends = 0;
 
 export class PeerSendError extends Error {
+  /**
+   * True when the failure is this process's own limit rather than anything
+   * at the other end: nothing was dialed and nothing was written.
+   */
+  readonly local: boolean;
+
   constructor(
     message: string,
     /** The errno behind the failure, when there is one. */
     readonly code: string | undefined,
+    options: { local?: boolean } = {},
   ) {
     super(message);
     this.name = 'PeerSendError';
+    this.local = options.local ?? false;
   }
 }
 
@@ -123,6 +131,7 @@ export function sendPeerFrame(
         new PeerSendError(
           `Already sending ${inFlightSends} frames; not opening another connection`,
           'EBUSY',
+          { local: true },
         ),
       );
       return;
@@ -180,7 +189,7 @@ export type PeerSocketVerdict = 'alive' | 'dead' | 'unknown';
  * missing path or a socket file nothing holds (`ENOENT`, `ECONNREFUSED`) is
  * dead: a socket file outlives a crash, and only a dial tells the two apart.
  */
-export function probePeerSocket(
+export function probePeerSocketVerdict(
   socketPath: string,
 ): Promise<PeerSocketVerdict> {
   return new Promise((resolve) => {

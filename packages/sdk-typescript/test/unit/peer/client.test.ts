@@ -7,11 +7,11 @@
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   isLocalIpcPath,
   PeerSendError,
-  probePeerSocket,
+  probePeerSocketVerdict,
   sendPeerFrame,
 } from '../../../src/peer/client.js';
 import {
@@ -19,6 +19,7 @@ import {
   buildUserFrame,
   MAX_FRAME_CHARS,
 } from '../../../src/peer/frames.js';
+import { MAX_CONCURRENT_SENDS } from '../../../src/peer/client.js';
 import { makeTempRoot, noUnixSockets } from './helpers.js';
 
 describe('isLocalIpcPath', () => {
@@ -102,7 +103,7 @@ describe.skipIf(noUnixSockets)('sendPeerFrame and probePeerSocket', () => {
     const missing = path.join(root, 'missing.sock');
     await expect(
       sendPeerFrame(missing, buildUserFrame({ content: 'x' })),
-    ).rejects.toMatchObject({ code: 'ENOENT' });
+    ).rejects.toMatchObject({ code: 'ENOENT', local: false });
     await expect(
       sendPeerFrame(
         missing,
@@ -119,9 +120,11 @@ describe.skipIf(noUnixSockets)('sendPeerFrame and probePeerSocket', () => {
 
   it('tells a listener from nothing, and establishes nothing about a path it will not dial', async () => {
     const socketPath = await listen('alive.sock', (socket) => socket.end());
-    expect(await probePeerSocket(socketPath)).toBe('alive');
-    expect(await probePeerSocket(path.join(root, 'missing.sock'))).toBe('dead');
-    expect(await probePeerSocket('relative.sock')).toBe('unknown');
+    expect(await probePeerSocketVerdict(socketPath)).toBe('alive');
+    expect(await probePeerSocketVerdict(path.join(root, 'missing.sock'))).toBe(
+      'dead',
+    );
+    expect(await probePeerSocketVerdict('relative.sock')).toBe('unknown');
   });
 
   it.runIf(process.platform === 'linux')(
@@ -129,7 +132,48 @@ describe.skipIf(noUnixSockets)('sendPeerFrame and probePeerSocket', () => {
     async () => {
       const stale = path.join(root, 'stale.sock');
       fs.writeFileSync(stale, '');
-      expect(await probePeerSocket(stale)).toBe('dead');
+      expect(await probePeerSocketVerdict(stale)).toBe('dead');
     },
   );
+});
+
+describe.skipIf(noUnixSockets)('the concurrent send ceiling', () => {
+  it('refuses the send past it locally, before dialing anything', async () => {
+    const root = makeTempRoot();
+    const socketPath = path.join(root, 'blackhole.sock');
+    const held: net.Socket[] = [];
+    const blackhole = net.createServer({ allowHalfOpen: true }, (socket) => {
+      held.push(socket);
+      socket.on('error', () => {});
+    });
+    await new Promise<void>((resolve) => blackhole.listen(socketPath, resolve));
+    try {
+      const inFlight = Array.from({ length: MAX_CONCURRENT_SENDS }, () =>
+        sendPeerFrame(socketPath, buildUserFrame({ content: 'x' }), {
+          timeoutMs: 20_000,
+        }).catch((error: unknown) => error),
+      );
+      await vi.waitFor(() => expect(held).toHaveLength(MAX_CONCURRENT_SENDS));
+
+      // A path nothing listens on: past the ceiling it is never dialed, so
+      // the answer is the local refusal and not ENOENT.
+      const started = Date.now();
+      const refused = await sendPeerFrame(
+        path.join(root, 'never-dialed.sock'),
+        buildUserFrame({ content: 'y' }),
+      ).catch((error: unknown) => error);
+      expect(refused).toMatchObject({
+        name: 'PeerSendError',
+        code: 'EBUSY',
+        local: true,
+      });
+      expect(Date.now() - started).toBeLessThan(1_000);
+
+      for (const socket of held) socket.destroy();
+      await Promise.all(inFlight);
+    } finally {
+      blackhole.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

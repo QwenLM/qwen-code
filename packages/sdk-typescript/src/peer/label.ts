@@ -17,12 +17,13 @@ import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 
 /**
- * Control, format and bidirectional-override characters. Kept as a string
- * and compiled per call, so a line of it never reads as a pattern that
- * matches control characters by accident.
+ * Control and format characters, and the line and paragraph separators —
+ * matched by Unicode category rather than by a list of ranges, so blocks
+ * nobody thought to list (tag characters, the Mongolian vowel separator,
+ * interlinear annotation marks) are covered along with zero-width spaces
+ * and bidi overrides.
  */
-const INVISIBLE_CHARACTERS =
-  '\\u0000-\\u001f\\u007f-\\u009f\\u00ad\\u061c\\u200b-\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2060-\\u206f\\ufeff';
+const INVISIBLE_RUN = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu;
 
 const ELLIPSIS = '…';
 
@@ -32,12 +33,16 @@ export const MAX_LABEL_CHARS = 200;
 /** Longest name a record keeps: it is printed in a fixed-width column. */
 export const MAX_SESSION_NAME_CHARS = 40;
 
+/**
+ * One line of printable text, at most {@link MAX_LABEL_CHARS} code points.
+ * Counted in code points so the cut never leaves half of an astral
+ * character behind.
+ */
 export function flattenPeerLabel(value: string): string {
-  const oneLine = value
-    .replace(new RegExp(`[${INVISIBLE_CHARACTERS}]+`, 'g'), ' ')
-    .trim();
-  return oneLine.length > MAX_LABEL_CHARS
-    ? `${oneLine.slice(0, MAX_LABEL_CHARS - 1)}${ELLIPSIS}`
+  const oneLine = value.replace(INVISIBLE_RUN, ' ').trim();
+  const points = Array.from(oneLine);
+  return points.length > MAX_LABEL_CHARS
+    ? `${points.slice(0, MAX_LABEL_CHARS - 1).join('')}${ELLIPSIS}`
     : oneLine;
 }
 
