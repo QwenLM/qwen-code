@@ -617,11 +617,13 @@ export function useQueuedPrompts({
   const startedDuringRemovalRef = useRef<Map<string, string>>(new Map());
   /**
    * Prompts whose submit body returned with the row still unbound because no
-   * confirmation snapshot ever landed. From that return on, no in-flight
-   * admission will echo the message, so the settle-time last-chance echo must
-   * not defer to a row that merely renders the same text.
+   * confirmation snapshot ever landed, mapped to that row's id. From that
+   * return on, no in-flight admission will echo the message, so the
+   * settle-time last-chance echo must not defer to a row that merely renders
+   * the same text; the id also lets the settle drop a still-unbound row that
+   * can never bind anymore — a payload-bearing row has no binding route.
    */
-  const returnedUnboundPromptIdsRef = useRef<Set<string>>(new Set());
+  const returnedUnboundPromptIdsRef = useRef<Map<string, number>>(new Map());
 
   const rememberCompletedPromptId = useCallback((promptId: string) => {
     if (completedPromptIdsRef.current.has(promptId)) return;
@@ -982,7 +984,25 @@ export function useQueuedPrompts({
       if (!startedDuringRemovalRef.current.has(promptId)) {
         pendingEchoByPromptIdRef.current.delete(promptId);
       }
+      const returnedRowId = returnedUnboundPromptIdsRef.current.get(promptId);
       returnedUnboundPromptIdsRef.current.delete(promptId);
+      // A settled prompt can never bind its row anymore: for a body that
+      // returned unbound the row has no remaining recovery route (a
+      // payload-bearing row has none at all), so drop a still-unbound copy
+      // rather than leave a phantom submitting row suppressing
+      // materialization.
+      if (returnedRowId !== undefined) {
+        const returnedRow = queuedPromptsRef.current.find(
+          (item) => item.id === returnedRowId,
+        );
+        if (returnedRow && returnedRow.serverPromptId === undefined) {
+          const next = queuedPromptsRef.current.filter(
+            (item) => item.id !== returnedRowId,
+          );
+          queuedPromptsRef.current = next;
+          setQueuedPrompts(next);
+        }
+      }
       settledServerPromptIdsRef.current.add(promptId);
       while (
         settledServerPromptIdsRef.current.size > MAX_COMPLETED_PROMPT_IDS
@@ -1611,7 +1631,7 @@ export function useQueuedPrompts({
     pendingEchoByPromptIdRef.current = new Map();
     clearedUnconfirmedPromptIdsRef.current = new Set();
     startedDuringRemovalRef.current = new Map();
-    returnedUnboundPromptIdsRef.current = new Set();
+    returnedUnboundPromptIdsRef.current = new Map();
     initialRefreshSessionIdRef.current = undefined;
     midTurnEnqueueAbortRef.current?.abort();
     midTurnEnqueueAbortRef.current = null;
@@ -2189,18 +2209,21 @@ export function useQueuedPrompts({
                   settleCompletionCallback(result.promptId, prompt.onComplete);
                 }
               } else {
-                returnedUnboundPromptIdsRef.current.add(result.promptId);
+                returnedUnboundPromptIdsRef.current.set(
+                  result.promptId,
+                  localId,
+                );
                 while (returnedUnboundPromptIdsRef.current.size > 200) {
                   const oldestReturned = returnedUnboundPromptIdsRef.current
-                    .values()
+                    .keys()
                     .next().value;
                   if (typeof oldestReturned !== 'string') break;
                   returnedUnboundPromptIdsRef.current.delete(oldestReturned);
                 }
                 if (prompt.onComplete) {
-                  // The row stays submitting for a later sync to bind; the
-                  // daemon already holds the prompt, so its callback must be
-                  // registered now or no terminal event will ever fire it.
+                  // The daemon already holds the prompt, so its callback
+                  // must be registered now or no terminal event will ever
+                  // fire it.
                   settleCompletionCallback(result.promptId, prompt.onComplete);
                 }
               }
