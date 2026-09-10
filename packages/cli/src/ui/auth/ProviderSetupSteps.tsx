@@ -907,13 +907,13 @@ export function ProviderSetupSteps({
               items={[
                 {
                   key: 'chat-completions',
-                  title: 'Chat Completions',
+                  title: t('Chat Completions'),
                   description: t('Standard OpenAI API format (most common)'),
                   value: 'chat-completions' as ModelApi,
                 },
                 {
                   key: 'responses',
-                  title: 'Responses',
+                  title: t('Responses'),
                   description: t(
                     'OpenAI Responses API — streaming reasoning + tool use',
                   ),

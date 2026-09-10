@@ -1922,18 +1922,30 @@ export async function loadCliConfig(
     getAuthTypeFromEnv();
 
   // Unified resolution of generation config with source attribution
-  const resolvedCliConfig = resolveCliGenerationConfig({
-    argv: {
-      model: argv.model,
-      openaiApiKey: argv.openaiApiKey,
-      openaiBaseUrl: argv.openaiBaseUrl,
-      openaiLogging: argv.openaiLogging,
-      openaiLoggingDir: argv.openaiLoggingDir,
-    },
-    settings,
-    selectedAuthType,
-    env: process.env as Record<string, string | undefined>,
-  });
+  let resolvedCliConfig: ReturnType<typeof resolveCliGenerationConfig>;
+  try {
+    resolvedCliConfig = resolveCliGenerationConfig({
+      argv: {
+        model: argv.model,
+        openaiApiKey: argv.openaiApiKey,
+        openaiBaseUrl: argv.openaiBaseUrl,
+        openaiLogging: argv.openaiLogging,
+        openaiLoggingDir: argv.openaiLoggingDir,
+      },
+      settings,
+      selectedAuthType,
+      env: process.env as Record<string, string | undefined>,
+    });
+  } catch (err) {
+    // Resolution reads settings, so its throws are config errors -- notably
+    // per-model `api` validation from the registry resolver. This runs before
+    // the TUI starts, so without this a one-character typo in settings.json
+    // ends as a stack trace with no in-app way to correct it.
+    if (err instanceof FatalConfigError) throw err;
+    throw new FatalConfigError(
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 
   const { model: resolvedModel } = resolvedCliConfig;
 

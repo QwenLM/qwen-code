@@ -72,6 +72,8 @@ function buildGenerationConfig(
   const parts: ProviderModelConfig['generationConfig'] = {};
   let hasAny = false;
   if (spec.enableThinking) {
+    // Kept in step with buildAdvancedGenerationConfig below, which carries the
+    // rationale for why the Responses wire cannot use extra_body.
     if (protocol === AuthType.USE_OPENAI_RESPONSES) {
       parts.reasoning = { effort: 'medium' };
     } else {

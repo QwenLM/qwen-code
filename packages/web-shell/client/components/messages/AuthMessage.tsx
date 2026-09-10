@@ -202,8 +202,8 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     [provider, t],
   );
   const apiOptions: Array<Option<ModelApi>> = [
-    { value: 'chat-completions', label: 'Chat Completions' },
-    { value: 'responses', label: 'Responses' },
+    { value: 'chat-completions', label: t('auth.api.chatCompletions') },
+    { value: 'responses', label: t('auth.api.responses') },
   ];
   const currentStep = steps[stepIndex] as AuthStep | undefined;
   const shouldReview = provider?.showAdvancedConfig === true;

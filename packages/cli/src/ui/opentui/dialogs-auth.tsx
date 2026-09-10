@@ -145,7 +145,7 @@ function providerToItem(config: ProviderConfig): RadioItem {
 
 function getStepLabel(step: string | null, p: ProviderConfig): string {
   if (step === 'protocol') return t('Protocol');
-  if (step === 'api') return 'API';
+  if (step === 'api') return t('API');
   if (step === 'baseUrl') {
     if (p.uiLabels?.baseUrlStepTitle) return t(p.uiLabels.baseUrlStepTitle);
     return Array.isArray(p.baseUrl) ? t('Endpoint') : t('Base URL');
@@ -304,10 +304,10 @@ function ApiStep({ flow }: { flow: ProviderSetupFlow }) {
   const items: RadioItem[] = [
     {
       key: 'chat-completions',
-      label: 'Chat Completions',
+      label: t('Chat Completions'),
       value: 'chat-completions',
     },
-    { key: 'responses', label: 'Responses', value: 'responses' },
+    { key: 'responses', label: t('Responses'), value: 'responses' },
   ];
   const [cursor, setCursor] = useState(flow.state.api === 'responses' ? 1 : 0);
   useKeyboard((key) => {
