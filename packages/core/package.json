@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.23.3",
+  "version": "0.23.3-nightly.20260910.c46cb85cf2",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
