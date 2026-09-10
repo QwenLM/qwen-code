@@ -41,6 +41,66 @@ afterEach(async () => {
 });
 
 describe('PlaywrightRuntime command contracts', () => {
+  it('reports invalid nested locator plans before starting the bridge', async () => {
+    const fixture = await runtimeFixture();
+    fixture.request.mockClear();
+    await expect(
+      fixture.runtime.dispatch('locator.count', {
+        tabId: 'tab-1',
+        steps: [{ kind: 'and', steps: [{ kind: 'locator' }] }],
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      message: expect.stringContaining('steps.0.steps.0.selector'),
+    });
+    expect(fixture.request).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'playwright.evaluate',
+    'locator.evaluate',
+    'locator.evaluateAll',
+  ] as const)(
+    'bounds the full %s call with a timeout error',
+    async (method) => {
+      const fixture = await runtimeFixture();
+      const tab = await createTab(fixture.runtime);
+      const evaluate =
+        method === 'playwright.evaluate'
+          ? fixture.page.evaluate
+          : method === 'locator.evaluate'
+            ? fixture.locator.evaluate
+            : fixture.locator.evaluateAll;
+      let resolve: (value: unknown) => void = () => undefined;
+      const pending = new Promise<unknown>((done) => {
+        resolve = done;
+      });
+      evaluate.mockReturnValueOnce(pending);
+      vi.useFakeTimers();
+      try {
+        const result = fixture.runtime
+          .dispatch(method, {
+            tabId: tab.id,
+            ...(method === 'playwright.evaluate'
+              ? {}
+              : { steps: [{ kind: 'locator', selector: 'body' }] }),
+            script: 'return new Promise(() => {});',
+            timeoutMs: 100,
+          })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(100);
+        expect(await result).toMatchObject({
+          code: 'OPERATION_TIMEOUT',
+        });
+        expect(evaluate).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        resolve(null);
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('selects Chrome by canonical id, family, or client type', async () => {
     const fixture = await runtimeFixture();
 
@@ -1734,6 +1794,7 @@ function fakeLocator(): {
     pressSequentially: ReturnType<typeof vi.fn>;
     evaluate: ReturnType<typeof vi.fn>;
     evaluateHandle: ReturnType<typeof vi.fn>;
+    evaluateAll: ReturnType<typeof vi.fn>;
     getAttribute: ReturnType<typeof vi.fn>;
     fill: ReturnType<typeof vi.fn>;
     dispatchEvent: ReturnType<typeof vi.fn>;
@@ -1759,6 +1820,7 @@ function fakeLocator(): {
     pressSequentially: vi.fn(async () => undefined),
     evaluate: vi.fn(async () => undefined),
     evaluateHandle: vi.fn(),
+    evaluateAll: vi.fn(async () => undefined),
     getAttribute: vi.fn(async () => 'Field'),
     fill: vi.fn(async () => undefined),
     dispatchEvent: vi.fn(async () => undefined),

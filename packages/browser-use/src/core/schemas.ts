@@ -30,7 +30,7 @@ const matcher = z.union([
 ]);
 
 const locatorStepSchema: z.ZodType<LocatorStep> = z.lazy(() =>
-  z.union([
+  z.discriminatedUnion('kind', [
     z
       .object({
         kind: z.literal('locator'),

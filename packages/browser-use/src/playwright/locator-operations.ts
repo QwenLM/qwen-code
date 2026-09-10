@@ -355,16 +355,19 @@ async function evaluateLocator(
       timeout,
     );
   }
-  return await locator.evaluate(
-    async (element, source) => {
-      const AsyncFunction = Object.getPrototypeOf(async () => undefined)
-        .constructor as new (
-        argument: string,
-        body: string,
-      ) => (element: Element) => Promise<unknown>;
-      return await new AsyncFunction('element', source)(element);
-    },
-    script,
-    { timeout },
+  return await withTimeout(
+    locator.evaluate(
+      async (element, source) => {
+        const AsyncFunction = Object.getPrototypeOf(async () => undefined)
+          .constructor as new (
+          argument: string,
+          body: string,
+        ) => (element: Element) => Promise<unknown>;
+        return await new AsyncFunction('element', source)(element);
+      },
+      script,
+      { timeout },
+    ),
+    timeout,
   );
 }

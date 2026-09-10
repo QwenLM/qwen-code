@@ -343,7 +343,13 @@ export async function withTimeout<T>(
       promise,
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(
-          () => reject(new Error(`Operation timed out after ${timeout}ms`)),
+          () =>
+            reject(
+              new BrowserRuntimeError(
+                'OPERATION_TIMEOUT',
+                `Operation timed out after ${timeout}ms`,
+              ),
+            ),
           timeout,
         );
       }),

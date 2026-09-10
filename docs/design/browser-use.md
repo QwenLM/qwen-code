@@ -93,6 +93,16 @@ styles:
 `tab.dom_cua` is used when the model identifies an element in a DOM snapshot.
 `tab.cua` is used when the target is identified visually in a screenshot.
 
+Page and locator evaluation accept functions or strings. Functions are invoked
+with their documented arguments; strings return their JavaScript `eval`
+completion value, including trailing semicolons, comments, and statements.
+String evaluation retains the SDK's lexical `arg`, `element`, and `elements`
+bindings. A function-valued string is not invoked. Use async function arguments
+for `await` and parenthesize object literals in strings. Evaluation deadlines
+cover the whole call, including element lookup, and report `OPERATION_TIMEOUT`;
+`timeoutMs: 0` disables the deadline. A deadline ends the caller's wait without
+terminating JavaScript already running in the page.
+
 Input actions and navigation waits have separate deadlines. Locator clicks,
 locator key presses, and DOM CUA clicks disable Playwright's implicit
 post-action navigation wait. The action deadline covers performing input;

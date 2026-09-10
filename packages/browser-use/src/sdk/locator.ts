@@ -86,7 +86,13 @@ export function pageEvaluateScript(
   if (typeof pageFunction === 'string') {
     if (pageFunction.length === 0)
       throw new TypeError('playwright.evaluate requires a pageFunction');
-    return 'const arg = ' + serializedArg + ';\nreturn (' + pageFunction + ');';
+    return (
+      'const arg = ' +
+      serializedArg +
+      ';\nreturn eval(' +
+      JSON.stringify(pageFunction) +
+      ');'
+    );
   }
   if (typeof pageFunction === 'function') {
     return [
@@ -108,7 +114,13 @@ function locatorEvaluateScript(
   if (typeof pageFunction === 'string') {
     if (pageFunction.length === 0)
       throw new TypeError(method + ' requires a pageFunction');
-    return 'const arg = ' + serializedArg + ';\nreturn (' + pageFunction + ');';
+    return (
+      'const arg = ' +
+      serializedArg +
+      ';\nreturn eval(' +
+      JSON.stringify(pageFunction) +
+      ');'
+    );
   }
   if (typeof pageFunction === 'function') {
     return [

@@ -5,8 +5,36 @@
  */
 
 import type { Page } from 'playwright-core';
-import { describe, expect, it, vi } from 'vitest';
-import { withModifiers } from './runtime-helpers.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { withModifiers, withTimeout } from './runtime-helpers.js';
+
+describe('evaluation deadlines', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('keeps a zero timeout unlimited', async () => {
+    vi.useFakeTimers();
+    let resolve: (value: number) => void = () => undefined;
+    const pending = new Promise<number>((done) => {
+      resolve = done;
+    });
+    const result = withTimeout(pending, 0);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120_000);
+    resolve(42);
+    await expect(result).resolves.toBe(42);
+  });
+
+  it('preserves early results and errors and clears their timers', async () => {
+    vi.useFakeTimers();
+    await expect(withTimeout(Promise.resolve(42), 100)).resolves.toBe(42);
+    expect(vi.getTimerCount()).toBe(0);
+    const failure = new Error('script failed');
+    await expect(withTimeout(Promise.reject(failure), 100)).rejects.toBe(
+      failure,
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
 
 function fixture() {
   const keyboard = {
