@@ -1688,6 +1688,32 @@ describe('AgentCore.prepareTools', () => {
     expect(tools.map((t) => t.name)).toEqual(['lsp']);
   });
 
+  it.each(['subagent', 'teammate'])(
+    'excludes parent-owned record_source from a reused registry in a %s',
+    async (context) => {
+      const { core } = buildAgentForTools({ tools: ['*'] }, [
+        { name: ToolNames.RECORD_SOURCE },
+        { name: ToolNames.READ_FILE },
+      ]);
+
+      const prepareTools = () => core.prepareTools();
+      const tools =
+        context === 'subagent'
+          ? await runWithAgentContext('workflow-subagent', prepareTools)
+          : await runWithTeammateIdentity(
+              {
+                agentId: 'scribe@demo',
+                agentName: 'scribe',
+                teamName: 'demo',
+                isTeamLead: false,
+              },
+              prepareTools,
+            );
+
+      expect(tools.map((tool) => tool.name)).toEqual([ToolNames.READ_FILE]);
+    },
+  );
+
   it('explicit tools list does NOT use the wildcard inherit path', async () => {
     // When the subagent enumerates tools by name, deferred-tool inclusion
     // is not the wildcard branch's responsibility — getFunctionDeclarationsFiltered
@@ -2163,6 +2189,7 @@ describe('extractParentToolNames', () => {
             { name: ToolNames.WORKFLOW },
             { name: ToolNames.AGENT },
             { name: ToolNames.REQUEST_SHUTDOWN },
+            { name: ToolNames.RECORD_SOURCE },
             { name: ToolNames.READ_FILE },
           ],
         },
@@ -2174,6 +2201,7 @@ describe('extractParentToolNames', () => {
     // Leader-only team control: a subagent must never impersonate the
     // leader by requesting a teammate shutdown (#9401).
     expect(names).not.toContain(ToolNames.REQUEST_SHUTDOWN);
+    expect(names).not.toContain(ToolNames.RECORD_SOURCE);
   });
 
   it('filters out empty and non-string declaration names', () => {

@@ -67,9 +67,10 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // never enter or exit the user's worktree state independently.
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
-  // V1 session artifacts are owned by the parent daemon session.
+  // V1 session artifacts and sources are owned by the parent daemon session.
   ToolNames.ARTIFACT,
   ToolNames.RECORD_ARTIFACT,
+  ToolNames.RECORD_SOURCE,
   // FIX-8 (SEC-I1): WORKFLOW is excluded to prevent unbounded recursive
   // fan-out: a subagent spawned by Workflow that calls Workflow would create
   // O(k^n) subagents.
@@ -98,6 +99,7 @@ export const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   // Worktree management belongs to the parent session.
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
+  ToolNames.RECORD_SOURCE,
   // Same recursion guard as EXCLUDED_TOOLS_FOR_SUBAGENTS: the teammate
   // identity propagates through AsyncLocalStorage into anything it
   // spawns, so prepareTools() would keep choosing THIS exclusion set

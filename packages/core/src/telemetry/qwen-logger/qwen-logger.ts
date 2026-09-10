@@ -285,7 +285,8 @@ export class QwenLogger {
         auth_type: authType,
         model: this.config?.getModel(),
         base_url:
-          authType === AuthType.USE_OPENAI
+          authType === AuthType.USE_OPENAI ||
+          authType === AuthType.USE_OPENAI_RESPONSES
             ? this.config?.getContentGeneratorConfig().baseUrl || ''
             : '',
         ...(this.config?.getChannel?.()

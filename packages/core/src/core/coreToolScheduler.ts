@@ -2469,6 +2469,9 @@ export class CoreToolScheduler {
     runtimeView?: RuntimeContentGeneratorView,
   ): Promise<void> {
     if (this.isRunning() || this.isScheduling) {
+      if (signal.aborted) {
+        return Promise.reject(new Error('Tool call cancelled while in queue.'));
+      }
       return new Promise((resolve, reject) => {
         const abortHandler = () => {
           // Find and remove the request from the queue
