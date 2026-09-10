@@ -1562,10 +1562,18 @@ export function buildRoleBrief(
         'the diff concretely changes its behavior or exposure; increased ' +
         'discoverability alone does not establish that. Reject unrelated ' +
         'pre-existing candidates without investigating their implementations. ' +
-        'Do not file incidental findings or start further audit rounds: this ' +
-        'profile runs no later verification round to carry one, so the ' +
-        '`### Incidental findings` channel above is withdrawn — leave that ' +
-        'section out of the report.',
+        'Do not file incidental findings or start further audit rounds.' +
+        // The withdrawal belongs to the verify brief alone: it is the only
+        // brief carrying the `### Incidental findings` channel, and only its
+        // own incidentals have no later round to rule on them — the finder's
+        // candidates are ruled on by Step 4's single verification pass.
+        (role === 'verify'
+          ? ' This profile runs no later verification round to carry one, so ' +
+            'the `### Incidental findings` channel above is withdrawn — leave ' +
+            'that section out of the report.'
+          : " Step 4's single verification pass rules on the candidates you " +
+            'file; nothing carries an incidental, so report only what this ' +
+            'diff causes or worsens.'),
     );
     if (
       role === 'docs-nav' &&

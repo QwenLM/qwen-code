@@ -113,6 +113,30 @@ describe('static documentation navigation profile', () => {
     expect(classify(head, base)).toBe(false);
   });
 
+  it('retains full review for a reorder of a nested digit-shaped key', () => {
+    // The refusal lives in the flat token loop, so it fires at every depth —
+    // pin that: Object.keys hoists '2026' ahead of 'notes' inside `release`
+    // on BOTH sides, and the order-sensitive JSON.stringify(rest) comparison
+    // hoists it too, so narrowing the refusal to top-level keys would admit
+    // this nested sidebar reorder as presentation-only.
+    const base = `export default {
+  release: {
+    '2026': { title: '2026' },
+    notes: 'Notes',
+  },
+};
+`;
+    const head = `export default {
+  release: {
+    notes: 'Notes',
+    '2026': { title: '2026' },
+  },
+};
+`;
+    expect(classify(base, head)).toBe(false);
+    expect(classify(head, base)).toBe(false);
+  });
+
   it('checks the entire files, including unchanged executable content', () => {
     expect(
       classify(

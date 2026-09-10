@@ -2831,6 +2831,12 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       expect(brief).toContain('discoverability alone does not establish that');
       if (role === 'docs-nav') {
         expect(brief).toContain(join(absTmp, 'qwen-review-pr-6766-context.md'));
+        // The finder's brief carries no `### Incidental findings` channel and
+        // Step 4's single verification pass DOES rule on its candidates, so
+        // the withdrawal clause — written for the verifier, whose incidentals
+        // no later round carries — must not be welded in here.
+        expect(brief).not.toContain('channel above is withdrawn');
+        expect(brief).toContain('Do not file incidental findings');
       }
       if (role === 'verify') {
         // The verify brief carries the `### Incidental findings` channel two
