@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  getModelReasoningConfig,
+  resolveEffectiveReasoning,
+} from '../model-reasoning-config.js';
 import type {
   EmbedContentParameters,
   EmbedContentResponse,
@@ -198,7 +202,7 @@ export class LlmContentGenerator implements ContentGenerator {
         'frequencyPenalty',
       ),
       thinkingConfig: getParameterValue(
-        this.buildThinkingConfig(),
+        this.buildThinkingConfig(request),
         'thinkingConfig',
         {
           includeThoughts: true,
@@ -208,12 +212,28 @@ export class LlmContentGenerator implements ContentGenerator {
     };
   }
 
-  private buildThinkingConfig():
-    | { includeThoughts: boolean; thinkingLevel?: ThinkingLevel }
-    | undefined {
-    const reasoning = this.contentGeneratorConfig?.reasoning;
+  private buildThinkingConfig(
+    request?: GenerateContentParameters,
+  ): { includeThoughts: boolean; thinkingLevel?: ThinkingLevel } | undefined {
+    const generation = this.contentGeneratorConfig;
+    const external = generation
+      ? getModelReasoningConfig(
+          this.cliConfig,
+          generation,
+          request?.model || generation.model,
+        )
+      : undefined;
+    const reasoning = generation
+      ? resolveEffectiveReasoning(generation, external)
+      : undefined;
+    if (
+      external &&
+      request?.config?.thinkingConfig?.includeThoughts === false &&
+      external.canDisable !== false
+    )
+      return { includeThoughts: false };
 
-    if (reasoning === false) {
+    if (reasoning === false && external?.canDisable !== false) {
       return { includeThoughts: false };
     }
 

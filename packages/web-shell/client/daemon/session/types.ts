@@ -145,6 +145,7 @@ export interface DaemonReasoningControls {
   efforts: Array<Exclude<ReasoningSelection, 'none' | 'default'>>;
   /** The model default when the daemon advertises one. */
   defaultEffort?: Exclude<ReasoningSelection, 'none' | 'default'>;
+  canResetToDefault?: boolean;
   enableValue?: 'default';
   canEnable?: false;
   /** Defaults to true. False means effort is mutable but thinking is required. */

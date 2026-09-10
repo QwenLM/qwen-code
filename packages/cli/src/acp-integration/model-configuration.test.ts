@@ -9,6 +9,8 @@ import {
   buildInstallPlan,
   findProviderById,
   resolveBaseUrl,
+  resolveModelReasoningConfig,
+  AuthType,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import { describe, expect, it, vi } from 'vitest';
@@ -25,6 +27,72 @@ import {
   isReasoningSelectionSupported,
   resolvePersistedReasoningConfigState,
 } from './model-configuration.js';
+
+describe('external model thinking controls', () => {
+  const generation: ContentGeneratorConfig = {
+    model: 'deployment-alias',
+    authType: AuthType.USE_OPENAI,
+    baseUrl: 'https://proxy.example/v1',
+    reasoningConfig: {
+      profile: 'dashscope-effort',
+      supportedEfforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'medium',
+    },
+  };
+
+  it('advertises a real default and a way to restore it', () => {
+    const options = buildModelReasoningConfigPreview(
+      generation.model,
+      {},
+      undefined,
+      generation,
+    );
+    expect(options?.[0]).toMatchObject({
+      currentValue: 'medium',
+      options: [
+        { value: 'none' },
+        { value: 'default' },
+        { value: 'low' },
+        { value: 'medium' },
+        { value: 'xhigh' },
+      ],
+      _meta: {
+        'qwenCode/reasoning': { defaultEffort: 'medium', resetToDefault: true },
+      },
+    });
+  });
+
+  it('shows the raw override that actually wins on the wire', () => {
+    const options = buildModelReasoningConfigPreview(
+      generation.model,
+      {},
+      undefined,
+      { ...generation, extra_body: { reasoning_effort: 'xhigh' } },
+    );
+    expect(options?.[0]?.currentValue).toBe('xhigh');
+  });
+
+  it('keeps mandatory thinking effort options and clamps a persisted preference', () => {
+    const config = { ...generation, thinkingMandatory: true };
+    const reasoning = resolveModelReasoningConfig(config)!;
+    const state = resolvePersistedReasoningConfigState(
+      config.model,
+      'high',
+      true,
+      reasoning,
+    );
+    expect(state).toMatchObject({ effort: 'xhigh' });
+    const option = buildModelReasoningConfigOption(
+      config.model,
+      state,
+      reasoning,
+    )!;
+    expect(option.options).not.toContainEqual(
+      expect.objectContaining({ value: 'none' }),
+    );
+    expect(option.currentValue).toBe('xhigh');
+  });
+});
 
 describe('default reasoning configuration', () => {
   it.each([

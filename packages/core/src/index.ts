@@ -67,6 +67,8 @@ export {
   runOutsideAgentContext,
 } from './agents/runtime/agent-context.js';
 export * from './core/reasoning-effort.js';
+export * from './core/model-reasoning-config.js';
+export { getOpenAIReasoningState } from './core/openaiContentGenerator/reasoning-profile.js';
 export { isOpenRouterHostname } from './core/openaiContentGenerator/provider/openrouter.js';
 export * from './core/coreToolScheduler.js';
 export * from './core/permissionFlow.js';

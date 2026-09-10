@@ -148,6 +148,7 @@ import {
   listWorkflowSnapshots,
   type TurnResultRecordPayload,
   sessionIdContext,
+  resolveModelReasoningConfig,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -7361,16 +7362,28 @@ class QwenAgent implements Agent {
 
         const isCurrent =
           currentAuth === model.authType && currentAcpModelId === modelId;
-        const resolved =
-          !model.isRuntimeModel && !modelId.startsWith(ACP_ROUTE_ID_PREFIX)
-            ? config.getResolvedModelConfig?.(
-                model.authType,
-                model.id,
-                model.registryBaseUrl ?? model.baseUrl,
-              )
-            : undefined;
+        const resolved = !model.isRuntimeModel
+          ? config.getResolvedModelConfig?.(
+              model.authType,
+              model.id,
+              model.registryBaseUrl ?? model.baseUrl,
+            )
+          : undefined;
+        const reasoning = resolved
+          ? (resolveModelReasoningConfig(
+              {
+                ...resolved.generationConfig,
+                model: model.id,
+                authType: model.authType,
+                baseUrl: resolved.baseUrl,
+              },
+              model.capabilities?.reasoning,
+            ) ?? model.capabilities?.reasoning)
+          : model.capabilities?.reasoning;
         const configOptions =
-          model.isRuntimeModel || modelId.startsWith(ACP_ROUTE_ID_PREFIX)
+          model.isRuntimeModel ||
+          (modelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
+            resolved?.generationConfig.reasoningConfig === undefined)
             ? undefined
             : buildModelReasoningConfigPreview(
                 model.id,
@@ -7378,13 +7391,14 @@ class QwenAgent implements Agent {
                   model.id,
                   settings.merged.model?.reasoningEffort,
                   resolved?.generationConfig.thinkingMandatory === true,
-                  model.capabilities?.reasoning,
+                  reasoning,
                 ),
-                model.capabilities?.reasoning,
+                reasoning,
                 resolved
                   ? {
                       ...resolved.generationConfig,
                       model: model.id,
+                      authType: model.authType,
                       baseUrl: resolved.baseUrl,
                     }
                   : undefined,
@@ -13318,8 +13332,17 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.workspaceReload: {
         const oldMerged = structuredClone(this.settings.merged);
 
-        this.settings.reloadScopeFromDisk(SettingScope.User);
-        this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+        if (
+          !this.settings.reloadScopesFromDiskAtomically([
+            SettingScope.User,
+            SettingScope.Workspace,
+          ])
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Unable to reload settings from disk.',
+          );
+        }
         const newMerged = this.settings.merged;
 
         const envResult = reloadEnvironment(newMerged, cwd);
@@ -13377,9 +13400,26 @@ class QwenAgent implements Agent {
         const sessions = [...this.sessions.entries()];
         const refreshed: string[] = [];
         const skipped: string[] = [];
+        const newModelName = newMerged.model?.name;
 
         const results = await Promise.allSettled(
           sessions.map(async ([id, session]) => {
+            if (providersChanged) {
+              const config = session.getConfig();
+              if (changed.has('model')) {
+                config.stageModelProvidersReload(
+                  newMerged.modelProviders,
+                  newMerged.providerProtocol ?? {},
+                  newModelName || null,
+                  newMerged.model?.baseUrl,
+                );
+              } else {
+                config.stageModelProvidersReload(
+                  newMerged.modelProviders,
+                  newMerged.providerProtocol ?? {},
+                );
+              }
+            }
             if (!session.isIdle()) {
               skipped.push(id);
               return;
@@ -13387,25 +13427,8 @@ class QwenAgent implements Agent {
             const config = session.getConfig();
             const authType = config.getAuthType();
 
-            // Long-lived ACP sessions never restart, so honor providerProtocol
-            // changes here too (its requiresRestart only gates the TUI path) and
-            // always pass the current map so a modelProviders-only reload doesn't
-            // re-register against a stale protocol mapping.
-            if (providersChanged) {
-              try {
-                config.reloadModelProvidersConfig(
-                  newMerged.modelProviders,
-                  newMerged.providerProtocol ?? {},
-                );
-              } catch (err) {
-                debugLogger.warn(
-                  `reload: reloadModelProvidersConfig failed for session ${id}: ${err}`,
-                );
-              }
-            }
-
-            const newModelName = newMerged.model?.name;
             if (
+              !providersChanged &&
               changed.has('model') &&
               newModelName &&
               newModelName !== config.getModel() &&
@@ -13419,7 +13442,7 @@ class QwenAgent implements Agent {
                   `reload: switchModel failed for session ${id}: ${err}`,
                 );
               }
-            } else if ((providersChanged || envChanged) && authType) {
+            } else if (envChanged && !providersChanged && authType) {
               try {
                 await this.refreshAuthWithPersistedReasoning(
                   config,
@@ -14723,8 +14746,9 @@ class QwenAgent implements Agent {
     );
 
     if (
-      activeRuntimeSnapshot ||
-      currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) ||
+      (!modelReasoning?.profile &&
+        (activeRuntimeSnapshot ||
+          currentModelId.startsWith(ACP_ROUTE_ID_PREFIX))) ||
       !isReasoningSelectionSupported(
         rawCurrentModelId,
         REASONING_EFFORT_DEFAULT,
@@ -14806,13 +14830,25 @@ class QwenAgent implements Agent {
         : generation.reasoning !== false &&
           (!reasoningOverride || !overrideDisablesReasoning) &&
           gptOverride?.enabled !== false;
+    const externalState =
+      generation.reasoningConfig !== undefined
+        ? config.getEffectiveReasoning()
+        : undefined;
     const canDisableReasoning = generation.thinkingMandatory !== true;
     const reasoningEffortConfigOption: SessionConfigOption = (modelReasoning
       ? buildModelReasoningConfigOption(
           rawCurrentModelId,
           {
-            enabled: reasoningEnabled,
-            effort: effectiveModelEffort,
+            enabled:
+              externalState === false
+                ? false
+                : externalState
+                  ? true
+                  : reasoningEnabled,
+            effort:
+              externalState && externalState.effort
+                ? externalState.effort
+                : effectiveModelEffort,
             ...(gptEnableOverride?.blocksTierChange
               ? gptEnableOverride.enabled && defaultReasoning !== false
                 ? { enableValue: REASONING_EFFORT_DEFAULT }
@@ -14863,6 +14899,8 @@ class QwenAgent implements Agent {
     config: Config,
     currentAcpModelId?: string,
   ): ModelReasoningConfiguration | undefined {
+    if (config.getContentGeneratorConfig?.()?.reasoningConfig !== undefined)
+      return getConfiguredModelReasoning(config);
     if (config.getActiveRuntimeModelSnapshot?.()) {
       return undefined;
     }

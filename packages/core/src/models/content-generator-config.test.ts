@@ -53,6 +53,28 @@ describe('buildAgentContentGeneratorConfig', () => {
   };
 
   describe('same-provider, bare model ID, no registry match', () => {
+    it('does not inherit a thinking profile across endpoints with the same model name', () => {
+      const config = createMockConfig({
+        ...parentConfig,
+        thinkingMandatory: true,
+        reasoningConfig: {
+          profile: 'dashscope-effort',
+          defaultEffort: 'medium',
+        },
+      });
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        parentConfig.model,
+        {
+          authType: 'openai',
+          baseUrl: 'https://other.example/v1',
+        },
+      );
+      expect(result.reasoningConfig).toBeUndefined();
+      expect(result.thinkingMandatory).toBeUndefined();
+      expect(result.baseUrl).toBe('https://other.example/v1');
+    });
+
     it('should override the model but keep parent generation config', () => {
       const config = createMockConfig(parentConfig);
 

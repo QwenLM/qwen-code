@@ -72,6 +72,7 @@ describe('SettingsSchema', () => {
         getSettingsSchema().model.properties.reasoningEffort;
 
       expect(options?.map((option) => option.value)).toEqual([
+        'default',
         'low',
         'medium',
         'high',
@@ -80,15 +81,22 @@ describe('SettingsSchema', () => {
       ]);
       expect(jsonSchemaOverride).toEqual({
         type: 'string',
-        enum: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+        enum: ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'],
       });
       expectTypeOf<
         NonNullable<Settings['model']>['reasoningEffort']
       >().toEqualTypeOf<
-        'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined
+        | 'default'
+        | 'none'
+        | 'low'
+        | 'medium'
+        | 'high'
+        | 'xhigh'
+        | 'max'
+        | undefined
       >();
       expect(options).not.toContainEqual(
-        expect.objectContaining({ value: 'default' }),
+        expect.objectContaining({ value: 'none' }),
       );
     });
 

@@ -205,6 +205,9 @@ export function mapReasoningControls(
     effort,
     efforts: effortValues,
     ...(defaultEffort ? { defaultEffort } : {}),
+    ...(reasoningMeta?.['resetToDefault'] === true && values.includes('default')
+      ? { canResetToDefault: true }
+      : {}),
     ...(reasoningMeta?.['canEnable'] === false ? { canEnable: false } : {}),
     ...(reasoningMeta?.['enableValue'] === 'default'
       ? { enableValue: 'default' as const }

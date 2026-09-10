@@ -69,6 +69,63 @@ The selected route must declare an explicit HTTPS `baseUrl` and a non-empty
 if chat and image generation require different endpoints or credentials,
 configure two routes instead.
 
+## Override model thinking rules
+
+Use `generationConfig.reasoningConfig` to describe a new model or override the
+thinking rules inferred from an existing model name and endpoint:
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "company-model-v2",
+        "baseUrl": "https://gateway.example.com/v1",
+        "envKey": "COMPANY_MODEL_API_KEY",
+        "generationConfig": {
+          "reasoningConfig": {
+            "profile": "dashscope-effort",
+            "supportedEfforts": ["low", "medium", "xhigh"],
+            "defaultEffort": "medium"
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+- `profile` selects an existing thinking request format. OpenAI-compatible
+  routes accept `openai-reasoning`, `openai-effort`, `deepseek-openai`,
+  `dashscope-thinking`, `dashscope-effort`, or `qwen-chat-template`.
+  Anthropic routes accept `anthropic-manual`, `anthropic-adaptive`,
+  `anthropic-adaptive-only`, or `deepseek-anthropic`. Gemini/Vertex routes use
+  `gemini`. A profile does not change the endpoint, authentication or SDK.
+- `supportedEfforts` overrides the supported subset of
+  `low/medium/high/xhigh/max`. Omit it to use existing defaults. Gemini uses
+  `low/medium/high`. The two toggle-only profiles (`dashscope-thinking` and
+  `qwen-chat-template`) do not accept effort fields.
+- `defaultEffort` must belong to that supported set. It is sent on requests
+  when no explicit effort is selected, and the controls display the same value.
+  `/effort default` or **Use model default** clears the explicit selection.
+
+Omitted fields inherit existing rules. Existing `capabilities.reasoning`
+settings continue to work; an explicit new declaration takes precedence.
+`reasoning: false` still disables thinking, and `thinkingMandatory: true`
+prevents disabling it. Fixed budgets continue to use `reasoning.budget_tokens`;
+there is no per-effort budget mapping setting.
+
+Settings reload validates and stages the model update. The entire current
+prompt, including tools and retries, retains its configuration. The latest
+valid staged update applies when the next user prompt starts; new sessions use
+the latest settings immediately. Invalid updates report a configuration error
+and preserve the running configuration. Model and endpoint identities remain
+separate, so two routes with the same model name can use different profiles.
+
+This supports new models that reuse these thinking protocols. New authentication
+schemes, response formats and other unsupported model restrictions still need a
+corresponding implementation.
+
 ## Configuration Examples by Auth Type
 
 Below are comprehensive configuration examples for different authentication types, showing the available parameters and their combinations.

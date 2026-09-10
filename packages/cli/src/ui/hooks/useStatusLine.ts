@@ -314,7 +314,9 @@ export function useStatusLine(
   // Reasoning effort lives on the content-generator config, not uiState, so it
   // isn't a natural render trigger. Track it as a string key so the status line
   // recomputes immediately when `/effort` changes it mid-session.
-  const reasoningConfig = config.getContentGeneratorConfig()?.reasoning;
+  const reasoningConfig =
+    config.getEffectiveReasoning?.() ??
+    config.getContentGeneratorConfig()?.reasoning;
   const reasoningEffortKey =
     reasoningConfig === false ? 'off' : (reasoningConfig?.effort ?? '');
   const prevStateRef = useRef<{
@@ -461,7 +463,8 @@ export function useStatusLine(
         sessionId: stats.sessionId,
         version: cfg.getCliVersion(),
         modelDisplayName,
-        reasoning: contentGeneratorConfig?.reasoning,
+        reasoning:
+          cfg.getEffectiveReasoning?.() ?? contentGeneratorConfig?.reasoning,
         currentDir,
         branch: ui.branchName,
         pullRequestNumber: pullRequestNumberRef.current,

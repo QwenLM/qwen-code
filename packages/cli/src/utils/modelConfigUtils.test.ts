@@ -252,6 +252,36 @@ describe('modelConfigUtils', () => {
       );
     });
 
+    it('loads Default without injecting an effort or reporting an invalid preference', () => {
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'alias',
+          reasoningConfig: {
+            profile: 'openai-effort',
+            defaultEffort: 'medium',
+          },
+        },
+        sources: {},
+        warnings: [],
+      });
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        selectedAuthType: AuthType.USE_OPENAI,
+        settings: makeMockSettings({
+          model: { name: 'alias', reasoningEffort: 'default' },
+        }),
+      });
+      expect(result.generationConfig.reasoning).toBeUndefined();
+      expect(result.generationConfig.reasoningConfig?.defaultEffort).toBe(
+        'medium',
+      );
+      expect(result.warnings).not.toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('Ignoring invalid model.reasoningEffort'),
+        ]),
+      );
+    });
+
     it('should resolve config from argv with highest precedence', () => {
       const argv = {
         model: 'argv-model',

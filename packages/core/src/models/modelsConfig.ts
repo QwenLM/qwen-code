@@ -82,7 +82,9 @@ export interface ModelsConfigOptions {
  * Config uses this as a thin entry point for all model-related operations.
  */
 export class ModelsConfig {
-  private readonly modelRegistry: ModelRegistry;
+  private modelRegistry: ModelRegistry;
+  private pendingModelRegistry?: ModelRegistry;
+  private pendingModelSelection?: { modelId: string; baseUrl?: string };
 
   // Current selection state
   private currentAuthType: AuthType | undefined;
@@ -1453,6 +1455,59 @@ export class ModelsConfig {
       modelProvidersConfig,
       providerProtocolConfig,
     );
+  }
+
+  getNextPromptModelProvidersConfig(): ModelProvidersConfig | undefined {
+    return (
+      this.pendingModelRegistry ?? this.modelRegistry
+    ).getModelProvidersConfig();
+  }
+
+  stageModelProvidersReload(
+    modelProviders?: ModelProvidersConfig,
+    providerProtocol?: ProviderProtocolConfig,
+    modelId?: string | null,
+    baseUrl?: string,
+  ): void {
+    this.pendingModelRegistry = this.modelRegistry.prepareReload(
+      structuredClone(modelProviders),
+      structuredClone(providerProtocol),
+    );
+    if (modelId !== undefined) {
+      this.pendingModelSelection =
+        modelId === null
+          ? undefined
+          : {
+              modelId,
+              ...(baseUrl !== undefined ? { baseUrl } : {}),
+            };
+    }
+  }
+
+  async applyPendingModelProvidersReload(
+    refresh: (selection?: {
+      modelId: string;
+      baseUrl?: string;
+    }) => Promise<void>,
+  ): Promise<boolean> {
+    const pending = this.pendingModelRegistry;
+    if (!pending) return false;
+    const pendingModelSelection = this.pendingModelSelection;
+    const previousRegistry = this.modelRegistry;
+    const previousState = this.createStateSnapshotForRollback();
+    this.modelRegistry = pending;
+    try {
+      await refresh(pendingModelSelection);
+      if (this.pendingModelRegistry === pending) {
+        this.pendingModelRegistry = undefined;
+        this.pendingModelSelection = undefined;
+      }
+      return true;
+    } catch (error) {
+      this.modelRegistry = previousRegistry;
+      this.rollbackToStateSnapshot(previousState);
+      throw error;
+    }
   }
 
   /** The raw providers config the registry was last built from. */

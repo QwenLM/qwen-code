@@ -5,6 +5,7 @@
  */
 
 import { AuthType } from '../core/contentGenerator.js';
+import { resolveModelReasoningConfig } from '../core/model-reasoning-config.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
@@ -325,6 +326,16 @@ export class ModelRegistry {
       generationConfig.modalities = defaultModalities(config.id);
     }
 
+    resolveModelReasoningConfig(
+      {
+        ...generationConfig,
+        model: config.id,
+        authType,
+        baseUrl: config.baseUrl,
+      },
+      config.capabilities?.reasoning,
+    );
+
     return {
       ...config,
       authType,
@@ -373,13 +384,23 @@ export class ModelRegistry {
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
   ): void {
-    const reloaded = new ModelRegistry(
+    const reloaded = this.prepareReload(
       modelProvidersConfig,
-      providerProtocolConfig ?? this.providerProtocolConfig,
+      providerProtocolConfig,
     );
     this.modelsByAuthType = reloaded.modelsByAuthType;
     this.providerProtocolConfig = reloaded.providerProtocolConfig;
     this.modelProvidersConfig = reloaded.modelProvidersConfig;
+  }
+
+  prepareReload(
+    modelProvidersConfig?: ModelProvidersConfig,
+    providerProtocolConfig?: ProviderProtocolConfig,
+  ): ModelRegistry {
+    return new ModelRegistry(
+      modelProvidersConfig,
+      providerProtocolConfig ?? this.providerProtocolConfig,
+    );
   }
 
   /** The raw providers config this registry was last built from. */

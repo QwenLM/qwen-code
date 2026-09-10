@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getModelReasoningConfig } from '../model-reasoning-config.js';
+import { applyOpenAIReasoningProfile } from './reasoning-profile.js';
 import type OpenAI from 'openai';
 import {
   type GenerateContentParameters,
@@ -960,6 +962,20 @@ export class ContentGenerationPipeline {
         this.config.cliConfig.getSessionId?.(),
         request.promptCacheSharing === true,
         isInForkExecution() ? undefined : (getCurrentAgentId() ?? undefined),
+      );
+    }
+
+    const externalReasoning = getModelReasoningConfig(
+      this.config.cliConfig,
+      this.contentGeneratorConfig,
+      context.model,
+    );
+    if (externalReasoning) {
+      return applyOpenAIReasoningProfile(
+        providerRequest,
+        this.contentGeneratorConfig,
+        externalReasoning,
+        request.config?.thinkingConfig?.includeThoughts === false,
       );
     }
 

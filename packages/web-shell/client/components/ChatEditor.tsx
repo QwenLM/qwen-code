@@ -1148,6 +1148,17 @@ function ModelReasoningControls({
           <div className={styles.reasoningSectionTitle}>
             {t('reasoning.effort')}
           </div>
+          {reasoning.canResetToDefault ? (
+            <button
+              type="button"
+              className={styles.reasoningEffortRow}
+              data-web-shell-effort="default"
+              disabled={busy || !onSelect}
+              onClick={() => void select('default')}
+            >
+              <span>{t('reasoning.default')}</span>
+            </button>
+          ) : null}
           {reasoning.efforts.map((effort) => (
             <button
               key={effort}

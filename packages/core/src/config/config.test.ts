@@ -6605,6 +6605,41 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getReasoningEffortOverride()).toBeUndefined();
     });
+
+    it('reports overrides for an explicit DashScope effort profile on a proxy', () => {
+      const config = new Config({ ...baseParams });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'deployment-alias',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://proxy.example/v1',
+        reasoningConfig: {
+          profile: 'dashscope-effort',
+          supportedEfforts: ['low', 'medium', 'xhigh'],
+          defaultEffort: 'medium',
+        },
+        extra_body: { thinking_budget: 2048 },
+      };
+
+      expect(config.getReasoningEffortOverride()).toEqual({
+        source: 'extra_body',
+        field: 'thinking_budget',
+      });
+      config.getContentGeneratorConfig().extra_body = {
+        reasoning_effort: 'medium',
+      };
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
+      config.getContentGeneratorConfig().extra_body = {
+        reasoning_effort: 'xhigh',
+      };
+      expect(config.getReasoningEffortOverride()).toEqual({
+        source: 'extra_body',
+        field: 'reasoning_effort',
+      });
+    });
   });
 
   describe('refreshAuth', () => {

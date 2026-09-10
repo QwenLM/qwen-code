@@ -9,6 +9,7 @@ import {
   APPROVAL_MODES,
   createDebugLogger,
   ModelsConfig,
+  resolveModelReasoningConfig,
   tokenLimit,
 } from '@qwen-code/qwen-code-core';
 import type { AuthType } from '@qwen-code/qwen-code-core';
@@ -166,32 +167,44 @@ function buildWorkspaceProvidersStatus(
 
       const isCurrent =
         currentAuth === model.authType && currentAcpModelId === modelId;
-      const resolved = modelId.startsWith(ACP_ROUTE_ID_PREFIX)
-        ? undefined
-        : modelsConfig.getResolvedModel(
-            model.authType,
-            model.id,
-            model.registryBaseUrl ?? model.baseUrl,
-          );
-      const configOptions = modelId.startsWith(ACP_ROUTE_ID_PREFIX)
-        ? undefined
-        : buildModelReasoningConfigPreview(
-            model.id,
-            resolvePersistedReasoningConfigState(
-              model.id,
-              settings.model?.reasoningEffort,
-              resolved?.generationConfig.thinkingMandatory === true,
-              model.capabilities?.reasoning,
-            ),
+      const resolved = modelsConfig.getResolvedModel(
+        model.authType,
+        model.id,
+        model.registryBaseUrl ?? model.baseUrl,
+      );
+      const reasoning = resolved
+        ? (resolveModelReasoningConfig(
+            {
+              ...resolved.generationConfig,
+              model: model.id,
+              authType: model.authType,
+              baseUrl: resolved.baseUrl,
+            },
             model.capabilities?.reasoning,
-            resolved
-              ? {
-                  ...resolved.generationConfig,
-                  model: model.id,
-                  baseUrl: resolved.baseUrl,
-                }
-              : undefined,
-          );
+          ) ?? model.capabilities?.reasoning)
+        : model.capabilities?.reasoning;
+      const configOptions =
+        modelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
+        resolved?.generationConfig.reasoningConfig === undefined
+          ? undefined
+          : buildModelReasoningConfigPreview(
+              model.id,
+              resolvePersistedReasoningConfigState(
+                model.id,
+                settings.model?.reasoningEffort,
+                resolved?.generationConfig.thinkingMandatory === true,
+                reasoning,
+              ),
+              reasoning,
+              resolved
+                ? {
+                    ...resolved.generationConfig,
+                    model: model.id,
+                    authType: model.authType,
+                    baseUrl: resolved.baseUrl,
+                  }
+                : undefined,
+            );
       const providerModel: ServeWorkspaceProviderModel = {
         modelId,
         baseModelId: parseAcpBaseModelId(effectiveModelId),
