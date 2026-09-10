@@ -241,6 +241,9 @@ import {
 import {
   deriveSessionName,
   patchSessionRecord,
+  SHARED_RECORD_SLOT,
+  type SessionRecordSlot,
+  type SessionRegistration,
   unregisterSession,
 } from '../services/session-registry.js';
 import { delay } from '../utils/retry.js';
@@ -2425,6 +2428,15 @@ export class Config {
   private runtimeStatusEnabled = false;
   private sessionRegistryActive = false;
   private sessionRegistered = false;
+  /**
+   * Which of this process's registry records belongs to this session.
+   *
+   * A process hosting one session owns the shared `<pid>.json`; one
+   * hosting several owns a minted record per session, and every patch and
+   * the final removal have to name the right one or they would rewrite a
+   * sibling's record. Learned from the registration itself.
+   */
+  private sessionRegistrySlot: SessionRecordSlot = SHARED_RECORD_SLOT;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly restoreAskUserQuestion: boolean = false;
   /**
@@ -4709,10 +4721,11 @@ export class Config {
     failureWarning: string,
   ): void {
     this.queueSessionRegistryWrite(async () => {
-      let applied = await patchSessionRecord(patch);
+      const slot = this.sessionRegistrySlot;
+      let applied = await patchSessionRecord(patch, slot);
       for (let attempt = 0; attempt < 2 && !applied; attempt += 1) {
         await delay(250);
-        applied = await patchSessionRecord(patch);
+        applied = await patchSessionRecord(patch, slot);
       }
       if (!applied) {
         this.debugLogger.warn(failureWarning);
@@ -4737,20 +4750,36 @@ export class Config {
    * Serializes initial registration with mid-session patches and cleanup.
    * The registration promise is deliberately not awaited by UI startup.
    */
-  trackSessionRegistration(registration: Promise<boolean>): void {
+  trackSessionRegistration(registration: Promise<SessionRegistration>): void {
     this.sessionRegistryActive = true;
     this.sessionRegistryWrite = this.sessionRegistryWrite
       .catch(() => {
         // Keep registration independent from an earlier best-effort write.
       })
       .then(async () => {
-        this.sessionRegistered = await registration;
+        // The slot is taken whether or not the write landed: it names the
+        // record this session would own, and every later patch is queued
+        // behind this step, so none of them can run against the wrong one.
+        const outcome = await registration;
+        this.sessionRegistrySlot = outcome.slot;
+        this.sessionRegistered = outcome.registered;
         if (!this.sessionRegistered) this.sessionRegistryActive = false;
       })
       .catch(() => {
         this.sessionRegistered = false;
         this.sessionRegistryActive = false;
       });
+  }
+
+  /**
+   * Which registry record describes this session.
+   *
+   * Read by the send path: a process hosting several sessions has a record
+   * each, and the reply address, name and id a message carries have to
+   * come from the sending session's own.
+   */
+  getSessionRegistrySlot(): SessionRecordSlot {
+    return this.sessionRegistrySlot;
   }
 
   /**
@@ -4778,7 +4807,8 @@ export class Config {
     if (!this.sessionRegistryActive) return;
     let applied = false;
     this.queueSessionRegistryWrite(async () => {
-      applied = await patchSessionRecord({ ipcPath, ipcToken });
+      const slot = this.sessionRegistrySlot;
+      applied = await patchSessionRecord({ ipcPath, ipcToken }, slot);
       if (ipcPath === undefined || applied) return;
       // The advertise is one-shot: no later patch re-asserts ipcPath, and
       // every skip is transient (the fd-pressure window on this process's
@@ -4787,7 +4817,7 @@ export class Config {
       // session would keep a live inbox no peer can ever discover.
       for (let attempt = 0; attempt < 2 && !applied; attempt += 1) {
         await delay(250);
-        applied = await patchSessionRecord({ ipcPath, ipcToken });
+        applied = await patchSessionRecord({ ipcPath, ipcToken }, slot);
       }
       if (!applied) {
         this.debugLogger.warn(
@@ -4808,7 +4838,7 @@ export class Config {
       .then(async () => {
         if (!this.sessionRegistered) return;
         this.sessionRegistered = false;
-        await unregisterSession();
+        await unregisterSession(this.sessionRegistrySlot);
       })
       .catch(() => {
         // ignored: registry cleanup must not disrupt process teardown.
@@ -4887,10 +4917,13 @@ export class Config {
         // folder this session left. Unlike the /clear path, `name`
         // follows: it is derived from the directory's basename, which is
         // exactly what changed here.
-        await patchSessionRecord({
-          cwd: workDir,
-          name: deriveSessionName(workDir, sessionId),
-        });
+        await patchSessionRecord(
+          {
+            cwd: workDir,
+            name: deriveSessionName(workDir, sessionId),
+          },
+          this.sessionRegistrySlot,
+        );
       });
     }
     await this.flushRuntimeStatusWrites();
