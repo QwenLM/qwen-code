@@ -2337,7 +2337,9 @@ export class CoreToolScheduler {
 
   /** Suggests similar tool names using Levenshtein distance. */
   private getToolSuggestion(unknownToolName: string, topN = 3): string {
-    const allToolNames = this.toolRegistry.getAllToolNames();
+    const allToolNames = this.toolRegistry
+      .getAllToolNames()
+      .filter((name) => this.toolRegistry.isToolDeclared?.(name) ?? true);
 
     const matches = allToolNames.map((toolName) => ({
       name: toolName,
