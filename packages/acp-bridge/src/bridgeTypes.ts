@@ -976,6 +976,8 @@ export interface BridgeClientRequestContext {
    * unchanged. HTTP routes never populate this from request input.
    */
   modelPrompt?: string;
+  /** Original text explicitly declared by a supported submission producer. */
+  submittedPrompt?: string;
   /** User-facing projection supplied by an authenticated channel worker. */
   promptDisplayText?: string;
   /**
@@ -1081,6 +1083,8 @@ export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
  * caller that could set it could make one agent post as another.
  */
 export const DAEMON_AGENT_RUN_META_KEY = 'qwen.daemon.agentRun';
+export const SUBMITTED_PROMPT_META_KEY = 'qwen.submittedPrompt';
+export const DAEMON_SUBMITTED_PROMPT_META_KEY = 'qwen.daemon.submittedPrompt';
 export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
 // Wire twin of channel-base's CHANNEL_PROMPT_META_KEY; the packages have no

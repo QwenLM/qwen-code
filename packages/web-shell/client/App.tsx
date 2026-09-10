@@ -616,6 +616,7 @@ function resolvePreparedSubmit(
 }
 
 interface SendPromptOptionsWithRetry {
+  submittedPrompt?: string;
   optimisticUserMessage?: boolean;
   images?: PromptImage[];
   files?: PromptFile[];
@@ -9540,6 +9541,7 @@ export function App({
         // by the failed-prompt retry, whose user message was never
         // recorded.
         skipPrepareSubmit?: boolean;
+        submittedPrompt?: string;
         inputAnnotations?: DaemonInputAnnotation[];
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
@@ -9752,6 +9754,9 @@ export function App({
       let admissionStarted = false;
       let admitted = false;
       const promptOptions: SendPromptOptionsWithRetry = {
+        ...(opts?.submittedPrompt !== undefined
+          ? { submittedPrompt: opts.submittedPrompt }
+          : {}),
         images,
         files,
         inputAnnotations:
@@ -10304,6 +10309,7 @@ export function App({
       onComplete?: () => void,
       commitComposerAccepted?: ComposerSubmitCommit,
       inputAnnotations?: DaemonInputAnnotation[],
+      submittedPrompt = text,
     ) => {
       const normalizedInputAnnotations = inputAnnotations
         ? [...inputAnnotations]
@@ -10330,6 +10336,8 @@ export function App({
           files,
           onComplete,
           annotations,
+          undefined,
+          submittedPrompt,
         );
         if (result !== false) {
           if (commitComposerAccepted) {
@@ -13971,6 +13979,7 @@ export function App({
           undefined,
           commitComposerAccepted,
           metadata?.inputAnnotations,
+          text,
         );
       };
       const submitPromptFromEditor = (
@@ -14013,6 +14022,7 @@ export function App({
         let admissionStarted = false;
         let admissionSessionId: string | undefined;
         sendPrompt(promptText, promptImages, promptFiles, {
+          submittedPrompt: text,
           ownerRef: admissionAttachment,
           ...sendOptions,
           clearComposerOnPromptStart,
@@ -14489,6 +14499,7 @@ export function App({
                     writeBlockGeneration
                 ) {
                   return sendPrompt(prompt, images, files, {
+                    submittedPrompt: text,
                     clearComposerOnPromptStart: true,
                     inputAnnotations: metadata?.inputAnnotations,
                   });

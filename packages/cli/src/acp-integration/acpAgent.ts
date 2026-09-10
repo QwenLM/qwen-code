@@ -433,6 +433,8 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_SUBMITTED_PROMPT_META_KEY,
+  SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
@@ -6339,12 +6341,21 @@ class QwenAgent implements Agent {
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
     const suppliedPromptDisplayText = meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    const submittedPrompt =
+      this.privateParentState === 'trusted'
+        ? meta[DAEMON_SUBMITTED_PROMPT_META_KEY]
+        : meta[SUBMITTED_PROMPT_META_KEY];
     const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
     const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
     delete meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
     delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    delete meta[SUBMITTED_PROMPT_META_KEY];
+    delete meta[DAEMON_SUBMITTED_PROMPT_META_KEY];
+    if (typeof submittedPrompt === 'string' && suppliedChannelPrompt !== true) {
+      meta[DAEMON_SUBMITTED_PROMPT_META_KEY] = submittedPrompt;
+    }
     delete meta[CHANNEL_PROMPT_META_KEY];
     delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     // The user-facing display projection is caller-controlled metadata; honor

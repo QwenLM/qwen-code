@@ -2972,6 +2972,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         'qwen-code/private-parent-capability': 'forged-capability',
         'qwen.daemon.modelPrompt': 'forged model-only prompt',
         'qwen.daemon.promptDisplayText': 'forged display text',
+        'qwen.daemon.submittedPrompt': 'forged submission',
       },
     });
 
@@ -2980,6 +2981,57 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sessionId: 'untrusted-session',
         prompt: [{ type: 'text', text: 'hello' }],
         _meta: { keep: true },
+      },
+      undefined,
+      expect.any(AbortSignal),
+      undefined,
+    );
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('admits an explicit public submission without trusting private ACP metadata', async () => {
+    await setupSessionMocks('untrusted-session');
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({ clientCapabilities: {} });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await agent.prompt({
+      sessionId: 'untrusted-session',
+      prompt: [{ type: 'text', text: 'hello' }],
+      _meta: {
+        keep: true,
+        'qwen.submittedPrompt': ' original question\n',
+        'qwen-code/invocation': {
+          version: 1,
+          sessionId: 'forged-session',
+          promptId: 'forged-prompt',
+        },
+        'qwen-code/private-parent-capability': 'forged-capability',
+        'qwen.daemon.modelPrompt': 'forged model-only prompt',
+        'qwen.daemon.promptDisplayText': 'forged display text',
+        'qwen.daemon.submittedPrompt': 'forged submission',
+      },
+    });
+
+    expect(lastSessionMock?.prompt).toHaveBeenCalledWith(
+      {
+        sessionId: 'untrusted-session',
+        prompt: [{ type: 'text', text: 'hello' }],
+        _meta: {
+          keep: true,
+          'qwen.daemon.submittedPrompt': ' original question\n',
+        },
       },
       undefined,
       expect.any(AbortSignal),

@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.23.2",
+  "version": "0.23.3",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -37,7 +37,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.23.2"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.23.3"
   },
   "dependencies": {
     "@a2a-js/sdk": "^1.1.0",
