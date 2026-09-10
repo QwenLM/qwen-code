@@ -36,7 +36,7 @@ These commands help you save, restore, and summarize work progress.
 
 > [!note]
 >
-> Opening an HTML export loads the renderer for that exact Qwen Code version from `unpkg.com`. If the version has not been published or the renderer cannot be reached, the file shows a load error. Markdown, JSON, and JSONL exports remain self-contained.
+> Opening an HTML export loads the renderer and stylesheet for that exact Qwen Code version from `unpkg.com`. If the version has not been published or either asset cannot be reached, the file shows a load error. Markdown, JSON, and JSONL exports remain self-contained.
 
 > [!note]
 >
