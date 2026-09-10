@@ -78,9 +78,9 @@ describe('splitTextByUrls', () => {
     ]);
   });
 
-  // Interior placement matters: at a trailing position these characters are
-  // trimmed by TRAILING_PUNCT either way, which would not discriminate the
-  // character class at all.
+  // Interior placement matters for the six that TRAILING_PUNCT also trims
+  // (`: , ; ! * ~`): a trailing fixture for those would not discriminate the
+  // character class. The other five are kept interior for a uniform fixture.
   it.each([':', ',', ';', '!', '*', '$', '+', '-', '%', '~', '@'])(
     'keeps %s inside the URL',
     (c) => {

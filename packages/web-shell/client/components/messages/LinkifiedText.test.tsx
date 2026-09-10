@@ -85,6 +85,39 @@ describe('LinkifiedText', () => {
     );
   });
 
+  // A `%` followed by two non-hex alphanumerics is not encoded — the same
+  // rule as the assistant path's normalizeUri.
+  it('leaves a % followed by two alphanumerics untouched', () => {
+    const container = render(
+      <LinkifiedText text="see https://example.com/50%off end" />,
+    );
+    expect(container.querySelector('a')?.getAttribute('href')).toBe(
+      'https://example.com/50%off',
+    );
+  });
+
+  it('sends the normalized href to the desktop external opener', () => {
+    externalOpenMock.isDesktopShell.mockReturnValue(true);
+    const container = render(
+      <LinkifiedText text="see https://example.com/100%" />,
+    );
+    const link = container.querySelector('a');
+    expect(link).not.toBeNull();
+
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    act(() => {
+      link!.dispatchEvent(event);
+    });
+
+    expect(externalOpenMock.openExternalUrl).toHaveBeenCalledWith(
+      'https://example.com/100%25',
+    );
+  });
+
   it('routes clicks through the desktop external opener', () => {
     externalOpenMock.isDesktopShell.mockReturnValue(true);
     const container = render(<LinkifiedText text="see https://a.example/b" />);

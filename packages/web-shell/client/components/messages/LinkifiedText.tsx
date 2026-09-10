@@ -21,10 +21,12 @@ export const LinkifiedText = memo(function LinkifiedText({
   }
   return segments.map((segment, index) => {
     if (segment.type === 'text') return segment.value;
-    // A bare `%` (not starting a percent-encoded pair) is normalized in the
-    // href only — matching the assistant markdown path's normalizeUri — while
-    // the visible text stays verbatim.
-    const href = segment.value.replace(/%(?![0-9A-Fa-f]{2})/g, '%25');
+    // A bare `%` (not followed by two ASCII alphanumerics) is percent-encoded
+    // in the href only — byte-identical to the assistant markdown path's
+    // normalizeUri on every reachable input — while the visible text stays
+    // verbatim. `[`, `]`, `{` and `}` stay raw where normalizeUri encodes
+    // them (recorded in the design doc's known deltas).
+    const href = segment.value.replace(/%(?![0-9A-Za-z]{2})/g, '%25');
     const safeHref = isSafeHref(href) ? href : undefined;
     return (
       <a
