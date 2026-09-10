@@ -36,7 +36,7 @@ import { gitOpt } from './lib/git.js';
 import { worktreePath } from './lib/paths.js';
 import { untrustedGitfile } from './lib/worktree.js';
 import {
-  anyRootCarriesCriticalMarker,
+  anyCommentCarriesCriticalMarker,
   isBlockerBody,
   findRootId,
 } from './pr-context.js';
@@ -487,7 +487,7 @@ function writeCommentStatusReport(
     } catch (err) {
       lookupError = err;
     }
-    if (me === '' && anyRootCarriesCriticalMarker(comments)) {
+    if (me === '' && anyCommentCarriesCriticalMarker(comments)) {
       throw new Error(
         `cannot determine the reviewing account (${
           lookupError === null
