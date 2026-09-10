@@ -16,6 +16,7 @@ import type {
   Part,
 } from '@google/genai';
 import type {
+  AgentRunContext,
   Config,
   ContentGeneratorConfig,
   LlmChat,
@@ -237,7 +238,6 @@ import {
   requireAgentRunContext,
   consumeAgentInput,
   readThread,
-  type AgentRunContext,
   decideNotificationAdmission,
   DroppedNotificationTally,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
