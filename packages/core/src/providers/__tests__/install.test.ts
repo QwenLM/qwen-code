@@ -311,6 +311,141 @@ describe('applyProviderInstallPlan', () => {
     ]);
   });
 
+  it.each([false, true])(
+    'preserves the other API sibling when installing Responses (ownsModel=%s)',
+    async (owned) => {
+      const baseUrl = 'https://gateway.test/v1';
+      const chat = { id: 'same', baseUrl, envKey: 'TEST_API_KEY' };
+      const responses = {
+        id: 'same',
+        baseUrl,
+        api: 'responses' as const,
+        envKey: 'TEST_API_KEY',
+      };
+      const adapter = createAdapter({
+        openai: [chat, { ...responses, name: 'old' }],
+      });
+      vi.mocked(adapter.getValue).mockImplementation(
+        (key) =>
+          (
+            ({
+              'security.auth.selectedType': AuthType.USE_OPENAI,
+              'model.name': 'same',
+              'model.baseUrl': baseUrl,
+            }) as Record<string, unknown>
+          )[key],
+      );
+      const syncAuthState = vi.fn();
+      await applyProviderInstallPlan(
+        {
+          providerId: 'test',
+          authType: AuthType.USE_OPENAI_RESPONSES,
+          modelSelection: { modelId: 'same', baseUrl },
+          modelProviders: [
+            {
+              authType: AuthType.USE_OPENAI,
+              models: [responses],
+              mergeStrategy: 'prepend-and-remove-owned',
+              ...(owned ? { ownsModel: () => true } : {}),
+            },
+          ],
+        },
+        { settings: adapter, syncAuthState },
+      );
+      expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+        responses,
+        chat,
+      ]);
+      expect(syncAuthState).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI_RESPONSES,
+        'same',
+        baseUrl,
+      );
+    },
+  );
+
+  it('preserves a non-first canonical Responses selection across reinstall', async () => {
+    const baseUrl = 'https://gateway.test/v1';
+    const models = ['first', 'chosen'].map((id) => ({
+      id,
+      baseUrl,
+      api: 'responses' as const,
+    }));
+    const adapter = createAdapter({ openai: models });
+    vi.mocked(adapter.getValue).mockImplementation(
+      (key) =>
+        (
+          ({
+            'security.auth.selectedType': AuthType.USE_OPENAI,
+            'model.name': 'chosen',
+            'model.baseUrl': baseUrl,
+          }) as Record<string, unknown>
+        )[key],
+    );
+    const syncAuthState = vi.fn();
+    await applyProviderInstallPlan(
+      {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        modelSelection: { modelId: 'first', baseUrl },
+        modelProviders: [
+          {
+            authType: AuthType.USE_OPENAI,
+            models,
+            mergeStrategy: 'prepend-and-remove-owned',
+          },
+        ],
+      },
+      { settings: adapter, syncAuthState },
+    );
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.name',
+      expect.anything(),
+    );
+    expect(syncAuthState).not.toHaveBeenCalled();
+  });
+
+  it('replaces a reinstalled legacy Responses route without deleting its other models', async () => {
+    const baseUrl = 'https://gateway.test/v1';
+    const keep = { id: 'keep', baseUrl };
+    const otherApi = { id: 'same', baseUrl, api: 'chat-completions' as const };
+    const adapter = createAdapter({
+      'openai-responses': [
+        { id: 'same', baseUrl, envKey: 'OLD' },
+        keep,
+        otherApi,
+      ],
+    });
+    const updated = {
+      id: 'same',
+      baseUrl,
+      api: 'responses' as const,
+      envKey: 'NEW',
+    };
+    const result = await applyProviderInstallPlan(
+      {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        modelProviders: [
+          {
+            authType: AuthType.USE_OPENAI,
+            models: [updated],
+            mergeStrategy: 'prepend-and-remove-owned',
+          },
+        ],
+      },
+      { settings: adapter },
+    );
+    expect(result.updatedModelProviders).toEqual({
+      'openai-responses': [keep, otherApi],
+      openai: [updated],
+    });
+    expect(adapter.setValue).toHaveBeenCalledWith(
+      'modelProviders.openai-responses',
+      [keep, otherApi],
+    );
+  });
+
   it('preserves existing custom provider models and selects the installed endpoint', async () => {
     const baseUrl = 'http://new.example/v1';
     const otherBaseUrl = 'http://192.168.100.100:8000/v1';
@@ -357,7 +492,13 @@ describe('applyProviderInstallPlan', () => {
     }
 
     expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
-      { id: 'model-b', name: 'model-b', baseUrl, envKey },
+      {
+        id: 'model-b',
+        name: 'model-b',
+        baseUrl,
+        envKey,
+        api: 'chat-completions',
+      },
       {
         id: 'model-b',
         name: 'model-b',

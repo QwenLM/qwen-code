@@ -11,6 +11,29 @@ import {
 } from './model-providers-edit.js';
 
 describe('removeModelFromProviders', () => {
+  it.each(['openai', 'gateway'])(
+    'removes only the requested API from %s',
+    (providerId) => {
+      const chat = {
+        id: 'same',
+        baseUrl: 'https://api.example/v1',
+        api: 'chat-completions' as const,
+      };
+      const responses = { ...chat, api: 'responses' as const };
+      const result = removeModelFromProviders(
+        { [providerId]: [chat, responses] },
+        { gateway: 'openai' },
+        {
+          authType: 'openai-responses',
+          modelId: 'same',
+          baseUrl: chat.baseUrl,
+        },
+      );
+      expect(result.removed).toBe(true);
+      expect(result.next).toEqual({ [providerId]: [chat] });
+    },
+  );
+
   it('removes a model from a built-in provider and keeps the rest', () => {
     const providers = {
       openai: [{ id: 'gpt-4o' }, { id: 'deepseek-v4' }],
@@ -125,6 +148,21 @@ describe('removeModelFromProviders', () => {
 });
 
 describe('isActiveModelSelection', () => {
+  it('preserves the selected other-API sibling', () => {
+    expect(
+      isActiveModelSelection(
+        'same',
+        'https://api.example/v1',
+        {
+          authType: 'openai',
+          modelId: 'same',
+          baseUrl: 'https://api.example/v1',
+        },
+        'openai-responses',
+      ),
+    ).toBe(false);
+  });
+
   it('matches by id when no active baseUrl is pinned', () => {
     expect(
       isActiveModelSelection('gpt-4o', undefined, {

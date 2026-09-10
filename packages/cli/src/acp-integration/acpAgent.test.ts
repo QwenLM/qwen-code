@@ -228,6 +228,13 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  resolveModelSelectionAuthType: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).resolveModelSelectionAuthType,
+  resolveModelProtocol: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).resolveModelProtocol,
+
   SessionSourceService: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).SessionSourceService,
@@ -399,6 +406,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   AuthType: {
     QWEN_OAUTH: 'qwen-oauth',
     USE_OPENAI: 'openai',
+    USE_OPENAI_RESPONSES: 'openai-responses',
     USE_ANTHROPIC: 'anthropic',
     USE_GEMINI: 'gemini',
     USE_VERTEX_AI: 'vertex-ai',
@@ -902,20 +910,6 @@ vi.mock('./runtimeOutputDirContext.js', () => ({
   ),
 }));
 
-vi.mock('./authMethods.js', () => {
-  const buildAuthMethods = vi.fn();
-  return {
-    buildAuthMethods,
-    pickAuthMethodsForAuthRequired: vi.fn((selectedType?: string) => {
-      const authMethods = buildAuthMethods();
-      if (!selectedType) return authMethods;
-      const matched = authMethods.filter(
-        (method: { id: string }) => method.id === selectedType,
-      );
-      return matched.length ? matched : authMethods;
-    }),
-  };
-});
 vi.mock('./service/filesystem.js', () => ({
   AcpFileSystemService: vi.fn(),
 }));
@@ -1079,6 +1073,7 @@ import {
   tokenLimit,
   McpBudgetWouldExceedError,
   buildInstallPlan,
+  findExistingProviderModels,
   applyProviderInstallPlan,
   Storage,
   SessionTranscriptReader,
@@ -1152,7 +1147,6 @@ import {
   writeOutputLanguageAndRegisterPath,
 } from '../i18n/languageUtils.js';
 import { getCurrentLanguage, setLanguageAsync } from '../i18n/index.js';
-import { buildAuthMethods } from './authMethods.js';
 import {
   ACTIVE_WORK_HEARTBEAT_META_KEY,
   ACTIVE_WORK_HEARTBEAT_MIN_INTERVAL_MS,
@@ -2155,6 +2149,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   };
   type AgentLike = {
     initialize: (args: Record<string, unknown>) => Promise<unknown>;
+    authenticate: (args: { methodId: string }) => Promise<void>;
     newSession: (args: Record<string, unknown>) => Promise<unknown>;
     setSessionConfigOption: (args: Record<string, unknown>) => Promise<unknown>;
     beginManagedShutdown: () => {
@@ -4338,14 +4333,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it('does not return discontinued qwen-oauth as the only ACP auth option', async () => {
-    vi.mocked(buildAuthMethods).mockReturnValue([
-      {
-        id: 'openai',
-        name: 'Use OpenAI API key',
-        description: 'Requires setting OPENAI_API_KEY',
-      },
-    ]);
-
     const innerConfig = makeInnerConfig();
     vi.mocked(innerConfig.getModelsConfig).mockReturnValue({
       getCurrentAuthType: vi.fn().mockReturnValue('qwen-oauth'),
@@ -19440,6 +19427,161 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([
+    {
+      label: 'canonical Responses only',
+      providerId: 'openai',
+      initialAuthType: AuthType.USE_OPENAI,
+      withChat: false,
+      methodId: AuthType.USE_OPENAI,
+      expected: AuthType.USE_OPENAI_RESPONSES,
+    },
+    {
+      label: 'Responses with a Chat sibling',
+      providerId: 'openai',
+      initialAuthType: AuthType.USE_OPENAI_RESPONSES,
+      withChat: true,
+      methodId: AuthType.USE_OPENAI,
+      expected: AuthType.USE_OPENAI_RESPONSES,
+    },
+    {
+      label: 'selected Chat with a Responses sibling',
+      providerId: 'gateway',
+      initialAuthType: AuthType.USE_OPENAI,
+      withChat: true,
+      methodId: AuthType.USE_OPENAI,
+      expected: AuthType.USE_OPENAI,
+    },
+    {
+      label: 'explicit legacy Responses method',
+      providerId: 'openai',
+      initialAuthType: AuthType.USE_OPENAI,
+      withChat: true,
+      methodId: AuthType.USE_OPENAI_RESPONSES,
+      expected: AuthType.USE_OPENAI_RESPONSES,
+    },
+  ])(
+    'authenticate preserves API routing for $label',
+    async ({ initialAuthType, providerId, withChat, methodId, expected }) => {
+      const actual = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core')
+      >('@qwen-code/qwen-code-core');
+      const baseUrl = 'https://api.example/v1';
+      const modelProviders = {
+        [providerId]: [
+          ...(withChat
+            ? [{ id: 'same', baseUrl, api: 'chat-completions' as const }]
+            : []),
+          { id: 'same', baseUrl, api: 'responses' as const },
+        ],
+      };
+      const providerProtocol = { gateway: 'openai' as const };
+      const models = new actual.ModelsConfig({
+        initialAuthType,
+        generationConfig: { model: 'same', baseUrl },
+        modelProvidersConfig: modelProviders,
+        providerProtocolConfig: providerProtocol,
+      });
+      const initialEffectiveAuthType = models.getCurrentAuthType();
+      const refreshAuth = vi.fn(async (authType: AuthType) => {
+        models.syncAfterAuthRefresh(authType, models.getModel());
+      });
+      mockConfig = {
+        ...mockConfig,
+        getModel: () => models.getModel(),
+        getAuthType: () => undefined,
+        getCurrentAuthType: () => models.getCurrentAuthType(),
+        getCurrentModelRegistryBaseUrl: () =>
+          models.getCurrentRegistryBaseUrl(),
+        refreshAuth,
+      } as unknown as Config;
+      const settings = {
+        ...makeSessionSettings({ modelProviders, providerProtocol }),
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+      const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+      try {
+        expect(
+          await agent.initialize({ clientCapabilities: {} }),
+        ).toMatchObject({
+          authMethods: [
+            {
+              id: initialEffectiveAuthType,
+              name: 'Use OpenAI API key',
+              _meta: { args: [`--auth-type=${initialEffectiveAuthType}`] },
+            },
+          ],
+        });
+        await agent.authenticate({ methodId });
+        expect(refreshAuth).toHaveBeenCalledWith(expected, undefined);
+        expect(models.getCurrentAuthType()).toBe(expected);
+        expect(settings.setValue).toHaveBeenCalledWith(
+          SettingScope.User,
+          'security.auth.selectedType',
+          expected,
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each([
+    { protocol: 'openai', api: 'responses' },
+    { protocol: 'openai-responses' },
+  ])(
+    'qwen/providers/connect forwards OpenAI API selection: %j',
+    async (selection) => {
+      const { agent, agentPromise } = await bootCoreSettingsAgent(
+        makeSessionSettings(),
+      );
+      await expect(
+        agent.extMethod('qwen/providers/connect', {
+          providerId: 'custom-openai-compatible',
+          apiKey: 'sk-test',
+          baseUrl: 'https://api.example/v1',
+          modelIds: ['same'],
+          ...selection,
+        }),
+      ).resolves.toMatchObject({ success: true });
+      expect(buildInstallPlan).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining(selection),
+      );
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it.each([
+    { protocol: 'openai', api: 'invalid' },
+    { protocol: 'openai', api: null },
+    { protocol: 'anthropic', api: 'responses' },
+  ])(
+    'qwen/providers/connect rejects invalid API before writing: %j',
+    async (selection) => {
+      const { agent, agentPromise } = await bootCoreSettingsAgent(
+        makeSessionSettings(),
+      );
+      vi.mocked(buildInstallPlan).mockClear();
+      vi.mocked(applyProviderInstallPlan).mockClear();
+      await expect(
+        agent.extMethod('qwen/providers/connect', {
+          providerId: 'custom-openai-compatible',
+          apiKey: 'sk-test',
+          baseUrl: 'https://api.example/v1',
+          modelIds: ['same'],
+          ...selection,
+        }),
+      ).rejects.toThrow(/api/i);
+      expect(buildInstallPlan).not.toHaveBeenCalled();
+      expect(applyProviderInstallPlan).not.toHaveBeenCalled();
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
   it('qwen/providers/connect returns preserved model when adapter getValue returns a non-empty string', async () => {
     vi.mocked(createLoadedSettingsAdapter).mockImplementationOnce(
       (settings: unknown) => {
@@ -19477,6 +19619,48 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each(['openai', 'openai-responses'])(
+    'qwen/providers/list exposes API prefill for %s',
+    async (providerId) => {
+      const actual = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core')
+      >('@qwen-code/qwen-code-core');
+      vi.mocked(findExistingProviderModels).mockImplementationOnce(
+        actual.findExistingProviderModels,
+      );
+      const settings = makeSessionSettings({
+        env: { DEEPSEEK_API_KEY: 'sk-existing' },
+        modelProviders: {
+          [providerId]: [
+            {
+              id: 'same',
+              name: '[DeepSeek] same',
+              baseUrl: 'https://api.deepseek.com',
+              envKey: 'DEEPSEEK_API_KEY',
+              ...(providerId === 'openai' ? { api: 'responses' } : {}),
+            },
+          ],
+        },
+      });
+      const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+      const result = await agent.extMethod('qwen/providers/list', {});
+      expect(result).toMatchObject({
+        providers: [
+          expect.objectContaining({
+            existingConfig: expect.objectContaining({
+              protocol: 'openai',
+              api: 'responses',
+              hasApiKey: true,
+            }),
+          }),
+        ],
+      });
+      expect(JSON.stringify(result)).not.toContain('sk-existing');
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('qwen/providers/list includes existing provider settings', async () => {
     const settings = {
@@ -19517,6 +19701,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           id: 'deepseek',
           existingConfig: {
             protocol: 'openai',
+            api: 'chat-completions',
             baseUrl: 'https://api.deepseek.com/v1',
             hasApiKey: true,
             modelIds: ['deepseek-chat'],
@@ -19952,6 +20137,46 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'auto',
     );
 
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect keeps a legacy Responses key for the same endpoint only', async () => {
+    const baseUrl = 'https://api.example/v1';
+    const settings = makeSessionSettings({
+      env: {
+        QWEN_CUSTOM_API_KEY_LEGACY: 'sk-legacy',
+        QWEN_CUSTOM_API_KEY_openai_https___api_example_v1: 'sk-chat',
+      },
+      modelProviders: {
+        'openai-responses': [
+          { id: 'same', baseUrl, envKey: 'QWEN_CUSTOM_API_KEY_LEGACY' },
+        ],
+      },
+    });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'custom-openai-compatible',
+        protocol: 'openai',
+        api: 'responses',
+        baseUrl,
+        modelIds: ['same'],
+      }),
+    ).resolves.toMatchObject({ success: true });
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ apiKey: 'sk-legacy', api: 'responses' }),
+    );
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'custom-openai-compatible',
+        protocol: 'openai',
+        api: 'responses',
+        baseUrl: 'https://other.example/v1',
+        modelIds: ['same'],
+      }),
+    ).rejects.toThrow('Invalid or missing apiKey');
     mockConnectionState.resolve();
     await agentPromise;
   });

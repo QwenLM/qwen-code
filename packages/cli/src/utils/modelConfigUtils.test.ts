@@ -11,6 +11,7 @@ import {
   type ProviderModelConfig,
 } from '@qwen-code/qwen-code-core';
 import {
+  collectProviderModelsForProtocol,
   getAuthTypeFromEnv,
   resolveCliGenerationConfig,
 } from './modelConfigUtils.js';
@@ -34,6 +35,184 @@ vi.mock('./stdioHelpers.js', () => ({
 }));
 
 describe('modelConfigUtils', () => {
+  describe('model API selection', () => {
+    const chat: ProviderModelConfig = {
+      id: 'shared-model',
+      baseUrl: 'https://shared.example/v1',
+      api: 'chat-completions',
+      envKey: 'CHAT_KEY',
+    };
+    const responses: ProviderModelConfig = {
+      ...chat,
+      api: 'responses',
+      envKey: 'RESPONSES_KEY',
+      generationConfig: { reasoning: { effort: 'xhigh' } },
+    };
+
+    beforeEach(async () => {
+      const original = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core')
+      >('@qwen-code/qwen-code-core');
+      vi.mocked(resolveModelConfig).mockImplementation(
+        original.resolveModelConfig,
+      );
+    });
+
+    afterEach(() => vi.resetAllMocks());
+
+    it.each(['openai', 'custom'])(
+      'resolves Responses stored under %s',
+      (providerId) => {
+        const result = resolveCliGenerationConfig({
+          argv: {},
+          settings: {
+            model: {
+              name: responses.id,
+              generationConfig: {
+                contextWindowSize: 272000,
+              } as Record<string, unknown>,
+            },
+            modelProviders: {
+              anthropic: [
+                { id: 'claude-model', baseUrl: 'https://anthropic.example' },
+              ],
+              [providerId]: [responses],
+            },
+            providerProtocol: { custom: AuthType.USE_OPENAI },
+          },
+          selectedAuthType: AuthType.USE_OPENAI,
+          env: { RESPONSES_KEY: 'responses-key' },
+        });
+
+        expect(result.generationConfig).toMatchObject({
+          authType: AuthType.USE_OPENAI_RESPONSES,
+          model: responses.id,
+          reasoning: { effort: 'xhigh' },
+        });
+        expect(result.generationConfig).not.toHaveProperty('api');
+        expect(result.apiKey).toBe('responses-key');
+        expect(result.registryBaseUrl).toBe(responses.baseUrl);
+        expect(result.sources['apiKey']).toMatchObject({
+          kind: 'env',
+          envKey: 'RESPONSES_KEY',
+        });
+        expect(result.warnings.join('\n')).toContain(
+          `from modelProviders.${providerId}`,
+        );
+      },
+    );
+
+    it.each([
+      [AuthType.USE_OPENAI, 'chat-key'],
+      [AuthType.USE_OPENAI_RESPONSES, 'responses-key'],
+    ] as const)(
+      'retains exact %s route with duplicate model and URL',
+      (authType, key) => {
+        const result = resolveCliGenerationConfig({
+          argv: {},
+          settings: {
+            model: { name: chat.id, baseUrl: chat.baseUrl },
+            modelProviders: { openai: [responses, chat] },
+          },
+          selectedAuthType: authType,
+          env: { CHAT_KEY: 'chat-key', RESPONSES_KEY: 'responses-key' },
+        });
+        expect(result.generationConfig.authType).toBe(authType);
+        expect(result.apiKey).toBe(key);
+      },
+    );
+
+    it('uses the saved endpoint before an API match at another endpoint', () => {
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: {
+          model: { name: responses.id, baseUrl: responses.baseUrl },
+          modelProviders: {
+            openai: [
+              { ...chat, baseUrl: 'https://other.example/v1' },
+              responses,
+            ],
+          },
+        },
+        selectedAuthType: AuthType.USE_OPENAI,
+        env: { CHAT_KEY: 'chat-key', RESPONSES_KEY: 'responses-key' },
+      });
+      expect(result.generationConfig.authType).toBe(
+        AuthType.USE_OPENAI_RESPONSES,
+      );
+      expect(result.apiKey).toBe('responses-key');
+      expect(result.warnings).toEqual([]);
+    });
+
+    it('does not apply the saved endpoint to a CLI model selection', () => {
+      const result = resolveCliGenerationConfig({
+        argv: { model: chat.id },
+        settings: {
+          model: { name: responses.id, baseUrl: responses.baseUrl },
+          modelProviders: {
+            openai: [
+              responses,
+              { ...chat, baseUrl: 'https://chat.example/v1' },
+            ],
+          },
+        },
+        selectedAuthType: AuthType.USE_OPENAI,
+        env: { CHAT_KEY: 'chat-key', RESPONSES_KEY: 'responses-key' },
+      });
+      expect(result.generationConfig.authType).toBe(AuthType.USE_OPENAI);
+      expect(result.apiKey).toBe('chat-key');
+    });
+
+    it('resolves a QWEN_MODEL selection before changing its effective API', () => {
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: { modelProviders: { openai: [responses] } },
+        selectedAuthType: AuthType.USE_OPENAI,
+        env: { QWEN_MODEL: responses.id, RESPONSES_KEY: 'responses-key' },
+      });
+      expect(result.model).toBe(responses.id);
+      expect(result.generationConfig.authType).toBe(
+        AuthType.USE_OPENAI_RESPONSES,
+      );
+      expect(result.apiKey).toBe('responses-key');
+    });
+
+    it('filters a mixed provider bucket by each effective API', () => {
+      const providers = { openai: [responses, chat] };
+      expect(
+        collectProviderModelsForProtocol(
+          providers,
+          undefined,
+          AuthType.USE_OPENAI,
+        ),
+      ).toEqual([chat]);
+      expect(
+        collectProviderModelsForProtocol(
+          providers,
+          undefined,
+          AuthType.USE_OPENAI_RESPONSES,
+        ),
+      ).toEqual([responses]);
+    });
+
+    it('rejects invalid API configuration before resolving credentials', () => {
+      expect(() =>
+        resolveCliGenerationConfig({
+          argv: {},
+          settings: {
+            model: { name: responses.id },
+            modelProviders: {
+              openai: [{ ...responses, api: 'response' }],
+            } as unknown as Settings['modelProviders'],
+          },
+          selectedAuthType: AuthType.USE_OPENAI,
+          env: {},
+        }),
+      ).toThrow(/api/i);
+      expect(resolveModelConfig).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getAuthTypeFromEnv', () => {
     const originalEnv = process.env;
 

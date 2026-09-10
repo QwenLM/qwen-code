@@ -4,8 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AuthType } from '../core/contentGenerator.js';
-import type { ModelProvidersConfig } from '../models/types.js';
+import { AuthType } from '../core/contentGenerator.js';
+import type {
+  ModelProvidersConfig,
+  ProviderProtocolConfig,
+} from '../models/types.js';
+import {
+  resolveModelProtocol,
+  resolveModelSelectionAuthType,
+} from '../models/modelRegistry.js';
 import type {
   ProviderInstallPlan,
   ProviderModelProvidersPatch,
@@ -56,10 +63,20 @@ function applyModelProvidersPatch(
     const ownsModel = patch.ownsModel;
     const preservedModels = existingModels.filter((model) => {
       if (ownsModel) {
-        return !ownsModel(model);
+        return (
+          !ownsModel(model) ||
+          !patch.models.some(
+            (newModel) =>
+              resolveModelProtocol(patch.authType, newModel) ===
+              resolveModelProtocol(patch.authType, model),
+          )
+        );
       }
-      return !patch.models.some((newModel) =>
-        isSameModelIdentity(newModel, model),
+      return !patch.models.some(
+        (newModel) =>
+          isSameModelIdentity(newModel, model) &&
+          resolveModelProtocol(patch.authType, newModel) ===
+            resolveModelProtocol(patch.authType, model),
       );
     });
 
@@ -69,10 +86,29 @@ function applyModelProvidersPatch(
         : [...patch.models, ...preservedModels];
   }
 
-  return {
+  const updated = {
     ...existingModelProviders,
     [patch.authType]: updatedModels,
   };
+  if (
+    patch.authType === AuthType.USE_OPENAI &&
+    patch.mergeStrategy !== 'append'
+  ) {
+    const legacyModels = existingModelProviders[AuthType.USE_OPENAI_RESPONSES];
+    const preservedLegacy = legacyModels?.filter(
+      (model) =>
+        !patch.models.some(
+          (newModel) =>
+            isSameModelIdentity(newModel, model) &&
+            resolveModelProtocol(patch.authType, newModel) ===
+              resolveModelProtocol(AuthType.USE_OPENAI_RESPONSES, model),
+        ),
+    );
+    if (preservedLegacy && preservedLegacy.length !== legacyModels?.length) {
+      updated[AuthType.USE_OPENAI_RESPONSES] = preservedLegacy;
+    }
+  }
+  return updated;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +175,7 @@ export async function applyProviderInstallPlan(
     doRefreshAuth = true,
   } = options;
 
+  const selectedAuthType = settings.getValue('security.auth.selectedType');
   const previousEnvValues = new Map<string, string | undefined>();
   // Snapshot the runtime providers map *before* any setValue/reload so we can
   // restore in-memory state if a callback later in the flow rejects (e.g.
@@ -147,6 +184,21 @@ export async function applyProviderInstallPlan(
   const previousRuntimeProviders: ModelProvidersConfig = {
     ...settings.getModelProviders(),
   };
+
+  const previousModelId = settings.getValue('model.name');
+  const previousBaseUrl = settings.getValue('model.baseUrl');
+  const previousAuthType =
+    typeof selectedAuthType === 'string'
+      ? resolveModelSelectionAuthType(
+          selectedAuthType as AuthType,
+          typeof previousModelId === 'string' ? previousModelId : undefined,
+          previousRuntimeProviders,
+          settings.getValue('providerProtocol') as
+            | ProviderProtocolConfig
+            | undefined,
+          typeof previousBaseUrl === 'string' ? previousBaseUrl : undefined,
+        )
+      : undefined;
 
   // Track which step is in flight so a rethrow at the bottom can name it
   // (an EACCES from persist vs a refreshAuth rejection look identical
@@ -201,10 +253,20 @@ export async function applyProviderInstallPlan(
     };
 
     for (const patch of plan.modelProviders ?? []) {
+      const previousLegacy =
+        updatedModelProviders[AuthType.USE_OPENAI_RESPONSES];
       updatedModelProviders = applyModelProvidersPatch(
         updatedModelProviders,
         patch,
       );
+      if (
+        previousLegacy !== updatedModelProviders[AuthType.USE_OPENAI_RESPONSES]
+      ) {
+        settings.setValue(
+          'modelProviders.openai-responses',
+          updatedModelProviders[AuthType.USE_OPENAI_RESPONSES],
+        );
+      }
       settings.setValue(
         `modelProviders.${patch.authType}`,
         updatedModelProviders[patch.authType] ?? [],
@@ -240,16 +302,20 @@ export async function applyProviderInstallPlan(
         | string
         | undefined;
       const planOffersCurrentModel =
+        (previousAuthType === undefined ||
+          previousAuthType === plan.authType) &&
         typeof currentModelId === 'string' &&
         currentModelId.length > 0 &&
         (plan.modelProviders ?? []).some((patch) =>
-          patch.models.some((model) =>
-            currentBaseUrl === '' || currentBaseUrl === undefined
-              ? model.id === currentModelId
-              : isSameModelIdentity(
-                  { id: currentModelId, baseUrl: currentBaseUrl },
-                  model,
-                ),
+          patch.models.some(
+            (model) =>
+              resolveModelProtocol(patch.authType, model) === plan.authType &&
+              (currentBaseUrl === '' || currentBaseUrl === undefined
+                ? model.id === currentModelId
+                : isSameModelIdentity(
+                    { id: currentModelId, baseUrl: currentBaseUrl },
+                    model,
+                  )),
           ),
         );
       if (planOffersCurrentModel) {

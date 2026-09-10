@@ -18,21 +18,21 @@ export function buildAuthMethods(): AuthMethod[] {
         args: ['--auth-type=openai'],
       },
     },
-    {
-      id: AuthType.USE_OPENAI_RESPONSES,
-      name: 'Use OpenAI Responses API key',
-      description: 'Requires setting the `OPENAI_API_KEY` environment variable',
-      _meta: {
-        type: 'terminal',
-        args: ['--auth-type=openai-responses'],
-      },
-    },
   ];
 }
 
 export function pickAuthMethodsForAuthRequired(
   selectedType?: AuthType | string,
 ): AuthMethod[] {
+  if (selectedType === AuthType.USE_OPENAI_RESPONSES) {
+    return [
+      {
+        ...buildAuthMethods()[0],
+        id: AuthType.USE_OPENAI_RESPONSES,
+        _meta: { type: 'terminal', args: ['--auth-type=openai-responses'] },
+      },
+    ];
+  }
   const authMethods = buildAuthMethods();
   if (selectedType) {
     const matched = authMethods.filter((method) => method.id === selectedType);

@@ -26,7 +26,7 @@ import { AuthMessageHandler } from './AuthMessageHandler.js';
 
 describe('AuthMessageHandler', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it('sends authCancelled when the provider picker is dismissed', async () => {
@@ -238,7 +238,6 @@ describe('AuthMessageHandler', () => {
     expect(protocolItems).toEqual(
       expect.arrayContaining([
         { label: 'OpenAI Compatible', value: 'openai' },
-        { label: 'OpenAI Responses', value: 'openai-responses' },
         { label: 'Anthropic', value: 'anthropic' },
         { label: 'Gemini', value: 'gemini' },
       ]),
@@ -248,7 +247,8 @@ describe('AuthMessageHandler', () => {
   it('rejects a non-http(s) custom base URL with authError', async () => {
     mockShowQuickPick
       .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
-      .mockResolvedValueOnce({ value: 'openai' });
+      .mockResolvedValueOnce({ value: 'openai' })
+      .mockResolvedValueOnce({ value: 'chat-completions' });
     // file:// URL must be rejected before reaching authInteractiveHandler.
     mockShowInputBox.mockResolvedValueOnce('file:///etc/passwd');
 
@@ -269,6 +269,35 @@ describe('AuthMessageHandler', () => {
       data: { message: expect.stringContaining('http') },
     });
     expect(authInteractiveHandler).not.toHaveBeenCalled();
+  });
+
+  it('collects Responses as an API choice within OpenAI setup', async () => {
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
+      .mockResolvedValueOnce({ value: 'openai' })
+      .mockResolvedValueOnce({ value: 'responses' })
+      .mockResolvedValueOnce({ value: 'no' });
+    mockShowInputBox
+      .mockResolvedValueOnce('https://gateway.example/v1')
+      .mockResolvedValueOnce('key')
+      .mockResolvedValueOnce('model');
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      vi.fn(),
+    );
+    const submit = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(submit);
+    await handler.handle({ type: 'auth' });
+    expect(submit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        protocol: 'openai',
+        api: 'responses',
+        modelIds: ['model'],
+      }),
+    );
   });
 
   it('falls back to the protocol-specific default when custom URL input is blank', async () => {
@@ -307,7 +336,8 @@ describe('AuthMessageHandler', () => {
   it('rejects whitespace-only model IDs with authError', async () => {
     mockShowQuickPick
       .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
-      .mockResolvedValueOnce({ value: 'openai' });
+      .mockResolvedValueOnce({ value: 'openai' })
+      .mockResolvedValueOnce({ value: 'chat-completions' });
     mockShowInputBox
       .mockResolvedValueOnce('https://api.example.com/v1')
       .mockResolvedValueOnce('sk-test')
@@ -339,7 +369,8 @@ describe('AuthMessageHandler', () => {
     // failure must send ONLY authError, never a trailing authCancelled.
     mockShowQuickPick
       .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
-      .mockResolvedValueOnce({ value: 'openai' });
+      .mockResolvedValueOnce({ value: 'openai' })
+      .mockResolvedValueOnce({ value: 'chat-completions' });
     mockShowInputBox.mockResolvedValueOnce('file:///etc/passwd');
 
     const sendToWebView = vi.fn();

@@ -333,15 +333,23 @@ describe('ProviderSetupSteps', () => {
     flow.state.apiKey = 'secret-key';
   };
 
-  it('renders OpenAI Responses for the custom provider protocol step', () => {
+  it('shows one OpenAI provider choice and a separate API step', () => {
     const flow = createProtocolFlow();
 
     const { lastFrame, unmount } = renderWithProviders(
       <ProviderSetupSteps flow={flow} />,
     );
 
-    expect(lastFrame()).toContain('OpenAI Responses');
+    expect(lastFrame()).toContain('OpenAI-compatible');
+    expect(lastFrame()).not.toContain('OpenAI Responses');
     unmount();
+    flow.state.step = 'api';
+    flow.state.api = 'responses';
+    flow.selectApi = vi.fn();
+    const apiView = renderWithProviders(<ProviderSetupSteps flow={flow} />);
+    expect(apiView.lastFrame()).toContain('Chat Completions');
+    expect(apiView.lastFrame()).toContain('Responses');
+    apiView.unmount();
   });
   it('maps Ctrl+P/N to advanced-config focus navigation', () => {
     const flow = createAdvancedConfigFlow();

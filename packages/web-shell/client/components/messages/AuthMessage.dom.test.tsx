@@ -80,7 +80,9 @@ async function install(
   return openAndSave();
 }
 
-async function openAndSave() {
+async function openAndSave(
+  setup?: (click: (text: string) => Promise<void>) => Promise<void>,
+) {
   const onMessage = vi.fn();
   const onClose = vi.fn();
   container = document.createElement('div');
@@ -111,6 +113,7 @@ async function openAndSave() {
     });
   };
   await click('Custom');
+  await setup?.(click);
   await click('Save');
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -183,5 +186,77 @@ describe('AuthMessage runtime provider sync', () => {
       container?.querySelectorAll('button') ?? [],
     ).at(-1);
     expect(saveButton?.disabled).toBe(false);
+  });
+});
+
+describe('AuthMessage API selection', () => {
+  beforeEach(() => {
+    actions.getAuthProviders.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/workspace',
+      providers: [
+        {
+          id: 'custom-openai-compatible',
+          label: 'Custom OpenAI',
+          description: '',
+          protocol: 'openai',
+          protocolOptions: [
+            'openai',
+            'openai-responses',
+            'anthropic',
+            'gemini',
+          ],
+          steps: ['protocol', 'api', 'models'],
+          showAdvancedConfig: true,
+          models: [{ id: 'same' }],
+        },
+      ],
+      groups: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          description: '',
+          providerIds: ['custom-openai-compatible'],
+        },
+      ],
+    });
+    actions.installAuthProvider.mockResolvedValue({ message: 'Saved' });
+  });
+
+  it('previews canonical Responses routing and forwards the API selection', async () => {
+    await openAndSave(async (click) => {
+      await click('OpenAI-compatible');
+      await click('Responses');
+      await click('previous');
+      await click('next');
+      await click('next');
+      expect(container?.textContent).toContain('"api": "responses"');
+      expect(container?.textContent).toContain(
+        '"selectedType": "openai-responses"',
+      );
+      expect(container?.textContent).toContain('"openai": [');
+    });
+    expect(actions.installAuthProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        protocol: 'openai',
+        api: 'responses',
+        modelIds: ['same'],
+      }),
+    );
+  });
+
+  it('uses the displayed protocol index and omits API for Anthropic', async () => {
+    await openAndSave(async (click) => {
+      await click('Anthropic');
+      await click('next');
+      expect(container?.textContent).toContain('"selectedType": "anthropic"');
+      expect(container?.textContent).not.toContain('"api":');
+    });
+    expect(actions.installAuthProvider).toHaveBeenCalledWith(
+      expect.objectContaining({ protocol: 'anthropic' }),
+    );
+    expect(actions.installAuthProvider.mock.calls[0][0]).not.toHaveProperty(
+      'api',
+    );
   });
 });

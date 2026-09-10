@@ -98,13 +98,13 @@ function buildWorkspaceProvidersStatus(
       env,
     });
     const modelsConfig = new ModelsConfig({
-      initialAuthType: selectedAuthType,
+      initialAuthType: resolvedCliConfig.authType,
       modelProvidersConfig: settings.modelProviders,
       providerProtocolConfig: settings.providerProtocol,
       generationConfig: resolvedCliConfig.generationConfig,
       generationConfigSources: resolvedCliConfig.sources,
     });
-    const currentAuth = selectedAuthType;
+    const currentAuth = resolvedCliConfig.authType;
     const currentModelId = (
       resolvedCliConfig.model ||
       modelsConfig.getModel() ||

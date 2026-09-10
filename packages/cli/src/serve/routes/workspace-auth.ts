@@ -5,7 +5,11 @@
  */
 
 import type { Application, RequestHandler } from 'express';
-import { ALL_PROVIDERS } from '@qwen-code/qwen-code-core';
+import {
+  ALL_PROVIDERS,
+  AuthType,
+  resolveModelProtocol,
+} from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   TooManyActiveDeviceFlowsError,
@@ -333,13 +337,32 @@ export function registerWorkspaceAuthRoutes(
           knownProvider.protocolOptions && knownProvider.protocolOptions.length
             ? knownProvider.protocolOptions
             : [knownProvider.protocol];
-        if (!allowedProtocols.includes(installRequest.protocol)) {
+        const requestedProtocol =
+          installRequest.protocol === AuthType.USE_OPENAI_RESPONSES &&
+          knownProvider.protocolOptions?.includes(AuthType.USE_OPENAI)
+            ? AuthType.USE_OPENAI
+            : installRequest.protocol;
+        if (!allowedProtocols.includes(requestedProtocol)) {
           res.status(400).json({
             error: `protocol must be one of: ${allowedProtocols.join(', ')}`,
             code: 'unsupported_protocol',
           });
           return;
         }
+      }
+      try {
+        resolveModelProtocol(
+          installRequest.protocol ?? knownProvider.protocol,
+          {
+            api: installRequest.api,
+          },
+        );
+      } catch (error) {
+        res.status(400).json({
+          error: error instanceof Error ? error.message : String(error),
+          code: 'invalid_api',
+        });
+        return;
       }
       try {
         const assertGenerationOpen = captureGenerationAssertion?.();

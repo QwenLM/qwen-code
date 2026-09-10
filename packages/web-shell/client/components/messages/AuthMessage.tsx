@@ -16,7 +16,14 @@ const TOS_PRIVACY_URL =
 type AuthView = 'groups' | 'providers' | 'step' | 'review';
 type AuthGroupId = 'alibaba' | 'third-party' | 'custom';
 type AuthGroup = DaemonAuthProviderCatalog['groups'][number];
-type AuthStep = 'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig';
+type ModelApi = 'chat-completions' | 'responses';
+type AuthStep =
+  | 'protocol'
+  | 'api'
+  | 'baseUrl'
+  | 'apiKey'
+  | 'models'
+  | 'advancedConfig';
 type AdvancedOptionValue =
   | 'thinking'
   | 'modality'
@@ -82,6 +89,7 @@ function titleForStep(
   t: ReturnType<typeof useI18n>['t'],
 ): string {
   if (step === 'protocol') return t('auth.step.protocol');
+  if (step === 'api') return t('auth.step.api');
   if (step === 'baseUrl') {
     return provider.uiLabels?.baseUrlStepTitle ?? t('auth.step.baseUrl');
   }
@@ -131,6 +139,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     null,
   );
   const [protocol, setProtocol] = useState('openai');
+  const [api, setApi] = useState<ModelApi>('chat-completions');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [models, setModels] = useState('');
@@ -176,7 +185,26 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       );
   }, [catalog, groupId, groups]);
 
-  const steps = useMemo(() => provider?.steps ?? [], [provider?.steps]);
+  const steps = useMemo(
+    () =>
+      (provider?.steps ?? []).filter(
+        (step) => step !== 'api' || protocol === 'openai',
+      ),
+    [provider?.steps, protocol],
+  );
+  const protocolOptions = useMemo(
+    () =>
+      getProtocolOptions(t).filter((option) =>
+        (provider?.protocolOptions ?? [provider?.protocol]).includes(
+          option.value,
+        ),
+      ),
+    [provider, t],
+  );
+  const apiOptions: Array<Option<ModelApi>> = [
+    { value: 'chat-completions', label: 'Chat Completions' },
+    { value: 'responses', label: 'Responses' },
+  ];
   const currentStep = steps[stepIndex] as AuthStep | undefined;
   const shouldReview = provider?.showAdvancedConfig === true;
   const advancedOptionValues = useMemo<AdvancedOptionValue[]>(
@@ -195,6 +223,12 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   const [optionIndex, setOptionIndex] = useState(0);
 
   useEffect(() => {
+    if (currentStep === 'api') {
+      setOptionIndex(api === 'responses' ? 1 : 0);
+    }
+  }, [api, currentStep]);
+
+  useEffect(() => {
     if (!ownerChanged) return;
     saveOperationRef.current += 1;
     setSaving(false);
@@ -210,7 +244,12 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       setSetupBackView(backView);
       const nextProtocol =
         nextProvider.protocolOptions?.[0] ?? nextProvider.protocol;
-      setProtocol(nextProtocol);
+      setProtocol(
+        nextProtocol === 'openai-responses' ? 'openai' : nextProtocol,
+      );
+      setApi(
+        nextProtocol === 'openai-responses' ? 'responses' : 'chat-completions',
+      );
       if (typeof nextProvider.baseUrl === 'string') {
         setBaseUrl(nextProvider.baseUrl);
       } else if (Array.isArray(nextProvider.baseUrl)) {
@@ -275,6 +314,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       .installAuthProvider({
         providerId: provider.id,
         protocol,
+        ...(protocol === 'openai' && provider.steps.includes('api')
+          ? { api }
+          : {}),
         baseUrl,
         apiKey,
         modelIds: normalizeModelIds(models),
@@ -317,6 +359,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         if (isCurrent()) setSaving(false);
       });
   }, [
+    api,
     apiKey,
     baseUrl,
     contextWindow,
@@ -449,13 +492,17 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     }
     if (!provider || !currentStep) return;
     if (currentStep === 'protocol') {
-      const value = (provider.protocolOptions ?? [provider.protocol])[
-        optionIndex
-      ];
+      const value = protocolOptions[optionIndex]?.value;
       if (value) {
         setProtocol(value);
+        setApi('chat-completions');
         if (!provider.baseUrl) setBaseUrl(defaultBaseUrl(value));
       }
+      goNext();
+      return;
+    }
+    if (currentStep === 'api') {
+      setApi(optionIndex === 1 ? 'responses' : 'chat-completions');
       goNext();
       return;
     }
@@ -479,6 +526,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     optionIndex,
     provider,
     providerIndex,
+    protocolOptions,
     providers,
     save,
     startProvider,
@@ -522,11 +570,17 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         return;
       }
       if (currentStep === 'protocol') {
-        const value = (provider.protocolOptions ?? [provider.protocol])[index];
+        const value = protocolOptions[index]?.value;
         if (value) {
           setProtocol(value);
+          setApi('chat-completions');
           if (!provider.baseUrl) setBaseUrl(defaultBaseUrl(value));
         }
+        goNext();
+        return;
+      }
+      if (currentStep === 'api') {
+        setApi(index === 1 ? 'responses' : 'chat-completions');
         goNext();
         return;
       }
@@ -548,6 +602,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       activateAdvancedOption,
       advancedOptionValues,
       provider,
+      protocolOptions,
       providers,
       save,
       startProvider,
@@ -585,14 +640,10 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   const renderStep = () => {
     if (!provider || !currentStep) return null;
     if (currentStep === 'protocol') {
-      const allowed = provider.protocolOptions ?? [provider.protocol];
-      return renderOptions(
-        getProtocolOptions(t).filter((option) =>
-          allowed.includes(option.value),
-        ),
-        optionIndex,
-        setOptionIndex,
-      );
+      return renderOptions(protocolOptions, optionIndex, setOptionIndex);
+    }
+    if (currentStep === 'api') {
+      return renderOptions(apiOptions, optionIndex, setOptionIndex);
     }
     if (currentStep === 'baseUrl') {
       if (Array.isArray(provider.baseUrl)) {
@@ -777,7 +828,13 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     const envKey = provider.envKey ?? `${protocol.toUpperCase()}_API_KEY`;
     const normalizedIds = normalizeModelIds(models);
     const generationConfig: Record<string, unknown> = {};
-    if (thinking) generationConfig['extra_body'] = { enable_thinking: true };
+    if (thinking) {
+      if (protocol === 'openai' && api === 'responses') {
+        generationConfig['reasoning'] = { effort: 'medium' };
+      } else {
+        generationConfig['extra_body'] = { enable_thinking: true };
+      }
+    }
     if (modality) {
       const modalities: Record<string, boolean> = {};
       if (modalityImage) modalities['image'] = true;
@@ -799,19 +856,35 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         modelProviders: {
           [protocol]: normalizedIds.map((id) => ({
             id,
+            ...(protocol === 'openai' && provider.steps.includes('api')
+              ? { api }
+              : {}),
             name: id,
             baseUrl: baseUrl.trim(),
             envKey,
             ...(hasGenerationConfig ? { generationConfig } : {}),
           })),
         },
-        security: { auth: { selectedType: protocol } },
-        model: { name: normalizedIds[0] },
+        security: {
+          auth: {
+            selectedType:
+              protocol === 'openai' && api === 'responses'
+                ? 'openai-responses'
+                : protocol,
+          },
+        },
+        model: {
+          name: normalizedIds[0],
+          ...(provider.id === 'custom-openai-compatible'
+            ? { baseUrl: baseUrl.trim() }
+            : {}),
+        },
       },
       null,
       2,
     );
   }, [
+    api,
     apiKey,
     baseUrl,
     contextWindow,

@@ -12,6 +12,8 @@ import {
   normalizeReasoningEffort,
   REASONING_EFFORT_TIERS,
   resolveModelConfig,
+  resolveModelProtocol,
+  resolveModelSelectionAuthType,
   resolveProviderProtocol,
   type ModelConfigSourcesInput,
   type ModelProvidersConfig,
@@ -39,9 +41,10 @@ const AUTH_ENV_MODEL_VARS: Record<AuthType, string[]> = {
  * Collect every modelProviders entry whose provider id resolves (via
  * providerProtocol) to the given protocol, in declaration order. Mirrors
  * {@link ModelRegistry}: a built-in key resolves to itself, a custom id resolves
- * through providerProtocol. Lets credential/metadata lookups find a custom
+ * through providerProtocol, with each model's api selecting its OpenAI route.
+ * Lets credential/metadata lookups find a custom
  * provider's models under their resolved protocol instead of only the protocol
- * key. For built-in-only configs this equals `modelProviders[protocol]`.
+ * key.
  */
 export function collectProviderModelsForProtocol(
   modelProviders: ModelProvidersConfig | undefined,
@@ -56,9 +59,13 @@ export function collectProviderModelsForProtocol(
     if (!Array.isArray(models)) {
       continue;
     }
-    if (resolveProviderProtocol(providerId, providerProtocol) === protocol) {
-      out.push(...models);
-    }
+    out.push(
+      ...models.filter(
+        (model) =>
+          resolveModelProtocol(providerId, model, providerProtocol) ===
+          protocol,
+      ),
+    );
   }
   return out;
 }
@@ -76,10 +83,11 @@ function findProviderIdForModel(
     if (!Array.isArray(models)) {
       continue;
     }
-    if (resolveProviderProtocol(providerId, providerProtocol) !== protocol) {
-      continue;
-    }
-    if (models.includes(modelProvider)) {
+    if (
+      models.includes(modelProvider) &&
+      resolveModelProtocol(providerId, modelProvider, providerProtocol) ===
+        protocol
+    ) {
       return providerId;
     }
   }
@@ -184,6 +192,8 @@ export interface CliGenerationConfigInputs {
 }
 
 export interface ResolvedCliGenerationConfig {
+  /** Effective protocol after applying the selected model's API. */
+  authType: AuthType | undefined;
   /** The resolved model id (may be empty string if not resolvable at CLI layer) */
   model: string;
   /** API key for OpenAI-compatible auth */
@@ -261,8 +271,6 @@ export function resolveCliGenerationConfig(
   const { argv, settings, selectedAuthType } = inputs;
   const env = inputs.env ?? (process.env as Record<string, string | undefined>);
 
-  const authType = selectedAuthType;
-
   // Resolve the target model based on strict precedence:
   // argv.model > settings.model.name > auth-specific env model vars
   // Env vars are ONLY considered when neither argv.model nor settings.model.name is set.
@@ -277,9 +285,9 @@ export function resolveCliGenerationConfig(
     // Self-heal configs already corrupted by older builds.
     resolvedModel = stripRuntimeSnapshotPrefix(settings.model.name);
     resolvedFromSettings = true;
-  } else if (authType && AUTH_ENV_MODEL_VARS[authType]) {
+  } else if (selectedAuthType && AUTH_ENV_MODEL_VARS[selectedAuthType]) {
     // Only check env vars for the current auth type
-    for (const envVar of AUTH_ENV_MODEL_VARS[authType]) {
+    for (const envVar of AUTH_ENV_MODEL_VARS[selectedAuthType]) {
       if (env[envVar]) {
         resolvedModel = env[envVar];
         sourceEnvVar = envVar;
@@ -287,6 +295,16 @@ export function resolveCliGenerationConfig(
       }
     }
   }
+
+  const authType = selectedAuthType
+    ? resolveModelSelectionAuthType(
+        selectedAuthType,
+        resolvedModel,
+        settings.modelProviders,
+        settings.providerProtocol,
+        resolvedFromSettings ? settings.model?.baseUrl : undefined,
+      )
+    : undefined;
 
   // Find a matching provider for the resolved model (for metadata: generationConfig, envKey, etc.)
   // When resolvedModel is from settings and matches a provider, modelProvider.id == settings.model.name,
@@ -453,6 +471,7 @@ export function resolveCliGenerationConfig(
   }
 
   return {
+    authType,
     model: resolved.config.model || '',
     apiKey: resolved.config.apiKey || '',
     baseUrl: resolved.config.baseUrl || '',

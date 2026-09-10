@@ -21,6 +21,7 @@ import {
   providerMatchesCredentials,
   resolveBaseUrl,
   resolveMetadataKey,
+  resolveModelProtocol,
   resolveOwnsModel,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -170,7 +171,9 @@ function readInstalledOwnedIds(
     | Record<string, ProviderModelConfig[]>
     | undefined;
   if (!modelProviders) return [];
-  const allModels: ProviderModelConfig[] = modelProviders[protocol] ?? [];
+  const allModels = (modelProviders[protocol] ?? []).filter(
+    (model) => resolveModelProtocol(protocol, model) === protocol,
+  );
   const ownsFn = resolveOwnsModel(provider);
   return ownsFn
     ? allModels.filter(ownsFn).map((m) => m.id)

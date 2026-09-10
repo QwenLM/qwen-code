@@ -2328,7 +2328,7 @@ export async function loadCliConfig(
     locale: resolveLocaleForExtensions(settings),
     overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],
-    authType: selectedAuthType,
+    authType: resolvedCliConfig.authType,
     inputFormat,
     outputFormat,
     includePartialMessages,

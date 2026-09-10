@@ -38596,6 +38596,84 @@ describe('auth device-flow routes', () => {
     expect(res.body.features).toContain('auth_device_flow');
   });
 
+  it.each([
+    { protocol: 'openai', api: 'unknown' },
+    { protocol: 'openai', api: null },
+    { protocol: 'anthropic', api: 'responses' },
+    { protocol: 'gemini', api: 'chat-completions' },
+  ])(
+    'POST /workspace/auth/provider rejects incompatible api before installation: %j',
+    async (selection) => {
+      const installAuthProvider = vi.fn();
+      const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+        bridge: fakeBridge(),
+        installAuthProvider,
+      });
+      const res = await request(app)
+        .post('/workspace/auth/provider')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          providerId: 'custom-openai-compatible',
+          apiKey: 'sk-test',
+          ...selection,
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_api');
+      expect(installAuthProvider).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { protocol: 'openai', api: 'responses' },
+    { protocol: 'openai-responses' },
+  ])(
+    'POST /workspace/auth/provider accepts OpenAI API selection: %j',
+    async (selection) => {
+      const installAuthProvider = vi
+        .fn()
+        .mockResolvedValue({ v: 1, message: 'Saved' });
+      const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+        bridge: fakeBridge(),
+        installAuthProvider,
+      });
+      const res = await request(app)
+        .post('/workspace/auth/provider')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          providerId: 'custom-openai-compatible',
+          apiKey: 'sk-test',
+          ...selection,
+        });
+      expect(res.status).toBe(200);
+      expect(installAuthProvider).toHaveBeenCalledWith(
+        expect.objectContaining(selection),
+        expect.any(Function),
+      );
+    },
+  );
+
+  it('POST /workspace/auth/provider does not change a fixed provider protocol via the legacy alias', async () => {
+    const installAuthProvider = vi.fn();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge: fakeBridge(),
+      installAuthProvider,
+    });
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'deepseek',
+        apiKey: 'sk-test',
+        protocol: 'openai-responses',
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('unsupported_protocol');
+    expect(installAuthProvider).not.toHaveBeenCalled();
+  });
+
   it('POST /workspace/auth/provider rejects unsupported protocol values', async () => {
     const installAuthProvider = vi.fn();
     const bridge = fakeBridge();

@@ -12,6 +12,10 @@ import {
   getWritableScopes,
 } from '../../config/modelProvidersScope.js';
 import { getSettingDefinition } from '../../config/settingsUtils.js';
+import {
+  getAuthTypeFromEnv,
+  resolveCliGenerationConfig,
+} from '../../utils/modelConfigUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   isActiveModelSelection,
@@ -43,6 +47,7 @@ function scopeToWire(scope: SettingScope): string {
 
 export interface WorkspaceModelsRouteDeps {
   boundWorkspace: string;
+  env?: Readonly<Record<string, string | undefined>>;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
@@ -200,11 +205,25 @@ export function registerWorkspaceModelsRoutes(
         };
         for (const activeScope of getWritableScopes(loaded)) {
           const scopeModel = loaded.forScope(activeScope).settings.model;
+          const selectedAuthType =
+            loaded.forScope(activeScope).settings.security?.auth
+              ?.selectedType ??
+            loaded.merged.security?.auth?.selectedType ??
+            getAuthTypeFromEnv(deps.env ?? {});
+          const activeAuthType = selectedAuthType
+            ? resolveCliGenerationConfig({
+                argv: {},
+                settings: { ...loaded.merged, model: scopeModel },
+                selectedAuthType,
+                env: deps.env ?? {},
+              }).authType
+            : undefined;
           if (
             isActiveModelSelection(
               scopeModel?.name,
               scopeModel?.baseUrl,
               activeTarget,
+              activeAuthType,
             )
           ) {
             writes.push({ scope: activeScope, key: 'model.name', value: '' });

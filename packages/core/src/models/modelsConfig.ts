@@ -18,7 +18,10 @@ import {
 } from '../utils/runtimeModelPrefix.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
-import { ModelRegistry } from './modelRegistry.js';
+import {
+  ModelRegistry,
+  resolveModelSelectionAuthType,
+} from './modelRegistry.js';
 import {
   type ModelProvidersConfig,
   type ProviderProtocolConfig,
@@ -174,8 +177,16 @@ export class ModelsConfig {
     this.authTypeWasExplicitlyProvided = options.initialAuthType !== undefined;
 
     // Initialize selection state
-    this.currentAuthType = options.initialAuthType;
     const initialModelId = this._generationConfig.model;
+    this.currentAuthType = options.initialAuthType
+      ? resolveModelSelectionAuthType(
+          options.initialAuthType,
+          initialModelId,
+          options.modelProvidersConfig,
+          options.providerProtocolConfig,
+          options.initialRegistryBaseUrl,
+        )
+      : undefined;
     if (this.currentAuthType && initialModelId) {
       const initialModel = this.modelRegistry.getModel(
         this.currentAuthType,
@@ -517,17 +528,25 @@ export class ModelsConfig {
       }
 
       const previousModelId = rollbackSnapshot.generationConfig.model || '';
+      const previousAuthType = rollbackSnapshot.currentAuthType;
       const previousModel =
-        !isAuthTypeChange && previousModelId
+        previousAuthType && previousModelId
           ? (this.modelRegistry.getModel(
-              authType,
+              previousAuthType,
               previousModelId,
               rollbackSnapshot.currentRegistryBaseUrl,
-            ) ?? this.modelRegistry.getModel(authType, previousModelId))
+            ) ?? this.modelRegistry.getModel(previousAuthType, previousModelId))
           : undefined;
+      const sharesOpenAICredentials =
+        (authType === AuthType.USE_OPENAI ||
+          authType === AuthType.USE_OPENAI_RESPONSES) &&
+        (previousAuthType === AuthType.USE_OPENAI ||
+          previousAuthType === AuthType.USE_OPENAI_RESPONSES);
       const canReusePreviousApiKey =
         authType !== AuthType.QWEN_OAUTH &&
-        !isAuthTypeChange &&
+        (!isAuthTypeChange ||
+          (sharesOpenAICredentials &&
+            rollbackSnapshot.generationConfig.baseUrl === model.baseUrl)) &&
         !!rollbackSnapshot.generationConfig.apiKey &&
         !!model.envKey &&
         previousModel?.envKey === model.envKey &&
@@ -1041,6 +1060,18 @@ export class ModelsConfig {
       ? (this.modelRegistry.getModel(authType, modelId, providerBaseUrl) ??
         this.modelRegistry.getModel(authType, modelId))
       : undefined;
+    if (
+      !resolved &&
+      (authType === AuthType.USE_OPENAI ||
+        authType === AuthType.USE_OPENAI_RESPONSES) &&
+      previousAuthType === authType &&
+      this.currentRegistryBaseUrl !== undefined &&
+      modelId === this._generationConfig.model
+    ) {
+      throw new Error(
+        `Model '${modelId}' is no longer configured for authType '${authType}'. Select an available model.`,
+      );
+    }
     if (resolved?.imageOnly) {
       throw new Error(
         `Image-only model '${modelId}' cannot be used as the primary model`,

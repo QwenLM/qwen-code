@@ -14,6 +14,7 @@ import type {
 
 const AUTH_PROVIDER_STEPS: ServeAuthProviderDescriptor['steps'] = [
   'protocol',
+  'api',
   'baseUrl',
   'apiKey',
   'models',
@@ -294,6 +295,14 @@ export function parseAuthProviderInstallRequest(
     };
   }
   const protocol = body['protocol'];
+  const api = body['api'];
+  if (api !== undefined && api !== 'chat-completions' && api !== 'responses') {
+    return {
+      ok: false,
+      code: 'invalid_api',
+      error: '`api` must be chat-completions or responses',
+    };
+  }
   const baseUrl = parseAuthProviderBaseUrl(
     body['baseUrl'],
     options?.allowPrivateBaseUrl === true,
@@ -354,6 +363,7 @@ export function parseAuthProviderInstallRequest(
     ok: true,
     value: {
       providerId: providerId.trim(),
+      ...(api ? { api } : {}),
       ...(typeof protocol === 'string' && protocol.trim()
         ? {
             protocol:

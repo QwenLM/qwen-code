@@ -47,6 +47,7 @@ function readWorkspaceSettings(): Record<string, unknown> {
 
 function makeApp(
   overrides: {
+    env?: Readonly<Record<string, string | undefined>>;
     parseAndValidateClientId?: (
       req: express.Request,
       res: express.Response,
@@ -77,6 +78,7 @@ function makeApp(
   });
   registerWorkspaceModelsRoutes(app, {
     boundWorkspace: workspace,
+    env: overrides.env,
     mutate,
     safeBody: (req) =>
       req.body && typeof req.body === 'object' ? req.body : {},
@@ -223,6 +225,64 @@ describe('DELETE /workspace/models', () => {
     );
     expect(readWorkspaceSettings()['modelProviders']).toEqual({
       openai: [{ id: 'deepseek-v4' }],
+    });
+  });
+
+  it.each(['settings', 'runtime env'])(
+    'keeps the active API selection from %s when deleting its sibling',
+    async (source) => {
+      const baseUrl = 'https://api.example/v1';
+      const responses = { id: 'same', baseUrl, api: 'responses' };
+      writeUserSettings({
+        modelProviders: { openai: [{ id: 'same', baseUrl }, responses] },
+        model: { name: 'same', baseUrl },
+        ...(source === 'settings'
+          ? { security: { auth: { selectedType: 'openai-responses' } } }
+          : {}),
+      });
+      const { app } = makeApp({
+        env:
+          source === 'runtime env'
+            ? {
+                OPENAI_API_KEY: 'sk-runtime',
+                OPENAI_MODEL: 'same',
+                OPENAI_BASE_URL: baseUrl,
+              }
+            : {},
+      });
+      const res = await request(app)
+        .delete('/workspace/models')
+        .send({
+          authType: source === 'settings' ? 'openai' : 'openai-responses',
+          modelId: 'same',
+          baseUrl,
+        });
+      expect(res.status).toBe(200);
+      expect(readUserSettings()).toMatchObject({
+        model: { name: 'same', baseUrl },
+        modelProviders: {
+          openai: [source === 'settings' ? responses : { id: 'same', baseUrl }],
+        },
+      });
+    },
+  );
+
+  it('clears canonical Responses selected through the shared OpenAI auth type', async () => {
+    const baseUrl = 'https://api.example/v1';
+    writeUserSettings({
+      modelProviders: { openai: [{ id: 'same', baseUrl, api: 'responses' }] },
+      model: { name: 'same', baseUrl },
+      security: { auth: { selectedType: 'openai' } },
+    });
+    const { app } = makeApp();
+    const res = await request(app).delete('/workspace/models').send({
+      authType: 'openai-responses',
+      modelId: 'same',
+      baseUrl,
+    });
+    expect(res.status).toBe(200);
+    expect(readUserSettings()).toMatchObject({
+      model: { name: '', baseUrl: '' },
     });
   });
 

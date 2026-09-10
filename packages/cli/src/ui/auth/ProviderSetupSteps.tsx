@@ -16,6 +16,7 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
 import { AuthType, discoverProviderModels } from '@qwen-code/qwen-code-core';
 import type {
+  ModelApi,
   ProviderConfig,
   BaseUrlOption,
   ModelSpec,
@@ -808,13 +809,6 @@ const PROTOCOL_ITEMS = [
     value: AuthType.USE_OPENAI,
   },
   {
-    key: AuthType.USE_OPENAI_RESPONSES,
-    title: t('OpenAI Responses'),
-    label: t('OpenAI Responses'),
-    description: t('OpenAI Responses API — streaming reasoning + tool use'),
-    value: AuthType.USE_OPENAI_RESPONSES,
-  },
-  {
     key: AuthType.USE_ANTHROPIC,
     title: t('Anthropic-compatible'),
     label: t('Anthropic-compatible'),
@@ -892,7 +886,10 @@ export function ProviderSetupSteps({
           <Box marginTop={1}>
             <DescriptiveRadioButtonSelect
               items={items}
-              initialIndex={0}
+              initialIndex={Math.max(
+                0,
+                items.findIndex((item) => item.value === flow.state.protocol),
+              )}
               onSelect={flow.selectProtocol}
               itemGap={1}
             />
@@ -901,6 +898,36 @@ export function ProviderSetupSteps({
         </>
       );
     }
+
+    case 'api':
+      return (
+        <>
+          <Box marginTop={1}>
+            <DescriptiveRadioButtonSelect
+              items={[
+                {
+                  key: 'chat-completions',
+                  title: 'Chat Completions',
+                  description: t('Standard OpenAI API format (most common)'),
+                  value: 'chat-completions' as ModelApi,
+                },
+                {
+                  key: 'responses',
+                  title: 'Responses',
+                  description: t(
+                    'OpenAI Responses API — streaming reasoning + tool use',
+                  ),
+                  value: 'responses' as ModelApi,
+                },
+              ]}
+              initialIndex={flow.state.api === 'responses' ? 1 : 0}
+              onSelect={flow.selectApi}
+              itemGap={1}
+            />
+          </Box>
+          <NAV_HINT_SELECT />
+        </>
+      );
 
     case 'baseUrl':
       if (Array.isArray(provider.baseUrl)) {

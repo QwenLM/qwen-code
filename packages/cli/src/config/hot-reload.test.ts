@@ -19,6 +19,7 @@ import * as fs from 'node:fs';
 import {
   ApprovalMode,
   AuthType,
+  ModelRegistry,
   type Config,
   type MCPServerConfig,
   type ModelProvidersConfig,
@@ -707,6 +708,76 @@ describe('registerModelProvidersHotReload', () => {
       merged.modelProviders,
     );
     expect(refreshAuth).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the registry usable after an invalid API edit and applies its correction', async () => {
+    const original: ModelProvidersConfig = {
+      openai: [{ id: 'gpt-model', api: 'responses', envKey: 'RESPONSES_KEY' }],
+    };
+    const registry = new ModelRegistry(original);
+    merged.modelProviders = original;
+    config = {
+      reloadModelProvidersConfig: (next?: ModelProvidersConfig) =>
+        registry.reloadModels(next),
+      getModelProvidersConfig: () => registry.getModelProvidersConfig(),
+      getAuthType: () => AuthType.USE_OPENAI_RESPONSES,
+      refreshAuth,
+    } as unknown as Config;
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-model', api: 'invalid' }],
+    } as unknown as ModelProvidersConfig;
+    await listener([]);
+
+    expect(
+      registry.getModel(AuthType.USE_OPENAI_RESPONSES, 'gpt-model')?.envKey,
+    ).toBe('RESPONSES_KEY');
+    expect(registry.getModelProvidersConfig()).toEqual(original);
+    expect(refreshAuth).not.toHaveBeenCalled();
+
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-model', api: 'responses', envKey: 'UPDATED_KEY' }],
+    };
+    await listener([]);
+
+    expect(
+      registry.getModel(AuthType.USE_OPENAI_RESPONSES, 'gpt-model')?.envKey,
+    ).toBe('UPDATED_KEY');
+    expect(refreshAuth).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI_RESPONSES,
+      true,
+    );
+  });
+
+  it('refreshes the current API without selecting a changed API route', async () => {
+    const original: ModelProvidersConfig = {
+      openai: [{ id: 'gpt-model', api: 'responses' }],
+    };
+    const registry = new ModelRegistry(original);
+    merged.modelProviders = original;
+    config = {
+      reloadModelProvidersConfig: (next?: ModelProvidersConfig) =>
+        registry.reloadModels(next),
+      getModelProvidersConfig: () => registry.getModelProvidersConfig(),
+      getAuthType: () => AuthType.USE_OPENAI_RESPONSES,
+      refreshAuth,
+    } as unknown as Config;
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-model', api: 'chat-completions' }],
+    };
+    await listener([]);
+
+    expect(
+      registry.getModel(AuthType.USE_OPENAI_RESPONSES, 'gpt-model'),
+    ).toBeUndefined();
+    expect(registry.getModel(AuthType.USE_OPENAI, 'gpt-model')).toBeDefined();
+    expect(refreshAuth).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI_RESPONSES,
+      true,
+    );
   });
 
   it('retries only refreshAuth on later unchanged events after it failed once', async () => {

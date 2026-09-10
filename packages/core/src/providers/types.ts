@@ -6,6 +6,7 @@
 
 import type { AuthType, InputModalities } from '../core/contentGenerator.js';
 import type {
+  ModelApi,
   ModelCapabilities,
   ModelConfig,
   ModelProvidersConfig,
@@ -151,6 +152,7 @@ export interface ProviderConfig {
 export interface ProviderSetupInputs {
   /** Override protocol (only for custom provider). Defaults to config.protocol. */
   protocol?: AuthType;
+  api?: ModelApi;
   baseUrl: string;
   apiKey: string;
   modelIds: string[];

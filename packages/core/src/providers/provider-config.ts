@@ -6,6 +6,8 @@
 
 import { createHash } from 'node:crypto';
 import { AuthType } from '../core/contentGenerator.js';
+import { resolveModelProtocol } from '../models/modelRegistry.js';
+import type { ModelApi } from '../models/types.js';
 import type {
   ModelSpec,
   ProviderConfig,
@@ -24,8 +26,10 @@ function resolveEnvKey(
   inputs: ProviderSetupInputs,
 ): string {
   const protocol = inputs.protocol ?? config.protocol;
+  const credentialProtocol =
+    protocol === AuthType.USE_OPENAI_RESPONSES ? AuthType.USE_OPENAI : protocol;
   return typeof config.envKey === 'function'
-    ? config.envKey(protocol, inputs.baseUrl)
+    ? config.envKey(credentialProtocol, inputs.baseUrl)
     : config.envKey;
 }
 
@@ -63,11 +67,16 @@ function buildGenerationConfig(
     ModelSpec,
     'enableThinking' | 'thinkingMandatory' | 'contextWindowSize' | 'modalities'
   >,
+  protocol: AuthType,
 ): ProviderModelConfig['generationConfig'] | undefined {
   const parts: ProviderModelConfig['generationConfig'] = {};
   let hasAny = false;
   if (spec.enableThinking) {
-    parts.extra_body = { enable_thinking: true };
+    if (protocol === AuthType.USE_OPENAI_RESPONSES) {
+      parts.reasoning = { effort: 'medium' };
+    } else {
+      parts.extra_body = { enable_thinking: true };
+    }
     hasAny = true;
   }
   if (spec.thinkingMandatory) {
@@ -125,8 +134,9 @@ function specToModelConfig(
   prefix: string,
   baseUrl: string,
   envKey: string,
+  protocol: AuthType,
 ): ProviderModelConfig {
-  const genConfig = buildGenerationConfig(spec);
+  const genConfig = buildGenerationConfig(spec, protocol);
   return {
     id: spec.id,
     name: prefix ? `[${prefix}] ${spec.id}` : spec.id,
@@ -166,14 +176,17 @@ function buildModelConfigs(
 ): ProviderModelConfig[] {
   const envKey = resolveEnvKey(config, inputs);
   const prefix = resolveModelNamePrefix(config, inputs.baseUrl);
-  const protocol = inputs.protocol ?? config.protocol;
+  const protocol = resolveModelProtocol(
+    inputs.protocol ?? config.protocol,
+    inputs,
+  )!;
 
   let models: ProviderModelConfig[];
 
   // Fixed ModelSpec[] (not editable) — use specs directly
   if (config.models && !config.modelsEditable) {
     models = config.models.map((spec) =>
-      specToModelConfig(spec, prefix, inputs.baseUrl, envKey),
+      specToModelConfig(spec, prefix, inputs.baseUrl, envKey, protocol),
     );
   } else if (config.models && config.modelsEditable) {
     // Editable ModelSpec[] — look up per-model metadata for known IDs
@@ -186,6 +199,7 @@ function buildModelConfigs(
           prefix,
           inputs.baseUrl,
           envKey,
+          protocol,
         );
       }
       const genConfig = buildAdvancedGenerationConfig(
@@ -273,12 +287,33 @@ export function buildInstallPlan(
   config: ProviderConfig,
   inputs: ProviderSetupInputs,
 ): ProviderInstallPlan {
-  const protocol = inputs.protocol ?? config.protocol;
+  const inputProtocol = inputs.protocol ?? config.protocol;
+  const protocol = resolveModelProtocol(inputProtocol, inputs)!;
+  const isOpenAI =
+    protocol === AuthType.USE_OPENAI ||
+    protocol === AuthType.USE_OPENAI_RESPONSES;
+  const savedProtocol = isOpenAI ? AuthType.USE_OPENAI : protocol;
+  const api: ModelApi | undefined =
+    isOpenAI &&
+    (inputs.api ||
+      config.protocolOptions ||
+      inputProtocol === AuthType.USE_OPENAI_RESPONSES)
+      ? protocol === AuthType.USE_OPENAI_RESPONSES
+        ? 'responses'
+        : 'chat-completions'
+      : undefined;
   const envKey = resolveEnvKey(config, inputs);
-  const models = inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  const builtModels =
+    inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  const models = api
+    ? builtModels.map((model) =>
+        model.api === undefined ? { ...model, api } : model,
+      )
+    : builtModels;
   const ownsModel = config.mergeModelsByIdentity
     ? undefined
     : resolveOwnsModel(config);
+  for (const model of models) resolveModelProtocol(savedProtocol, model);
   const firstModel = models[0];
   if (models.length === 0) {
     throw new Error(
@@ -298,12 +333,12 @@ export function buildInstallPlan(
 
   return {
     providerId: config.id,
-    authType: protocol,
+    authType: resolveModelProtocol(savedProtocol, firstModel!)!,
     env: { [envKey]: inputs.apiKey },
     ...(modelSelection ? { modelSelection } : {}),
     modelProviders: [
       {
-        authType: protocol,
+        authType: savedProtocol,
         models,
         mergeStrategy: 'prepend-and-remove-owned' as const,
         ...(ownsModel ? { ownsModel } : {}),
@@ -413,12 +448,24 @@ export function findExistingProviderModels(
     ? config.protocolOptions
     : [config.protocol];
   for (const protocol of protocols) {
-    const raw = modelProviders[protocol];
-    if (!Array.isArray(raw)) continue;
-    const models = raw.filter(
-      (m): m is ProviderModelConfig => isProviderModelConfig(m) && ownsModel(m),
-    );
-    if (models.length > 0) return { protocol, models };
+    const effectiveProtocols =
+      protocol === AuthType.USE_OPENAI
+        ? [AuthType.USE_OPENAI, AuthType.USE_OPENAI_RESPONSES]
+        : [protocol];
+    for (const effectiveProtocol of effectiveProtocols) {
+      const models = Object.entries(modelProviders).flatMap(
+        ([providerId, raw]) => {
+          if (!Array.isArray(raw)) return [];
+          return raw.filter(
+            (model): model is ProviderModelConfig =>
+              isProviderModelConfig(model) &&
+              ownsModel(model) &&
+              resolveModelProtocol(providerId, model) === effectiveProtocol,
+          );
+        },
+      );
+      if (models.length > 0) return { protocol: effectiveProtocol, models };
+    }
   }
   return undefined;
 }
@@ -429,13 +476,20 @@ export function findExistingProviderModels(
 
 export function shouldShowStep(
   config: ProviderConfig,
-  step: 'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig',
+  step: 'protocol' | 'api' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig',
+  protocol: AuthType = config.protocol,
 ): boolean {
   switch (step) {
     case 'protocol':
       return (
         Array.isArray(config.protocolOptions) &&
         config.protocolOptions.length > 1
+      );
+    case 'api':
+      return (
+        Boolean(config.protocolOptions?.length) &&
+        (protocol === AuthType.USE_OPENAI ||
+          protocol === AuthType.USE_OPENAI_RESPONSES)
       );
     case 'baseUrl':
       return config.baseUrl === undefined || Array.isArray(config.baseUrl);
@@ -475,7 +529,10 @@ export function providerMatchesCredentials(
     const protocols = config.protocolOptions?.length
       ? config.protocolOptions
       : [config.protocol];
-    for (const proto of protocols) {
+    const credentialProtocols = protocols.includes(AuthType.USE_OPENAI)
+      ? [...protocols, AuthType.USE_OPENAI_RESPONSES]
+      : protocols;
+    for (const proto of credentialProtocols) {
       try {
         const derived = config.envKey(proto, baseUrl);
         if (derived === envKey) {

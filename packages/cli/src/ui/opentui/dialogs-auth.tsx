@@ -29,6 +29,7 @@ import type {
   Config,
   ProviderConfig,
   ProviderSetupInputs,
+  ModelApi,
 } from '@qwen-code/qwen-code-core';
 import {
   ALIBABA_PROVIDERS,
@@ -114,12 +115,6 @@ const PROTOCOL_ITEMS: RadioItem[] = [
     value: AuthType.USE_OPENAI,
   },
   {
-    key: AuthType.USE_OPENAI_RESPONSES,
-    label: t('OpenAI Responses'),
-    description: t('OpenAI Responses API — streaming reasoning + tool use'),
-    value: AuthType.USE_OPENAI_RESPONSES,
-  },
-  {
     key: AuthType.USE_ANTHROPIC,
     label: t('Anthropic-compatible'),
     description: t('Anthropic Messages API format'),
@@ -150,6 +145,7 @@ function providerToItem(config: ProviderConfig): RadioItem {
 
 function getStepLabel(step: string | null, p: ProviderConfig): string {
   if (step === 'protocol') return t('Protocol');
+  if (step === 'api') return 'API';
   if (step === 'baseUrl') {
     if (p.uiLabels?.baseUrlStepTitle) return t(p.uiLabels.baseUrlStepTitle);
     return Array.isArray(p.baseUrl) ? t('Endpoint') : t('Base URL');
@@ -277,7 +273,12 @@ function ProtocolStep({ flow }: { flow: ProviderSetupFlow }) {
       protocolOpts.includes(p.value as AuthType),
     );
   }, [provider]);
-  const [cursor, setCursor] = useState(0);
+  const [cursor, setCursor] = useState(
+    Math.max(
+      0,
+      items.findIndex((item) => item.value === flow.state.protocol),
+    ),
+  );
   useKeyboard((key) => {
     const o = toOriginalKey(key);
     if (o.name === 'up') {
@@ -288,6 +289,33 @@ function ProtocolStep({ flow }: { flow: ProviderSetupFlow }) {
       const item = items[cursor];
       if (item) flow.selectProtocol(item.value as AuthType);
     }
+  });
+  return (
+    <>
+      <RadioList items={items} cursor={cursor} />
+      <box marginTop={1}>
+        <text fg={C.dim}>{NAV_HINT_SELECT}</text>
+      </box>
+    </>
+  );
+}
+
+function ApiStep({ flow }: { flow: ProviderSetupFlow }) {
+  const items: RadioItem[] = [
+    {
+      key: 'chat-completions',
+      label: 'Chat Completions',
+      value: 'chat-completions',
+    },
+    { key: 'responses', label: 'Responses', value: 'responses' },
+  ];
+  const [cursor, setCursor] = useState(flow.state.api === 'responses' ? 1 : 0);
+  useKeyboard((key) => {
+    const o = toOriginalKey(key);
+    if (o.name === 'up') setCursor(0);
+    else if (o.name === 'down') setCursor(1);
+    else if (o.name === 'return')
+      flow.selectApi(items[cursor]!.value as ModelApi);
   });
   return (
     <>
@@ -734,6 +762,8 @@ function SetupSteps({ flow }: { flow: ProviderSetupFlow }) {
   switch (step) {
     case 'protocol':
       return <ProtocolStep flow={flow} />;
+    case 'api':
+      return <ApiStep flow={flow} />;
     case 'baseUrl':
       return Array.isArray(provider.baseUrl) ? (
         <BaseUrlSelectStep provider={provider} flow={flow} />
@@ -811,9 +841,10 @@ function AuthDialogFlow({
 
   const handleProviderSubmit = useCallback(
     async (providerConfig: ProviderConfig, inputs: ProviderSetupInputs) => {
-      const protocol = inputs.protocol ?? providerConfig.protocol;
+      let protocol = inputs.protocol ?? providerConfig.protocol;
       try {
         const plan = buildInstallPlan(providerConfig, inputs);
+        protocol = plan.authType;
         await applyProviderInstallPlan(plan, {
           settings: createLoadedSettingsAdapter(settings),
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
@@ -898,7 +929,10 @@ function AuthDialogFlow({
       if (!providerConfig) return;
       setupFlow.start(
         providerConfig,
-        undefined,
+        findExistingProviderModels(
+          providerConfig,
+          settings.merged.modelProviders,
+        )?.protocol,
         existingEnv,
         getExistingModelIds(providerConfig),
       );
@@ -943,7 +977,10 @@ function AuthDialogFlow({
         case 'CUSTOM_PROVIDER':
           setupFlow.start(
             customProvider,
-            undefined,
+            findExistingProviderModels(
+              customProvider,
+              settings.merged.modelProviders,
+            )?.protocol,
             existingEnv,
             getExistingModelIds(customProvider),
           );

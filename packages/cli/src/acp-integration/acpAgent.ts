@@ -9,6 +9,9 @@ import {
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
+  type ModelApi,
+  resolveModelProtocol,
+  resolveModelSelectionAuthType,
   hasVertexProjectConfigured,
   BTW_MAX_INPUT_LENGTH,
   buildBtwCacheSafeParams,
@@ -53,6 +56,7 @@ import {
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   parseInvocationContext,
   findExistingProviderModels,
+  resolveOwnsModel,
   ExtensionManager,
   ExtensionSettingScope,
   HookEventName,
@@ -194,10 +198,7 @@ import type {
   SetSessionModeRequest,
   SetSessionModeResponse,
 } from '@agentclientprotocol/sdk';
-import {
-  buildAuthMethods,
-  pickAuthMethodsForAuthRequired,
-} from './authMethods.js';
+import { pickAuthMethodsForAuthRequired } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
@@ -1687,7 +1688,20 @@ function readExistingProviderConfig(
   const advancedConfig = readExistingAdvancedConfig(firstModel);
 
   return {
-    protocol,
+    protocol:
+      protocol === AuthType.USE_OPENAI_RESPONSES
+        ? AuthType.USE_OPENAI
+        : protocol,
+    ...(protocol === AuthType.USE_OPENAI ||
+    protocol === AuthType.USE_OPENAI_RESPONSES
+      ? {
+          api:
+            firstModel?.api ??
+            (protocol === AuthType.USE_OPENAI_RESPONSES
+              ? 'responses'
+              : 'chat-completions'),
+        }
+      : {}),
     baseUrl: sanitizeProviderBaseUrl(baseUrl),
     // Never serialize the raw secret over the ACP wire. Expose only whether a
     // key is stored; the client can omit `apiKey` on connect to keep it.
@@ -1706,8 +1720,32 @@ function resolveExistingProviderApiKey(
   protocol: ProviderConfig['protocol'],
   baseUrl: string,
 ): string | undefined {
-  const envKey = resolveProviderEnvKey(config, protocol, baseUrl);
-  return readSettingsEnv(settings, envKey);
+  const ownsModel = resolveOwnsModel(config);
+  for (const [providerId, models] of Object.entries(
+    settings.merged.modelProviders ?? {},
+  )) {
+    if (!Array.isArray(models)) continue;
+    for (const model of models) {
+      if (model.baseUrl !== baseUrl || !model.envKey || !ownsModel?.(model))
+        continue;
+      if (
+        resolveModelProtocol(
+          providerId,
+          model,
+          settings.merged.providerProtocol,
+        ) === protocol
+      ) {
+        const storedKey = readSettingsEnv(settings, model.envKey);
+        if (storedKey) return storedKey;
+      }
+    }
+  }
+  const canonicalProtocol =
+    protocol === AuthType.USE_OPENAI_RESPONSES ? AuthType.USE_OPENAI : protocol;
+  return readSettingsEnv(
+    settings,
+    resolveProviderEnvKey(config, canonicalProtocol, baseUrl),
+  );
 }
 
 function serializeProviderConfig(
@@ -1756,11 +1794,28 @@ function readProviderSetupInputs(
   if (
     protocol &&
     protocol !== config.protocol &&
-    !config.protocolOptions?.includes(protocol)
+    !config.protocolOptions?.includes(protocol) &&
+    !(
+      protocol === AuthType.USE_OPENAI_RESPONSES &&
+      config.protocolOptions?.includes(AuthType.USE_OPENAI)
+    )
   ) {
     throw RequestError.invalidParams(
       undefined,
       `Invalid protocol for provider "${config.id}"`,
+    );
+  }
+
+  const api = params['api'] as ModelApi | undefined;
+  let effectiveProtocol: AuthType;
+  try {
+    effectiveProtocol = resolveModelProtocol(protocol ?? config.protocol, {
+      api,
+    })!;
+  } catch (error) {
+    throw RequestError.invalidParams(
+      undefined,
+      error instanceof Error ? error.message : String(error),
     );
   }
 
@@ -1782,7 +1837,7 @@ function readProviderSetupInputs(
   // received `hasApiKey` from the list response), fall back to the stored key.
   const apiKey =
     readOptionalString(params['apiKey'], 'apiKey') ??
-    resolveExistingApiKey?.(protocol ?? config.protocol, baseUrl);
+    resolveExistingApiKey?.(effectiveProtocol, baseUrl);
   if (!apiKey) {
     throw RequestError.invalidParams(undefined, 'Invalid or missing apiKey');
   }
@@ -1805,6 +1860,7 @@ function readProviderSetupInputs(
 
   return {
     ...(protocol ? { protocol } : {}),
+    ...(api ? { api } : {}),
     baseUrl,
     apiKey,
     modelIds: resolvedModelIds,
@@ -4753,7 +4809,9 @@ class QwenAgent implements Agent {
       }
     }
     this.clientCapabilities = args.clientCapabilities;
-    const authMethods = buildAuthMethods();
+    const authMethods = pickAuthMethodsForAuthRequired(
+      this.config.getCurrentAuthType?.() ?? this.config.getAuthType?.(),
+    );
     const version = process.env['CLI_VERSION'] || process.version;
 
     const response: InitializeResponse = {
@@ -4876,6 +4934,20 @@ class QwenAgent implements Agent {
 
   async authenticate({ methodId }: AuthenticateRequest): Promise<void> {
     const method = z.nativeEnum(AuthType).parse(methodId);
+    const currentAuthType =
+      this.config.getCurrentAuthType?.() ?? this.config.getAuthType?.();
+    const authType =
+      method === AuthType.USE_OPENAI
+        ? resolveModelSelectionAuthType(
+            currentAuthType === AuthType.USE_OPENAI_RESPONSES
+              ? currentAuthType
+              : method,
+            this.config.getModel(),
+            this.settings.merged.modelProviders,
+            this.settings.merged.providerProtocol,
+            this.config.getCurrentModelRegistryBaseUrl?.(),
+          )
+        : method;
 
     let authUri: string | undefined;
     const authUriHandler = (deviceAuth: DeviceAuthorizationData) => {
@@ -4894,12 +4966,12 @@ class QwenAgent implements Agent {
       await this.refreshAuthWithPersistedReasoning(
         this.config,
         this.settings,
-        method,
+        authType,
       );
       this.settings.setValue(
         SettingScope.User,
         'security.auth.selectedType',
-        method,
+        authType,
       );
     } finally {
       if (method === AuthType.QWEN_OAUTH) {

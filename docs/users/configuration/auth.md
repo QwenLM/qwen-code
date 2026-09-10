@@ -283,6 +283,7 @@ Edit `~/.qwen/settings.json` (create it if it doesn't exist). You can mix multip
 | Field              | Required | Description                                                                                                                                        |
 | ------------------ | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `id`               | Yes      | Model ID sent to the API (e.g. `gpt-4o`, `claude-sonnet-4-20250514`)                                                                               |
+| `api`              | No       | OpenAI-compatible request format: `chat-completions` or `responses`. Omit to inherit the provider protocol.                                        |
 | `name`             | No       | Display name in the `/model` picker (defaults to `id`)                                                                                             |
 | `envKey`           | No       | Environment variable name for the API key (e.g. `OPENAI_API_KEY`); optional/recommended — defaults to the auth type's default env key when omitted |
 | `baseUrl`          | No       | API endpoint override (useful for proxies or custom endpoints)                                                                                     |

@@ -182,6 +182,35 @@ describe('buildInstallPlan', () => {
     expect(models?.[0]?.generationConfig?.extra_body).toBeUndefined();
   });
 
+  it('uses the explicit model API for thinking and rejects incompatible setup inputs', () => {
+    const config = makeConfig({ models: undefined });
+    const inputs = {
+      baseUrl: 'https://custom.com/v1',
+      apiKey: 'sk-custom',
+      modelIds: ['m1'],
+      api: 'responses' as const,
+      advancedConfig: { enableThinking: true },
+    };
+    const plan = buildInstallPlan(config, inputs);
+    expect(plan.authType).toBe(AuthType.USE_OPENAI_RESPONSES);
+    expect(plan.modelProviders?.[0]).toMatchObject({
+      authType: AuthType.USE_OPENAI,
+      models: [
+        {
+          id: 'm1',
+          api: 'responses',
+          generationConfig: { reasoning: { effort: 'medium' } },
+        },
+      ],
+    });
+    expect(() =>
+      buildInstallPlan(config, { ...inputs, protocol: AuthType.USE_ANTHROPIC }),
+    ).toThrow(/api/i);
+    expect(() =>
+      buildInstallPlan(config, { ...inputs, api: 'invalid' as 'responses' }),
+    ).toThrow(/api/i);
+  });
+
   it('produces independent generationConfig objects per custom model', () => {
     const config = makeConfig({ models: undefined, modelNamePrefix: '' });
     const plan = buildInstallPlan(config, {
@@ -435,6 +464,33 @@ describe('findExistingProviderModels', () => {
         { id: 'custom-model', envKey: 'TEST_API_KEY' },
         { id: 'default-model', envKey: 'TEST_API_KEY' },
       ],
+    });
+  });
+
+  it.each(['openai', 'openai-responses'])(
+    'finds saved Responses models in the %s bucket',
+    (bucket) => {
+      const model = {
+        id: 'responses-model',
+        api: 'responses',
+        envKey: 'TEST_API_KEY',
+      };
+      expect(findExistingProviderModels(config, { [bucket]: [model] })).toEqual(
+        {
+          protocol: AuthType.USE_OPENAI_RESPONSES,
+          models: [model],
+        },
+      );
+    },
+  );
+
+  it('inspects legacy Responses entries without rewriting their credential reference', () => {
+    const model = { id: 'legacy', envKey: 'TEST_API_KEY' };
+    expect(
+      findExistingProviderModels(config, { 'openai-responses': [model] }),
+    ).toEqual({
+      protocol: AuthType.USE_OPENAI_RESPONSES,
+      models: [model],
     });
   });
 

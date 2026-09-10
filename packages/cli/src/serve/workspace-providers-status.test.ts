@@ -83,6 +83,25 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
+  it('reports effective Responses routing for canonical OpenAI settings', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'same' },
+      modelProviders: {
+        openai: [
+          { id: 'same', api: 'responses', baseUrl: 'https://api.example/v1' },
+        ],
+      },
+    });
+    expect(await provider(workspace, false)).toMatchObject({
+      current: {
+        authType: 'openai-responses',
+        modelId: 'same(openai-responses)',
+      },
+    });
+  });
+
   it('reads fresh default model settings on every request', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
