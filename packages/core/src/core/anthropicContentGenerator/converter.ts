@@ -265,7 +265,11 @@ export class AnthropicContentConverter {
       request.config?.systemInstruction,
     );
 
-    this.processContents(request.contents, messages);
+    this.processContents(
+      request.contents,
+      messages,
+      !!options.dropUnsignedAssistantThinking,
+    );
 
     if (options.stripAssistantThinking) {
       this.stripThinkingFromAssistantMessages(messages);
@@ -568,19 +572,21 @@ export class AnthropicContentConverter {
   private processContents(
     contents: ContentListUnion,
     messages: AnthropicMessageParam[],
+    demoteForeignThoughtToText: boolean,
   ): void {
     if (Array.isArray(contents)) {
       for (const content of contents) {
-        this.processContent(content, messages);
+        this.processContent(content, messages, demoteForeignThoughtToText);
       }
     } else if (contents) {
-      this.processContent(contents, messages);
+      this.processContent(contents, messages, demoteForeignThoughtToText);
     }
   }
 
   private processContent(
     content: ContentUnion | PartUnion,
     messages: AnthropicMessageParam[],
+    demoteForeignThoughtToText: boolean,
   ): void {
     if (typeof content === 'string') {
       messages.push({
@@ -624,13 +630,20 @@ export class AnthropicContentConverter {
               debugLogger.debug(
                 'Dropping a Responses reasoning replay payload from thoughtSignature',
               );
-              // An unsigned `thinking` block is exactly the shape the passes
-              // below treat as a proxy protocol violation
-              // (`dropUnsignedThinkingFromAssistantMessages`), so do not emit
-              // one. Keep the visible summary as plain text when present.
-              dropThinkingBlock = true;
-              if (part.text) {
-                contentBlocks.push({ type: 'text', text: part.text });
+              // When the caller asked to drop unsigned thinking
+              // (`dropUnsignedAssistantThinking`), an unsigned `thinking`
+              // block is exactly the shape the pass below treats as a proxy
+              // protocol violation, so do not emit one — keep the visible
+              // summary as plain text when present. Otherwise leave the block
+              // unsigned (never attach the foreign payload as a signature) so
+              // `stripThinkingFromAssistantMessages` removes it under
+              // `stripAssistantThinking` and `fillMissingThinkingSignatures`
+              // fills `signature: ''` under DeepSeek normalization.
+              if (demoteForeignThoughtToText) {
+                dropThinkingBlock = true;
+                if (part.text) {
+                  contentBlocks.push({ type: 'text', text: part.text });
+                }
               }
             } else {
               (thinkingBlock as { signature?: string }).signature =

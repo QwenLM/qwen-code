@@ -4485,22 +4485,32 @@ describe('AnthropicContentConverter', () => {
         { enableCacheControl: false },
       );
 
-      const blocks = messages[1]!.content as Array<{
-        type: string;
-        thinking?: string;
-        signature?: string;
-        text?: string;
-      }>;
-
-      // The foreign replay payload must not be sent as a native signature,
-      // and no unsigned thinking block is emitted for it...
-      expect(blocks.some((b) => b.type === 'thinking')).toBe(false);
-      // ...but the visible reasoning summary survives as plain text.
-      expect(blocks).toContainEqual({
-        type: 'text',
-        text: 'Reasoning summary',
+      // The foreign replay payload must not be attached as a native
+      // `signature`: the thinking block is emitted unsigned (no `signature`
+      // key), leaving the summary text intact for the downstream
+      // strip/normalize passes to decide its fate.
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'Reasoning summary' },
+          { type: 'text', text: 'Visible answer' },
+        ],
       });
-      expect(blocks).toContainEqual({ type: 'text', text: 'Visible answer' });
+    });
+
+    it('strips the foreign replay payload under stripAssistantThinking', () => {
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        buildRequest(responsesReplaySignature),
+        { stripAssistantThinking: true, enableCacheControl: false },
+      );
+
+      // The hidden reasoning must not leak as visible assistant prose: under
+      // stripAssistantThinking the unsigned thinking block is removed, and no
+      // demoted `'Reasoning summary'` text block is emitted.
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Visible answer' }],
+      });
     });
 
     it('does not throw on an active tool-use turn when dropping the replay payload', () => {
@@ -4548,9 +4558,14 @@ describe('AnthropicContentConverter', () => {
         ? assistant!.content
         : [];
       expect(blocks.some((b) => b.type === 'tool_use')).toBe(true);
+      // ...and the demoted reasoning summary survives as plain text.
+      expect(blocks).toContainEqual({
+        type: 'text',
+        text: 'Reasoning summary',
+      });
     });
 
-    it('drops a signature-only replay payload without emitting a thinking block', () => {
+    it('never forwards a signature-only replay payload as a native signature', () => {
       // flushThoughtEpisode always sets `text` (to '' for a signature-only
       // episode), so the shape reaching this converter is an empty-text
       // thought part, not a part with no `text` key.
@@ -4574,35 +4589,51 @@ describe('AnthropicContentConverter', () => {
         ],
       });
 
-      const assertShape = (result: {
+      const findAssistant = (result: {
+        messages: Array<{ role: string; content: unknown }>;
+      }) => result.messages.find((m) => m.role === 'assistant');
+
+      // Under dropUnsignedAssistantThinking the replay payload is dropped and
+      // no thinking block is emitted.
+      const assertDropped = (result: {
         messages: Array<{ role: string; content: unknown }>;
       }) => {
-        const assistant = result.messages.find((m) => m.role === 'assistant');
-        expect(assistant?.content).toEqual([
+        expect(findAssistant(result)?.content).toEqual([
+          { type: 'text', text: 'Visible answer' },
+        ]);
+      };
+
+      // Under the bare option set the block is kept but left unsigned (no
+      // `signature` key), so the foreign payload still never reaches the wire.
+      const assertUnsigned = (result: {
+        messages: Array<{ role: string; content: unknown }>;
+      }) => {
+        expect(findAssistant(result)?.content).toEqual([
+          { type: 'thinking', thinking: '' },
           { type: 'text', text: 'Visible answer' },
         ]);
       };
 
       // Latest-turn and non-latest-turn positions, under both the production
       // proxy option set (dropUnsignedAssistantThinking) and the bare option
-      // set. The replay payload must never surface as a thinking block or a
-      // signature in any of them.
-      assertShape(
+      // set. The replay payload must never surface as a native signature in
+      // any of them.
+      assertDropped(
         converter.convertLlmRequestToAnthropic(build(false), {
           dropUnsignedAssistantThinking: true,
         }),
       );
-      assertShape(
+      assertDropped(
         converter.convertLlmRequestToAnthropic(build(true), {
           dropUnsignedAssistantThinking: true,
         }),
       );
-      assertShape(
+      assertUnsigned(
         converter.convertLlmRequestToAnthropic(build(false), {
           enableCacheControl: false,
         }),
       );
-      assertShape(
+      assertUnsigned(
         converter.convertLlmRequestToAnthropic(build(true), {
           enableCacheControl: false,
         }),
