@@ -91,20 +91,28 @@ function redactGitPaths(detail: string, cwd: string): string {
   // The system gitconfig path is a build-time setting (ETC_GITCONFIG):
   // Homebrew git reads /opt/homebrew/etc/gitconfig, a source build may
   // read /usr/local/etc/gitconfig — so redact any path ENDING in
-  // /etc/gitconfig, not just the literal. (\S* may absorb a leading
-  // quote from git's `unable to access '<path>'` form — harmless for
-  // redaction.)
-  message = message.replace(/\S*\/etc\/gitconfig\b/g, '<home>');
+  // /etc/gitconfig, not just the literal. Decide per whitespace-
+  // delimited TOKEN, not with an unbounded \S* prefix: one long
+  // whitespace-free run in the payload (a rejected push's sideband data
+  // bypasses git's vreportf cap) would otherwise cost O(L^2) of
+  // synchronous CPU on the daemon's single event loop, before the
+  // 512-char slice ever applies.
+  message = message
+    .split(/(\s+)/)
+    .map((token) => (/\/etc\/gitconfig\b/.test(token) ? '<home>' : token))
+    .join('');
   // include.path pulls config files from ARBITRARY absolute locations
-  // (a team-shared file under the user's home, say), and git echoes the
-  // target in these two shapes — redact the payload wherever it points.
+  // (a team-shared file under the user's home, say), and git's
+  // config-error family echoes the target after ` in file ` — an OPEN
+  // set of shapes (`bad config line N in file %s`, `bad numeric/boolean/
+  // date config value … in file %s: out of range`, per-version drift),
+  // so the arm keys on the shared phrase, not one enumerated shape.
   // The `(?!<)` keeps the already-labeled `<home>` arms intact.
-  // The path is the message tail in this shape, unquoted — a
-  // space-bearing path would otherwise leak past the first space.
-  message = message.replace(
-    /(bad config line \d+ in file )(?!<)[^\n]+/g,
-    '$1<config>',
-  );
+  // The path is the message tail in these shapes, unquoted — a
+  // space-bearing path must redact to end of line, not to the first
+  // space (the fail-closed sweep below redacts only the first
+  // whitespace-delimited token, so it cannot own this class).
+  message = message.replace(/( in file )(?!<)[^\n]+/g, '$1<config>');
   // `unable to access '<url>'` is also git's TRANSPORT error on every
   // fetch/pull/push network failure — only an absolute filesystem path
   // is a config target; a URL payload stays as-is. Absolute means a
@@ -112,6 +120,24 @@ function redactGitPaths(detail: string, cwd: string): string {
   message = message.replace(
     /(unable to access ')(?!<)((?:\/|[A-Za-z]:[\\/]|\\\\)[^']*)(')/g,
     '$1<config>$3',
+  );
+  // An apostrophe INSIDE the quoted target stops the payload early:
+  // drop the fragment between the label and the closing quote, or the
+  // tail of a host path reaches the client.
+  message = message.replace(/(<config>')[^'\n]*(')/g, '$1$2');
+
+  // Fail-closed sweep: the ` in file ` family above owns its tail, but
+  // OTHER sentences can carry an absolute path (today's or tomorrow's
+  // wording) — remove ANY surviving absolute-path token, whatever
+  // sentence wrapped it. A transport URL survives: its slashes follow
+  // `:` or a word character, never whitespace, a quote, a paren or the
+  // start. The sweep's token boundary is the documented limit — a
+  // space-bearing path belongs to a shape arm, never to this one.
+  // It runs before the 512-char slice so the loose keyword branches
+  // classify on the bounded, swept text.
+  message = message.replace(
+    /(^|[\s'"(<])(?:\/|[A-Za-z]:[\\/]|\\\\)[^\s'"<>]*/g,
+    '$1<path>',
   );
   return message;
 }
@@ -336,8 +362,11 @@ export function sendGitError(
     res.status(409).json({ error: 'remote_config_unparsable', message });
     return;
   }
-  // Our own add pre-flight refusal (a plain Error, no git prefix): the
-  // name exists in an inherited scope git's duplicate check cannot see.
+  // Our own add AND remove pre-flight refusal (a plain Error, no git
+  // prefix): the name exists in an inherited scope — add refuses because
+  // git's duplicate check cannot see it; remove refuses because git rm
+  // would destroy the local half first while the survivor keeps the name
+  // resolving.
   if (/^remote already configured in an inherited scope$/i.test(fullMessage)) {
     res.status(409).json({ error: 'remote_shadows_inherited', message });
     return;

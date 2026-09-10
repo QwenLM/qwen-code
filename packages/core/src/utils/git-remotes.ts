@@ -424,15 +424,21 @@ export async function gitRemoteRemove(
   }
   // git's rm mutates BEFORE it can fail: it deletes the tracking refs
   // and unsets the pointing branches' keys first, then dies renaming a
-  // section held in a file it cannot write. A section held in an
-  // include.path'd file is scope-labeled `local`, so the scope reads
-  // cannot tell it apart — only the record ORIGINS can. Refuse up front,
-  // before anything is destroyed; the post-removal gates stay as the
-  // backstop for everything the pre-flight cannot foresee.
-  if (await remoteSectionHasIncludedOrigin(cwd, name, env)) {
-    // No name in the message: sendGitError classifies on message text,
-    // and a config-chosen name could carry a keyword another branch
-    // claims.
+  // section held in a file it cannot write — and over a SPLIT section
+  // (the name also configured in an inherited scope) it exits 0 after
+  // destroying the local half while the inherited survivor keeps the
+  // name resolving. Refuse up front, before anything is destroyed, when
+  // any record of the section lives outside the two files a removal
+  // edits; the post-removal gates stay as the backstop for everything
+  // the pre-flight cannot foresee.
+  const sectionBlock = await remoteSectionRemovalBlock(cwd, name, env);
+  // No name in either message: sendGitError classifies on message text,
+  // and a config-chosen name could carry a keyword another branch
+  // claims.
+  if (sectionBlock === 'inherited') {
+    throw new Error('remote already configured in an inherited scope');
+  }
+  if (sectionBlock === 'included') {
     throw new Error('remote section lives in an included config file');
   }
   // Snapshot the branches pointing at `name` BEFORE git rm unsets the
@@ -466,7 +472,44 @@ export async function gitRemoteRemove(
     if (!completed) {
       if (
         /^(?:error|fatal): No such remote: /m.test(detail) &&
-        (await remoteSectionScopes(cwd, name, env)).size === 0
+        // A sectionless upstream VALUE (`.`, a URL, a path, a scp-like
+        // `host:path`) is admitted by the lenient name predicate, and a
+        // repo whose branch tracks such a value holds LIVE config a
+        // value-matched sweep would destroy over a 404. The skip trades
+        // away one residual: git accepts a colon-bearing (or `.`/`/`-
+        // shaped) SECTION name too, so a hand-made sectionless-named
+        // remote whose first-attempt cleanup died mid-sweep converges
+        // nothing on retry — accepted because the two states
+        // (never-sectioned live upstream vs orphaned-by-failed-removal)
+        // are indistinguishable once the section is gone, and sweeping
+        // risks the live one.
+        // Pure string test, ahead of the scope read: no spawn for a
+        // name git resolves without a section.
+        !isSectionlessUpstream(name) &&
+        (await remoteSectionScopes(cwd, name, env)).size === 0 &&
+        // Bare words are distinguishable post-hoc: a name git still
+        // RESOLVES without any config section (an insteadOf alias —
+        // probed to fail no-such-remote with nothing touched) is a live
+        // upstream too — the sweep must not run over git's 404. (A legacy
+        // `$GIT_DIR/remotes|branches` file resolves the same probe but
+        // never reaches this arm: git's own rm fails it with "Could not
+        // remove config section".) Fail-closed: a blind resolver read
+        // throws rather than sweeping.
+        !(await remoteStillResolves(cwd, name, env)) &&
+        // A bare word naming a DIRECTORY repo inside the worktree is a
+        // live local-path upstream (git resolves the path transport),
+        // which the resolver never sees — `--get-url` echoes the name
+        // verbatim without consulting the filesystem (probed). Probe
+        // the path before sweeping.
+        !(await bareWordResolvesAsRepoPath(cwd, name, env)) &&
+        // A `url.<base>.pushInsteadOf = <prefix>` alias keeps a bare
+        // name resolving PUSH-side (the `gh:` pattern) while nothing
+        // fetch-side answers it — no resolver probe can see it (git has
+        // no push-side equivalent), so the dump itself answers. A
+        // prefix over-match skips the sweep: the safe polarity.
+        !(await pushInsteadOfAliases(cwd, env)).some((alias) =>
+          name.startsWith(alias),
+        )
       ) {
         // The section is already gone — an earlier attempt died after
         // removing it but before finishing the cleanup, so a retry
@@ -474,6 +517,13 @@ export async function gitRemoteRemove(
         // keys AND the orphaned tracking refs a refspec-less removal
         // leaves), then surface git's answer.
         await deleteRemoteTrackingRefs(cwd, name, env);
+        // Same re-verify the certify path runs: the sweep is
+        // best-effort per ref, so a surviving ref (a stale lock) must
+        // refuse, not converge to a 404 that abandons the phantom
+        // namespace with no remote left to prune it.
+        if ((await remoteTrackingRefs(cwd, name, env)).length > 0) {
+          throw new Error('remote still configured after removal');
+        }
         await unsetUpstreamKeys(cwd, pointed, name, env);
         await sweepSiblingWorktreeKeys(cwd, name, env);
         // Same resolution check as the main path: an inert survivor
@@ -515,8 +565,9 @@ export async function gitRemoteRemove(
   // insteadOf alias) — but git still resolves it: fetch/push keep
   // reaching the remote the panel just said was removed. Two checks,
   // because each sees a different survivor: the all-scope section read
-  // catches an inherited pushurl-only section (which resolves
-  // fetch-side as the bare name), and git's own resolver catches the
+  // is the backstop for an inherited record the pre-flight could not
+  // see (a concurrent inherited edit racing in after its read, or its
+  // no-match fall-through), and git's own resolver catches the
   // non-config sources — `ls-remote --get-url` expands the name without
   // contacting the remote and echoes the input verbatim only when
   // nothing answers it.
@@ -643,15 +694,34 @@ async function repoTopLevel(
   }
 }
 
-// Whether any repository-scope `remote.<name>.*` record's ORIGIN is a file
-// other than the two a removal can edit — which only an include.path'd
-// file produces (inherited scopes are filtered out by the scope field;
-// command-scope records are not file-backed and not repository-scope).
-async function remoteSectionHasIncludedOrigin(
+// The pre-removal section refusal, answered from ONE all-scope
+// origin-annotated dump:
+// - 'inherited': a `remote.<name>.*` record lives OUTSIDE the repository
+//   scopes (global/system/unknown/command) WHILE the section also has a
+//   repository-scope record. git rm would destroy the local half, the
+//   tracking refs and the pointing branches' keys first and the
+//   inherited survivor would keep the name resolving — the same refusal
+//   gitRemoteAdd runs as a pre-flight, mirrored here ahead of the
+//   destruction instead of after it. A section with ONLY inherited
+//   records has no repository half to destroy, so it falls through to
+//   git's own no-such-remote 404 — the answer the client's stale-row
+//   convergence keys on (a phantom row after an out-of-band removal
+//   re-reads and clears; a 409 would stick).
+// - 'included': a repository-scope record's ORIGIN is a file other than
+//   the two a removal can edit — which only an include.path'd file
+//   produces (it is scope-labeled `local`, so the scope field cannot
+//   tell it apart; only the record origins can).
+// The repository-ness ordering comes from the reads below: the config
+// dump exits 0 outside a repository (with the inherited config), but
+// the `rev-parse` probes inside editableConfigSpellings throw there
+// BEFORE any record is inspected, so git's canonical not-a-repository
+// answer keeps winning over these refusals (the add path pins the same
+// ordering at git-remotes.test.ts:411).
+async function remoteSectionRemovalBlock(
   cwd: string,
   name: string,
   env?: Readonly<Record<string, string | undefined>>,
-): Promise<boolean> {
+): Promise<'inherited' | 'included' | null> {
   let raw: string;
   try {
     raw = await runGit(
@@ -660,7 +730,7 @@ async function remoteSectionHasIncludedOrigin(
       env,
     );
   } catch (err) {
-    if (isNoMatchConfigError(err)) return false;
+    if (isNoMatchConfigError(err)) return null;
     stripConfigDump(err);
     throw err;
   }
@@ -668,17 +738,27 @@ async function remoteSectionHasIncludedOrigin(
     editableConfigSpellings(cwd, env),
     repoTopLevel(cwd, env),
   ]);
+  let included = false;
+  let inheritedSeen = false;
+  let repoRecordSeen = false;
   const prefix = `remote.${name}.`;
   for (const record of iterConfigRecords(raw, true)) {
-    if (!REPOSITORY_SCOPES.has(record.scope)) continue;
-    const { key, origin } = record;
+    const { scope, key, origin } = record;
     if (!key.startsWith(prefix)) continue;
     // Section identity, not prefix: a sibling remote whose name extends
     // this one (`a.b` next to `a`) must not count as a record of `a`.
     const rest = key.slice('remote.'.length);
     const dot = rest.lastIndexOf('.');
     if (dot <= 0 || rest.slice(0, dot) !== name) continue;
-    if (origin === undefined || !origin.startsWith('file:')) return true;
+    if (!REPOSITORY_SCOPES.has(scope)) {
+      inheritedSeen = true;
+      continue;
+    }
+    repoRecordSeen = true;
+    if (origin === undefined || !origin.startsWith('file:')) {
+      included = true;
+      continue;
+    }
     let editableOrigin = false;
     // Relative origins are printed against the worktree TOPLEVEL (git
     // chdirs during setup), not the passed cwd, which may be a subdir.
@@ -688,9 +768,13 @@ async function remoteSectionHasIncludedOrigin(
         break;
       }
     }
-    if (!editableOrigin) return true;
+    if (!editableOrigin) included = true;
   }
-  return false;
+  // The inherited refusal protects the DESTRUCTION case — a repository
+  // half existing to be destroyed. Nothing repository-scoped means
+  // nothing to destroy: fall through to git's own no-such-remote.
+  if (repoRecordSeen && inheritedSeen) return 'inherited';
+  return included ? 'included' : null;
 }
 
 // Whether git still RESOLVES the name after the section is gone — the
@@ -714,6 +798,104 @@ async function remoteStillResolves(
   } catch (err) {
     stripConfigDump(err);
     throw err;
+  }
+}
+
+// Whether a bare-word name resolves as a local transport upstream (a
+// same-named directory repo or bundle file): git's `ls-remote --get-url`
+// resolver never consults the filesystem, so the path leg needs its own
+// answer — asked of git itself, not re-implemented. The converge arm
+// asks this for the removed NAME; the unmask gate asks it for upstream
+// VALUES (configured upstreams the snapshot proves were in force — not
+// a coincidental directory). The name-keyed certification gate must NOT
+// ask it (a coincidental same-named directory must not make a
+// configured remote unremovable). Fail-closed like the resolver's: a
+// kill rethrows; a non-repository answer is simply false.
+async function bareWordResolvesAsRepoPath(
+  cwd: string,
+  name: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  // git's own transport answers: a same-named directory repo OR a
+  // bundle file at the worktree toplevel (setup chdirs there, so the
+  // base needs no derivation — probed from a subdirectory cwd). A
+  // `--resolve-git-dir` model misses bundles (git sniffs the bundle
+  // magic, extension-independent) and needs the base by hand. No
+  // `--exit-code`: a ref-less repo exits 2 and would read as
+  // unresolved. Only bare words reach this probe and insteadOf aliases
+  // are answered by the resolver probes ahead of it, so no network.
+  // Fail-closed: a kill rethrows stripped; any other failure is false.
+  try {
+    await runGit(cwd, ['ls-remote', '--', name], env);
+    return true;
+  } catch (err) {
+    if (isKillError(err)) {
+      stripConfigDump(err);
+      throw err;
+    }
+    return false;
+  }
+}
+
+// The `url.*.pushInsteadOf` alias VALUES (the prefixes users type —
+// the `gh:` pattern) from the all-scope dump. Push-side aliasing is
+// invisible to every resolver probe: `ls-remote --get-url` is
+// fetch-side only and git has no push-side `--get-url` (probed:
+// `ls-remote --push` exits 129), so the config record is the only
+// answer. Fail-closed: a read failure throws rather than answering
+// "no aliases".
+async function pushInsteadOfAliases(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string[]> {
+  let raw: string;
+  try {
+    raw = await runGit(cwd, ['config', '--list', '--show-scope', '-z'], env);
+  } catch (err) {
+    stripConfigDump(err);
+    throw err;
+  }
+  const out: string[] = [];
+  for (const record of iterConfigRecords(raw)) {
+    // An empty value would prefix-match EVERY name (`startsWith('')`),
+    // making the converge arm unreachable and the unmask push arms
+    // never-refusing — the opposite of both gates' polarity.
+    if (
+      record.value &&
+      record.key.startsWith('url.') &&
+      record.key.endsWith('.pushinsteadof')
+    ) {
+      out.push(record.value);
+    }
+  }
+  return out;
+}
+
+// Whether git RESOLVES a bare-word upstream value — the unmask gate's
+// question, which "some `remote.<value>.*` record exists" answers wrong
+// in both polarities: a URL-less section (a bare `[remote "foo"] proxy =
+// …`) puts the name in the record set while resolving NOTHING, and a
+// legacy `$GIT_DIR/remotes/<name>` file resolves with no record at all.
+// Only the bare-word class reaches this probe — `.`, URLs and paths
+// short-circuit through isSectionlessUpstream first. Fail-closed toward
+// refusal: a read that cannot answer (other than a kill, which
+// propagates) counts as unresolved.
+async function remoteNameResolves(
+  cwd: string,
+  value: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  try {
+    const out = await runGit(cwd, ['ls-remote', '--get-url', '--', value], env);
+    // Same echo rule as remoteStillResolves: the unanswered name comes
+    // back verbatim plus exactly one trailing LF.
+    return (out.endsWith('\n') ? out.slice(0, -1) : out) !== value;
+  } catch (err) {
+    if (isKillError(err)) {
+      stripConfigDump(err);
+      throw err;
+    }
+    return false;
   }
 }
 
@@ -1255,14 +1437,25 @@ async function sweepSiblingWorktreeKeys(
 }
 
 // The local-scope values of one branch key, [] when unset (exit 1 with
-// no output). A kill is not an answer.
+// no output). A kill is not an answer. Read with includes ON: the
+// snapshot these presence checks are weighed against captured the
+// config dump's `local`-labeled records, and git labels an
+// include.path'd file's records `local` too — a bare `--local` (includes
+// off) would read an include-held survivor as absent and re-add it to
+// .git/config, duplicating the key and permanently shadowing the
+// include (a `--add` appends at EOF, past the include directive, and
+// wins last-value resolution).
 async function localBranchKeyValues(
   cwd: string,
   key: string,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<string[]> {
   try {
-    const out = await runGit(cwd, ['config', '--local', '--get-all', key], env);
+    const out = await runGit(
+      cwd,
+      ['config', '--local', '--includes', '--get-all', key],
+      env,
+    );
     return out.split('\n').filter((line) => line !== '');
   } catch (err) {
     if (isNoMatchConfigError(err)) return [];
@@ -1275,7 +1468,8 @@ async function localBranchKeyValues(
 // its effective-value match: a pointed branch whose LOCAL copy named a
 // SURVIVING remote (shadowed by a worktree-scope record) loses the whole
 // [branch <b>] section. Only absent keys are rewritten — a surviving
-// key (a multi-valued one git skipped, swept by value above) is never
+// key (a multi-valued one git skipped, swept by value above) or an
+// include-held one (the presence check reads with includes on) is never
 // duplicated. Fail-closed: a restore that cannot run refuses the
 // certification rather than leaving the branch silently untracked.
 async function restoreLocalUpstreamBackups(
@@ -1389,14 +1583,33 @@ async function survivingUpstreamKeys(
     throw err;
   }
   const lastValue = new Map<string, string>();
-  const sectionNames = new Set<string>();
+  // Sections carrying a pushurl record: a pushurl-ONLY section resolves
+  // PUSH-side (git push reaches it) while the fetch-side resolver probe
+  // echoes the bare name — the push-side unmask arms must count it as
+  // resolving. (The fetch arm stays resolver-only: a pushurl-only
+  // upstream is genuinely fetch-dangling.)
+  const pushurlSections = new Set<string>();
+  // Push-side alias prefixes (`url.*.pushInsteadOf`): a value they
+  // prefix-match resolves push-side while nothing fetch-side answers
+  // it — count it as live, the same polarity as pushurlSections.
+  const pushAliases: string[] = [];
   for (const record of iterConfigRecords(raw)) {
     lastValue.set(record.key, record.value);
+    if (
+      record.value &&
+      record.key.startsWith('url.') &&
+      record.key.endsWith('.pushinsteadof')
+    ) {
+      pushAliases.push(record.value);
+      continue;
+    }
     if (!record.key.startsWith('remote.')) continue;
-    const rest = record.key.slice('remote.'.length);
-    const dot = rest.lastIndexOf('.');
-    if (dot > 0) sectionNames.add(rest.slice(0, dot));
+    if (!record.key.endsWith('.pushurl')) continue;
+    const rest = record.key.slice('remote.'.length, -'.pushurl'.length);
+    if (rest.length > 0) pushurlSections.add(rest);
   }
+  const pushAliasMatches = (value: string) =>
+    pushAliases.some((alias) => value.startsWith(alias));
   for (const [key, value] of lastValue) {
     if (value !== name) continue;
     if (key === 'remote.pushdefault') return true;
@@ -1413,7 +1626,8 @@ async function survivingUpstreamKeys(
       value !== undefined &&
       value !== name &&
       !isSectionlessUpstream(value) &&
-      !sectionNames.has(value)
+      !(await remoteNameResolves(cwd, value, env)) &&
+      !(await bareWordResolvesAsRepoPath(cwd, value, env))
     ) {
       return true;
     }
@@ -1424,7 +1638,10 @@ async function survivingUpstreamKeys(
       value !== undefined &&
       value !== name &&
       !isSectionlessUpstream(value) &&
-      !sectionNames.has(value)
+      !pushurlSections.has(value) &&
+      !pushAliasMatches(value) &&
+      !(await remoteNameResolves(cwd, value, env)) &&
+      !(await bareWordResolvesAsRepoPath(cwd, value, env))
     ) {
       return true;
     }
@@ -1439,7 +1656,10 @@ async function survivingUpstreamKeys(
       value !== undefined &&
       value !== name &&
       !isSectionlessUpstream(value) &&
-      !sectionNames.has(value)
+      !pushurlSections.has(value) &&
+      !pushAliasMatches(value) &&
+      !(await remoteNameResolves(cwd, value, env)) &&
+      !(await bareWordResolvesAsRepoPath(cwd, value, env))
     ) {
       return true;
     }
@@ -1451,12 +1671,21 @@ async function survivingUpstreamKeys(
 // (`.`), anything carrying a `:` — a URL (`https:…`, `ssh:…`) or the
 // scp-like `[user@]host:path` — and local PATHS (`/abs`, `./rel`,
 // `a/b`): git decides the transport from the shape, so an unmasked one
-// is a valid upstream, not a dangling remote name. Only consulted when
-// no `remote.<value>.*` section exists, so a section whose name happens
-// to contain a colon or slash still wins first. A bare word is the one
-// remaining class — and the dangling-remote-name shape the gate refuses.
+// is a valid upstream, not a dangling remote name. Only these shapes
+// skip the resolution probe — a bare word is the one remaining class,
+// and git's own resolver answers it (a URL-less section resolves
+// nothing; a legacy remotes/ file resolves with no section at all).
 function isSectionlessUpstream(value: string): boolean {
-  return value === '.' || value.includes(':') || value.includes('/');
+  return (
+    value === '.' ||
+    value.includes(':') ||
+    value.includes('/') ||
+    // Windows path spellings are sectionless values on win32 the same
+    // way `/`-bearing ones are on POSIX (git normalizes backslashes);
+    // on POSIX a backslash is an ordinary name character.
+    (process.platform === 'win32' &&
+      (value.includes('\\') || /^[A-Za-z]:[\\/]/.test(value)))
+  );
 }
 
 // Whether any upstream key still RESOLVES to the removed name after the

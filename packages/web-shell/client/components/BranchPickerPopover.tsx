@@ -35,6 +35,7 @@ import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { validateBranchName } from './GitModePopover';
 import { deriveStatus, hasComputedTreeSummary } from './GitBranchIndicator';
 import { getShadowAwareActiveElement } from '../utils/dom';
+import { CONFUSABLE_PROTOTYPES } from '../utils/unicodeConfusables';
 import styles from './BranchPickerPopover.module.css';
 
 // The daemon's stash/force pull flows chain git commands, each with its own
@@ -131,6 +132,58 @@ function escapeNameChars(value: string, nonAscii = false): string {
       : /[\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029]/gu,
     (ch) => `\\u{${ch.codePointAt(0)?.toString(16)}}`,
   );
+}
+
+// The escape for skeleton-collision rows: the ambiguity the fold caught
+// can live in PRINTABLE ASCII (the table folds 1→l, m→rn), which the
+// non-ASCII arm would leave unspelled — so every code point the fold
+// rewrites is escaped alongside the non-ASCII class, and the tooltip
+// always differs from the inked text (never the stutter a no-op tail
+// would give a screen reader).
+function escapeSkeletonNameChars(value: string): string {
+  let out = '';
+  for (const ch of value) {
+    const cp = ch.codePointAt(0) ?? 0;
+    out +=
+      cp < 0x21 || cp > 0x7e || CONFUSABLE_PROTOTYPES.has(ch)
+        ? `\\u{${cp.toString(16)}}`
+        : ch;
+  }
+  return out;
+}
+
+// The Unicode TR39 confusables fold: two names whose per-code-point
+// prototypes match ink (nearly) identically through NO invisible
+// character — a ligature (`of\uFB01ce` vs `office`), a dotless `ı`, a
+// Kelvin sign, a cross-script twin — so the per-property arms alone
+// have no last corner. The TABLE answers first: its prototype is the
+// authoritative one (a Greek lunate sigma Ϲ folds to C — asking NFKC
+// first would route it through Σ to a different class, defeating the
+// entry the table carries for exactly this pair). NFKC is the fallback
+// for the compatibility shapes the table does not list (a name's own
+// precomposed é must still meet its decomposed twin). Rows
+// mark by COLLISION with a sibling's skeleton, never by a blanket
+// non-ASCII test: a lone `上游` (no table entry) keeps its own skeleton
+// and stays plain.
+function remoteNameSkeleton(name: string): string {
+  let out = '';
+  for (const ch of name) {
+    const direct = CONFUSABLE_PROTOTYPES.get(ch);
+    if (direct !== undefined) {
+      out += direct;
+      continue;
+    }
+    // Table-absent: fold the compatibility shapes (a ligature, a
+    // fullwidth form) and give each half its own table chance.
+    for (const folded of ch.normalize('NFKC')) {
+      out += CONFUSABLE_PROTOTYPES.get(folded) ?? folded;
+    }
+  }
+  // Canonical closure: a precomposed é and its decomposed twin fold
+  // per code point to the same decomposed string — NFC the skeleton so
+  // the comparison (and the raw ≠ skeleton polarity) works on canonical
+  // forms.
+  return out.normalize('NFC');
 }
 
 interface BranchPickerPopoverProps {
@@ -1189,25 +1242,44 @@ export function BranchPickerPopover({
     // a needle copied from a raw config string carries the same invisible
     // characters the row strips, so sanitize it too — and collapse
     // whitespace the way CSS inks it, so a needle copied from the row's
-    // displayed (collapsed) text finds the row.
-    const collapse = (v: string) => v.replace(/\s+/g, ' ');
-    const needle = collapse(sanitizeRemoteDisplay(q)).toLowerCase();
+    // displayed (collapsed) text finds the row. NFKC folds the inked
+    // forms (a ligature inks as its letter pair), so a row is findable
+    // by the text it inks as.
+    const collapse = (v: string) =>
+      v.replace(/\s+/g, ' ').normalize('NFKC').toLowerCase();
+    // The marking fold as an extra name-side target: NFKC alone finds
+    // compatibility twins (ligatures) but not table-only folds
+    // (dotless-ı, long s), so a twin the marker flags as ink-identical
+    // must be reachable by the text it inks as.
+    const inked = (v: string) =>
+      remoteNameSkeleton(sanitizeRemoteDisplay(v)).toLowerCase();
+    const needle = collapse(sanitizeRemoteDisplay(q));
+    const inkedNeedle = inked(q);
     return remotes.filter(
       (r) =>
-        collapse(sanitizeRemoteDisplay(r.name))
-          .toLowerCase()
-          .includes(needle) ||
-        collapse(sanitizeRemoteDisplay(r.fetchUrl))
-          .toLowerCase()
-          .includes(needle) ||
-        collapse(sanitizeRemoteDisplay(r.pushUrl))
-          .toLowerCase()
-          .includes(needle) ||
-        collapse(sanitizeRemoteDisplay(remoteExtras(r, t)))
-          .toLowerCase()
-          .includes(needle),
+        collapse(sanitizeRemoteDisplay(r.name)).includes(needle) ||
+        inked(r.name).includes(inkedNeedle) ||
+        collapse(sanitizeRemoteDisplay(r.fetchUrl)).includes(needle) ||
+        collapse(sanitizeRemoteDisplay(r.pushUrl)).includes(needle) ||
+        collapse(sanitizeRemoteDisplay(remoteExtras(r, t))).includes(needle),
     );
   }, [remotes, q, t]);
+
+  // TR39 fold, counted over the UNFILTERED list: a search that isolates
+  // one twin must not strip the collision marker from the surviving row
+  // (removing the unmarked twin would be the wrong-remote outcome the
+  // marker exists to prevent).
+  const remoteSkeletonGroups = useMemo(() => {
+    const groups = new Map<string, { count: number; allAscii: boolean }>();
+    for (const r of remotes ?? []) {
+      const skeleton = remoteNameSkeleton(r.name);
+      const group = groups.get(skeleton) ?? { count: 0, allAscii: true };
+      group.count += 1;
+      if (/[^ -~]/.test(r.name)) group.allAscii = false;
+      groups.set(skeleton, group);
+    }
+    return groups;
+  }, [remotes]);
 
   // An armed confirm whose row left the rendered list (a search filter
   // hiding it) must not stay pre-armed for the next single click.
@@ -1304,6 +1376,7 @@ export function BranchPickerPopover({
             <RemotesView
               remotes={filteredRemotes}
               totalCount={remotes?.length ?? 0}
+              skeletonGroups={remoteSkeletonGroups}
               loading={remotesLoading}
               error={remotesError}
               busyAction={busyAction}
@@ -1799,6 +1872,7 @@ function BranchItem({
 function RemotesView({
   remotes,
   totalCount,
+  skeletonGroups,
   loading,
   error,
   busyAction,
@@ -1817,6 +1891,9 @@ function RemotesView({
   /** Pre-search count, so a filtered-to-empty list does not claim the
    * repository has no remotes at all. */
   totalCount: number;
+  /** TR39 skeleton → row count over the UNFILTERED list: a search that
+   * isolates one twin must not strip the survivor's collision marker. */
+  skeletonGroups: ReadonlyMap<string, { count: number; allAscii: boolean }>;
   loading: boolean;
   error: string | null;
   busyAction: string | null;
@@ -1879,13 +1956,17 @@ function RemotesView({
               // two lookalikes never present one identity. CSS also
               // collapses edge and repeated whitespace out of the inked
               // text, so a name differing only by whitespace (origin vs
-              // "origin ") flags the same way. Two more structural
+              // "origin ") flags the same way. Three more structural
               // arms, because the class list alone has no last corner:
               // canonical-equivalence twins (an NFD name inks like its
-              // NFC twin), and a Latin name mixing in another script's
-              // letters (the Cyrillic-`о` homoglyph shape). Both mark
-              // the UNUSUAL row, keeping the house polarity: a plain
-              // sibling row stays unmarked.
+              // NFC twin), a Latin name mixing in another script's
+              // letters (the Cyrillic-`о` homoglyph shape), and the TR39
+              // skeleton collision below (an ink-identical twin INSIDE
+              // Latin/Common, like a ligature — the table closes what
+              // per-property arms cannot enumerate). The first two mark
+              // the UNUSUAL row; the collision marks the row carrying
+              // the non-canonical spelling — a plain sibling row stays
+              // unmarked either way.
               // URLs are a bounded ASCII-only surface (RFC 3986: anything
               // else is percent-encoded/punycoded), so a non-ASCII byte in
               // one is a homoglyph or garbage — fail closed: the row
@@ -1898,12 +1979,43 @@ function RemotesView({
                 /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u.test(
                   r.name,
                 );
+              // The table-driven fold's half: a sibling's skeleton
+              // matches while the raw name differs (the ligature twin).
+              // The row carrying the non-canonical spelling marks — raw
+              // ≠ skeleton — keeping the house polarity: the canonical
+              // sibling row stays plain.
+              const skeleton = remoteNameSkeleton(r.name);
+              const group = skeletonGroups.get(skeleton);
+              // For an all-printable-ASCII group the "raw ≠ skeleton"
+              // test carries no evidence about which spelling is the
+              // impostor (the table's `m → rn` expansion makes the
+              // LEGITIMATE `main` the deviant-looking side), so both
+              // rows mark; a group carrying a non-ASCII member keeps
+              // the odd-character polarity (the visible evidence).
+              const skeletonCollision =
+                (group?.count ?? 0) > 1 &&
+                (skeleton !== r.name || (group?.allAscii ?? false));
               const nameUnusual =
                 displayName !== r.name ||
                 r.name.replace(/\s+/g, ' ').trim() !== r.name ||
                 nfcName !== r.name ||
-                mixedScripts;
+                mixedScripts ||
+                skeletonCollision;
               const hiddenChars = nameUnusual || fetchNonAscii || pushNonAscii;
+              // The marker copy keys on the evidence: a row marked ONLY
+              // by a skeleton collision inside printable ASCII (the
+              // table folds 1→l, m→rn) has nothing hidden —
+              // "(lookalike name)" names it, and the tooltip's escapes
+              // spell the fold-covered code points.
+              const asciiSkeletonOnly =
+                skeletonCollision &&
+                displayName === r.name &&
+                r.name.replace(/\s+/g, ' ').trim() === r.name &&
+                nfcName === r.name &&
+                !mixedScripts &&
+                !fetchNonAscii &&
+                !pushNonAscii &&
+                !/[^\x20-\x7E]/.test(r.name);
               // The marker's visible part shows the name as CSS inks it
               // (whitespace collapsed, edges trimmed) so the raw name's
               // padding does not double the separator before the marker;
@@ -1911,14 +2023,22 @@ function RemotesView({
               const visibleName = displayName.replace(/\s+/g, ' ').trim();
               const rowName = hiddenChars
                 ? visibleName
-                  ? `${visibleName} ${t('branchPicker.remotes.hiddenChars')}`
+                  ? `${visibleName} ${t(asciiSkeletonOnly ? 'branchPicker.remotes.lookalikeName' : 'branchPicker.remotes.hiddenChars')}`
                   : t('branchPicker.remotes.invisibleName')
                 : displayName;
               // The escaped tail exists to disambiguate the NAME; a row
               // marked only for a URL homoglyph has a clean name, and
-              // appending it would stutter in screen readers.
+              // appending it would stutter in screen readers. A skeleton
+              // row's ambiguity can live in printable ASCII, so its
+              // escape spells the fold-covered code points too — always
+              // differing from the raw name there.
+              const skeletonEscape = escapeSkeletonNameChars(r.name);
               const escapedName = nameUnusual
-                ? escapeNameChars(r.name, nfcName !== r.name || mixedScripts)
+                ? skeletonCollision
+                  ? skeletonEscape !== r.name
+                    ? skeletonEscape
+                    : undefined
+                  : escapeNameChars(r.name, nfcName !== r.name || mixedScripts)
                 : undefined;
               const ariaName = escapedName
                 ? `${rowName} ${escapedName}`

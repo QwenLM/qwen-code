@@ -2880,6 +2880,318 @@ describe('BranchPickerPopover remotes view', () => {
     expect(footer?.textContent).not.toContain('File existsfatal');
   });
 
+  it('marks a skeleton-collision twin inside the Latin script', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        remote('office'),
+        // U+FB01 LATIN SMALL LIGATURE FI inks as the glyph pair `fi`:
+        // no invisible character, no whitespace, NFC-stable, Script
+        // Latin — only the TR39 confusables fold sees the twin. (The
+        // literals stay ESCAPED — an ink-identical fixture pair must
+        // never rely on the reader's eyes.)
+        remote('of\u{fb01}ce'),
+        // A dotless-ı twin folds the same way (0131 → i).
+        remote('origin'),
+        remote('or\u{131}g\u{131}n'),
+        // U+017F LATIN SMALL LETTER LONG S: the table's prototype is f
+        // while NFKC says s — the fold must answer the TABLE before the
+        // compatibility fallback, or this twin never collides with the
+        // pafword row (NFKC-first would land it beside `password`).
+        remote('pafword'),
+        remote('pa\u{17f}word'),
+        // A lone non-canonical name without a twin stays unmarked:
+        // the fold is collision-based, not a blanket non-ASCII rule.
+        remote('na\u{ef}ve'),
+        // A lone name the fold REWRITES (U+FB01, no sibling) stays
+        // unmarked too — the count > 1 conjunct, pinned here rather
+        // than by an incidental assertion elsewhere.
+        remote('o\u{fb01}ce'),
+      ],
+    });
+    await openRemotesView();
+
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    // The canonical sibling rows stay plain; the rows carrying the
+    // non-canonical spelling mark and spell the confusable out.
+    expect(rowOf('office')?.textContent).not.toContain('(hidden characters)');
+    expect(rowOf('of\u{fb01}ce')?.textContent).toContain('(hidden characters)');
+    expect(
+      rowOf('of\u{fb01}ce')
+        ?.querySelector('[data-testid="remote-name"]')
+        ?.getAttribute('title'),
+    ).toContain('\\u{fb01}');
+    expect(rowOf('origin')?.textContent).not.toContain('(hidden characters)');
+    expect(rowOf('or\u{131}g\u{131}n')?.textContent).toContain(
+      '(hidden characters)',
+    );
+    expect(
+      rowOf('or\u{131}g\u{131}n')
+        ?.querySelector('[data-testid="remote-name"]')
+        ?.getAttribute('title'),
+    ).toContain('\\u{131}');
+    expect(rowOf('na\u{ef}ve')?.textContent).not.toContain(
+      '(hidden characters)',
+    );
+    expect(rowOf('o\u{fb01}ce')?.textContent).not.toContain(
+      '(hidden characters)',
+    );
+    expect(rowOf('o\u{fb01}ce')?.textContent).not.toContain('(lookalike name)');
+    // The long-s twin: marked, and the tooltip spells 017F.
+    expect(rowOf('pa\u{17f}word')?.textContent).toContain(
+      '(hidden characters)',
+    );
+    expect(
+      rowOf('pa\u{17f}word')
+        ?.querySelector('[data-testid="remote-name"]')
+        ?.getAttribute('title'),
+    ).toContain('\\u{17f}');
+  });
+
+  it('keeps the hidden-characters marker when a URL homoglyph co-fires with a skeleton collision', async () => {
+    const remote = (name: string, url: string) => ({
+      name,
+      fetchUrl: url,
+      pushUrl: url,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        // Skeleton twins with a non-ASCII FETCH URL on the marked row:
+        // the row genuinely has hidden characters — the marker must not
+        // soften to the lookalike copy.
+        {
+          ...remote('remote1', 'https://example.com/remote1/r.git'),
+          fetchUrl: 'https://example.c\u{43e}m/a/r.git',
+        },
+        remote('remotel', 'https://example.com/remotel/r.git'),
+        // Same on the PUSH side.
+        {
+          ...remote('push1', 'https://example.com/push1/r.git'),
+          pushUrl: 'https://example.c\u{43e}m/push1/r.git',
+        },
+        remote('pushl', 'https://example.com/pushl/r.git'),
+      ],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    for (const marked of ['remote1', 'push1']) {
+      expect(rowOf(marked)?.textContent).toContain('(hidden characters)');
+      expect(rowOf(marked)?.textContent).not.toContain('(lookalike name)');
+    }
+    // The twins carry no hidden characters anywhere: never the
+    // hidden-characters copy. (remotel marks `(lookalike name)` — the
+    // table's prototype for `m` is `rn`, so its raw name is not its
+    // skeleton; pushl is its own skeleton and stays plain.)
+    expect(rowOf('remotel')?.textContent).toContain('(lookalike name)');
+    expect(rowOf('remotel')?.textContent).not.toContain('(hidden characters)');
+    // The all-ASCII group marks BOTH rows: `raw ≠ skeleton` carries no
+    // evidence about which spelling is the impostor there.
+    expect(rowOf('pushl')?.textContent).toContain('(lookalike name)');
+    expect(rowOf('pushl')?.textContent).not.toContain('(hidden characters)');
+  });
+
+  it('marks an NFC-closure twin pair the raw table would split', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      // U+AB74's prototype is o+U+031B, whose NFC form (U+01A1) is itself
+      // a table key: without the generator's NFC closure the two fold
+      // to different skeletons and neither row marks.
+      remotes: [remote('\u{ab74}'), remote('\u{1a1}')],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    expect(rowOf('\u{ab74}')?.textContent).toContain('(hidden characters)');
+    expect(rowOf('\u{1a1}')?.textContent).toContain('(hidden characters)');
+  });
+
+  it('marks both rows of an all-ASCII expansion-prototype collision', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [remote('main'), remote('rnain')],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    // The `m → rn` expansion makes the legitimate `main` the
+    // deviant-looking side of its own skeleton — both rows must carry
+    // the marker, or the panel certifies the planted twin as clean.
+    expect(rowOf('main')?.textContent).toContain('(lookalike name)');
+    expect(rowOf('rnain')?.textContent).toContain('(lookalike name)');
+    // The prototype-spelling row has no escape tail to offer: its title
+    // stays its own name and its aria-label must not stutter.
+    expect(
+      rowOf('rnain')
+        ?.querySelector('[data-testid="remote-name"]')
+        ?.getAttribute('title'),
+    ).toBe('rnain');
+    const aria = document.body
+      .querySelector('[data-testid="remote-remove-rnain"]')
+      ?.getAttribute('aria-label');
+    expect(aria).not.toContain('rnain rnain');
+  });
+
+  it('finds table-only ink twins by the text they ink as', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [remote('origin'), remote('or\u{131}g\u{131}n')],
+    });
+    await openRemotesView();
+    // NFKC alone cannot fold the dotless-ı twin; the marking fold must
+    // be a search target too, or the flagged row is unreachable by the
+    // text the panel displays for it.
+    setInput('remotes-search', 'origin');
+    await flush();
+    expect(
+      document.body.querySelectorAll('[data-testid="remote-row"]').length,
+    ).toBe(2);
+  });
+
+  it('spells the fold-covered code points for a printable-ASCII collision', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    // The table folds 1→l: two printable-ASCII rows ink alike with
+    // NOTHING hidden — the marker copy names a lookalike instead of
+    // claiming hidden characters, and the tooltip spells the folded
+    // code point (never a no-op tail that would stutter in the
+    // aria-label).
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [remote('remote1'), remote('remotel')],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    const marked = rowOf('remote1');
+    expect(marked?.textContent).toContain('(lookalike name)');
+    expect(marked?.textContent).not.toContain('(hidden characters)');
+    const title = marked
+      ?.querySelector('[data-testid="remote-name"]')
+      ?.getAttribute('title');
+    expect(title).toContain('\\u{31}');
+    expect(title).not.toBe('remote1');
+    // The remove button's accessible name carries the escape tail once
+    // — no doubled name.
+    const aria = document.body
+      .querySelector('[data-testid="remote-remove-remote1"]')
+      ?.getAttribute('aria-label');
+    expect(aria).toContain('\\u{31}');
+    expect(aria).not.toContain('remote1 remote1');
+  });
+
+  it('finds a ligature row by the text it inks as', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [remote('office'), remote('of\u{fb01}ce')],
+    });
+    await openRemotesView();
+    setInput('remotes-search', 'office');
+    await flush();
+    // The ligature row inks as `office` and must be found by it.
+    const rows = [
+      ...document.body.querySelectorAll('[data-testid="remote-row"]'),
+    ];
+    expect(rows.length).toBe(2);
+    expect(
+      rows.some((row) => row.textContent?.includes('(hidden characters)')),
+    ).toBe(true);
+    // The collision counts are computed over the UNFILTERED list: a
+    // search that isolates the ligature row (via its encoded URL) must
+    // not strip its marker.
+    setInput('remotes-search', 'of%ef%ac%81ce');
+    await flush();
+    const isolated = [
+      ...document.body.querySelectorAll('[data-testid="remote-row"]'),
+    ];
+    expect(isolated.length).toBe(1);
+    expect(isolated[0]?.textContent).toContain('(hidden characters)');
+  });
+
   it('marks canonical-equivalence and script-mixing lookalikes', async () => {
     const remote = (name: string) => ({
       name,

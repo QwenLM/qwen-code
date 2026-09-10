@@ -59,6 +59,16 @@ function exit1WithStderr(): Error {
   });
 }
 
+// git's own no-such-remote answer (a removal retry whose section is
+// already gone): exits 128, stderr carries the line.
+function noSuchRemoteError(): Error {
+  return Object.assign(new Error('exit 128'), {
+    stdout: '',
+    stderr: "error: No such remote: 'x'\n",
+    code: 128,
+  });
+}
+
 // A killed read that already dumped partial config (every scope included)
 // to stdout: the route forwards error text to the client, so the dump must
 // not leave the module. stderr carries git's diagnostics and must SURVIVE
@@ -245,6 +255,87 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     expect(err).toMatchObject({ killed: true });
     expect((err as { stdout?: unknown }).stdout).toBe('');
     expect(runGit.mock.calls.length).toBe(calls + 19);
+  });
+
+  it('fails the converge arm closed on a killed repo-path probe', async () => {
+    // The converge gate's last conjunct probes whether a bare-word name
+    // resolves as a local-path upstream — a killed probe must not read
+    // as "not a repo" and let the sweep run over a blind answer.
+    const calls = runGit.mock.calls.length;
+    runGit
+      .mockResolvedValueOnce('local\u0000file:.git/config\u0000core.x\ny\u0000') // x pre-flight read
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // snapshot
+      .mockRejectedValueOnce(noSuchRemoteError()) // git remote remove
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // scope read (empty of x)
+      .mockResolvedValueOnce('x\n') // ls-remote --get-url: echo = unresolved
+      .mockRejectedValueOnce(killedDumpError()); // ls-remote -- x (path leg)
+    const err = await gitRemoteRemove('/repo', 'x').catch((e: unknown) => e);
+    expect(err).toMatchObject({ killed: true });
+    expect((err as { stdout?: unknown }).stdout).toBe('');
+    // The kill stops the chain: no sweep spawn (for-each-ref, config
+    // --unset, worktree list) ever follows the blind probe.
+    expect(runGit.mock.calls.length).toBe(calls + 9);
+  });
+
+  it('refuses over an inherited record that races in after the pre-flight', async () => {
+    // The certify-path union gate's section half is the backstop for a
+    // survivor the pre-flight could not see (a concurrent global edit,
+    // or the pre-flight's no-match fall-through): the post-removal
+    // scope read grows an inherited record the pre-flight never saw.
+    const calls = runGit.mock.calls.length;
+    runGit
+      .mockResolvedValueOnce(
+        'local\u0000file:.git/config\u0000remote.origin.url\nhttps://example.com/o/r.git\u0000',
+      ) // pre-flight origin read: repository record only
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // snapshot
+      .mockResolvedValueOnce('') // git remote remove
+      .mockResolvedValueOnce('.git\n') // listing probe
+      .mockResolvedValueOnce('') // listing read: the row is gone
+      .mockResolvedValueOnce(
+        'global\u0000remote.origin.pushurl\nhttps://global.example/p.git\u0000',
+      ); // union gate scope read: the inherited record raced in
+    await expect(gitRemoteRemove('/repo', 'origin')).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    expect(runGit.mock.calls.length).toBe(calls + 9);
+  });
+
+  it('does not complete a worktree section when an inherited record shares it', async () => {
+    // removeWorktreeScopeSection's `scopes.size !== 1` conjunct: a
+    // worktree survivor shadowed by an inherited record must NOT be
+    // completed (the per-worktree URL would be deleted with no
+    // in-product recovery).
+    const calls = runGit.mock.calls.length;
+    runGit
+      .mockResolvedValueOnce(
+        'worktree\u0000file:.git/config.worktree\u0000remote.dup.url\nhttps://example.com/w.git\u0000',
+      ) // pre-flight origin read: worktree record, editable
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
+      .mockResolvedValueOnce('worktree\u0000core.x\ny\u0000') // snapshot
+      .mockRejectedValueOnce(
+        Object.assign(new Error('exit 128'), {
+          stdout: '',
+          stderr: "error: Could not remove config section 'remote.dup'\n",
+          code: 128,
+        }),
+      ) // git remote remove
+      .mockResolvedValueOnce(
+        'worktree\u0000remote.dup.url\nhttps://example.com/w.git\u0000global\u0000remote.dup.url\nhttps://global.example/d.git\u0000',
+      ); // completion scope read: worktree AND global
+    const err = await gitRemoteRemove('/repo', 'dup').catch((e: unknown) => e);
+    expect(String((err as { stderr?: unknown }).stderr)).toContain(
+      'Could not remove config section',
+    );
+    // The completion's `--worktree --remove-section` never spawned.
+    expect(runGit.mock.calls.length).toBe(calls + 7);
   });
 
   it('restores the shadowed local copy BEFORE any post-removal gate can fail', async () => {

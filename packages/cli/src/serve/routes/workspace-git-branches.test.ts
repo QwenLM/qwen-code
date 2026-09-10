@@ -426,11 +426,14 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
         409,
         'git_config_write_failed',
       ],
-      // A long lock line (a deeply nested config path) must not push the
-      // write failure's line-2 prefix past the client-message slice:
-      // classification reads the full redacted detail.
+      // A long lock line must not push the write failure's line-2
+      // prefix past the client-message slice: classification reads the
+      // full redacted detail. The filler is a long RELATIVE path — an
+      // absolute one would collapse to <path> under the fail-closed
+      // sweep and pull line 2 back inside the slice, neutering the
+      // row's discrimination.
       [
-        `error: could not lock config file ${'/p'.repeat(300)}/.git/config\nerror: could not remove config section 'remote.origin'`,
+        `error: could not lock config file ${'deep/'.repeat(150)}config\nerror: could not remove config section 'remote.origin'`,
         409,
         'git_config_write_failed',
       ],
@@ -502,6 +505,64 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
       const early = classify('error: the working tree is dirty');
       expect(early.status).toBe(409);
       expect(early.body['error']).toBe('dirty_working_tree');
+    });
+
+    it('keeps redaction linear over a long whitespace-free run', () => {
+      // A bare remote's pre-receive hook prints one long line (sideband
+      // data bypasses git's vreportf cap): an arm scanning an unbounded
+      // \S* prefix per payload position costs O(L^2) of synchronous CPU
+      // on the daemon's single event loop — before the 512-char slice
+      // ever applies. The bound is deliberately loose: the quadratic arm
+      // it discriminates against costs ~17 s on this payload.
+      const start = Date.now();
+      const out = classify(`remote: ${'a'.repeat(200_000)}`);
+      expect(Date.now() - start).toBeLessThan(10_000);
+      expect(out.status).not.toBe(0);
+      // The labeled arm still redacts the build-time system path,
+      // prefix included, when the same kind of payload carries it.
+      const labeled = classify(
+        `/opt/homebrew/etc/gitconfig ${'a'.repeat(100_000)}`,
+      );
+      const text = String(labeled.body['error'] ?? labeled.body['message']);
+      expect(text).toContain('<home>');
+      expect(text).not.toContain('/opt/homebrew');
+    });
+
+    it('sweeps absolute paths in config-error shapes no arm enumerates', () => {
+      // The ` in file ` arm owns the whole config-error family to end of
+      // line — a SPACE-BEARING include target keeps no tail (the sweep's
+      // whitespace-token boundary cannot own that class).
+      const out = classify(
+        "fatal: bad numeric config value '999999999999999999999' for 'core.abbrev' in file /tmp/probe/inc sha/red/bad5.gitconfig: out of range",
+      );
+      const text = String(out.body['error'] ?? out.body['message']);
+      expect(text).not.toContain('/tmp/probe');
+      expect(text).not.toContain('bad5.gitconfig');
+      expect(text).not.toContain('sha/red');
+      // The fail-closed sweep owns what no shape arm names: any
+      // surviving absolute-path token goes, whatever sentence wraps it.
+      const other = classify(
+        'fatal: cannot parse /tmp/probe/inc/shared/bad5.gitconfig header',
+      );
+      const otherText = String(other.body['error'] ?? other.body['message']);
+      expect(otherText).not.toContain('/tmp/probe');
+      expect(otherText).toContain('<path>');
+      // An apostrophe-bearing include target stops the quoted arm's
+      // [^']* payload early: the prefix still redacts, and the tail
+      // carries no absolute-path token for the sweep to miss.
+      const apos = classify(
+        "fatal: unable to access '/tmp/probe/Team's cfg.gitconfig': No such file or directory",
+      );
+      const aposText = String(apos.body['error'] ?? apos.body['message']);
+      expect(aposText).not.toContain('/tmp/probe');
+      expect(aposText).not.toContain('s cfg.gitconfig');
+      // The transport negative control: a URL's slashes follow the
+      // scheme's colon, so the sweep leaves it verbatim.
+      const url = classify(
+        "fatal: unable to access 'https://example.invalid/org/repo.git/': Could not resolve host",
+      );
+      const urlText = String(url.body['error'] ?? url.body['message']);
+      expect(urlText).toContain('https://example.invalid/org/repo.git/');
     });
 
     it('classifies the stdout half of the detail too', () => {
