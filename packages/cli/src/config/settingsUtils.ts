@@ -246,16 +246,10 @@ export function validateSettingValue(
       return `Settings of type '${def.type}' cannot be modified via this API`;
   }
   if (
-    def.excludedValues?.some((excluded) =>
-      // Numbers compare with `===` so signed zero matches: `Object.is(0, -0)`
-      // is false, and `-0` reaching a `[0]` exclusion would be written out by
-      // `JSON.stringify` as `0` -- the very value the exclusion exists to keep
-      // out of settings.json, and one that aborts every later startup in that
-      // scope. Identity stays for the string half of the field's type.
-      typeof excluded === 'number' && typeof value === 'number'
-        ? excluded === value
-        : Object.is(excluded, value),
-    )
+    (typeof value === 'string' || typeof value === 'number') &&
+    // `includes` is SameValueZero, so a `[0]` exclusion also catches the `-0`
+    // that `Number('-0')` produces and `JSON.stringify` would persist as `0`.
+    def.excludedValues?.includes(value as string | number)
   ) {
     return `Value must not be ${String(value)}`;
   }

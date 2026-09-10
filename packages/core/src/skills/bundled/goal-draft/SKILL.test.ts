@@ -235,8 +235,19 @@ describe('bundled goal-draft skill', () => {
     }
     expect(template).toContain("<user's advisory stopping agreement");
     expect(template).toContain('stop as blocked after 20 turns');
-    expect(template).toContain('model.goalMaxTurns');
-    expect(template).toContain('model.goalMaxActiveMinutes');
+    // The ceiling settings are operator configuration, not objective text:
+    // the template and the exemplar keep them out of the Budget slot, and the
+    // rules of thumb name them instead. One placement, pinned both ways, so
+    // the two cannot drift apart again.
+    expect(template).not.toContain('model.goalMax');
+    const exemplar = body
+      .split('\n')
+      .find((line) => line.startsWith('| make checkout faster'));
+    expect(exemplar).toBeDefined();
+    expect(exemplar).not.toContain('model.goalMax');
+    expect(body).toContain('model.goalMaxTurns');
+    expect(body).toContain('model.goalMaxActiveMinutes');
+    expect(body).toContain('never write the setting into the objective');
     expect(template).not.toContain('minutes');
     // parseGoalCommand joins whitespace-separated tokens with single
     // spaces, so a multi-line objective would be flattened anyway.
