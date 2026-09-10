@@ -11,6 +11,7 @@
 // is in the prompt, the read call is in the prompt, and the agent is not handed a
 // sentence to recite when it finds nothing.
 
+import { readWorkflowBatches } from './lib/workflow-batch.js';
 import { SHELL_TOOL_MAX_TIMEOUT_MS } from './lib/build-budget.js';
 import {
   describe,
@@ -7669,5 +7670,79 @@ describe('incremental-scope briefs', () => {
       'Changed since the last round (full review): src/changed.ts.',
     );
     expect(p).toContain('src/caller.ts (imports src/changed.ts)');
+  });
+});
+
+describe('agent-prompt --batch', () => {
+  let dir: string;
+  let plan: string;
+  let findings: string;
+  const run = (args: Record<string, unknown>) =>
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      batch: true,
+      ...args,
+    });
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubEnv(DEADLINE_ENV, '');
+    dir = mkdtempSync(join(tmpdir(), 'agent-prompt-batch-'));
+    plan = join(dir, 'plan.json');
+    findings = join(dir, 'findings.md');
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, srcDiffLines: 1000, diffLines: 1200 }),
+    );
+    writeFileSync(findings, '');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    process.exitCode = 0;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  function selected() {
+    const calls = vi.mocked(writeStdoutLine).mock.calls;
+    expect(calls).toHaveLength(1);
+    const file = join(dir, 'batch.json');
+    writeFileSync(file, calls[0][0]);
+    return readWorkflowBatches(plan, [file]);
+  }
+  it('emits the recorded verifier with its findings pointer intact', () => {
+    writeFileSync(findings, 'A candidate finding to verify');
+    run({ role: 'verify', findings });
+    const agents = selected();
+    expect(agents).toHaveLength(1);
+    expect(agents[0].key).toMatch(/^verify--/);
+    expect(agents[0].prompt).toContain('.findings.md');
+    expect(agents[0].prompt).toBe(readRecordedPrompts(plan).get(agents[0].key));
+  });
+  it('emits all admitted audit chunks and preserves the round stamp', () => {
+    run({ role: 'reverse-audit', 'all-chunks': true, findings, round: 1 });
+    const agents = selected();
+    expect(agents.map((a) => a.key)).toHaveLength(3);
+    expect(agents.every((a) => a.key.startsWith('reverse-audit--chunk-'))).toBe(
+      true,
+    );
+    expect(readRoundStamps(plan)).toHaveLength(1);
+  });
+  it('emits the whole initial roster without selecting older records', () => {
+    run({ roster: true });
+    const agents = selected();
+    expect(agents.length).toBeGreaterThan(3);
+    expect(new Set(agents.map((a) => a.key))).toEqual(
+      new Set(readRecordedPrompts(plan).keys()),
+    );
+  });
+  it('emits no manifest when the verifier budget refuses admission', () => {
+    writeFileSync(findings, 'A candidate finding to verify');
+    vi.stubEnv(DEADLINE_ENV, String(Math.floor(Date.now() / 1000) + 1));
+    run({ role: 'verify', findings });
+    expect(process.exitCode).toBe(4);
+    expect(writeStdoutLine).not.toHaveBeenCalled();
+    expect(readRecordedPrompts(plan).size).toBe(0);
+  });
+  it('rejects incomplete custom specialist blocks', () => {
+    expect(() => run({ 'whole-diff': true })).toThrow(/complete role/);
+    expect(writeStdoutLine).not.toHaveBeenCalled();
   });
 });

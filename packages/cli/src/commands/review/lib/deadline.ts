@@ -48,7 +48,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { parsePositiveIntegerEnv } from '@qwen-code/qwen-code-core';
+import { resolveReviewWorkflowConcurrency } from '@qwen-code/qwen-code-core';
 import { promptRecordDir, runEpochMs } from './prompt-record.js';
 
 /** Unix seconds at which the review process will be killed. Set by CI. */
@@ -142,10 +142,9 @@ const MIN_OBSERVED_ROUND_SECONDS = 600;
 
 /**
  * The runtime's concurrent-agent slots — the pool every fan-out launch
- * shares. The core tool scheduler runs the orchestrator's parallel `agent`
- * calls under this cap (default 10), the review workflow does not override
- * it, and an `agent-prompt` subprocess inherits the orchestrator's
- * environment — so the gate and the launches it gates read the same pool.
+ * shares. Review workflows prefer their explicit workflow concurrency limit,
+ * then this tool limit, then ten slots. The admission estimate uses the same
+ * resolver as dispatch so both price a paired audit against the same pool.
  */
 export const TOOL_CONCURRENCY_ENV = 'QWEN_CODE_MAX_TOOL_CONCURRENCY';
 export const DEFAULT_TOOL_CONCURRENCY = 10;
@@ -394,10 +393,7 @@ export function expectedAdmissionSeconds(
   const single =
     costliestSpanSeconds(stamps.slice(0, -1), last.atMs) ??
     DEFAULT_ROUND_SECONDS;
-  const pool = parsePositiveIntegerEnv(
-    env[TOOL_CONCURRENCY_ENV],
-    DEFAULT_TOOL_CONCURRENCY,
-  );
+  const pool = resolveReviewWorkflowConcurrency(env);
   const width = Math.max(1, Math.floor(fanOutWidth));
   const pairWaves = Math.ceil((2 * width) / pool);
   const roundWaves = Math.ceil(width / pool);

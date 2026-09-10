@@ -47,7 +47,10 @@ import {
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { tokenLimit } from '../core/tokenLimits.js';
-import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
+import {
+  getRuntimeContentGenerator,
+  isTopLevelSession,
+} from '../agents/runtime/agent-context.js';
 import type { ExternalAgentExecutor } from '../agents/runtime/subagent-executor.js';
 import { isTieredEffortWireModel } from '../core/modalityDefaults.js';
 import {
@@ -7962,7 +7965,7 @@ export class Config {
 
   isWorkflowsEnabled(): boolean {
     if (this.provisionalWorkspace) return false;
-    // Workflows are experimental and opt-in: enabled via settings or env var
+    // Workflows are opt-in via settings, env, or the bundled review skill.
     // P1 also honors a kill switch: QWEN_CODE_DISABLE_WORKFLOWS=1 forces off
     if (process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
     if (process.env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1') return true;
@@ -7971,6 +7974,21 @@ export class Config {
 
   setWorkflowsEnabled(enabled: boolean): void {
     this.workflowsEnabled = enabled;
+  }
+
+  async enableReviewWorkflow(): Promise<void> {
+    if (
+      !isTopLevelSession() ||
+      this.getBareMode() ||
+      this.provisionalWorkspace ||
+      process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1'
+    ) {
+      return;
+    }
+    if (await this.registerWorkflowTool(this.getToolRegistry())) {
+      this.setWorkflowsEnabled(true);
+      await this.getLlmClient().setTools();
+    }
   }
 
   /**
@@ -9474,6 +9492,33 @@ export class Config {
     return this.onPersistPermissionRuleCallback;
   }
 
+  private async registerWorkflowTool(registry: ToolRegistry): Promise<boolean> {
+    if (registry.getAllToolNames().includes(ToolNames.WORKFLOW)) return true;
+    let status: ToolRegistrationStatus;
+    try {
+      status =
+        (await this.getPermissionManager()?.getToolRegistrationStatus(
+          ToolNames.WORKFLOW,
+        )) ?? 'registered';
+    } catch (error) {
+      this.debugLogger.warn(
+        `Failed to check permissions for tool "${ToolNames.WORKFLOW}", skipping registration:`,
+        error,
+      );
+      return false;
+    }
+    const factory: ToolFactory = async () => {
+      const { WorkflowTool } = await import('../tools/workflow/workflow.js');
+      return new WorkflowTool(this);
+    };
+    if (status === 'deferred') {
+      registry.registerPermissionDeferredFactory(ToolNames.WORKFLOW, factory);
+    } else if (status === 'registered') {
+      registry.registerFactory(ToolNames.WORKFLOW, factory);
+    }
+    return registry.getAllToolNames().includes(ToolNames.WORKFLOW);
+  }
+
   private async registerImageGenerationTool(
     registry: ToolRegistry,
   ): Promise<void> {
@@ -10005,10 +10050,7 @@ export class Config {
 
     // Register workflow tool when enabled
     if (this.isWorkflowsEnabled()) {
-      await registerLazy(ToolNames.WORKFLOW, async () => {
-        const { WorkflowTool } = await import('../tools/workflow/workflow.js');
-        return new WorkflowTool(this);
-      });
+      await this.registerWorkflowTool(registry);
     }
 
     // Register monitor tool

@@ -400,17 +400,18 @@ export function applySkillHooks(
  * skill's instructions reached the model while the hook that was supposed to
  * enforce them was never registered.
  *
- * Both underlying registrations dedup, so calling this repeatedly for the same
+ * The registrations dedup, so calling this repeatedly for the same
  * skill is safe — and necessary, since folder trust can be granted mid-session.
+ * Await review workflow registration before returning the skill to the model.
  */
-export function applySkillSideEffects(
+export async function applySkillSideEffects(
   config:
     | (Pick<Config, 'getHookSystem' | 'getSessionId' | 'getPermissionManager'> &
-        Pick<Config, 'isTrustedFolder'>)
+        Pick<Config, 'isTrustedFolder' | 'enableReviewWorkflow'>)
     | null
     | undefined,
   skill: SkillConfig,
-): void {
+): Promise<void> {
   if (!config) {
     return;
   }
@@ -426,6 +427,9 @@ export function applySkillSideEffects(
     trustGated: skill.level === 'project',
   });
   applySkillHooks(config, skill);
+  if (skill.level === 'bundled' && skill.name === 'review') {
+    await config.enableReviewWorkflow();
+  }
 }
 
 /**

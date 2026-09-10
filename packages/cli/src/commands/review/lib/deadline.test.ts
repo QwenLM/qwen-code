@@ -499,6 +499,28 @@ describe('the pair admission price — a round launched beside an in-flight roun
     );
   });
 
+  it('prices the workflow override before the tool pool, including one slot', () => {
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 30_000);
+    for (const [pool, expected] of [
+      ['1', 2],
+      ['12', 1],
+    ] as const) {
+      expect(
+        expectedAdmissionSeconds(
+          p,
+          2,
+          6,
+          {
+            QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: pool,
+            [TOOL_CONCURRENCY_ENV]: '10',
+          },
+          NOW_MS,
+        ),
+      ).toBe(expected * DEFAULT_ROUND_SECONDS);
+    }
+  });
+
   it('keeps the reserve on top of the pair price at the refusal boundary', () => {
     const p = plan();
     stampRound(p, 1, NOW_MS - 30_000);
