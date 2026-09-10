@@ -116,6 +116,7 @@ const DIST_ALLOWED_ENTRY_PATTERNS = [
 // standalone archives must not copy them into lib/.
 const DIST_NPM_PACKAGE_ONLY_ENTRIES = new Set([
   'export-transcript-document.js',
+  'export-transcript-document.css',
   'postinstall.js',
   'patches',
 ]);
