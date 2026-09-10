@@ -27,6 +27,11 @@
       "import": "./dist/daemon/transcript.js",
       "require": "./dist/daemon/transcript.cjs"
     },
+    "./peer": {
+      "types": "./dist/peer/index.d.ts",
+      "import": "./dist/peer/index.js",
+      "require": "./dist/peer/index.cjs"
+    },
     "./package.json": "./package.json"
   },
   "bin": {

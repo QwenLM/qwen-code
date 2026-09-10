@@ -31,6 +31,12 @@ const MAX_TRANSPORTS_BROWSER_BUNDLE_BYTES = 48 * 1024;
 // Measured with `npm run build && wc -c dist/daemon/transcript.js`.
 // Baseline for the initial projection implementation is ~66 KiB.
 const MAX_TRANSCRIPT_BROWSER_BUNDLE_BYTES = 192 * 1024;
+// `@qwen-code/sdk/peer` is Node-only and built from Node's own modules, so it
+// is budgeted on its own. Measured with `npm run build && wc -c dist/peer/*`:
+// about 24 KiB (esm) and 25 KiB (cjs) at introduction. The headroom is for
+// growth, not for a dependency slipping in — `assertPeerBundle` checks that
+// separately.
+const MAX_PEER_BUNDLE_BYTES = 40 * 1024;
 
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });
@@ -221,6 +227,33 @@ await esbuild.build({
   treeShaking: true,
 });
 
+// Opt-in peer subpath (`@qwen-code/sdk/peer`): the cross-session protocol for
+// a program that is not a Qwen Code session. Node-only, so it never joins a
+// browser bundle, and it must stay free of every runtime dependency.
+for (const [format, outfile] of [
+  ['esm', join(rootDir, 'dist', 'peer', 'index.js')],
+  ['cjs', join(rootDir, 'dist', 'peer', 'index.cjs')],
+]) {
+  await esbuild.build({
+    entryPoints: [join(rootDir, 'src', 'peer', 'index.ts')],
+    bundle: true,
+    format,
+    platform: 'node',
+    target: 'node22',
+    outfile,
+    sourcemap: false,
+    minify: true,
+    minifyWhitespace: true,
+    minifyIdentifiers: true,
+    minifySyntax: true,
+    legalComments: 'none',
+    keepNames: false,
+    treeShaking: true,
+  });
+  assertPeerBundle(outfile);
+}
+assertPeerDeclaration(join(rootDir, 'dist', 'peer', 'index.d.ts'));
+
 // Build serve-bridge CLI bin entry. The options — including the absence of a
 // hashbang `banner`, see `serveBridgeBinBuildOptions` — are shared with the
 // test that pins the emitted bytes.
@@ -302,6 +335,39 @@ function assertTranscriptBundle(filePath) {
     );
   }
   assertNoNodeBuiltins(filePath, 'Browser daemon transcript bundle');
+}
+
+// The peer subpath is the contract's standalone implementation: a bundle that
+// pulls in the SDK's other dependencies, or Qwen Code's own sources, would no
+// longer be one.
+function assertPeerBundle(filePath) {
+  const size = statSync(filePath).size;
+  if (size > MAX_PEER_BUNDLE_BYTES) {
+    throw new Error(
+      `Peer bundle ${filePath} is ${size} bytes; expected <= ${MAX_PEER_BUNDLE_BYTES}`,
+    );
+  }
+  const contents = readFileSync(filePath, 'utf8');
+  const forbidden = [
+    '@modelcontextprotocol',
+    'zod',
+    'qwen-code-core',
+    'acp-bridge',
+  ];
+  const found = forbidden.find((token) => contents.includes(token));
+  if (found) {
+    throw new Error(`Peer bundle ${filePath} contains a dependency: ${found}`);
+  }
+}
+
+function assertPeerDeclaration(filePath) {
+  const contents = readFileSync(filePath, 'utf8');
+  const found = ['@qwen-code/qwen-code-core', '@qwen-code/acp-bridge'].find(
+    (token) => contents.includes(token),
+  );
+  if (found) {
+    throw new Error(`Peer declaration leaks an internal dependency: ${found}`);
+  }
 }
 
 function assertTranscriptDeclaration(filePath) {

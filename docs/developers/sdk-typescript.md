@@ -185,6 +185,59 @@ The SDK requires the daemon's `session_id_override` capability before sending th
 
 This option always creates a new thread session and is not an idempotent attach. If the create outcome is ambiguous, use the known ID with load or resume. Omitting the option preserves the existing create-or-attach behavior.
 
+## Talking to running sessions
+
+`@qwen-code/sdk/peer` lets a program that is not a Qwen Code session join the
+sessions running as the same user on the same machine — a voice front-end, a
+relay, a build watcher. The program shows up in `qwen sessions ps` and in every
+session's `list_agents`, sessions can message it by name with `send_message`,
+and it can message them back. It runs on Node only and needs nothing beyond
+Node itself.
+
+```typescript
+import { PeerEndpoint } from '@qwen-code/sdk/peer';
+
+const endpoint = await PeerEndpoint.start({
+  name: 'voice-bridge',
+  controllerToken: process.env['QWEN_CONTROLLER_TOKEN'],
+  onMessage: (message) =>
+    console.log(`${message.fromName}: ${message.content}`),
+});
+
+const [session] = await endpoint.list();
+if (session) {
+  const sent = await endpoint.send({
+    to: session.address,
+    content: 'What are you working on?',
+  });
+  if (sent.kind === 'sent') {
+    const receipt = await endpoint.awaitReceipt(sent.msgId, { final: true });
+    console.log(receipt?.status); // delivered, denied, refused, ...
+  }
+}
+
+await endpoint.close();
+```
+
+Things to know:
+
+- A session has an inbox — and so appears in `list()` — only while its
+  `agents.crossSessionMessaging` setting is on. The setting is off by default.
+- A message from a program is held for the session's user to review unless the
+  program presents a controller token. Mint one with
+  `qwen sessions controllers add --label voice-bridge` and pass it as
+  `controllerToken`. Nothing else — not `kind`, not `name` — gets a message
+  delivered without review.
+- Without `onMessage`, every message sent to the endpoint is answered
+  `refused`.
+- Call `close()` before exiting, including from your own signal handlers. A
+  process killed without closing leaves its record behind until a Qwen Code
+  session lists the directory and sees the process is gone.
+- UNIX domain sockets only: Windows is not supported yet.
+
+The record schema, wire format and receipt states are documented in
+[Cross-Session Protocol](../users/features/cross-session-protocol.md).
+
 ## Permission Modes
 
 The SDK supports different permission modes for controlling tool execution:
