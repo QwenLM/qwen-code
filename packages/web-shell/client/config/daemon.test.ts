@@ -111,6 +111,30 @@ describe('getDaemonToken', () => {
     });
   }
 
+  // The restore half has to re-define the property with value/writable/
+  // configurable or window.sessionStorage stays a throwing getter for the
+  // rest of the file — keep the dance in one place.
+  async function withSessionStorageThrowing<T>(
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const original = window.sessionStorage;
+    Object.defineProperty(window, 'sessionStorage', {
+      get() {
+        throw new Error('storage disabled');
+      },
+      configurable: true,
+    });
+    try {
+      return await run();
+    } finally {
+      Object.defineProperty(window, 'sessionStorage', {
+        value: original,
+        writable: true,
+        configurable: true,
+      });
+    }
+  }
+
   it('reads the token from the URL fragment', async () => {
     setupToken('', '#token=frag-secret');
     const mod = await import('./daemon');
@@ -167,25 +191,61 @@ describe('getDaemonToken', () => {
   });
 
   it('degrades gracefully when sessionStorage throws', async () => {
-    const original = window.sessionStorage;
-    Object.defineProperty(window, 'sessionStorage', {
-      get() {
-        throw new Error('storage disabled');
-      },
-      configurable: true,
-    });
-    try {
+    await withSessionStorageThrowing(async () => {
       setupToken('', '#token=frag-secret');
       const mod = await import('./daemon');
       // Same-load behavior is unaffected; only refresh persistence is lost.
       expect(mod.getDaemonToken()).toBe('frag-secret');
-    } finally {
-      Object.defineProperty(window, 'sessionStorage', {
-        value: original,
-        writable: true,
-        configurable: true,
+    });
+  });
+
+  describe('hasReloadSurvivableDaemonToken', () => {
+    it('is true when the URL fragment carries a token', async () => {
+      setupToken('', '#token=frag-secret');
+      const mod = await import('./daemon');
+      expect(mod.hasReloadSurvivableDaemonToken()).toBe(true);
+    });
+
+    it('is true when the query parameter carries a token', async () => {
+      setupToken('?token=query-secret', '');
+      const mod = await import('./daemon');
+      expect(mod.hasReloadSurvivableDaemonToken()).toBe(true);
+    });
+
+    it('is true when a per-tab persisted token exists', async () => {
+      window.sessionStorage.setItem('qwen-daemon-token', 'stored-secret');
+      setupToken('', '#/chat');
+      const mod = await import('./daemon');
+      expect(mod.hasReloadSurvivableDaemonToken()).toBe(true);
+    });
+
+    it('is false when neither the URL nor storage has a token', async () => {
+      setupToken('', '#/chat');
+      const mod = await import('./daemon');
+      expect(mod.hasReloadSurvivableDaemonToken()).toBe(false);
+    });
+
+    it('is false when storage is unavailable and the URL has no token', async () => {
+      await withSessionStorageThrowing(async () => {
+        setupToken('', '#/chat');
+        const mod = await import('./daemon');
+        expect(mod.hasReloadSurvivableDaemonToken()).toBe(false);
       });
-    }
+    });
+
+    it('is false when the in-memory cache holds a token a reload would lose', async () => {
+      await withSessionStorageThrowing(async () => {
+        setupToken('', '#token=boot-secret');
+        const mod = await import('./daemon');
+        // Warms the in-memory cache while the persist throws. The predicate
+        // must NOT consult getDaemonToken(): after boot it always reports a
+        // token, which would fail-open the reload.
+        expect(mod.getDaemonToken()).toBe('boot-secret');
+        // Models removeDaemonTokenFromUrl(): the URL no longer carries it.
+        setupToken('', '#/chat');
+        expect(mod.hasReloadSurvivableDaemonToken()).toBe(false);
+      });
+    });
   });
 });
 
