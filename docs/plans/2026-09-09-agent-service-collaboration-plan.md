@@ -94,7 +94,16 @@ P2/P3 已有最小可见入口；此步只收束体验：原有新建对话、�
 
 ## 3b. 本轮实际进度（2026-09-09 追加）
 
-以下按段记录，未通过项写未通过，不用百分比。三个审计脚本可复跑：`run-workspace-agents.mjs`(335)、`check-agent-collaboration-gate.mjs`(21)、`check-request-capture.mjs`(15)，全绿。
+以下按段记录，未通过项写未通过，不用百分比。四个审计脚本可复跑，全绿：
+
+| 脚本                                 | 断言数 | 覆盖                                                                                       |
+| ------------------------------------ | ------ | ------------------------------------------------------------------------------------------ |
+| `run-workspace-agents.mjs`           | 373    | 存储与派发规则、线程工具、开关落点、绑定、搁浅、契约、接单、取消、Host 取件与结果          |
+| `check-a2a-transport.mjs`            | 34     | 真起 express 打真 HTTP：公开卡片、版本协商、授权拒绝的不可区分性、幂等、按调用方隔离、取消 |
+| `check-agent-collaboration-gate.mjs` | 21     | 真实 `Config` 与工具注册表的六组合观测、两开关独立性、capability tag                       |
+| `check-request-capture.mjs`          | 15     | 关闭对照的捕获钩子                                                                         |
+
+`check-a2a-transport.mjs` 在 `@a2a-js/sdk` 未安装时以 exit 0 跳过并说明，不伪装成通过。
 
 - **P0 已完成。** 架构 §7 的十四行全部落点；新增 `experimental.agentCollaboration`（daemon 启动解析一次）、`agent_collaboration_v1` capability、服务器绑定反查、搁浅终态。观测发现两处读代码没发现的问题：门里的 `forSubAgent` 多余且有害；服务器绑定按原有顺序会把派发器自己锁死（`bindRunSession` 在 `port.start()` 之后）。**未做：** 带旧 roster/排队任务/Host 凭证、关闭启动时的文件访问、定时器与网络调用记录——需要真跑 daemon。web-shell 消费端无测试覆盖。
 - **P1 已完成。** 契约冻结在 `a2a-contract.ts`：协议 `1.0`、`JSONRPC`、`@a2a-js/sdk@1.1.0`；映射与不支持项见 [冻结契约](../design/2026-09-09-a2a-frozen-contract.md)。互通验收者定为 `a2a-sdk`(Python)。

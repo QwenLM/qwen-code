@@ -3383,6 +3383,54 @@ ok(
   `${failedRun.error} / ${failedRun.closeKind}`,
 );
 
+console.log('\n39. who must name an owner, and who need not');
+// `thread_create` requires an assignee; `createThread` does not. The asymmetry
+// is deliberate and worth pinning, because it reads like an inconsistency: an
+// agent splitting work must say who does it, or it has created work nothing
+// will ever dispatch. A person may raise a thread and decide later.
+const unowned = await M.createThread(ROOT, { title: 'For someone, later' });
+ok(
+  'a person may raise a thread with nobody on it',
+  unowned.assigneeAgentId === undefined,
+  String(unowned.assigneeAgentId),
+);
+const ownerLater = await startFor('Splitting without an owner');
+// Rejected by the tool's own schema, so it throws rather than returning an
+// error result — the model never gets as far as an execution it could
+// misread as partial success.
+let splitRefusal;
+try {
+  await asAgent(
+    ownerLater.agentId,
+    ownerLater.th.id,
+    ownerLater.runId,
+    ownerLater.th.rootThreadId,
+    () =>
+      new M.ThreadCreateTool(cfg).buildAndExecute(
+        { title: 'Nobody owns me' },
+        sig(),
+      ),
+  );
+} catch (error) {
+  splitRefusal = error;
+}
+ok(
+  'but an agent splitting work must name who does it',
+  splitRefusal !== undefined,
+  String(splitRefusal),
+);
+ok(
+  'and the refusal says which field is missing',
+  String(splitRefusal?.message ?? '').includes('assignee'),
+  String(splitRefusal?.message),
+);
+ok(
+  'and no orphan thread was created by the attempt',
+  !(await M.listThreads(ROOT)).threads.some(
+    (t) => t.title === 'Nobody owns me',
+  ),
+);
+
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
