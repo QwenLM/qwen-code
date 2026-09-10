@@ -56,6 +56,73 @@ describe('turn notification observer', () => {
     });
   });
 
+  it('only computes content for an accepted terminal once', () => {
+    const observer = createTurnNotificationObserver(vi.fn());
+    observer.retain('scope');
+    const content = vi.fn(() => ({ responseText: 'Done' }));
+    observer.observe('scope', 's', terminal('history'), true, content);
+    observer.observe('scope', 'other', terminal(), false, content);
+    expect(content).not.toHaveBeenCalled();
+    observer.observe('scope', 's', terminal(), false, content);
+    observer.observe('scope', 's', terminal(), false, content);
+    expect(content).toHaveBeenCalledOnce();
+  });
+
+  it('preserves admitted text over queued copies and derives a code title', () => {
+    const notify = vi.fn();
+    const observer = createTurnNotificationObserver(notify);
+    observer.retain('scope');
+    observer.admit('scope', 'p', '```ts\nexport const a = 1;\n```');
+    observer.observe('scope', 's', {
+      type: 'pending_prompt_started',
+      data: { sessionId: 's', promptId: 'p', text: 'Daemon copy' },
+    });
+    observer.observe('scope', 's', terminal());
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionTitle: 'export const a = 1;',
+        promptText: '```ts\nexport const a = 1;\n```',
+      }),
+    );
+  });
+
+  it('bounds pending prompt text and forgets mid-turn injections', () => {
+    const notify = vi.fn();
+    const observer = createTurnNotificationObserver(notify);
+    observer.retain('scope');
+    observer.observe('scope', 's', {
+      type: 'pending_prompt_added',
+      data: { sessionId: 's', promptId: 'p', text: 'x'.repeat(10000) },
+    });
+    observer.observe('scope', 's', terminal(), true);
+    expect(notify.mock.calls[0][0].promptText).toHaveLength(4096);
+    observer.admit('scope', 'injected', 'steering text');
+    observer.observe('scope', 's', {
+      type: 'mid_turn_message_injected',
+      promptId: 'active',
+      data: { sessionId: 'other', messageIds: ['injected'] },
+    });
+    observer.observe('scope', 's', {
+      type: 'mid_turn_message_injected',
+      promptId: 'active',
+      data: { sessionId: 's', messageIds: ['injected'] },
+    });
+    observer.observe('scope', 's', terminal('injected'), true);
+    expect(notify).toHaveBeenCalledOnce();
+  });
+
+  it('evicts oldest pending labels at the scope limit', () => {
+    const notify = vi.fn();
+    const observer = createTurnNotificationObserver(notify);
+    observer.retain('scope');
+    for (let i = 0; i < 1025; i++)
+      observer.admit('scope', String(i), 'Question');
+    observer.observe('scope', 's', terminal('0'), true);
+    expect(notify).not.toHaveBeenCalled();
+    observer.observe('scope', 's', terminal('1024'), true);
+    expect(notify).toHaveBeenCalledOnce();
+  });
+
   it('keeps initial history silent but catches up admitted prompts once', () => {
     const notify = vi.fn();
     const observer = createTurnNotificationObserver(notify);
@@ -311,6 +378,60 @@ describe('turn notification content', () => {
         'Title',
       ),
     ).toEqual({ sessionTitle: 'Title', promptText: 'Current question' });
+  });
+
+  it('omits transport attachment tails without changing prompt prose', () => {
+    expect(
+      getTurnNotificationContent(
+        terminal(),
+        [
+          block('check\n\n@attachment:///private.txt', { kind: 'user' }),
+          block('Done'),
+        ],
+        undefined,
+      ),
+    ).toEqual({
+      sessionTitle: 'check',
+      promptText: 'check',
+      responseText: 'Done',
+    });
+    expect(
+      getTurnNotificationContent(
+        terminal(),
+        [block('Discuss @attachment:/// tokens', { kind: 'user' })],
+        'Title',
+      )?.promptText,
+    ).toBe('Discuss @attachment:/// tokens');
+  });
+
+  it('keeps visible insight prose while omitting internal segments', () => {
+    for (const text of [
+      'Report ready\n{"insight_ready":{"path":"/tmp/r.md"}}',
+      'the marker "insight_ready": is emitted',
+    ]) {
+      expect(
+        getTurnNotificationContent(terminal(), [block(text)], 'Title')
+          ?.responseText,
+      ).toBe(text.startsWith('Report') ? 'Report ready' : text);
+    }
+    expect(
+      getTurnNotificationContent(
+        terminal(),
+        [
+          block(
+            'Report ready\n{"insight_ready":{"path":"/tmp/r.md"}}\n{"insight_error":{"path":"/private',
+          ),
+        ],
+        'Title',
+      ),
+    ).toEqual({ sessionTitle: 'Title' });
+    expect(
+      getTurnNotificationContent(
+        terminal(),
+        [block('{"insight_ready":{"path":"/private')],
+        'Title',
+      ),
+    ).toEqual({ sessionTitle: 'Title' });
   });
 
   it('does not borrow old replies or expose partial failure replies and insight payloads', () => {

@@ -6,6 +6,8 @@
 
 // @vitest-environment jsdom
 
+import { webcrypto } from 'node:crypto';
+import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -19816,6 +19818,81 @@ describe('DaemonSessionProvider', () => {
     expect(notify.mock.calls[0]?.[0].key).not.toContain('unknown');
   });
 
+  it('toggles browser notifications without restarting the session stream', async () => {
+    vi.stubGlobal('isSecureContext', true);
+    vi.stubGlobal('crypto', webcrypto);
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    const notifications = vi.fn();
+    vi.stubGlobal(
+      'Notification',
+      Object.assign(notifications, { permission: 'granted' }),
+    );
+    localStorage.setItem('qwen-code-web-shell-browser-notifications', 'true');
+    const offGate = createDeferred<void>(),
+      onGate = createDeferred<void>();
+    const events = vi.fn(async function* (opts: { signal?: AbortSignal } = {}) {
+      yield {
+        type: 'replay_complete',
+        data: { sessionId: 'active-toggle' },
+      } as DaemonEvent;
+      await offGate.promise;
+      yield {
+        type: 'turn_complete',
+        data: {
+          sessionId: 'active-toggle',
+          promptId: 'off',
+          stopReason: 'end_turn',
+        },
+      } as DaemonEvent;
+      await onGate.promise;
+      yield {
+        type: 'turn_complete',
+        data: {
+          sessionId: 'active-toggle',
+          promptId: 'on',
+          stopReason: 'end_turn',
+        },
+      } as DaemonEvent;
+      yield* createIdleEvents()(opts);
+    });
+    const session = createMockSession({ sessionId: 'active-toggle', events });
+    sdkMocks.sessions.push(session);
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const show = async (enabled: boolean) => {
+      await act(async () => {
+        root!.render(
+          <BrowserTurnNotifications active={enabled} language="en">
+            <DaemonSessionProvider
+              baseUrl="http://127.0.0.1:4170"
+              autoConnect
+              sessionId="active-toggle"
+            >
+              <span>child</span>
+            </DaemonSessionProvider>
+          </BrowserTurnNotifications>,
+        );
+        await flushPromises();
+      });
+    };
+    await show(true);
+    await show(false);
+    await act(async () => {
+      offGate.resolve();
+      await flushPromises();
+    });
+    expect(notifications).not.toHaveBeenCalled();
+    await show(true);
+    await act(async () => {
+      onGate.resolve();
+      await vi.waitFor(() => expect(notifications).toHaveBeenCalledOnce());
+    });
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);
+    expect(events).toHaveBeenCalledTimes(1);
+    expect(session.detach).not.toHaveBeenCalled();
+    localStorage.removeItem('qwen-code-web-shell-browser-notifications');
+  });
   async function renderWithProvider(
     children: ReactNode,
     props: Partial<DaemonSessionProviderProps> = {},

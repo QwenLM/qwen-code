@@ -2825,10 +2825,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             if (sessionRef.current === activeSession) {
               for (const event of notificationReplayEvents) {
-                turnNotifications.observe(
-                  activeSession,
-                  event,
-                  true,
+                turnNotifications.observe(activeSession, event, true, () =>
                   getTurnNotificationContent(
                     event,
                     store.getSnapshot().blocks,
@@ -3516,10 +3513,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 );
               }
               if (sessionRef.current === activeSession) {
-                turnNotifications.observe(
-                  activeSession,
-                  event,
-                  false,
+                turnNotifications.observe(activeSession, event, false, () =>
                   getTurnNotificationContent(
                     event,
                     store.getSnapshot().blocks,

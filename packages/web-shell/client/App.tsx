@@ -13017,6 +13017,8 @@ export function App({
         (explicitContext.kind !== 'workspace' ||
           current.workspaceCwd === explicitContext.cwd)
       ) {
+        if (mainView === 'split')
+          focusComposerAfterSplitCloseRef.current = true;
         closePanel();
         closeMobileDrawer();
         return;
@@ -13036,7 +13038,14 @@ export function App({
         reportError(error, 'Failed to open session');
       });
     },
-    [closeMobileDrawer, closePanel, loadSidebarSession, reportError, showChat],
+    [
+      closeMobileDrawer,
+      closePanel,
+      loadSidebarSession,
+      mainView,
+      reportError,
+      showChat,
+    ],
   );
 
   const notificationNavigationTarget = useContext(

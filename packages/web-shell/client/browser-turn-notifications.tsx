@@ -13,6 +13,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { notificationExcerpt } from './notification-text';
 import { getTranslator, type WebShellLanguage } from './i18n';
 import {
   createTurnNotificationObserver,
@@ -43,6 +44,7 @@ interface BrowserTurnNotificationsProps {
   children: ReactNode;
   language: WebShellLanguage;
   options?: WebShellBrowserNotificationsOptions;
+  active?: boolean;
 }
 
 type Permission = NotificationPermission | 'unavailable';
@@ -88,30 +90,20 @@ function readPreference(defaultEnabled: boolean) {
   };
 }
 
-function notificationExcerpt(text: string, limit: number): string {
-  const plain = text
-    .replace(/```[^\n]*\n([\s\S]*?)```/g, '$1')
-    .replace(/!?\[([^\]]*)\]\([^)]+\)/g, '$1')
-    .replace(/<[^>]*>/g, '')
-    .replace(/^\s{0,3}(?:#{1,6}|>|[-*+]|\d+\.)\s+/gm, '')
-    .replace(/(\*\*|__|~~|`)(.*?)\1/g, '$2')
-    .replace(/\s+/g, ' ')
-    .trim();
-  const chars = Array.from(plain);
-  return chars.length > limit
-    ? chars.slice(0, limit - 1).join('') + '…'
-    : plain;
-}
-
 export function BrowserTurnNotifications({
   children,
   language,
   options,
+  active = true,
 }: BrowserTurnNotificationsProps) {
   if (typeof window === 'undefined' || window.top !== window.self)
     return <>{children}</>;
   return (
-    <StandaloneNotifications language={language} options={options}>
+    <StandaloneNotifications
+      language={language}
+      options={options}
+      active={active}
+    >
       {children}
     </StandaloneNotifications>
   );
@@ -121,7 +113,10 @@ function StandaloneNotifications({
   children,
   language,
   options,
+  active = true,
 }: BrowserTurnNotificationsProps) {
+  const activeRef = useRef(active);
+  activeRef.current = active;
   const [navigationTarget] = useState(() => new EventTarget());
   const [appLanguage, syncLanguage] = useState<WebShellLanguage>();
   const [defaultEnabled] = useState(options?.defaultEnabled ?? false);
@@ -213,6 +208,7 @@ function StandaloneNotifications({
     const request = version.current;
     const canShow = () =>
       mounted.current &&
+      activeRef.current &&
       request === version.current &&
       enabledRef.current &&
       permission() === 'granted' &&
@@ -309,18 +305,24 @@ function StandaloneNotifications({
   };
 
   return (
-    <TurnNotificationNavigationContext.Provider value={navigationTarget}>
-      <TurnNotificationContext.Provider value={observer}>
+    <TurnNotificationNavigationContext.Provider
+      value={active ? navigationTarget : undefined}
+    >
+      <TurnNotificationContext.Provider value={active ? observer : undefined}>
         <BrowserNotificationSettingsContext.Provider
-          value={{
-            ...preference,
-            permission: currentPermission,
-            pending,
-            error,
-            setEnabled,
-            refreshPermission,
-            syncLanguage,
-          }}
+          value={
+            active
+              ? {
+                  ...preference,
+                  permission: currentPermission,
+                  pending,
+                  error,
+                  setEnabled,
+                  refreshPermission,
+                  syncLanguage,
+                }
+              : undefined
+          }
         >
           {children}
         </BrowserNotificationSettingsContext.Provider>

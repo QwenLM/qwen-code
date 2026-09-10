@@ -394,6 +394,39 @@ describe('browser task notifications', () => {
     ).not.toMatch(/Fix|Result|private|Please|alerts/);
   });
 
+  it('preserves code and comparisons while removing invisible controls', async () => {
+    window.localStorage.setItem(BROWSER_NOTIFICATIONS_STORAGE_KEY, 'true');
+    const capture: Capture = {};
+    render(capture);
+    attach(capture);
+    await act(async () => {
+      capture.observer!.observe(
+        'scope',
+        'session',
+        {
+          type: 'turn_complete',
+          data: {
+            sessionId: 'session',
+            promptId: 'code',
+            stopReason: 'end_turn',
+          },
+        },
+        false,
+        {
+          sessionTitle: 'Build\u202E passed',
+          promptText: 'Use `Map<string, number>`; is 3 < 5 and 7 > 2 correct?',
+          responseText:
+            '```html\n<div>Hello<br>world</div>\n```\ndone\u0000 tail\u0085\u2066',
+        },
+      );
+      await vi.waitFor(() => expect(notifications).toHaveLength(1));
+    });
+    expect(notifications[0]?.title).toBe('QwenCode · Build passed');
+    expect(notifications[0]?.options.body).toBe(
+      'This turn has completed.\nPrompt: Use Map<string, number>; is 3 < 5 and 7 > 2 correct?\nReply: <div>Hello<br>world</div> done tail',
+    );
+  });
+
   it('bounds Unicode titles and excerpts, and keeps status-only fallbacks', async () => {
     window.localStorage.setItem(BROWSER_NOTIFICATIONS_STORAGE_KEY, 'true');
     const capture: Capture = {};
@@ -413,7 +446,7 @@ describe('browser task notifications', () => {
         [
           'empty',
           'turn_complete',
-          { sessionTitle: '  ', promptText: '<br>  ', responseText: '<br>  ' },
+          { sessionTitle: '  ', promptText: '  ', responseText: '  ' },
         ],
         [
           'failure',

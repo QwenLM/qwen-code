@@ -13,6 +13,7 @@ import { useBrowserNotificationSettings } from './browser-turn-notifications';
 // top-level boundary sits *outside* the daemon providers (a boundary nested
 // under them couldn't catch their own throw).
 let workspaceShouldThrow = false;
+const sessionUnmounted = vi.fn();
 const sessionProviderProps: Array<Record<string, unknown>> = [];
 const appProps: Array<Record<string, unknown>> = [];
 const notificationObservers: Array<TurnNotificationObserver | undefined> = [];
@@ -46,6 +47,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async () => {
     }: {
       children: React.ReactNode;
     }) => {
+      React.useEffect(() => () => sessionUnmounted(), []);
       sessionProviderProps.push(props);
       notificationObservers.push(useContext(TurnNotificationContext));
       notificationSettings.push(useBrowserNotificationSettings());
@@ -101,6 +103,7 @@ afterEach(() => {
     container.remove();
   }
   workspaceShouldThrow = false;
+  sessionUnmounted.mockClear();
   sessionProviderProps.length = 0;
   appProps.length = 0;
   notificationObservers.length = 0;
@@ -195,6 +198,18 @@ describe('WebShellWithProviders top-level boundary', () => {
     );
     expect(notificationObservers.at(-1)).toBe(observer);
     expect(notificationSettings.at(-1)?.enabled).toBe(true);
+  });
+
+  it('toggles notification integration without remounting the session', () => {
+    render(<WebShellWithProviders browserNotifications={{}} />);
+    const observer = notificationObservers.at(-1);
+    const root = mounted.at(-1)!.root;
+    act(() => root.render(<WebShellWithProviders />));
+    expect(notificationObservers.at(-1)).toBeUndefined();
+    expect(notificationSettings.at(-1)).toBeUndefined();
+    act(() => root.render(<WebShellWithProviders browserNotifications={{}} />));
+    expect(notificationObservers.at(-1)).toBe(observer);
+    expect(sessionUnmounted).not.toHaveBeenCalled();
   });
 
   it('starts on an empty session by default', () => {

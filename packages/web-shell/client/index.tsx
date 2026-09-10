@@ -141,16 +141,13 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
           : undefined
       }
     >
-      {browserNotifications ? (
-        <BrowserTurnNotifications
-          language={normalizeLanguage(webShellProps.language)}
-          options={browserNotifications}
-        >
-          {shell}
-        </BrowserTurnNotifications>
-      ) : (
-        shell
-      )}
+      <BrowserTurnNotifications
+        language={normalizeLanguage(webShellProps.language)}
+        options={browserNotifications}
+        active={browserNotifications !== undefined}
+      >
+        {shell}
+      </BrowserTurnNotifications>
     </RootBoundary>
   );
 }

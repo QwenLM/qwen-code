@@ -6,6 +6,11 @@
 
 import { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import type { DaemonEvent, DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
+import {
+  MAX_NOTIFICATION_SOURCE_LENGTH,
+  notificationTextLines,
+} from '../../notification-text.js';
+import { splitInsightSegments } from '../../adapters/transcriptToMessages.js';
 import type {
   DaemonConnectionState,
   DaemonProductSessionContext,
@@ -41,7 +46,9 @@ export interface TurnNotificationObserver {
     sessionId: string,
     event: DaemonEvent,
     replay?: boolean,
-    content?: TurnNotificationContent,
+    content?:
+      | TurnNotificationContent
+      | (() => TurnNotificationContent | undefined),
   ): void;
 }
 
@@ -59,6 +66,8 @@ export function useTurnNotificationBinding(
   connection: DaemonConnectionState,
 ) {
   const observer = useContext(TurnNotificationContext);
+  const observerRef = useRef(observer);
+  observerRef.current = observer;
   const binding = useRef<
     | {
         scope: string;
@@ -83,10 +92,13 @@ export function useTurnNotificationBinding(
     >();
     const activate = (owner: NotificationOwner) => {
       const next = owners.get(owner);
-      if (!observer || !next) return undefined;
+      if (!next) return undefined;
       if (binding.current?.scope !== next.scope) {
         binding.current?.release();
-        binding.current = { ...next, release: observer.retain(next.scope) };
+        binding.current = {
+          ...next,
+          release: observerRef.current?.retain(next.scope) ?? (() => {}),
+        };
       }
       return next.scope;
     };
@@ -95,7 +107,7 @@ export function useTurnNotificationBinding(
         owner: T,
         context: DaemonProductSessionContext,
       ): T {
-        if (!observer || !baseUrl) return owner;
+        if (!baseUrl) return owner;
         const url = new URL(baseUrl, 'http://localhost');
         const cwd = context.kind === 'workspace' ? owner.workspaceCwd : '';
         owners.set(owner, {
@@ -122,27 +134,41 @@ export function useTurnNotificationBinding(
       activate,
       admit(owner: NotificationOwner, promptId: string, label?: string) {
         const scope = activate(owner);
-        if (scope) observer?.admit(scope, promptId, label);
+        if (scope) observerRef.current?.admit(scope, promptId, label);
       },
       remove(owner: NotificationOwner, promptId: string) {
         const scope = owners.get(owner)?.scope;
-        if (scope) observer?.remove(scope, promptId);
+        if (scope) observerRef.current?.remove(scope, promptId);
       },
       observe(
         owner: NotificationOwner,
         event: DaemonEvent,
         replay = false,
-        content?: TurnNotificationContent,
+        content?:
+          | TurnNotificationContent
+          | (() => TurnNotificationContent | undefined),
       ) {
         const source = owners.get(owner);
         if (source && binding.current?.scope === source.scope)
-          observer?.observe(source.scope, owner.sessionId, event, replay, {
-            ...content,
-            target: source.target,
-          });
+          observerRef.current?.observe(
+            source.scope,
+            owner.sessionId,
+            event,
+            replay,
+            () => ({
+              ...(typeof content === 'function' ? content() : content),
+              target: source.target,
+            }),
+          );
       },
     };
-  }, [baseUrl, observer]);
+  }, [baseUrl]);
+  useEffect(() => {
+    const current = binding.current;
+    if (!current) return;
+    current.release();
+    current.release = observer?.retain(current.scope) ?? (() => {});
+  }, [observer]);
   useEffect(() => {
     const current = binding.current;
     if (
@@ -176,6 +202,15 @@ export function useTurnNotificationBinding(
   return handlers;
 }
 
+function notificationPromptText(text: string): string {
+  const lines = text
+    .slice(0, MAX_NOTIFICATION_SOURCE_LENGTH)
+    .trimEnd()
+    .split('\n');
+  while (lines.at(-1)?.startsWith('@attachment:///')) lines.pop();
+  return lines.join('\n').trimEnd();
+}
+
 export function getTurnNotificationContent(
   event: DaemonEvent,
   blocks: readonly DaemonTranscriptBlock[],
@@ -193,9 +228,9 @@ export function getTurnNotificationContent(
       block.text.trim(),
   );
   if (request?.kind === 'user') {
-    content.promptText = request.text;
+    content.promptText = notificationPromptText(request.text);
     if (!sessionTitle?.trim())
-      content.sessionTitle = request.text.trim().split('\n')[0];
+      content.sessionTitle = notificationTextLines(content.promptText)[0];
   }
   if (event.type === 'turn_error') return content;
   for (let index = blocks.length - 1; index >= 0; index--) {
@@ -208,8 +243,19 @@ export function getTurnNotificationContent(
       block.meta?.source !== 'vision_bridge_notice' &&
       block.text.trim()
     ) {
-      if (!/"insight_(?:progress|ready|error)"\s*:/.test(block.text))
-        content.responseText = block.text;
+      const segments = splitInsightSegments(block.text);
+      const visibleText = segments
+        ? segments
+            .filter((segment) => segment.kind === 'text')
+            .map((segment) => segment.text)
+            .join('\n')
+            .trim()
+        : block.text;
+      if (
+        visibleText &&
+        !/\{\s*"insight_(?:progress|ready|error)"\s*:/.test(visibleText)
+      )
+        content.responseText = visibleText;
       break;
     }
   }
@@ -258,7 +304,17 @@ export function createTurnNotificationObserver(
     },
     admit(scope, promptId, label) {
       if (promptId && !handled.has(keyFor(scope, promptId)))
-        scopes.get(scope)?.pending.set(promptId, label?.trim());
+        scopes
+          .get(scope)
+          ?.pending.set(
+            promptId,
+            label === undefined
+              ? undefined
+              : notificationPromptText(label).trim(),
+          );
+      const pending = scopes.get(scope)?.pending;
+      if (pending && pending.size > MAX_RECENT_TURNS)
+        pending.delete(pending.keys().next().value!);
     },
     remove(scope, promptId) {
       if (scopes.has(scope) && promptId) consume(scope, promptId);
@@ -274,7 +330,20 @@ export function createTurnNotificationObserver(
         .sessionId;
       if (
         value['sessionId'] !== sessionId ||
-        (envelopeSessionId !== undefined && envelopeSessionId !== sessionId) ||
+        (envelopeSessionId !== undefined && envelopeSessionId !== sessionId)
+      )
+        return;
+      if (
+        event.type === 'mid_turn_message_injected' &&
+        Array.isArray(value['messageIds'])
+      ) {
+        for (const id of value['messageIds']) {
+          if (typeof id === 'string' && state.pending.has(id))
+            consume(scope, id);
+        }
+        return;
+      }
+      if (
         typeof promptId !== 'string' ||
         !promptId.trim() ||
         (event.promptId !== undefined && event.promptId !== promptId)
@@ -292,9 +361,11 @@ export function createTurnNotificationObserver(
           state.pending.set(
             promptId,
             typeof value['text'] === 'string'
-              ? value['text'].trim()
+              ? notificationPromptText(value['text']).trim()
               : undefined,
           );
+        if (state.pending.size > MAX_RECENT_TURNS)
+          state.pending.delete(state.pending.keys().next().value!);
         return;
       }
       if (
@@ -311,13 +382,17 @@ export function createTurnNotificationObserver(
         typeof value['stopReason'] !== 'string'
       )
         return;
-      const promptText = content?.promptText || state.pending.get(promptId);
-      const sessionTitle =
-        content?.sessionTitle || promptText?.trim().split('\n')[0];
+      const pendingText = state.pending.get(promptId);
       if (!consume(scope, promptId)) return;
       try {
+        const resolvedContent =
+          typeof content === 'function' ? content() : content;
+        const promptText = resolvedContent?.promptText || pendingText;
+        const sessionTitle =
+          resolvedContent?.sessionTitle ||
+          (promptText ? notificationTextLines(promptText)[0] : undefined);
         notify({
-          ...content,
+          ...resolvedContent,
           ...(sessionTitle ? { sessionTitle } : {}),
           ...(promptText ? { promptText } : {}),
           key: keyFor(scope, promptId),
