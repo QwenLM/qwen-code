@@ -73,7 +73,6 @@ import type {
 } from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
-import { applyMessagePrefix } from './message-prefix.js';
 import {
   buildChannelWebhookDisplayText,
   buildChannelWebhookPrompt,
@@ -488,9 +487,6 @@ export abstract class ChannelBase {
   private readonly observedContacts?: ChannelBaseOptions['observedContacts'];
   private readonly namedSessions?: NamedSessionManager;
   private readonly observedContactEnvelopes = new WeakSet<Envelope>();
-  private readonly messagePrefix?: string;
-  private readonly messagePrefixCheckedEnvelopes = new WeakSet<Envelope>();
-  private readonly messagePrefixRejectedEnvelopes = new WeakSet<Envelope>();
   private instructedSessions: Set<string> = new Set();
   private unattendedMemorySessions: Set<string> = new Set();
   private channelMemoryReads = new Map<string, ChannelMemoryReadState>();
@@ -698,7 +694,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        `Could not resolve the current task for ${this.prefixedCommand('/btw')}.`,
+        `Could not resolve the current task for /btw.`,
         sourceLabel,
       );
       return;
@@ -1371,17 +1367,8 @@ export abstract class ChannelBase {
     bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
-    if (
-      config.messagePrefix !== undefined &&
-      typeof config.messagePrefix !== 'string'
-    ) {
-      throw new Error(
-        `Channel "${name}" field "messagePrefix" must be a string.`,
-      );
-    }
     this.name = name;
     this.config = config;
-    this.messagePrefix = config.messagePrefix?.trim() || undefined;
     this.bridge = bridge;
     this.locale = options?.locale ?? 'en';
     this.proxy = options?.proxy;
@@ -3318,13 +3305,13 @@ export abstract class ChannelBase {
       ? { approve: '          ', always: '   ', deny: '             ' }
       : { approve: '        ', always: ' ', deny: '           ' };
     const replies = [
-      `${this.prefixedCommand(`/approve${requestSuffix}`)}${replyPadding.approve}${approveLabel}`,
+      `/approve${requestSuffix}${replyPadding.approve}${approveLabel}`,
       ...(alwaysOption
         ? [
-            `${this.prefixedCommand(`/approve-always${requestSuffix}`)}${replyPadding.always}${alwaysOption.label}`,
+            `/approve-always${requestSuffix}${replyPadding.always}${alwaysOption.label}`,
           ]
         : []),
-      `${this.prefixedCommand(`/deny${requestSuffix}`)}${replyPadding.deny}${denyLabel}`,
+      `/deny${requestSuffix}${replyPadding.deny}${denyLabel}`,
     ];
     return [
       copy.required,
@@ -3337,14 +3324,6 @@ export abstract class ChannelBase {
       copy.replyWith,
       ...replies,
     ].join('\n');
-  }
-
-  protected prefixedCommand(command: string): string {
-    return this.messagePrefix ? `${this.messagePrefix} ${command}` : command;
-  }
-
-  protected configuredMessagePrefix(): string | undefined {
-    return this.messagePrefix;
   }
 
   private permissionTitle(
@@ -3574,7 +3553,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        `Multiple permission requests are pending for this chat. Reply with ${this.prefixedCommand(`/${decision} <request-id>`)}.\n${requestList}`,
+        `Multiple permission requests are pending for this chat. Reply with /${decision} <request-id>.\n${requestList}`,
       );
       return true;
     }
@@ -3607,7 +3586,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        `Submit this question through its interactive card, or use ${this.prefixedCommand('/deny [request-id]')} to cancel it.`,
+        `Submit this question through its interactive card, or use /deny [request-id] to cancel it.`,
         pending.sourceLabel,
       );
       return true;
@@ -3869,7 +3848,7 @@ export abstract class ChannelBase {
     const remedy =
       safeTaskName === undefined
         ? 'select this task first or close it'
-        : `select this task first or close it with ${this.prefixedCommand(`/session close ${safeTaskName}`)}`;
+        : `select this task first or close it with /session close ${safeTaskName}`;
     return `${subject} ${problem}. Its files were not changed. Clearing now would reset the selected task instead, so ${remedy}.`;
   }
 
@@ -3918,7 +3897,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        `Usage: ${this.prefixedCommand('/sessions [all]')}`,
+        `Usage: /sessions [all]`,
       );
       return true;
     }
@@ -3971,7 +3950,7 @@ export abstract class ChannelBase {
             envelope.threadId,
             current
               ? `Current task: ${current.name} (${current.isolation})`
-              : `No task is currently selected. Use ${this.prefixedCommand('/session new <name>')} or ${this.prefixedCommand('/session use <name>')}.`,
+              : `No task is currently selected. Use /session new <name> or /session use <name>.`,
           );
           return true;
         }
@@ -4081,7 +4060,7 @@ export abstract class ChannelBase {
     await this.sendThreadMessage(
       envelope.chatId,
       envelope.threadId,
-      `Usage: ${this.prefixedCommand('/session current')} | ${this.prefixedCommand('/session new <name> [--worktree]')} | ${this.prefixedCommand('/session use <name>')} | ${this.prefixedCommand('/session close <name>')} | ${this.prefixedCommand('/session cancel [<name>]')}`,
+      `Usage: /session current | /session new <name> [--worktree] | /session use <name> | /session close <name> | /session cancel [<name>]`,
     );
     return true;
   }
@@ -4280,7 +4259,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          `This clears the shared session for everyone who shares it. Re-send with "confirm" (e.g. ${this.prefixedCommand('/clear confirm')}) to proceed.`,
+          `This clears the shared session for everyone who shares it. Re-send with "confirm" (e.g. /clear confirm) to proceed.`,
         );
         return true;
       }
@@ -4368,24 +4347,24 @@ export abstract class ChannelBase {
     this.registerCommand('help', async (envelope) => {
       const lines = [
         'Commands:',
-        `${this.prefixedCommand('/help')} — Show this help`,
+        `/help — Show this help`,
         this.isSharedSession(envelope)
-          ? `${this.prefixedCommand('/clear confirm')} — Clear the shared session (aliases: ${this.prefixedCommand('/reset')}, ${this.prefixedCommand('/new')})`
-          : `${this.prefixedCommand('/clear')} — Clear your session (aliases: ${this.prefixedCommand('/reset')}, ${this.prefixedCommand('/new')})`,
-        `${this.prefixedCommand('/who')} — Show current session & workspace`,
-        `${this.prefixedCommand('/status')} — Show session info`,
-        `${this.prefixedCommand('/approve [request-id]')} — Approve a pending permission request`,
-        `${this.prefixedCommand('/approve-always [request-id]')} — Always approve a pending permission request`,
-        `${this.prefixedCommand('/deny [request-id]')} — Deny a pending permission request`,
+          ? `/clear confirm — Clear the shared session (aliases: /reset, /new)`
+          : `/clear — Clear your session (aliases: /reset, /new)`,
+        `/who — Show current session & workspace`,
+        `/status — Show session info`,
+        `/approve [request-id] — Approve a pending permission request`,
+        `/approve-always [request-id] — Always approve a pending permission request`,
+        `/deny [request-id] — Deny a pending permission request`,
         ...(this.bridge.btw
           ? [
-              `${this.prefixedCommand('/btw <question>')} — Ask a side question without interrupting the current task`,
+              `/btw <question> — Ask a side question without interrupting the current task`,
             ]
           : []),
         ...(this.namedSessions
           ? [
-              `${this.prefixedCommand('/sessions [all]')} — List your named tasks`,
-              `${this.prefixedCommand('/session current|new|use|close|cancel')} — Manage your named tasks`,
+              `/sessions [all] — List your named tasks`,
+              `/session current|new|use|close|cancel — Manage your named tasks`,
             ]
           : []),
       ];
@@ -4413,7 +4392,7 @@ export abstract class ChannelBase {
       );
       if (platformCmds.length > 0) {
         for (const cmd of platformCmds) {
-          lines.push(this.prefixedCommand(`/${cmd}`));
+          lines.push(`/${cmd}`);
         }
       }
 
@@ -4433,18 +4412,11 @@ export abstract class ChannelBase {
       if (agentCommands.length > 0) {
         lines.push('', 'Agent commands (forwarded to Qwen Code):');
         for (const cmd of agentCommands) {
-          lines.push(
-            `${this.prefixedCommand(`/${cmd.name}`)} — ${cmd.description}`,
-          );
+          lines.push(`/${cmd.name} — ${cmd.description}`);
         }
       }
 
-      lines.push(
-        '',
-        this.messagePrefix
-          ? `Start each message with ${this.messagePrefix} to chat with the agent.`
-          : 'Send any text to chat with the agent.',
-      );
+      lines.push('', 'Send any text to chat with the agent.');
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
@@ -4532,7 +4504,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          `Usage: ${this.prefixedCommand('/loop add "<cron>" <prompt>')} | ${this.prefixedCommand('/loop list')} | ${this.prefixedCommand('/loop inspect <id>')} | ${this.prefixedCommand('/loop cancel <id>')}`,
+          `Usage: /loop add "<cron>" <prompt> | /loop list | /loop inspect <id> | /loop cancel <id>`,
         );
         return true;
     }
@@ -4565,7 +4537,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        `Usage: ${this.prefixedCommand('/loop add "<cron>" <prompt>')}`,
+        `Usage: /loop add "<cron>" <prompt>`,
       );
       return true;
     }
@@ -4792,7 +4764,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        `Usage: ${this.prefixedCommand('/loop inspect <id>')}`,
+        `Usage: /loop inspect <id>`,
       );
       return true;
     }
@@ -4872,7 +4844,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        `Usage: ${this.prefixedCommand('/loop cancel <id>')}`,
+        `Usage: /loop cancel <id>`,
       );
       return true;
     }
@@ -6175,23 +6147,6 @@ export abstract class ChannelBase {
     envelope: Envelope,
     options: PreflightInboundOptions = {},
   ): boolean | Promise<boolean> {
-    // Ahead of both pairing gates on purpose: a pairing request is a reply,
-    // and replying to every unprefixed message would be exactly the traffic
-    // the prefix exists to suppress. First contact carries the prefix too.
-    if (this.messagePrefixRejectedEnvelopes.has(envelope)) return false;
-    if (!this.messagePrefixCheckedEnvelopes.has(envelope)) {
-      this.messagePrefixCheckedEnvelopes.add(envelope);
-      if (!applyMessagePrefix(envelope, this.messagePrefix)) {
-        this.messagePrefixRejectedEnvelopes.add(envelope);
-        if (
-          !(envelope.isGroup && !envelope.isMentioned && !envelope.isReplyToBot)
-        ) {
-          this.logPreflightRejected('message_prefix_mismatch');
-        }
-        return false;
-      }
-    }
-
     const groupResult = this.groupGate.check(envelope, {
       createPairingRequest: !options.deferPairingRequests,
     });
@@ -6284,10 +6239,6 @@ export abstract class ChannelBase {
         80,
       )}\n`,
     );
-  }
-
-  protected wasMessagePrefixRejected(envelope: Envelope): boolean {
-    return this.messagePrefixRejectedEnvelopes.has(envelope);
   }
 
   protected logDebugPayload(platform: string, payload: unknown): void {
@@ -6622,7 +6573,7 @@ export abstract class ChannelBase {
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            `Only authorized members can use ${this.prefixedCommand('/btw')} in this shared session.`,
+            `Only authorized members can use /btw in this shared session.`,
           );
           return;
         }
@@ -6631,7 +6582,7 @@ export abstract class ChannelBase {
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            `Usage: ${this.prefixedCommand('/btw <question>')}`,
+            `Usage: /btw <question>`,
           );
           return;
         }
@@ -6647,7 +6598,7 @@ export abstract class ChannelBase {
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            `${this.prefixedCommand('/btw')} supports text-only questions.`,
+            `/btw supports text-only questions.`,
           );
           return;
         }
@@ -6751,7 +6702,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          `No task is currently selected. Use ${this.prefixedCommand('/session new <name>')} or ${this.prefixedCommand('/session use <name>')}.`,
+          `No task is currently selected. Use /session new <name> or /session use <name>.`,
         );
         return;
       }
@@ -6773,7 +6724,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        `Could not identify the selected task. Use ${this.prefixedCommand('/sessions')}, select it again, and retry.`,
+        `Could not identify the selected task. Use /sessions, select it again, and retry.`,
       );
       return;
     }
