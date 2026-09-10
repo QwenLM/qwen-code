@@ -821,6 +821,60 @@ describe('receipts', () => {
     expect(statuses).toEqual(['held', 'misaddressed']);
   });
 
+  it('judges a parked frame against the sessions a host still holds', () => {
+    // The multi-session shape: no single id to compare, so the release
+    // path asks whether the frame's addressee is still one of them. The
+    // ACP host that wires this today refuses everything on arrival, so
+    // nothing reaches here from it — the rule belongs to the gate all the
+    // same, and a caller that parks (an inbound policy that holds) must
+    // not have its pin judged by whichever check ran first.
+    const hosted = new Set(['session-a', 'session-b']);
+    const delivered: PeerUserFrame[] = [];
+    const statuses: string[] = [];
+    const gate = new InboundGate({
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => 'hold',
+      ownsSessionId: (id) => hosted.has(id),
+      deliver: (candidate) => delivered.push(candidate),
+      reportStatus: (_candidate, status) => statuses.push(status),
+    });
+
+    const forB = frame({ fromMode: 'prompting', toSessionId: 'session-b' });
+    expect(gate.admit(forB)).toBe('held');
+    expect(gate.decide(forB.msgId, 'approve')).toBe('done');
+    expect(delivered).toEqual([forB]);
+
+    // The addressee goes while its message waits: releasing it now would
+    // hand one session's message to whatever else the process hosts.
+    const forA = frame({ fromMode: 'prompting', toSessionId: 'session-a' });
+    expect(gate.admit(forA)).toBe('held');
+    hosted.delete('session-a');
+    expect(gate.decide(forA.msgId, 'approve')).toBe('gone');
+    expect(delivered).toEqual([forB]);
+    expect(statuses.at(-1)).toBe('misaddressed');
+  });
+
+  it('will not release a parked frame that named no session to a host of several', () => {
+    // With one session an unpinned frame could only have meant that one;
+    // with several there is nothing to guess from, so it is misaddressed
+    // on the release path exactly as it is on arrival.
+    const delivered: PeerUserFrame[] = [];
+    const statuses: string[] = [];
+    const gate = new InboundGate({
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => 'hold',
+      ownsSessionId: () => true,
+      deliver: (candidate) => delivered.push(candidate),
+      reportStatus: (_candidate, status) => statuses.push(status),
+    });
+
+    const unpinned = frame({ fromMode: 'prompting' });
+    expect(gate.admit(unpinned)).toBe('held');
+    expect(gate.decide(unpinned.msgId, 'approve')).toBe('gone');
+    expect(delivered).toEqual([]);
+    expect(statuses).toEqual(['held', 'misaddressed']);
+  });
+
   it('tombstones a misaddressed drop so a re-send repeats the verdict', () => {
     for (const path of ['decide', 'reevaluate'] as const) {
       let currentSessionId = 'session-a';

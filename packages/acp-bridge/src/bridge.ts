@@ -167,6 +167,8 @@ import {
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_SUBMITTED_PROMPT_META_KEY,
+  SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
@@ -5056,6 +5058,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       privateParentCapability,
                   },
                   clientCapabilities: {
+                    _meta: { 'qwen.goalProposals': true },
                     fs: {
                       readTextFile: delegateReadTextFileToClient,
                       writeTextFile: true,
@@ -7696,6 +7699,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     historyPageSize: number,
     liveReplayMode: 'full' | 'summary',
   ): Promise<ReturnType<typeof replayFieldsFor>> {
+    // A pending permission/question lives only in the in-memory journal — it
+    // is never persisted to the chat transcript — and the turns that park on
+    // one without an RPC prompt (Goal and background-notification turns)
+    // never flip promptActive, so the !promptActive check below does not
+    // cover them. Serving the persisted page with an empty liveJournal here
+    // would strand the interaction: the session summary still advertises it
+    // (input-needed badge) while the re-opening client receives nothing to
+    // answer.
+    if (entry.pendingInteractions.size > 0) {
+      return replayFieldsFor(entry, 'load', liveReplayMode);
+    }
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const lastEventId = entry.events.lastEventId;
@@ -7773,6 +7787,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ...(page.hasMore ? { historyHasMore: true as const } : {}),
           };
         }
+        // Not transient: only a human answer, a cancel or a timeout clears
+        // a pending interaction, so a re-fetched page cannot contain it
+        // either. Keep retrying only the genuinely transient terms.
+        if (entry.pendingInteractions.size > 0) break;
       } catch {
         // A failed bounded read (missing/unreadable persisted transcript or a
         // workspace timeout) must not tear down a healthy live session; fall
@@ -10515,6 +10533,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   delete meta[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY];
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
                   delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+                  delete meta[SUBMITTED_PROMPT_META_KEY];
+                  delete meta[DAEMON_SUBMITTED_PROMPT_META_KEY];
+                  if (
+                    typeof context?.submittedPrompt === 'string' &&
+                    !isPromotedMidTurn &&
+                    context?.channelPrompt !== true
+                  ) {
+                    meta[DAEMON_SUBMITTED_PROMPT_META_KEY] =
+                      context.submittedPrompt;
+                  }
                   delete meta[DAEMON_MODEL_PROMPT_META_KEY];
                   delete meta[DAEMON_ATTACHMENT_REFERENCES_META_KEY];
                   // Channel classification is authenticated channel-worker
@@ -10522,6 +10550,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   // authorization and re-arms it through the trusted
                   // `channelPrompt` context flag below.
                   delete meta[CHANNEL_PROMPT_META_KEY];
+                  delete meta['qwen.goalProposalApproval'];
+                  if (
+                    originatorClientId !== undefined &&
+                    entry.clientIds.has(originatorClientId) &&
+                    !context?.channelPrompt &&
+                    !isContinue &&
+                    !isRestoreAskUserQuestion
+                  ) {
+                    meta['qwen.goalProposalApproval'] = true;
+                  }
                   if (isRetry) {
                     meta[DAEMON_RETRY_META_KEY] = true;
                   }
