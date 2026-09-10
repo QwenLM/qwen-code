@@ -138,8 +138,12 @@ jobs:
           git fetch origin "$INPUT_REF"
           sha="$(git rev-parse FETCH_HEAD)"
           if [ "$IS_DRY_RUN" = 'false' ]; then
-            if [ "$GITHUB_REF_NAME" != 'main' ]; then
-              echo '::error::Published desktop releases must run from main.'
+            # A release-triggered publish runs on the released tag's ref, not on
+            # main, so the branch name cannot be the gate there. The ancestry
+            # check below still is: the bundled commit must be reachable from
+            # main either way.
+            if [ "$GITHUB_REF_NAME" != 'main' ] && [ "$GITHUB_EVENT_NAME" != 'release' ]; then
+              echo '::error::Published desktop releases must run from main or follow a published release.'
               exit 1
             fi
             git fetch origin main:refs/remotes/origin/main
@@ -738,7 +742,7 @@ jobs:
 
   sync-oss:
     name: 'Mirror stable Desktop release to Aliyun OSS'
-    if: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false && github.repository == 'QwenLM/qwen-code' }}"
+    if: "${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'release') && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false && github.repository == 'QwenLM/qwen-code' }}"
     needs:
       - 'prepare'
       - 'build'
