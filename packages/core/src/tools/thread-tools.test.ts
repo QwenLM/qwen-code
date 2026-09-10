@@ -179,12 +179,12 @@ describe('thread tools', () => {
 
     await runWithAgentRunContext(frame(first), () =>
       new ThreadCreateTool(config)
-        .build({ title: 'from the first turn' })
+        .build({ title: 'from the first turn', assignee: 'bob' })
         .execute(new AbortController().signal),
     );
     await runWithAgentRunContext(frame(second), () =>
       new ThreadCreateTool(config)
-        .build({ title: 'from the second turn' })
+        .build({ title: 'from the second turn', assignee: 'bob' })
         .execute(new AbortController().signal),
     );
 
