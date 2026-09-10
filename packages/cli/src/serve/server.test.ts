@@ -47,6 +47,7 @@ import {
   getServeAppLifecycle,
   type ServeAppLifecycle,
 } from './serve-app-lifecycle.js';
+import { ChannelControlWorkspaceLimitError } from './channel-control-capacity.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import { tagListener } from './local-control/index.js';
 import {
@@ -4713,6 +4714,90 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
+    it.each([undefined, '25', '256'])(
+      'freezes registration capacity %s and does not infer an injected channel limit',
+      async (configured) => {
+        const daemonEnv = { QWEN_SERVE_MAX_WORKSPACES: configured };
+        const app = createServeApp(baseOpts, undefined, {
+          bridge: fakeBridge(),
+          daemonEnv,
+          getChannelWorkerSnapshot: () => ({
+            enabled: false,
+            state: 'disabled',
+            channels: [],
+          }),
+        });
+        daemonEnv.QWEN_SERVE_MAX_WORKSPACES = '2';
+        const response = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(response.body.limits.maxRegisteredWorkspaces).toBe(
+          configured === undefined ? 256 : Number(configured),
+        );
+        expect(response.body.limits).not.toHaveProperty(
+          'maxChannelControlWorkspaces',
+        );
+        expect(response.body.limits).not.toHaveProperty('maxTotalSessions');
+      },
+    );
+
+    it('rejects an injected registry above registration capacity', () => {
+      const runtimes = [WS_BOUND, '/workspace/secondary'].map((cwd, index) =>
+        makeWorkspaceRuntimeForTest({
+          workspaceId: `id-${index}`,
+          workspaceCwd: cwd,
+          primary: index === 0,
+          bridge: fakeBridge(),
+        }),
+      );
+      expect(() =>
+        createServeApp({ ...baseOpts, maxRegisteredWorkspaces: 1 }, undefined, {
+          workspaceRegistry: createWorkspaceRegistry(runtimes),
+        }),
+      ).toThrow(/Initial workspace registry exceeds/);
+    });
+
+    it('exempts the internal Conversations runtime from that limit', () => {
+      const runtimes: WorkspaceRuntime[] = [
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'user-0',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: fakeBridge(),
+        }),
+        {
+          ...makeWorkspaceRuntimeForTest({
+            workspaceId: 'live-0',
+            workspaceCwd: '/workspace/conversations',
+            primary: false,
+            bridge: fakeBridge(),
+          }),
+          provenance: 'live-conversation',
+        },
+      ];
+      expect(() =>
+        createServeApp({ ...baseOpts, maxRegisteredWorkspaces: 1 }, undefined, {
+          workspaceRegistry: createWorkspaceRegistry(runtimes),
+        }),
+      ).not.toThrow();
+    });
+
+    it('advertises an explicitly enforced channel limit and total admission with one workspace', async () => {
+      const app = createServeApp(
+        { ...baseOpts, maxTotalSessions: 800 },
+        undefined,
+        { bridge: fakeBridge(), maxChannelControlWorkspaces: 25 },
+      );
+      const response = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(response.body.limits).toMatchObject({
+        maxRegisteredWorkspaces: 256,
+        maxChannelControlWorkspaces: 25,
+        maxTotalSessions: 800,
+      });
+    });
+
     it.each([
       [undefined, 5_000],
       ['', 5_000],
@@ -26652,6 +26737,26 @@ describe('createServeApp', () => {
           primary: true,
         },
       ],
+    });
+
+    it('returns 409 for a channel control owner capacity rejection', async () => {
+      const state = disabled();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        getChannelWorkerControl: () => state,
+        setChannelWorkerSelection: vi.fn(async () => {
+          throw new ChannelControlWorkspaceLimitError();
+        }),
+        stopChannelWorker: vi.fn(async () => ({ changed: false, state })),
+      });
+      const response = await auth(request(app).put('/workspace/channel')).send({
+        selection: { mode: 'names', names: ['bot'] },
+      });
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe(
+        'channel_control_workspace_limit_reached',
+      );
     });
 
     it('exposes disabled state and advertises control but not reload', async () => {

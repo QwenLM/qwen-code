@@ -44,10 +44,6 @@ export type {
 } from './DaemonChannelBridge.js';
 export { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 export {
-  startsWithMessagePrefix,
-  stripMessagePrefix,
-} from './message-prefix.js';
-export {
   CHANNEL_PROACTIVE_DELIVERY_ERROR_CODE,
   ChannelProactiveDeliveryError,
   isChannelProactiveDeliveryError,

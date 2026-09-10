@@ -2538,10 +2538,7 @@ export class DingtalkChannel extends ChannelBase {
       }
     }
     this.sessionMentionTargets.delete(sessionId);
-    // A session dying after segments arrived but before the terminal signal is
-    // precisely the case the partial-card fallback exists for; dropping the
-    // buffer here would lose text the agent already produced, which the
-    // pre-aggregation code always delivered on arrival.
+    // Preserve a pending background turn's latest result if its session dies.
     this.backgroundOutputCoordinator.drain(sessionId);
     const cardRunId = this.cardRunBySession.get(sessionId);
     if (cardRunId) {
@@ -2818,7 +2815,7 @@ export class DingtalkChannel extends ChannelBase {
     let preparedReplyBody: string | undefined;
     let composedTurnComplete = false;
     return async (output) => {
-      const body = this.formatBackgroundResponseAggregation(output);
+      const body = this.formatBackgroundOutput(output);
       const plan = proactivePlan ?? replyPlan;
       if (!plan || plan.nextChunk === 0) {
         const header = body.split('\n', 1)[0]!;
@@ -2871,9 +2868,7 @@ export class DingtalkChannel extends ChannelBase {
     };
   }
 
-  private formatBackgroundResponseAggregation(
-    delivery: BackgroundOutputPacket,
-  ): string {
+  private formatBackgroundOutput(delivery: BackgroundOutputPacket): string {
     const icon =
       delivery.status === 'completed'
         ? '✅'
@@ -2955,7 +2950,7 @@ export class DingtalkChannel extends ChannelBase {
   /**
    * Body-identical to the base implementation — this override exists only to
    * widen the signature, which the base seam does not declare. The background
-   * aggregation flush passes `prepared` so the body it already projected isn't
+   * output delivery passes `prepared` so the body it already projected isn't
    * projected a second time (that would re-upload its files), and
    * `failOnHttpError` so a failed send throws instead of being swallowed,
    * letting the flush capture the delivery plan for the next retry.

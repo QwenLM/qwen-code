@@ -10,6 +10,7 @@ import { plugin } from './index.js';
 describe('DingTalk management fields', () => {
   it('opts in to shared output mode without redeclaring its management field', () => {
     expect(plugin.supportsOutputMode).toBe(true);
+    expect(plugin.requiredConfigFields).toEqual(['clientId', 'clientSecret']);
     expect(plugin.management?.fields.map((field) => field.key)).toEqual([
       'clientId',
       'clientSecret',

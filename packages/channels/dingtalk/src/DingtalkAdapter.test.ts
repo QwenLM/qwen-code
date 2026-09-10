@@ -193,8 +193,7 @@ vi.mock('@qwen-code/channel-base', async () => {
         _messageIds: string[],
       ): void {}
       protected requestPromptRunCancellation = vi.fn().mockResolvedValue(false);
-      // Real base dispatch flow, delegated like logDebugPayload: the adapter
-      // override under test replaces only the final delivery step.
+      // Delegate background dispatch and delivery to the real base implementation.
       async dispatchBackgroundResponse(
         sessionId: string,
         text: string,
@@ -247,6 +246,7 @@ vi.mock('@qwen-code/channel-base', async () => {
         chatId: string,
         text: string,
         sessionId: string,
+        sourceLabel?: string,
       ): Promise<void> {
         await (
           real.ChannelBase.prototype as unknown as {
@@ -254,9 +254,16 @@ vi.mock('@qwen-code/channel-base', async () => {
               chatId: string,
               text: string,
               sessionId: string,
+              sourceLabel?: string,
             ): Promise<void>;
           }
-        ).deliverBackgroundReply.call(this, chatId, text, sessionId);
+        ).deliverBackgroundReply.call(
+          this,
+          chatId,
+          text,
+          sessionId,
+          sourceLabel,
+        );
       }
       protected supportsProactiveTarget(target: SessionTarget): boolean {
         return target.threadId === undefined;
@@ -756,7 +763,6 @@ describe('turn-scoped output modes', () => {
     },
   );
 });
-
 it('rejects a non-boolean useConnectionManager value', () => {
   expect(() => createChannel({ useConnectionManager: 'false' })).toThrow(
     'useConnectionManager must be a boolean',
@@ -6252,10 +6258,8 @@ describe('DingtalkChannel quoted media', () => {
     ).onMessage(downstream);
   }
 
-  it('keeps user-authored DingTalk text behind the configured prefix', async () => {
-    // The mirror of the media exemption: text the user typed must never be
-    // exempted, or the configured prefix is defeated for the whole adapter.
-    const channel = createChannel({ messagePrefix: '/review' });
+  it('preserves user-authored DingTalk text without marking it as synthetic', async () => {
+    const channel = createChannel();
 
     sendDirectText(channel, '/review inspect this');
 
@@ -6265,12 +6269,11 @@ describe('DingtalkChannel quoted media', () => {
     const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
     expect(envelope.text).toBe('/review inspect this');
     expect(envelope.syntheticText).toBeUndefined();
-    expect(envelope.bypassMessagePrefix).toBeUndefined();
   });
 
-  it('exempts a captionless DingTalk media message from the prefix', async () => {
+  it('marks captionless DingTalk media text as synthetic', async () => {
     mockMediaDownload('image/png', new Uint8Array([1, 2, 3]));
-    const channel = createChannel({ messagePrefix: '/review' });
+    const channel = createChannel();
 
     sendDirectMedia(channel, 'picture', { downloadCode: 'direct-picture' });
 
@@ -6281,8 +6284,8 @@ describe('DingtalkChannel quoted media', () => {
     expect(envelope.syntheticText).toBe(true);
   });
 
-  it('marks readable chat records as user text and exempts only the empty placeholder', async () => {
-    const readable = createChannel({ messagePrefix: '/review' });
+  it('marks readable chat records as user text and only the empty placeholder as synthetic', async () => {
+    const readable = createChannel();
     sendDirectMedia(readable, 'chatRecord', {
       chatRecord: [{ senderName: 'Alice', content: 'inspect production' }],
     });
@@ -6294,7 +6297,7 @@ describe('DingtalkChannel quoted media', () => {
       .calls[0]![0];
     expect(readableEnvelope.syntheticText).toBeUndefined();
 
-    const empty = createChannel({ messagePrefix: '/review' });
+    const empty = createChannel();
     sendDirectMedia(empty, 'chatRecord', {});
 
     await vi.waitFor(() => {
@@ -6308,24 +6311,21 @@ describe('DingtalkChannel quoted media', () => {
   it.each([
     ['an empty rich-text message', 'richText', { richText: [] }],
     ['a picture without a download code', 'picture', {}],
-  ])(
-    'does not exempt %s from the configured prefix',
-    async (_label, msgtype, content) => {
-      const channel = createChannel({ messagePrefix: '/review' });
+  ])('does not mark %s as synthetic', async (_label, msgtype, content) => {
+    const channel = createChannel();
 
-      sendDirectMedia(channel, msgtype, content);
+    sendDirectMedia(channel, msgtype, content);
 
-      await vi.waitFor(() => {
-        expect(channel.handleInbound).toHaveBeenCalledOnce();
-      });
-      const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
-      expect(envelope.syntheticText).toBeUndefined();
-    },
-  );
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(envelope.syntheticText).toBeUndefined();
+  });
 
   it.each([
     {
-      label: 'a transcribed voice message stays gated',
+      label: 'a transcribed voice message stays user-authored',
       content: {
         downloadCode: 'direct-audio',
         recognition: 'please review the build failure',
@@ -6340,26 +6340,23 @@ describe('DingtalkChannel quoted media', () => {
       text: '',
       synthetic: true,
     },
-  ])(
-    'under a configured prefix, $label',
-    async ({ content, text, synthetic }) => {
-      // A transcript is the user's own words, so it carries the prefix like
-      // any other message; only the `(audio)` placeholder is adapter text.
-      mockMediaDownload('audio/amr', new Uint8Array([1, 2, 3]));
-      const channel = createChannel({ messagePrefix: '/review' });
+  ])('$label', async ({ content, text, synthetic }) => {
+    // A transcript is the user's own words; only the `(audio)` placeholder
+    // is adapter-generated text.
+    mockMediaDownload('audio/amr', new Uint8Array([1, 2, 3]));
+    const channel = createChannel();
 
-      sendDirectMedia(channel, 'audio', content);
+    sendDirectMedia(channel, 'audio', content);
 
-      await vi.waitFor(() => {
-        expect(channel.handleInbound).toHaveBeenCalledOnce();
-      });
-      const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
-      const filePath = envelope.attachments?.[0]?.filePath;
-      if (filePath) tempDirs.add(dirname(filePath));
-      expect(envelope.text).toBe(text);
-      expect(envelope.syntheticText).toBe(synthetic);
-    },
-  );
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    const filePath = envelope.attachments?.[0]?.filePath;
+    if (filePath) tempDirs.add(dirname(filePath));
+    expect(envelope.text).toBe(text);
+    expect(envelope.syntheticText).toBe(synthetic);
+  });
 
   it('downloads every picture in one richText callback', async () => {
     const downloadCodes: string[] = [];
@@ -8788,6 +8785,35 @@ describe('DingtalkChannel outbound file delivery', () => {
     expect(bodies[1]!.markdown.text).toBe('Background notification');
   });
 
+  it('preserves the resolved source label on a DM background reply', async () => {
+    const channel = createChannel({ interactiveCards: { enabled: false } });
+    const target: SessionTarget = {
+      channelName: 'test-dingtalk',
+      senderId: 'user-1',
+      chatId: 'cid123',
+      isGroup: false,
+    };
+    seedWebhook(channel, target.chatId);
+    seedSessionTarget(channel, 'session-1', target);
+    vi.spyOn(
+      channel as unknown as {
+        resolveBackgroundResponseDelivery(
+          sessionId: string,
+        ): Promise<{ target: SessionTarget; sourceLabel?: string }>;
+      },
+      'resolveBackgroundResponseDelivery',
+    ).mockResolvedValue({ target, sourceLabel: '[review]' });
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+
+    await channel.dispatchBackgroundResponse('session-1', 'Review complete.');
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const body = JSON.parse(String(fetchSpy.mock.calls[0]![1]?.body));
+    expect(body.markdown.text).toBe('\\[review\\]\n\nReview complete.');
+  });
+
   it('delivers group background responses proactively', async () => {
     const channel = createChannel({ interactiveCards: { enabled: false } });
     seedWebhook(channel, 'cid123');
@@ -8914,15 +8940,18 @@ describe('DingtalkChannel outbound file delivery', () => {
       'First result.',
       context,
     );
+    expect(pushProactive).not.toHaveBeenCalled();
     await channel.dispatchBackgroundResponse(
       'session-1',
       'Second result.',
       context,
     );
+    expect(pushProactive).not.toHaveBeenCalled();
     await channel.dispatchBackgroundResponse('session-1', '', {
       ...context,
       turnComplete: true,
     });
+    expect(pushProactive).toHaveBeenCalledOnce();
     await channel.dispatchBackgroundResponse(
       'session-1',
       'Transitional result.',
@@ -12351,7 +12380,6 @@ describe('DingtalkChannel outbound file delivery', () => {
       vi.useRealTimers();
     }
   });
-
   it('feeds status presentation only projected chunks and final text', async () => {
     const channel = createChannel();
     const projected: string[] = [];
@@ -13076,7 +13104,6 @@ describe('DingtalkChannel proactive send', () => {
       vi.useRealTimers();
     }
   });
-
   it('stops at the first failed chunk', async () => {
     const channel = proactive(createChannel());
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);

@@ -860,7 +860,7 @@ describe('channel registry', () => {
     );
     for (const type of ['dingtalk', 'wecom', 'feishu'] as const) {
       const fields = catalog.find((entry) => entry.type === type)?.fields;
-      expect(fields).toContainEqual(
+      expect(fields).not.toContainEqual(
         expect.objectContaining({
           key: 'messagePrefix',
           kind: 'string',
@@ -901,7 +901,7 @@ describe('channel registry', () => {
     }
     for (const type of ['github', 'gitlab'] as const) {
       const fields = catalog.find((entry) => entry.type === type)?.fields;
-      expect(fields).toContainEqual(
+      expect(fields).not.toContainEqual(
         expect.objectContaining({
           key: 'messagePrefix',
           kind: 'string',

@@ -753,31 +753,34 @@ describe('ChannelBase', () => {
       },
     );
 
-    it('filters and strips configured message prefixes before dispatch', async () => {
-      const ch = createChannel({ messagePrefix: '/review' });
+    it.each(['hello', '/review /new', '@Qwen /review inspect this'])(
+      'preserves %s when an old config still contains messagePrefix',
+      async (text) => {
+        const legacyConfig = { ...defaultConfig(), messagePrefix: '/review' };
+        const ch = createChannel(legacyConfig);
 
-      await ch.handleInbound(envelope({ text: 'hello' }));
-      await ch.handleInbound(envelope({ text: '@Qwen /review inspect this' }));
+        await ch.handleInbound(envelope({ text }));
 
-      expect(bridge.prompt).toHaveBeenCalledTimes(1);
-      expect(bridge.prompt).toHaveBeenCalledWith(
-        expect.any(String),
-        'inspect this',
-        expect.any(Object),
-      );
-    });
+        expect(bridge.prompt).toHaveBeenCalledWith(
+          expect.any(String),
+          text,
+          expect.any(Object),
+        );
+        expect(bridge.discardSession).not.toHaveBeenCalled();
+      },
+    );
 
-    it('checks a prepared envelope once and rejects before preparation', async () => {
-      const ch = createChannel({ messagePrefix: '/review' });
+    it('rejects disallowed groups before preparing media', async () => {
+      const ch = createChannel();
       const prepare = vi.fn(async () => {});
-      const rejected = envelope({ text: 'hello' });
+      const rejected = envelope({ isGroup: true });
 
       await ch.handlePreparedInbound(rejected, prepare);
       await ch.handlePreparedInbound(rejected, prepare);
       expect(prepare).not.toHaveBeenCalled();
 
       await ch.handlePreparedInbound(
-        envelope({ text: '/review inspect this' }),
+        envelope({ text: 'inspect this' }),
         prepare,
       );
       expect(prepare).toHaveBeenCalledTimes(1);
@@ -788,23 +791,22 @@ describe('ChannelBase', () => {
       );
     });
 
-    it('documents the prefix on shared command replies', async () => {
-      const ch = createChannel({ messagePrefix: '/review' });
+    it('documents direct shared commands', async () => {
+      const ch = createChannel();
 
-      await ch.handleInbound(envelope({ text: '/review /help' }));
+      await ch.handleInbound(envelope({ text: '/help' }));
 
-      expect(ch.sent[0]?.text).toContain('/review /help — Show this help');
+      expect(ch.sent[0]?.text).toContain('/help — Show this help');
       expect(ch.sent[0]?.text).toContain(
-        '/review /approve [request-id] — Approve a pending permission request',
+        '/approve [request-id] — Approve a pending permission request',
       );
     });
 
-    it('keeps permission and shared-clear instructions usable with a prefix', async () => {
+    it('keeps permission and shared-clear instructions directly usable', async () => {
       const ch = createChannel({
-        messagePrefix: '/review',
         sessionScope: 'single',
       });
-      await ch.handleInbound(envelope({ text: '/review start' }));
+      await ch.handleInbound(envelope({ text: 'start' }));
       ch.sent = [];
       for (const requestId of ['req-1', 'req-2']) {
         await ch.dispatchPermissionRequest({
@@ -821,74 +823,27 @@ describe('ChannelBase', () => {
       }
       expect(ch.sent).toHaveLength(2);
 
-      expect(ch.sent[0]?.text).toContain('/review /approve');
-      expect(ch.sent[0]?.text).toContain('/review /deny');
+      expect(ch.sent[0]?.text).toContain('/approve');
+      expect(ch.sent[0]?.text).toContain('/deny');
 
       ch.sent = [];
-      await ch.handleInbound(envelope({ text: '/review /approve' }));
-      expect(ch.sent[0]?.text).toContain('/review /approve <request-id>');
+      await ch.handleInbound(envelope({ text: '/approve' }));
+      expect(ch.sent[0]?.text).toContain('/approve <request-id>');
 
       ch.sent = [];
-      await ch.handleInbound(envelope({ text: '/review /clear' }));
-      expect(ch.sent[0]?.text).toContain('/review /clear confirm');
+      await ch.handleInbound(envelope({ text: '/clear' }));
+      expect(ch.sent[0]?.text).toContain('/clear confirm');
     });
 
-    it('logs prefix mismatches for DMs but not ambient group traffic', async () => {
+    it('offers pairing on first contact with ordinary text', async () => {
       const ch = createChannel({
-        messagePrefix: '/review',
-        groupPolicy: 'open',
-      });
-      const writeSpy = vi
-        .spyOn(process.stderr, 'write')
-        .mockImplementation(() => true);
-
-      await ch.handleInbound(
-        envelope({
-          text: 'ambient',
-          isGroup: true,
-          isMentioned: false,
-          isReplyToBot: false,
-        }),
-      );
-      expect(
-        writeSpy.mock.calls.some(([message]) =>
-          String(message).includes('message_prefix_mismatch'),
-        ),
-      ).toBe(false);
-
-      await ch.handleInbound(envelope({ text: 'direct' }));
-      expect(
-        writeSpy.mock.calls.some(([message]) =>
-          String(message).includes('message_prefix_mismatch'),
-        ),
-      ).toBe(true);
-    });
-
-    it('requires the prefix on a pairing first contact too', async () => {
-      // Deliberate ordering: the prefix gate runs ahead of the pairing
-      // gates. A pairing code is a reply, and replying to every unprefixed
-      // message is exactly the traffic the prefix suppresses.
-      const ch = createChannel({
-        messagePrefix: '/review',
         senderPolicy: 'pairing',
         allowedUsers: [],
       });
 
       await ch.handleInbound(envelope({ text: 'hello' }));
-      expect(ch.sent).toEqual([]);
-
-      await ch.handleInbound(envelope({ text: '/review hello' }));
       expect(ch.sent[0]?.text).toContain('pairing code');
-    });
-
-    it('allows explicitly marked system envelopes through', async () => {
-      const ch = createChannel({ messagePrefix: '/review' });
-
-      await ch.handleInbound(
-        envelope({ text: 'system event', bypassMessagePrefix: true }),
-      );
-
-      expect(bridge.prompt).toHaveBeenCalled();
+      expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
     it('silently drops group messages when groupPolicy=disabled', async () => {
@@ -2617,11 +2572,11 @@ describe('ChannelBase', () => {
     });
 
     it('requires card-presented questions to be submitted or denied', async () => {
-      const ch = createChannel({ messagePrefix: '/review' });
+      const ch = createChannel();
       ch.userInputPresentationResult = { kind: 'presented' };
       const active = await startActiveSession(ch, {
         senderId: 'owner-1',
-        text: '/review run tests',
+        text: 'run tests',
       });
       emitUserQuestion(active.sessionId, 'req-card-command');
       await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
@@ -2631,7 +2586,7 @@ describe('ChannelBase', () => {
       await ch.handleInbound(
         envelope({
           senderId: 'owner-1',
-          text: '/review /approve req-card-command',
+          text: '/approve req-card-command',
         }),
       );
 
@@ -2639,12 +2594,12 @@ describe('ChannelBase', () => {
       expect(ch.sent.at(-1)?.text).toContain(
         'Submit this question through its interactive card',
       );
-      expect(ch.sent.at(-1)?.text).toContain('/review /deny [request-id]');
+      expect(ch.sent.at(-1)?.text).toContain('/deny [request-id]');
 
       await ch.handleInbound(
         envelope({
           senderId: 'owner-1',
-          text: '/review /deny req-card-command',
+          text: '/deny req-card-command',
         }),
       );
 
