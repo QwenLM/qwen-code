@@ -62,12 +62,14 @@ npm run bundle     # Bundle dist/ into a single dist/cli.js via esbuild
 ### Development
 
 ```bash
-npm run dev        # Run CLI from TypeScript source (no manual build needed)
+npm run dev        # Run CLI from TypeScript source
 ```
 
 Runs the CLI via `tsx` with `DEV=true`. Changes to `packages/core` or
-`packages/cli` are reflected immediately without rebuilding. Each launch
-automatically builds and stages the Browser Use runtime from its current source.
+`packages/cli` are reflected immediately without rebuilding. Browser Use reuses
+its built runtime, like other compiled workspace dependencies. After editing
+Browser Use, run `npm run build --workspace=@qwen-code/browser-use` to rebuild
+and stage its runtime for dev. Normal `npm install` prepares it automatically.
 
 ### Unit Testing
 

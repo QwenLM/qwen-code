@@ -100,57 +100,19 @@ describe('scripts/dev.js launcher', () => {
     expect(options).toEqual(expect.objectContaining({ shell: false }));
   });
 
-  it('builds and stages current browser-use source before launching the CLI', async () => {
-    await import('../dev.js?browser-use');
+  it.each(['--version', '--help'])(
+    'launches %s without building or staging Browser Use',
+    async (flag) => {
+      process.argv = ['node', 'scripts/dev.js', flag];
 
-    expect(execSyncMock).toHaveBeenCalledWith(
-      'npm run build --workspace=@qwen-code/browser-use',
-      {
-        cwd: fileURLToPath(new URL('../../', import.meta.url)).replace(
-          /[/\\]$/,
-          '',
-        ),
-        stdio: ['ignore', 2, 2],
-      },
-    );
-    expect(execSyncMock.mock.invocationCallOrder[0]).toBeLessThan(
-      copyBrowserUseAssetsMock.mock.invocationCallOrder[0],
-    );
-    expect(copyBrowserUseAssetsMock).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.stringMatching(
-        /packages[/\\]core[/\\]src[/\\]skills[/\\]bundled[/\\]browser-use$/,
-      ),
-    );
-    expect(copyBrowserUseAssetsMock.mock.invocationCallOrder[0]).toBeLessThan(
-      spawnMock.mock.invocationCallOrder[0],
-    );
-  });
+      await import('../dev.js?browser-use');
 
-  it('does not stage stale assets or launch when the browser-use build fails', async () => {
-    execSyncMock.mockImplementationOnce(() => {
-      throw new Error('browser-use build failed');
-    });
-
-    await expect(import('../dev.js?browser-use-build-failure')).rejects.toThrow(
-      'browser-use build failed',
-    );
-    expect(copyBrowserUseAssetsMock).not.toHaveBeenCalled();
-    expect(spawnMock).not.toHaveBeenCalled();
-  });
-
-  it('does not launch with missing browser-use runtime assets', async () => {
-    copyBrowserUseAssetsMock.mockImplementationOnce(() => {
-      throw new Error(
-        'Run "npm run build --workspace=@qwen-code/browser-use" first.',
-      );
-    });
-
-    await expect(import('../dev.js?missing-browser-use')).rejects.toThrow(
-      'npm run build --workspace=@qwen-code/browser-use',
-    );
-    expect(spawnMock).not.toHaveBeenCalled();
-  });
+      expect(execSyncMock).not.toHaveBeenCalled();
+      expect(copyBrowserUseAssetsMock).not.toHaveBeenCalled();
+      expect(spawnMock).toHaveBeenCalledOnce();
+      expect(spawnMock.mock.calls[0][1]).toContain(flag);
+    },
+  );
 
   it('keeps shell fallback for Windows tsx.cmd resolution', async () => {
     platformMock.mockReturnValue('win32');

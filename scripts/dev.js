@@ -8,14 +8,14 @@
 /**
  * Development entry point for Qwen Code CLI.
  *
- * Runs the CLI from TypeScript source, automatically building Browser Use assets.
+ * Runs the CLI from TypeScript source with prebuilt workspace dependencies.
  * Changes to packages/core or packages/cli are reflected immediately.
  *
  * Usage: npm run dev -- [args]
  * Example: npm run dev -- help
  */
 
-import { execSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
@@ -28,22 +28,11 @@ import {
   readFileSync,
 } from 'node:fs';
 import { tmpdir, platform } from 'node:os';
-import { copyBrowserUseAssets } from './copy-browser-use-assets.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const cliPackageDir = join(root, 'packages', 'cli');
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
-
-execSync('npm run build --workspace=@qwen-code/browser-use', {
-  cwd: root,
-  // Keep build output off stdout for commands that return JSON.
-  stdio: ['ignore', 2, 2],
-});
-copyBrowserUseAssets(
-  root,
-  join(root, 'packages', 'core', 'src', 'skills', 'bundled', 'browser-use'),
-);
 
 // Ensure qc-helper bundled skill can find user docs in dev mode.
 // In dev, import.meta.url resolves to the source tree, so the bundled skill

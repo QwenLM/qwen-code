@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export function copyBrowserUseAssets(root, skillDir) {
   const browserUseDir = path.join(root, 'packages', 'browser-use');
@@ -57,5 +58,17 @@ export function copyBrowserUseAssets(root, skillDir) {
     path.dirname(playwrightManifestPath),
     path.join(runtimeDir, 'node_modules', 'playwright-core'),
     { recursive: true },
+  );
+}
+
+if (
+  process.argv[1] &&
+  fs.existsSync(process.argv[1]) &&
+  fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  copyBrowserUseAssets(
+    root,
+    path.join(root, 'packages/core/src/skills/bundled/browser-use'),
   );
 }

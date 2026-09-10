@@ -5,6 +5,7 @@
  */
 
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -137,6 +138,37 @@ describe('browser-use builtin resources', () => {
       ).toThrow('npm run build --workspace=@qwen-code/browser-use');
     },
   );
+
+  it('stages the dev runtime when the copy script runs from another directory', () => {
+    const scriptPath = path.join(root, 'scripts/copy-browser-use-assets.js');
+    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+    fs.copyFileSync(
+      new URL('../copy-browser-use-assets.js', import.meta.url),
+      scriptPath,
+    );
+    write('package.json', '{"type":"module"}\n');
+
+    const result = spawnSync(process.execPath, [scriptPath], {
+      cwd: tmpdir(),
+      encoding: 'utf8',
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    for (const file of runtimeFiles) {
+      expect(
+        fs.readFileSync(path.join(root, skillPath, 'runtime', file), 'utf8'),
+      ).toBe(`// ${file}\n`);
+    }
+    expect(
+      fs.existsSync(
+        path.join(
+          root,
+          skillPath,
+          'runtime/node_modules/playwright-core/LICENSE',
+        ),
+      ),
+    ).toBe(true);
+  });
 
   it('uses the SDK-local pinned Playwright instead of the hoisted version', () => {
     write(
