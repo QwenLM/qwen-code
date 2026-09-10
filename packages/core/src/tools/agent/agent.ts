@@ -562,6 +562,7 @@ export interface ApprovalModeOverrideHandle {
 
 export interface ApprovalModeOverrideOptions {
   persistedCliFlags?: AgentPersistedCliFlags;
+  externalExecutor?: boolean;
 }
 
 function hasOwn(value: object, key: PropertyKey): boolean {
@@ -642,7 +643,14 @@ export async function createApprovalModeOverride(
   mode: ApprovalMode,
   options: ApprovalModeOverrideOptions = {},
 ): Promise<ApprovalModeOverrideHandle> {
-  const { config: override, cleanup } = deriveApprovalModeConfig(base, mode);
+  const { config: override, cleanup } = deriveApprovalModeConfig(base, mode, {
+    hooks: options.externalExecutor
+      ? {
+          acquireAutoApprovalOverride: () => false,
+          releaseAutoApprovalOverride: () => {},
+        }
+      : undefined,
+  });
   try {
     // Session Workflow plan-revision state is session-global on the base
     // Config; without the shim the prototype set/clear would assign it
@@ -3020,6 +3028,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const { config: agentConfig, cleanup } = await createApprovalModeOverride(
         worktreeConfig,
         resolvedApprovalMode,
+        { externalExecutor: subagentConfig.executor !== undefined },
       );
       restoreParentPM = cleanup;
 

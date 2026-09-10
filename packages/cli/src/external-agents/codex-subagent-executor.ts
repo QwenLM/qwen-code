@@ -155,7 +155,13 @@ async function runCodex(
   lines.on('line', (line) => {
     if (terminal && pending.size === 0) return;
     try {
-      const frame = object(JSON.parse(line));
+      let frame: JsonObject;
+      try {
+        frame = object(JSON.parse(line));
+      } catch (error) {
+        if (terminal) return;
+        throw error;
+      }
       if (typeof frame['method'] !== 'string') {
         const reply = pending.get(frame['id'] as number);
         if (!reply) return;
@@ -284,9 +290,13 @@ async function runCodex(
     return answer;
   };
   let completedAnswer: string | undefined;
+  let interruption: CodexInterruption | undefined;
   try {
     completedAnswer = await Promise.race([run(), failure]);
     return completedAnswer;
+  } catch (error) {
+    if (error instanceof CodexInterruption) interruption = error;
+    throw error;
   } finally {
     clearTimeout(initTimer);
     clearTimeout(executionTimer);
@@ -312,6 +322,10 @@ async function runCodex(
             });
           }
         } else if (!isExpectedExternalAgentCleanupExit(error)) {
+          if (interruption) {
+            interruption.message += `\n\nCodex cleanup failed: ${detail}`;
+            throw interruption;
+          }
           throw new Error(
             `Codex cleanup failed: ${detail}` +
               (completedAnswer === undefined

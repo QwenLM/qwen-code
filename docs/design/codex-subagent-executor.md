@@ -69,21 +69,29 @@ require an explicit agent or session auto-edit grant; yolo grants native sandbox
 bypass. A session already in auto-edit or yolo retains precedence over a stricter
 agent definition. Other effective modes fail before startup. Approval requests
 and human input are denied; native tool permissions are not Qwen tool-rule
-enforcement. Qwen and ACP retain their existing permission resolution.
+enforcement. External executor approval overlays retain their resolved mode without
+acquiring or restoring Qwen AUTO rules on the parent PermissionManager. Qwen and
+ACP retain their existing permission resolution; ordinary Qwen subagents retain
+the AUTO rule lifecycle.
 
 Validate the initialization response, ephemeral thread acknowledgment, associated
 thread/turn IDs and successful terminal result. Missing answers, wrong-turn
 results and protocol errors before completion cannot count as success. After a
 terminal notification, freeze notifications and answers while still validating
 any outstanding turn/start reply; trailing output cannot replace the result.
+Ignore malformed top-level output after the terminal notification, including
+while that reply is pending; invalid required reply results still fail.
 Initialization has a 10-second deadline; optional `runConfig.max_time_minutes` bounds execution.
 Already cancelled calls do not start a product. Cancellation, timeout and failure
 release pending requests and await process cleanup before the executor returns.
 After root exit, output draining is limited to 10 seconds. A completed answer
 survives cancellation during cleanup, with the task still marked cancelled.
-Genuine cleanup failures propagate as errors with any validated completed answer
-retained in the error text, except the initial process-tree snapshot race: as in ACP, it reports an unproven-tree diagnostic
-without replacing the task outcome. Cancellation does not undo workspace edits.
+If cancellation or timeout has already settled the run, genuine cleanup failure
+preserves that interruption mode and appends the cleanup error to the final text.
+For other outcomes, genuine cleanup failures propagate as errors with any
+validated completed answer retained in the error text. The initial process-tree
+snapshot race retains its existing exception: as in ACP, it reports an
+unproven-tree diagnostic without replacing the task outcome. Cancellation does not undo workspace edits.
 
 ## Validation and acceptance
 

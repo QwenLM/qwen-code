@@ -6175,6 +6175,11 @@ describe('AgentTool', () => {
     it.each([
       ['codex', ApprovalMode.DEFAULT, undefined, ApprovalMode.DEFAULT],
       ['codex', ApprovalMode.AUTO, undefined, ApprovalMode.AUTO],
+      ['codex', ApprovalMode.DEFAULT, 'auto', ApprovalMode.AUTO],
+      ['codex', ApprovalMode.PLAN, 'auto', ApprovalMode.AUTO],
+      ['acp', ApprovalMode.DEFAULT, 'auto', ApprovalMode.AUTO],
+      [undefined, ApprovalMode.DEFAULT, 'auto', ApprovalMode.AUTO],
+      [undefined, ApprovalMode.AUTO, undefined, ApprovalMode.AUTO],
       ['codex', ApprovalMode.PLAN, undefined, ApprovalMode.PLAN],
       ['codex', ApprovalMode.AUTO_EDIT, undefined, ApprovalMode.AUTO_EDIT],
       ['codex', ApprovalMode.YOLO, undefined, ApprovalMode.YOLO],
@@ -6188,6 +6193,14 @@ describe('AgentTool', () => {
     ] as const)(
       'resolves %s parent=%s override=%s to %s at the child runtime',
       async (kind, parentMode, approvalMode, expectedMode) => {
+        const strip = vi.fn();
+        const restore = vi.fn();
+        Object.assign(config, {
+          getPermissionManager: () => ({
+            stripDangerousRulesForAutoMode: strip,
+            restoreDangerousRules: restore,
+          }),
+        });
         vi.mocked(config.getApprovalMode).mockReturnValue(parentMode);
         Object.assign(config, { getPrePlanMode: () => ApprovalMode.DEFAULT });
         vi.mocked(config.isTrustedFolder).mockReturnValue(true);
@@ -6208,6 +6221,14 @@ describe('AgentTool', () => {
         const childConfig = vi.mocked(mockSubagentManager.createAgentHeadless)
           .mock.calls[0]?.[1];
         expect(childConfig?.getApprovalMode()).toBe(expectedMode);
+        const autoOverrideCount =
+          !kind &&
+          parentMode !== ApprovalMode.AUTO &&
+          expectedMode === ApprovalMode.AUTO
+            ? 1
+            : 0;
+        expect(strip).toHaveBeenCalledTimes(autoOverrideCount);
+        expect(restore).toHaveBeenCalledTimes(autoOverrideCount);
       },
     );
 

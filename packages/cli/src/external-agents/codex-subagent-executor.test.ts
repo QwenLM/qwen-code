@@ -80,6 +80,9 @@ createInterface({input:process.stdin}).on('line', line => {
       finish();
       const trailing = {
         'terminal-blank': '\n',
+        'terminal-before-reply-blank': '\n',
+        'terminal-before-reply-junk': 'junk line\n',
+        'terminal-before-reply-nonobject': 'null\n',
         'terminal-invalid': 'invalid json\n',
         'terminal-request': JSON.stringify({id:101,method:'future/request'}) + '\n',
         'terminal-foreign': JSON.stringify({method:'turn/completed',params:{threadId:'thread',turn:{id:'foreign',status:'completed'}}}) + '\n',
@@ -89,7 +92,7 @@ createInterface({input:process.stdin}).on('line', line => {
       if (scenario === 'terminal-before-reply-notification') notify('item/completed', {
         turnId:'foreign',item:{type:'agentMessage',phase:'final_answer',text:'overwritten'}
       });
-      if (delayedReply) reply(frame.id, {
+      if (delayedReply) reply(frame.id, scenario === 'terminal-before-reply-null-result' ? null : {
         turn:{id:scenario === 'terminal-before-reply-invalid' ? 'foreign' : 'turn'}
       });
       process.stdout.write(batch);
@@ -271,6 +274,9 @@ describe.skipIf(process.platform === 'win32')('Codex subagent executor', () => {
     'terminal-overwrite',
     'terminal-before-reply',
     'terminal-before-reply-notification',
+    'terminal-before-reply-blank',
+    'terminal-before-reply-junk',
+    'terminal-before-reply-nonobject',
   ])(
     'preserves a completed answer with %s output in one batch',
     async (scenario) => {
@@ -324,6 +330,7 @@ describe.skipIf(process.platform === 'win32')('Codex subagent executor', () => {
     ['close', /closed before completion/],
     ['missing-reply', /closed before completion/],
     ['terminal-before-reply-invalid', /another turn/],
+    ['terminal-before-reply-null-result', /invalid protocol object/],
     ['unknown-request', /unsupported interaction/],
   ])('fails %s instead of publishing success', async (scenario, error) => {
     const executor = await create(params(scenario));
@@ -466,6 +473,39 @@ describe.skipIf(process.platform === 'win32')('Codex subagent executor', () => {
       .split('\n\nCompleted Codex answer:\n');
     expect(JSON.parse(answer).task.threadId).toBe('thread');
   });
+
+  it.each([AgentTerminateMode.CANCELLED, AgentTerminateMode.TIMEOUT])(
+    'retains %s with genuine cleanup failure details',
+    async (mode) => {
+      const message = 'process-tree snapshot exceeded 256 processes or depth 8';
+      injectCleanupError(`ACP child pid=1 ${message}`);
+      const options = params('hold');
+      if (mode === AgentTerminateMode.TIMEOUT) {
+        options.runConfig = { max_time_minutes: 0.005 };
+      }
+      const finish = vi.fn();
+      options.eventEmitter!.on(AgentEventType.FINISH, finish);
+      const executor = await create(options);
+      const abort = new AbortController();
+      const execution = executor.execute(context(), abort.signal);
+      if (mode === AgentTerminateMode.CANCELLED) {
+        setTimeout(() => abort.abort(), 200);
+      }
+      await execution;
+      expect(executor.getTerminateMode()).toBe(mode);
+      expect(finish).toHaveBeenCalledWith(
+        expect.objectContaining({ terminateReason: mode }),
+      );
+      expect(executor.getFinalText()).toContain(
+        mode === AgentTerminateMode.CANCELLED
+          ? 'Codex task cancelled.'
+          : 'Codex task exceeded its time limit.',
+      );
+      expect(executor.getFinalText()).toContain(
+        `Codex cleanup failed: ACP child pid=1 ${message}`,
+      );
+    },
+  );
 
   it('bounds output draining when an exited root leaves an open pipe', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'codex-held-pipe-'));
