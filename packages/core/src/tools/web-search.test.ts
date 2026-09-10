@@ -222,6 +222,7 @@ describe('evaluateWebSearchGate', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         modelId: 'qwen3.6-plus',
         apiKeyEnvKey: TEST_ENV_KEY,
         baseUrl: DASHSCOPE_BASE_URL,
@@ -453,6 +454,7 @@ describe('evaluateWebSearchGate', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         modelId: 'qwen3.6-plus',
         apiKeyEnvKey: TEST_ENV_KEY,
         baseUrl: DASHSCOPE_BASE_URL,
@@ -649,6 +651,7 @@ describe('evaluateWebSearchGate auto derivation', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         // Not the primary model id: the search runs on the documented
         // search model at the same endpoint.
         modelId: 'qwen3.8-flash',
