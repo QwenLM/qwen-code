@@ -18,6 +18,7 @@ const observed = vi.hoisted(() => ({
   store: undefined as DaemonHistoryNavigationStore | undefined,
   props: undefined as MessageListProps | undefined,
   collapseRows: false,
+  hideRows: false,
 }));
 vi.mock('../daemon/session/DaemonSessionProvider', () => ({
   useDaemonHistoryNavigationStore: () => observed.store,
@@ -37,7 +38,7 @@ vi.mock('./MessageList', () => ({
       );
       return (
         <div data-web-shell-message-list>
-          {props.messages.flatMap((message) => [
+          {(observed.hideRows ? [] : props.messages).flatMap((message) => [
             <div
               key={message.id}
               data-message-row-key={`msg:${message.id}`}
@@ -72,6 +73,7 @@ afterEach(() => {
   root = undefined;
   container?.remove();
   observed.collapseRows = false;
+  observed.hideRows = false;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -208,9 +210,14 @@ async function setup(
         v: 1,
         sessionId: 'session',
         snapshot: 's',
-        totalTurns: 1,
+        totalTurns: 4,
         start: 0,
-        turns: [{ ordinal: 0, turnId: 'u1', kind: 'prompt', label: 'u1' }],
+        turns: Array.from({ length: 4 }, (_, ordinal) => ({
+          ordinal,
+          turnId: ordinal === 0 ? 'u1' : `turn-${ordinal}`,
+          kind: 'prompt' as const,
+          label: 'u1',
+        })),
       };
     });
   const client: DaemonTurnNavigationClient = {
@@ -281,6 +288,53 @@ async function setup(
 }
 
 describe('TranscriptViewport scroll restoration and fallback', () => {
+  it('waits for virtualized rows before loading and preserving the reading position', async () => {
+    const { click, list, row, getTranscriptPage, settleFrames, render } =
+      await setup();
+    await click('history.openEarlier');
+    settleFrames();
+    list().scrollTop = 170;
+    const targetKey = `msg:${observed.props!.messages[2]!.id}`;
+    const before = row(targetKey).getBoundingClientRect().top;
+    let resolve!: (value: DaemonSessionTranscriptPage) => void;
+    getTranscriptPage.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    observed.hideRows = true;
+    render();
+    await click('history.loadEarlier');
+    expect(getTranscriptPage).toHaveBeenCalledTimes(1);
+    observed.hideRows = false;
+    render();
+    settleFrames();
+    expect(getTranscriptPage).toHaveBeenCalledTimes(2);
+    await act(async () => resolve(page(['old1', 'old2'])));
+    settleFrames();
+    expect(row(targetKey).getBoundingClientRect().top).toBe(before);
+  });
+
+  it('cancels a deferred boundary load when the user interacts again', async () => {
+    const { click, list, getTranscriptPage, settleFrames, render } =
+      await setup();
+    await click('history.openEarlier');
+    settleFrames();
+    observed.hideRows = true;
+    render();
+    await click('history.loadEarlier');
+    act(() =>
+      list().dispatchEvent(new Event('pointerdown', { bubbles: true })),
+    );
+    observed.hideRows = false;
+    render();
+    settleFrames();
+    expect(getTranscriptPage).toHaveBeenCalledTimes(1);
+    await click('history.loadEarlier');
+    expect(getTranscriptPage).toHaveBeenCalledTimes(2);
+  });
+
   it.each(['none', 'wheel', 'pointerdown', 'keydown', 'scroll'] as const)(
     'preserves the reading row through a deferred prepend after %s input',
     async (input) => {
@@ -324,6 +378,32 @@ describe('TranscriptViewport scroll restoration and fallback', () => {
       ).toBe(expected);
     },
   );
+
+  it('captures rows materialized after a boundary request starts before admitting the page', async () => {
+    const { click, list, row, getTranscriptPage, settleFrames, render } =
+      await setup();
+    await click('history.openEarlier');
+    settleFrames();
+    const targetKey = `msg:${observed.props!.messages[0]!.id}`;
+    let resolve!: (value: DaemonSessionTranscriptPage) => void;
+    getTranscriptPage.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    await click('history.loadEarlier');
+    expect(getTranscriptPage).toHaveBeenCalledTimes(2);
+    observed.hideRows = true;
+    render();
+    observed.hideRows = false;
+    render();
+    list().scrollTop += 20;
+    const before = row(targetKey).getBoundingClientRect().top;
+    await act(async () => resolve(page(['old1', 'old2'])));
+    settleFrames();
+    expect(row(targetKey).getBoundingClientRect().top).toBe(before);
+  });
 
   it('restores a collapse row independently of its sibling prompt sharing its source', async () => {
     const { click, list, row, getTranscriptPage, settleFrames } = await setup({

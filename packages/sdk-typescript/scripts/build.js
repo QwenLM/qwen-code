@@ -17,6 +17,10 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import esbuild from 'esbuild';
 import { serveBridgeBinBuildOptions } from './serve-bridge-bin-build-options.js';
+import {
+  assertPeerBundle,
+  assertPeerDeclarations,
+} from './peer-build-assertions.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -220,6 +224,33 @@ await esbuild.build({
   keepNames: false,
   treeShaking: true,
 });
+
+// Opt-in peer subpath (`@qwen-code/sdk/peer`): the cross-session protocol for
+// a program that is not a Qwen Code session. Node-only, so it never joins a
+// browser bundle, and it must stay free of every runtime dependency.
+for (const [format, outfile] of [
+  ['esm', join(rootDir, 'dist', 'peer', 'index.js')],
+  ['cjs', join(rootDir, 'dist', 'peer', 'index.cjs')],
+]) {
+  await esbuild.build({
+    entryPoints: [join(rootDir, 'src', 'peer', 'index.ts')],
+    bundle: true,
+    format,
+    platform: 'node',
+    target: 'node22',
+    outfile,
+    sourcemap: false,
+    minify: true,
+    minifyWhitespace: true,
+    minifyIdentifiers: true,
+    minifySyntax: true,
+    legalComments: 'none',
+    keepNames: false,
+    treeShaking: true,
+  });
+  assertPeerBundle(outfile);
+}
+assertPeerDeclarations(join(rootDir, 'dist', 'peer'));
 
 // Build serve-bridge CLI bin entry. The options — including the absence of a
 // hashbang `banner`, see `serveBridgeBinBuildOptions` — are shared with the

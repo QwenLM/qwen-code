@@ -43,6 +43,7 @@ import {
 } from '@qwen-code/sdk/daemon';
 import { extractHttpStatus, isInvalidClientIdError } from './httpErrors.js';
 import {
+  getPlanExecutionMode,
   mapProviderStatus,
   mapReasoningControls,
   mapSessionContextReasoning,
@@ -344,6 +345,7 @@ export function getConnectionAfterSessionClear(
       delete next.models;
       delete next.currentModel;
       delete next.currentMode;
+      delete next.planExecutionMode;
       delete next.contextWindow;
       delete next.providers;
       delete next.gitBranch;
@@ -602,6 +604,65 @@ export function createDaemonSessionActions({
       error instanceof DaemonPendingPromptLimitError
     );
   }
+
+  const registerAcceptedAttachmentSources = (
+    session: DaemonSessionClient,
+    references: readonly DaemonSessionAttachmentReference[],
+    fileReferences: readonly DaemonSessionAttachmentReference[],
+    files: readonly { name: string }[],
+  ): void => {
+    if (
+      !references.length ||
+      !getConnection().capabilities?.features.includes('session_sources')
+    )
+      return;
+    const sessionId = session.sessionId;
+    const clientId = session.clientId;
+    let remaining = references.map((reference) => ({
+      reference,
+      title:
+        files[fileReferences.indexOf(reference)]?.name ??
+        reference.attachmentId,
+    }));
+    const retry = async (): Promise<void> => {
+      if (sessionRef.current !== session) return;
+      const results = await Promise.allSettled(
+        remaining.map(({ reference: attachment, title }) =>
+          session.client.upsertSessionSource(
+            sessionId,
+            {
+              title,
+              locator: {
+                type: 'attachment',
+                attachmentId: attachment.attachmentId,
+              },
+            },
+            clientId,
+          ),
+        ),
+      );
+      remaining = remaining.filter((_, index) => {
+        const result = results[index];
+        if (result?.status !== 'rejected') return false;
+        const code = getDaemonErrorCode(result.reason);
+        return (
+          code !== 'source_limit_reached' &&
+          code !== 'invalid_source' &&
+          code !== 'source_attachment_not_found'
+        );
+      });
+      if (sessionRef.current !== session || !remaining.length) return;
+      noticeForSession(session)({
+        severity: 'warning',
+        category: 'user_action',
+        code: 'daemon.sources.registration_failed',
+        message: 'Message sent; some source details could not be saved',
+        recoverable: true,
+        sourceRetry: retry,
+      });
+    };
+    void retry().catch(() => {});
+  };
 
   const ignoreStaleNotice: AddDaemonSessionNotice = (notice) => ({
     ...notice,
@@ -1059,8 +1120,13 @@ export function createDaemonSessionActions({
           prompt: uploaded.content,
         };
         options?.onAdmissionStarted?.();
-        if (inputAnnotations) {
-          promptRequest['_meta'] = { inputAnnotations };
+        if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
+          promptRequest['_meta'] = {
+            ...(typeof options?.submittedPrompt === 'string'
+              ? { 'qwen.submittedPrompt': options.submittedPrompt }
+              : {}),
+            ...(inputAnnotations ? { inputAnnotations } : {}),
+          };
         }
         if (options?.retry) {
           promptRequest['retry'] = true;
@@ -1110,6 +1176,12 @@ export function createDaemonSessionActions({
         if (activePromptsRef.current.get(sessionId)?.controller === ctrl) {
           restartEventStream(sessionId);
         }
+        registerAcceptedAttachmentSources(
+          session,
+          uploaded.references,
+          uploaded.fileReferences,
+          displayedFiles,
+        );
         // The prompt is admitted to the session here — signal it before we wait
         // out the (possibly long) turn, so an admission-only caller can proceed.
         options?.onAdmitted?.();
@@ -1220,8 +1292,13 @@ export function createDaemonSessionActions({
       const promptRequest: Record<string, unknown> = {
         prompt: uploaded.content,
       };
-      if (inputAnnotations) {
-        promptRequest['_meta'] = { inputAnnotations };
+      if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
+        promptRequest['_meta'] = {
+          ...(typeof options?.submittedPrompt === 'string'
+            ? { 'qwen.submittedPrompt': options.submittedPrompt }
+            : {}),
+          ...(inputAnnotations ? { inputAnnotations } : {}),
+        };
       }
       if (options?.retry) {
         promptRequest['retry'] = true;
@@ -1292,6 +1369,14 @@ export function createDaemonSessionActions({
             recoverable: true,
           });
         }
+      }
+      registerAcceptedAttachmentSources(
+        session,
+        uploaded.references,
+        uploaded.fileReferences,
+        displayedFiles,
+      );
+      if (options?.signal?.aborted) {
         throw (
           options.signal.reason ?? new DOMException('Aborted', 'AbortError')
         );
@@ -1510,16 +1595,24 @@ export function createDaemonSessionActions({
       );
       try {
         const result = await withActionTimeout(
-          session.client.setSessionApprovalMode(session.sessionId, mode, {
-            persist: opts?.persist,
-            clientId: session.clientId,
-          }),
+          trackSessionConfigMutation(
+            session,
+            session.client.setSessionApprovalMode(session.sessionId, mode, {
+              persist: opts?.persist,
+              clientId: session.clientId,
+              ...(opts?.planMode !== undefined
+                ? { planMode: opts.planMode }
+                : {}),
+            }),
+          ),
           'Set approval mode timed out',
         );
         if (sessionRef.current === session) {
           setConnection((current) => ({
             ...current,
             currentMode: result.mode || mode,
+            planExecutionMode:
+              result.mode === 'plan' ? result.planExecutionMode : undefined,
           }));
         }
         return result;
@@ -2053,11 +2146,15 @@ export function createDaemonSessionActions({
           ) {
             return current;
           }
+          const currentMode = getModeFromSessionContext(context);
           return {
             ...current,
             context,
-            currentMode:
-              getModeFromSessionContext(context) ?? current.currentMode,
+            currentMode: currentMode ?? current.currentMode,
+            planExecutionMode:
+              currentMode !== undefined
+                ? getPlanExecutionMode(context)
+                : current.planExecutionMode,
             currentModel:
               getModelFromSessionContext(context) ?? current.currentModel,
             reasoning: mapSessionContextReasoning(context),
@@ -2760,6 +2857,30 @@ export function createDaemonSessionActions({
       }
     },
 
+    async listSources() {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
+      return withActionTimeout(session.listSources(), 'Load sources timed out');
+    },
+
+    async upsertSource(source) {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
+      return withActionTimeout(
+        session.upsertSource(source),
+        'Add source timed out',
+      );
+    },
+
+    async removeSource(sourceId) {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
+      return withActionTimeout(
+        session.removeSource(sourceId),
+        'Remove source timed out',
+      );
+    },
+
     async loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope> {
       const session = sessionRef.current;
       if (!session) throw new Error('Daemon session is not connected');
@@ -2857,6 +2978,9 @@ export function createDaemonSessionActions({
           sessionId: result.sessionId,
           displayName: result.displayName,
           switchStarted,
+          ...(result.sourceWarnings?.length
+            ? { sourceWarnings: result.sourceWarnings }
+            : {}),
         };
       } catch (error) {
         if (isStaleBranchPointError(error)) {

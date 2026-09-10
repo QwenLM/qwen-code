@@ -465,6 +465,20 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ]);
     });
 
+    it('maps goal_settlement_failed to a warning', () => {
+      const map = createEventMapper();
+      const out = map({
+        type: 'goal_settlement_failed',
+        value: 'The approved Goal could not be started.',
+      } as unknown as AnyEv);
+      expect(out).toEqual([
+        {
+          type: 'warning',
+          text: 'The approved Goal could not be started.',
+        },
+      ]);
+    });
+
     it('maps user_prompt_submit_blocked to reason + original prompt', () => {
       const map = createEventMapper();
       const out = map({
@@ -738,6 +752,16 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
           message: 'working',
         }),
       ).toBe('◌ [2] working');
+    });
+
+    it('renders structured question answers as their display text', () => {
+      expect(
+        renderResultDisplay({
+          type: 'ask_user_question_answers',
+          text: 'Deploy where?\nStaging',
+          answers: [{ question: 'Deploy where?', answer: 'Staging' }],
+        }),
+      ).toBe('Deploy where?\nStaging');
     });
 
     it('renders mcp_app with its fallbackText only', () => {

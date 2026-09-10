@@ -114,6 +114,12 @@ const PROTOCOL_ITEMS: RadioItem[] = [
     value: AuthType.USE_OPENAI,
   },
   {
+    key: AuthType.USE_OPENAI_RESPONSES,
+    label: t('OpenAI Responses'),
+    description: t('OpenAI Responses API — streaming reasoning + tool use'),
+    value: AuthType.USE_OPENAI_RESPONSES,
+  },
+  {
     key: AuthType.USE_ANTHROPIC,
     label: t('Anthropic-compatible'),
     description: t('Anthropic Messages API format'),
