@@ -113,10 +113,6 @@ const mockParseAndFormatApiError = vi.hoisted(() =>
   ),
 );
 const mockLogApiCancel = vi.hoisted(() => vi.fn());
-const mockGetActiveGoal = vi.hoisted(() => vi.fn());
-const mockActiveGoalEquals = vi.hoisted(() => vi.fn());
-const mockSetActiveGoal = vi.hoisted(() => vi.fn());
-const mockClearActiveGoal = vi.hoisted(() => vi.fn());
 const mockRefreshMemoryAfterManagedWrite = vi.hoisted(() => vi.fn());
 const mockRefreshMemoryInstruction = vi.hoisted(() => vi.fn());
 const mockCleanupReviewWorktreeLeases = vi.hoisted(() => vi.fn());
@@ -154,10 +150,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     ApiCancelEvent: MockedApiCancelEvent,
     parseAndFormatApiError: mockParseAndFormatApiError,
     logApiCancel: mockLogApiCancel,
-    getActiveGoal: mockGetActiveGoal,
-    activeGoalEquals: mockActiveGoalEquals,
-    setActiveGoal: mockSetActiveGoal,
-    clearActiveGoal: mockClearActiveGoal,
     runVisionBridge: mockRunVisionBridge,
     refreshMemoryAfterManagedWrite: mockRefreshMemoryAfterManagedWrite,
     refreshMemoryInstruction: mockRefreshMemoryInstruction,
@@ -249,8 +241,6 @@ describe('useLlmStream', () => {
     mockGetActiveInteractionSpan.mockReturnValue(mockInteractionSpan);
     mockRefreshMemoryAfterManagedWrite.mockResolvedValue(false);
     mockRefreshMemoryInstruction.mockResolvedValue(undefined);
-    mockGetActiveGoal.mockReturnValue(undefined);
-    mockActiveGoalEquals.mockReturnValue(false);
     vi.mocked(findLastSafeSplitPoint).mockImplementation(
       (s: string) => s.length,
     );
@@ -7279,18 +7269,6 @@ describe('useLlmStream', () => {
   });
 
   it('drops a queued replacement prompt when a later goal command clears it', async () => {
-    const activeGoal = {
-      condition: 'first',
-      iterations: 0,
-      setAt: 123,
-      tokensAtStart: 0,
-      hookId: 'first-goal-hook',
-    };
-    mockGetActiveGoal
-      .mockReturnValueOnce(undefined)
-      .mockReturnValueOnce(activeGoal)
-      .mockReturnValueOnce(activeGoal)
-      .mockReturnValueOnce(undefined);
     mockHandleSlashCommand
       .mockResolvedValueOnce({
         type: 'submit_prompt',
@@ -19845,55 +19823,16 @@ describe('useLlmStream', () => {
           };
         })(),
       );
-      mockGetActiveGoal
-        .mockReturnValueOnce(undefined)
-        .mockReturnValueOnce(activeGoal);
-      mockActiveGoalEquals.mockReturnValue(false);
-
       const { result } = renderTestHook();
 
       await act(async () => {
         await result.current.submitQuery('continue goal');
       });
 
-      expect(mockSetActiveGoal).not.toHaveBeenCalled();
-      expect(mockClearActiveGoal).not.toHaveBeenCalled();
-    });
-
-    it('skips redundant active_goal store updates', async () => {
-      const activeGoal = {
-        condition: 'finish the refactor',
-        iterations: 1,
-        setAt: 123,
-        tokensAtStart: 456,
-        hookId: 'goal-hook-id',
-        lastReason: 'still missing verification',
-      };
-      mockSendMessageStream.mockReturnValue(
-        (async function* () {
-          yield {
-            type: ServerLlmEventType.ActiveGoal,
-            value: activeGoal,
-          };
-          yield {
-            type: ServerLlmEventType.ActiveGoal,
-            value: null,
-          };
-        })(),
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'goal_status' }),
+        expect.any(Number),
       );
-      mockGetActiveGoal
-        .mockReturnValueOnce(activeGoal)
-        .mockReturnValueOnce(undefined);
-      mockActiveGoalEquals.mockReturnValue(true);
-
-      const { result } = renderTestHook();
-
-      await act(async () => {
-        await result.current.submitQuery('continue goal');
-      });
-
-      expect(mockSetActiveGoal).not.toHaveBeenCalled();
-      expect(mockClearActiveGoal).not.toHaveBeenCalled();
     });
 
     it('should handle StopHookLoop event and add stop hook loop history item', async () => {
@@ -19943,14 +19882,6 @@ describe('useLlmStream', () => {
       const recordSlashCommand = vi.fn();
       mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
         recordSlashCommand,
-      });
-      mockGetActiveGoal.mockReturnValue({
-        condition: 'finish the refactor',
-        iterations: 7,
-        setAt: 100,
-        tokensAtStart: 0,
-        hookId: 'goal-hook',
-        lastReason: 'not enough evidence yet',
       });
       mockSendMessageStream.mockReturnValue(
         (async function* () {
@@ -20065,6 +19996,37 @@ describe('useLlmStream', () => {
   });
 
   describe('HookSystemMessage Event', () => {
+    it('shows Goal settlement failures as warnings without Stop attribution', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.GoalSettlementFailed,
+            value: 'The approved Goal could not be started.',
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('set a goal');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'warning',
+            text: 'The approved Goal could not be started.',
+          }),
+          expect.any(Number),
+        );
+      });
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'stop_hook_system_message' }),
+        expect.any(Number),
+      );
+    });
+
     it('commits staged inline content and restarts after a displayed Goal state', async () => {
       const image = {
         data: 'aW1hZ2U=',

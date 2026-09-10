@@ -27,6 +27,7 @@ import {
   buildPermissionCheckContext,
   evaluatePermissionRules,
 } from './permission-helpers.js';
+import { parseRule } from '../permissions/rule-parser.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import type { ToolCallConfirmationDetails } from '../tools/tools.js';
 
@@ -107,11 +108,44 @@ export async function evaluatePermissionFlow(
       const ruleInfo = matchingRule
         ? ` Matching deny rule: "${matchingRule}".`
         : '';
-      result.denyMessage = `Tool "${toolName}" is denied by permission rules.${ruleInfo}`;
+      // A specifier-scoped deny (e.g. `Bash(npm view *)`) blocks only this
+      // invocation, not the whole tool. Say so explicitly so the model does
+      // not abandon the tool entirely (issue #11405). Tool-wide catch-alls
+      // (`Bash(*)`, `Read(//**)`, `WebFetch(*)`) block the tool entirely and
+      // must NOT get this reassurance.
+      const stillPermitted =
+        matchingRule && !isToolWideDenyRule(matchingRule)
+          ? ' Other uses of this tool are still permitted.'
+          : '';
+      result.denyMessage = `This "${toolName}" invocation was denied by permission rules.${ruleInfo}${stillPermitted}`;
     }
   }
 
   return result;
+}
+
+/**
+ * Whether a raw deny-rule string blocks the tool as a whole (tool-wide)
+ * rather than a single scoped invocation.
+ *
+ * Tool-wide forms are the bare tool name (`Bash`), an empty specifier
+ * (`Bash()`), the command/domain catch-all (`Bash(*)`, `WebFetch(*)`), and
+ * the filesystem-root path catch-all (`Read(//**)`). A rule like
+ * `Bash(npm view *)` is scoped and returns false.
+ */
+function isToolWideDenyRule(raw: string): boolean {
+  const rule = parseRule(raw);
+  if (!rule.specifier) {
+    // No specifier blocks the whole tool; a param-matcher-only rule
+    // (e.g. `Agent(model:opus)`) is still scoped by its matchers.
+    return !rule.toolParamMatchers?.length;
+  }
+  if (rule.specifierKind === 'path') {
+    // `//**` resolves to the filesystem root (`/**`) and matches every path.
+    return rule.specifier === '//**';
+  }
+  // `*` is the documented catch-all for command and domain specifiers.
+  return rule.specifier === '*';
 }
 
 /**
