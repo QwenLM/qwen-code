@@ -17,12 +17,16 @@ shape, a value that does not is dropped, never rejected with an error.
 A running session publishes one record:
 
 ```
-$QWEN_HOME/sessions/<pid>.json        (directory 0700, file 0600)
+$QWEN_HOME/sessions/<pid>.json            (directory 0700, file 0600)
+$QWEN_HOME/sessions/<pid>-<8 hex>.json    (a process hosting several sessions)
 ```
 
-`$QWEN_HOME` defaults to `~/.qwen`. The file name is the writer's PID
-and nothing else; a record whose `pid` field disagrees with its file
-name is ignored.
+`$QWEN_HOME` defaults to `~/.qwen`. The file name is keyed by the
+writer's PID — either the bare PID, or the PID, a dash, and eight
+lowercase hex characters minted at registration (see "Several records
+from one process" below). A record whose `pid` field disagrees with the
+PID prefix of its file name — compared in canonical decimal form, so a
+zero-padded name agrees with nothing — is ignored.
 
 ```json
 {
@@ -44,7 +48,7 @@ name is ignored.
 | Field           | Meaning                                                                                                                                                                                                                                                                                               |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `schemaVersion` | Always `1`. A reader skips a record with a higher version and never deletes it.                                                                                                                                                                                                                       |
-| `pid`           | The writer's process id. Must equal the file name.                                                                                                                                                                                                                                                    |
+| `pid`           | The writer's process id. Must equal the PID the file name is keyed by: the whole name for the bare form, the digits before the `-<8 hex>` suffix for the minted one.                                                                                                                                  |
 | `procStart`     | `<boot id>:<process start ticks>` on Linux (`/proc/sys/kernel/random/boot_id` and field 22 of `/proc/<pid>/stat`); `null` elsewhere. Guards against PID reuse, and against records written on another machine that shares this home directory.                                                        |
 | `pidNs`         | Inode number of `/proc/self/ns/pid` on Linux; `null` elsewhere. A reader only lists and sweeps records from its own namespace.                                                                                                                                                                        |
 | `sessionId`     | The session's id. `/clear` and `/resume` swap it under the same PID, so re-read the record before each send.                                                                                                                                                                                          |
@@ -80,8 +84,9 @@ including tokens: being able to discover a session and being able to
 authenticate to it are one capability by design. Do not print
 `ipcToken` anywhere a model or a log can see it.
 
-**Liveness.** A record is live when all of these hold: the file name
-matches `pid`; `pidNs` equals the reader's; the boot id inside
+**Liveness.** A record is live when all of these hold: the file name is
+`<pid>.json` or `<pid>-<8 hex>.json` and its PID prefix equals `pid`;
+`pidNs` equals the reader's; the boot id inside
 `procStart` equals the reader's (or `procStart` is `null`); and the PID
 is alive with the same start ticks. A live record with an `ipcPath`
 still has to be dialed before it is advertised as reachable — a socket
@@ -91,6 +96,21 @@ file outlives a crash.
 sessions may share a `name`; the address grammar a sender types is
 `name`, `name [ref]`, `[ref]` or the bare `ref`, and an ambiguous
 `name` is an error rather than a guess.
+
+**Several records from one process.** Any `qwen --acp` child — spawned
+by the daemon, or driven directly by an editor or another client —
+writes one record per session, named `<pid>-<8 hex>.json`, from its
+first session on. The suffix is minted at
+registration and never changes; a session id swapped underneath is a
+patch to the record, not a rename of it. Every one of them carries the
+same `ipcPath`, because the process binds one inbox for all its sessions
+and tells them apart by the `toSessionId` on each frame — so **always
+send `toSessionId`**: a frame without one that reaches such a process is
+answered `misaddressed`, since there is no single session it could have
+meant. Liveness, sweeping and the namespace and boot guards read the
+record exactly as they do for the bare name; only the PID/filename
+agreement check differs, and only in comparing `pid` against the digits
+before the suffix rather than the whole name.
 
 ## 2. The inbox socket
 
@@ -285,7 +305,16 @@ that look like the envelope are defanged inside `content`.
   renamed itself, are both still to come.
 - **Same-name reporting.** `qwen sessions ps` and `list_agents` do not
   flag records that still collide.
-- **Daemon-managed sessions.** Only the interactive UI registers today, so
-  a session `qwen serve` drives is not in the registry, cannot be
-  addressed, and cannot send. The `serve` and `headless` kinds are
-  reserved for it.
+- **Inbound messages to ACP-driven sessions.** A session a program
+  drives over ACP — daemon-spawned or not — registers and can send, but
+  answers `refused` to anything sent to it: a hold is a question put to
+  a person, and nobody is watching a hold list on its behalf. Where a
+  held message should surface for those sessions — its client, or the
+  daemon's own API — is still open.
+- **Sessions behind one inbox are one sender to every peer.** A process
+  hosting several sessions sends with one `from` address, so a
+  receiver's per-sender budget and duplicate window (§6) are shared by
+  all of that process's sessions at once: a busy sibling can spend
+  another's allowance, and a body just sent to one cannot be repeated
+  to its sibling inside the window. Per-session accounting would have
+  to trust a frame-asserted field, which §3's trust model rules out.
