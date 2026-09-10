@@ -73,7 +73,10 @@ import type {
 } from './types.js';
 import { AsyncEventQueue } from './async-event-queue.js';
 
-const INIT_TIMEOUT_MS = 10_000;
+// Widened from 10s: under macOS runner load the ACP child's initialize
+// handshake missed the old budget and reddened the qwen-live E2E leg
+// (#11088). Matches the E2E harness's 30s daemon-boot budget.
+const INIT_TIMEOUT_MS = 30_000;
 const KILL_GRACE_MS = 2_000;
 const MAX_PENDING_PROMPTS = 8;
 const DRAIN_BATCH = 10;
@@ -570,7 +573,7 @@ export class AcpAdaptor implements BackendAdaptor {
       exited = spawned.exitPromise;
     }
     // Race the handshake against both a timeout and child exit — a
-    // crash-on-boot must fail in milliseconds, not after 10s.
+    // crash-on-boot must fail in milliseconds, not after the deadline.
     const racers: Array<Promise<unknown>> = [
       conn.initialize({
         protocolVersion: PROTOCOL_VERSION,
