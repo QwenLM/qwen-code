@@ -68,9 +68,11 @@ import type {
 } from '../../agents/workflow-run-registry.js';
 import { buildFailureLines } from '../../agents/workflow-failure-lines.js';
 import {
-  isWorkflowAuthoringSkillAvailable,
   readWorkflowAuthoringReference,
+  resolveWorkflowAuthoringSurface,
   WORKFLOW_AUTHORING_SKILL_NAME,
+  type WorkflowAuthoringReference,
+  type WorkflowAuthoringSurface,
 } from '../../skills/workflow-authoring-skill.js';
 import {
   buildResumeCall,
@@ -141,11 +143,11 @@ const WORKFLOW_PARAM_SCHEMA = {
         '`workflow()`, `args` and `budget`, and cannot import anything. ' +
         'May start with a literal `export const meta = {...}` ' +
         '(stripped before execution). ' +
-        '`Date.now()` and `Math.random()` both throw — a script must be ' +
-        'deterministic for resume. Pass THUNKS to parallel(), not eager ' +
-        'calls: `parallel([() => agent(...)])`, not `parallel([agent(...)])`. ' +
-        'agent() options and orchestration patterns are in the ' +
-        `\`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill.`,
+        '`Math.random()` and all of `Date` (`new Date()`, `Date.now()` ' +
+        'included) throw — a script must be deterministic for resume, so ' +
+        'pass timestamps in via `args` or stamp the result after the run ' +
+        'returns. Pass THUNKS to parallel(), not eager calls: ' +
+        '`parallel([() => agent(...)])`, not `parallel([agent(...)])`.',
     },
     scriptPath: {
       type: 'string',
@@ -203,10 +205,30 @@ class WorkflowToolInvocation extends BaseToolInvocation<
 > {
   private callId?: string;
 
+  /**
+   * The failure hint, when the failing script is one this call authored.
+   *
+   * A saved workflow is the user's file, and the resume advice already tells
+   * the model to copy it before making a run-specific change — "fix the script,
+   * and retry" would contradict that in the same message.
+   */
+  private authoredScriptHint(): string | null {
+    if (!this.authoringHint) return null;
+    return isScriptAuthoredByThisCall(
+      this.config,
+      this.workflowName,
+      this.params.scriptPath,
+    )
+      ? this.authoringHint
+      : null;
+  }
+
   constructor(
     private readonly config: Config,
     private readonly toolOptions: WorkflowToolOptions,
     params: WorkflowParams,
+    /** This session's failure hint, from the tool's recorded description shape. */
+    private readonly authoringHint: string | null,
     private readonly workflowName?: string,
   ) {
     super(params);
@@ -354,6 +376,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         signal,
         toolUseId: this.callId,
         ...(this.workflowName ? { workflowName: this.workflowName } : {}),
+        ...authoringHintOption(this.authoredScriptHint()),
         script: this.params.script,
         scriptPath: this.params.scriptPath,
         args: this.params.args,
@@ -385,11 +408,17 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // orchestration broke" when the actual problem is a typo the model can
       // fix and re-send.
       if (error instanceof WorkflowScriptNotLaunchedError) {
+        // The earliest and most common first-attempt failure, and the one a
+        // model is most likely to hit without having read the reference.
+        // Mirrored into `error.message` for the same reason the run-failure
+        // trailer is: the scheduler surfaces that string.
+        const hint = this.authoredScriptHint();
+        const text = hint ? `${error.message}\n${hint}` : error.message;
         return {
-          llmContent: [{ text: error.message }],
+          llmContent: [{ text }],
           returnDisplay: error.message,
           error: {
-            message: error.message,
+            message: text,
             type: ToolErrorType.INVALID_TOOL_PARAMS,
           },
         };
@@ -510,7 +539,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         this.params.args,
         logs,
         !cancelled,
-        !cancelled,
+        cancelled ? null : this.authoredScriptHint(),
       );
       // T19 (PR #4732 R1): if the orchestrator preserved phases / logs
       // accumulated before the failure, include them in the display so
@@ -594,7 +623,7 @@ function buildRunTrailer(
   args: unknown,
   logs?: string[],
   includeResume = true,
-  authoringHint = false,
+  authoringHint: string | null = null,
 ): string {
   const lines = [
     '--- workflow run ---',
@@ -665,18 +694,11 @@ function buildRunTrailer(
       lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
     }
   }
-  // A script that threw is a script that has to be rewritten, and the model
-  // may well have written it without ever reading the reference — the tool
-  // description only points at it. Say so here rather than letting a second
-  // attempt repeat the first one's mistake. Omitted when the reference is
-  // inlined in the description, where "load the skill" would be wrong advice.
-  if (authoringHint) {
-    lines.push(
-      isWorkflowAuthoringSkillAvailable(config)
-        ? `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill for the script reference if you have not, fix the script, and retry.`
-        : "hint: See the authoring reference in this tool's description, fix the script, and retry.",
-    );
-  }
+  // A script that threw has to be rewritten, and the model may have written
+  // it without reading the reference — the description only points at it. The
+  // caller decides whether this run is one the model authored, and the wording
+  // comes from what this session's description actually holds.
+  if (authoringHint) lines.push(authoringHint);
   const tail = (logs ?? []).slice(-TRAILER_LOG_LINES);
   if (tail.length > 0) {
     lines.push(
@@ -1083,25 +1105,11 @@ function safeStringifyDisplayPayload(payload: unknown): string {
 }
 
 /**
- * Everything the model needs to decide WHETHER to call this tool, and the
- * runtime facts it has to plan around — but not how to write the script.
- *
- * The authoring contract (agent() options, orchestration patterns, resume
- * mechanics, a worked example) lives in the bundled `workflow-authoring`
- * skill instead. It is roughly three times this text and is needed only on
- * the turn that actually writes a script, while a tool description is paid
- * for on every turn of every session. `buildWorkflowToolDescription` inlines
- * it for the builds that cannot reach the skill.
- *
- * Every cap and env knob here is interpolated from the exported runtime
- * constants, so raising a cap moves the model-visible copy at once — there is
- * no prose to hand-sync. The wall-clock cap is the one exception:
- * `DEFAULT_MAX_WALL_CLOCK_MS` is private to `workflow-sandbox.ts`, so
- * "30-minute" is a literal here and has to be edited alongside it. The skill
- * repeats these numbers for the authoring turn and its own test pins them to
- * the same constants.
+ * The half of the description that decides WHETHER to call this tool. Present
+ * in every shape: it is the opt-in rule, and nothing else may displace it from
+ * the front of the text.
  */
-const WORKFLOW_TOOL_DESCRIPTION_BASE = `Execute a workflow script that orchestrates subagents deterministically.
+const WORKFLOW_TOOL_DECISION = `Execute a workflow script that orchestrates subagents deterministically.
 
 **Only on an explicit request**
 
@@ -1117,61 +1125,172 @@ Otherwise do not call it, however well the task would parallelize. Do the work i
 
 **What a workflow is for**
 
-Reach for one to be comprehensive (cover every part of the work in parallel), to be confident (independent perspectives and adversarial checks before an answer is committed to), or to take on scale a single context cannot hold. Parallelism on its own is not a reason; work that is already one short sequence of edits belongs in the main loop.
-
-**Runtime**
-
-\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope); \`scriptPath\` additionally accepts a path inside the generated-scripts root (\`$QWEN_CODE_PROJECT_DIR/workflows/generated\` — the per-project runtime dir, not the project tree), and a path outside those roots is refused. Default \`max(2, min(16, cpus-2))\` agents in flight per run (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. Each subagent attempt is separately capped at ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS} turns (\`${WORKFLOW_SUBAGENT_MAX_TURNS_ENV}\`) and ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES} minutes (\`${WORKFLOW_SUBAGENT_MAX_MINUTES_ENV}\`). \`agent()\` resolves to \`null\` when that admitted agent fails on its own — turn/time caps, model or setup errors, missing structured output, exhausted stall retries — for a bare \`await agent()\` exactly as inside \`parallel()\`/\`pipeline()\`, so check for \`null\` wherever you read a result; run-level rejections no later call could survive (the token budget, the ${DEFAULT_MAX_AGENTS_PER_RUN}-agent cap, cancellation) throw instead. Every run hands back its runId, the script's path on disk (an inline script is persisted, so a resume edits that file rather than re-sending the source) and its journal path; the journal holds one line per agent, so read it before diagnosing an empty or surprising result. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.`;
+Reach for one to be comprehensive (cover every part of the work in parallel), to be confident (independent perspectives and adversarial checks before an answer is committed to), or to take on scale a single context cannot hold. Parallelism on its own is not a reason; work that is already one short sequence of edits belongs in the main loop.`;
 
 /**
- * Sentence that replaces the authoring reference when the model can load it
- * on its own. Names what is in there, so the model can tell whether it needs
- * it for this particular request.
+ * The runtime facts a model needs to plan a run and to read back a result it
+ * did not author. Carried by the pointer and withheld shapes; the inline shape
+ * leaves it out because the reference states all of it in full, and two
+ * copies of every number in one string is how they come to disagree.
+ *
+ * Every cap and env knob with an exported constant is interpolated from it.
+ * Two are literals on both sides: the wall-clock cap
+ * (`DEFAULT_MAX_WALL_CLOCK_MS` is private to `workflow-sandbox.ts`) and the
+ * concurrency window formula, so edit those alongside the runtime.
+ */
+const WORKFLOW_TOOL_RUNTIME = `**Runtime**
+
+\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope); \`scriptPath\` additionally accepts a path inside the generated-scripts root (\`$QWEN_CODE_PROJECT_DIR/workflows/generated\` — the per-project runtime dir, not the project tree), and a path outside those roots is refused. Default \`max(2, min(16, cpus-2))\` agents in flight per run (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. Each subagent attempt is separately capped at ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS} turns (\`${WORKFLOW_SUBAGENT_MAX_TURNS_ENV}\`) and ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES} minutes (\`${WORKFLOW_SUBAGENT_MAX_MINUTES_ENV}\`). \`agent()\` resolves to \`null\` when that admitted agent fails on its own — turn/time caps, model or setup errors, missing structured output, exhausted stall retries — for a bare \`await agent()\` exactly as inside \`parallel()\`/\`pipeline()\`, so check for \`null\` wherever you read a result; run-level rejections no later call could survive (the token budget, the ${DEFAULT_MAX_AGENTS_PER_RUN}-agent cap, cancellation) throw instead. Every run hands back its runId, the script's path on disk (an inline script is persisted, so a resume edits that file rather than re-sending the source) and its journal path; read it before diagnosing an empty or surprising result. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.`;
+
+/**
+ * Replaces the authoring reference when the model can load it on its own.
+ * Names what is in there, so the model can tell whether this request needs it.
  */
 const WORKFLOW_AUTHORING_POINTER = `**Writing the script**
 
 Before writing a script, load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill — the authoring reference: the sandbox contract, agent() options, \`pipeline()\` vs \`parallel()\`, verification and convergence patterns, resume, and a worked example.`;
 
+/** Appended to the pointer when a `tools.eager` allowlist defers the Skill tool. */
+const WORKFLOW_AUTHORING_TOOL_SEARCH_NOTE =
+  ' The Skill tool is deferred in this session: reveal it with ToolSearch first.';
+
 /**
- * The tool description for this session.
- *
- * Two shapes. When the bundled reference is reachable through the Skill tool
- * the description points at it, which is the whole reason the reference was
- * moved out. When it is not — skills disabled, the Skill tool denied, this
- * skill turned off — the reference is inlined instead: a model told to load a
- * skill it cannot reach would be left writing scripts against nothing.
- *
- * Falls back to the pointer if the reference itself cannot be read, on the
- * grounds that a dangling pointer is a recoverable failed call while a
- * description missing both is not recoverable at all.
+ * Leads the inlined reference. The reference is written for sessions that can
+ * load skills, so it names another one (`workflow-creator`); say up front that
+ * such pointers do not apply here.
  */
-export function buildWorkflowToolDescription(config: Config): string {
-  if (isWorkflowAuthoringSkillAvailable(config)) {
-    return `${WORKFLOW_TOOL_DESCRIPTION_BASE}\n\n${WORKFLOW_AUTHORING_POINTER}`;
+const WORKFLOW_AUTHORING_INLINE_NOTE =
+  'Skills cannot be loaded in this session, so the authoring reference follows in full. Where it points at another skill, that skill is not available here either.';
+
+/**
+ * The tool description for a given shape.
+ *
+ * - `pointer` / `pointer-via-tool-search`: decision + runtime + a line naming
+ *   the skill. This is the point of moving the reference out: roughly four
+ *   times this text, needed only on the turn that writes a script.
+ * - `inline`: decision + the reference in full. No route to any skill, so a
+ *   pointer would leave the model writing scripts against nothing.
+ * - `withheld`: decision + runtime. The user turned the reference off; putting
+ *   it back into every request would raise exactly the cost they removed.
+ *
+ * An `inline` request without a readable reference falls back to the pointer:
+ * it is the only remaining text that names the reference at all.
+ */
+export function buildWorkflowToolDescription(
+  surface: WorkflowAuthoringSurface,
+  reference: WorkflowAuthoringReference | null = readWorkflowAuthoringReference(),
+): string {
+  const pointer = `${WORKFLOW_TOOL_DECISION}\n\n${WORKFLOW_TOOL_RUNTIME}\n\n${WORKFLOW_AUTHORING_POINTER}`;
+  switch (surface) {
+    case 'pointer':
+      return pointer;
+    case 'pointer-via-tool-search':
+      return `${pointer}${WORKFLOW_AUTHORING_TOOL_SEARCH_NOTE}`;
+    case 'withheld':
+      return `${WORKFLOW_TOOL_DECISION}\n\n${WORKFLOW_TOOL_RUNTIME}`;
+    case 'inline':
+      return reference
+        ? `${WORKFLOW_TOOL_DECISION}\n\n${WORKFLOW_AUTHORING_INLINE_NOTE}\n\n---\n\n${reference.body.trim()}`
+        : pointer;
+    default:
+      return pointer;
   }
-  const reference = readWorkflowAuthoringReference();
-  return reference
-    ? `${WORKFLOW_TOOL_DESCRIPTION_BASE}\n\n---\n\n${reference.body.trim()}`
-    : `${WORKFLOW_TOOL_DESCRIPTION_BASE}\n\n${WORKFLOW_AUTHORING_POINTER}`;
+}
+
+/**
+ * The parameter schema for a given shape. Only `script` varies: its closing
+ * sentence has to name wherever the rest of the authoring contract actually is
+ * in this session, or the parameter the model is about to fill contradicts the
+ * description beside it.
+ */
+function buildWorkflowParamSchema(surface: WorkflowAuthoringSurface) {
+  const base = WORKFLOW_PARAM_SCHEMA.properties.script.description;
+  const where =
+    surface === 'pointer' || surface === 'pointer-via-tool-search'
+      ? ` agent() options and orchestration patterns are in the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill.`
+      : surface === 'inline'
+        ? " agent() options and orchestration patterns are in the authoring reference in this tool's description."
+        : '';
+  return {
+    ...WORKFLOW_PARAM_SCHEMA,
+    properties: {
+      ...WORKFLOW_PARAM_SCHEMA.properties,
+      script: { type: 'string', description: `${base}${where}` },
+    },
+  };
+}
+
+/**
+ * The failure hint for a given shape, or `null` when there is nowhere to send
+ * the model: a user who withheld the reference asked for it not to come back.
+ */
+function buildWorkflowAuthoringHint(
+  surface: WorkflowAuthoringSurface,
+): string | null {
+  switch (surface) {
+    case 'pointer':
+    case 'pointer-via-tool-search':
+      return `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill for the script reference if you have not, fix the script, and retry.`;
+    case 'inline':
+      return "hint: See the authoring reference in this tool's description, fix the script, and retry.";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Whether the script this call runs is one the model wrote: an inline script,
+ * or a generated one-run copy. A saved workflow — named, or reached by a path
+ * outside the generated root — belongs to the user. A path that cannot be
+ * classified counts as not authored, the conservative reading for advice that
+ * says to edit it.
+ */
+function isScriptAuthoredByThisCall(
+  config: Config,
+  workflowName: string | undefined,
+  scriptPath: string | undefined,
+): boolean {
+  if (workflowName) return false;
+  if (!scriptPath) return true;
+  try {
+    return isGeneratedWorkflowScriptPath(config, scriptPath);
+  } catch {
+    return false;
+  }
+}
+
+/** Runner option carrying the hint, omitted when there is none. */
+function authoringHintOption(hint: string | null): { authoringHint?: string } {
+  return hint ? { authoringHint: hint } : {};
 }
 
 export class WorkflowTool extends BaseDeclarativeTool<
   WorkflowParams,
   WorkflowToolResult
 > {
+  /**
+   * What this tool's description says about the authoring reference, decided
+   * once here. The failure hint and the keyword reminder read it instead of
+   * asking again, so a mid-session `/skills` toggle cannot make them disagree
+   * with the description the model is holding.
+   */
+  readonly authoringSurface: WorkflowAuthoringSurface;
+
   constructor(
     private readonly config: Config,
     private readonly toolOptions: WorkflowToolOptions = {},
   ) {
+    const surface = resolveWorkflowAuthoringSurface(config);
     super(
       ToolNames.WORKFLOW,
       ToolDisplayNames.WORKFLOW,
-      buildWorkflowToolDescription(config),
+      buildWorkflowToolDescription(surface),
       Kind.Other,
-      WORKFLOW_PARAM_SCHEMA,
+      buildWorkflowParamSchema(surface),
       /* isOutputMarkdown */ true,
       /* canUpdateOutput */ true,
     );
+    this.authoringSurface = surface;
   }
 
   buildSessionOwnedBackground(
@@ -1191,6 +1310,7 @@ export class WorkflowTool extends BaseDeclarativeTool<
       this.config,
       this.toolOptions,
       { ...params, run_in_background: true },
+      buildWorkflowAuthoringHint(this.authoringSurface),
       workflowName,
     );
   }
@@ -1238,6 +1358,11 @@ export class WorkflowTool extends BaseDeclarativeTool<
   protected createInvocation(
     params: WorkflowParams,
   ): ToolInvocation<WorkflowParams, WorkflowToolResult> {
-    return new WorkflowToolInvocation(this.config, this.toolOptions, params);
+    return new WorkflowToolInvocation(
+      this.config,
+      this.toolOptions,
+      params,
+      buildWorkflowAuthoringHint(this.authoringSurface),
+    );
   }
 }

@@ -1473,18 +1473,10 @@ export class SpeculationEvent implements BaseTelemetryEvent {
 export class WorkflowKeywordEvent implements BaseTelemetryEvent {
   'event.name': 'qwen-code.workflow_keyword';
   'event.timestamp': string;
-  /**
-   * Whether the turn also carried the `workflow-authoring` reference. False
-   * when it was already in context, or when the reference is unreachable and
-   * the tool description carries it instead — the two cases the trigger
-   * cannot tell apart from its own logs otherwise.
-   */
-  skill_autoloaded: boolean;
 
-  constructor(params: { skill_autoloaded?: boolean } = {}) {
+  constructor() {
     this['event.name'] = 'qwen-code.workflow_keyword';
     this['event.timestamp'] = new Date().toISOString();
-    this.skill_autoloaded = params.skill_autoloaded ?? false;
   }
 }
 

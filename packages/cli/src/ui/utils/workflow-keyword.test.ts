@@ -5,10 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  WorkflowAuthoringSurface,
+} from '@qwen-code/qwen-code-core';
 import {
-  buildSkillLlmContent,
-  readWorkflowAuthoringReference,
   ToolNames,
   WORKFLOW_AUTHORING_SKILL_NAME,
 } from '@qwen-code/qwen-code-core';
@@ -18,34 +19,32 @@ import {
   detectWorkflowKeyword,
 } from './workflow-keyword.js';
 
-/** Stands in for `SkillTool`'s loaded-skill bookkeeping. */
-function fakeSkillTool() {
-  const names = new Set<string>();
-  return {
-    getLoadedSkillNames: () => names as ReadonlySet<string>,
-    markSkillLoaded: (name: string) => names.add(name),
-    loaded: names,
-  };
+interface StubOptions {
+  toolNames?: string[];
+  /** What the Workflow tool instance recorded when it was built. */
+  recordedSurface?: WorkflowAuthoringSurface;
+  /** What a live re-derivation would say now. */
+  skillEnabledNow?: boolean;
 }
 
-function stubConfig(
-  options: {
-    skillTool?: ReturnType<typeof fakeSkillTool>;
-    withSkillTool?: boolean;
-  } = {},
-): Config {
-  const { skillTool = fakeSkillTool(), withSkillTool = true } = options;
+function stubConfig(options: StubOptions = {}): Config {
+  const {
+    toolNames = [ToolNames.SKILL, ToolNames.WORKFLOW],
+    recordedSurface,
+    skillEnabledNow = true,
+  } = options;
   return {
-    getSkillManager: () => ({ getCachedSkills: () => null }),
+    getSkillManager: () => ({}),
+    getDisabledSkillLevels: () => new Set(),
+    isSkillEnabled: () => skillEnabledNow,
     getToolRegistry: () => ({
-      getAllToolNames: () =>
-        withSkillTool
-          ? [ToolNames.SKILL, ToolNames.WORKFLOW]
-          : [ToolNames.WORKFLOW],
+      getAllToolNames: () => toolNames,
+      isPermissionDeferred: () => false,
       getTool: (name: string) =>
-        name === ToolNames.SKILL && withSkillTool ? skillTool : undefined,
+        name === ToolNames.WORKFLOW && recordedSurface
+          ? { authoringSurface: recordedSurface }
+          : undefined,
     }),
-    isSkillEnabled: () => true,
   } as unknown as Config;
 }
 
@@ -80,26 +79,29 @@ describe('buildWorkflowSteeringNotice', () => {
     expect(notice).toMatch(/proceed normally/i);
   });
 
-  // The closing sentence exists to stop the model spending a Skill call on
-  // text that is already in the same message — or, when nothing was
-  // injected, to keep it from being told to read something that is not
-  // there.
-  it('tells the model the reference is included when it was injected', () => {
-    const notice = buildWorkflowSteeringNotice('loaded');
-    expect(notice).toContain(WORKFLOW_AUTHORING_SKILL_NAME);
-    expect(notice).toContain('do not load it again');
+  // The description only points at the skill, so the turn that is about to
+  // write a script is told where the contract is.
+  it('tells the model to load the skill when the description points at it', () => {
+    const notice = buildWorkflowSteeringNotice('pointer');
+    expect(notice).toContain(`load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\``);
+    expect(notice).toContain('unless it is already in this conversation');
   });
 
-  it('tells the model the reference is already in the conversation', () => {
-    const notice = buildWorkflowSteeringNotice('already-loaded');
-    expect(notice).toContain('already in this conversation');
+  it('names the ToolSearch detour when the Skill tool is deferred', () => {
+    expect(buildWorkflowSteeringNotice('pointer-via-tool-search')).toContain(
+      'reveal the Skill tool with ToolSearch first',
+    );
   });
 
-  it('says nothing about the reference when none was injected', () => {
-    const notice = buildWorkflowSteeringNotice('unavailable');
-    expect(notice).not.toContain(WORKFLOW_AUTHORING_SKILL_NAME);
-    expect(notice).toMatch(/proceed normally/i);
-  });
+  // Inlined: nothing to load. Withheld: the user asked for it not to come back.
+  it.each([['inline'], ['withheld']] as const)(
+    'says nothing about the skill when the description is %s',
+    (surface) => {
+      const notice = buildWorkflowSteeringNotice(surface);
+      expect(notice).not.toContain(WORKFLOW_AUTHORING_SKILL_NAME);
+      expect(notice).toMatch(/proceed normally/i);
+    },
+  );
 });
 
 describe('buildWorkflowKeywordPrefix', () => {
@@ -109,49 +111,57 @@ describe('buildWorkflowKeywordPrefix', () => {
     );
   });
 
-  // The turn the keyword steers is the one turn known in advance to be about
-  // orchestration, so the reference rides along instead of costing a round
-  // trip — in exactly the form the Skill tool would have produced.
-  it('carries the authoring reference on the first triggered turn', () => {
-    const skillTool = fakeSkillTool();
-    const reference = readWorkflowAuthoringReference()!;
+  // A shell-mode submission goes to bash, where a leading `<system-reminder>`
+  // is a syntax error, and is recorded as the command the user ran.
+  it('returns nothing for a shell-mode submission', () => {
+    expect(
+      buildWorkflowKeywordPrefix(stubConfig(), 'gh workflow list', {
+        shellMode: true,
+      }),
+    ).toBe(null);
+  });
 
-    const triggered = buildWorkflowKeywordPrefix(
-      stubConfig({ skillTool }),
+  // Steering toward a tool that is not in the request helps nobody.
+  it('returns nothing when the Workflow tool is not in this session', () => {
+    expect(
+      buildWorkflowKeywordPrefix(
+        stubConfig({ toolNames: [ToolNames.SKILL] }),
+        'build me a workflow',
+      ),
+    ).toBe(null);
+  });
+
+  // The prefix is part of the user's own message: it is rendered in the
+  // transcript and restored into the input buffer on a queue-cancel. It names
+  // the reference and must never carry its body.
+  it('names the reference without carrying it', () => {
+    const prefix = buildWorkflowKeywordPrefix(
+      stubConfig({ recordedSurface: 'pointer' }),
       'build me a workflow for this',
     );
 
-    expect(triggered?.autoloaded).toBe(true);
-    expect(triggered?.prefix).toContain('<system-reminder>');
-    expect(triggered?.prefix).toContain('Workflow tool');
-    expect(triggered?.prefix).toContain(
-      buildSkillLlmContent(reference.baseDir, reference.body),
-    );
-    // Registered, so a later Skill call dedups instead of repeating it.
-    expect(skillTool.loaded.has(WORKFLOW_AUTHORING_SKILL_NAME)).toBe(true);
+    expect(prefix).toContain('<system-reminder>');
+    expect(prefix).toContain(`load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\``);
+    expect(prefix).not.toContain('Base directory for this skill:');
+    expect(prefix).not.toContain('# Workflow authoring reference');
+    expect(prefix!.length).toBeLessThan(1_000);
   });
 
-  it('sends the reference once per session', () => {
-    const config = stubConfig();
-    const first = buildWorkflowKeywordPrefix(config, 'a workflow please');
-    const second = buildWorkflowKeywordPrefix(config, 'another workflow');
-
-    expect(first?.autoloaded).toBe(true);
-    expect(second?.autoloaded).toBe(false);
-    expect(second?.prefix).toContain('already in this conversation');
-    expect(second?.prefix).not.toContain('Base directory for this skill:');
-  });
-
-  // Without a Skill tool the reference is inlined in the tool description
-  // instead, so the reminder still fires — it just has nothing to add.
-  it('still steers the turn when the reference cannot be injected', () => {
-    const triggered = buildWorkflowKeywordPrefix(
-      stubConfig({ withSkillTool: false }),
+  // The Workflow tool recorded its description shape when it was built. A
+  // `/skills` toggle since then changes what a live re-derivation would say,
+  // but not the description the model holds — so the reminder follows the
+  // record.
+  it('follows the shape the Workflow tool recorded, not a re-derivation', () => {
+    const prefix = buildWorkflowKeywordPrefix(
+      stubConfig({ recordedSurface: 'inline', skillEnabledNow: true }),
       'run a workflow',
     );
 
-    expect(triggered?.autoloaded).toBe(false);
-    expect(triggered?.prefix).toContain('Workflow tool');
-    expect(triggered?.prefix).not.toContain('Base directory for this skill:');
+    expect(prefix).not.toContain(WORKFLOW_AUTHORING_SKILL_NAME);
+  });
+
+  it('derives the shape when the Workflow tool is not instantiated yet', () => {
+    const prefix = buildWorkflowKeywordPrefix(stubConfig(), 'run a workflow');
+    expect(prefix).toContain(`load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\``);
   });
 });

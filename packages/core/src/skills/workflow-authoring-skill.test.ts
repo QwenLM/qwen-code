@@ -7,15 +7,14 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import { buildSkillLlmContent } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { parseSkillContent } from './skill-load.js';
 import {
-  isWorkflowAuthoringSkillAvailable,
   readWorkflowAuthoringReference,
-  resolveWorkflowAuthoringAutoload,
+  resolveWorkflowAuthoringRoute,
+  resolveWorkflowAuthoringSurface,
   WORKFLOW_AUTHORING_SKILL_NAME,
 } from './workflow-authoring-skill.js';
 
@@ -26,52 +25,41 @@ const SKILL_PATH = path.join(
   'SKILL.md',
 );
 
-/**
- * A skill-load tracker with the same surface as `SkillTool`'s, so a test can
- * assert on what the trigger registered. Structural on purpose — building a
- * real `SkillTool` needs a wired `SkillManager` and a watcher, none of which
- * this module touches.
- */
-function fakeSkillTool() {
-  const names = new Set<string>();
-  const contents = new Set<string>();
-  return {
-    getLoadedSkillNames: () => names as ReadonlySet<string>,
-    getLoadedSkillContents: () => contents as ReadonlySet<string>,
-    markSkillLoaded: (name: string, content?: string) => {
-      names.add(name);
-      if (content !== undefined) contents.add(content);
-    },
-  };
-}
-
 interface StubOptions {
   skillManager?: boolean;
-  skillTool?: ReturnType<typeof fakeSkillTool> | null;
-  toolNames?: string[];
-  skillEnabled?: boolean;
-  /** The manager's cached bundled entry, when the test wants it consulted. */
-  cachedSkills?: Array<{ name: string; body: string; filePath: string }>;
+  /** `null` models a registry that cannot answer. */
+  toolNames?: string[] | null;
+  deferred?: string[];
+  disabledNames?: string[];
+  disabledLevels?: string[];
 }
 
-function stubConfig(options: StubOptions = {}): Config {
+/**
+ * A config that answers exactly the questions the route asks. `isSkillEnabled`
+ * decides on the name it is handed, as the real one does, so a drift in the
+ * name the production code probes turns the disabled-by-name case red.
+ */
+function stubConfig(options: StubOptions = {}) {
   const {
     skillManager = true,
-    skillTool = fakeSkillTool(),
-    toolNames = [ToolNames.SKILL, ToolNames.WORKFLOW],
-    skillEnabled = true,
-    cachedSkills,
+    toolNames = [ToolNames.SKILL, ToolNames.WORKFLOW, ToolNames.TOOL_SEARCH],
+    deferred = [],
+    disabledNames = [],
+    disabledLevels = [],
   } = options;
-  return {
-    getSkillManager: () =>
-      skillManager ? { getCachedSkills: () => cachedSkills ?? null } : null,
+  const isSkillEnabled = vi.fn(
+    (skill: { name: string }) => !disabledNames.includes(skill.name),
+  );
+  const config = {
+    getSkillManager: () => (skillManager ? {} : null),
     getToolRegistry: () => ({
-      getAllToolNames: () => toolNames,
-      getTool: (name: string) =>
-        name === ToolNames.SKILL ? (skillTool ?? undefined) : undefined,
+      getAllToolNames: () => toolNames ?? undefined,
+      isPermissionDeferred: (name: string) => deferred.includes(name),
     }),
-    isSkillEnabled: () => skillEnabled,
+    isSkillEnabled,
+    getDisabledSkillLevels: () => new Set(disabledLevels),
   } as unknown as Config;
+  return { config, isSkillEnabled };
 }
 
 describe('readWorkflowAuthoringReference', () => {
@@ -88,26 +76,82 @@ describe('readWorkflowAuthoringReference', () => {
   });
 });
 
-describe('isWorkflowAuthoringSkillAvailable', () => {
-  it('is available in a session with skills and the Skill tool', () => {
-    expect(isWorkflowAuthoringSkillAvailable(stubConfig())).toBe(true);
+describe('resolveWorkflowAuthoringRoute', () => {
+  it('points at the skill in an ordinary session', () => {
+    const { config, isSkillEnabled } = stubConfig();
+
+    expect(resolveWorkflowAuthoringRoute(config)).toBe('skill');
+    // The name is the load-bearing field: for the bundled level the decision
+    // rests entirely on whether that exact name is disabled.
+    expect(isSkillEnabled).toHaveBeenCalledWith(
+      expect.objectContaining({ name: WORKFLOW_AUTHORING_SKILL_NAME }),
+    );
   });
 
-  // Each of these is a real way to end up unable to load the skill, and each
-  // one has to flip the Workflow tool into inlining the reference instead.
+  it('is not affected by a different skill being disabled', () => {
+    const { config } = stubConfig({ disabledNames: ['some-other-skill'] });
+    expect(resolveWorkflowAuthoringRoute(config)).toBe('skill');
+  });
+
+  // A user who turned the reference off asked for the text to go away.
+  // Inlining it would put it back into every request at a higher price.
+  it.each([
+    [
+      'the skill is disabled by name',
+      { disabledNames: [WORKFLOW_AUTHORING_SKILL_NAME] },
+    ],
+    ['the bundled level is disabled', { disabledLevels: ['bundled'] }],
+    [
+      'the skill is disabled and there is no Skill tool either',
+      {
+        disabledNames: [WORKFLOW_AUTHORING_SKILL_NAME],
+        toolNames: [ToolNames.WORKFLOW],
+      },
+    ],
+  ])('withholds the reference when %s', (_case, options: StubOptions) => {
+    expect(resolveWorkflowAuthoringRoute(stubConfig(options).config)).toBe(
+      'withheld',
+    );
+  });
+
+  // No route to any skill: the reference has to travel in the description.
   it.each([
     ['skills are off entirely', { skillManager: false }],
     ['the Skill tool is not registered', { toolNames: [ToolNames.WORKFLOW] }],
-    ['this skill is disabled', { skillEnabled: false }],
-  ])('is unavailable when %s', (_case, options: StubOptions) => {
-    expect(isWorkflowAuthoringSkillAvailable(stubConfig(options))).toBe(false);
+    [
+      'the Skill tool is deferred and nothing can reveal it',
+      {
+        toolNames: [ToolNames.SKILL, ToolNames.WORKFLOW],
+        deferred: [ToolNames.SKILL],
+      },
+    ],
+  ])('inlines when %s', (_case, options: StubOptions) => {
+    expect(resolveWorkflowAuthoringRoute(stubConfig(options).config)).toBe(
+      'inline',
+    );
   });
 
-  // A config that cannot answer the question is not evidence of absence.
-  // Guessing "unavailable" would inline the whole reference into every
-  // request of the session; guessing "available" costs at most one failed
-  // Skill call.
-  it('assumes available when the config cannot answer', () => {
+  // A `tools.eager` allowlist that omits the Skill tool keeps its schema out
+  // of the request while leaving it registered. The pointer still works, one
+  // ToolSearch away, and has to say so.
+  it('routes through ToolSearch when the Skill tool is deferred', () => {
+    const { config } = stubConfig({ deferred: [ToolNames.SKILL] });
+    expect(resolveWorkflowAuthoringRoute(config)).toBe('skill-via-tool-search');
+  });
+
+  // A config that cannot answer is not evidence of absence. Guessing "inline"
+  // would put the whole reference into every request of the session; guessing
+  // "skill" costs at most one failed Skill call.
+  it.each([['the registry has no tool list', { toolNames: null }]])(
+    'assumes the skill is reachable when %s',
+    (_case, options: StubOptions) => {
+      expect(resolveWorkflowAuthoringRoute(stubConfig(options).config)).toBe(
+        'skill',
+      );
+    },
+  );
+
+  it('assumes the skill is reachable when the config throws', () => {
     const config = {
       getSkillManager: () => ({}),
       getToolRegistry: () => {
@@ -115,76 +159,62 @@ describe('isWorkflowAuthoringSkillAvailable', () => {
       },
     } as unknown as Config;
 
-    expect(isWorkflowAuthoringSkillAvailable(config)).toBe(true);
+    expect(resolveWorkflowAuthoringRoute(config)).toBe('skill');
   });
 });
 
-describe('resolveWorkflowAuthoringAutoload', () => {
-  it('hands back exactly what the Skill tool would have returned', () => {
-    const reference = readWorkflowAuthoringReference()!;
-    const autoload = resolveWorkflowAuthoringAutoload(stubConfig());
-
-    expect(autoload.status).toBe('loaded');
-    if (autoload.status !== 'loaded') return;
-    expect(autoload.content).toBe(
-      buildSkillLlmContent(reference.baseDir, reference.body),
-    );
-  });
-
-  // The dedup contract: once the trigger has put the body in the turn, the
-  // Skill tool has to know, or invoking the skill would append the same text
-  // a second time.
-  it('registers the load, and reports it as already loaded afterwards', () => {
-    const skillTool = fakeSkillTool();
-    const config = stubConfig({ skillTool });
-
-    const first = resolveWorkflowAuthoringAutoload(config);
-    expect(first.status).toBe('loaded');
-    if (first.status !== 'loaded') return;
-    // Resolving alone must not mark it: a caller that decides not to send
-    // the turn would otherwise leave the session believing the model read it.
-    expect(skillTool.getLoadedSkillNames().size).toBe(0);
-
-    first.markLoaded();
-
-    expect(
-      skillTool.getLoadedSkillNames().has(WORKFLOW_AUTHORING_SKILL_NAME),
-    ).toBe(true);
-    expect(skillTool.getLoadedSkillContents().has(first.content)).toBe(true);
-    expect(resolveWorkflowAuthoringAutoload(config).status).toBe(
-      'already-loaded',
-    );
-  });
-
-  // The manager's own copy is authoritative for the `(filePath, body)` pair
-  // the Skill tool renders, so injection matches it even if a build ever
-  // resolved the bundled directory differently from this module.
-  it('prefers the skill manager cached entry', () => {
-    const config = stubConfig({
-      cachedSkills: [
-        {
-          name: WORKFLOW_AUTHORING_SKILL_NAME,
-          body: 'cached body',
-          filePath: '/elsewhere/workflow-authoring/SKILL.md',
-        },
-      ],
-    });
-
-    const autoload = resolveWorkflowAuthoringAutoload(config);
-
-    expect(autoload.status).toBe('loaded');
-    if (autoload.status !== 'loaded') return;
-    expect(autoload.content).toBe(
-      buildSkillLlmContent('/elsewhere/workflow-authoring', 'cached body'),
-    );
-  });
-
+describe('resolveWorkflowAuthoringSurface', () => {
   it.each([
-    ['the skill is unreachable', { toolNames: [ToolNames.WORKFLOW] }],
-    ['the Skill tool instance is not there to track it', { skillTool: null }],
-  ])('reports unavailable when %s', (_case, options: StubOptions) => {
-    expect(resolveWorkflowAuthoringAutoload(stubConfig(options)).status).toBe(
-      'unavailable',
+    [{}, 'pointer'],
+    [{ deferred: [ToolNames.SKILL] }, 'pointer-via-tool-search'],
+    [{ toolNames: [ToolNames.WORKFLOW] }, 'inline'],
+    [{ disabledNames: [WORKFLOW_AUTHORING_SKILL_NAME] }, 'withheld'],
+  ])('maps %o to %s', (options: StubOptions, surface) => {
+    expect(resolveWorkflowAuthoringSurface(stubConfig(options).config)).toBe(
+      surface,
     );
+  });
+});
+
+// The real read failing, not a substituted function: a module mock of this
+// file would never run its own try/catch. `node:fs` is replaced only for this
+// file's path, and the module registry is reset because the reference is
+// cached process-wide once read.
+describe('when the bundled reference cannot be read', () => {
+  afterEach(() => {
+    vi.doUnmock('node:fs');
+    vi.resetModules();
+  });
+
+  it('degrades to no reference and a pointer, without throwing', async () => {
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      return {
+        ...actual,
+        readFileSync: ((file: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+          if (
+            String(file).endsWith(
+              path.join(WORKFLOW_AUTHORING_SKILL_NAME, 'SKILL.md'),
+            )
+          ) {
+            throw new Error('EACCES: permission denied');
+          }
+          return (actual.readFileSync as (...args: unknown[]) => unknown)(
+            file,
+            ...rest,
+          );
+        }) as typeof actual.readFileSync,
+      };
+    });
+    const fresh = await import('./workflow-authoring-skill.js');
+    const { config } = stubConfig({ toolNames: [ToolNames.WORKFLOW] });
+
+    expect(() => fresh.readWorkflowAuthoringReference()).not.toThrow();
+    expect(fresh.readWorkflowAuthoringReference()).toBeNull();
+    // No route to the skill and nothing to inline: the pointer is the only
+    // text left that names the reference.
+    expect(fresh.resolveWorkflowAuthoringRoute(config)).toBe('inline');
+    expect(fresh.resolveWorkflowAuthoringSurface(config)).toBe('pointer');
   });
 });

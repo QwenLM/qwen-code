@@ -5,7 +5,7 @@ description: Reference for writing a Workflow tool script (script API and gotcha
 
 # Workflow authoring reference
 
-Everything below is about *writing* the script. Whether a workflow may run at
+Everything below is about _writing_ the script. Whether a workflow may run at
 all is decided by the Workflow tool's own opt-in rule — this reference does
 not authorize a run.
 
@@ -35,39 +35,47 @@ sweep, deep read, synthesis), migrate (discover sites, transform each under
 ## Script contract
 
 The source is wrapped as an async IIFE, so top-level `await` and a top-level
-`return` are both legal — and a trailing expression is *not* a return value.
+`return` are both legal — and a trailing expression is _not_ a return value.
 End every successful path with an explicit `return`.
 
 It is plain JavaScript, not TypeScript, and it cannot `import` anything.
 
 The script may start with a literal `export const meta = {...}` declaration
-(`name`, `description`, optionally `phases`). It must be a pure literal — no
-variables, calls, or interpolation — and it is stripped before execution, so
-nothing in the script body can read it. It is what the approval dialog and the
-`/workflows` list show.
+with `name`, `description`, and optionally `whenToUse` and
+`phases: [{ title, detail? }]`. It must be a pure literal — no variables,
+calls, or interpolation — and it is stripped before execution, so nothing in
+the script body can read it. Fields outside that list are dropped. The
+approval dialog prints the name, the description, and each phase title with
+its `detail` as a one-line explanation beside it: give every phase a `detail`,
+because for a run that may dispatch hundreds of agents it is what the user
+reads before approving.
 
 Injected globals, and nothing else:
 
 - `phase(title)` — open a phase. Everything dispatched afterwards is attributed
-  to it in the live phase tree.
+  to it in the live phase tree, until the next phase opens.
 - `log(msg)` — one line into the run log the user watches.
 - `agent(prompt, opts?)` — dispatch one subagent. See **agent() options**.
 - `parallel(thunks)` — run thunks through the shared concurrency window,
-  resolving to a position-aligned array.
+  resolving to a position-aligned array. `parallel()` itself rejects on
+  invalid arguments.
 - `pipeline(items, ...stages)` — run each item through the stages
   independently. See **Default to `pipeline()`**.
 - `workflow(nameOrRef, args?)` — run a saved workflow inline. See **Saved
-  workflows**.
+  workflows and workflow()**.
 - `args` — the structured value the caller passed, or `undefined`.
 - `budget` — `budget.total` (`null` = uncapped) and `budget.spent()`.
 
 Pass THUNKS to `parallel()`, not eager calls: `parallel([() => agent(...)])`,
-not `parallel([agent(...)])`. The second form starts every dispatch at once and
-throws the concurrency window away.
+not `parallel([agent(...)])`. The eager form is refused outright: a
+non-function element rejects the whole batch, and by then every `agent()` in it
+has already been admitted, counted against the caps, and spent — with its
+result discarded.
 
-`Date.now()` and `Math.random()` both throw — a script must be deterministic so
-a resume replays the same call sequence. Ask an agent for anything that depends
-on the current time.
+A script must be deterministic so a resume replays the same call sequence.
+`Math.random()` throws, and so does all of `Date` — `new Date()`,
+`Date.now()`, `Date.parse()` and `Date.UTC()` alike. Pass timestamps in via
+`args`, or stamp the result after the workflow returns.
 
 Scripts run in a `node:vm` sandbox with no filesystem, shell, network, or
 environment access. All I/O happens through the prompts you give the agents, so
@@ -77,10 +85,13 @@ say explicitly what each one should read and whether it may edit files.
 
 `agent(prompt, { label?, phase?, schema?, model?, agentType?, isolation?, workingDir?, stallMs? })`
 
-- `label` (string) — short name for the run views and the failures list. Give
-  every dispatch one; without it a failed agent is hard to identify.
-- `phase` (string) — attribute this dispatch to a named phase instead of the
-  currently open one.
+- `label` (string) — the name shown in the run views and the failures list.
+  Make it unique per dispatch: a failure line carries only the label and the
+  error, so two failed dispatches that share a label cannot be told apart.
+- `phase` (string) — opens a named phase at this call, exactly as `phase(title)`
+  would: this dispatch and every dispatch issued after it are attributed to that
+  phase. It is not scoped to the one call, so in a fan-out open phases with
+  `phase()` between groups rather than per dispatch.
 - `schema` (JSON Schema object) — the subagent must deliver its result by
   calling `structured_output` with arguments matching the schema; agent()
   resolves to the validated object. After two in-conversation nudges without a
@@ -97,9 +108,10 @@ say explicitly what each one should read and whether it may edit files.
   `<projectRoot>/.qwen/worktrees/agent-<7hex>`; the worktree is auto-removed if
   no changes, otherwise the path and branch are returned alongside the result.
   `'remote'` makes the admitted agent() resolve to null and records
-  "agent({isolation:'remote'}) is not available in this build". `isolation=worktree`
-  also resolves to null and records a refusal when the parent working tree has
-  uncommitted changes (the subagent would see a stale HEAD).
+  "agent({isolation:'remote'}) is not available in this build".
+  `isolation=worktree` also resolves to null and records a refusal when the
+  parent working tree has uncommitted changes (the subagent would see a stale
+  HEAD).
 - `workingDir` (string) — pin the subagent to an EXISTING git worktree of this
   repository that the caller owns; nothing is created and nothing is removed.
   Use it when the directory the agent must work in already exists and its
@@ -116,8 +128,12 @@ say explicitly what each one should read and whether it may edit files.
   `QWEN_CODE_WORKFLOW_STALL_SECONDS`, whole seconds); `0` disables the
   watchdog. Wall time per attempt is bounded separately.
 
-Workflow subagents always have SendMessage / Monitor / EnterPlanMode /
-ExitPlanMode in their disallowed-tool floor regardless of `agentType`.
+Workflow subagents can never use AskUserQuestion, SendMessage, Monitor,
+EnterPlanMode, ExitPlanMode, or the Agent tool, whatever their `agentType`. A
+subagent therefore cannot fan out further and cannot ask anyone anything: the
+script owns all fan-out, and every ambiguity has to be resolved in the prompt
+it is given. Never ask a subagent to spawn its own verifiers — dispatch them
+from the script.
 
 ## What agent() returns
 
@@ -137,6 +153,11 @@ settles to `null` still counts as dispatched and is named, with its error, in
 the run's failures list; a `null` returned by an ordinary thunk or stage is not
 an agent dispatch.
 
+A `pipeline()` stage that returns `null` — or throws — drops that item: its
+remaining stages are skipped and its slot in the result is `null`. So a `null`
+check belongs in the stage that dispatched the agent, never in a later stage,
+which will not run for that item.
+
 A result must be JSON-serializable to survive the sandbox boundary and the
 resume journal. A thunk that resolves to something that is not becomes `null`
 at its index.
@@ -144,16 +165,18 @@ at its index.
 ## Limits
 
 - Concurrency: `max(2, min(16, cpus-2))` agents in flight per run, override via
-  `QWEN_CODE_MAX_WORKFLOW_CONCURRENCY`.
-- 1000 `agent()` calls per run, override via `QWEN_CODE_MAX_WORKFLOW_AGENTS`.
-  The 1001st throws.
+  `QWEN_CODE_MAX_WORKFLOW_CONCURRENCY` (clamped to 64).
+- 1000 `agent()` calls per run, override via `QWEN_CODE_MAX_WORKFLOW_AGENTS`
+  (clamped to 10000). The call past the cap throws.
 - 30-minute wall-clock cap per run, override via
-  `QWEN_CODE_MAX_WORKFLOW_SECONDS`. A fan-out near the agent cap will not fit
-  inside the default cap.
-- Per subagent attempt: 50 turns (`QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS`) and 10
-  minutes (`QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES`). Raise them for legitimately
-  long work rather than letting agents come back `null`.
-- Stall retries: 3 attempts per `agent()` call.
+  `QWEN_CODE_MAX_WORKFLOW_SECONDS` (applied as given). A fan-out near the agent
+  cap will not fit inside the default cap.
+- Per subagent attempt: 50 turns (`QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS`, clamped
+  to 500) and 10 minutes (`QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES`, clamped
+  to 100). Raise them for legitimately long work rather than letting agents
+  come back `null` — but a value above the clamp is silently cut down to it.
+- Stall retries: 3 attempts per `agent()` call; the stall timeout itself
+  (`QWEN_CODE_WORKFLOW_STALL_SECONDS`) is applied as given.
 - Tokens: a per-run output-token cap may be in effect — read `budget.total`
   (`null` = uncapped) before committing to a large fan-out, because once the
   cap is reached every further `agent()` call is refused.
@@ -177,7 +200,7 @@ an unnecessary barrier. When in doubt, `pipeline()`.
 ## Verify before believing
 
 A subagent's answer is a claim, not a result. For findings that matter, spawn
-independent verifiers prompted to *refute*, and drop what a majority refutes.
+independent verifiers prompted to _refute_, and drop what a majority refutes.
 When a claim can be wrong in several different ways, give each verifier a
 distinct lens (correctness, security, performance, does it actually reproduce)
 — diversity catches what repetition cannot. For a wide solution space, generate
@@ -208,13 +231,15 @@ truncation reads as full coverage, which is worse than a smaller honest result.
 and nests one level only — a workflow reached through `workflow()` cannot call
 `workflow()` itself, and doing so throws.
 
-Saved workflows are `<name>.js` files under `<projectRoot>/.qwen/workflows`
-(project scope, also surfaced as `/<name>` slash commands) or
-`~/.qwen/workflows` (user scope, lower precedence when both define the same
-name). `workflow('<name>')` resolves against those two directories, while the
-tool's `scriptPath` takes an absolute path to a script inside either of them or
-inside the generated-scripts root (`$QWEN_CODE_PROJECT_DIR/workflows/generated`
-— the per-project runtime dir, not the project tree); a path outside those
+It takes one of two forms. `workflow('<name>')` resolves a name against
+`<projectRoot>/.qwen/workflows` (project scope, also surfaced as `/<name>`
+slash commands) and `~/.qwen/workflows` (user scope, lower precedence when both
+define the same name). `workflow({ scriptPath: '<absolute path>' })` loads a
+script file directly from either of those directories or from the
+generated-scripts root (`$QWEN_CODE_PROJECT_DIR/workflows/generated` — the
+per-project runtime dir, not the project tree). A bare string is always a name:
+a path passed as a string is rejected as an invalid workflow name, and that
+rejection ends the run rather than settling to `null`. A path outside those
 roots is refused.
 
 To create or edit a saved workflow, use the `workflow-creator` skill — it owns
@@ -234,10 +259,19 @@ first changed or missing call onward runs live. Post-processing after the last
 agent can therefore change freely without losing the cache. Pass the same
 `args` — they seed the chain, so different args re-run everything.
 
-The journal holds one result line per completed agent and one `failed` line per
-agent that settled without a result. Read it before diagnosing an empty or
-surprising result: a cached result can itself be empty, and a `null` slot in
-the output means an agent failed, not that the work found nothing.
+The journal is one JSON line per event: a `started` line when an agent is
+dispatched, then a `result` line when it returns a value or a `failed` line
+when it settles without one. Only `result` lines feed the resume cache. A
+`started` line with neither after it means the run was interrupted with that
+agent in flight — not that the agent is broken. Read the journal before
+diagnosing an empty or surprising result: a cached result can itself be empty,
+and a `null` slot in the output means an agent failed, not that the work found
+nothing.
+
+Runs appear in the background-tasks view and the `/workflows` dialog (live
+phase tree, token usage, cooperative pause/resume, cancel);
+`run_in_background: true` returns a run handle immediately in the interactive
+TUI and delivers completion through the conversation.
 
 ## Worked example
 
@@ -249,13 +283,28 @@ verification of a fast one.
 export const meta = {
   name: 'Review changes',
   description: 'Review the diff across dimensions and verify every finding',
-  phases: [{ title: 'Review' }, { title: 'Verify' }],
+  phases: [
+    { title: 'Review', detail: 'One reviewer per dimension reads the diff' },
+    {
+      title: 'Verify',
+      detail: 'An independent verifier tries to refute each finding',
+    },
+  ],
 };
 
 const DIMENSIONS = [
-  { key: 'correctness', lens: 'logic errors, wrong edge cases, broken invariants' },
-  { key: 'security', lens: 'injection, path traversal, secrets, unsafe defaults' },
-  { key: 'performance', lens: 'accidental O(n^2), unbounded memory, chatty I/O' },
+  {
+    key: 'correctness',
+    lens: 'logic errors, wrong edge cases, broken invariants',
+  },
+  {
+    key: 'security',
+    lens: 'injection, path traversal, secrets, unsafe defaults',
+  },
+  {
+    key: 'performance',
+    lens: 'accidental O(n^2), unbounded memory, chatty I/O',
+  },
 ];
 
 const FINDINGS = {
@@ -285,26 +334,35 @@ const VERDICT = {
 phase('Review');
 const reviewed = await pipeline(
   DIMENSIONS,
-  (dimension) =>
-    agent(
+  // The stage that dispatches an agent is the stage that handles its null:
+  // returning null here would drop the dimension and skip the verify stage.
+  async (dimension) => {
+    const review = await agent(
       `Review the changes in ${args.target} for ${dimension.lens}. ` +
         `Read the files; do not edit anything.`,
       { label: `review:${dimension.key}`, schema: FINDINGS },
-    ),
-  (review, dimension) => {
+    );
     if (review === null) {
       log(`review:${dimension.key} came back empty — its findings are missing`);
       return [];
     }
+    return review.findings;
+  },
+  (findings, dimension) => {
     phase('Verify');
     return parallel(
-      review.findings.map((finding) => async () => {
+      findings.map((finding, index) => async () => {
+        const label = `verify:${dimension.key}:${index + 1}`;
         const verdict = await agent(
           `Adversarially verify this claim about ${finding.file}: ` +
             `"${finding.claim}". Try to REFUTE it. Read the code first.`,
-          { label: `verify:${dimension.key}`, schema: VERDICT },
+          { label, schema: VERDICT },
         );
-        return verdict === null ? null : { ...finding, verdict };
+        if (verdict === null) {
+          log(`${label} came back empty — "${finding.claim}" is unverified`);
+          return null;
+        }
+        return { ...finding, verdict };
       }),
     );
   },
@@ -317,6 +375,6 @@ log(`confirmed ${confirmed.length} finding(s)`);
 return { confirmed };
 ```
 
-Note what the example does with failure: every `agent()` result is checked for
-`null` before it is read, and the dropped work is `log()`ged rather than
-silently omitted.
+Note what the example does with failure: each `null` is handled in the stage
+that dispatched the agent, every verify dispatch has its own label, and every
+dropped piece of work is `log()`ged by name rather than silently omitted.

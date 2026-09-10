@@ -5,30 +5,34 @@
  */
 
 /**
- * @fileoverview Reaching the bundled `workflow-authoring` reference from
- * outside the Skill tool.
+ * @fileoverview How the model reaches the bundled `workflow-authoring`
+ * reference in this session.
  *
  * The authoring reference is a bundled skill rather than tool-description
  * prose because only the turn that actually writes a script needs it, while a
- * tool description is paid for on every turn. That trade only works if two
- * other things hold, and this module is what makes them hold:
+ * tool description is paid for on every turn. That trade only works if the
+ * Workflow tool knows which of three situations it is in, because each one
+ * wants a different description:
  *
- * 1. A build where the model cannot reach the Skill tool (denied by
- *    permissions, or a `coreTools` allowlist that omits it) must still get the
- *    reference — so the Workflow tool inlines it into its description instead.
- *    {@link isWorkflowAuthoringSkillAvailable} decides which of the two.
- * 2. The `workflow` keyword already steers a turn toward orchestration, and
- *    that is exactly the turn the reference is for. Injecting it there saves a
- *    round trip — but only if it is injected in the SAME form the Skill tool
- *    would produce and registered as loaded, or the model would pay for it
- *    twice and `/context` would under-count it.
+ * - The model can load the skill. Point at it.
+ * - The model has no way to load any skill (skills are off, the Skill tool is
+ *   denied, or it is deferred with no ToolSearch to reveal it). Inline the
+ *   reference, or the model writes scripts against nothing.
+ * - The user turned this reference off (the skill by name, or the whole
+ *   bundled level). Carry neither: inlining would put back, at a higher
+ *   per-turn price, exactly the text they asked to remove.
+ *
+ * The decision is made once, when the Workflow tool is constructed, and
+ * recorded on it. Every other surface that talks about the reference — the
+ * failure hint, the keyword reminder — reads that record instead of asking
+ * again, so a mid-session `/skills` toggle cannot make them disagree with the
+ * description the model is holding.
  */
 
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { buildSkillLlmContent } from '../tools/skill-utils.js';
 import { parseSkillContent } from './skill-load.js';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -66,13 +70,11 @@ function referencePath(): string {
 /**
  * The bundled reference's body, or `null` when it cannot be read.
  *
- * Synchronous on purpose: the Workflow tool decides between pointing at the
- * skill and inlining it while building its own description, which happens in a
+ * Synchronous on purpose: the Workflow tool builds its description in a
  * constructor. The file is small and read at most once per process.
  *
- * Never throws — a build that somehow shipped without the file degrades to a
- * tool description that points at a skill, which is the same thing the model
- * sees when the skill is present.
+ * Never throws — a build that somehow shipped without the file must still
+ * construct its Workflow tool.
  */
 export function readWorkflowAuthoringReference(): WorkflowAuthoringReference | null {
   if (cachedReference !== undefined) return cachedReference;
@@ -88,123 +90,101 @@ export function readWorkflowAuthoringReference(): WorkflowAuthoringReference | n
 }
 
 /**
- * Whether the model can reach the reference through the Skill tool.
+ * How the reference reaches the model in this session.
  *
- * False means the Workflow tool has to carry the reference itself. Three ways
- * that happens: skills are off entirely (no `SkillManager`), the Skill tool is
- * not in this session's tool set (a deny rule or a `coreTools` allowlist), or
- * this particular skill is disabled.
- *
- * Read through `getAllToolNames()` rather than `getTool()` because it counts
- * tools registered as lazy factories: this runs while the Workflow tool itself
- * is being constructed, and the Skill tool may not be instantiated yet. A
- * question this cannot answer resolves to `true` — pointing at a skill that
- * turns out to be missing costs the model one failed call, while inlining
- * ~9 KB of reference into every request costs every turn of the session.
+ * - `skill` — the Skill tool is in the request; the model can load it.
+ * - `skill-via-tool-search` — the Skill tool is registered but its schema is
+ *   withheld by a `tools.eager` allowlist; the model has to reveal it with
+ *   ToolSearch first, and the pointer has to say so.
+ * - `inline` — no route to any skill; the reference has to travel in the
+ *   Workflow tool's own description.
+ * - `withheld` — the user turned this reference off; carry nothing.
  */
-export function isWorkflowAuthoringSkillAvailable(config: Config): boolean {
+export type WorkflowAuthoringRoute =
+  | 'skill'
+  | 'skill-via-tool-search'
+  | 'inline'
+  | 'withheld';
+
+/**
+ * Decide the route for this config.
+ *
+ * Order matters: a user opt-out wins over the lack of a Skill tool, because
+ * the opt-out says "not this text" regardless of how it would have arrived.
+ *
+ * Tool presence is read through `getAllToolNames()`, which counts lazy
+ * factories: this runs while the Workflow tool itself is being constructed,
+ * and the Skill tool may not be instantiated yet. A question this cannot
+ * answer resolves to `skill` — pointing at a skill that turns out to be
+ * missing costs the model one failed call, while inlining ~15 KB of reference
+ * into every request costs every turn of the session.
+ */
+export function resolveWorkflowAuthoringRoute(
+  config: Config,
+): WorkflowAuthoringRoute {
   try {
-    if (!config.getSkillManager?.()) return false;
-    const toolNames = config.getToolRegistry?.()?.getAllToolNames?.();
-    if (Array.isArray(toolNames) && !toolNames.includes(ToolNames.SKILL)) {
-      return false;
-    }
-    return (
+    if (config.getDisabledSkillLevels?.()?.has('bundled')) return 'withheld';
+    if (
       config.isSkillEnabled?.({
         name: WORKFLOW_AUTHORING_SKILL_NAME,
         level: 'bundled',
-      }) !== false
-    );
-  } catch (error) {
-    debugLogger.warn(`cannot resolve skill availability: ${error}`);
-    return true;
-  }
-}
-
-/**
- * The subset of `SkillTool` this module needs. Structural rather than a real
- * import so a tool module never has to import a skills module that imports it
- * back.
- */
-interface LoadedSkillTracker {
-  getLoadedSkillNames(): ReadonlySet<string>;
-  markSkillLoaded(name: string, content?: string): void;
-}
-
-function skillLoadTracker(config: Config): LoadedSkillTracker | null {
-  const tool = config.getToolRegistry?.()?.getTool?.(ToolNames.SKILL) as
-    | Partial<LoadedSkillTracker>
-    | undefined;
-  return typeof tool?.getLoadedSkillNames === 'function' &&
-    typeof tool?.markSkillLoaded === 'function'
-    ? (tool as LoadedSkillTracker)
-    : null;
-}
-
-/** What a keyword-triggered turn should do about the reference. */
-export type WorkflowAuthoringAutoload =
-  | {
-      status: 'loaded';
-      /** Byte-identical to what `Skill("workflow-authoring")` would return. */
-      content: string;
-      /** Call once the content is actually in the request. */
-      markLoaded(): void;
+      }) === false
+    ) {
+      return 'withheld';
     }
-  | { status: 'already-loaded' }
-  | { status: 'unavailable' };
-
-/**
- * Whether to inject the reference into a turn the `workflow` keyword steered,
- * and the content to inject.
- *
- * `markLoaded()` is separate from building the content so a caller that ends
- * up not sending the turn does not leave the session believing the model has
- * read something it never saw.
- *
- * Returns `unavailable` when the reference cannot be tracked as loaded, even
- * if it could be read: an injection the Skill tool does not know about would
- * be sent again in full the next time the model invoked the skill.
- */
-export function resolveWorkflowAuthoringAutoload(
-  config: Config,
-): WorkflowAuthoringAutoload {
-  if (!isWorkflowAuthoringSkillAvailable(config))
-    return { status: 'unavailable' };
-  const tracker = skillLoadTracker(config);
-  if (!tracker) return { status: 'unavailable' };
-  if (tracker.getLoadedSkillNames().has(WORKFLOW_AUTHORING_SKILL_NAME)) {
-    return { status: 'already-loaded' };
+    if (!config.getSkillManager?.()) return 'inline';
+    const registry = config.getToolRegistry?.();
+    const toolNames = registry?.getAllToolNames?.();
+    if (!Array.isArray(toolNames)) return 'skill';
+    if (!toolNames.includes(ToolNames.SKILL)) return 'inline';
+    if (registry?.isPermissionDeferred?.(ToolNames.SKILL)) {
+      // A deferred schema is only reachable through ToolSearch. Without it
+      // the Skill tool is registered but invisible, which is no route at all.
+      return toolNames.includes(ToolNames.TOOL_SEARCH)
+        ? 'skill-via-tool-search'
+        : 'inline';
+    }
+    return 'skill';
+  } catch (error) {
+    debugLogger.warn(`cannot resolve the workflow-authoring route: ${error}`);
+    return 'skill';
   }
-  const reference = resolveReferenceForInjection(config);
-  if (!reference) return { status: 'unavailable' };
-  const content = buildSkillLlmContent(reference.baseDir, reference.body);
-  return {
-    status: 'loaded',
-    content,
-    markLoaded: () =>
-      tracker.markSkillLoaded(WORKFLOW_AUTHORING_SKILL_NAME, content),
-  };
 }
 
 /**
- * Prefer the manager's own cached copy: it is the exact `(filePath, body)`
- * pair the Skill tool would render, so the injected content matches what a
- * later `Skill("workflow-authoring")` call would produce even if a build ever
- * resolved the two paths differently. Falls back to reading the file.
+ * What the Workflow tool's description holds about the reference, derived from
+ * the route plus whether the file can actually be read.
+ *
+ * - `pointer` — names the skill.
+ * - `pointer-via-tool-search` — names the skill and says to reveal the Skill
+ *   tool with ToolSearch first.
+ * - `inline` — carries the reference in full.
+ * - `withheld` — says nothing about it.
+ *
+ * The Workflow tool records this when it is built; the failure hint and the
+ * keyword reminder read that record rather than calling this again.
  */
-function resolveReferenceForInjection(
+export type WorkflowAuthoringSurface =
+  | 'pointer'
+  | 'pointer-via-tool-search'
+  | 'inline'
+  | 'withheld';
+
+export function resolveWorkflowAuthoringSurface(
   config: Config,
-): WorkflowAuthoringReference | null {
-  try {
-    const cached = config
-      .getSkillManager?.()
-      ?.getCachedSkills?.('bundled')
-      ?.find((skill) => skill.name === WORKFLOW_AUTHORING_SKILL_NAME);
-    if (cached?.body && cached.filePath) {
-      return { body: cached.body, baseDir: path.dirname(cached.filePath) };
-    }
-  } catch (error) {
-    debugLogger.warn(`cannot read the cached skill entry: ${error}`);
+): WorkflowAuthoringSurface {
+  switch (resolveWorkflowAuthoringRoute(config)) {
+    case 'skill':
+      return 'pointer';
+    case 'skill-via-tool-search':
+      return 'pointer-via-tool-search';
+    case 'withheld':
+      return 'withheld';
+    case 'inline':
+      // Inlining needs the file. Without it the pointer is the only text left
+      // that names the reference at all.
+      return readWorkflowAuthoringReference() ? 'inline' : 'pointer';
+    default:
+      return 'pointer';
   }
-  return readWorkflowAuthoringReference();
 }

@@ -11,17 +11,24 @@
  * qwen-code analogue of upstream's keyword opt-in — deliberately keyed on the
  * plain word `workflow` (never any other marker).
  *
- * The same reminder carries the `workflow-authoring` reference. This is the
- * one turn that is known in advance to be about orchestration, so the model
- * would otherwise spend a round trip loading a skill it is about to need —
- * and the tool description no longer carries the authoring contract itself.
+ * The reminder also says where the authoring reference is, because the Workflow
+ * tool's description no longer carries it. It names the reference; it does not
+ * carry it. The prefix becomes part of the user's own message — rendered in the
+ * transcript, restored into the input buffer when a queued turn is cancelled,
+ * kept in history on every later request — and a skill body travelling that way
+ * would miss everything a real Skill load gets: dedup on resume, `/context`
+ * attribution, microcompaction, and the skill's declared side effects.
  */
 
 import {
-  resolveWorkflowAuthoringAutoload,
+  resolveWorkflowAuthoringSurface,
+  ToolNames,
   WORKFLOW_AUTHORING_SKILL_NAME,
 } from '@qwen-code/qwen-code-core';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  WorkflowAuthoringSurface,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Edge punctuation stripped from a token before the keyword comparison, so
@@ -45,23 +52,18 @@ export function detectWorkflowKeyword(text: string): boolean {
     .some((token) => token.replace(STRIP_EDGE_PUNCT, '') === 'workflow');
 }
 
-/** What this turn is doing about the authoring reference. */
-export type WorkflowAuthoringAutoloadStatus =
-  | 'loaded'
-  | 'already-loaded'
-  | 'unavailable';
-
 /**
  * The steering note injected into a triggered turn. A soft nudge, not a
  * forced tool call — the model keeps discretion so a casual mention of
  * "workflow" doesn't derail an unrelated request.
  *
- * The closing sentence tells the model where the authoring reference is, so
- * it does not spend a Skill call re-loading text that is already in the same
- * message — or, when nothing was injected, so it knows to go and get it.
+ * `surface` is what the Workflow tool's description actually holds. Only a
+ * description that points at the skill gets a closing sentence about loading
+ * it: when the reference is inlined there is nothing to load, and when the user
+ * withheld it there is nothing the model should go looking for.
  */
 export function buildWorkflowSteeringNotice(
-  autoload: WorkflowAuthoringAutoloadStatus = 'unavailable',
+  surface?: WorkflowAuthoringSurface,
 ): string {
   const base =
     'The user\'s message includes the "workflow" keyword. If this request ' +
@@ -69,50 +71,54 @@ export function buildWorkflowSteeringNotice(
     'the Workflow tool — author a script using phase(), log(), agent(), and ' +
     'parallel()/pipeline() — over ad-hoc sequential tool calls. If a workflow ' +
     'is not a good fit for this request, proceed normally.';
-  if (autoload === 'loaded') {
-    return (
-      `${base} The \`${WORKFLOW_AUTHORING_SKILL_NAME}\` reference is ` +
-      'included below; do not load it again.'
-    );
+  const load =
+    ` Before writing a script, load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` ` +
+    'skill unless it is already in this conversation';
+  if (surface === 'pointer') return `${base}${load}.`;
+  if (surface === 'pointer-via-tool-search') {
+    return `${base}${load}; reveal the Skill tool with ToolSearch first.`;
   }
-  if (autoload === 'already-loaded') {
-    return (
-      `${base} The \`${WORKFLOW_AUTHORING_SKILL_NAME}\` reference is ` +
-      'already in this conversation.'
-    );
-  }
-  // Nothing injected: either the reference is unreachable, in which case the
-  // Workflow tool's own description carries it, or it could not be tracked.
-  // Either way, saying "load it" would be advice the model cannot act on.
   return base;
 }
 
 /**
- * The `<system-reminder>` prefix for a turn the keyword triggered, or `null`
- * when the keyword is absent.
+ * The `<system-reminder>` prefix for this submission, or `null` when there
+ * should be none.
  *
- * Separate from the caller so the whole decision — detect, resolve the
- * reference, mark it loaded, render — is testable without a TUI. `markLoaded`
- * is called here rather than by the caller because the returned prefix is the
- * message: once it has been built there is no path that sends the turn
- * without it.
+ * `null` when the keyword is absent, when the Workflow tool is not in this
+ * session (steering toward a tool the model cannot call helps nobody), and for
+ * a shell-mode submission — that text goes to bash, where a leading
+ * `<system-reminder>` is a syntax error, and is recorded as the command the
+ * user ran.
+ *
+ * The description shape is read from the Workflow tool instance, which
+ * recorded it when it was built, rather than re-derived: a `/skills` toggle
+ * since then must not make the reminder and the description disagree.
  */
 export function buildWorkflowKeywordPrefix(
   config: Config,
   text: string,
-): { prefix: string; autoloaded: boolean } | null {
+  options: { shellMode?: boolean } = {},
+): string | null {
+  if (options.shellMode) return null;
   if (!detectWorkflowKeyword(text)) return null;
-  const autoload = resolveWorkflowAuthoringAutoload(config);
-  const notice = buildWorkflowSteeringNotice(autoload.status);
-  if (autoload.status !== 'loaded') {
-    return {
-      prefix: `<system-reminder>\n${notice}\n</system-reminder>\n\n`,
-      autoloaded: false,
-    };
+  let surface: WorkflowAuthoringSurface | undefined;
+  try {
+    const registry = config.getToolRegistry?.();
+    const toolNames = registry?.getAllToolNames?.();
+    // Registered counts, deferred included: a Workflow tool withheld by a
+    // `tools.eager` allowlist is still one ToolSearch away.
+    if (Array.isArray(toolNames) && !toolNames.includes(ToolNames.WORKFLOW)) {
+      return null;
+    }
+    const tool = registry?.getTool?.(ToolNames.WORKFLOW) as
+      | { authoringSurface?: WorkflowAuthoringSurface }
+      | undefined;
+    surface = tool?.authoringSurface ?? resolveWorkflowAuthoringSurface(config);
+  } catch {
+    // The steering sentence does not depend on the surface; losing only the
+    // closing sentence is the right degradation.
+    surface = undefined;
   }
-  autoload.markLoaded();
-  return {
-    prefix: `<system-reminder>\n${notice}\n\n${autoload.content}</system-reminder>\n\n`,
-    autoloaded: true,
-  };
+  return `<system-reminder>\n${buildWorkflowSteeringNotice(surface)}\n</system-reminder>\n\n`;
 }

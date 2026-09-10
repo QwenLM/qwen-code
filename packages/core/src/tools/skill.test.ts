@@ -1133,33 +1133,6 @@ describe('SkillTool', () => {
       expect(skillTool.getLoadedSkillContents()).toEqual(new Set([llmText1]));
     });
 
-    // A skill body can reach the model without this tool running: the
-    // `workflow` keyword injects the authoring reference into the turn it
-    // steers. Whatever did that registers it here, and the tool then has to
-    // treat it exactly like a load of its own — otherwise the model is
-    // handed the same text twice.
-    it('treats an externally injected skill as already loaded', async () => {
-      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
-        mockRuntimeConfig,
-      );
-
-      skillTool.markSkillLoaded('code-review', 'injected body');
-
-      expect(skillTool.getLoadedSkillNames().has('code-review')).toBe(true);
-      expect(skillTool.getLoadedSkillContents()).toEqual(
-        new Set(['injected body']),
-      );
-
-      const invocation = (
-        skillTool as SkillToolWithProtectedMethods
-      ).createInvocation({ skill: 'code-review' });
-      const result = await invocation.execute();
-
-      expect(partToString(result.llmContent)).toBe(
-        'Skill "code-review" is already loaded in context.',
-      );
-    });
-
     it('still allows loading a different skill after one is already loaded', async () => {
       vi.mocked(mockSkillManager.loadSkillForRuntime)
         .mockResolvedValueOnce(mockSkills[0])

@@ -311,31 +311,15 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     return commands.filter((cmd) => !shadowedNames.has(cmd.name));
   }
 
-  /**
-   * Records a skill as loaded in this session.
-   *
-   * Public because a skill body can reach the model without going through
-   * this tool: the `workflow` keyword injects the `workflow-authoring`
-   * reference into the turn it steers. Whatever put that body in context has
-   * to say so here, or the model would be handed the same text again the
-   * first time it invoked the skill itself, and `/context` would attribute
-   * none of those tokens to it.
-   *
-   * `content` must be exactly what the model received (see
-   * {@link buildSkillLlmContent}) — the content set is matched against
-   * transcript output by `restoreLoadedSkillsFromHistory`.
-   */
-  markSkillLoaded(name: string, content?: string): void {
-    this.loadedSkillNames.add(name);
-    if (content !== undefined) this.loadedSkillContents.add(content);
-  }
-
   protected createInvocation(params: SkillParams) {
     return new SkillToolInvocation(
       this.config,
       this.skillManager,
       params,
-      (name: string, content?: string) => this.markSkillLoaded(name, content),
+      (name: string, content?: string) => {
+        this.loadedSkillNames.add(name);
+        if (content !== undefined) this.loadedSkillContents.add(content);
+      },
       this.config.getModelInvocableCommandsExecutor(),
       (name: string) => this.loadedSkillNames.has(name),
       (name: string) => this.hiddenSkillNames.has(name),

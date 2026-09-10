@@ -1448,7 +1448,6 @@ export function logWorkflowKeyword(
     ...getCommonAttributes(config),
     'event.name': EVENT_WORKFLOW_KEYWORD,
     'event.timestamp': event['event.timestamp'],
-    skill_autoloaded: event.skill_autoloaded,
   };
   const logger = logs.getLogger(SERVICE_NAME);
   logger.emit({ body: 'Workflow keyword trigger fired.', attributes });

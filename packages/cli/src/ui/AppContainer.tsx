@@ -3159,19 +3159,16 @@ export const AppContainer = (props: AppContainerProps) => {
         // queuing the side question as a normal prompt instead.
         !isBtwCommand(userPromptText)
       ) {
-        // Detection, the authoring-reference decision and the reminder text
-        // all live in `buildWorkflowKeywordPrefix` so they stay testable
-        // without a TUI; a `null` result means the keyword was absent.
-        const triggered = buildWorkflowKeywordPrefix(config, userPromptText);
-        if (triggered) {
+        // A `null` result means no reminder for this submission: the keyword
+        // is absent, the Workflow tool is not in this session, or this is a
+        // shell-mode command, which goes to bash rather than to the model.
+        const prefix = buildWorkflowKeywordPrefix(config, userPromptText, {
+          shellMode: shellModeActive,
+        });
+        if (prefix) {
           setWorkflowKeywordActive(true);
-          logWorkflowKeyword(
-            config,
-            new WorkflowKeywordEvent({
-              skill_autoloaded: triggered.autoloaded,
-            }),
-          );
-          submittedValue = triggered.prefix + submittedValue;
+          logWorkflowKeyword(config, new WorkflowKeywordEvent());
+          submittedValue = prefix + submittedValue;
         }
       }
       if (options?.deferUntilIdle) {
