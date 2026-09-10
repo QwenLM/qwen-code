@@ -70,6 +70,10 @@ export interface ServeOptions {
    */
   token?: string;
   mode: ServeMode;
+  /** Registration capacity, including primary and user scratch workspaces.
+   * Defaults to QWEN_SERVE_MAX_WORKSPACES or 256; accepts integers 1..256.
+   */
+  maxRegisteredWorkspaces?: number;
   /**
    * Per-workspace cap on concurrent live sessions. Once a runtime's
    * `bridge.sessionCount` reaches
@@ -89,10 +93,11 @@ export interface ServeOptions {
   maxSessions?: number;
   /**
    * Non-negative integer cap on concurrent live sessions across all workspace
-   * runtimes. `runQwenServe` derives a default once from the per-workspace cap
-   * and startup workspace count when several startup/restored workspaces are
-   * present; direct embeds may leave it unlimited. Dynamic registration does
-   * not recompute it. `0` or `Infinity` disables the cap.
+   * runtimes. `runQwenServe` defaults to 800 when registration capacity exceeds
+   * 25; otherwise it derives the default from the per-workspace cap and startup
+   * workspace count when several startup/restored workspaces are present.
+   * Direct embeds may leave it unlimited. Dynamic registration does not
+   * recompute it. `0` or `Infinity` disables the cap.
    */
   maxTotalSessions?: number;
   /**
@@ -493,6 +498,8 @@ export interface CapabilitiesEnvelope {
    * `null` means the operator explicitly disabled that cap.
    */
   limits?: {
+    maxRegisteredWorkspaces?: number;
+    maxChannelControlWorkspaces?: number;
     maxPendingPromptsPerSession?: number | null;
     maxSessionsPerWorkspace?: number | null;
     maxTotalSessions?: number | null;
