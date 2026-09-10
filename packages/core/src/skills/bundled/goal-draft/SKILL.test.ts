@@ -257,11 +257,11 @@ describe('bundled goal-draft skill', () => {
     expect(body).toContain('acknowledge it in one sentence and end the turn');
     // The text hand-off survives for headless runs and disabled tools.
     expect(body).toContain(
-      '**Otherwise** (Web Shell or another ACP client, headless, the tool is disabled, or a Goal is active)',
+      '**Otherwise** (a client without Goal proposal support, headless, the tool is disabled, or a Goal is active)',
     );
     expect(body).toContain('the draft has not been applied');
     expect(body).toContain(
-      'Do not promise a dialog in Web Shell or other ACP sessions',
+      'Do not promise a dialog when the tool is unavailable',
     );
   });
 
