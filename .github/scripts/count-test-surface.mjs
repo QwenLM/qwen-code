@@ -1072,37 +1072,47 @@ export function measure({ path, tip, pre, events = [] }) {
     }
     const before = countFile(ev.before, path);
     const after = countFile(ev.after, path);
-    const landed = sameContent(ev.after, landedRef)
-      ? after
-      : countFile(landedRef, path);
-    // "What actually landed" is the merge result measured against the
-    // BRANCH's own side at the merge, not against the merge base: the
-    // latter folds the round's own pre-merge edits into main's landed
-    // contribution, so a resolution that kept the branch's side whole
-    // would credit main's discarded removal against the round's own
-    // (R27-20). A fast-forwarded main commit carries no branch side —
-    // its landed blob is main's own, and the merge base is the right
-    // baseline there.
+    // Which side the merge resolution took decides what main's delta
+    // LANDED as: took main's side whole → main's delta landed exactly;
+    // kept the branch's side whole → none of it landed; MIXED → measure
+    // the result against the branch's own side, so the round's pre-merge
+    // edits never enter main's landed contribution (R27-20) — while the
+    // merge-base baseline would charge the round for main's landed
+    // removal even when the round's own edits were discarded with the
+    // branch's side (the binary-resolution-takes-main fixture).
+    const tookMainWhole = sameContent(ev.after, landedRef);
+    const keptBranchWhole =
+      ev.branch !== undefined &&
+      ev.branch !== null &&
+      sameContent(ev.branch, landedRef);
+    const landed = tookMainWhole ? after : countFile(landedRef, path);
     const landedBase =
       ev.branch !== undefined && ev.branch !== null
         ? countFile(ev.branch, path)
         : before;
+    const landedDelta = (key) =>
+      tookMainWhole
+        ? after[key] - before[key]
+        : keptBranchWhole
+          ? 0
+          : landed[key] - landedBase[key];
     assertions -= clamp(
       after.assertions - before.assertions,
-      landed.assertions - landedBase.assertions,
+      landedDelta('assertions'),
     );
     declared -= clamp(
       after.declared - before.declared,
-      landed.declared - landedBase.declared,
+      landedDelta('declared'),
     );
-    enabled -= clamp(
-      after.enabled - before.enabled,
-      landed.enabled - landedBase.enabled,
-    );
+    enabled -= clamp(after.enabled - before.enabled, landedDelta('enabled'));
     const modelledTitles = new Map();
     absorb(modelledTitles, before.enabledTitles, after.enabledTitles);
     const landedTitles = new Map();
-    absorb(landedTitles, landedBase.enabledTitles, landed.enabledTitles);
+    absorb(
+      landedTitles,
+      (tookMainWhole ? before : landedBase).enabledTitles,
+      landed.enabledTitles,
+    );
     for (const [k, n] of clampBag(modelledTitles, landedTitles)) {
       bagAdd(baselineEnabled, k, n);
     }
