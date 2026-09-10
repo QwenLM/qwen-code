@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { SessionSourcesSnapshot } from './session-sources.js';
+
 import { type Config } from '../config/config.js';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -315,6 +317,7 @@ export interface ChatRecord {
     | 'user_text_elements'
     | 'session_artifact_event'
     | 'session_artifact_snapshot'
+    | 'session_sources_snapshot'
     | 'branch_checkpoint'
     | 'goal_state'
     | 'goal_runtime'
@@ -382,6 +385,7 @@ export interface ChatRecord {
     | UserTextElementsRecordPayload
     | SessionArtifactEventRecordPayload
     | SessionArtifactSnapshotRecordPayload
+    | SessionSourcesSnapshot
     | BranchCheckpointRecordPayloadV1
     | GoalStateRecordPayloadV2
     | TurnResultRecordPayload;
@@ -3019,6 +3023,17 @@ export class ChatRecordingService {
       ...this.createBaseRecord('system'),
       type: 'system',
       subtype: 'session_artifact_snapshot',
+      systemPayload: payload,
+    };
+    await this.appendRecordStrict(record, { updateActiveTail: false });
+  }
+  async recordSessionSourcesSnapshot(
+    payload: SessionSourcesSnapshot,
+  ): Promise<void> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'session_sources_snapshot',
       systemPayload: payload,
     };
     await this.appendRecordStrict(record, { updateActiveTail: false });

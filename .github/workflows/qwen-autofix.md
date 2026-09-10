@@ -257,6 +257,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [153. review-address · Prepare branch and feedback — Convergence-break mirror (#10107): the scan refuses to select while the breaker holds,…](#af-153)
 - [154. review-address · Report dry-run / failure — Convergence-break report guard (#10122): the report step's stale-base retry is a sibling…](#af-154)
 - [155. review-address · Report dry-run / failure — Hold the stale-base refresh while a review-pr is in flight on the PR.…](#af-155)
+- [156. review-address · Triage and address — In-round self-review A/B: one bounded delta review before the round's commit,…](#af-156)
 
 ---
 
@@ -4262,4 +4263,82 @@ streak-reset needles ("deferred a stale-base refresh"): like the
 updated-a-stale-base round it defers to, the round's failure is not
 evidence about the PR, and counting it toward the cap would park a PR
 for having been reviewed at the wrong moment.
+```
+
+<a id="af-156"></a>
+
+### 156. review-address · Triage and address — In-round self-review A/B: one bounded delta review before the round's commit,…
+
+In `review-address` · `Triage and address` (arm), `Verification gate` (record), `Push and report` (marker).
+
+```text
+Measured on the takeover fleet on 2026-09-10 (40 PRs, 79 acted rounds,
+1369 inline findings, each blamed at its review head): after a round
+pushes, 73% of the next review's new Criticals and 93% of its
+Suggestions sit on that round's own delta (44/90 on the delta lines,
+15/90 on earlier bot rounds, 7 more within five lines of a delta hunk);
+54% of those reviews had EVERY new finding on the delta, and 62% would
+have posted nothing under the critical floor. Each pushed round costs a
+full cycle of 870 minutes median (118 agent + 289 review turnaround +
+348 idle to the next round). A fresh adversarial pass over the delta
+before the push therefore has the right scope, and its ceiling is that
+54-62%.
+
+The same measurement fixes the shape. Critical density on bot deltas is
+0.53 per 100 changed lines against 0.52 on human deltas, ~2 new
+Criticals per review whoever pushed, with no decay across rounds — the
+reviewer's yield on a fresh delta is the invariant, not the fixer's
+code. A pass that fixes findings produces a new delta with the same
+yield, so "review until clean" cannot converge inside a round; it only
+relocates the churn into a step with a hard agent budget whose overrun
+counts toward CONSECUTIVE_FAILURE_CAP and TIMEOUT_WINDOW_CAP. So the
+pass is ONE bounded delta review (--effort high: medium skips the
+reverse-audit depth where fix-of-fix Criticals first appear), a
+60-minute wait cap, and a skip below 150 changed lines (0.7 Criticals
+per review there, 89% of those reviews already delta-only).
+
+Mechanism. SELF_REVIEW (repo variable QWEN_AUTOFIX_SELF_REVIEW:
+off|ab|on) is resolved to an arm per PR in the address step — 'ab'
+splits on PR parity — and reaches the skill as three Invocation lines:
+`Self-review: on|off`, `Self-review CLI: node <workspace>/dist/cli.js`
+(the host's qwen wrapper is not on PATH inside the sandbox), and
+`Round deadline (UTC)`. An armed round's agent budget is
+SELF_REVIEW_TIMEOUT_MS (180m default) under a per-arm step cap
+(`timeout-minutes` = 190 armed, 130 unarmed), the unarmed 120m/130m
+margin rule unchanged. The 345-minute job bound cannot hold the armed
+cap AND the 70+60 same-run repair chain, and a GitHub-hosted job is cut
+at 360 whatever the bound says — so the arm is resolved once in prepare
+(never on a github-hosted runner: the hosted fallback runs the control
+shape), and an armed round skips the same-run repair (its `if:` excludes
+the arm; the repair fired on 7/79 = 9% of acted rounds in the sample), a
+deterministic rejection staying retryable for the next round as it was
+before the repair existed. The A/B must read gate rejections per arm
+beside the round counts, since the treatment arm pays a full cycle where
+the control arm pays a 60-minute repair. The skill runs the review
+command inside the session's own sandbox with QWEN_REVIEW_SANDBOX=off:
+the outer boundary is the operator's, and the review's own container
+would be a container inside it that no runtime can answer. After its
+commit the agent writes self-review.json (status, passes, dispositions,
+minutes, and the tree id of its commit). The gate validates the shape,
+compares that id with the tree of the head about to be pushed
+(bound=true|false — a tree id rather than a diff text, so git version
+skew between the sandbox and the host cannot fake a mismatch), and
+publishes one token string as the
+self_review output — advisory only, nothing rejects. Finalize
+verification selects it with the outcome exactly like audit_verdict,
+and Push and report renders it as
+`<!-- autofix-self-review arm=… status=… passes=… act=… declined=…
+deferred=… minutes=… bound=… -->` on the round report, so the A/B reads
+from the PR thread: pushed rounds to convergence, on-delta Criticals in
+the review after each armed push (baseline 73%), and round wall-clock,
+treatment arm against control.
+
+Known limits, deliberate. The record is agent-authored except for its
+binding hash and grammar; a missing or malformed file only marks the
+round (status=missing|invalid). The three Invocation lines are the only
+channel: a repo variable cannot smuggle prose (run-agent pins the CLI to
+a plain path and the deadline to an ISO instant). Whether the nested
+`review run` resolves its model credentials inside the sandbox is a
+runner fact the first armed round has to prove; the skill treats a
+failed or incomplete pass as review-failed and pushes regardless.
 ```
