@@ -72,6 +72,8 @@ interface PtySession {
   reclaimTimer?: ReturnType<typeof setTimeout>;
   dataDisposable?: { dispose(): void };
   exitDisposable?: { dispose(): void };
+  /** Set once the PTY-side resources are freed; guards the double release. */
+  ptyReleased?: boolean;
 }
 
 interface SpawnedWebTerminalPty extends WebTerminalPty {
@@ -270,6 +272,18 @@ export class WebTerminalRegistry {
       session.exited = true;
       session.exitCode = e.exitCode;
       for (const listener of [...session.exitListeners]) listener(e);
+      // Free the PTY's resources at exit time rather than at the idle
+      // reclaim: exited sessions do not count against the admission cap, so
+      // their accumulation inside the 15-minute reclaim window is unbounded.
+      // Nothing needs the PTY once the shell has exited — write()/resize()
+      // short-circuit on `exited`, and readSnapshot() replays the JS-side
+      // buffer — so the session itself stays in the map for scrollback
+      // replay. Deferred one tick because onExit can arrive slightly before
+      // trailing onData callbacks node-pty still has queued (the race the
+      // shell-tool path drains before finalizing); disposing dataDisposable
+      // synchronously here could truncate the tail of that replay. See
+      // #11353.
+      setImmediate(() => this.releasePtyResources(session)).unref?.();
     };
     let dataDisposable: { dispose(): void } | undefined;
     let exitDisposable: { dispose(): void } | undefined;
@@ -458,8 +472,6 @@ export class WebTerminalRegistry {
         listener({ exitCode: 143, signal: 15 });
       }
     }
-    session.dataDisposable?.dispose();
-    session.exitDisposable?.dispose();
     session.outputListeners.clear();
     session.exitListeners.clear();
     if (!session.exited) {
@@ -468,19 +480,19 @@ export class WebTerminalRegistry {
       // false, so a terminal released before its shell's first output byte (tab
       // closed during slow pwsh startup, or a workspace drain) still has a
       // kill() queued in node-pty's `_deferreds`. The wrapper's kill() notes
-      // the close only when it really ran; releaseHost then disposes the worker
-      // a deferred kill would strand, and skips the native close so the queued
-      // kill() stays the single closer — never a second close.
-      session.pty.releaseHost?.();
-    } else {
-      // The shell already exited, so nothing may signal its (possibly recycled)
-      // pid — but node-pty does not release its conout worker thread on a
-      // natural exit, so without this every terminal the user exits leaks one
-      // for the life of the CLI. Same defect as the shell-tool path in
-      // shellExecutionService. The conhost.exe half is not freed here (the
-      // native baton is already gone); see releaseConPtyHost. See #11303.
-      session.pty.releaseHost?.();
+      // the close only when it really ran; releasePtyResources' releaseHost
+      // then disposes the worker a deferred kill would strand, and skips the
+      // native close so the queued kill() stays the single closer — never a
+      // second close.
     }
+    // On the exited arm the shell is already gone, so nothing may signal its
+    // (possibly recycled) pid — but node-pty does not release its conout
+    // worker thread on a natural exit, so without releaseHost every terminal
+    // the user exits leaks one for the life of the CLI. Same defect as the
+    // shell-tool path in shellExecutionService. The conhost.exe half is not
+    // freed here (the native baton is already gone); see releaseConPtyHost.
+    // See #11303.
+    this.releasePtyResources(session);
     return true;
   }
 
@@ -500,6 +512,20 @@ export class WebTerminalRegistry {
   private finishCreating(terminalId: string): void {
     this.creating.delete(terminalId);
     this.cancelledCreations.delete(terminalId);
+  }
+
+  /**
+   * Dispose a session's PTY-side resources exactly once, keeping the session
+   * and its buffer for scrollback replay. An exited session reaches this
+   * twice — handleExit's deferred release at exit time, then release() on tab
+   * close, reclaim, workspace drain, or dispose() — hence the flag.
+   */
+  private releasePtyResources(session: PtySession): void {
+    if (session.ptyReleased) return;
+    session.ptyReleased = true;
+    session.dataDisposable?.dispose();
+    session.exitDisposable?.dispose();
+    session.pty.releaseHost?.();
   }
 
   private clearReclaim(session: PtySession): void {

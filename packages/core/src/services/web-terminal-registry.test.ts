@@ -69,7 +69,20 @@ describe('WebTerminalRegistry', () => {
       },
       onData: vi.fn((listener) => {
         onData = listener;
-        return { dispose: disposeData };
+        // Capture this session's spy by value: the describe-scope `disposeData`
+        // variable is reassigned every test, and a deferred exit-time release
+        // from a previous session may fire during a later test — it must hit
+        // its own spy, not the current one. Same reason the detach guard
+        // checks listener identity before clearing the shared `onData`.
+        const disposeDataSpy = disposeData;
+        return {
+          // Model node-pty's disposable detaching the listener, so a test can
+          // tell a synchronous dispose apart from the deferred one.
+          dispose: () => {
+            if (onData === listener) onData = () => {};
+            disposeDataSpy();
+          },
+        };
       }),
       onExit: vi.fn((listener) => {
         onExit = listener;
@@ -404,6 +417,99 @@ describe('WebTerminalRegistry', () => {
     expect(nativeKill).not.toHaveBeenCalled();
     expect(conoutDispose).not.toHaveBeenCalled();
     expect(kill).not.toHaveBeenCalled();
+  });
+
+  it('frees an exited session at exit time, not at the idle reclaim', async () => {
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:exit-release',
+      workspaceCwd: '/workspace',
+    });
+
+    onExit({ exitCode: 0 });
+    // Real timers and no clock advance, so the 15-minute idle reclaim cannot
+    // have fired: anything released now was released at exit time. See #11353.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // Nothing may signal the exited shell's possibly-recycled pid: no
+    // taskkill, no process-group kill, no ptyProcess.kill().
+    expect(spawnSync).not.toHaveBeenCalled();
+    expect(kill).not.toHaveBeenCalled();
+    expect(nativeKill).toHaveBeenCalledOnce();
+    expect(conoutDispose).toHaveBeenCalledOnce();
+    expect(disposeData).toHaveBeenCalledOnce();
+    expect(disposeExit).toHaveBeenCalledOnce();
+    // The session itself stays in the map for scrollback replay — release()
+    // did not run.
+    expect(registry.readSnapshot('terminal:exit-release')).toMatchObject({
+      exited: true,
+      exitCode: 0,
+    });
+  });
+
+  it('still replays buffered scrollback after the exit-time release', async () => {
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:exit-replay',
+      workspaceCwd: '/workspace',
+    });
+    onData('final output');
+    onExit({ exitCode: 3 });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // Both halves matter: the release ran at exit time, AND the reconnect
+    // replay it must not break still returns the buffered scrollback.
+    expect(conoutDispose).toHaveBeenCalledOnce();
+    expect(registry.readSnapshot('terminal:exit-replay')).toMatchObject({
+      output: 'final output',
+      exited: true,
+      exitCode: 3,
+    });
+  });
+
+  it('releases an exited session exactly once across exit and release()', async () => {
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:exit-then-release',
+      workspaceCwd: '/workspace',
+    });
+    onExit({ exitCode: 0 });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // A later release() — tab close, workspace drain, or dispose() — must not
+    // repeat the exit-time release. disposeData/disposeExit pin the flag:
+    // nativeKill/conoutDispose alone could not, since releaseConPtyHost
+    // already self-dedupes on the pty object.
+    expect(registry.release('terminal:exit-then-release')).toBe(true);
+    expect(nativeKill).toHaveBeenCalledOnce();
+    expect(conoutDispose).toHaveBeenCalledOnce();
+    expect(disposeData).toHaveBeenCalledOnce();
+    expect(disposeExit).toHaveBeenCalledOnce();
+  });
+
+  it('lets output queued behind onExit reach the scrollback before the release', async () => {
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:exit-trailing',
+      workspaceCwd: '/workspace',
+    });
+
+    // node-pty can deliver queued onData callbacks after onExit; the release
+    // is deferred one tick precisely so this tail still lands. With a
+    // synchronous dispose the fake's disposable detaches the listener and the
+    // tail is lost, so this test fails if the defer is removed.
+    onExit({ exitCode: 0 });
+    onData('trailing');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(registry.readSnapshot('terminal:exit-trailing')).toMatchObject({
+      output: 'trailing',
+      exited: true,
+    });
   });
 
   it('forwards live output and bounds unacknowledged PTY input', async () => {
