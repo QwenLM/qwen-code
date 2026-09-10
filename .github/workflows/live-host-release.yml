@@ -359,8 +359,9 @@ jobs:
       - name: 'Install dependencies'
         run: 'npm install --ignore-scripts'
 
-      - name: 'Build dependency chain (core → acp-bridge → sdk → qwen-live)'
+      - name: 'Build dependency chain (browser-use → core → acp-bridge → sdk → qwen-live)'
         run: |-
+          npm run build --workspace @qwen-code/browser-use
           npm run build --workspace @qwen-code/qwen-code-core
           npm run build --workspace @qwen-code/acp-bridge
           npm run build --workspace @qwen-code/sdk

@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { copyBrowserUseAssets } from '../copy-browser-use-assets.js';
 import { copyBundleAssets } from '../copy_bundle_assets.js';
 import { copyFiles } from '../copy_files.js';
+import { getWorkflowJob } from './workflow-helpers.js';
 
 const skillPath = 'packages/core/src/skills/bundled/browser-use';
 const runtimeFiles = [
@@ -194,6 +195,26 @@ describe('browser-use builtin resources', () => {
     const browserUseIndex = script.indexOf("'packages/browser-use'");
     expect(browserUseIndex).toBeGreaterThan(0);
     expect(browserUseIndex).toBeLessThan(script.indexOf("'packages/core'"));
+  });
+
+  it('builds browser-use before core when publishing Live Host', () => {
+    const publish = getWorkflowJob(
+      fs.readFileSync(
+        new URL(
+          '../../.github/workflows/live-host-release.yml',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+      'publish',
+    );
+    const browserUseIndex = publish.indexOf(
+      'npm run build --workspace @qwen-code/browser-use',
+    );
+    expect(browserUseIndex).toBeGreaterThanOrEqual(0);
+    expect(browserUseIndex).toBeLessThan(
+      publish.indexOf('npm run build --workspace @qwen-code/qwen-code-core'),
+    );
   });
 
   it('keeps the pinned Playwright installable as a workspace dependency', () => {
