@@ -120,6 +120,10 @@ describe('Workflow tool description shape', () => {
       ).toHaveLength(1);
       expect(description).not.toContain('**Runtime**');
       expect(description).not.toContain('journal holds one line per agent');
+      // Not repeating the runtime paragraph only works if the reference really
+      // states it: the inline shape reads these from SKILL.md alone.
+      expect(description).toContain('Every run hands back its runId');
+      expect(description).toContain('run_in_background');
     });
 
     // The parameter the model is about to fill sits beside the description,
@@ -166,6 +170,50 @@ describe('Workflow tool description shape', () => {
     expect(scriptDescription(tool)).not.toContain(
       WORKFLOW_AUTHORING_SKILL_NAME,
     );
+  });
+
+  // The hint is delivered at the moment the model is about to retry, so it has
+  // to match each shape — including the two no other test executes.
+  describe('failure hint', () => {
+    async function failingRunText(tool: WorkflowTool): Promise<string> {
+      const result = await tool
+        .build({ script: 'throw new Error("boom");' })
+        .execute(new AbortController().signal);
+      return (result.llmContent as Array<{ text: string }>)
+        .map((part) => part.text)
+        .join('\n');
+    }
+
+    it('says nothing about the reference when it is withheld', async () => {
+      const tool = new WorkflowTool(
+        configFor({ disabledNames: [WORKFLOW_AUTHORING_SKILL_NAME] }),
+        { dispatch: async () => 'unused' },
+      );
+      const text = await failingRunText(tool);
+
+      expect(tool.authoringSurface).toBe('withheld');
+      expect(text).toContain('Workflow failed: boom');
+      expect(text).not.toContain('hint:');
+      expect(text).not.toContain(WORKFLOW_AUTHORING_SKILL_NAME);
+    });
+
+    it('repeats the ToolSearch detour when the Skill tool is deferred', async () => {
+      const tool = new WorkflowTool(
+        configFor({ deferred: [ToolNames.SKILL] }),
+        {
+          dispatch: async () => 'unused',
+        },
+      );
+      const text = await failingRunText(tool);
+
+      expect(tool.authoringSurface).toBe('pointer-via-tool-search');
+      expect(text).toContain(
+        `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+      expect(text).toContain(
+        'If the Skill tool is not in your tool list, reveal it with ToolSearch first.',
+      );
+    });
   });
 
   it('falls back to the pointer when asked to inline an unreadable reference', () => {

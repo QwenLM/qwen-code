@@ -46,6 +46,13 @@ function fakeConfig(): Config {
   } as unknown as Config;
 }
 
+function paramDescription(tool: WorkflowTool, name: string): string {
+  const schema = tool.schema.parametersJsonSchema as {
+    properties: Record<string, { description: string }>;
+  };
+  return schema.properties[name].description;
+}
+
 /**
  * P4b Round 5 (wenshao): the registry integration path inside
  * `WorkflowTool.execute()` (register → emitter → complete/fail/cancel)
@@ -54,13 +61,6 @@ function fakeConfig(): Config {
  * builds a config with a real `WorkflowRunRegistry` and returns the
  * registry handle so tests can inspect post-run state.
  */
-function paramDescription(tool: WorkflowTool, name: string): string {
-  const schema = tool.schema.parametersJsonSchema as {
-    properties: Record<string, { description: string }>;
-  };
-  return schema.properties[name].description;
-}
-
 function configWithRegistry(): {
   config: Config;
   registry: WorkflowRunRegistry;
@@ -114,7 +114,7 @@ describe('WorkflowTool', () => {
     // `QWEN_CODE_MAX_WORKFLOW_SECONDS` has no exported constant
     // (`workflow-sandbox.ts` reads it inline), so it stays a literal.
     for (const anchor of [
-      'min(16, cpus-2)',
+      'min(16, availableParallelism()-2)',
       MAX_WORKFLOW_AGENTS_ENV,
       MAX_WORKFLOW_CONCURRENCY_ENV,
       WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
@@ -716,6 +716,22 @@ await agent('scan package.json')
     );
   });
 
+  // The inline fallback is large by construction — it carries the whole
+  // reference — and grows whenever the reference does. It still needs a
+  // ceiling, or growth passes every other assertion about its size.
+  it('keeps the inline fallback description within its budget', () => {
+    const tool = new WorkflowTool({
+      ...fakeConfig(),
+      getToolRegistry: () => ({
+        getAllToolNames: () => [ToolNames.WORKFLOW],
+        getTool: () => undefined,
+      }),
+    } as unknown as Config);
+
+    expect(tool.authoringSurface).toBe('inline');
+    expect(tool.description.length).toBeLessThanOrEqual(24_000);
+  });
+
   it('rejects build() when script is missing', () => {
     const tool = new WorkflowTool(fakeConfig());
     expect(() => tool.build({} as never)).toThrow(/script/);
@@ -802,6 +818,43 @@ await agent('scan package.json')
         run_in_background: true,
       }),
     ).toThrow(/interactive TUI/i);
+  });
+
+  // A session-owned run of a saved workflow is the user's script even when it
+  // is started from inline source. Its failure notice must not tell the model
+  // to "fix the script", which would contradict the copy-first resume advice.
+  it('keeps the authoring hint off a failed session-owned run of a saved workflow', async () => {
+    const runtimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'workflow-session-hint-'),
+    );
+    const registry = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    registry.setCompletionCallback(completion);
+    const config = {
+      ...fakeConfig(),
+      storage: new Storage(path.join(runtimeDir, 'project'), runtimeDir),
+      isInteractive: () => false,
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    } as unknown as Config;
+
+    try {
+      const tool = new WorkflowTool(config, { dispatch: async () => 'unused' });
+      expect(tool.authoringSurface).toBe('pointer');
+      await tool
+        .buildSessionOwnedBackground(
+          { script: 'throw new Error("boom");' },
+          'review-and-fix',
+        )
+        .execute(new AbortController().signal);
+      await vi.waitFor(() => expect(completion).toHaveBeenCalled());
+
+      const modelText = completion.mock.calls[0][1] as string;
+      expect(modelText).toContain('<recovery>');
+      expect(modelText).not.toContain('hint:');
+    } finally {
+      await fs.rm(runtimeDir, { recursive: true, force: true });
+    }
   });
 
   it('starts a session-owned background run outside the interactive TUI', async () => {
@@ -2298,6 +2351,28 @@ await agent('scan package.json')
         '1 cached',
       );
     });
+    // The trailer tells the model to resume by passing the generated copy
+    // back as `scriptPath`. That copy is still the model's script, so a
+    // failure there keeps the hint the first run had.
+    it('keeps the hint when a generated script is re-run by path and fails', async () => {
+      const { config } = storedConfig();
+      const dispatch = async () => 'unused';
+      const first = await new WorkflowTool(config, { dispatch })
+        .build({ script: 'throw new Error("first");' })
+        .execute(new AbortController().signal);
+      expect(first.scriptPath).toBeDefined();
+
+      const second = await new WorkflowTool(config, { dispatch })
+        .build({ scriptPath: first.scriptPath! })
+        .execute(new AbortController().signal);
+
+      const trailer = (second.llmContent as Array<{ text: string }>)[1].text;
+      expect(trailer).toContain('edit that generated copy first');
+      expect(trailer).toContain(
+        `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+    });
+
     it('carries the original args in the resume call', async () => {
       const { config } = storedConfig();
       const result = await new WorkflowTool(config, {

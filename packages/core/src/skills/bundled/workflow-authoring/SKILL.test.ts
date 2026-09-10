@@ -7,7 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '../../../config/config.js';
 import { parseSkillContent } from '../../skill-load.js';
 import {
@@ -29,6 +29,7 @@ import {
   MAX_WORKFLOW_STALL_MS_ENV,
 } from '../../../agents/runtime/workflow-stall.js';
 import { WorkflowAgentFailedError } from '../../../agents/runtime/workflow-agent-failure.js';
+import type { WorkflowAgentDispatch } from '../../../agents/runtime/workflow-orchestrator.js';
 import {
   buildWorkflowToolDescription,
   WorkflowTool,
@@ -143,7 +144,7 @@ describe('bundled workflow-authoring skill', () => {
     ],
     ['`QWEN_CODE_MAX_WORKFLOW_SECONDS` (applied as given)'],
     ['30-minute wall-clock cap per run'],
-    ['max(2, min(16, cpus-2))'],
+    ['max(2, min(16, availableParallelism()-2))'],
   ])('states the runtime limit: %s', (anchor) => {
     expect(skillProse()).toContain(anchor);
   });
@@ -172,9 +173,20 @@ describe('bundled workflow-authoring skill', () => {
       'AskUserQuestion, SendMessage, Monitor, EnterPlanMode, ExitPlanMode, or the Agent tool',
     ],
     ['cannot fan out further'],
-    // workflow(): both forms, and that a bare string is a name.
+    // workflow(): both forms, that a bare string is a name, and that its
+    // rejection is only loud at the top level.
     ['`workflow({ scriptPath:'],
     ['A bare string is always a name'],
+    [
+      'inside `parallel()`/`pipeline()` it becomes a position-aligned `null` like any other thunk rejection',
+    ],
+    ['so null-check a `workflow()` result too'],
+    // isolation: every refusal, and the workaround for the nested one.
+    ['when the session is already inside a worktree'],
+    ['pass it as `workingDir`'],
+    ['git is not available or the directory is not a git repository'],
+    // Concurrency follows the runtime's own source of parallelism.
+    ['follows CPU affinity and container CPU limits'],
     // Labels: the failures list carries nothing else.
     ['Make it unique per dispatch'],
     // The journal: every line type, and what a bare `started` means.
@@ -213,48 +225,112 @@ describe('the worked example', () => {
     expect(example).toContain('`verify:${dimension.key}:${index + 1}`');
   });
 
-  it('logs every agent it loses, by name', async () => {
-    const dispatch = async (_prompt: string, opts: { label?: string }) => {
-      const label = opts.label ?? '';
-      if (label === 'review:security' || label === 'verify:performance:1') {
-        throw new WorkflowAgentFailedError(
-          'did not complete (terminate mode: MAX_TURNS).',
-          'max_turns',
-          'MAX_TURNS',
-        );
-      }
-      if (label.startsWith('review:')) {
-        return {
-          findings: [{ file: `${label}.ts`, claim: `claim of ${label}` }],
-        };
-      }
-      return { isReal: true, why: 'reproduced' };
-    };
-
-    const result = await new WorkflowTool({} as unknown as Config, {
-      dispatch,
+  function runExample(
+    dispatch: (prompt: string, opts: { label?: string }) => Promise<unknown>,
+    args?: unknown,
+  ) {
+    return new WorkflowTool({} as unknown as Config, {
+      // The stub returns plain objects for `schema` dispatches, which the
+      // production dispatch would have validated; the cast says so.
+      dispatch: dispatch as unknown as WorkflowAgentDispatch,
     })
-      .build({ script: extractExample(), args: { target: 'HEAD' } })
+      .build({
+        script: extractExample(),
+        ...(args === undefined ? {} : { args }),
+      })
       .execute(new AbortController().signal);
+  }
 
-    expect(result.error).toBeUndefined();
+  function payloadOf(result: { returnDisplay?: unknown }) {
     const display = String(result.returnDisplay);
-    const payload = JSON.parse(
+    return JSON.parse(
       display.slice(
         display.indexOf('```json\n') + 8,
         display.lastIndexOf('\n```'),
       ),
     ) as { logs: string[]; result: { confirmed: Array<{ file: string }> } };
+  }
 
+  const failed = () =>
+    new WorkflowAgentFailedError(
+      'did not complete (terminate mode: MAX_TURNS).',
+      'max_turns',
+      'MAX_TURNS',
+    );
+
+  // One reviewer fails, one verifier fails, and one finding is refuted. The
+  // run must name both lost agents, and `confirmed` must hold only what a
+  // verifier actually upheld — the refuted finding is the case that pins the
+  // `verdict.isReal` filter.
+  it('logs every agent it loses by name, and confirms only upheld findings', async () => {
+    const result = await runExample(
+      async (_prompt, opts) => {
+        const label = opts.label ?? '';
+        if (label === 'review:security' || label === 'verify:performance:1') {
+          throw failed();
+        }
+        if (label === 'review:correctness') {
+          return {
+            findings: [
+              { file: 'correctness-a.ts', claim: 'upheld claim' },
+              { file: 'correctness-b.ts', claim: 'refuted claim' },
+            ],
+          };
+        }
+        if (label.startsWith('review:')) {
+          return { findings: [{ file: `${label}.ts`, claim: `of ${label}` }] };
+        }
+        if (label === 'verify:correctness:2') {
+          return { isReal: false, why: 'refuted' };
+        }
+        return { isReal: true, why: 'reproduced' };
+      },
+      { target: 'HEAD' },
+    );
+
+    expect(result.error).toBeUndefined();
+    const payload = payloadOf(result);
     expect(payload.logs).toEqual(
       expect.arrayContaining([
         expect.stringContaining('review:security came back empty'),
         expect.stringContaining('verify:performance:1 came back empty'),
-        'confirmed 1 finding(s)',
+        'confirmed 1 finding(s), refuted 1',
       ]),
     );
     expect(payload.result.confirmed.map((entry) => entry.file)).toEqual([
-      'review:correctness.ts',
+      'correctness-a.ts',
     ]);
+  });
+
+  // A stage that throws drops its dimension to a null slot. Flattening would
+  // hide that, so the example has to log it by name.
+  it('logs a dimension dropped by a stage that threw', async () => {
+    const result = await runExample(
+      async (_prompt, opts) => {
+        const label = opts.label ?? '';
+        // Not a list: the verify stage's `.map` throws for this dimension.
+        if (label === 'review:performance') return { findings: 'not a list' };
+        if (label.startsWith('review:')) return { findings: [] };
+        return { isReal: true, why: 'reproduced' };
+      },
+      { target: 'HEAD' },
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(payloadOf(result).logs).toEqual(
+      expect.arrayContaining([
+        'performance was dropped before its findings were verified',
+      ]),
+    );
+  });
+
+  // Called without its input, the example must fail loudly rather than
+  // report a clean, empty success built from reviewers told to review nothing.
+  it('refuses to run without args.target', async () => {
+    const dispatch = vi.fn(async () => ({ findings: [] }));
+    const result = await runExample(dispatch);
+
+    expect(result.error?.message).toContain('args.target is required');
+    expect(dispatch).not.toHaveBeenCalled();
   });
 });

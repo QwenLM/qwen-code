@@ -30,6 +30,10 @@ interface StubOptions {
   /** `null` models a registry that cannot answer. */
   toolNames?: string[] | null;
   deferred?: string[];
+  /** `settings.tools.visible`: deferred, but declared from session start. */
+  visibleTools?: string[];
+  /** Deferred tools already revealed through ToolSearch. */
+  revealed?: string[];
   disabledNames?: string[];
   disabledLevels?: string[];
 }
@@ -44,18 +48,26 @@ function stubConfig(options: StubOptions = {}) {
     skillManager = true,
     toolNames = [ToolNames.SKILL, ToolNames.WORKFLOW, ToolNames.TOOL_SEARCH],
     deferred = [],
+    visibleTools = [],
+    revealed = [],
     disabledNames = [],
     disabledLevels = [],
   } = options;
+  // Models the real `Config.isSkillEnabled`: a level other than the bundled one
+  // for this skill finds no owner and answers false, so a drift in the level
+  // the production code passes turns every row below red.
   const isSkillEnabled = vi.fn(
-    (skill: { name: string }) => !disabledNames.includes(skill.name),
+    (skill: { name: string; level?: string }) =>
+      skill.level === 'bundled' && !disabledNames.includes(skill.name),
   );
   const config = {
     getSkillManager: () => (skillManager ? {} : null),
     getToolRegistry: () => ({
       getAllToolNames: () => toolNames ?? undefined,
       isPermissionDeferred: (name: string) => deferred.includes(name),
+      isDeferredToolRevealed: (name: string) => revealed.includes(name),
     }),
+    getVisibleTools: () => new Set(visibleTools),
     isSkillEnabled,
     getDisabledSkillLevels: () => new Set(disabledLevels),
   } as unknown as Config;
@@ -84,7 +96,10 @@ describe('resolveWorkflowAuthoringRoute', () => {
     // The name is the load-bearing field: for the bundled level the decision
     // rests entirely on whether that exact name is disabled.
     expect(isSkillEnabled).toHaveBeenCalledWith(
-      expect.objectContaining({ name: WORKFLOW_AUTHORING_SKILL_NAME }),
+      expect.objectContaining({
+        name: WORKFLOW_AUTHORING_SKILL_NAME,
+        level: 'bundled',
+      }),
     );
   });
 
@@ -101,6 +116,16 @@ describe('resolveWorkflowAuthoringRoute', () => {
       { disabledNames: [WORKFLOW_AUTHORING_SKILL_NAME] },
     ],
     ['the bundled level is disabled', { disabledLevels: ['bundled'] }],
+    // An opt-out must win over "no SkillManager" too: config paths that skip
+    // the manager still build tools, and the user still asked for no text.
+    [
+      'the skill is disabled and skills are off entirely',
+      { skillManager: false, disabledNames: [WORKFLOW_AUTHORING_SKILL_NAME] },
+    ],
+    [
+      'the bundled level is disabled and skills are off entirely',
+      { skillManager: false, disabledLevels: ['bundled'] },
+    ],
     [
       'the skill is disabled and there is no Skill tool either',
       {
@@ -138,6 +163,23 @@ describe('resolveWorkflowAuthoringRoute', () => {
     const { config } = stubConfig({ deferred: [ToolNames.SKILL] });
     expect(resolveWorkflowAuthoringRoute(config)).toBe('skill-via-tool-search');
   });
+
+  // Deferred is not the same as hidden: `tools.visible` declares the schema
+  // from session start, and a ToolSearch reveal brings it back. Either way the
+  // Skill tool is in the request, and a detour note would be false.
+  it.each([
+    ['listed in tools.visible', { visibleTools: [ToolNames.SKILL] }],
+    ['already revealed', { revealed: [ToolNames.SKILL] }],
+  ])(
+    'points straight at the skill when a deferred Skill tool is %s',
+    (_case, options: StubOptions) => {
+      const { config } = stubConfig({
+        deferred: [ToolNames.SKILL],
+        ...options,
+      });
+      expect(resolveWorkflowAuthoringRoute(config)).toBe('skill');
+    },
+  );
 
   // A config that cannot answer is not evidence of absence. Guessing "inline"
   // would put the whole reference into every request of the session; guessing

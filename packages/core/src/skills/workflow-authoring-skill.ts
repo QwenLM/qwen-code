@@ -94,8 +94,9 @@ export function readWorkflowAuthoringReference(): WorkflowAuthoringReference | n
  *
  * - `skill` — the Skill tool is in the request; the model can load it.
  * - `skill-via-tool-search` — the Skill tool is registered but its schema is
- *   withheld by a `tools.eager` allowlist; the model has to reveal it with
- *   ToolSearch first, and the pointer has to say so.
+ *   withheld by a `tools.eager` allowlist (not listed in `tools.visible`, not
+ *   revealed yet); the model has to reveal it with ToolSearch first, and the
+ *   pointer has to say so.
  * - `inline` — no route to any skill; the reference has to travel in the
  *   Workflow tool's own description.
  * - `withheld` — the user turned this reference off; carry nothing.
@@ -137,8 +138,8 @@ export function resolveWorkflowAuthoringRoute(
     const toolNames = registry?.getAllToolNames?.();
     if (!Array.isArray(toolNames)) return 'skill';
     if (!toolNames.includes(ToolNames.SKILL)) return 'inline';
-    if (registry?.isPermissionDeferred?.(ToolNames.SKILL)) {
-      // A deferred schema is only reachable through ToolSearch. Without it
+    if (isToolHiddenBehindToolSearch(config, ToolNames.SKILL)) {
+      // A withheld schema is only reachable through ToolSearch. Without it
       // the Skill tool is registered but invisible, which is no route at all.
       return toolNames.includes(ToolNames.TOOL_SEARCH)
         ? 'skill-via-tool-search'
@@ -173,7 +174,8 @@ export type WorkflowAuthoringSurface =
 export function resolveWorkflowAuthoringSurface(
   config: Config,
 ): WorkflowAuthoringSurface {
-  switch (resolveWorkflowAuthoringRoute(config)) {
+  const route = resolveWorkflowAuthoringRoute(config);
+  switch (route) {
     case 'skill':
       return 'pointer';
     case 'skill-via-tool-search':
@@ -184,7 +186,44 @@ export function resolveWorkflowAuthoringSurface(
       // Inlining needs the file. Without it the pointer is the only text left
       // that names the reference at all.
       return readWorkflowAuthoringReference() ? 'inline' : 'pointer';
-    default:
-      return 'pointer';
+    default: {
+      // Unreachable while every route has a case above. Typed `never` so a
+      // new route is a compile error here rather than a silent pointer.
+      const unhandled: never = route;
+      return unhandled;
+    }
   }
+}
+
+/**
+ * Whether a registered tool's schema is withheld from the request right now:
+ * permission-deferred by a `tools.eager` allowlist, not listed in
+ * `tools.visible`, and not revealed through ToolSearch yet.
+ *
+ * Mirrors `ToolRegistry.isDeferredAndHidden`, which cannot be used here: it
+ * answers false for a tool that is still only a lazy factory, which is exactly
+ * the state while the Workflow tool is being constructed.
+ */
+export function isToolHiddenBehindToolSearch(
+  config: Config,
+  name: string,
+): boolean {
+  const registry = config.getToolRegistry?.();
+  if (!registry?.isPermissionDeferred?.(name)) return false;
+  if (config.getVisibleTools?.()?.has(name)) return false;
+  if (registry.isDeferredToolRevealed?.(name)) return false;
+  return true;
+}
+
+/**
+ * The one wording for "fetch this tool's schema first", shared by the tool
+ * description, the failure hint and the keyword reminder so the three never
+ * phrase it differently.
+ *
+ * Conditional on purpose: the description is built once, and the tool can be
+ * revealed later in the session (a ToolSearch call, or a resumed history that
+ * references it), which would make a flat "it is deferred" untrue.
+ */
+export function toolSearchRevealSentence(toolDisplayName: string): string {
+  return `If the ${toolDisplayName} tool is not in your tool list, reveal it with ToolSearch first.`;
 }

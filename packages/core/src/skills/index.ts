@@ -50,9 +50,11 @@ export * from './skill-curator.js';
 // how it reaches the model: pointed at, inlined in the tool description, or
 // withheld because the user turned it off.
 export {
+  isToolHiddenBehindToolSearch,
   readWorkflowAuthoringReference,
   resolveWorkflowAuthoringRoute,
   resolveWorkflowAuthoringSurface,
+  toolSearchRevealSentence,
   WORKFLOW_AUTHORING_SKILL_NAME,
 } from './workflow-authoring-skill.js';
 export type {

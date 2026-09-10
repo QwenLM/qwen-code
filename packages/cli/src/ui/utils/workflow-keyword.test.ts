@@ -21,6 +21,8 @@ import {
 
 interface StubOptions {
   toolNames?: string[];
+  /** Tools a `tools.eager` allowlist demoted to deferred. */
+  deferred?: string[];
   /** What the Workflow tool instance recorded when it was built. */
   recordedSurface?: WorkflowAuthoringSurface;
   /** What a live re-derivation would say now. */
@@ -30,6 +32,7 @@ interface StubOptions {
 function stubConfig(options: StubOptions = {}): Config {
   const {
     toolNames = [ToolNames.SKILL, ToolNames.WORKFLOW],
+    deferred = [],
     recordedSurface,
     skillEnabledNow = true,
   } = options;
@@ -37,9 +40,11 @@ function stubConfig(options: StubOptions = {}): Config {
     getSkillManager: () => ({}),
     getDisabledSkillLevels: () => new Set(),
     isSkillEnabled: () => skillEnabledNow,
+    getVisibleTools: () => new Set<string>(),
     getToolRegistry: () => ({
       getAllToolNames: () => toolNames,
-      isPermissionDeferred: () => false,
+      isPermissionDeferred: (name: string) => deferred.includes(name),
+      isDeferredToolRevealed: () => false,
       getTool: (name: string) =>
         name === ToolNames.WORKFLOW && recordedSurface
           ? { authoringSurface: recordedSurface }
@@ -89,7 +94,7 @@ describe('buildWorkflowSteeringNotice', () => {
 
   it('names the ToolSearch detour when the Skill tool is deferred', () => {
     expect(buildWorkflowSteeringNotice('pointer-via-tool-search')).toContain(
-      'reveal the Skill tool with ToolSearch first',
+      'If the Skill tool is not in your tool list, reveal it with ToolSearch first.',
     );
   });
 
@@ -119,6 +124,37 @@ describe('buildWorkflowKeywordPrefix', () => {
         shellMode: true,
       }),
     ).toBe(null);
+  });
+
+  // A Workflow tool withheld by a `tools.eager` allowlist is out of reach when
+  // nothing can reveal it: its schema is in no request.
+  it('returns nothing when the Workflow tool is deferred and ToolSearch is absent', () => {
+    expect(
+      buildWorkflowKeywordPrefix(
+        stubConfig({
+          toolNames: [ToolNames.SKILL, ToolNames.WORKFLOW],
+          deferred: [ToolNames.WORKFLOW],
+        }),
+        'build me a workflow',
+      ),
+    ).toBe(null);
+  });
+
+  // When ToolSearch can reveal it, the reminder has to say so, or the model is
+  // steered toward a tool it has no declaration for.
+  it('tells the model to reveal a deferred Workflow tool first', () => {
+    const prefix = buildWorkflowKeywordPrefix(
+      stubConfig({
+        toolNames: [ToolNames.SKILL, ToolNames.WORKFLOW, ToolNames.TOOL_SEARCH],
+        deferred: [ToolNames.WORKFLOW],
+        recordedSurface: 'pointer',
+      }),
+      'build me a workflow',
+    );
+
+    expect(prefix).toContain(
+      'If the Workflow tool is not in your tool list, reveal it with ToolSearch first.',
+    );
   });
 
   // Steering toward a tool that is not in the request helps nobody.

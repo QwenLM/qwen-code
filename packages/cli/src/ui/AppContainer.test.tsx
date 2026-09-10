@@ -2993,6 +2993,78 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    // The shell-mode gate is load-bearing only through this call site: a
+    // shell-mode submission goes to bash, where a leading `<system-reminder>`
+    // is a syntax error, and is recorded as the command the user ran. Both arms
+    // go through the real handleFinalSubmit and the real shellModeActive state,
+    // so dropping `shellMode: shellModeActive` from the call turns the shell
+    // arm red while the ordinary arm keeps the assertion from passing vacuously.
+    it.each([
+      ['a shell-mode submission', true, false],
+      ['an ordinary prompt', false, true],
+    ])(
+      'adds the workflow keyword reminder only outside shell mode: %s',
+      (_case, shellMode, expectReminder) => {
+        const mockQueueMessage = vi.fn();
+        vi.spyOn(mockConfig, 'isWorkflowsEnabled').mockReturnValue(true);
+        vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+          getAllToolNames: () => ['workflow'],
+          getTool: () => undefined,
+          getMcpClientManager: () => ({
+            getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+          }),
+        } as unknown as ReturnType<Config['getToolRegistry']>);
+        mockedUseLlmStream.mockReturnValue({
+          streamingState: 'idle',
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: vi.fn(),
+          retryLastPrompt: vi.fn(),
+          streamingResponseLengthRef: { current: 0 },
+          isReceivingContent: false,
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          removeGoalTurns: vi.fn().mockReturnValue([]),
+          messageQueue: [],
+          addMessage: mockQueueMessage,
+          clearQueue: vi.fn(),
+          getQueuedMessagesText: vi.fn().mockReturnValue(''),
+          popAllMessages: vi.fn().mockReturnValue(null),
+          drainQueue: vi.fn().mockReturnValue([]),
+          popNextTurn: vi.fn().mockReturnValue(null),
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+
+        if (shellMode) {
+          act(() => {
+            capturedUIActions.setShellModeActive(true);
+          });
+        }
+        capturedUIActions.handleFinalSubmit('gh workflow list', {
+          submittedPrompt: 'gh workflow list',
+        });
+
+        expect(mockQueueMessage).toHaveBeenCalledTimes(1);
+        const submitted = mockQueueMessage.mock.calls[0][0] as string;
+        expect(submitted).toContain('gh workflow list');
+        if (expectReminder) {
+          expect(submitted).toContain('<system-reminder>');
+        } else {
+          expect(submitted).not.toContain('<system-reminder>');
+        }
+      },
+    );
+
     it('preserves unchanged queue provenance across the input clear before submit', () => {
       const modelText =
         '<system-reminder>\nmanaged context\n</system-reminder>\n\nreview this';

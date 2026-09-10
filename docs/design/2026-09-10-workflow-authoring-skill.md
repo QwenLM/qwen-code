@@ -8,8 +8,8 @@ Tracking issue: #11013, item 4.
 
 The Workflow tool's description carried the whole authoring contract: the
 orchestration policy, every `agent()` option with the error strings a script
-compares against, and the fan-out patterns. It was about 17,000 characters
-between the description and the `script` parameter, sent in the tool
+compares against, and the fan-out patterns. It was about 12,900 characters —
+8,906 in the description and 3,973 in the `script` parameter — sent in the tool
 definition of every turn. Only the turn that writes a script needs it.
 
 ## Decision
@@ -31,12 +31,12 @@ constant and stay literals on both sides.
 tool is constructed. The order matters: a user opt-out wins over the lack of a
 Skill tool.
 
-| Route                   | When                                                                                    | Description shape                                                     |
-| ----------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `withheld`              | The skill is disabled by name, or the bundled level is disabled                         | Decision and runtime, nothing about the reference                     |
-| `inline`                | No SkillManager, the Skill tool is not registered, or it is deferred with no ToolSearch | Decision and the full reference                                       |
-| `skill-via-tool-search` | The Skill tool is deferred by a `tools.eager` allowlist and ToolSearch is registered    | Decision, runtime, pointer, and a note to reveal the Skill tool first |
-| `skill`                 | Otherwise, including when the config cannot answer                                      | Decision, runtime, and a pointer                                      |
+| Route                   | When                                                                                                                | Description shape                                                     |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `withheld`              | The skill is disabled by name, or the bundled level is disabled                                                     | Decision and runtime, nothing about the reference                     |
+| `inline`                | No SkillManager, the Skill tool is not registered, or it is deferred with no ToolSearch                             | Decision and the full reference                                       |
+| `skill-via-tool-search` | The Skill tool is deferred by a `tools.eager` allowlist, not made visible or revealed, and ToolSearch is registered | Decision, runtime, pointer, and a note to reveal the Skill tool first |
+| `skill`                 | Otherwise, including when the config cannot answer                                                                  | Decision, runtime, and a pointer                                      |
 
 An `inline` route with an unreadable `SKILL.md` falls back to the pointer, the
 only remaining text that names the reference.
@@ -81,7 +81,8 @@ would miss what a real Skill load gets: dedup on resume, `/context`
 attribution, microcompaction, and the skill's declared side effects.
 
 The reminder is skipped for shell-mode submissions and when the Workflow tool
-is not registered.
+is out of reach: not registered, or deferred with no ToolSearch to reveal it.
+When ToolSearch can reveal it, the reminder says to do that first.
 
 ## Not in scope
 

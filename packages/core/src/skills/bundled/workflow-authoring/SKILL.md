@@ -108,10 +108,14 @@ say explicitly what each one should read and whether it may edit files.
   `<projectRoot>/.qwen/worktrees/agent-<7hex>`; the worktree is auto-removed if
   no changes, otherwise the path and branch are returned alongside the result.
   `'remote'` makes the admitted agent() resolve to null and records
-  "agent({isolation:'remote'}) is not available in this build".
-  `isolation=worktree` also resolves to null and records a refusal when the
+  "agent({isolation:'remote'}) is not available in this build". A `'worktree'`
+  dispatch is also refused — it resolves to null with the reason recorded —
+  when the session is already inside a worktree (nested isolation worktrees are
+  not supported; to run agents in that worktree, pass it as `workingDir`), when
+  git is not available or the directory is not a git repository, when the
   parent working tree has uncommitted changes (the subagent would see a stale
-  HEAD).
+  HEAD), or when the worktree cannot be created. The nested case refuses every
+  dispatch, so rule it out before a large `isolation: 'worktree'` fan-out.
 - `workingDir` (string) — pin the subagent to an EXISTING git worktree of this
   repository that the caller owns; nothing is created and nothing is removed.
   Use it when the directory the agent must work in already exists and its
@@ -164,8 +168,10 @@ at its index.
 
 ## Limits
 
-- Concurrency: `max(2, min(16, cpus-2))` agents in flight per run, override via
-  `QWEN_CODE_MAX_WORKFLOW_CONCURRENCY` (clamped to 64).
+- Concurrency: `max(2, min(16, availableParallelism()-2))` agents in flight per
+  run — `availableParallelism()` follows CPU affinity and container CPU limits,
+  not the host's core count — override via `QWEN_CODE_MAX_WORKFLOW_CONCURRENCY`
+  (clamped to 64).
 - 1000 `agent()` calls per run, override via `QWEN_CODE_MAX_WORKFLOW_AGENTS`
   (clamped to 10000). The call past the cap throws.
 - 30-minute wall-clock cap per run, override via
@@ -237,10 +243,12 @@ slash commands) and `~/.qwen/workflows` (user scope, lower precedence when both
 define the same name). `workflow({ scriptPath: '<absolute path>' })` loads a
 script file directly from either of those directories or from the
 generated-scripts root (`$QWEN_CODE_PROJECT_DIR/workflows/generated` — the
-per-project runtime dir, not the project tree). A bare string is always a name:
-a path passed as a string is rejected as an invalid workflow name, and that
-rejection ends the run rather than settling to `null`. A path outside those
-roots is refused.
+per-project runtime dir, not the project tree); a path outside those roots is
+refused. A bare string is always a name: a path passed as a string is rejected
+as an invalid workflow name. At the top level that rejection ends the run;
+inside `parallel()`/`pipeline()` it becomes a position-aligned `null` like any
+other thunk rejection — with no agent dispatched and nothing in the failures
+list — so null-check a `workflow()` result too.
 
 To create or edit a saved workflow, use the `workflow-creator` skill — it owns
 the file layout, naming rules, and the save round-trip.
@@ -331,6 +339,11 @@ const VERDICT = {
   required: ['isReal', 'why'],
 };
 
+const target = args?.target;
+if (!target) {
+  throw new Error('args.target is required, e.g. { target: "HEAD~1..HEAD" }');
+}
+
 phase('Review');
 const reviewed = await pipeline(
   DIMENSIONS,
@@ -338,7 +351,7 @@ const reviewed = await pipeline(
   // returning null here would drop the dimension and skip the verify stage.
   async (dimension) => {
     const review = await agent(
-      `Review the changes in ${args.target} for ${dimension.lens}. ` +
+      `Review the changes in ${target} for ${dimension.lens}. ` +
         `Read the files; do not edit anything.`,
       { label: `review:${dimension.key}`, schema: FINDINGS },
     );
@@ -368,13 +381,27 @@ const reviewed = await pipeline(
   },
 );
 
-const confirmed = reviewed
-  .flat()
-  .filter((entry) => entry !== null && entry.verdict.isReal);
-log(`confirmed ${confirmed.length} finding(s)`);
+// A stage that throws drops its dimension to a null slot. Say which ones
+// before flattening, or the drop reads as a dimension that found nothing.
+reviewed.forEach((entries, index) => {
+  if (entries === null) {
+    log(
+      `${DIMENSIONS[index].key} was dropped before its findings were verified`,
+    );
+  }
+});
+const verdicts = reviewed.filter((entries) => entries !== null).flat();
+const confirmed = verdicts.filter(
+  (entry) => entry !== null && entry.verdict.isReal,
+);
+const refuted = verdicts.filter(
+  (entry) => entry !== null && !entry.verdict.isReal,
+);
+log(`confirmed ${confirmed.length} finding(s), refuted ${refuted.length}`);
 return { confirmed };
 ```
 
-Note what the example does with failure: each `null` is handled in the stage
-that dispatched the agent, every verify dispatch has its own label, and every
-dropped piece of work is `log()`ged by name rather than silently omitted.
+Note what the example does with failure: it refuses to run without the input
+it needs, handles each `null` in the stage that dispatched the agent, gives
+every verify dispatch its own label, and `log()`s every dimension, claim and
+refutation it drops rather than silently omitting them.
