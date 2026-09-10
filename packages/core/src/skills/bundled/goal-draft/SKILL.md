@@ -114,10 +114,10 @@ Then hand off, and nothing else:
 
 **If the `propose_goal` tool is available and no Goal is active**, call it with the objective on one line. The user approves or declines it in a dialog; only their approval sets the Goal. If they decline you will not be told why: stop, do not ask about it, and do not propose the same or a reworded objective again. After approval, acknowledge it in one sentence and end the turn — the Goal runtime starts the first Goal turn on its own.
 
-**Otherwise** (Web Shell or another ACP client, headless, the tool is disabled, or a Goal is active), print:
+**Otherwise** (a client without Goal proposal support, headless, the tool is disabled, or a Goal is active), print:
 
 1. The objective in a fenced code block.
 2. One line the user can run as-is: `/goal set <objective on one line>` (or `/goal edit …` when tightening the active goal). Print it as plain text with no code markers, so it can be copied verbatim.
-3. One sentence explaining that the draft has not been applied and the user must run the command to apply it; include any `[ASSUMPTION]` items. Do not promise a dialog in Web Shell or other ACP sessions.
+3. One sentence explaining that the draft has not been applied and the user must run the command to apply it; include any `[ASSUMPTION]` items. Do not promise a dialog when the tool is unavailable.
 
 Do not run /goal yourself. Do not begin the task. Stop and wait for the user.

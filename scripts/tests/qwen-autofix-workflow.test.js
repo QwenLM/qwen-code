@@ -8,11 +8,13 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -20,10 +22,14 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { getWorkflowJob } from './workflow-helpers.js';
+import {
+  count as countTestSurface,
+  measure as measureTestSurface,
+} from '../../.github/scripts/count-test-surface.mjs';
 
 // A hung-runner bound, not a performance budget, so it rides the suite's own
 // knob (scripts/tests/vitest.config.ts) instead of a figure measured on a
@@ -69,6 +75,12 @@ const upsertDeferredScript = readFileSync(
 );
 const autofixContractsScriptPath = '.github/scripts/check-autofix-contracts.sh';
 const autofixContractsScript = readFileSync(autofixContractsScriptPath, 'utf8');
+// The loop-owned lane exclusion list lives in ONE workflow env entry
+// (R27-23); harnesses executing the real classifier blocks inject the
+// REAL value read from the workflow, so a drift between the two fails
+// here, not in production.
+const loopOwnedLanesJson =
+  workflow.match(/^ {2}LOOP_OWNED_LANES: '(.+)'$/m)?.[1] ?? '[]';
 const autofixRunnerScriptPath = '.qwen/skills/autofix/scripts/run-agent.mjs';
 const checkBotCredentialsStep =
   workflow.match(
@@ -253,6 +265,16 @@ const nodeSetupSteps =
 const hasBashMapfile =
   spawnSync('bash', ['-c', 'mapfile -d "" -t x <<< y'], { stdio: 'ignore' })
     .status === 0;
+
+// sha256sum is GNU coreutils: a macOS host without the GNU toolchain
+// (Homebrew ships it as gsha256sum) cannot run the staging step's digest
+// lines — the step is written for the runner, where coreutils is always
+// present. Probe the host like hasBashMapfile does; the pin gates only the
+// verbatim phase of the staging witness, never its text pins.
+const hasSha256sum =
+  spawnSync('bash', ['-c', 'command -v sha256sum > /dev/null 2>&1'], {
+    stdio: 'ignore',
+  }).status === 0;
 
 // GitHub Actions expressions return operand VALUES from &&/||, not
 // booleans: && yields the first falsy operand (else the last operand), ||
@@ -649,6 +671,9 @@ describe('qwen-autofix workflow', () => {
           !/startswith\("review-address"\)/.test(sel) &&
           !/!= "Qwen Autofix"/.test(sel) &&
           !/IN\("Qwen Autofix"/.test(sel) &&
+          // The wake filter excludes the loop's fleet through the shared
+          // env list now (R27-23) — the reference IS the guard.
+          !/IN\(\$looplanes\[\]\)/.test(sel) &&
           // The review-in-flight gate (#8888) selects BY NAME for the LLM
           // review check — a liveness probe, not a feedback selector, so it
           // needs neither the review-address carve-out nor the workflow guard.
@@ -8660,6 +8685,7 @@ exit 1
           '-c',
           `set -e\nAUTOFIX_BOT=qwen-code-dev-bot\nREVIEW_BOT=qwen-code-ci-bot\n` +
             `LIVE_REARM_KEY=W1\nWORKDIR=${dir}\nSTALE=${stale}\n` +
+            `LOOP_OWNED_LANES=${JSON.stringify(loopOwnedLanesJson)}\n` +
             `BASE_UPD_AT='${baseUpdAt}'\n` +
             `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
             `${conflictBlock}\nprintf '%s' "$STALE"`,
@@ -9811,7 +9837,10 @@ exit 1
     // review-address must also fetch ic.json and render issue-level comments.
     expect(prepareBranchAndFeedbackStep).toMatch(normalizedIcFetch);
     expect(prepareBranchAndFeedbackStep).toContain(
-      '2> /dev/null || echo \'[]\' > "${WORKDIR}/checks.json"',
+      'jq \'.statusCheckRollup // []\' <<< "${PR_ROLLUP}" > "${WORKDIR}/checks.json"',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '|| echo \'[]\' > "${WORKDIR}/checks.json"',
     );
     expect(workflow).toContain('## Issue-level comments');
     expect(workflow).toContain('## Failed checks');
@@ -9821,10 +9850,14 @@ exit 1
     );
     // Four sites: the NEWEST computation, the live-watermark revalidation,
     // the "Failed checks" rendering, and the "Still-red checks" rendering
-    // share the address-check carve-out (the autofix workflow's OTHER lanes
-    // failing is the loop's own business, not actionable feedback). The
-    // conflict-handoff wake filter deliberately does NOT share it: under a
-    // park no address round can legitimately run, so it excludes ALL Qwen
+    // share the address-check carve-out (the autofix workflow's OTHER
+    // lanes failing is the loop's own business, not actionable feedback).
+    // The regression classifier (af-157) deliberately does NOT share it:
+    // the charge verdict excludes ALL own-lane checks via the canonical
+    // five-name filter — a failed or in-flight own run is feedback or
+    // observer noise, not a red the loop may charge to its own push. The
+    // conflict-handoff wake filter also does NOT share it: under a park
+    // no address round can legitimately run, so it excludes ALL Qwen
     // Autofix checks — the conflict round's own failed check must not
     // unpark its own park.
     expect(
@@ -12575,6 +12608,8 @@ exit 1
       'CI="${CI:-true}"',
       'KISS_AUDIT="${KISS_AUDIT:-false}"',
       'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
+      'WEAKEN_COUNTER_SHA256="${WEAKEN_COUNTER_SHA256:-}"',
+      'WEAKEN_PARSER_SHA256="${WEAKEN_PARSER_SHA256:-}"',
       'SELF_REVIEW_ARM="${SELF_REVIEW_ARM:-off}"',
       'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
     ];
@@ -17003,11 +17038,7 @@ exit 1
         'crashed or timed out before reading the feedback',
         '在读取反馈之前崩溃或超时',
       ],
-      [
-        'HEADLINE',
-        'consecutive rounds that pushed nothing',
-        '轮未能推送任何内容',
-      ],
+      ['HEADLINE', 'consecutive rounds without progress', '轮没有进展'],
       ['HEADLINE', 'time-budget exhaustions', '次时间预算耗尽'],
       // The cap remedy is inlined in HEADLINE/HEADLINE_ZH (the REMEDY
       // variables are gone) — its EN/ZH pairing stays pinned here.
@@ -17487,6 +17518,13 @@ exit 1
     ).toBeLessThan(
       stageStep.indexOf('cp .github/scripts/autofix-status-heartbeat.sh'),
     );
+    // count-test-surface.mjs carries the SAME absent-from-base exposure,
+    // and takes this guard verbatim — but it is staged one step later,
+    // because its parser is a copy of the typescript `npm ci` installs.
+    // Its own pins (guard, order, and the verbatim absence probe) live in
+    // 'stages the counter and its parser from the trusted base'; this step
+    // must not stage it, or it would run before node_modules exists.
+    expect(stageStep).not.toContain('count-test-surface.mjs');
     const stageProbeDir = mkdtempSync(join(tmpdir(), 'hb-stage-probe-'));
     const stageRunnerTemp = mkdtempSync(join(tmpdir(), 'hb-stage-temp-'));
     try {
@@ -18949,6 +18987,7 @@ exit 1
         staleBaseRetry = false,
         staleBaseDeferred = false,
         agentTimeout = '',
+        regressedRound = '',
       } = {},
     ) => {
       const dir = mkdtempSync(join(tmpdir(), 'consec-'));
@@ -18963,7 +19002,11 @@ exit 1
             return {
               user: { login: 'qwen-code-dev-bot' },
               created_at: `2026-01-01T00:${String(i).padStart(2, '0')}:00Z`,
-              body: `${headline}\n<!-- autofix-eval ts=x acted=y round=1${win ? ` win=${win}` : ''} -->`,
+              body: `${headline}\n<!-- autofix-eval ts=x acted=y round=1${win ? ` win=${win}` : ''} -->${
+                typeof h === 'object' && h.regressed !== undefined
+                  ? `\n<!-- autofix-regression round=${h.regressed} key=${h.regKey ?? win ?? 'none'} -->`
+                  : ''
+              }`,
             };
           }),
         ),
@@ -18977,7 +19020,7 @@ exit 1
         'bash',
         [
           '-c',
-          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\nSTALE_BASE_DEFERRED='${staleBaseDeferred}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\nHEADLINE_ZH=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE" "$HEADLINE_ZH"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\nSTALE_BASE_DEFERRED='${staleBaseDeferred}'\nREGRESSED_ROUND='${regressedRound}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\nHEADLINE_ZH=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE" "$HEADLINE_ZH"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -19085,6 +19128,84 @@ exit 1
       consec: 3,
       terminal: false,
     });
+    // A push that turned the checks red is NOT progress (af-157). Before
+    // this, "pushed something" was the whole reset test, so a PR could
+    // alternate regress / repair forever and every brake read it as
+    // converging: the red it created came back as the next round's input
+    // and was paid for out of the round budget.
+    const pushAt = (n) =>
+      `🤖 Addressed the latest review feedback (round ${n}/100).`;
+    // Control: the same push with no regression marker still resets.
+    expect(run([FAIL, FAIL, { headline: pushAt(2) }, FAIL])).toMatchObject({
+      consec: 2,
+      terminal: false,
+    });
+    // ...and with one, the streak carries straight through it.
+    expect(
+      run([FAIL, FAIL, { headline: pushAt(2), regressed: 2 }, FAIL]),
+    ).toMatchObject({ consec: 5, terminal: true });
+    // An unbroken run of regressing pushes trips the cap on its own — the
+    // shape the old counter could never see, because each round pushed.
+    expect(
+      run([
+        { headline: pushAt(1), regressed: 1 },
+        { headline: pushAt(2), regressed: 2 },
+        { headline: pushAt(3), regressed: 3 },
+        { headline: pushAt(4), regressed: 4 },
+      ]),
+    ).toMatchObject({ consec: cap, terminal: true });
+    // THIS round's own observation is not in the fetched comments yet — the
+    // marker rides the report this step is still composing. Without folding
+    // it in, the newest regressing push escapes by exactly one round, and
+    // that is the round that matters.
+    expect(
+      run(
+        [
+          { headline: pushAt(1), regressed: 1 },
+          { headline: pushAt(2), regressed: 2 },
+          { headline: pushAt(3), regressed: 3 },
+          { headline: pushAt(4) },
+        ],
+        { regressedRound: '4' },
+      ),
+    ).toMatchObject({ consec: cap, terminal: true });
+    // A clean push after a regression clears the streak: the brake is about
+    // consecutive non-progress, and the loop recovering is progress.
+    expect(
+      run([
+        { headline: pushAt(1), regressed: 1 },
+        { headline: pushAt(2) },
+        { headline: pushAt(3) },
+      ]),
+    ).toMatchObject({ consec: 1, terminal: false });
+    // Marker round numbers are matched WHOLE — round 1 must not charge
+    // round 10 (a substring match would, and the cap would trip early).
+    expect(
+      run([FAIL, FAIL, { headline: pushAt(10), regressed: 1 }, FAIL]),
+    ).toMatchObject({ consec: 2, terminal: false });
+    // A regression keyed to another window is not this window's business:
+    // a re-arm drops the whole set with the rounds it keyed.
+    expect(
+      run(
+        [
+          FAIL,
+          FAIL,
+          { headline: pushAt(2), win: 'w1', regressed: 2, regKey: 'w0' },
+          { headline: FAIL, win: 'w1' },
+        ],
+        { window: 'w1' },
+      ),
+    ).toMatchObject({ consec: 2, terminal: false });
+    // The terminal headline must name the new cause, or a maintainer reads
+    // "pushed nothing" on a PR whose every round pushed.
+    expect(
+      run([
+        { headline: pushAt(1), regressed: 1 },
+        { headline: pushAt(2), regressed: 2 },
+        { headline: pushAt(3), regressed: 3 },
+        { headline: pushAt(4), regressed: 4 },
+      ]).headline,
+    ).toContain('left the checks red');
     // The CURRENT round being a stale-base retry is exempt from the breaker
     // entirely — the base was just updated and the next round builds fresh, so
     // cap-1 prior failures must not trip it.
@@ -19154,7 +19275,7 @@ exit 1
     });
     expect(idleStreak).toMatchObject({ consec: cap, terminal: true });
     expect(idleStreak.headline).toContain(
-      'consecutive rounds that pushed nothing',
+      'consecutive rounds without progress',
     );
     // ...and the TERMINAL run's job log still names the wedged runner: the
     // census warning runs outside the cap's terminal guard precisely so an
@@ -19277,7 +19398,7 @@ exit 1
     // — an `if true` mutation on the timeout guard flips the headline and
     // must fail here.
     expect(bothCapped.headline).toContain(
-      'consecutive rounds that pushed nothing',
+      'consecutive rounds without progress',
     );
     expect(bothCapped.headline).not.toContain('time-budget exhaustions');
     // Pin the census greps to the actual emit line: the timeout CAUSE text
@@ -23066,6 +23187,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
               PR: '1',
               CHECKS_JSON: JSON.stringify(checks),
               TRUSTED_ASSOC: '["OWNER", "MEMBER", "COLLABORATOR"]',
+              LOOP_OWNED_LANES: loopOwnedLanesJson,
               RV_FIXTURE: join(dir, 'rv.fixture.json'),
               RC_FIXTURE: join(dir, 'rc.fixture.json'),
             },
@@ -24526,6 +24648,34 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // drive stop-marker combinations through this. Defaults empty: the
     // summary default is owned by summaryPresent above, not duplicated here.
     workdirFiles = {},
+    // Test-weakening fixtures: names a shape in WEAKEN_FIXTURES whose
+    // PRE-ROUND ref carries the pinned test and whose round then edits it.
+    weaken = '',
+    // Leave the counter unstaged: the measured signals go UNAVAILABLE.
+    noCounter = false,
+    // Shadow git so the gate's own enumeration producer fails (only the
+    // calls carrying the weakening pathspec): the producer's status must
+    // be read, not swallowed.
+    gitDiffFails = false,
+    // Shadow node so the counter fails for exactly one measured file —
+    // the shape a round-authored input that exhausts the parser produces.
+    counterFailsFor = '',
+    // Shadow node so the counter SUCCEEDS for exactly one measured file
+    // while printing a verdict that carries none of the fields the reader
+    // consumes: an exit-0 run whose output cannot be read must not pass
+    // for "not the round's to weaken".
+    counterGarbageFor = '',
+    // The instrument's trust chain: a counter or parser changed after its
+    // digest was recorded, or no trusted parser staged at all.
+    tamperCounter = false,
+    tamperParser = false,
+    dropCounter = false,
+    dropParser = false,
+    unreadableCounter = false,
+    noParser = false,
+    // Plant a package.json beside the staged parser that would turn a
+    // `.js` file into an ES module: the `.cjs` staging must not care.
+    parserTypePlant = false,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
@@ -24541,18 +24691,55 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       sh(`git clone -q '${origin}' '${work}'`, dir);
       const g = (cmd) => sh(cmd, work);
       g('git config user.email t@t && git config user.name t');
+      // The checkout's own node_modules is the round's to choose, so the
+      // fixture plants a HOSTILE typescript there: every API returns
+      // undefined, which measures a zero surface. Every charge this suite
+      // asserts therefore proves the counter parsed with the trusted
+      // parser staged under RUNNER_TEMP, never with the checkout's.
+      mkdirSync(join(work, 'node_modules', 'typescript'), { recursive: true });
+      writeFileSync(
+        join(work, 'node_modules', 'typescript', 'package.json'),
+        '{"name":"typescript","main":"index.js"}',
+      );
+      writeFileSync(
+        join(work, 'node_modules', 'typescript', 'index.js'),
+        'module.exports = new Proxy({}, { get: () => () => undefined });\n',
+      );
+      g("printf 'node_modules/\\n' > .gitignore");
       g('echo base > f.txt && git add . && git commit -qm base');
       g('git branch -M main && git push -q origin main');
+      if (weaken && !WEAKEN_FIXTURES[weaken]) {
+        throw new Error(`unknown weaken fixture: ${weaken}`);
+      }
+      const fx = weaken ? WEAKEN_FIXTURES[weaken] : null;
+      if (fx && fx.onMain) {
+        for (const cmd of fixtureWrite(fx.onMain)) g(cmd);
+        // Raw commands for content `fixtureWrite` cannot express — a byte
+        // no shell argument can carry, for instance.
+        for (const cmd of fx.onMainSeed ?? []) g(cmd);
+        g('git add . && git commit -qm seed-test && git push -q origin main');
+      }
       g('git checkout -qb feature');
       if (touchCore) {
         // Reaches the core-rebuild run_check BEFORE the commit gate, so a
         // failure there exercises the no-round-commit guard.
         g('mkdir -p packages/core/src && echo x > packages/core/src/x.ts');
         g('git add . && git commit -qm core');
+      } else if (fx) {
+        // The pinned test must exist at origin/feature (the PRE-ROUND ref)
+        // before the round's agent commit weakens it.
+        for (const cmd of fixtureWrite(fx.files ?? {})) g(cmd);
+        for (const cmd of fx.seed ?? []) g(cmd);
+        g('echo branch > f.txt && git add . && git commit -qm branch');
       } else {
         g('echo branch > f.txt && git commit -qam branch');
       }
       g('git push -q origin feature');
+      if (fx && fx.mainMoves) {
+        g('git checkout -q main');
+        for (const cmd of fx.mainMoves) g(cmd);
+        g('git push -q origin main && git checkout -q feature');
+      }
       if (agentCommit) {
         if (addWorkspace) {
           // The round ADDS a workspace — it does not exist at the baseline.
@@ -24565,6 +24752,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           // A file the branch TRACKS but the baseline lacks: the baseline
           // leg recreates it untracked, and the restore checkout refuses.
           g('echo tracked > clash.txt && git add . && git commit -qm agent');
+        } else if (fx) {
+          for (const cmd of fx.round) g(cmd);
         } else {
           g('echo agent > f.txt && git commit -qam agent');
         }
@@ -24675,6 +24864,65 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         writeFileSync(join(bin, 'comm'), '#!/bin/bash\nexit 1\n');
         chmodSync(join(bin, 'comm'), 0o755);
       }
+      if (counterFailsFor) {
+        const realNode = execFileSync('bash', ['-c', 'command -v node'], {
+          encoding: 'utf8',
+          env: { ...process.env, ...GIT_ISOLATION },
+        }).trim();
+        writeFileSync(
+          join(bin, 'node'),
+          [
+            '#!/bin/bash',
+            'for a in "$@"; do',
+            `  if [[ "$a" == *.json && -f "$a" ]] && grep -q '"path": *"${counterFailsFor}"' "$a"; then`,
+            '    echo "stub: parser exhausted" >&2',
+            '    exit 1',
+            '  fi',
+            'done',
+            `exec '${realNode}' "$@"`,
+          ].join('\n'),
+        );
+        chmodSync(join(bin, 'node'), 0o755);
+      }
+      if (counterGarbageFor) {
+        const realNode = execFileSync('bash', ['-c', 'command -v node'], {
+          encoding: 'utf8',
+          env: { ...process.env, ...GIT_ISOLATION },
+        }).trim();
+        writeFileSync(
+          join(bin, 'node'),
+          [
+            '#!/bin/bash',
+            'for a in "$@"; do',
+            `  if [[ "$a" == *.json && -f "$a" ]] && grep -q '"path": *"${counterGarbageFor}"' "$a"; then`,
+            // Valid JSON, no verdict: `.baselinePresent` reads as null,
+            // which the pre-fix reader took for "not the round's".
+            `    echo '{"note":"measured nothing"}'`,
+            '    exit 0',
+            '  fi',
+            'done',
+            `exec '${realNode}' "$@"`,
+          ].join('\n'),
+        );
+        chmodSync(join(bin, 'node'), 0o755);
+      }
+      if (gitDiffFails) {
+        const realGit = execFileSync('bash', ['-c', 'command -v git'], {
+          encoding: 'utf8',
+          env: { ...process.env, ...GIT_ISOLATION },
+        }).trim();
+        writeFileSync(
+          join(bin, 'git'),
+          [
+            '#!/bin/bash',
+            'for a in "$@"; do',
+            "  if [[ \"$a\" == ':(glob)**/test_*.py' ]]; then echo 'stub: enumeration refused' >&2; exit 128; fi",
+            'done',
+            `exec '${realGit}' "$@"`,
+          ].join('\n'),
+        );
+        chmodSync(join(bin, 'git'), 0o755);
+      }
       const rt = join(dir, 'rt');
       mkdirSync(rt);
       writeFileSync(
@@ -24706,6 +24954,60 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         join(rt, 'resolve-owning-packages.sh'),
         'cat > /dev/null\nprintf "%s" "${RESOLVED_PKGS:-}"\n',
       );
+      // Staged the way the workflow stages them: the counter copied from
+      // the trusted base and the parser installed from the base lockfile's
+      // pin under RUNNER_TEMP, each digested BEFORE any later mutation.
+      const digest = (file) =>
+        createHash('sha256').update(readFileSync(file)).digest('hex');
+      let counterSha = '';
+      let parserSha = '';
+      if (!noCounter) {
+        copyFileSync(
+          resolve('.github/scripts/count-test-surface.mjs'),
+          join(rt, 'count-test-surface.mjs'),
+        );
+        counterSha = digest(join(rt, 'count-test-surface.mjs'));
+        if (dropCounter) rmSync(join(rt, 'count-test-surface.mjs'));
+        if (unreadableCounter) chmodSync(join(rt, 'count-test-surface.mjs'), 0);
+        if (tamperCounter) {
+          writeFileSync(
+            join(rt, 'count-test-surface.mjs'),
+            `${readFileSync(join(rt, 'count-test-surface.mjs'), 'utf8')}\n// planted\n`,
+          );
+        }
+      }
+      if (!noParser) {
+        // The workflow stages a `.cjs` COPY of typescript's single-file
+        // build; a symlink to the real file is the same bytes for the
+        // digest and the loader, so only the tamper and plant shapes copy.
+        const parser = join(rt, 'weaken-parser', 'typescript.cjs');
+        mkdirSync(join(rt, 'weaken-parser'), { recursive: true });
+        if (tamperParser || parserTypePlant) {
+          copyFileSync(
+            resolve('node_modules/typescript/lib/typescript.js'),
+            parser,
+          );
+        } else {
+          symlinkSync(
+            resolve('node_modules/typescript/lib/typescript.js'),
+            parser,
+          );
+        }
+        parserSha = digest(parser);
+        if (tamperParser) {
+          writeFileSync(
+            parser,
+            `${readFileSync(parser, 'utf8')}\n// planted\n`,
+          );
+        }
+        if (parserTypePlant) {
+          writeFileSync(
+            join(rt, 'weaken-parser', 'package.json'),
+            '{"type":"module"}\n',
+          );
+        }
+        if (dropParser) rmSync(parser);
+      }
       const workdir = join(dir, 'wd');
       mkdirSync(workdir);
       if (summaryPresent) {
@@ -24775,6 +25077,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             FORGE_OUTPUT: forgeOutput ? '1' : '',
             DISCOVER_OUTPUT: discoverOutput ? '1' : '',
             DISCOVER_ENV: forgeEnvFile ? '1' : '',
+            WEAKEN_COUNTER_SHA256: counterSha,
+            WEAKEN_PARSER_SHA256: parserSha,
           },
         },
       );
@@ -24790,6 +25094,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         summary: readFileSync(summaryFile, 'utf8'),
         rejection: existsSync(join(workdir, 'gate-rejection.md'))
           ? readFileSync(join(workdir, 'gate-rejection.md'), 'utf8')
+          : '',
+        advisories: existsSync(join(workdir, 'gate-advisories.md'))
+          ? readFileSync(join(workdir, 'gate-advisories.md'), 'utf8')
           : '',
         headAfter: sh('git rev-parse --abbrev-ref HEAD', work).trim(),
         baselineSha,
@@ -25668,6 +25975,4449 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).not.toContain('audit_verdict=');
     expect(r.outputs).toContain('retryable=true');
   });
+
+  // ---- test-weakening gate ------------------------------------------------
+  // Each fixture names the file(s) seeded at the PRE-ROUND ref (`files`, on
+  // the branch; `onMain`, on main ahead of the fork when the shape needs
+  // main-side history), main's moves after the fork (`mainMoves`), and the
+  // round's own commands (`round`). The gate runs for real against the
+  // fixture repo: count-test-surface.mjs is staged the way the workflow
+  // stages it (a copy under RUNNER_TEMP) and `typescript` resolves from the
+  // checkout under measurement, as on the runner.
+  const shellQuote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
+  const fixtureWrite = (files) =>
+    Object.entries(files).flatMap(([path, lines]) => [
+      ...(path.includes('/')
+        ? [`mkdir -p '${path.slice(0, path.lastIndexOf('/'))}'`]
+        : []),
+      `printf '%s\\n' ${lines.map(shellQuote).join(' ')} > '${path}'`,
+    ]);
+  const AGENT_COMMIT = 'echo agent > f.txt && git commit -qam agent';
+  const WT_IMPORT = "import { it, expect } from 'vitest';";
+  const WT_BASE = [
+    WT_IMPORT,
+    "it('a', () => {",
+    '  expect(one()).toBe(1);',
+    '  expect(two()).toBe(2);',
+    '});',
+  ];
+  const WT_BASE_MINUS_TWO = WT_BASE.filter((l) => !l.includes('two()'));
+  const WT_BASE_PLUS_THREE = [
+    ...WT_BASE.slice(0, -1),
+    '  expect(three()).toBe(3);',
+    '});',
+  ];
+  const testA = (head, ...body) => [
+    WT_IMPORT,
+    head,
+    ...(body.length
+      ? body
+      : ['  expect(one()).toBe(1);', '  expect(two()).toBe(2);']),
+    '});',
+  ];
+  // A second registration appended to WT_BASE, enabled or not.
+  const testB = (kind = 'it') => [
+    `${kind}('b', () => {`,
+    '  expect(three()).toBe(3);',
+    '});',
+  ];
+  const WEAKEN_REASON =
+    'coverage moved to pkg/b.test.ts, which pins the same behaviour end to end';
+  const roundWrites = (files, ...extra) => [
+    ...fixtureWrite(files),
+    ...extra,
+    AGENT_COMMIT,
+  ];
+  const WEAKEN_FIXTURES = {
+    // -- the three plain shapes
+    assert: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+    },
+    skip: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({ 'pkg/a.test.ts': testA("it.skip('a', () => {") }),
+    },
+    delete: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: ['git rm -q pkg/a.test.ts', AGENT_COMMIT],
+    },
+    // -- the round deletes a pre-existing test file and THEN merges main,
+    //    which still carries it. Main moved a DIFFERENT file, so the merge
+    //    keeps the deletion without a conflict — and the merge event moves
+    //    nothing for the deleted path on either side that survived, which
+    //    must not read as main removing the baseline the round is charged
+    //    against.
+    'delete-then-merge': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/b.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/b.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-grows-b',
+      ],
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm round-deletes-a',
+        'git merge -q --no-edit origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- honest edits the gate must not charge
+    add: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+    },
+    'skipif-guard': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it.skipIf(process.platform === 'win32')('a', () => {",
+        ),
+      }),
+    },
+    'ctx-skip-conditional': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', (ctx) => {",
+          "  ctx.skip(process.platform === 'win32', 'requires the POSIX daemon harness');",
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'todo-new': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [...WT_BASE, "it.todo('a later behaviour');"],
+      }),
+    },
+    rename: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA("it('a, renamed', () => {"),
+      }),
+    },
+    'move-within': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '});',
+          "it('b', () => {",
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '});',
+          "it('b', () => {",
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      }),
+    },
+    reflow: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(',
+          '    one(),',
+          '  ).toBe(',
+          '    1,',
+          '  );',
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      }),
+    },
+    'jsx-swap': {
+      files: { 'pkg/a.test.tsx': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.tsx': testA(
+          "it('a', () => {",
+          "  expect(render(<Foo bar={1} />).getByText('x')).toBeTruthy();",
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'delete-readd-stronger': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm delete',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add pkg/a.test.ts',
+        AGENT_COMMIT,
+      ],
+    },
+    'python-edit': {
+      files: { 'tests/test_x.py': ['def test_x():', '    assert one() == 1'] },
+      round: roundWrites({ 'tests/test_x.py': ['def test_x():', '    pass'] }),
+    },
+    'non-test-file-delete': {
+      files: {
+        'integration-tests/README.md': ['# notes'],
+        'packages/cli/src/test-utils/render.tsx': [
+          'export const render = () => null;',
+        ],
+      },
+      round: [
+        'git rm -q integration-tests/README.md packages/cli/src/test-utils/render.tsx',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- weakenings that hide from text patterns, visible to the parser
+    'comment-out': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  /*',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '  */',
+        ),
+      }),
+    },
+    'string-decoy': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          "  const decoy = 'expect(two()).toBe(2); expect(x).toBe(1)';",
+          '  const re = /expect\\(two\\(\\)\\)\\.toBe\\(2\\)/;',
+          '  fn(expect.anything(), `expect(${decoy}).toBe(2)`);',
+        ),
+      }),
+    },
+    'jsx-decoy': {
+      files: { 'pkg/a.test.tsx': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.tsx': testA(
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '  const html = <div>expect(two()).toBe(2)</div>;',
+        ),
+      }),
+    },
+    'matcher-drop': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '  expect(two());',
+        ),
+      }),
+    },
+    'computed-skip': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA("it['\\x73kip']('a', () => {"),
+      }),
+    },
+    'options-skip': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA("it('a', { skip: true }, () => {"),
+      }),
+    },
+    'skipif-true': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA("it.skipIf(true)('a', () => {"),
+      }),
+    },
+    'ctx-skip': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', (ctx) => {",
+          '  ctx.skip();',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'early-return': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  return;',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'early-return-conditional': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  if (!process.env.QWEN_RUN_ADDS) {',
+          '    return;',
+          '  }',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'skip-swap': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '});',
+          "it.skip('b', () => {",
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it.skip('a', () => {",
+          '  expect(one()).toBe(1);',
+          '});',
+          "it('b', () => {",
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      }),
+    },
+    'rename-skip': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA("it.skip('a, renamed', () => {"),
+      }),
+    },
+    'delete-readd-weaker': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm delete',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git add pkg/a.test.ts',
+        AGENT_COMMIT,
+      ],
+    },
+    symlink: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'rm pkg/a.test.ts',
+        'ln -s ../f.txt pkg/a.test.ts',
+        'git add -A pkg',
+        AGENT_COMMIT,
+      ],
+    },
+    'python-delete': {
+      files: { 'tests/test_x.py': ['def test_x():', '    assert one() == 1'] },
+      round: ['git rm -q tests/test_x.py', AGENT_COMMIT],
+    },
+    'ours-merge-drops-branch-work': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: { 'pkg/a.test.ts': WT_BASE_PLUS_THREE },
+      round: [
+        // The merge's TREE is its first parent's, so every per-commit diff
+        // is empty while the tip lost the branch's own assertion.
+        'git checkout -q --detach origin/main',
+        'git merge -q --no-edit -s ours feature',
+        'git branch -f feature HEAD',
+        'git checkout -q feature',
+        AGENT_COMMIT,
+      ],
+    },
+    'main-landed-unmeasurable': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/new.test.ts': WT_BASE_PLUS_THREE }),
+        'git add pkg/new.test.ts && git commit -qm main-adds-a-test',
+      ],
+      round: [
+        'git merge -q --no-edit origin/main',
+        ...fixtureWrite({ 'pkg/new.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A pkg',
+        AGENT_COMMIT,
+      ],
+    },
+    'unparseable-addition': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites(
+        {
+          'pkg/a.test.ts': WT_BASE_MINUS_TWO,
+          'pkg/generated.test.ts': [WT_IMPORT, "it('deep', () => {});"],
+        },
+        'git add -A pkg',
+      ),
+    },
+    'symlink-restored': {
+      files: { 'pkg/real.test.ts': WT_BASE },
+      round: [
+        // Writing THROUGH the link would edit its target; the link itself
+        // has to go first for the tip to hold a regular file.
+        'rm pkg/a.test.ts',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add -A pkg',
+        AGENT_COMMIT,
+      ],
+      seed: ['ln -s real.test.ts pkg/a.test.ts', 'git add pkg/a.test.ts'],
+    },
+    'merge-historical-main-commit': {
+      onMain: { 'pkg/a.test.ts': WT_BASE_PLUS_THREE },
+      files: {},
+      mainMoves: [
+        'git checkout -qb side',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam side-trims',
+        'git rev-parse HEAD > /tmp/qwen-side-sha',
+        'git checkout -q main',
+        'git merge -q --no-ff --no-edit -s ours side',
+        'git branch -D side',
+      ],
+      round: [
+        'git merge -q --no-edit -s ours "$(cat /tmp/qwen-side-sha)"',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
+    'directory-swap': {
+      files: { 'tests/test_x.py': ['def test_x():', '    assert one() == 1'] },
+      round: [
+        'git rm -q tests/test_x.py',
+        'mkdir -p tests/test_x.py',
+        "printf 'moved\\n' > tests/test_x.py/inner.txt",
+        'git add -A tests',
+        AGENT_COMMIT,
+      ],
+    },
+    'symlink-python': {
+      files: { 'tests/test_x.py': ['def test_x():', '    assert one() == 1'] },
+      round: [
+        'rm tests/test_x.py',
+        'ln -s ../f.txt tests/test_x.py',
+        'git add -A tests',
+        AGENT_COMMIT,
+      ],
+    },
+    'rust-delete': {
+      files: { 'crates/x/src/browser/v2_tests.rs': ['#[test]', 'fn t() {}'] },
+      round: ['git rm -q crates/x/src/browser/v2_tests.rs', AGENT_COMMIT],
+    },
+    'tab-name': {
+      files: { 'pkg/a\tb.test.ts': WT_BASE },
+      round: roundWrites({ 'pkg/a\tb.test.ts': WT_BASE_MINUS_TWO }),
+    },
+    'two-files': {
+      files: { 'pkg/a.test.ts': WT_BASE, 'pkg/b.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': WT_BASE_MINUS_TWO,
+        'pkg/b.test.ts': WT_BASE_MINUS_TWO,
+      }),
+    },
+    'spec-delete': {
+      files: { 'pkg/a.spec.ts': WT_BASE },
+      round: ['git rm -q pkg/a.spec.ts', AGENT_COMMIT],
+    },
+    'snapshot-delete': {
+      files: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/__snapshots__/a.test.ts.snap': ['exports[`a 1`] = `1`;'],
+      },
+      round: ['git rm -q pkg/__snapshots__/a.test.ts.snap', AGENT_COMMIT],
+    },
+    // -- attribution corners: deletions across merges, renames, roots
+    'delete-then-merge-edit': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) => l.replace('toBe(1)', 'toBe(10)')),
+        }),
+        'git commit -qam main-edits',
+      ],
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm delete',
+        'git merge -q --no-edit origin/main || true',
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm keep-the-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    'own-file-merge-delete': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      mainMoves: [
+        'echo m > m.txt && git add m.txt && git commit -qm main-moves',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/own.test.ts': WT_BASE }),
+        'git add pkg/own.test.ts && git commit -qm own',
+        'git merge -q --no-edit origin/main',
+        'git rm -q pkg/own.test.ts',
+        'git commit -qm drop-own',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the round's OWN new test file, touched while resolving a merge and
+    //    dropped afterwards. Main never held it, so no event may latch it
+    //    into the baseline: an event whose model moved nothing contributed
+    //    nothing, however the merge commit touched the file.
+    'own-file-merge-edit-delete': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      mainMoves: [
+        'echo m > m.txt && git add m.txt && git commit -qm main-moves',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/own.test.ts': WT_BASE }),
+        'git add pkg/own.test.ts && git commit -qm own',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/own.test.ts': WT_BASE_PLUS_THREE }),
+        'git add pkg/own.test.ts && git commit -qm merge-and-grow-own',
+        'git rm -q pkg/own.test.ts',
+        'git commit -qm drop-own',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main ADDS an assertion during the round and the merge resolution
+    //    drops it. Main's additions raise the baseline whatever the merge
+    //    kept, so the round removed coverage and is charged: clamping this
+    //    direction would hand it the removal for free.
+    'merge-drops-mains-add': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-adds',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        "printf '// merge note\\n' >> 'pkg/a.test.ts'",
+        'git add pkg/a.test.ts && git commit -qm merge-drops-add',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the same discard through the modify/delete arm: main appends a
+    //    whole test, the round deleted the file, and the resolution puts
+    //    back the PRE-ROUND bytes -- so main's added test is gone.
+    'delete-merge-drops-mains-test': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': [...WT_BASE, ...testB()] }),
+        'git commit -qam main-adds-test',
+      ],
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm round-deletes',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add pkg/a.test.ts && git commit -qm resolution',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- and the same discard spelled as a disable: the resolution keeps
+    //    main's new test but registers it skipped.
+    'delete-merge-skips-mains-test': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': [...WT_BASE, ...testB()] }),
+        'git commit -qam main-adds-test',
+      ],
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm round-deletes',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [...WT_BASE, ...testB('it.skip')],
+        }),
+        'git add pkg/a.test.ts && git commit -qm resolution',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main removes TWO assertions, the resolution keeps one of them, and
+    //    the round then removes a third of its own. Credit is what LANDED
+    //    (one), not what the model says main removed (two): crediting the
+    //    model would swallow the round's own removal.
+    'merge-keeps-one-then-round-removes': {
+      onMain: { 'pkg/a.test.ts': WT_BASE_PLUS_THREE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-removes-two',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add pkg/a.test.ts && git commit -qm keeps-one',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main DISABLES a pre-existing test, the resolution keeps it
+    //    enabled, and the round disables it afterwards. Main's disable
+    //    never landed, so the title stays in the baseline and the round
+    //    answers for it.
+    'merge-keeps-enabled-then-round-disables': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) =>
+            l.replace("it('a'", "it.skip('a'"),
+          ),
+        }),
+        'git commit -qam main-disables',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add pkg/a.test.ts && git commit -qm keeps-enabled',
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) =>
+            l.replace("it('a'", "it.skip('a'"),
+          ),
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- BOTH sides add the same path during the round, the resolution
+    //    lands main's file, and the round then deletes it. Main held that
+    //    side, so the baseline holds the file and the deletion is the
+    //    round's: presence reads main's own side, not a three-way model
+    //    whose endpoint happens to equal the branch's.
+    'addadd-takes-main-then-drops': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        'git add pkg/x.test.ts && git commit -qm main-adds-x',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        'git add pkg/x.test.ts && git commit -qm round-adds-x',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        'git add pkg/x.test.ts && git commit -qm resolution-takes-main',
+        'git rm -q pkg/x.test.ts',
+        'git commit -qm drop-x',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the round un-skips a suite, main adds a test INSIDE that suite,
+    //    and the resolution takes main's file verbatim -- so the tip is
+    //    byte-identical to main's and nothing was weakened. A three-way
+    //    splice of the two sides would invent an ENABLED registration that
+    //    existed in no tree and charge the round for disabling it.
+    'merge-takes-main-after-own-unskip': {
+      onMain: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "describe.skip('S', () => {",
+          "  it('a', () => {",
+          '    expect(one()).toBe(1);',
+          '  });',
+          '});',
+        ],
+      },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "describe.skip('S', () => {",
+            "  it('a', () => {",
+            '    expect(one()).toBe(1);',
+            '  });',
+            "  it('c', () => {",
+            '    expect(three()).toBe(3);',
+            '  });',
+            '});',
+          ],
+        }),
+        'git commit -qam main-adds-c',
+      ],
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "describe('S', () => {",
+            "  it('a', () => {",
+            '    expect(one()).toBe(1);',
+            '  });',
+            '});',
+          ],
+        }),
+        'git commit -qam round-unskips',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "describe.skip('S', () => {",
+            "  it('a', () => {",
+            '    expect(one()).toBe(1);',
+            '  });',
+            "  it('c', () => {",
+            '    expect(three()).toBe(3);',
+            '  });',
+            '});',
+          ],
+        }),
+        'git add pkg/a.test.ts && git commit -qm resolution-takes-main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the resolution removes MORE than main's side did. Credit is
+    //    main's own delta, not the merge's: crediting the larger landed
+    //    removal would shield the round for the difference.
+    'resolution-removes-more-than-main': {
+      onMain: { 'pkg/a.test.ts': WT_BASE_PLUS_THREE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git commit -qam main-removes-one',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git add pkg/a.test.ts && git commit -qm resolution-removes-two',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main REMOVED while the merge landed an ADDITION: the two moved in
+    //    opposite directions, so main's removal was plainly not taken and
+    //    credits nothing. Crediting the landed addition instead would
+    //    charge the round for one assertion more than it removed.
+    'main-removes-merge-adds': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-removes-one',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add pkg/a.test.ts && git commit -qm resolution-adds',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the file was removed in an EARLIER round, so the pre-round ref
+    //    lacks it while main still carries it untouched. Main landed
+    //    nothing here, and the round only merged: main merely still
+    //    HOLDING a file it has always held must not put it back in the
+    //    baseline, or every later round re-charges the same deletion.
+    'deleted-earlier-round-then-merge': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/x.test.ts'],
+      mainMoves: [
+        'echo m > m.txt && git add m.txt && git commit -qm main-moves',
+      ],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    // -- the same shape spelled as a rename an earlier round made. The old
+    //    path costs ONE ack entry in the round that renames it, not one in
+    //    every later round that merges main.
+    'renamed-earlier-round-then-merge': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      seed: ['git mv pkg/a.test.ts pkg/b.test.ts'],
+      mainMoves: [
+        'echo m > m.txt && git add m.txt && git commit -qm main-moves',
+      ],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    // -- main adds a file, deletes it again with the merge keeping the
+    //    round's copy, then re-adds it. Each event measures main against
+    //    its OWN merge base, so the re-add must not be credited a second
+    //    time on top of the first.
+    'main-adds-deletes-readds': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        'git add pkg/x.test.ts && git commit -qm main-adds-x',
+      ],
+      round: [
+        'git merge -q --no-edit origin/main',
+        'git checkout -q main',
+        'git rm -q pkg/x.test.ts',
+        'git commit -qm main-drops-x',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        'git add pkg/x.test.ts && git commit -qm keep-x',
+        'git checkout -q main',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        // One comment line, so the re-add is a real event: byte-identical
+        // content makes `git diff --quiet` skip it and the fixture would
+        // never reach the chain it exists to pin.
+        "printf '// main re-added this\\n' >> 'pkg/x.test.ts'",
+        'git add pkg/x.test.ts && git commit -qm main-readds-x',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        "printf '// main re-added this\\n' >> 'pkg/x.test.ts'",
+        'git add -A pkg && git commit -qm take-mains-readd',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main DELETES the file and the merge does not adopt the deletion:
+    //    the round keeps its own copy, gutted. Main contributed nothing
+    //    here, so recording the event would let the round's own copy stand
+    //    in for main's side and credit main with the round's removal.
+    'main-deletes-round-keeps-weakened': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['git rm -q pkg/x.test.ts', 'git commit -qm main-deletes-x'],
+      round: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam round-guts-x',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git add -A pkg && git commit -qm keep-our-copy',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the file was removed in an EARLIER round, main GROWS it during
+    //    this one, and the round restores main's file and then guts it.
+    //    Main contributed content this round, so the baseline holds the
+    //    file however the pre-round ref stood.
+    'preround-absent-main-grows-round-guts': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/x.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-grows-x',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm restore-mains-file',
+        ...fixtureWrite({
+          'pkg/x.test.ts': testA("it('a', () => {", '  noop();'),
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a pre-existing file MAIN never held, deleted inside the merge
+    //    commit itself. Main moved nothing, so nothing may take it out of
+    //    the baseline the pre-round ref established.
+    'preround-own-file-merge-drops': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: { 'pkg/n.test.ts': WT_BASE },
+      mainMoves: [
+        'echo m > m.txt && git add m.txt && git commit -qm main-moves',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q pkg/n.test.ts',
+        'git commit -qm merge-drops-n',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a real criss-cross: the round merged a main commit and main
+    //    merged the round's, so the merge of main has TWO equally valid
+    //    bases. They hold the same blob for this file, so git's pick
+    //    cannot change the verdict and it is measured normally.
+    'crisscross-bases-agree': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['echo m1 > m1.txt', 'git add m1.txt', 'git commit -qm m1'],
+      round: [
+        'git merge -q --no-edit origin/main',
+        'git checkout -q main',
+        'git merge -q --no-edit origin/feature',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-grows',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm take-main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the same criss-cross, but the two bases DISAGREE about the file,
+    //    so git's pick would decide the verdict. Refused rather than
+    //    measured on a tie-break git does not promise.
+    'crisscross-bases-disagree': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam m1-weakens',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add -A pkg && git commit -qm keep-ours',
+        'git checkout -q main',
+        'git merge -q --no-edit --no-commit origin/feature || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A pkg && git commit -qm m2',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-grows',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm take-main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main moved the file EARLIER in the round, then deleted it with
+    //    the merge keeping the round's gutted copy, and the round merges
+    //    main once more. The later merge sees no main side and no base,
+    //    and recording it would let the round's own copy set the clamp --
+    //    crediting main with the round's removal one merge later.
+    'main-deletes-after-moving-then-merges-again': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['echo m1 > m1.txt && git add m1.txt && git commit -qm m1'],
+      round: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam round-guts-x',
+        'git checkout -q main',
+        "printf '// main touched this\\n' >> 'pkg/x.test.ts'",
+        'git commit -qam main-comments-x',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A pkg && git commit -qm keep-ours-1',
+        'git checkout -q main',
+        'git rm -q pkg/x.test.ts',
+        'git commit -qm main-deletes-x',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A pkg && git commit -qm keep-ours-2',
+        'git checkout -q main',
+        'echo m3 > m3.txt && git add m3.txt && git commit -qm m3',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the file was removed in an EARLIER round and main only appends a
+    //    comment to its own copy. That moves no surface, so it is not a
+    //    contribution and the old deletion is not re-charged.
+    'preround-absent-main-comments': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/x.test.ts'],
+      mainMoves: [
+        "printf '// main touched this\\n' >> 'pkg/x.test.ts'",
+        'git commit -qam main-comments-x',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/x.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a NON-JS test file: the counter reads no surface from it, so
+    //    "the surface did not move" is unmeasurable rather than false.
+    //    An earlier round deleted it, main GROWS it during this one, and
+    //    the round keeps its deletion: the deletion arm is the only arm
+    //    these shapes have, and it must still fire.
+    'preround-absent-main-grows-python': {
+      onMain: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/test_x.py': ['def test_a():', '    assert one() == 1'],
+      },
+      files: {},
+      seed: ['git rm -q pkg/test_x.py'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/test_x.py': [
+            'def test_a():',
+            '    assert one() == 1',
+            '',
+            'def test_b():',
+            '    assert two() == 2',
+          ],
+        }),
+        'git commit -qam main-grows-py',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/test_x.py',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main ADDS a test file with no readable surface at all during the
+    //    round, and the round discards it in the resolution. Main added a
+    //    path the baseline did not have, so the deletion is the round's
+    //    however little the file measures.
+    'main-adds-zero-surface-round-drops': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        // No registrations and no assertions: its measured surface is
+        // indistinguishable from an absent file, so only the file's
+        // EXISTENCE tells the baseline it arrived.
+        ...fixtureWrite({
+          'pkg/e.test.ts': [WT_IMPORT, '// fixtures live here for now'],
+        }),
+        'git add pkg/e.test.ts && git commit -qm main-adds-empty',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/e.test.ts',
+        'git commit -qm drop-mains-file',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a `.test.ts` the instrument reads NOTHING from, grown by main
+    //    while the round keeps an earlier round's deletion. An empty
+    //    measured surface is the same reading for a file that declares
+    //    nothing as for a shape the parser does not know, so the byte
+    //    fallback has to engage on the extension the parser DOES know too.
+    'preround-absent-main-grows-zero-surface-ts': {
+      onMain: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/z.test.ts': [WT_IMPORT, '// type-level fixtures live here'],
+      },
+      files: {},
+      seed: ['git rm -q pkg/z.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/z.test.ts': [
+            WT_IMPORT,
+            '// type-level fixtures live here',
+            '// and a second note',
+          ],
+        }),
+        'git commit -qam main-grows-z',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/z.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main moves only DISABLED registrations on a file an earlier round
+    //    deleted. A skipped test is no coverage and reaches no signal, so
+    //    it is not a contribution and the old deletion is not re-charged.
+    'preround-absent-main-adds-skip': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/x.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/x.test.ts': [...WT_BASE, ...testB('it.skip')],
+        }),
+        'git commit -qam main-adds-skip',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/x.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a criss-cross whose two candidate bases disagree about whether the
+    //    file EXISTS, not about its content. Refused like any other
+    //    disagreement: which base git picks would decide the verdict.
+    'crisscross-bases-disagree-presence': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['git rm -q pkg/a.test.ts', 'git commit -qm m1-deletes'],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add -A pkg && git commit -qm keep-ours',
+        'git checkout -q main',
+        'git merge -q --no-edit --no-commit origin/feature || true',
+        'git rm -q -f --ignore-unmatch pkg/a.test.ts',
+        'git commit -qm m2',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm main-restores',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm take-main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a file that is NOTHING BUT disabled registrations, rewritten
+    //    wholesale by main while the round keeps an earlier deletion. The
+    //    surface comparison cannot see disabled registrations, so such a
+    //    file has to reach the bytes or no rewrite of it would ever read
+    //    as main contributing.
+    'preround-absent-main-rewrites-skips-only': {
+      onMain: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/s.test.ts': [
+          WT_IMPORT,
+          "describe.skip('S', () => {",
+          "  it('a', () => {",
+          '    expect(one()).toBe(1);',
+          '  });',
+          '});',
+        ],
+      },
+      files: {},
+      seed: ['git rm -q pkg/s.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/s.test.ts': [
+            WT_IMPORT,
+            "describe.skip('S renamed', () => {",
+            "  it('a', () => {",
+            '    expect(one()).toBe(1);',
+            '  });',
+            "  it('c', () => {",
+            '    expect(three()).toBe(3);',
+            '  });',
+            '});',
+          ],
+        }),
+        'git commit -qam main-rewrites-s',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/s.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main moves ONLY the assertion total: it plants an early return
+    //    ahead of the body, so the registrations and the declared total
+    //    stand while the live count falls.
+    'preround-absent-main-guards': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/g.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/g.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/g.test.ts': testA(
+            "it('a', () => {",
+            '  return;',
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+          ),
+        }),
+        'git commit -qam main-guards-g',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/g.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main moves ONLY the DECLARED total: it deletes an assertion that
+    //    already sat behind a guard, so the live count cannot fall further.
+    'preround-absent-main-drops-behind-guard': {
+      onMain: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/d.test.ts': testA(
+          "it('a', () => {",
+          '  return;',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      },
+      files: {},
+      seed: ['git rm -q pkg/d.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/d.test.ts': testA(
+            "it('a', () => {",
+            '  return;',
+            '  expect(one()).toBe(1);',
+          ),
+        }),
+        'git commit -qam main-drops-guarded',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/d.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main moves ONLY the enabled-title multiset: same counts, a
+    //    different test name.
+    'preround-absent-main-renames-test': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/r.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/r.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/r.test.ts': WT_BASE.map((l) =>
+            l.replace("it('a'", "it('a renamed'"),
+          ),
+        }),
+        'git commit -qam main-renames-test',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/r.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    'main-directory-swap': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        'git rm -q pkg/a.test.ts',
+        'mkdir -p pkg/a.test.ts',
+        "printf 'moved\\n' > pkg/a.test.ts/inner.txt",
+        'git add -A pkg && git commit -qm main-swaps-for-a-directory',
+      ],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    'merge-main-empties': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [': > pkg/a.test.ts', 'git commit -qam main-empties'],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    'rename-weaken': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git mv pkg/a.test.ts pkg/b.test.ts',
+        ...fixtureWrite({ 'pkg/b.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A pkg',
+        AGENT_COMMIT,
+      ],
+    },
+    'rename-only': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: ['git mv pkg/a.test.ts pkg/b.test.ts', AGENT_COMMIT],
+    },
+    'main-renames': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        'git mv pkg/a.test.ts pkg/b.test.ts',
+        'git commit -qm main-renames',
+      ],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    'skip-with-standin': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          ...testA("it.skip('a', () => {"),
+          "it('a', () => {});",
+        ],
+      }),
+    },
+    // The same shape with the callback handed by NAME: the instrument
+    // resolves the module-scope binding, so the skipped body's assertions
+    // still measure as removed.
+    'skip-with-standin-named': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          'function body() {',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '}',
+          "it.skip('a', body);",
+          "it('a', () => {});",
+        ],
+      }),
+    },
+    'delete-behind-guard': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  if (!process.env.QWEN_RUN_ADDS) {',
+          '    return;',
+          '  }',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  if (!process.env.QWEN_RUN_ADDS) {',
+          '    return;',
+          '  }',
+          '});',
+        ],
+      }),
+    },
+    'suite-guard': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "describe('d', () => {",
+          "  it('a', () => { expect(one()).toBe(1); });",
+          "  it('b', () => { expect(two()).toBe(2); });",
+          '});',
+        ],
+      },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "describe('d', () => {",
+          "  it('smoke', () => { expect(one()).toBe(1); });",
+          '  return;',
+          "  it('a', () => { expect(one()).toBe(1); });",
+          "  it('b', () => { expect(two()).toBe(2); });",
+          '});',
+        ],
+      }),
+    },
+    'guard-plus-todo': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  return;',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+          "it.todo('a later behaviour');",
+        ],
+      }),
+    },
+    'adds-guarded-test': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          ...WT_BASE,
+          "it('posix only', () => {",
+          "  if (process.platform === 'win32') {",
+          '    return;',
+          '  }',
+          '  expect(four()).toBe(4);',
+          '});',
+        ],
+      }),
+    },
+    'main-renames-round-keeps-both': {
+      onMain: { 'pkg/a.test.ts': WT_BASE_PLUS_THREE },
+      files: {},
+      mainMoves: [
+        'git mv pkg/a.test.ts pkg/m.test.ts',
+        ...fixtureWrite({ 'pkg/m.test.ts': WT_BASE }),
+        'git add -A pkg && git commit -qm main-renames-and-drops',
+      ],
+      round: [
+        'git merge -q --no-commit --no-edit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm keep-both-paths',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A pkg && git commit -qm drop-our-own',
+        AGENT_COMMIT,
+      ],
+    },
+    'delete-then-merge-restores': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm delete',
+        'git merge -q --no-edit origin/main || true',
+        'git add -A pkg && git commit -qm keep-mains-version',
+        AGENT_COMMIT,
+      ],
+    },
+    'delete-then-merge-adds': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-adds',
+      ],
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm delete',
+        'git merge -q --no-edit origin/main || true',
+        'git add -A pkg && git commit -qm keep-mains-version',
+        AGENT_COMMIT,
+      ],
+    },
+    'delete-then-rename-onto': {
+      files: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/b.test.ts': WT_BASE_PLUS_THREE,
+      },
+      round: [
+        'git rm -q pkg/b.test.ts',
+        'git commit -qm drop-b',
+        'git mv pkg/a.test.ts pkg/b.test.ts',
+        'git commit -qm move-a-onto-b',
+        AGENT_COMMIT,
+      ],
+    },
+    'unskip-with-guard': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it.skip('a', () => {",
+          '  if (!process.env.QWEN_SERVER) {',
+          '    return;',
+          '  }',
+          '  expect(one()).toBe(1);',
+          '});',
+        ],
+      },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  if (!process.env.QWEN_SERVER) {',
+          '    return;',
+          '  }',
+          '  expect(one()).toBe(1);',
+          '});',
+        ],
+      }),
+    },
+    'own-rename-then-delete': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git mv pkg/a.test.ts pkg/b.test.ts',
+        'git commit -qm rename',
+        'git rm -q pkg/b.test.ts',
+        'git commit -qm delete-the-destination',
+        AGENT_COMMIT,
+      ],
+    },
+    'hook-skip': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          "import { it, expect, beforeEach } from 'vitest';",
+          'beforeEach((ctx) => { ctx.skip(); });',
+          ...WT_BASE.slice(1),
+        ],
+      }),
+    },
+    'catch-skip': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', (ctx) => {",
+          '  try { connectDocker(); } catch { ctx.skip(); }',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'orphan-merge': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git checkout -q --orphan tmp',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A && git commit -qm orphan',
+        'git merge -q --allow-unrelated-histories --no-edit feature || true',
+        'git checkout --ours pkg/a.test.ts && git add pkg/a.test.ts',
+        'git commit -qm graft',
+        'git branch -f feature HEAD && git checkout -q feature',
+      ],
+    },
+    'octopus-freight': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'git checkout -qb side',
+        'echo s > s.txt && git add s.txt && git commit -qm side',
+        'git checkout -q feature',
+        // The branch moves too, so the octopus cannot fast-forward onto
+        // `side` and main's side lands as the THIRD parent.
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit side origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- declared non-goal: reachability is the runner's business
+    'dead-code': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  if (false) {',
+          '    expect(one()).toBe(1);',
+          '    expect(two()).toBe(2);',
+          '  }',
+        ),
+      }),
+    },
+    // -- attribution across main's own history
+    'merge-freight': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-weakens',
+      ],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    // -- main EMPTIES the file (keeps the path, removes every line) and
+    //    the round touches nothing. Main's own delta is the whole file
+    //    going empty, and the merge landed it, so the round answers for
+    //    nothing.
+    'main-empties': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      // Truly zero bytes: `printf '%s\n'` with no operands still writes a
+      // newline, and a one-byte result would never reach the emptiness
+      // question this fixture exists to ask.
+      mainMoves: [": > 'pkg/a.test.ts'", 'git commit -qam main-empties'],
+      // The branch moves FIRST, so the merge cannot fast-forward: this has
+      // to be a real merge commit, or main's side is read straight off the
+      // commit and the merge attribution is never exercised.
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a file carrying a NUL byte, which git will not merge as text.
+    //    Attribution never asks it to: main's delta is read on main's own
+    //    side, so the measurement is the same as for any other content.
+    //    Here main only appends a comment while the round deletes an
+    //    assertion.
+    'binary-merge': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
+      files: {},
+      mainMoves: [
+        "printf '// main touched this\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam main-touches',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit origin/main',
+        // Rewritten, not filtered: a line filter reads this file as binary
+        // and would empty it instead of dropping one assertion. The NUL
+        // only has to exist on the three sides of the MERGE.
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the same refusal, with MAIN as the side that moved: main drops an
+    //    assertion, the round only merges. Substituting the branch's side
+    //    unconditionally would read main's weakening as the round's and
+    //    reject an honest round, so the fallback has to follow git's own
+    //    trivial-merge rule instead of a fixed side.
+    'binary-merge-freight': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the refusal with BOTH sides moved: the round weakens the file and
+    //    main edits it. Neither side is the base, so the result resolves
+    //    for the branch exactly as `--ours` would have, and the round is
+    //    charged for its OWN removal — no more, no less. Taking main's
+    //    side here would charge the round for main's edit as well.
+    'binary-merge-conflict': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
+      files: {},
+      mainMoves: [
+        "printf '// main touched this\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam main-touches',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam round-weakens',
+        'git merge -q --no-edit -X ours origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the round merges main with `-s ours`, discarding main's side for
+    //    this file, and removes an assertion of its own in the same round.
+    //    Main contributed nothing the tip took, so nothing may be
+    //    subtracted: crediting the round with main's discarded delta would
+    //    absorb its own removal exactly.
+    'strategy-ours-hole': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit -s ours origin/main',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the same shape with unmergeable content: the merge landed
+    //    nothing of main's, so main still contributed nothing.
+    'strategy-ours-hole-binary': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit -s ours origin/main',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the same discard, but the merge commit is NOT byte-identical to
+    //    the branch's side: one comment line was added while resolving. A
+    //    byte-equality bound misses this; the clamp does not, because the
+    //    landed delta is zero either way.
+    'ours-hole-plus-comment': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit -s ours origin/main || true',
+        "printf '// merge note\\n' >> 'pkg/a.test.ts'",
+        'git add pkg/a.test.ts && git commit -qm merge-with-note',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// merge note\\n' >> 'pkg/a.test.ts'",
+        AGENT_COMMIT,
+      ],
+    },
+    // -- binary, BOTH sides moved, and the resolution took MAIN's version.
+    //    Main's own delta is measured on main's side and the merge landed
+    //    it whole, so the round -- whose own edit the resolution discarded
+    //    -- is charged for nothing.
+    'binary-resolution-takes-main': {
+      onMain: { 'pkg/a.test.ts': WT_BASE_PLUS_THREE },
+      onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam branch-edits',
+        'git merge -q --no-edit -X theirs origin/main',
+        AGENT_COMMIT,
+      ],
+    },
+    'merge-delete-freight': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['git rm -q pkg/a.test.ts', 'git commit -qm main-deletes'],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    'merge-conflict-drop': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) => l.replace('toBe(1)', 'toBe(10)')),
+        }),
+        'git commit -qam main-edits',
+      ],
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) => l.replace('toBe(1)', 'toBe(11)')),
+        }),
+        'git commit -qam branch-edits',
+        'git merge -q --no-edit origin/main || true',
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.filter((l) => !l.includes('one()')),
+        }),
+        'git add pkg/a.test.ts && git commit -qm resolution',
+        AGENT_COMMIT,
+      ],
+    },
+    'merge-restore': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) => l.replace('toBe(1)', 'toBe(10)')),
+        }),
+        'git commit -qam main-edits',
+      ],
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.filter((l) => !l.includes('one()')),
+        }),
+        'git commit -qam drop',
+        'git merge -q --no-edit origin/main || true',
+        'git checkout --theirs pkg/a.test.ts',
+        'git add pkg/a.test.ts && git commit -qm take-main',
+        AGENT_COMMIT,
+      ],
+    },
+    'premerge-weaken-postmerge-decoy': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [...WT_BASE, '// main touched this file'],
+        }),
+        'git commit -qam main-touches',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam weaken',
+        'git merge -q --no-edit origin/main',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            "  const decoy = 'expect(two()).toBe(2)';",
+            '});',
+            '// main touched this file',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    'ff-ride-freight': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'git reset -q --hard origin/main',
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE_MINUS_TWO.map((l) =>
+            l.replace('one()', 'uno()'),
+          ),
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    'ff-ride-revert': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-adds',
+      ],
+      round: [
+        'git reset -q --hard origin/main',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        AGENT_COMMIT,
+      ],
+    },
+    'merge-introduced-discard': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/b.test.ts': WT_BASE }),
+        'git add pkg/b.test.ts && git commit -qm main-adds-b',
+      ],
+      round: [
+        'git merge -q --no-commit --no-edit origin/main || true',
+        'git rm -qf pkg/b.test.ts',
+        'git commit -qm resolution',
+        AGENT_COMMIT,
+      ],
+    },
+    'side-branch-merge': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git checkout -qb side',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam side-weakens',
+        'git checkout -q feature',
+        'git merge -q --no-ff --no-edit side',
+        AGENT_COMMIT,
+      ],
+    },
+  };
+
+  const rejectsWeakening = (weaken, signal, opts = {}) => {
+    const r = runGate({ weaken, ...opts });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    // Retryable: the same-run repair pass can restore the coverage or
+    // record the evidence, so this must not burn the whole round.
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.rejection).toContain(signal);
+    // The remedy has to name the artifact, or the repair pass cannot act.
+    expect(r.rejection).toContain('test-weakening.json');
+    // Rejected BEFORE the expensive deterministic checks: a round that
+    // cannot be accepted must not spend twenty minutes proving it.
+    expect(r.stdout).not.toContain('Re-running deterministic checks');
+    return r;
+  };
+  const acceptsWithoutCharge = (weaken, opts = {}) => {
+    const r = runGate({ weaken, ...opts });
+    expect(r.status).toBe(0);
+    expect(r.outputs).toContain('outcome=fixed');
+    expect(r.rejection).toBe('');
+    expect(r.advisories).not.toContain('weakened or removed pre-existing');
+    expect(r.stdout).not.toContain('UNAVAILABLE');
+    return r;
+  };
+
+  it('rejects a round that removes assertions from a pre-existing test', () => {
+    const r = rejectsWeakening('assert', 'net 1 assertion(s) removed');
+    expect(r.rejection).toContain('pkg/a.test.ts');
+  });
+
+  it('rejects a skip marker added to a pre-existing test', () => {
+    // Assertion counts are identical on both sides — only the
+    // registration's enabled state moves.
+    rejectsWeakening('skip', 'pre-existing test registration(s) disabled');
+  });
+
+  it('rejects a deleted pre-existing test', () => {
+    rejectsWeakening('delete', 'test file deleted');
+    // A main-derived merge landing AFTER the round's own deletion does not
+    // launder it: the merge moved nothing for that path on the side that
+    // survived, so the baseline the charge rests on is still the pre-round
+    // ref's.
+    const deletedThenMerged = rejectsWeakening(
+      'delete-then-merge',
+      'test file deleted',
+    );
+    expect(deletedThenMerged.rejection).toContain('pkg/a.test.ts');
+    expect(deletedThenMerged.rejection).not.toContain('pkg/b.test.ts');
+  });
+
+  it('gates every status-0 weakening flow on the host probe', () => {
+    // Accepted rounds run the REAL script past the bite section's
+    // unconditional `mapfile`: on a bash without it (macOS ships 3.2) the
+    // spawn dies there before the semantics under test can execute, so
+    // every test asserting an ACCEPTED round carries the host gate. The
+    // set is DERIVED from this file, never hand-listed: a new
+    // accepted-round test added without the gate fails here rather than on
+    // the macOS lane, which is where the hand-list kept letting one slip.
+    const self = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+    const chunks = self
+      .split(/\n {2}it(?=[.(])/)
+      // ...except this test, whose own body quotes the signals below.
+      .filter((chunk) => !chunk.startsWith("('gates every status-0"));
+    const accepting = chunks.filter(
+      (chunk) =>
+        /acceptsWithoutCharge\('[a-z]/.test(chunk) ||
+        (chunk.includes('weaken:') &&
+          (chunk.includes('.status).toBe(0)') ||
+            chunk.includes(".rejection).toBe('')"))),
+    );
+    expect(accepting.length).toBeGreaterThan(8);
+    expect(
+      accepting
+        .filter((chunk) => !chunk.startsWith('.skipIf(!hasBashMapfile)('))
+        .map((chunk) => chunk.slice(0, 90)),
+    ).toEqual([]);
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'charges nothing to honest edits of a pre-existing test',
+    () => {
+      // Strictly more coverage.
+      acceptsWithoutCharge('add');
+      // The repo's environment-guard idioms are conditions, not skips.
+      acceptsWithoutCharge('skipif-guard');
+      acceptsWithoutCharge('ctx-skip-conditional');
+      // A skip in a catch clause is the setup-failure guard, not a skip.
+      acceptsWithoutCharge('catch-skip');
+      // Un-skipping a test that already carried an early return is
+      // strictly more coverage, not a guard the round added.
+      acceptsWithoutCharge('unskip-with-guard');
+      // A brand-new test carrying its own platform guard silences nothing
+      // that existed.
+      acceptsWithoutCharge('adds-guarded-test');
+      // A CONDITIONAL early return planted ahead of existing assertions
+      // is the environment-guard idiom (R27-21): sheltered assertions
+      // stay measured, so the round reads as no movement — the runner,
+      // not this gate, judges the condition.
+      acceptsWithoutCharge('early-return-conditional');
+      // A brand-new todo registration is the round's own.
+      acceptsWithoutCharge('todo-new');
+      // A retitled test keeps its assertions and its enabled state.
+      acceptsWithoutCharge('rename');
+      // An assertion moved WITHIN a file nets zero, by contract.
+      acceptsWithoutCharge('move-within');
+      // Prettier reflow and a JSX-carrying assertion swap: the parser sees
+      // the same declared surface a text census mis-measured.
+      acceptsWithoutCharge('reflow');
+      acceptsWithoutCharge('jsx-swap');
+      // Delete then recreate STRONGER: the tip is the authority, not the
+      // commit sequence.
+      acceptsWithoutCharge('delete-readd-stronger');
+    },
+    120000,
+  );
+
+  it('charges the weakenings that hide from a text census', () => {
+    // A commented-out assertion, a string/regex/template decoy, a JSX
+    // text decoy: the parser counts executable statements, not tokens.
+    rejectsWeakening('comment-out', 'net 2 assertion(s) removed');
+    rejectsWeakening('string-decoy', 'net 1 assertion(s) removed');
+    rejectsWeakening('jsx-decoy', 'net 1 assertion(s) removed');
+    // A matcher-less expect() pins nothing.
+    rejectsWeakening('matcher-drop', 'net 1 assertion(s) removed');
+    // Every spelling of a disabled registration the parser can decode.
+    for (const shape of [
+      'computed-skip',
+      'options-skip',
+      'skipif-true',
+      'ctx-skip',
+    ]) {
+      rejectsWeakening(shape, 'pre-existing test registration(s) disabled');
+    }
+    // The early-return spelling of a skip: the assertions it shelters stop
+    // being declared surface, so it measures as their removal.
+    rejectsWeakening('early-return', 'net 2 assertion(s) removed');
+    // ...and a throwaway registration appended beside it buys nothing.
+    rejectsWeakening('guard-plus-todo', 'net 2 assertion(s) removed');
+    // Assertions the baseline already carried behind a guard are not free
+    // to delete: the total that ignores guards falls even when the other
+    // one cannot.
+    rejectsWeakening('delete-behind-guard', 'net 2 assertion(s) removed');
+    // An early return in a DESCRIBE body stops the runner collecting what
+    // follows it, exactly as a `skip()` there would.
+    rejectsWeakening(
+      'suite-guard',
+      'pre-existing test registration(s) disabled',
+    );
+    // A hook that skips every test the file registers.
+    rejectsWeakening('hook-skip', 'pre-existing test registration(s) disabled');
+  }, 120000);
+
+  it('charges registration-level weakening by title, not by net marker count', () => {
+    // Un-skipping one test never licenses silencing another: the net
+    // marker count is zero here and the gate still charges `a`.
+    rejectsWeakening('skip-swap', 'pre-existing test registration(s) disabled');
+    // Retitle-and-skip: no baseline title is disabled, but the silenced
+    // body's assertions no longer execute.
+    rejectsWeakening('rename-skip', 'net 2 assertion(s) removed');
+    // Skip the body and plant an empty same-titled stand-in: the title
+    // count balances, the executed assertions do not.
+    rejectsWeakening('skip-with-standin', 'net 2 assertion(s) removed');
+    // ...and the same silencing with the callback handed by name: the
+    // binding resolves, so the skipped body still measures as removed.
+    rejectsWeakening('skip-with-standin-named', 'net 2 assertion(s) removed');
+  });
+
+  it('charges a weakening by the tip, whichever commit sequence produced it', () => {
+    // Delete then recreate WEAKER.
+    rejectsWeakening('delete-readd-weaker', 'net 1 assertion(s) removed');
+    // A pre-existing test replaced by a symlink is a typechange: the
+    // deletion of its surface, whatever the link's target text parses as.
+    rejectsWeakening('symlink', 'test file deleted');
+    rejectsWeakening('symlink-python', 'test file deleted');
+    // A DIRECTORY that took the file's name is not the file: the tip must
+    // hold a blob at that path for the file to count as still there.
+    rejectsWeakening('directory-swap', 'test file deleted');
+    // A side branch merged into the round is the round's own authorship.
+    rejectsWeakening('side-branch-merge', 'net 1 assertion(s) removed');
+    // ...and so is a merge whose tree is its first parent's: nothing moved
+    // per commit, yet the tip carries main's older, weaker copy.
+    const ours = rejectsWeakening(
+      'ours-merge-drops-branch-work',
+      'net 1 assertion(s) removed',
+    );
+    expect(ours.rejection).toContain('pkg/a.test.ts');
+    // A rename whose destination the round then deletes, one that lands ON
+    // a pre-existing test, and one that guts what it landed on: under the
+    // one-name rule each charges the old path, and the destination is
+    // measured against its OWN pre-round self when it had one.
+    const gone = rejectsWeakening(
+      'own-rename-then-delete',
+      'test file deleted',
+    );
+    expect(gone.rejection).toContain('pkg/a.test.ts');
+    const onto = rejectsWeakening(
+      'delete-then-rename-onto',
+      'test file deleted',
+    );
+    expect(onto.rejection).toContain('pkg/a.test.ts');
+    expect(onto.rejection).toContain('pkg/b.test.ts');
+    expect(onto.rejection).toContain('net 1 assertion(s) removed');
+  });
+
+  it('fails closed for the one file it could not measure, not the round', () => {
+    // A round-authored input can exhaust the parser. That file alone is
+    // charged (one ack entry answers it) while the rest of the round stays
+    // measured — waiving every signal because one file was unreadable is
+    // exactly the fail-open the header forbids.
+    const r = runGate({
+      weaken: 'unparseable-addition',
+      counterFailsFor: 'pkg/generated.test.ts',
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('net 1 assertion(s) removed');
+    expect(r.stdout).not.toContain('UNAVAILABLE');
+    // The file the round added has no coverage to weaken, so it is not
+    // charged for being unreadable.
+    expect(r.rejection).not.toContain('pkg/generated.test.ts');
+    // ...while an unreadable file the BASELINE holds is charged on its
+    // own — the pre-round ref's, and one main landed during the round,
+    // which is the same baseline the measured arm reports.
+    const own = runGate({
+      weaken: 'assert',
+      counterFailsFor: 'pkg/a.test.ts',
+    });
+    expect(own.status).toBe(1);
+    expect(own.rejection).toContain('test surface could not be measured');
+    const landed = runGate({
+      weaken: 'main-landed-unmeasurable',
+      counterFailsFor: 'pkg/new.test.ts',
+    });
+    expect(landed.status).toBe(1);
+    expect(landed.rejection).toContain('pkg/new.test.ts');
+    expect(landed.rejection).toContain('test surface could not be measured');
+    // A counter that EXITS 0 while printing something that is not a
+    // verdict takes the same fail-closed path. Read as a verdict, its
+    // absent `baselinePresent` would say "not the round's to weaken" and
+    // uncharge the file silently — while the round still reports itself
+    // measured, which is the fail-open this whole arm exists to prevent.
+    const mute = runGate({
+      weaken: 'assert',
+      counterGarbageFor: 'pkg/a.test.ts',
+    });
+    expect(mute.status).toBe(1);
+    expect(mute.rejection).toContain('pkg/a.test.ts');
+    expect(mute.rejection).toContain('test surface could not be measured');
+    expect(mute.stdout).not.toContain('UNAVAILABLE');
+  });
+
+  it("takes main's side only from commits main itself has been", () => {
+    // A commit reachable from origin/main as someone's merged feature tip
+    // was never main: merging it with `-s ours` must not credit the round
+    // with a smaller copy of a file main never carried.
+    const r = rejectsWeakening(
+      'merge-historical-main-commit',
+      'net 2 assertion(s) removed',
+    );
+    expect(r.rejection).toContain('pkg/a.test.ts');
+  });
+
+  it('judges non-JS test files by the deletion arm', () => {
+    rejectsWeakening('python-delete', 'test file deleted');
+    rejectsWeakening('rust-delete', 'test file deleted');
+    rejectsWeakening('spec-delete', 'test file deleted');
+  });
+
+  it('charges every weakened file and acknowledges per path', () => {
+    const r = rejectsWeakening('two-files', 'net 1 assertion(s) removed');
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('pkg/b.test.ts');
+    const half = runGate({
+      weaken: 'two-files',
+      workdirFiles: {
+        'test-weakening.json': JSON.stringify([
+          { path: 'pkg/a.test.ts', reason: WEAKEN_REASON },
+        ]),
+      },
+    });
+    expect(half.status).toBe(1);
+    expect(half.rejection).toContain('pkg/b.test.ts');
+    expect(half.rejection).not.toContain('pkg/a.test.ts');
+  });
+
+  it('uses no bash-4 construct ahead of the bite section (the bash-3.2 lane)', () => {
+    // The gate section runs before the bite section's mapfile — the first
+    // bash-4 boundary the host probe gates — so it must stay bash-3.2
+    // clean or the macOS lane dies before any verdict.
+    const start = reviewVerificationRunner.indexOf('# --- Test-weakening gate');
+    const end = reviewVerificationRunner.indexOf('\nmapfile ');
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    expect(reviewVerificationRunner.slice(start, end)).not.toMatch(
+      /mapfile|readarray|(declare|local|typeset) -[a-zA-Z]*[An]|\$\{[A-Za-z_]+(,,|\^\^|@[QEPAaKk])|\[-[0-9]|\|&|;;&/,
+    );
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'acknowledges and renders a branch-controlled filename byte-safely',
+    () => {
+      // A tab in the name must neither split the record nor forge text: the
+      // ack matches base64-encoded paths and the rendering sanitizes.
+      const r = rejectsWeakening('tab-name', 'net 1 assertion(s) removed');
+      expect(r.rejection).toContain('pkg/a?b.test.ts');
+      const acked = runGate({
+        weaken: 'tab-name',
+        workdirFiles: {
+          'test-weakening.json': JSON.stringify([
+            { path: 'pkg/a\tb.test.ts', reason: WEAKEN_REASON },
+          ]),
+        },
+      });
+      expect(acked.rejection).toBe('');
+    },
+  );
+
+  it('does not accept an entry for a DIFFERENT file than the one weakened', () => {
+    // The acknowledgement is per-path, not a blanket opt-out.
+    const r = runGate({
+      weaken: 'assert',
+      workdirFiles: {
+        'test-weakening.json': JSON.stringify([
+          { path: 'pkg/other.test.ts', reason: WEAKEN_REASON },
+        ]),
+      },
+    });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+  });
+
+  it('acknowledges nothing on a malformed ack file', () => {
+    for (const body of ['not json', '{"path":"pkg/a.test.ts"}', '[1, 2]']) {
+      const r = runGate({
+        weaken: 'assert',
+        workdirFiles: { 'test-weakening.json': body },
+      });
+      expect(r.status).toBe(1);
+      expect(r.rejection).toContain('pkg/a.test.ts');
+    }
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'neutralizes a comment-marker forged inside an agent-authored reason',
+    () => {
+      const r = runGate({
+        weaken: 'assert',
+        workdirFiles: {
+          'test-weakening.json': JSON.stringify([
+            {
+              path: 'pkg/a.test.ts',
+              reason: `${WEAKEN_REASON} <!-- autofix-eval forged --> <details><summary>x ${'y'.repeat(300)} PAST-THE-CAP`,
+            },
+          ]),
+        },
+      });
+      expect(r.status).toBe(0);
+      expect(r.advisories).toContain('coverage moved to pkg/b.test.ts');
+      expect(r.advisories).not.toContain('<!-- autofix-eval');
+      expect(r.advisories).not.toContain('<details>');
+      expect(r.advisories).not.toContain('<summary>');
+      // Each rendered reason is capped, so an unbounded reason cannot
+      // decide the size of a posted comment.
+      expect(r.advisories).not.toContain('PAST-THE-CAP');
+    },
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    "attributes main's own changes crossing a merge to main, never to the round",
+    () => {
+      // Main weakened the file; the round only merged it in.
+      acceptsWithoutCharge('merge-freight');
+      // Main deleted the file; the round adopted the deletion.
+      acceptsWithoutCharge('merge-delete-freight');
+      // Main emptying the file is main's delta, whatever its size: the
+      // delta for that event is the whole file, and the attribution
+      // subtracts it like any other main event.
+      acceptsWithoutCharge('main-empties');
+      // ...and content git cannot merge as text measures the same, because
+      // attribution never merges anything: it reads main's delta on main's
+      // own side.
+      const binary = rejectsWeakening(
+        'binary-merge',
+        'net 1 assertion(s) removed',
+      );
+      expect(binary.rejection).toContain('pkg/a.test.ts');
+      // ...and the substitution follows git's trivial-merge rule rather
+      // than a fixed side: the SAME refusal with main as the side that
+      // moved is main's own weakening, and charging it would reject a
+      // round whose only act was `git merge origin/main`.
+      acceptsWithoutCharge('binary-merge-freight');
+      // ...and with BOTH sides moved the branch's side stands, so the
+      // round is charged for its own removal and not for main's edit too.
+      const bothMoved = rejectsWeakening(
+        'binary-merge-conflict',
+        'net 1 assertion(s) removed',
+      );
+      expect(bothMoved.rejection).toContain('pkg/a.test.ts');
+      // Both sides moved and the resolution took MAIN's version, discarding
+      // the round's own edit. Main's delta is measured where main made it,
+      // so the round is charged for nothing -- the older model, which read
+      // main's contribution off a three-way splice, over-charged here.
+      acceptsWithoutCharge('binary-resolution-takes-main');
+      // Main's own delta is measured where MAIN made it, never spliced
+      // with the round's edits: a tip byte-identical to main's file has
+      // weakened nothing, however the round got there.
+      acceptsWithoutCharge('merge-takes-main-after-own-unskip');
+      // Credit is main's delta, not the merge's: a resolution that removed
+      // more than main did is charged for the difference...
+      rejectsWeakening(
+        'resolution-removes-more-than-main',
+        'net 1 assertion(s) removed',
+      );
+      // ...and one that moved the OPPOSITE way from main credits nothing,
+      // so the round answers for exactly what it removed.
+      rejectsWeakening('main-removes-merge-adds', 'net 1 assertion(s) removed');
+      // Main's ADDITIONS are never clamped by what the merge kept: a round
+      // that drops what main landed during the round removed coverage, in
+      // every spelling of "drops".
+      rejectsWeakening('merge-drops-mains-add', 'net 1 assertion(s) removed');
+      rejectsWeakening(
+        'delete-merge-drops-mains-test',
+        'net 1 assertion(s) removed',
+      );
+      rejectsWeakening(
+        'delete-merge-skips-mains-test',
+        '1 pre-existing test registration(s) disabled',
+      );
+      // Main's REMOVALS are credited only as far as they landed: crediting
+      // the model here would swallow the round's own removal.
+      rejectsWeakening(
+        'merge-keeps-one-then-round-removes',
+        'net 1 assertion(s) removed',
+      );
+      rejectsWeakening(
+        'merge-keeps-enabled-then-round-disables',
+        '1 pre-existing test registration(s) disabled',
+      );
+      // A merge that DISCARDED main's side adopted nothing from it, so
+      // nothing is subtracted: the round's own removal stands charged. Both
+      // lanes, because the model is what the tip took, not what an
+      // main's own side produced.
+      for (const shape of [
+        'strategy-ours-hole',
+        'strategy-ours-hole-binary',
+        // ...and the credit is clamped by the landed DELTA, not by byte
+        // equality with the branch's side: one comment line added while
+        // resolving must not restore the phantom.
+        'ours-hole-plus-comment',
+      ]) {
+        const discarded = rejectsWeakening(shape, 'net 1 assertion(s) removed');
+        expect(discarded.rejection).toContain('pkg/a.test.ts');
+      }
+      // The round dropped an assertion, main edited it, and the merge
+      // resolution took main's side: the tip carries the assertion.
+      acceptsWithoutCharge('merge-restore');
+      // A fast-forwarded main weakened the file; the round then renamed a
+      // symbol in it.
+      acceptsWithoutCharge('ff-ride-freight');
+    },
+    120000,
+  );
+
+  it("charges the round's own authorship on either side of a merge", () => {
+    // A conflict resolution that drops an assertion.
+    rejectsWeakening('merge-conflict-drop', 'net 1 assertion(s) removed');
+    // A weakening committed BEFORE the merge, with a post-merge decoy: the
+    // tip-based recount subtracts main's contribution and nothing else.
+    rejectsWeakening(
+      'premerge-weaken-postmerge-decoy',
+      'net 1 assertion(s) removed',
+    );
+    // After riding main forward, the round restored the pre-round bytes,
+    // dropping the assertion main had just landed.
+    rejectsWeakening('ff-ride-revert', 'net 1 assertion(s) removed');
+    // A merge resolution that discards a test main added during the round.
+    const r = rejectsWeakening('merge-introduced-discard', 'test file deleted');
+    expect(r.rejection).toContain('pkg/b.test.ts');
+  }, 120000);
+
+  it('charges a deletion the round made even when a later merge of main resolved for it', () => {
+    // The round deleted the file, main edited it, and the merge kept the
+    // deletion: main moved nothing the round can hide behind.
+    rejectsWeakening('delete-then-merge-edit', 'test file deleted');
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'attributes deletions, empty files, renames and octopus merges correctly',
+    () => {
+      // A file the round created, carried across a merge of main that
+      // never held it, then deleted: its own.
+      acceptsWithoutCharge('own-file-merge-delete');
+      // ...including when the merge commit TOUCHED that own file: main
+      // never held it, so no event may latch it into the baseline.
+      acceptsWithoutCharge('own-file-merge-edit-delete');
+      // A file an EARLIER round removed is not put back in the baseline by
+      // main merely still holding it, in either spelling.
+      acceptsWithoutCharge('deleted-earlier-round-then-merge');
+      acceptsWithoutCharge('renamed-earlier-round-then-merge');
+      // Main's contribution is counted once across add / delete / re-add,
+      // not once per merge that sees it: the events CHAIN, so each is
+      // measured against main's side at the previous one.
+      rejectsWeakening(
+        'main-adds-deletes-readds',
+        'net 1 assertion(s) removed',
+      );
+      // Main's deletion that the merge did NOT adopt contributes nothing:
+      // the round kept its own copy and answers for gutting it.
+      rejectsWeakening(
+        'main-deletes-round-keeps-weakened',
+        'net 1 assertion(s) removed',
+      );
+      // ...while main GROWING a path the pre-round ref lacks does put it
+      // back in the baseline, whatever an earlier round did to it.
+      rejectsWeakening(
+        'preround-absent-main-grows-round-guts',
+        'net 1 assertion(s) removed',
+      );
+      // ...and a pre-existing file main never held is still the baseline's,
+      // however the merge commit disposes of it.
+      const ownDropped = rejectsWeakening(
+        'preround-own-file-merge-drops',
+        'test file deleted',
+      );
+      expect(ownDropped.rejection).toContain('pkg/n.test.ts');
+      // A later merge cannot let the round's own copy stand in for main's
+      // side, however many merges have passed since main last held it.
+      rejectsWeakening(
+        'main-deletes-after-moving-then-merges-again',
+        'net 1 assertion(s) removed',
+      );
+      // Main appending a comment moves no SURFACE, so it does not put a
+      // file an earlier round deleted back into the baseline...
+      acceptsWithoutCharge('preround-absent-main-comments');
+      // ...but a file whose surface the instrument cannot read at all is
+      // judged by its bytes, or the deletion arm -- the only arm those
+      // shapes have -- could never fire again.
+      const py = rejectsWeakening(
+        'preround-absent-main-grows-python',
+        'test file deleted',
+      );
+      expect(py.rejection).toContain('pkg/test_x.py');
+      // ...and a path main ADDED is the baseline's however little it
+      // measures: the round discarding it is still the round's deletion.
+      const empty = rejectsWeakening(
+        'main-adds-zero-surface-round-drops',
+        'test file deleted',
+      );
+      expect(empty.rejection).toContain('pkg/e.test.ts');
+      // ...and the fallback keys on what was MEASURED, not on the
+      // extension: a `.test.ts` the parser reads nothing from measures
+      // exactly like a `.py`.
+      const zeroTs = rejectsWeakening(
+        'preround-absent-main-grows-zero-surface-ts',
+        'test file deleted',
+      );
+      expect(zeroTs.rejection).toContain('pkg/z.test.ts');
+      // Main moving only DISABLED registrations is no coverage and reaches
+      // no signal, so it does not put the file back in the baseline.
+      acceptsWithoutCharge('preround-absent-main-adds-skip');
+      // ...but a file that is NOTHING BUT disabled registrations is not
+      // compared that way at all: the comparison cannot see its only
+      // content, so it reaches the bytes and a rewrite counts.
+      const skipsOnly = rejectsWeakening(
+        'preround-absent-main-rewrites-skips-only',
+        'test file deleted',
+      );
+      expect(skipsOnly.rejection).toContain('pkg/s.test.ts');
+      // Each field the comparison reads is load-bearing on its own: the
+      // live assertion total, the declared total behind a guard, and the
+      // enabled-title multiset.
+      for (const [shape, path] of [
+        ['preround-absent-main-guards', 'pkg/g.test.ts'],
+        ['preround-absent-main-drops-behind-guard', 'pkg/d.test.ts'],
+        ['preround-absent-main-renames-test', 'pkg/r.test.ts'],
+      ]) {
+        const moved = rejectsWeakening(shape, 'test file deleted');
+        expect(moved.rejection).toContain(path);
+      }
+      // Two equally valid merge bases holding the SAME blob cannot change
+      // the verdict, so the file is measured...
+      acceptsWithoutCharge('crisscross-bases-agree');
+      // ...and two that disagree about it are refused rather than resolved
+      // by a tie-break git does not promise.
+      const crossed = runGate({ weaken: 'crisscross-bases-disagree' });
+      expect(crossed.status).toBe(1);
+      expect(crossed.rejection).toContain('test surface could not be measured');
+      expect(crossed.rejection).toContain('pkg/a.test.ts');
+      // ...including when they disagree about whether the file EXISTS,
+      // which an identity that could not tell "no blob" from "absent"
+      // would read as agreement.
+      const crossedPresence = runGate({
+        weaken: 'crisscross-bases-disagree-presence',
+      });
+      expect(crossedPresence.status).toBe(1);
+      expect(crossedPresence.rejection).toContain(
+        'test surface could not be measured',
+      );
+      expect(crossedPresence.rejection).toContain('pkg/a.test.ts');
+      // ...but a path MAIN also added during the round is the baseline's,
+      // and dropping it after the merge is the round's deletion.
+      const addAdd = rejectsWeakening(
+        'addadd-takes-main-then-drops',
+        'test file deleted',
+      );
+      expect(addAdd.rejection).toContain('pkg/x.test.ts');
+      // Main emptied the file, and the merge landed it: main's delta is
+      // main's.
+      acceptsWithoutCharge('merge-main-empties');
+      // Main replaced the file with a DIRECTORY of the same name: a tree
+      // at that path is not the file on either side, so the round that
+      // merely merged it is not charged for main's change.
+      acceptsWithoutCharge('main-directory-swap');
+      // Main's own rename is main's: it leaves the round's view without
+      // charging the round.
+      acceptsWithoutCharge('main-renames');
+      // The round deleted the file and the merge resolution kept main's
+      // version: main's own delta from the merge base is main's, and the
+      // round's deletion did not survive into the tip.
+      acceptsWithoutCharge('delete-then-merge-restores');
+      acceptsWithoutCharge('delete-then-merge-adds');
+      // Main's side arriving as the third parent of an octopus merge is
+      // still main's side.
+      acceptsWithoutCharge('octopus-freight');
+    },
+    120000,
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    'measures a rename as the deletion of the old path',
+    () => {
+      // Following a name across the round's own renames is a non-goal: the
+      // old path is charged, the new one is a new file, and one ack entry
+      // naming the old path answers it — whatever shrank inside the
+      // destination rides into the report as that entry's reason.
+      const r = rejectsWeakening('rename-weaken', 'test file deleted');
+      expect(r.rejection).toContain('pkg/a.test.ts');
+      expect(r.rejection).not.toContain('pkg/b.test.ts');
+      // A pure rename is charged the same way, and costs the same one entry.
+      const pure = rejectsWeakening('rename-only', 'test file deleted');
+      expect(pure.rejection).toContain('pkg/a.test.ts');
+      const acked = runGate({
+        weaken: 'rename-only',
+        workdirFiles: {
+          'test-weakening.json': JSON.stringify([
+            { path: 'pkg/a.test.ts', reason: WEAKEN_REASON },
+          ]),
+        },
+      });
+      expect(acked.rejection).toBe('');
+      // Main's own moves under either name are still main's: a file main
+      // renamed away leaves the round's view uncharged, and a round that
+      // keeps its own copy is charged only for what it removed there.
+      const bothPaths = rejectsWeakening(
+        'main-renames-round-keeps-both',
+        'net 2 assertion(s) removed',
+      );
+      expect(bothPaths.rejection).toContain('pkg/a.test.ts');
+    },
+  );
+
+  it("measures a parentless commit in the round as the round's own authorship", () => {
+    // An orphan root grafted in as the first parent of the tip is not a
+    // history the walk cannot read: it is authorship, measured against
+    // the empty tree, and the tip's shrinkage is charged.
+    const r = rejectsWeakening('orphan-merge', 'net 1 assertion(s) removed');
+    expect(r.stdout).not.toContain('UNAVAILABLE');
+  });
+
+  it('loads the staged parser as CommonJS whatever is planted beside it', () => {
+    // A package.json with {"type":"module"} next to a `.js` parser would
+    // make Node load it as ESM and the counter crash into UNAVAILABLE; the
+    // `.cjs` staging is immune, so the round is still charged.
+    const r = rejectsWeakening('assert', 'net 1 assertion(s) removed', {
+      parserTypePlant: true,
+    });
+    expect(r.stdout).not.toContain('UNAVAILABLE');
+  });
+
+  it('refuses an instrument that changed after staging', () => {
+    // The digests recorded at staging travel in expression context; a
+    // counter or parser that differs on disk when the gate runs is
+    // tampering, never a measurement.
+    for (const [knob, reason] of [
+      [{ tamperCounter: true }, 'modified after staging'],
+      [{ tamperParser: true }, 'modified after staging'],
+      // Digested at staging but gone now is tampering too, never a
+      // measurement that quietly went UNAVAILABLE.
+      [{ dropCounter: true }, 'removed after staging'],
+      [{ dropParser: true }, 'removed after staging'],
+      // ...and so is one that can no longer be read.
+      [{ unreadableCounter: true }, 'made unreadable after staging'],
+    ]) {
+      const r = runGate({ weaken: 'assert', ...knob });
+      expect(r.status).toBe(1);
+      expect(r.outputs).toContain('outcome=failed');
+      expect(r.outputs).not.toContain('retryable=true');
+      expect(r.rejection).toContain(reason);
+    }
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'does not charge non-test files or non-JS test edits',
+    () => {
+      // Files under a test directory that are not tests by name are not
+      // enumerated: a README or a render helper is not a test deletion.
+      const r = acceptsWithoutCharge('non-test-file-delete');
+      expect(r.stdout).not.toContain('test file deleted');
+      // A non-JS test file measures a zero surface: edits are not judged,
+      // only deletions are.
+      acceptsWithoutCharge('python-edit');
+      // Snapshots are out of scope: an obsolete one removed by `vitest -u`
+      // is routine bookkeeping.
+      acceptsWithoutCharge('snapshot-delete');
+      // A typechange in the GROWING direction — a symlink the round
+      // replaces with a real test file — is not a deletion.
+      acceptsWithoutCharge('symlink-restored');
+    },
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    "declares reachability a non-goal: dead code is the runner's business",
+    () => {
+      // Pinned as the documented boundary of the instrument, not as a
+      // guarantee: assertions wrapped in dead code still DECLARE the same
+      // surface. The package test run and the bite check judge execution.
+      acceptsWithoutCharge('dead-code');
+    },
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    'judges deletions even when the measurement is unavailable',
+    () => {
+      // Without the staged counter (or parser) the measured signals are
+      // skipped, and the gate says so; a whole-file deletion or typechange
+      // is proven by the pre-round -> tip pair alone.
+      for (const knob of [{ noCounter: true }, { noParser: true }]) {
+        const open = runGate({ weaken: 'assert', ...knob });
+        expect(open.status).toBe(0);
+        expect(open.stdout).toContain(
+          'test-weakening measurement UNAVAILABLE this round',
+        );
+      }
+      const closed = runGate({ weaken: 'delete', noCounter: true });
+      expect(closed.status).toBe(1);
+      expect(closed.rejection).toContain('test file deleted');
+      const linked = runGate({ weaken: 'symlink', noCounter: true });
+      expect(linked.status).toBe(1);
+      expect(linked.rejection).toContain('test file deleted');
+      // Without the walk nothing proves main made a deletion, so every
+      // one is surfaced and acknowledged like any other.
+      const freight = runGate({
+        weaken: 'merge-delete-freight',
+        noCounter: true,
+      });
+      expect(freight.status).toBe(1);
+      expect(freight.rejection).toContain('test file deleted');
+      // An enumeration producer git refuses fails CLOSED: the absence of
+      // deletions cannot be certified from nothing.
+      const refused = runGate({ weaken: 'delete', gitDiffFails: true });
+      expect(refused.status).toBe(1);
+      expect(refused.outputs).toContain('retryable=true');
+      expect(refused.rejection).toContain('refusing to certify their absence');
+    },
+  );
+
+  it('stages the counter and its parser from the trusted base, digested and verified', () => {
+    // Staged in a step of its own AFTER npm ci installed the trusted
+    // lockfile (integrity-checked) and BEFORE the branch checkout: the
+    // counter from the trusted checkout, the parser as a `.cjs` copy of the
+    // typescript npm ci installed. Absent from base implies absent on disk
+    // (rm -rf first, tolerant cp); a counter without its parser fails the
+    // step; both digests travel in expression context to the gate, which
+    // verifies them before the counter executes.
+    const stageAt = workflow.indexOf(
+      "- name: 'Stage trusted test-surface instrument'",
+    );
+    expect(stageAt).toBeGreaterThan(
+      workflow.indexOf("- name: 'Install dependencies'"),
+    );
+    expect(stageAt).toBeLessThan(
+      workflow.indexOf("- name: 'Prepare branch and feedback'"),
+    );
+    const stageStep = workflow.slice(
+      stageAt,
+      workflow.indexOf("- name: 'Download CLI bundle'", stageAt),
+    );
+    expect(stageStep).toContain("id: 'stage_surface'");
+    expect(stageStep).toContain(
+      'rm -rf "${RUNNER_TEMP}/count-test-surface.mjs" "${RUNNER_TEMP}/weaken-parser"',
+    );
+    expect(stageStep).toContain(
+      'cp .github/scripts/count-test-surface.mjs "${RUNNER_TEMP}/count-test-surface.mjs" 2> /dev/null || true',
+    );
+    // Absent-from-base must imply absent-on-disk: the tolerant cp FAILS
+    // every pre-merge round, so a leftover a same-UID run planted at the
+    // staged path on this persistent host must not survive it and reach
+    // the gate as trusted content. rm -rf, not -f: the leftover can be a
+    // DIRECTORY, and rm -f's non-zero exit would abort this -e step before
+    // the tolerant cp — killing every later round on the host.
+    expect(
+      stageStep.indexOf('rm -rf "${RUNNER_TEMP}/count-test-surface.mjs"'),
+    ).toBeLessThan(
+      stageStep.indexOf('cp .github/scripts/count-test-surface.mjs'),
+    );
+    // Witness, not just text: run this step VERBATIM against a tree that
+    // lacks the script (the merge-base shape) with leftovers planted in
+    // both shapes. The step must survive, leave nothing behind at either
+    // staged path, and emit no digest — the gate's own absence guard then
+    // fails open (WEAKEN_MEASURED=false), covered by `noCounter` above.
+    const surfaceProbeDir = mkdtempSync(join(tmpdir(), 'ws-stage-probe-'));
+    const surfaceRunnerTemp = mkdtempSync(join(tmpdir(), 'ws-stage-temp-'));
+    try {
+      const surfaceOutput = join(surfaceProbeDir, 'github-output');
+      mkdirSync(join(surfaceProbeDir, '.github', 'scripts'), {
+        recursive: true,
+      });
+      const surfaceScript = stageStep
+        .slice(stageStep.indexOf('run: |-') + 'run: |-'.length)
+        .replace(/^ {10}/gm, '');
+      // GitHub runs a `run:` block under `bash --noprofile --norc -e -o
+      // pipefail`, and this step is unconditional: any command inside it
+      // that fails kills the whole review-address job for every round. The
+      // probe therefore runs it the same way, or the guards it exists to
+      // witness ("rm -f's non-zero exit would abort this -e step") are not
+      // being witnessed at all.
+      const runStage = () =>
+        spawnSync(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-e',
+            '-o',
+            'pipefail',
+            '-c',
+            surfaceScript,
+          ],
+          {
+            cwd: surfaceProbeDir,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              RUNNER_TEMP: surfaceRunnerTemp,
+              GITHUB_OUTPUT: surfaceOutput,
+            },
+          },
+        );
+      for (const asDirectory of [false, true]) {
+        rmSync(join(surfaceRunnerTemp, 'count-test-surface.mjs'), {
+          recursive: true,
+          force: true,
+        });
+        rmSync(join(surfaceRunnerTemp, 'weaken-parser'), {
+          recursive: true,
+          force: true,
+        });
+        if (asDirectory) {
+          mkdirSync(join(surfaceRunnerTemp, 'count-test-surface.mjs'));
+          writeFileSync(
+            join(surfaceRunnerTemp, 'count-test-surface.mjs', 'payload'),
+            'ATTACKER_CONTROLLED\n',
+          );
+        } else {
+          writeFileSync(
+            join(surfaceRunnerTemp, 'count-test-surface.mjs'),
+            'console.log("ATTACKER_CONTROLLED");\n',
+          );
+        }
+        mkdirSync(join(surfaceRunnerTemp, 'weaken-parser'), {
+          recursive: true,
+        });
+        writeFileSync(
+          join(surfaceRunnerTemp, 'weaken-parser', 'typescript.cjs'),
+          'module.exports = { ATTACKER_CONTROLLED: true };\n',
+        );
+        writeFileSync(surfaceOutput, '');
+        const surfaceProbe = runStage();
+        expect(surfaceProbe.status).toBe(0);
+        expect(
+          existsSync(join(surfaceRunnerTemp, 'count-test-surface.mjs')),
+        ).toBe(false);
+        expect(existsSync(join(surfaceRunnerTemp, 'weaken-parser'))).toBe(
+          false,
+        );
+        expect(readFileSync(surfaceOutput, 'utf8')).toBe('');
+      }
+      // ...and the branch that runs in PRODUCTION once this lands: the
+      // counter present, the parser where npm ci puts it. Text pins cannot
+      // see ordering or a newly-failing command inside that `if`, and this
+      // step is unconditional, so a break there kills every round. Run it —
+      // on hosts with the GNU coreutils the step's digest lines assume:
+      // they call sha256sum bare, and a macOS host without it (Homebrew
+      // ships gsha256sum) would fail the spawn for a reason the runner can
+      // never hit. The witness is the string pins PLUS the redacted-arm
+      // probes above on such a host.
+      if (hasSha256sum) {
+        writeFileSync(
+          join(surfaceProbeDir, '.github', 'scripts', 'count-test-surface.mjs'),
+          readFileSync('.github/scripts/count-test-surface.mjs'),
+        );
+        mkdirSync(join(surfaceProbeDir, 'node_modules', 'typescript', 'lib'), {
+          recursive: true,
+        });
+        const plantedParser =
+          '// planted typescript build\nmodule.exports={};\n';
+        writeFileSync(
+          join(
+            surfaceProbeDir,
+            'node_modules',
+            'typescript',
+            'lib',
+            'typescript.js',
+          ),
+          plantedParser,
+        );
+        rmSync(join(surfaceRunnerTemp, 'count-test-surface.mjs'), {
+          recursive: true,
+          force: true,
+        });
+        rmSync(join(surfaceRunnerTemp, 'weaken-parser'), {
+          recursive: true,
+          force: true,
+        });
+        writeFileSync(surfaceOutput, '');
+        const staged = runStage();
+        expect(staged.stderr).toBe('');
+        expect(staged.status).toBe(0);
+        expect(
+          readFileSync(
+            join(surfaceRunnerTemp, 'count-test-surface.mjs'),
+            'utf8',
+          ),
+        ).toBe(readFileSync('.github/scripts/count-test-surface.mjs', 'utf8'));
+        expect(
+          readFileSync(
+            join(surfaceRunnerTemp, 'weaken-parser', 'typescript.cjs'),
+            'utf8',
+          ),
+        ).toBe(plantedParser);
+        // The digests the gate verifies against are of the bytes that were
+        // actually staged, and BOTH reach expression context.
+        const digestOf = (file) =>
+          createHash('sha256').update(readFileSync(file)).digest('hex');
+        const emitted = readFileSync(surfaceOutput, 'utf8');
+        expect(emitted).toContain(
+          `weaken_counter_sha256=${digestOf(
+            join(surfaceRunnerTemp, 'count-test-surface.mjs'),
+          )}\n`,
+        );
+        expect(emitted).toContain(
+          `weaken_parser_sha256=${digestOf(
+            join(surfaceRunnerTemp, 'weaken-parser', 'typescript.cjs'),
+          )}\n`,
+        );
+      }
+    } finally {
+      rmSync(surfaceProbeDir, { recursive: true, force: true });
+      rmSync(surfaceRunnerTemp, { recursive: true, force: true });
+    }
+    // The parser copy is NOT tolerant: a counter without its parser is a
+    // staging failure, not a round that quietly measures nothing.
+    expect(stageStep).toContain(
+      'cp node_modules/typescript/lib/typescript.js "${RUNNER_TEMP}/weaken-parser/typescript.cjs"\n',
+    );
+    expect(stageStep).not.toContain('npm install');
+    expect(stageStep).toContain(
+      'weaken_counter_sha256=$(sha256sum "${RUNNER_TEMP}/count-test-surface.mjs"',
+    );
+    expect(stageStep).toContain(
+      'weaken_parser_sha256=$(sha256sum "${RUNNER_TEMP}/weaken-parser/typescript.cjs"',
+    );
+    for (const name of ['WEAKEN_COUNTER_SHA256', 'WEAKEN_PARSER_SHA256']) {
+      expect(
+        workflow.match(
+          new RegExp(
+            `${name}: '\\$\\{\\{ steps\\.stage_surface\\.outputs\\.${name.toLowerCase()} \\}\\}'`,
+            'g',
+          ),
+        ) ?? [],
+      ).toHaveLength(2);
+      expect(
+        workflow.match(new RegExp(`${name}="\\$\\{${name}:-\\}" \\\\`, 'g')) ??
+          [],
+      ).toHaveLength(2);
+    }
+    expect(reviewVerificationRunner).toContain(
+      'WEAKEN_COUNTER="${RUNNER_TEMP}/count-test-surface.mjs"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'weaken_trusted "${WEAKEN_COUNTER}" "${WEAKEN_COUNTER_SHA256:-}"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'weaken_trusted "${WEAKEN_PARSER}" "${WEAKEN_PARSER_SHA256:-}"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'WEAKEN_PARSER="${RUNNER_TEMP}/weaken-parser/typescript.cjs"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'WEAKEN_PARSER_FILE="${WEAKEN_PARSER}" node "${WEAKEN_COUNTER}" measure',
+    );
+    // The landed clamp's baseline is the branch's own side at the merge
+    // (R27-20): the manifest carries it as `branch`, emitted as
+    // weaken_emit's fifth field. A dropped arm falls back to the merge
+    // base silently and the wrong-attribution bug returns — pin the
+    // producer/consumer pair together.
+    expect(reviewVerificationRunner).toContain(
+      "printf '%s\\n%s\\n%s\\n%s\\n%s\\n'",
+    );
+    expect(reviewVerificationRunner).toContain(
+      'branch_side="$(sed -n 5p <<< "${weaken_pair}")"',
+    );
+    expect(reviewVerificationRunner).toContain('branch: (if $bs == ""');
+    // R32-2: the ack remedy must not lean on the rejection document's
+    // tail window for the file list — a long list is cut from the front
+    // there, and the agent would ack a list it never saw. The complete
+    // measured list rides in its own workdir file.
+    expect(reviewVerificationRunner).toContain(
+      '> "${WORKDIR}/weaken-missing.txt"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'the complete list is <workdir>/weaken-missing.txt',
+    );
+  });
+});
+
+describe('count-test-surface: the declared test surface of a test file', () => {
+  // The instrument the test-weakening gate rests on. `count` is exercised
+  // in-process on a table of shapes (each row names what the parser must
+  // see through), and the CLI contract once through a real spawn; the
+  // attribution algebra of `measure` is exercised on blob files directly.
+  const surface = (source, path = 'a.test.ts') => {
+    const r = countTestSurface(source.join('\n'), path);
+    return { a: r.assertions, e: r.enabled, d: r.disabled };
+  };
+
+  it.each([
+    [
+      'counts a called matcher chain once, however it is chained',
+      [
+        "it('a', () => {",
+        '  expect(one()).toBe(1);',
+        '  expect(x).not.toBe(1);',
+        '  expect(x).resolves.toEqual({ a: 1 });',
+        '});',
+      ],
+      { a: 3, e: 1, d: [] },
+    ],
+    [
+      'counts awaited, returned and arrow-bodied assertions',
+      [
+        "it('a', async () => {",
+        '  await expect(p).rejects.toThrow();',
+        '  await vi.waitFor(() => expect(x).toBe(1));',
+        '  return expect(q).resolves.toBe(2);',
+        '});',
+      ],
+      { a: 3, e: 1, d: [] },
+    ],
+    [
+      'counts expect.soft/poll with a matcher and expect.unreachable',
+      [
+        "it('a', () => {",
+        '  expect.soft(x).toBe(1);',
+        '  expect.poll(() => y).toBe(2);',
+        "  expect.unreachable('never');",
+        '});',
+      ],
+      { a: 3, e: 1, d: [] },
+    ],
+    [
+      'counts assert() and assert.member() but not an uncalled member',
+      [
+        "it('a', () => {",
+        '  assert(x);',
+        '  assert.equal(a, b);',
+        '  const eq = assert.deepEqual;',
+        '  console.assert(x);',
+        '});',
+      ],
+      { a: 2, e: 1, d: [] },
+    ],
+    [
+      'counts a supertest .expect( member call once per chain',
+      [
+        "it('a', async () => {",
+        "  await request(app).get('/').expect(200).expect('x', /y/);",
+        '});',
+      ],
+      { a: 1, e: 1, d: [] },
+    ],
+    [
+      'does not count a bare expect(), a property-accessed matcher, or an argument',
+      [
+        "it('a', () => {",
+        '  expect(one());',
+        '  const dropped = expect(two()).toBe;',
+        '  expect.soft(x);',
+        '  fn(expect.anything(), expect.objectContaining({}));',
+        '});',
+      ],
+      { a: 0, e: 1, d: [] },
+    ],
+    [
+      'sees through comments, strings, regex literals and templates',
+      [
+        "it('a', () => {",
+        '  /* expect(one()).toBe(1); */',
+        '  // expect(two()).toBe(2);',
+        "  const s = 'expect(x).toBe(1)';",
+        '  const r = /expect\\(x\\)\\.toBe\\(1\\)/;',
+        '  const t = `expect(${s}).toBe(1)`;',
+        '  expect(three()).toBe(3);',
+        '});',
+      ],
+      { a: 1, e: 1, d: [] },
+    ],
+    [
+      'sees an assertion formatted across lines',
+      [
+        "it('a', () => {",
+        '  expect(',
+        '    one(),',
+        '  ).toBe(',
+        '    1,',
+        '  );',
+        '});',
+      ],
+      { a: 1, e: 1, d: [] },
+    ],
+    [
+      'sees through JSX, in both directions',
+      [
+        "it('a', () => {",
+        "  expect(render(<Foo bar={1} />).getByText('x')).toBeTruthy();",
+        '  const html = <div>expect(two()).toBe(2)</div>;',
+        '});',
+      ],
+      { a: 1, e: 1, d: [] },
+      'a.test.tsx',
+    ],
+    [
+      'reads every collector spelling of a disabled registration',
+      [
+        "it.skip('a', fn);",
+        "test.todo('b');",
+        "describe.concurrent.skip('c', fn);",
+        "it.skip.each([1])('d %s', fn);",
+        "it['skip']('e', fn);",
+        "it['\\x73kip']('f', fn);",
+        "it.\\u0073kip('g', fn);",
+        "it?.skip('h', fn);",
+        'it',
+        "  .skip('i', fn);",
+        "it.skip.each`table`('j', fn);",
+        "xit('k', fn);",
+        "xdescribe('l', fn);",
+        "suite.todo('m', fn);",
+      ],
+      {
+        a: 0,
+        e: 0,
+        d: [
+          'test:a',
+          'test:b',
+          'describe:c',
+          'test:d %s',
+          'test:e',
+          'test:f',
+          'test:g',
+          'test:h',
+          'test:i',
+          'test:j',
+          'test:k',
+          'describe:l',
+          'describe:m',
+        ],
+      },
+    ],
+    [
+      'reads a literal skipIf/runIf and a literal options object, not a condition',
+      [
+        "it.skipIf(true)('a', fn);",
+        "it.runIf(false)('b', fn);",
+        "it('c', { skip: true }, fn);",
+        "it('d', { 'todo': true }, fn);",
+        "it.each(getCases())('e', { skip: true }, fn);",
+        "it.skipIf(process.platform === 'win32')('f', fn);",
+        "it.runIf(cond)('g', fn);",
+        "it('h', { skip: cond }, fn);",
+        "it('i', opts, fn);",
+      ],
+      {
+        a: 0,
+        e: 4,
+        d: ['test:a', 'test:b', 'test:c', 'test:d', 'test:e'],
+      },
+    ],
+    [
+      'reads a body-level unconditional skip, not the condition-valued guard',
+      [
+        "it('a', (ctx) => { ctx.skip(); expect(x).toBe(1); });",
+        "it('b', () => { skip('reason'); });",
+        "it('c', function () { this.skip(true); });",
+        "it('d', () => { skip(process.platform === 'win32', 'reason'); expect(x).toBe(1); });",
+        "it('e', () => { skip(cond); });",
+      ],
+      { a: 1, e: 2, d: ['test:a', 'test:b', 'test:c'] },
+    ],
+    [
+      'measures what a conditional guard shelters; drops what an unconditional return shelters',
+      [
+        // The environment-guard idiom: a CONDITIONAL return silences
+        // nothing — the runner may still reach the assertions, and the
+        // header delegates the condition to the runner (R27-21: HEAD's
+        // own contract.test.ts measured {assertions: 0} from exactly
+        // this shape).
+        "it('a', () => {",
+        '  if (!process.env.X) {',
+        '    return;',
+        '  }',
+        '  expect(x).toBe(1);',
+        '});',
+        "it('b', () => { expect(x).toBe(1); return; });",
+        // …while an UNCONDITIONAL one still reports the test PASSED
+        // having asserted nothing, whatever constant it carries.
+        "it('c', () => { return; expect(x).toBe(1); });",
+        "it('d', () => { return 1; expect(x).toBe(1); });",
+        "it('e', () => { const h = (m) => { if (m) { return; } }; expect(x).toBe(1); });",
+        "it('f', () => { return expect(p).resolves.toBe(1); });",
+      ],
+      { a: 4, e: 6, d: [] },
+    ],
+    [
+      'reads a truthy options constant and the fails option, not a condition',
+      [
+        "it('a', { skip: 'flaky under load' }, fn);",
+        "it('b', { fails: true }, fn);",
+        "it('c', { skip: cond }, fn);",
+        "it('d', { skip: false }, fn);",
+      ],
+      { a: 0, e: 2, d: ['test:a', 'test:b'] },
+    ],
+    [
+      'propagates a disabled describe to everything registered inside it',
+      [
+        "describe.skip('new wrapper', () => {",
+        "  it('a', () => { expect(x).toBe(1); });",
+        "  it('b', fn);",
+        '});',
+        "describe('d', { skip: true }, () => { it('c', fn); });",
+        "it('e', fn);",
+      ],
+      {
+        a: 0,
+        e: 1,
+        d: ['describe:new wrapper', 'test:a', 'test:b', 'describe:d', 'test:c'],
+      },
+    ],
+    [
+      'folds constants in skipIf/runIf and computed collector names',
+      [
+        "it.skipIf(!!true)('a', fn);",
+        "it.runIf(!true)('b', fn);",
+        "it.skipIf(!false)('c', fn);",
+        "it['ski' + 'p']('d', fn);",
+        "it.skipIf(!cond)('e', fn);",
+        "it[S]('f', fn);",
+      ],
+      { a: 0, e: 2, d: ['test:a', 'test:b', 'test:c', 'test:d'] },
+    ],
+    [
+      'reads a constant through a type-only wrapper',
+      [
+        "it.skipIf(true as boolean)('a', fn);",
+        "it.runIf(false as boolean)('b', fn);",
+        "it('c', { skip: true } as const, fn);",
+        "it('d', { skip: (true as boolean) }, fn);",
+        "it.skipIf(<boolean>true)('e', fn);",
+        "it.skipIf(true!)('f', fn);",
+        "it.skipIf(true satisfies boolean)('g', fn);",
+        // A wrapper around a runtime value stays a condition.
+        "it.skipIf(process.env.CI as boolean)('h', fn);",
+      ],
+      {
+        a: 0,
+        e: 1,
+        d: [
+          'test:a',
+          'test:b',
+          'test:c',
+          'test:d',
+          'test:e',
+          'test:f',
+          'test:g',
+        ],
+      },
+    ],
+    [
+      'folds a comparison, equality or logical operator of two constants',
+      [
+        "it.skipIf(1 === 1)('a', fn);",
+        "describe.skipIf(2 > 1)('b', fn);",
+        "it.skipIf('x' !== '')('c', fn);",
+        "it.skipIf(1 && true)('d', fn);",
+        "it.runIf(1 > 2)('e', fn);",
+        "it('f', { skip: 1 === 1 }, fn);",
+        // Placeholder folds and bigint arithmetic stay opaque to
+        // comparison: `{} === {}` is false at runtime, `1n === 1` too.
+        "it.skipIf({} === {})('g', fn);",
+        "it.skipIf(1n === 1)('h', fn);",
+        "it['' || 'skip']('i', fn);",
+      ],
+      {
+        a: 0,
+        e: 2,
+        d: [
+          'test:a',
+          'describe:b',
+          'test:c',
+          'test:d',
+          'test:e',
+          'test:f',
+          'test:i',
+        ],
+      },
+    ],
+    [
+      "applies the runner's own rule to body skips: only `false` keeps the test",
+      [
+        "it('a', (ctx) => { ctx.skip(null); });",
+        "it('b', (ctx) => { ctx.skip(0); });",
+        "it('c', (ctx) => { ctx.skip(undefined); });",
+        "it('d', (ctx) => { ctx.skip(false); });",
+        "it('e', (ctx) => { if (cond) ctx.skip(); expect(x).toBe(1); });",
+        "it('f', (ctx) => { cond && ctx.skip(); });",
+        "it('g', (ctx) => { cond ? ctx.skip() : run(); });",
+      ],
+      { a: 1, e: 4, d: ['test:a', 'test:b', 'test:c'] },
+    ],
+    [
+      'measures the assertions behind a conditional return, whatever it yields',
+      [
+        // R27-27: the silencer no longer keys on the return's VALUE —
+        // sync and async spellings of the same conditional guard read
+        // alike, and both keep the sheltered assertions.
+        "it('a', () => { if (x) { return undefined; } expect(x).toBe(1); });",
+        "it('b', () => { if (x) return null; expect(x).toBe(1); });",
+        "it('c', () => { if (x) return void 0; expect(x).toBe(1); });",
+        "it('d', () => { if (x) return 1; expect(x).toBe(1); });",
+        "it('e', async () => { if (x) return Promise.resolve(); expect(x).toBe(1); });",
+        "it('f', async () => { if (x) return await go(); expect(x).toBe(1); });",
+        // ...as is one that follows every assertion, or one inside a
+        // nested function the test merely defines.
+        "it('g', () => { expect(x).toBe(1); return; });",
+        "it('h', () => { const h = () => { return; }; expect(x).toBe(1); });",
+      ],
+      { a: 8, e: 8, d: [] },
+    ],
+    [
+      'counts an assertion chain used as a variable initializer',
+      [
+        "it('a', async () => {",
+        "  const res = await request(app).get('/').expect(202);",
+        '  const shape = expect.objectContaining({});',
+        '  const e = expect;',
+        '});',
+      ],
+      { a: 1, e: 1, d: [] },
+    ],
+    [
+      'keeps a describe out of the enabled-test count',
+      ["describe('d', () => { it('a', fn); });", "it('b', fn);"],
+      { a: 0, e: 2, d: [] },
+    ],
+    [
+      'reads a file-scope body skip as disabling the whole file',
+      [
+        'beforeEach((ctx) => { ctx.skip(); });',
+        "it('a', () => { expect(x).toBe(1); });",
+        "it('b', () => { expect(y).toBe(2); });",
+      ],
+      { a: 0, e: 0, d: ['test:a', 'test:b'] },
+    ],
+    [
+      'keeps a conditional hook skip, a helper and a plain callback out of it',
+      [
+        'beforeEach((ctx) => { if (cond) ctx.skip(); });',
+        'const helper = (ctx) => ctx.skip();',
+        // A callback handed to something that is NOT a collector hook says
+        // nothing about whether the file's tests run — at file scope...
+        'const cases = table.map((n) => makeCase(n, (ctx) => ctx.skip()));',
+        "it('a', () => { expect(x).toBe(1); });",
+      ],
+      { a: 1, e: 1, d: [] },
+    ],
+    [
+      '...and the same boundary one level down, inside a describe',
+      [
+        "describe('d', () => {",
+        '  const cases = table.map((n) => makeCase(n, (ctx) => ctx.skip()));',
+        "  it('a', () => { expect(x).toBe(1); });",
+        '});',
+      ],
+      { a: 1, e: 1, d: [] },
+    ],
+    [
+      'reads collector names by their own entries, never the prototype',
+      [
+        // `'toString' in {}` is true through the prototype chain: a helper
+        // named after any Object.prototype member must stay a helper.
+        'const toString = (cb) => cb();',
+        "it('a', () => { expect(one()).toBe(1); });",
+        'toString(() => { expect(two()).toBe(2); });',
+        'valueOf(() => { expect(three()).toBe(3); });',
+      ],
+      { a: 3, e: 1, d: [] },
+    ],
+    [
+      'folds every constant shape a return or a collector option can carry',
+      [
+        // A CONDITIONAL return silences nothing whatever it yields
+        // (R27-21) — the constant folding is exercised on the collector
+        // spellings below, where it decides enabled state.
+        "it('a', () => { if (!r) return -1; expect(x).toBe(1); });",
+        "it('b', () => { if (!r) return {}; expect(x).toBe(1); });",
+        "it('c', () => { if (!r) return []; expect(x).toBe(1); });",
+        "it('d', () => { if (!r) return 1n; expect(x).toBe(1); });",
+        "it('e', () => { if (!r) return NaN; expect(x).toBe(1); });",
+        // A value the runner may AWAIT is ordinary control flow.
+        "it('f', () => { if (!r) return go(); expect(x).toBe(1); });",
+        "it.skipIf(-1)('g', fn);",
+        "it.runIf(-0)('h', fn);",
+        "it('i', { skip: -1 }, fn);",
+      ],
+      { a: 6, e: 6, d: ['test:g', 'test:h', 'test:i'] },
+    ],
+    [
+      'measures a conditional constant return through wrappers and templates alike',
+      [
+        // The wrappers and template spellings fold as constants, but a
+        // CONDITIONAL return silences nothing either way (R27-21) — the
+        // fold decides the UNCONDITIONAL arms elsewhere in this table.
+        "it('a', () => { if (!r) return undefined as void; expect(x).toBe(1); });",
+        "it('b', () => { if (!r) return `full suite only: ${process.env.QWEN_FULL}`; expect(x).toBe(1); });",
+        "it('c', () => { if (!r) return `reason`; expect(x).toBe(1); });",
+        // A possibly-thenable return stays ordinary control flow.
+        "it('d', () => { if (!r) return go(); expect(x).toBe(1); });",
+        "it('e', () => { return expect(p).resolves.toBe(1); });",
+      ],
+      { a: 5, e: 5, d: [] },
+    ],
+    [
+      'measures what a conditional return in a describe body or a hook shelters',
+      [
+        "describe('d', () => {",
+        '  if (!process.env.QWEN_FULL) {',
+        '    return;',
+        '  }',
+        '  expect(configured()).toBe(1);',
+        '});',
+        'beforeEach(() => {',
+        '  if (!process.env.QWEN_FULL) {',
+        '    return;',
+        '  }',
+        '  expect(setupOk()).toBe(true);',
+        '});',
+        "it('a', () => { expect(x).toBe(1); });",
+      ],
+      { a: 3, e: 1, d: [] },
+    ],
+    [
+      'reads an UNCONDITIONAL early return in a DESCRIBE body as silencing what follows',
+      [
+        "describe('d', () => {",
+        "  it('smoke', () => { expect(t).toBe(1); });",
+        '  if (true) {',
+        '    return;',
+        '  }',
+        "  it('a', () => { expect(x).toBe(1); });",
+        "  it('b', fn);",
+        '});',
+      ],
+      { a: 1, e: 1, d: ['test:a', 'test:b'] },
+    ],
+    [
+      'lets a CONDITIONAL early return in a DESCRIBE body keep every registration',
+      [
+        "describe('d', () => {",
+        "  it('smoke', () => { expect(t).toBe(1); });",
+        '  if (!process.env.QWEN_FULL) {',
+        '    return;',
+        '  }',
+        "  it('a', () => { expect(x).toBe(1); });",
+        "  it('b', fn);",
+        '});',
+      ],
+      { a: 2, e: 3, d: [] },
+    ],
+    [
+      'shelters nothing extra in a test that is already disabled',
+      [
+        "it.skip('a', () => { if (!s) { return; } expect(x).toBe(1); });",
+        "it('b', () => { if (!s) { return; } expect(y).toBe(1); });",
+        "it('c', () => { expect(z).toBe(1); });",
+      ],
+      { a: 2, e: 2, d: ['test:a'] },
+    ],
+    [
+      'reads a skip in a catch clause as the setup-failure guard it is',
+      [
+        "it('a', (ctx) => {",
+        '  try { connect(); } catch { ctx.skip(); }',
+        '  expect(x).toBe(1);',
+        '});',
+        "it('b', (ctx) => {",
+        '  try { connect(); } catch (e) { ctx.skip(); }',
+        '  expect(y).toBe(2);',
+        '});',
+      ],
+      { a: 2, e: 2, d: [] },
+    ],
+    [
+      'reads a skip that cannot be escaped as a disable, however wrapped',
+      [
+        // The catch fires exactly when the assertion fails: the test can
+        // never report a failure, so the registration is disabled — the
+        // setup-failure guard this is one token away from.
+        "it('a', (ctx) => { try { expect(x).toBe(1); } catch { ctx.skip(); } });",
+        "it('b', (ctx) => { if (true) ctx.skip(); expect(x).toBe(1); });",
+        "it('c', (ctx) => { if (1 === 1) { ctx.skip(); } expect(x).toBe(1); });",
+      ],
+      { a: 0, e: 0, d: ['test:a', 'test:b', 'test:c'] },
+    ],
+    [
+      'reads the constant-condition arms exactly as the runner reads them',
+      [
+        // Arm-aware (R27-1's other direction): the arm a constant takes
+        // is unconditional, the arm it skips is dead code that disables
+        // nothing — and an undecidable condition stays the runner's.
+        "it('a', (ctx) => { if (false) { ctx.skip(); } });",
+        "it('b', (ctx) => { if (false) {} else { ctx.skip(); } });",
+        "it('c', (ctx) => { true && ctx.skip(); });",
+        "it('d', (ctx) => { false && ctx.skip(); });",
+        "it('e', (ctx) => { if (cond) ctx.skip(); });",
+        "it('f', (ctx) => { true ? ctx.skip() : noop(); });",
+        "it('g', (ctx) => { false ? noop() : ctx.skip(); });",
+      ],
+      { a: 0, e: 3, d: ['test:b', 'test:c', 'test:f', 'test:g'] },
+    ],
+    [
+      'folds arithmetic in a collector position with JavaScript semantics',
+      [
+        // Every operator arm is pinned DISCRIMINATIVELY: dropping one
+        // flips its row between disabled and enabled.
+        "it.skipIf(6 * 7 === 42)('a', fn);",
+        "it.runIf(10 % 3)('b', fn);",
+        "it('c', { skip: 2 ** 10 > 1000 }, fn);",
+        "it.skipIf(8 - 8)('d', fn);",
+        "it.skipIf(8 - 7)('d2', fn);",
+        "it.skipIf(10 % 3)('x', fn);",
+        // A placeholder or a bigint never enters the fold.
+        "it.skipIf([] * 2)('e', fn);",
+        "it.skipIf(2n * 2n > 1n)('f', fn);",
+      ],
+      { a: 0, e: 4, d: ['test:a', 'test:c', 'test:d2', 'test:x'] },
+    ],
+    [
+      "reads Playwright's fixme as the disabled registration it is",
+      ["test.fixme('a', fn);", "it('b', fn);"],
+      { a: 0, e: 1, d: ['test:a'] },
+    ],
+    [
+      'books the Playwright-namespaced API by kind, and utilities as nothing',
+      [
+        // R30-2: `test.describe` is a suite (its disabled state
+        // propagates), `test.beforeEach` is a hook, and the utility
+        // members register no phantom test.
+        "test.describe('a', () => { it('x', () => { expect(one()).toBe(1); }); });",
+        "test.describe.skip('b', () => { it('y', fn); });",
+        'test.beforeEach(() => { expect(setup()).toBe(true); });',
+        "test.step('logged step', fn);",
+        'test.use({ headless: true });',
+      ],
+      { a: 2, e: 1, d: ['describe:b', 'test:y'] },
+    ],
+    [
+      'never folds an operator over a placeholder value',
+      [
+        // R32-1: the object fold carries truthiness, not a value —
+        // `-[]` is -0 (falsy) at runtime, never the placeholder's -1.
+        "it.skipIf(+{})('a', fn);",
+        "it.runIf(-[])('b', fn);",
+        "it('c', { skip: +[] }, fn);",
+        "it('d', { skip: -1 }, fn);",
+      ],
+      { a: 0, e: 3, d: ['test:d'] },
+    ],
+    [
+      'measures a registration through a callback handed by name',
+      [
+        'function body(ctx) {',
+        '  ctx.skip();',
+        '  expect(1).toBe(1);',
+        '}',
+        "it('a', body);",
+        "it('b', fn);",
+      ],
+      { a: 0, e: 1, d: ['test:a'] },
+    ],
+    [
+      'measures the named-body shapes exactly like their inline spellings',
+      [
+        'function body() {',
+        '  expect(1).toBe(1);',
+        '}',
+        "it.skip('a', body);",
+        "it('a', () => {});",
+        'function suite() {',
+        "  it('b', () => { expect(2).toBe(2); });",
+        '}',
+        "describe.skip('c', suite);",
+      ],
+      { a: 0, e: 1, d: ['test:a', 'test:b', 'describe:c'] },
+    ],
+    [
+      'keeps a body shared with an enabled registration live',
+      [
+        'function body() {',
+        '  expect(1).toBe(1);',
+        '}',
+        "it('a', body);",
+        "it.skip('b', body);",
+      ],
+      { a: 1, e: 1, d: ['test:b'] },
+    ],
+    [
+      'reads a collector factory binding as no registration at all',
+      [
+        "const posixOnly = it.skipIf(process.platform !== 'linux');",
+        'const rows = it.each(getCases());',
+        'const myTest = test.extend({});',
+        "it('a', fn);",
+      ],
+      { a: 0, e: 1, d: [] },
+    ],
+    [
+      'sees a chain through a type-only wrapper',
+      [
+        "(it as any).skip('a', () => { expect(1).toBe(1); });",
+        "(it.skip as any)('b', () => { expect(1).toBe(1); });",
+        "it('c', (ctx) => { (ctx as any).skip(); expect(1).toBe(1); });",
+        "it('d', () => { (expect(1) as any).toBe(1); });",
+        "(describe as any).skip('e', () => { it('f', () => { expect(1).toBe(1); }); });",
+      ],
+      // test:d stays enabled — its body only ASSERTS through a wrapper.
+      { a: 1, e: 1, d: ['test:a', 'test:b', 'test:c', 'describe:e', 'test:f'] },
+    ],
+    [
+      'counts assertions only where the runner would execute them',
+      [
+        "it.skip('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+        "it('a', () => {});",
+        "it('b', () => { expect(z).toBe(3); });",
+        'beforeEach(() => { expect(setup).toBe(true); });',
+      ],
+      { a: 2, e: 2, d: ['test:a'] },
+    ],
+    [
+      'counts a declared surface, not a reachable one (documented non-goal)',
+      [
+        "it('a', () => { if (false) { expect(x).toBe(1); } });",
+        "it('b', () => { const unused = () => expect(x).toBe(1); });",
+      ],
+      { a: 2, e: 2, d: [] },
+    ],
+    [
+      'measures a file that does not parse cleanly',
+      ["it('a', () => { expect(x).toBe(1) ; }} ) garbage <<<"],
+      { a: 1, e: 1, d: [] },
+    ],
+  ])('%s', (_title, source, expected, path) => {
+    expect(surface(source, path)).toEqual(expected);
+  });
+
+  it('resolves a registration callback bound by name, exactly like the inline spelling', () => {
+    // The runner receives the SAME function whether the registration
+    // hands it over inline or by name, so the two spellings must measure
+    // alike: the body's skip reaches the registration, its assertions
+    // leave the surface, and a disabled describe's body propagates.
+    expect(
+      countTestSurface(
+        [
+          'function body(ctx) {',
+          '  ctx.skip();',
+          '  expect(1).toBe(1);',
+          '}',
+          "it('x', body);",
+        ].join('\n'),
+        'a.test.ts',
+      ),
+    ).toMatchObject({
+      assertions: 0,
+      enabled: 0,
+      disabled: ['test:x'],
+      enabledTitles: [],
+    });
+    expect(
+      countTestSurface(
+        [
+          'function suite() {',
+          "  it('a', () => { expect(1).toBe(1); });",
+          '}',
+          "describe.skip('d', suite);",
+        ].join('\n'),
+        'a.test.ts',
+      ),
+    ).toMatchObject({ enabledTitles: [], enabled: 0, assertions: 0 });
+    // The inline spellings these must agree with.
+    expect(
+      countTestSurface(
+        "it('x', (ctx) => { ctx.skip(); expect(1).toBe(1); });",
+        'a.test.ts',
+      ),
+    ).toMatchObject({
+      assertions: 0,
+      enabled: 0,
+      disabled: ['test:x'],
+      enabledTitles: [],
+    });
+    expect(
+      countTestSurface(
+        "describe.skip('d', () => { it('a', () => { expect(1).toBe(1); }); });",
+        'a.test.ts',
+      ),
+    ).toMatchObject({ enabledTitles: [], enabled: 0, assertions: 0 });
+  });
+
+  it('measures every dialect the gate selects, not only .ts', () => {
+    // The pathspec selects `*.test.*` and `*.spec.*` whatever the
+    // extension, and the repository tracks hundreds of `*.test.js` files.
+    // A dialect missing from the parser's table measures ZERO — which the
+    // gate reads as a file with no surface to weaken, so gutting one is
+    // free. Every extension the table claims must therefore be exercised.
+    const body = [
+      "it('a', () => {",
+      '  expect(one()).toBe(1);',
+      '  expect(two()).toBe(2);',
+      '});',
+      "it.skip('b', () => {",
+      '  expect(three()).toBe(3);',
+      '});',
+    ];
+    for (const ext of [
+      '.ts',
+      '.mts',
+      '.cts',
+      '.tsx',
+      '.js',
+      '.mjs',
+      '.cjs',
+      '.jsx',
+    ]) {
+      expect({ ext, ...surface(body, `a.test${ext}`) }).toEqual({
+        ext,
+        a: 2,
+        e: 1,
+        d: ['test:b'],
+      });
+    }
+  });
+
+  it('measures a zero surface for a non-JS test file', () => {
+    expect(
+      countTestSurface('def test_x():\n    assert 1\n', 'test_x.py'),
+    ).toEqual({
+      language: 'other',
+      assertions: 0,
+      declared: 0,
+      enabled: 0,
+      disabled: [],
+      enabledTitles: [],
+    });
+  });
+
+  it('serves the count and measure modes over the CLI the gate uses', () => {
+    const counter = resolve('.github/scripts/count-test-surface.mjs');
+    const counted = spawnSync('node', [counter, 'count', 'pkg/a.test.ts'], {
+      input: "it('a', () => {\n  expect(one()).toBe(1);\n});\n",
+      encoding: 'utf8',
+    });
+    expect(counted.status).toBe(0);
+    expect(JSON.parse(counted.stdout)).toMatchObject({
+      language: 'ts',
+      assertions: 1,
+      enabled: 1,
+    });
+    // The gate runs the counter from a STAGED copy under RUNNER_TEMP, which
+    // on macOS is reached through /var -> /private/var. The CLI must fire
+    // when this file is the program however its path was spelled — a
+    // main-module guard comparing argv to the module URL literally would
+    // read as "imported", print nothing, and the gate would report every
+    // file unmeasurable.
+    const linkDir = mkdtempSync(join(tmpdir(), 'surface-link-'));
+    try {
+      const linked = join(linkDir, 'count-test-surface.mjs');
+      symlinkSync(counter, linked);
+      const viaLink = spawnSync('node', [linked, 'count', 'pkg/a.test.ts'], {
+        input: "it('a', () => {\n  expect(one()).toBe(1);\n});\n",
+        encoding: 'utf8',
+      });
+      expect(viaLink.status).toBe(0);
+      expect(JSON.parse(viaLink.stdout)).toMatchObject({ assertions: 1 });
+    } finally {
+      rmSync(linkDir, { recursive: true, force: true });
+    }
+    // ...and IMPORTING it must not run the CLI against the importer's argv:
+    // a positional the importing program owns would otherwise land in the
+    // unknown-mode arm and take that process down with exit 2.
+    const imported = spawnSync(
+      'node',
+      [
+        '--input-type=module',
+        '-e',
+        `await import(${JSON.stringify(pathToFileURL(counter).href)}); console.log('IMPORT_OK');`,
+        'measure',
+        'not-a-manifest.json',
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(imported.stderr).toBe('');
+    expect(imported.status).toBe(0);
+    expect(imported.stdout).toContain('IMPORT_OK');
+    const dir = mkdtempSync(join(tmpdir(), 'surface-'));
+    try {
+      const blob = (name, lines) => {
+        const p = join(dir, name);
+        writeFileSync(p, `${lines.join('\n')}\n`);
+        return p;
+      };
+      const manifest = join(dir, 'm.json');
+      writeFileSync(
+        manifest,
+        JSON.stringify({
+          path: 'pkg/a.test.ts',
+          tip: blob('tip', ["it('a', () => { expect(x).toBe(1); });"]),
+          pre: blob('pre', [
+            "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+          ]),
+          events: [],
+        }),
+      );
+      const measured = spawnSync('node', [counter, 'measure', manifest], {
+        encoding: 'utf8',
+      });
+      expect(measured.status).toBe(0);
+      expect(JSON.parse(measured.stdout)).toEqual({
+        language: 'ts',
+        assertions: -1,
+        enabled: 0,
+        newlyDisabled: [],
+        baselinePresent: true,
+      });
+      const unknown = spawnSync('node', [counter, 'bogus'], {
+        encoding: 'utf8',
+      });
+      expect(unknown.status).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("subtracts main's contribution across events, and only that", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'surface-'));
+    try {
+      const blob = (name, lines) => {
+        const p = join(dir, name);
+        writeFileSync(p, `${lines.join('\n')}\n`);
+        return p;
+      };
+      const two = blob('two', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+      ]);
+      const one = blob('one', ["it('a', () => { expect(x).toBe(1); });"]);
+      const oneSkipped = blob('one-skipped', [
+        "it.skip('a', () => { expect(x).toBe(1); });",
+      ]);
+      const twoPlusB = blob('two-b', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+        "it.todo('b');",
+      ]);
+      const m = (o) => measureTestSurface({ path: 'pkg/a.test.ts', ...o });
+      // Main removed the assertion (the event carries it); the round only
+      // merged: nothing to charge.
+      expect(
+        m({ tip: one, pre: two, events: [{ before: two, after: one }] }),
+      ).toMatchObject({ assertions: 0, baselinePresent: true });
+      // Main added the file; the round dropped it: the baseline holds the
+      // file and the round removed its whole surface.
+      expect(
+        m({ tip: null, pre: null, events: [{ before: null, after: two }] }),
+      ).toMatchObject({ assertions: -2, baselinePresent: true });
+      // Main deleted the file; the round adopted it: no baseline to weaken.
+      expect(
+        m({ tip: null, pre: two, events: [{ before: two, after: null }] }),
+      ).toMatchObject({ assertions: 0, baselinePresent: false });
+      // The round disabled `a`; main's later event did not touch its state.
+      expect(
+        m({
+          tip: oneSkipped,
+          pre: one,
+          events: [{ before: oneSkipped, after: oneSkipped }],
+        }),
+      ).toMatchObject({ enabled: -1, newlyDisabled: ['test:a'] });
+      // Main itself disabled `a` across the event: not the round's doing.
+      expect(
+        m({
+          tip: oneSkipped,
+          pre: one,
+          events: [{ before: one, after: oneSkipped }],
+        }),
+      ).toMatchObject({ enabled: 0, newlyDisabled: [] });
+      // A todo registration that is new at the tip is the round's own.
+      expect(m({ tip: twoPlusB, pre: two, events: [] })).toMatchObject({
+        enabled: 0,
+        newlyDisabled: [],
+      });
+      // Main disabled `a` and re-enabled it later: the shield does not
+      // outlive the re-enable, so the round disabling `a` is charged.
+      const aSkipped = blob('a-skipped', [
+        "it.skip('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+      ]);
+      const aSkippedPlusB = blob('a-skipped-b', [
+        "it.skip('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+        "it('b', () => { expect(z).toBe(3); });",
+      ]);
+      expect(
+        m({
+          tip: aSkippedPlusB,
+          pre: two,
+          events: [
+            { before: two, after: aSkipped },
+            { before: aSkipped, after: two },
+          ],
+        }),
+      ).toMatchObject({ newlyDisabled: ['test:a'] });
+      // A registration the round added before a merge of main is carried
+      // across the event on both sides: it never joins the baseline, so
+      // disabling it later is the round's own business.
+      const twoB = blob('two-b-enabled', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+        "it('b', () => { expect(z).toBe(3); });",
+      ]);
+      const twoBSkipped = blob('two-b-skipped', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+        "it.skip('b', () => { expect(z).toBe(3); });",
+      ]);
+      const twoBMainTouched = blob('two-b-main-touched', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+        "it('b', () => { expect(z).toBe(3); });",
+        '// main touched this file',
+      ]);
+      expect(
+        m({
+          tip: twoBSkipped,
+          pre: two,
+          events: [{ before: twoB, after: twoBMainTouched }],
+        }),
+      ).toMatchObject({ newlyDisabled: [], enabled: 0 });
+      // ...while a `b` that main itself landed is baseline.
+      expect(
+        m({
+          tip: twoBSkipped,
+          pre: two,
+          events: [{ before: two, after: twoB }],
+        }),
+      ).toMatchObject({ newlyDisabled: ['test:b'], enabled: -1 });
+      // Duplicate titles are multisets: disabling one of two `a`s is
+      // charged once; adding a third, disabled `a` beside two enabled
+      // ones charges nothing.
+      const twoAs = blob('two-as', [
+        "it('a', () => { expect(x).toBe(1); });",
+        "it('a', () => { expect(y).toBe(2); });",
+      ]);
+      const oneOfTwoAsSkipped = blob('two-as-one-skipped', [
+        "it('a', () => { expect(x).toBe(1); });",
+        "it.skip('a', () => { expect(y).toBe(2); });",
+      ]);
+      const twoAsPlusTodo = blob('two-as-todo', [
+        "it('a', () => { expect(x).toBe(1); });",
+        "it('a', () => { expect(y).toBe(2); });",
+        "it.todo('a');",
+      ]);
+      expect(
+        m({ tip: oneOfTwoAsSkipped, pre: twoAs, events: [] }),
+      ).toMatchObject({ newlyDisabled: ['test:a'] });
+      expect(m({ tip: twoAsPlusTodo, pre: twoAs, events: [] })).toMatchObject({
+        newlyDisabled: [],
+      });
+      // An UNCONDITIONAL early return the round plants in front of
+      // existing assertions measures as their removal, while a brand-new
+      // test carrying its own guard costs nothing and no throwaway
+      // registration can pay for one.
+      const oneNoGuard = blob('one-no-guard', [
+        "it('a', () => { expect(x).toBe(1); });",
+      ]);
+      const oneGuardedPlusTodo = blob('one-guarded-todo', [
+        "it('a', () => { return; expect(x).toBe(1); });",
+        "it.todo('c');",
+      ]);
+      const oneNoGuardPlusGuarded = blob('one-plus-guarded', [
+        "it('a', () => { expect(x).toBe(1); });",
+        "it('c', () => { return; expect(y).toBe(2); });",
+      ]);
+      expect(
+        m({ tip: oneGuardedPlusTodo, pre: oneNoGuard, events: [] }),
+      ).toMatchObject({ assertions: -1 });
+      expect(
+        m({ tip: oneNoGuardPlusGuarded, pre: oneNoGuard, events: [] }),
+      ).toMatchObject({ assertions: 0 });
+      // …while the CONDITIONAL spelling is the environment-guard idiom:
+      // sheltered assertions stay measured, so planting one reads as no
+      // movement in either direction (R27-21/R27-27).
+      const oneCondGuarded = blob('one-cond-guarded', [
+        "it('a', () => { if (!s) { return; } expect(x).toBe(1); });",
+      ]);
+      expect(
+        m({ tip: oneCondGuarded, pre: oneNoGuard, events: [] }),
+      ).toMatchObject({ assertions: 0 });
+      expect(
+        m({ tip: oneNoGuard, pre: oneCondGuarded, events: [] }),
+      ).toMatchObject({ assertions: 0 });
+      // ...and an assertion the baseline already carried behind a guard
+      // is not free to delete: the conditional guard keeps it measured,
+      // so deleting it still charges its removal.
+      const guardedTwo = blob('guarded-two', [
+        "it('a', () => { if (!s) { return; } expect(x).toBe(1); expect(y).toBe(2); });",
+      ]);
+      const guardedNone = blob('guarded-none', [
+        "it('a', () => { if (!s) { return; } });",
+      ]);
+      expect(
+        m({ tip: guardedNone, pre: guardedTwo, events: [] }),
+      ).toMatchObject({ assertions: -2 });
+      // R27-20: the landed delta is measured against the branch's side at
+      // the merge, or a resolution that DISCARDED main's removal still
+      // credits it — main removed three, the round removed two of its
+      // own, the merge kept the branch's side whole, and main's credit
+      // is zero (the old before-baseline read the round's own removal as
+      // main's landed one and the file reported no movement).
+      const baseFive = blob('base-five', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); expect(z).toBe(3); expect(u).toBe(4); expect(v).toBe(5); });",
+      ]);
+      const mainTwo = blob('main-two', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+      ]);
+      const branchThree = blob('branch-three', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); expect(z).toBe(3); });",
+      ]);
+      expect(
+        m({
+          tip: branchThree,
+          pre: baseFive,
+          events: [
+            {
+              before: baseFive,
+              after: mainTwo,
+              landed: branchThree,
+              branch: branchThree,
+            },
+          ],
+        }),
+      ).toMatchObject({ assertions: -2 });
+      // An event that moved nothing — both sides absent, or byte-identical
+      // — neither shields nor decides whether the baseline holds the file.
+      expect(
+        m({ tip: null, pre: two, events: [{ before: null, after: null }] }),
+      ).toMatchObject({ baselinePresent: true });
+      expect(
+        m({ tip: null, pre: null, events: [{ before: two, after: two }] }),
+      ).toMatchObject({ baselinePresent: false });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('review-address: regression accounting (af-157)', () => {
+  // The loop had no notion of a regression at all: the consecutive-failure
+  // brake counts "rounds that pushed nothing", so a round that pushed a fix
+  // and turned CI red counted as a SUCCESS and reset the counter. The gate
+  // cannot close this — it runs `--changed` tests for the touched workspaces
+  // and defers full regression to the PR's own CI, whose verdict does not
+  // exist until long after the job ended. So the charge is measured on the
+  // NEXT round, from markers, and these tests run the real block.
+  const script = prepareBranchAndFeedbackStep
+    .match(
+      /# ---- regression accounting[\s\S]*?echo "regressed_round=\$\{REGRESSED_ROUND\}" >> "\$\{GITHUB_OUTPUT\}"\n/,
+    )?.[0]
+    ?.replace(/^ {10}/gm, '');
+  it('extracts the block it tests', () => {
+    expect(script).toBeTruthy();
+  });
+
+  it('excludes every loop-owned lane from the head-state classifiers, by name', () => {
+    // R27-23: a lane the loop owns but the exclusion omits attaches its
+    // check runs to the same PR head, so the charge classifier reads the
+    // loop's OWN red as the round's regression (and the wake classifiers
+    // wake on it). The list lives in ONE env entry every classifier
+    // references — a hand-copied list per site drifts.
+    const expected = [
+      'Qwen Autofix',
+      '🧐 Qwen Pull Request Review',
+      'Qwen CI Failure Patrol',
+      'Qwen Autofix Fork Bridge',
+      'Qwen Autofix Fork Signal',
+      'Qwen Triage',
+      'Qwen Triage Finalize',
+      'PR self-report label',
+      'Qwen PR Safety Precheck',
+      'Comment Attachment Guard',
+      'PR Asset Branch Cleanup',
+    ];
+    const lanes = JSON.parse(loopOwnedLanesJson);
+    expect([...lanes].sort()).toEqual([...expected].sort());
+    // …every listed name is a real workflow's `name:` line, or a rename
+    // leaves the exclusion matching nothing while the suite is green.
+    const workflowNames = readdirSync('.github/workflows')
+      .filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
+      .map(
+        (f) =>
+          readFileSync(join('.github/workflows', f), 'utf8').match(
+            /^name:\s*'([^']+)'/m,
+          )?.[1] ??
+          readFileSync(join('.github/workflows', f), 'utf8').match(
+            /^name:\s*"?([^"\n]+)"?/m,
+          )?.[1],
+      );
+    for (const n of lanes) expect(workflowNames).toContain(n);
+    // …and every head-state classifier references the shared list —
+    // charge (review-address) and both wake sites (review-address,
+    // review-scan) — with no literal copy surviving beside it.
+    const uses = workflow.match(/IN\(\$looplanes\[\]\)/g) ?? [];
+    expect(uses.length).toBe(3);
+    expect(workflow).not.toMatch(/IN\("Qwen Autofix"/);
+    expect(workflow).not.toMatch(/IN\('Qwen Autofix'/);
+  });
+
+  const HEAD = 'a'.repeat(40);
+  const OTHER = 'b'.repeat(40);
+  const run = ({
+    checks,
+    comments = [],
+    checkedOutHead = HEAD,
+    // The commit the rollup describes (headRefOid read with the rollup).
+    checksHead = HEAD,
+    window = 'w1',
+    // The live re-arm key prepare computed: defaults to the run's window
+    // (the ordinary case); a supersede-exempt conflict round can still run
+    // under a stale matrix window.
+    liveKey = window,
+  }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'af148-'));
+    try {
+      writeFileSync(join(dir, 'checks.json'), JSON.stringify(checks));
+      writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+      const outFile = join(dir, 'out');
+      writeFileSync(outFile, '');
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\nWORKDIR=${JSON.stringify(dir)}\nAUTOFIX_BOT=qwen-code-dev-bot\nDISPATCH_STATUS_CONTEXT='qwen-autofix/dispatch-pending'\nCHECKED_OUT_HEAD='${checkedOutHead}'\nROLLUP_HEAD='${checksHead}'\nWINDOW='${window}'\nLIVE_REARM_KEY='${liveKey}'\nLOOP_OWNED_LANES=${JSON.stringify(loopOwnedLanesJson)}\nPR=1\nGITHUB_OUTPUT=${JSON.stringify(outFile)}\n${script}`,
+        ],
+        { encoding: 'utf8' },
+      );
+      const out = readFileSync(outFile, 'utf8');
+      return {
+        state: out.match(/check_state=(\S*)/)?.[1] ?? '',
+        regressed: out.match(/regressed_round=(\S*)/)?.[1] ?? '',
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const pushMarker = ({
+    round = 3,
+    head = HEAD,
+    pre = 'green',
+    key = 'w1',
+  }) => [
+    {
+      user: { login: 'qwen-code-dev-bot' },
+      created_at: '2026-01-01T00:00:00Z',
+      body: `report\n<!-- autofix-push round=${round} head=${head} pre=${pre} key=${key} -->`,
+    },
+  ];
+  const RED = [
+    {
+      name: 'Test',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      workflowName: 'Qwen Code CI',
+    },
+  ];
+  const GREEN = [
+    {
+      name: 'Test',
+      status: 'COMPLETED',
+      conclusion: 'SUCCESS',
+      workflowName: 'Qwen Code CI',
+    },
+  ];
+
+  it('classifies the head state the marker records', () => {
+    expect(run({ checks: GREEN }).state).toBe('green');
+    expect(run({ checks: RED }).state).toBe('red');
+    // A check still RUNNING is not green: a round pushing while CI is
+    // mid-flight must never be able to claim the head was clean, or a
+    // pre-existing failure that had not landed yet gets charged to it.
+    expect(
+      run({
+        checks: [{ name: 'Test', status: 'IN_PROGRESS', conclusion: null }],
+      }).state,
+    ).toBe('pending');
+    expect(
+      run({
+        checks: [
+          { __typename: 'StatusContext', context: 'dco', state: 'PENDING' },
+        ],
+      }).state,
+    ).toBe('pending');
+    // No checks at all is unknown, never green.
+    expect(run({ checks: [] }).state).toBe('none');
+    // The loop's OWN dispatch-pending commit status is a StatusContext with
+    // no workflowName: excluded by its exact context value, so a head
+    // carrying nothing but the loop's stamp is still unknown, while a
+    // third-party status (dco above) keeps counting.
+    expect(
+      run({
+        checks: [
+          {
+            __typename: 'StatusContext',
+            context: 'qwen-autofix/dispatch-pending',
+            state: 'SUCCESS',
+          },
+        ],
+      }).state,
+    ).toBe('none');
+    expect(
+      run({
+        checks: [
+          {
+            __typename: 'StatusContext',
+            context: 'qwen-autofix/dispatch-pending',
+            state: 'PENDING',
+          },
+          ...GREEN,
+        ],
+      }).state,
+    ).toBe('green');
+    // A check with no verdict — a required context that never reported, a
+    // stale one, a run that never started — is pending, never green.
+    for (const check of [
+      { __typename: 'StatusContext', context: 'required', state: 'EXPECTED' },
+      { name: 'a', status: 'COMPLETED', conclusion: 'STALE' },
+      { name: 'a', status: 'COMPLETED', conclusion: 'STARTUP_FAILURE' },
+    ]) {
+      expect(run({ checks: [check, ...GREEN] }).state).toBe('pending');
+    }
+    // GREEN is an allowlist, never the fall-through: a conclusion this
+    // classifier does not recognise — a state GitHub adds later, or one
+    // it never enumerated — reads as pending, so it can never mint the
+    // charge-enabling premise on its own. The recognised passing states
+    // stay green, or the mechanism would never charge anything.
+    for (const conclusion of ['SUCCESS', 'NEUTRAL', 'SKIPPED']) {
+      expect(
+        run({ checks: [{ name: 'a', status: 'COMPLETED', conclusion }] }).state,
+      ).toBe('green');
+    }
+    // A check still in flight is pending even when it carries a conclusion
+    // from an earlier attempt: the verdict on the head is not in yet.
+    // REQUESTED is in the enumeration too, and it is the member a denylist
+    // written from memory forgets — which is why this axis is an allowlist
+    // (`status == COMPLETED`) rather than a list of in-flight states.
+    for (const status of [
+      'QUEUED',
+      'IN_PROGRESS',
+      'WAITING',
+      'PENDING',
+      'REQUESTED',
+      'A_STATUS_GITHUB_ADDS_LATER',
+    ]) {
+      expect(
+        run({ checks: [{ name: 'a', status, conclusion: 'SUCCESS' }] }).state,
+      ).toBe('pending');
+    }
+    for (const conclusion of ['MOON_PHASE', 'DEGRADED', 'ABANDONED']) {
+      expect(
+        run({ checks: [{ name: 'a', status: 'COMPLETED', conclusion }] }).state,
+      ).toBe('pending');
+      expect(
+        run({
+          checks: [{ name: 'a', status: 'COMPLETED', conclusion }, ...GREEN],
+        }).state,
+      ).toBe('pending');
+    }
+    // The rollup is read live, after the checkout: a rollup describing any
+    // other commit says nothing about the checked-out head.
+    expect(run({ checks: GREEN, checksHead: OTHER }).state).toBe('none');
+    expect(run({ checks: RED, checksHead: OTHER }).state).toBe('none');
+    // CANCELLED is not a failure here, matching the scan's own N_RED_NOW
+    // filter — but not-red is not green: a cancelled run produced no
+    // verdict, so it classifies pending like every verdict-less state and
+    // can never mint the charge-enabling premise.
+    expect(
+      run({
+        checks: [{ name: 'a', status: 'COMPLETED', conclusion: 'CANCELLED' }],
+      }).state,
+    ).toBe('pending');
+    expect(
+      run({
+        checks: [
+          { name: 'a', status: 'COMPLETED', conclusion: 'CANCELLED' },
+          ...GREEN,
+        ],
+      }).state,
+    ).toBe('pending');
+    // The loop's OWN lanes going red is its business, not the PR's — the
+    // charge verdict excludes every own-lane workflow (the canonical
+    // five-name filter), with no review-address carve-out: a failed prior
+    // address round is feedback for the next round, not a regression the
+    // pushed code introduced, and an in-flight own check is observer
+    // noise on the triggers whose suite attaches to the PR head. The
+    // carve-out survives at the FEEDBACK sites (N_FAILED_CHECKS /
+    // N_RED_NOW). All FIVE own-lane workflow names are exercised — a name
+    // dropped from the jq filter would read as a PR-side regression here.
+    for (const loopWorkflow of [
+      'Qwen Autofix',
+      '🧐 Qwen Pull Request Review',
+      'Qwen CI Failure Patrol',
+      'Qwen Autofix Fork Bridge',
+      'Qwen Autofix Fork Signal',
+    ]) {
+      expect(
+        run({
+          checks: [
+            {
+              name: 'build',
+              status: 'COMPLETED',
+              conclusion: 'FAILURE',
+              workflowName: loopWorkflow,
+            },
+            ...GREEN,
+          ],
+        }).state,
+      ).toBe('green');
+      // An own lane ALONE is no signal at all: excluded by the filter, it
+      // leaves an empty set — unknown, never the red a charge needs.
+      expect(
+        run({
+          checks: [
+            {
+              name: 'build',
+              status: 'COMPLETED',
+              conclusion: 'FAILURE',
+              workflowName: loopWorkflow,
+            },
+          ],
+        }).state,
+      ).toBe('none');
+    }
+    // The round's own in-flight check must not hold the verdict pending.
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-address (1)',
+            status: 'IN_PROGRESS',
+            conclusion: null,
+            workflowName: 'Qwen Autofix',
+          },
+          ...GREEN,
+        ],
+      }).state,
+    ).toBe('green');
+  });
+
+  it('charges the prior round only when all four facts hold', () => {
+    // The whole point: green head in, red head out, nothing else moved.
+    expect(run({ checks: RED, comments: pushMarker({}) }).regressed).toBe('3');
+    // The head MOVED — a human push or a base update owns the red, not the
+    // bot's round.
+    expect(
+      run({ checks: RED, comments: pushMarker({ head: OTHER }) }).regressed,
+    ).toBe('');
+    // ...and the equality binds the rollup too: a red rollup for a commit
+    // pushed after the checkout is not the checked-out head's red.
+    expect(
+      run({ checks: RED, checksHead: OTHER, comments: pushMarker({}) })
+        .regressed,
+    ).toBe('');
+    // The round pushed onto an already-red head: it did not create this.
+    expect(
+      run({ checks: RED, comments: pushMarker({ pre: 'red' }) }).regressed,
+    ).toBe('');
+    expect(
+      run({ checks: RED, comments: pushMarker({ pre: 'pending' }) }).regressed,
+    ).toBe('');
+    expect(
+      run({ checks: RED, comments: pushMarker({ pre: 'none' }) }).regressed,
+    ).toBe('');
+    // A re-arm moved the window: the old round is not this window's charge.
+    expect(
+      run({ checks: RED, comments: pushMarker({ key: 'w0' }) }).regressed,
+    ).toBe('');
+    // ...and when this run's own matrix window is the stale one (a
+    // supersede-exempt conflict round after a re-arm), the charge stays
+    // with the live window: the brake walks headlines under the live key,
+    // so a charge keyed to the dead window would never land there.
+    expect(
+      run({
+        checks: RED,
+        comments: pushMarker({ key: 'w0' }),
+        window: 'w0',
+        liveKey: 'w1',
+      }).regressed,
+    ).toBe('');
+    // Head is green now — nothing to charge.
+    expect(run({ checks: GREEN, comments: pushMarker({}) }).regressed).toBe('');
+    // A failed own address run beside a green suite is feedback, not a
+    // regression: the charge path never bills the prior round for it.
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-address (1)',
+            status: 'COMPLETED',
+            conclusion: 'FAILURE',
+            workflowName: 'Qwen Autofix',
+          },
+          ...GREEN,
+        ],
+        comments: pushMarker({}),
+      }).regressed,
+    ).toBe('');
+    // Same for a red auxiliary lane of the fleet.
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-pr',
+            status: 'COMPLETED',
+            conclusion: 'FAILURE',
+            workflowName: '🧐 Qwen Pull Request Review',
+          },
+          ...GREEN,
+        ],
+        comments: pushMarker({}),
+      }).regressed,
+    ).toBe('');
+    // No push marker at all (a no-op round pushed nothing that could
+    // regress): fail open.
+    expect(run({ checks: RED, comments: [] }).regressed).toBe('');
+    // A marker forged by anyone other than the bot is not evidence.
+    expect(
+      run({
+        checks: RED,
+        comments: pushMarker({}).map((c) => ({
+          ...c,
+          user: { login: 'someone-else' },
+        })),
+      }).regressed,
+    ).toBe('');
+  });
+
+  it('reads the NEWEST push marker, not the first', () => {
+    const [older] = pushMarker({ round: 2, head: OTHER });
+    const [newer] = pushMarker({ round: 5, head: HEAD });
+    expect(
+      run({
+        checks: RED,
+        comments: [
+          { ...older, created_at: '2026-01-01T00:00:00Z' },
+          { ...newer, created_at: '2026-01-02T00:00:00Z' },
+        ],
+      }).regressed,
+    ).toBe('5');
+  });
+
+  it('stamps the push marker on the pushed report and nowhere else', () => {
+    // Only an ACTED round can regress, so only the pushed report carries
+    // autofix-push — and it names the PUSHED sha, not REPORT_HEAD (which
+    // deliberately records the PRE-round head for the redcheck marker).
+    expect(pushAndReportScript).toContain(
+      '<!-- autofix-push round=${NEXT_ROUND} head=${PUSHED_HEAD} pre=${PUSH_PRE} key=${WINDOW:-none} -->',
+    );
+    // The field carries the CLASSIFIER's verdict, not a literal: replacing
+    // this one line with `PUSH_PRE=green` would leave the whole mechanism
+    // shaped exactly as it is while charging every red head to the round.
+    expect(pushAndReportScript).toContain('PUSH_PRE="${CHECK_STATE:-none}"');
+    // A salvage-merged branch move or a base-conflict merge means the pushed
+    // head did not start from the head prepare classified: the premise is
+    // stamped unknown.
+    expect(pushAndReportScript).toContain(
+      "[[ \"${PUSH_RACE_MERGED}\" == 'true' ]] && PUSH_PRE='none'",
+    );
+    expect(pushAndReportScript).toContain(
+      "[[ \"${CONFLICT:-false}\" == 'true' ]] && PUSH_PRE='none'",
+    );
+    // ...and so does any merge commit the push carries past the head
+    // prepare classified (a clean in-round merge of main trips neither arm
+    // above): the pushed head then holds content prepare never classified.
+    expect(pushAndReportScript).toContain(
+      '[[ -n "$(git rev-list --merges "${REPORT_HEAD}..${PUSHED_HEAD}" 2>/dev/null)" ]] && PUSH_PRE=\'none\'',
+    );
+    // When the push landed but the report post failed, a marker-only
+    // comment still carries the push record — the only record a later
+    // round can charge a regression against.
+    expect(pushAndReportScript).toContain(
+      'gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/push-marker.md"',
+    );
+    // ...and the fallback is gated on the af-157 state the round AUTHORED,
+    // never on its outcome: a no-op round pushes nothing, but the
+    // regression it observed about the PRIOR round is just as
+    // unrecoverable once its report is lost, because the marker it read is
+    // superseded by the next push. Both markers are emitted under their
+    // own presence guard, so neither rides a round that has none.
+    // The REPORT-post give-up arm, not the push-retry give-up above it.
+    const giveUpArm = pushAndReportScript.slice(
+      pushAndReportScript.indexOf(
+        'report post failed ${attempt} times for PR #${PR}; giving up',
+      ),
+      pushAndReportScript.indexOf("REPORT_POSTED}\" == 'true'"),
+    );
+    expect(giveUpArm.length).toBeGreaterThan(200);
+    expect(giveUpArm).not.toContain('"${OUTCOME:-}" == \'fixed\'');
+    expect(giveUpArm).toContain(
+      '[[ -n "${PUSHED_HEAD:-}" || -n "${REGRESSED_ROUND:-}" ]]',
+    );
+    expect(giveUpArm).toContain(
+      '<!-- autofix-push round=${NEXT_ROUND} head=${PUSHED_HEAD} pre=${PUSH_PRE} key=${WINDOW:-none} -->',
+    );
+    expect(giveUpArm).toContain(
+      '<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->',
+    );
+    // Each marker under its own presence guard, so neither rides a round
+    // that has none.
+    expect(
+      giveUpArm.indexOf('if [[ -n "${PUSHED_HEAD:-}" ]]; then'),
+    ).toBeLessThan(giveUpArm.indexOf('autofix-push round='));
+    expect(
+      giveUpArm.indexOf('if [[ -n "${REGRESSED_ROUND:-}" ]]; then'),
+    ).toBeLessThan(giveUpArm.indexOf('autofix-regression round='));
+    // R31-2: the fallback note also carries the eval marker, in both arms
+    // — round numbering reads autofix-eval only, so a fallback-posted
+    // round that consumes no number makes the NEXT round reuse it, and
+    // the brake's regression walk then charges two rounds as one.
+    expect(giveUpArm).toContain(
+      '<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->',
+    );
+    expect(giveUpArm).toContain(
+      '<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->',
+    );
+    // The emitter's headline shape and the brake's reader agree on where
+    // the round number sits.
+    expect(pushAndReportScript).toContain(
+      'Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS})',
+    );
+    expect(workflow).toContain('[[ "${H}" =~ \\(round\\ ([0-9]+)/ ]]');
+    expect(
+      '🤖 Addressed the latest review feedback (round 12/100). What changed'.match(
+        /\(round ([0-9]+)\//,
+      )?.[1],
+    ).toBe('12');
+    expect(pushAndReportScript).toContain('PUSHED_HEAD="$(git rev-parse HEAD');
+    // headRefOid rides the same read as the rollup, so the classifier can
+    // bind its verdict to the commit the rollup describes.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '--json statusCheckRollup,headRefOid',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'ROLLUP_HEAD="$(jq -r \'.headRefOid // ""\' <<< "${PR_ROLLUP}"',
+    );
+    // Two emitters: the report, and the marker-only fallback for a report
+    // that could not be posted.
+    expect(
+      (pushAndReportScript.match(/<!-- autofix-push /g) ?? []).length,
+    ).toBe(2);
+    // The OBSERVATION rides every report shape: a run of failures after a
+    // regressing push must not lose the record.
+    expect(reviewAddressReportStep).toContain(
+      '<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->',
+    );
+    // The marker-only fallback carries the regression observation too:
+    // the report that would have carried it is the one that failed.
+    expect(pushAndReportScript).toMatch(
+      /<!-- autofix-push round=\$\{NEXT_ROUND\} head=\$\{PUSHED_HEAD\} pre=\$\{PUSH_PRE\} key=\$\{WINDOW:-none\} -->"\n[\s\S]{0,500}?<!-- autofix-regression round=\$\{REGRESSED_ROUND\} key=\$\{WINDOW:-none\} -->"[\s\S]{0,200}?\} > "\$\{WORKDIR\}\/push-marker\.md"/,
+    );
+    expect(
+      (pushAndReportScript.match(/<!-- autofix-regression round=/g) ?? [])
+        .length,
+    ).toBe(3);
+    // The visible disclosure rides beside the marker on every report shape
+    // — pushed, no-op and failure — not only the pushed one.
+    expect(
+      (pushAndReportScript.match(/Regression charged to round/g) ?? []).length,
+    ).toBe(2);
+    expect(reviewAddressReportStep).toContain('Regression charged to round');
+    // Both report steps receive the charge; only the push step (the marker
+    // emitter) reads the head state.
+    expect(
+      (
+        workflow.match(
+          /REGRESSED_ROUND: '\$\{\{ steps\.prepare\.outputs\.regressed_round \}\}'/g,
+        ) ?? []
+      ).length,
+    ).toBe(2);
+    expect(
+      (
+        workflow.match(
+          /CHECK_STATE: '\$\{\{ steps\.prepare\.outputs\.check_state \}\}'/g,
+        ) ?? []
+      ).length,
+    ).toBe(1);
+  });
 });
 
 describe('review verification gate: preexisting output is consumed', () => {
@@ -26052,7 +30802,7 @@ describe('report-step stale-base hold while review-pr is in flight (#10110)', ()
   // The scan's dispatch gate (#8888) covers every push the SCAN can make,
   // but the report step's stale-base retry calls update-branch hours after
   // that gate last looked — the one loop-owned head move outside the hold.
-  // Full rationale → qwen-autofix.md#af-155.
+  // Full rationale → qwen-autofix.md#af-156.
 
   it('probes for a live review before the report-step update-branch', () => {
     const probeAt = reviewAddressReportStep.indexOf('REVIEW_LIVE_R=');
@@ -26065,7 +30815,7 @@ describe('report-step stale-base hold while review-pr is in flight (#10110)', ()
     // started review-pr check) and the runs-API fallback for lifecycle runs
     // still parked in the delay window with no check-run yet. The probe is
     // lifecycle-scoped by construction — a command run carries no PR-head
-    // check and the runs fallback is event-scoped (af-155).
+    // check and the runs fallback is event-scoped (af-156).
     expect(reviewAddressReportStep).toContain('<<< "${ROLLUP_R}"');
     expect(reviewAddressReportStep).toContain(
       'actions/workflows/qwen-code-pr-review.yml',
