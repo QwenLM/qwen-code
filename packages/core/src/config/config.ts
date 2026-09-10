@@ -6485,17 +6485,18 @@ export class Config {
    * (used to classify why a server is unavailable — see
    * {@link getMcpServerUnavailableReason}).
    */
-  private getMergedMcpServers(): Record<string, MCPServerConfig> {
+  private getMergedMcpServers(
+    includeExtensionMetadata = true,
+  ): Record<string, MCPServerConfig> {
     const mcpServers = { ...(this.mcpServers || {}) };
     const extensions = this.getActiveExtensions();
     for (const extension of extensions) {
       Object.entries(extension.config.mcpServers || {}).forEach(
         ([key, server]) => {
           if (mcpServers[key]) return;
-          mcpServers[key] = {
-            ...server,
-            extensionName: extension.config.name,
-          };
+          mcpServers[key] = includeExtensionMetadata
+            ? { ...server, extensionName: extension.config.name }
+            : server;
         },
       );
     }
@@ -6508,7 +6509,10 @@ export class Config {
     return mcpServers;
   }
 
-  getMcpServers(): Record<string, MCPServerConfig> | undefined {
+  // Borrowers can compare source recipes without the extension metadata clone.
+  getMcpServers(
+    includeExtensionMetadata = true,
+  ): Record<string, MCPServerConfig> | undefined {
     // Safe mode distrusts LOCAL/ambient state (settings.json, extensions,
     // project `.mcp.json`) — not the caller's own explicit, per-invocation
     // request. `topTierMcpServers` (ACP `session/new`'s `mcpServers` field,
@@ -6519,7 +6523,7 @@ export class Config {
     // `--allowed-mcp-server-names` upper bound (Copilot review, PR #7827).
     let mcpServers = this.isSafeMode()
       ? { ...this.topTierMcpServers }
-      : this.getMergedMcpServers();
+      : this.getMergedMcpServers(includeExtensionMetadata);
 
     if (this.allowedMcpServers) {
       mcpServers = Object.fromEntries(

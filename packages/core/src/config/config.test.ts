@@ -13040,6 +13040,60 @@ describe('Model Switching and Config Updates', () => {
   });
 
   describe('getMcpServers cascade with runtime overlay', () => {
+    it('preserves source identity and layer precedence without extension metadata', () => {
+      const extensionRecipe = new MCPServerConfig('extension-cmd');
+      const settingsRecipe = new MCPServerConfig('settings-cmd');
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { settings: settingsRecipe },
+      });
+      vi.spyOn(config, 'getActiveExtensions').mockReturnValue([
+        {
+          id: 'extension',
+          name: 'extension',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extension',
+          contextFiles: [],
+          config: {
+            name: 'extension',
+            version: '1.0.0',
+            mcpServers: {
+              extension: extensionRecipe,
+              settings: extensionRecipe,
+            },
+          },
+        },
+      ]);
+      expect(config.getMcpServers()!['extension']).toMatchObject({
+        extensionName: 'extension',
+      });
+      expect(config.getMcpServers(false)!['extension']).toBe(extensionRecipe);
+      expect(config.getMcpServers(false)!['settings']).toBe(settingsRecipe);
+      const runtimeRecipe = new MCPServerConfig('runtime-cmd');
+      config.addRuntimeMcpServer('extension', runtimeRecipe);
+      expect(config.getMcpServers(false)!['extension']).toBe(runtimeRecipe);
+      config.removeRuntimeMcpServer('extension');
+      expect(config.getMcpServers(false)!['extension']).toBe(extensionRecipe);
+    });
+
+    it.each([false, true])(
+      'keeps admission filtering in source mode (safe mode: %s)',
+      (safeMode) => {
+        const recipe = new MCPServerConfig('node');
+        const config = new Config({
+          ...baseParams,
+          mcpServers: { ambient: recipe },
+          topTierMcpServers: { explicit: recipe, blocked: recipe },
+          allowedMcpServers: ['ambient', 'explicit'],
+        });
+        vi.spyOn(config, 'isSafeMode').mockReturnValue(safeMode);
+        expect(Object.keys(config.getMcpServers(false)!)).toEqual(
+          safeMode ? ['explicit'] : ['ambient'],
+        );
+      },
+    );
+
     it('runtime layer overlays settings layer (last write wins)', () => {
       const config = new Config({
         ...baseParams,

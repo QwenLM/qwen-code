@@ -5,8 +5,14 @@
  */
 
 import { EventEmitter } from 'node:events';
+import type { CallableTool } from '@google/genai';
 import { afterEach, describe, it, expect, vi } from 'vitest';
-import { Config, ApprovalMode, deriveConfig } from '../config/config.js';
+import {
+  Config,
+  ApprovalMode,
+  deriveConfig,
+  deriveAgentConfig,
+} from '../config/config.js';
 import { SubagentManager } from './subagent-manager.js';
 import type { SubagentConfig } from './types.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -19,6 +25,7 @@ import { SessionMcpView } from '../tools/session-mcp-view.js';
 import type { McpTransportPool } from '../tools/mcp-transport-pool.js';
 import { MCPServerStatus } from '../tools/mcp-client.js';
 import { connectionIdOf } from '../tools/mcp-pool-key.js';
+import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 
 /**
  * Companion to `tools/agent/agent-override.test.ts`. A derived child must
@@ -191,6 +198,86 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
   });
 
   describe('per-agent mcpServers override', () => {
+    it.each(['sdk', 'srv'])(
+      'refreshes inherited extension tools across cwd with SDK override %s',
+      async (overrideName) => {
+        const parent = new Config({ ...baseParams, mcpServers: {} });
+        parent.setMcpTransportPool({
+          getBudget: () => undefined,
+        } as unknown as McpTransportPool);
+        vi.spyOn(parent, 'getActiveExtensions').mockReturnValue([
+          {
+            id: 'extension',
+            name: 'extension',
+            version: '1.0.0',
+            isActive: true,
+            path: '/extension',
+            contextFiles: [],
+            config: {
+              name: 'extension',
+              version: '1.0.0',
+              mcpServers: { srv: { command: 'node', trust: true } },
+            },
+          },
+        ]);
+        const parentRegistry = await parent.createToolRegistry(undefined, {
+          skipDiscovery: true,
+        });
+        vi.spyOn(parent, 'getToolRegistry').mockReturnValue(parentRegistry);
+        const makeTool = () =>
+          new DiscoveredMCPTool(
+            {} as CallableTool,
+            'srv',
+            'read',
+            'read',
+            { type: 'object', properties: {} },
+            true,
+            undefined,
+            parent,
+          ).withSessionConfig(true, false, false);
+        const original = makeTool();
+        parentRegistry.registerTool(original);
+        const parentRead = vi
+          .spyOn(parentRegistry.getMcpClientManager(), 'readResource')
+          .mockResolvedValue({
+            contents: [{ uri: 'test://resource', text: 'parent' }],
+          });
+        const derived = deriveAgentConfig(parent, '/child').config;
+        const child = await callBuildOverride(
+          new SubagentManager(parent),
+          derived,
+          { mcpServers: { [overrideName]: { type: 'sdk' } } },
+        );
+        const childRegistry = child.getToolRegistry();
+        try {
+          await childRegistry.refreshMcpTools(new AbortController().signal);
+          const fresh = makeTool();
+          parentRegistry.removeMcpToolsByServer('srv');
+          parentRegistry.registerTool(fresh);
+          await childRegistry.refreshMcpTools(new AbortController().signal);
+          expect(childRegistry.getTool(original.name)).toBe(
+            overrideName === 'sdk' ? fresh : undefined,
+          );
+          if (overrideName === 'sdk') {
+            await expect(
+              childRegistry.readMcpResource('srv', 'test://resource'),
+            ).resolves.toEqual({
+              contents: [{ uri: 'test://resource', text: 'parent' }],
+            });
+            expect(parentRead).toHaveBeenCalledOnce();
+          } else {
+            await expect(
+              childRegistry.readMcpResource('srv', 'test://resource'),
+            ).rejects.toThrow();
+            expect(parentRead).not.toHaveBeenCalled();
+          }
+        } finally {
+          await childRegistry.stop();
+          await parentRegistry.stop();
+        }
+      },
+    );
+
     it('preserves parent prompts and resources when a pooled child discovers and stops', async () => {
       const parent = new Config(baseParams);
       const parentPrompts = new PromptRegistry();

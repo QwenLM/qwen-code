@@ -1024,6 +1024,83 @@ describe('DiscoveredMCPTool', () => {
     },
   );
 
+  it.each(['direct', 'callable'] as const)(
+    'does not attribute a sibling disconnect to a healthy shared call (%s)',
+    async (mode) => {
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      const error = new Error('file_path is required');
+      const call = vi.fn().mockRejectedValue(error);
+      const shared = new DiscoveredMCPTool(
+        { ...mockCallableToolInstance, callTool: call },
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        mode === 'direct' ? { callTool: call, transport: {} } : undefined,
+      ).withSessionConfig(false, false, false);
+      await expect(
+        shared.build({ param: 'test' }).execute(new AbortController().signal),
+      ).rejects.toBe(error);
+      expect(call).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('identifies its own closed SDK transport even when a sibling is connected', async () => {
+    updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+    const error = new Error('request lost');
+    const callTool = vi.fn().mockRejectedValue(error);
+    const shared = new DiscoveredMCPTool(
+      mockCallableToolInstance,
+      serverName,
+      serverToolName,
+      baseDescription,
+      inputSchema,
+      undefined,
+      undefined,
+      undefined,
+      {
+        callTool,
+        get transport() {
+          return undefined;
+        },
+      },
+    ).withSessionConfig(false, false, false);
+    await expect(
+      shared.build({ param: 'test' }).execute(new AbortController().signal),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('Do not retry automatically'),
+      cause: error,
+    });
+    expect(callTool).toHaveBeenCalledOnce();
+  });
+
+  it('retains timeout classification when another shared connection is disconnected', async () => {
+    updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+    const callTool = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error('request timed out'), { code: -32001 }),
+      );
+    const shared = new DiscoveredMCPTool(
+      mockCallableToolInstance,
+      serverName,
+      serverToolName,
+      baseDescription,
+      inputSchema,
+      undefined,
+      undefined,
+      undefined,
+      { callTool, transport: {} },
+    ).withSessionConfig(false, false, false);
+    await expect(
+      shared.build({ param: 'test' }).execute(new AbortController().signal),
+    ).rejects.toMatchObject({ errorType: ToolErrorType.EXECUTION_TIMEOUT });
+    expect(callTool).toHaveBeenCalledOnce();
+  });
+
   it.each(['business error', 'unregistered business error', 'abort'])(
     'preserves a shared invocation %s without a connection-loss warning',
     async (kind) => {

@@ -556,7 +556,10 @@ export class ToolRegistry {
     // override must also match the effective cwd used for its own discovery.
     if (
       localServers[serverName] &&
-      localServers[serverName] === sourceServers[serverName]
+      this.config.getMcpServers(false)?.[serverName] ===
+        source.config.getMcpServers(false)?.[serverName] &&
+      mcpSessionMetadataKey(localServers[serverName]) ===
+        mcpSessionMetadataKey(sourceServers[serverName] ?? {})
     )
       return true;
     const local = populateMcpServerCommand(

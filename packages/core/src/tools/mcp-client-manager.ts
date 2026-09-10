@@ -1735,10 +1735,17 @@ export class McpClientManager {
               return;
             }
             try {
-              if (conn.client.getStatus() !== MCPServerStatus.CONNECTED)
+              if (conn.state === 'closed' || conn.state === 'failed')
                 throw new Error('MCP connection closed during discovery');
               conn.updateConfig(current);
             } catch (error) {
+              // Restart can fail between acquire resolving and subscribing.
+              // Keep the missed failure, but never revive an explicit close.
+              if (conn.state === 'failed') {
+                this.failedPooledConnections.set(name, {
+                  transportId: conn.transportId,
+                });
+              }
               conn.release();
               throw error;
             }
@@ -3162,10 +3169,13 @@ export class McpClientManager {
   ): Promise<AddRuntimeMcpServerResult> {
     const token = {};
     const generation = this.pooledDiscoveryGeneration;
+    const exclusions = new Set<string>();
+    this.pooledDiscoveryExclusions.add(exclusions);
+    const canRollback = () =>
+      generation === this.pooledDiscoveryGeneration && !exclusions.has(name);
     this.runtimeMcpAddTokens.set(name, token);
     const stillCurrent = () =>
-      this.runtimeMcpAddTokens.get(name) === token &&
-      this.pooledDiscoveryGeneration === generation;
+      this.runtimeMcpAddTokens.get(name) === token && canRollback();
     const previous = this.runtimeMcpAddInFlight ?? this.discoveryInFlight;
     const result = (async () => {
       if (previous) {
@@ -3183,6 +3193,7 @@ export class McpClientManager {
         config,
         originatorClientId,
         stillCurrent,
+        canRollback,
       );
     })();
     const pending = result.then(
@@ -3193,6 +3204,7 @@ export class McpClientManager {
     try {
       return await result;
     } finally {
+      this.pooledDiscoveryExclusions.delete(exclusions);
       if (this.runtimeMcpAddInFlight === pending)
         this.runtimeMcpAddInFlight = undefined;
       if (this.runtimeMcpAddTokens.get(name) === token)
@@ -3205,6 +3217,7 @@ export class McpClientManager {
     config: MCPServerConfig,
     originatorClientId: string,
     stillCurrent: () => boolean,
+    canRollback: () => boolean,
   ): Promise<AddRuntimeMcpServerResult> {
     if (
       this.pool &&
@@ -3287,10 +3300,12 @@ export class McpClientManager {
       }
     }
     const existingConn = this.pooledConnections.get(name);
+    const previousConnectionWasClosed = existingConn?.state === 'closed';
     if (
       existingConn &&
       existingConn.transportId === newConnId &&
-      existingConn.client.getStatus() === MCPServerStatus.CONNECTED
+      existingConn.state !== 'closed' &&
+      existingConn.state !== 'failed'
     ) {
       // Same fingerprint — refresh the session projection, then persist the
       // Config overlay. Refreshing first leaves the overlay untouched when
@@ -3394,6 +3409,7 @@ export class McpClientManager {
     // Write the Config runtime overlay BEFORE spawning so
     // `getMcpServers()` reflects the new entry immediately (the pool
     // acquire + discover may read config for trust/filters).
+    const previousRuntimeConfig = this.cliConfig.getRuntimeMcpServers()[name];
     this.cliConfig.addRuntimeMcpServer(name, config);
 
     // Acquire the transport
@@ -3425,7 +3441,8 @@ export class McpClientManager {
             this.cliConfig.isMcpServerDisabled(name) ||
             this.cliConfig.isMcpServerPendingApproval?.(name) ||
             connectionIdOf(name, current) !== newConnId ||
-            conn.client.getStatus() !== MCPServerStatus.CONNECTED
+            conn.state === 'closed' ||
+            conn.state === 'failed'
           ) {
             throw new Error(
               'runtime MCP connection or eligibility changed during acquisition',
@@ -3467,8 +3484,23 @@ export class McpClientManager {
         toolCount = this.toolRegistry.getToolsByServer(name).length;
       }
     } catch (err) {
-      // Spawn failed — roll back Config overlay + budget reservation
-      this.cliConfig.removeRuntimeMcpServer(name);
+      // A newer queued add waits for this rollback, but cannot undo a
+      // disconnect/stop that invalidated this particular request.
+      if (
+        canRollback() &&
+        this.cliConfig.getRuntimeMcpServers()[name] === config
+      ) {
+        if (previousRuntimeConfig) {
+          this.cliConfig.addRuntimeMcpServer(name, previousRuntimeConfig);
+        } else {
+          this.cliConfig.removeRuntimeMcpServer(name);
+        }
+        if (existingConn && !previousConnectionWasClosed) {
+          this.failedPooledConnections.set(name, {
+            transportId: existingConn.transportId,
+          });
+        }
+      }
       if (budget) {
         this.pool!.releaseUnusedBudgetReservation(name);
       } else if (this.budgetMode !== 'off') {

@@ -7,7 +7,11 @@
 import type { CallableTool } from '@google/genai';
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Config, type MCPServerConfig } from '../config/config.js';
+import {
+  Config,
+  deriveAgentConfig,
+  type MCPServerConfig,
+} from '../config/config.js';
 import { ToolRegistry } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import type { McpTransportPool } from './mcp-transport-pool.js';
@@ -55,6 +59,88 @@ function makeTool(
 afterEach(() => vi.restoreAllMocks());
 
 describe('inherited MCP recovery', () => {
+  it.each([
+    'borrow',
+    'independent recipe',
+    'policy override',
+    'disabled',
+    'pending',
+    'untrusted',
+  ])(
+    'handles an extension recipe in another working directory: %s',
+    async (mode) => {
+      const recipe = { command: 'node', trust: true };
+      const config = makeConfig({});
+      config.setMcpTransportPool({} as McpTransportPool);
+      const extension: ReturnType<Config['getActiveExtensions']>[number] = {
+        id: 'extension',
+        name: 'extension',
+        version: '1.0.0',
+        isActive: true,
+        path: '/extension',
+        contextFiles: [],
+        config: {
+          name: 'extension',
+          version: '1.0.0',
+          mcpServers: { server: recipe },
+        },
+      };
+      vi.spyOn(config, 'getActiveExtensions').mockReturnValue([extension]);
+      const source = new ToolRegistry(config);
+      const derived = deriveAgentConfig(config, '/child');
+      const childConfig = derived.config;
+      const child = new ToolRegistry(childConfig);
+      const original = makeTool(config).tool;
+      source.registerTool(original);
+      const parentRead = vi
+        .spyOn(source.getMcpClientManager(), 'readResource')
+        .mockResolvedValue({
+          contents: [{ uri: 'test://resource', text: 'parent' }],
+        });
+      expect(config.getMcpServers()!['server']).not.toBe(
+        childConfig.getMcpServers()!['server'],
+      );
+      expect(config.getMcpServers()!['server'].extensionName).toBe('extension');
+      child.copyDiscoveredToolsFrom(source);
+      if (mode === 'independent recipe') {
+        childConfig.getMcpServers = () => ({ server: { ...recipe } });
+      } else if (mode === 'policy override') {
+        childConfig.getMcpServers = () => ({
+          server: { ...recipe, trust: false },
+        });
+      } else if (mode === 'disabled') {
+        childConfig.isMcpServerDisabled = () => true;
+      } else if (mode === 'pending') {
+        childConfig.isMcpServerPendingApproval = () => true;
+      } else if (mode === 'untrusted') {
+        childConfig.isTrustedFolder = () => false;
+      }
+      try {
+        await child.refreshMcpTools(new AbortController().signal);
+        const fresh = makeTool(config).tool;
+        source.removeMcpToolsByServer('server');
+        source.registerTool(fresh);
+        await child.refreshMcpTools(new AbortController().signal);
+        expect(child.getTool(original.name)).toBe(
+          mode === 'borrow' ? fresh : undefined,
+        );
+        if (mode === 'borrow') {
+          await expect(
+            child.readMcpResource('server', 'test://resource'),
+          ).resolves.toEqual({
+            contents: [{ uri: 'test://resource', text: 'parent' }],
+          });
+          expect(parentRead).toHaveBeenCalledOnce();
+        } else {
+          expect(parentRead).not.toHaveBeenCalled();
+        }
+      } finally {
+        await child.stop();
+        await source.stop();
+      }
+    },
+  );
+
   it.each(['connected', 'failed', 'disconnected'])(
     'keeps independently discovered HTTP resources in the child when %s',
     async (state) => {

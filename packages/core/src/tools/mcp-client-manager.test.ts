@@ -4688,7 +4688,7 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
     });
   });
 
-  it('reacquires a disconnected same-fingerprint runtime handle and uses its new tools and resources', async () => {
+  it('reacquires a failed same-fingerprint runtime handle and uses its new tools and resources', async () => {
     const { ToolRegistry } = await import('./tool-registry.js');
     const { ResourceRegistry } = await import(
       '../resources/resource-registry.js'
@@ -4770,6 +4770,7 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
     original.client.readResource.mockClear();
     original.updateConfig.mockClear();
     original.client.getStatus.mockReturnValue(MCPServerStatus.DISCONNECTED);
+    Object.assign(original, { state: 'failed' });
 
     await expect(
       manager.addRuntimeMcpServer('srv', serverConfig, 'client'),
@@ -5720,15 +5721,17 @@ describe('pooled session recovery', () => {
     },
   );
 
-  it.each(['disconnected', 'trust', 'approval', 'disabled', 'changed'])(
+  it.each(['failed', 'closed', 'trust', 'approval', 'disabled', 'changed'])(
     'rejects a runtime pooled acquire when %s changes before it returns',
     async (change) => {
       const f = runtimeFixture();
       f.pool.acquire.mockImplementationOnce(async () => {
-        if (change === 'disconnected')
+        if (change === 'failed' || change === 'closed') {
+          Object.assign(f.initial, { state: change });
           vi.spyOn(f.initial.client, 'getStatus').mockReturnValue(
             MCPServerStatus.DISCONNECTED,
           );
+        }
         if (change === 'trust') f.revokeTrust();
         if (change === 'approval') f.requireApproval();
         if (change === 'disabled') f.disable();

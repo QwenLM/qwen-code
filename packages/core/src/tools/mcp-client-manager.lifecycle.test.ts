@@ -111,6 +111,202 @@ function fixture() {
 }
 
 describe('pooled management lifecycle', () => {
+  it.each(['failed', 'closed'] as const)(
+    'retains only missed failures when an acquired entry becomes %s before tracking',
+    async (state) => {
+      const f = fixture();
+      f.pool.acquire.mockImplementationOnce(async () => {
+        Object.assign(f.initial, { state });
+        f.initial.client.getStatus.mockReturnValue(
+          MCPServerStatus.DISCONNECTED,
+        );
+        return f.initial;
+      });
+      await f.manager.discoverAllMcpTools(f.config);
+      expect(f.initial.release).toHaveBeenCalledOnce();
+      await f.recover();
+      if (state === 'failed') {
+        expect(f.pool.acquireForRecovery).toHaveBeenCalledOnce();
+        await expect(
+          f.manager.readResource('srv', 'test://resource'),
+        ).resolves.toEqual({ contents: [] });
+        expect(f.replacement.client.readResource).toHaveBeenCalledOnce();
+      } else {
+        expect(f.pool.acquireForRecovery).not.toHaveBeenCalled();
+        await expect(
+          f.manager.readResource('srv', 'test://resource'),
+        ).rejects.toThrow('pool connection unavailable');
+      }
+    },
+  );
+
+  it.each([MCPServerStatus.CONNECTING, MCPServerStatus.DISCONNECTED])(
+    'keeps a new subscription when an active entry is %s during restart',
+    async (status) => {
+      const f = fixture();
+      f.initial.client.getStatus.mockReturnValue(status);
+      await f.manager.discoverAllMcpTools(f.config);
+      expect(f.initial.release).not.toHaveBeenCalled();
+      expect(f.initial.listenerCount('event')).toBe(1);
+      f.initial.client.getStatus.mockReturnValue(MCPServerStatus.CONNECTED);
+      await expect(
+        f.manager.readResource('srv', 'test://resource'),
+      ).resolves.toEqual({ contents: [] });
+      expect(f.initial.client.readResource).toHaveBeenCalledOnce();
+      f.fail();
+      await f.recover();
+      expect(f.pool.acquireForRecovery).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([MCPServerStatus.CONNECTING, MCPServerStatus.DISCONNECTED])(
+    'keeps the runtime overlay and handle when the same entry is %s',
+    async (status) => {
+      const f = fixture();
+      const recipe = f.settings['srv'];
+      await f.manager.addRuntimeMcpServer('srv', recipe, 'client');
+      f.initial.client.getStatus.mockReturnValue(status);
+      await expect(
+        f.manager.addRuntimeMcpServer('srv', recipe, 'client'),
+      ).resolves.toMatchObject({ replaced: false });
+      expect(f.runtime['srv']).toBe(recipe);
+      expect(f.initial.release).not.toHaveBeenCalled();
+      expect(f.initial.listenerCount('event')).toBe(1);
+      expect(f.pool.acquire).toHaveBeenCalledOnce();
+      f.initial.client.getStatus.mockReturnValue(MCPServerStatus.CONNECTED);
+      await expect(
+        f.manager.readResource('srv', 'test://resource'),
+      ).resolves.toEqual({ contents: [] });
+    },
+  );
+
+  it('attaches a runtime server to an entry another session is restarting', async () => {
+    const f = fixture();
+    f.initial.client.getStatus.mockReturnValue(MCPServerStatus.CONNECTING);
+    await expect(
+      f.manager.addRuntimeMcpServer('srv', f.settings['srv'], 'client'),
+    ).resolves.toMatchObject({ name: 'srv' });
+    expect(f.initial.release).not.toHaveBeenCalled();
+    f.initial.client.getStatus.mockReturnValue(MCPServerStatus.CONNECTED);
+    await expect(
+      f.manager.readResource('srv', 'test://resource'),
+    ).resolves.toEqual({ contents: [] });
+  });
+
+  it('restores the original runtime recipe after failed replacement', async () => {
+    const f = fixture();
+    const original = f.settings['srv'];
+    await f.manager.addRuntimeMcpServer('srv', original, 'client');
+    f.pool.acquire.mockRejectedValueOnce(new Error('replacement failed'));
+    await expect(
+      f.manager.addRuntimeMcpServer(
+        'srv',
+        new MCPServerConfig('bad'),
+        'client',
+      ),
+    ).rejects.toThrow('replacement failed');
+    expect(f.runtime['srv']).toBe(original);
+    await f.recover();
+    expect(f.pool.acquireForRecovery).toHaveBeenCalledOnce();
+    await expect(
+      f.manager.readResource('srv', 'test://resource'),
+    ).resolves.toEqual({ contents: [] });
+  });
+
+  it.each(['remove', 'disconnect'] as const)(
+    'late failed replacement cannot overwrite a concurrent %s',
+    async (action) => {
+      const f = fixture();
+      await f.manager.addRuntimeMcpServer('srv', f.settings['srv'], 'client');
+      const gate = deferred<void>();
+      f.pool.acquire.mockImplementationOnce(async () => {
+        await gate.promise;
+        throw new Error('replacement failed');
+      });
+      const replacing = f.manager.addRuntimeMcpServer(
+        'srv',
+        new MCPServerConfig('bad'),
+        'client',
+      );
+      await vi.waitFor(() => expect(f.pool.acquire).toHaveBeenCalledTimes(2));
+      if (action === 'remove') {
+        await f.manager.removeRuntimeMcpServer('srv', 'client');
+      } else {
+        await f.manager.disconnectServer('srv');
+      }
+      const afterManagement = f.runtime['srv'];
+      gate.resolve();
+      await expect(replacing).rejects.toThrow('replacement failed');
+      expect(f.runtime['srv']).toBe(afterManagement);
+      await f.recover();
+      expect(f.pool.acquireForRecovery).not.toHaveBeenCalled();
+      await expect(
+        f.manager.readResource('srv', 'test://resource'),
+      ).rejects.toThrow('pool connection unavailable');
+    },
+  );
+
+  it('a new queued add cannot restore rollback authority after disconnect', async () => {
+    const f = fixture();
+    await f.manager.addRuntimeMcpServer('srv', f.settings['srv'], 'client');
+    const gate = deferred<void>();
+    f.pool.acquire.mockImplementationOnce(async () => {
+      await gate.promise;
+      throw new Error('replacement failed');
+    });
+    const replacing = f.manager.addRuntimeMcpServer(
+      'srv',
+      new MCPServerConfig('bad'),
+      'client',
+    );
+    await vi.waitFor(() => expect(f.pool.acquire).toHaveBeenCalledTimes(2));
+    await f.manager.disconnectServer('srv');
+    const disconnectedConfig = f.runtime['srv'];
+    const next = f.manager.addRuntimeMcpServer('srv', {}, 'client');
+    gate.resolve();
+    await Promise.all([
+      expect(replacing).rejects.toThrow('replacement failed'),
+      expect(next).rejects.toThrow('config must specify'),
+    ]);
+    expect(f.runtime['srv']).toBe(disconnectedConfig);
+    await f.recover();
+    expect(f.pool.acquireForRecovery).not.toHaveBeenCalled();
+    await expect(
+      f.manager.readResource('srv', 'test://resource'),
+    ).rejects.toThrow('pool connection unavailable');
+  });
+
+  it('queued replacements roll back to the original recipe when both fail', async () => {
+    const f = fixture();
+    const original = f.settings['srv'];
+    await f.manager.addRuntimeMcpServer('srv', original, 'client');
+    const gate = deferred<void>();
+    f.pool.acquire.mockImplementationOnce(async () => {
+      await gate.promise;
+      throw new Error('first replacement failed');
+    });
+    const first = f.manager.addRuntimeMcpServer(
+      'srv',
+      new MCPServerConfig('bad1'),
+      'client',
+    );
+    await vi.waitFor(() => expect(f.pool.acquire).toHaveBeenCalledTimes(2));
+    f.pool.acquire.mockRejectedValueOnce(
+      new Error('second replacement failed'),
+    );
+    const second = f.manager.addRuntimeMcpServer(
+      'srv',
+      new MCPServerConfig('bad2'),
+      'client',
+    );
+    gate.resolve();
+    await Promise.all([
+      expect(first).rejects.toThrow('first replacement failed'),
+      expect(second).rejects.toThrow('second replacement failed'),
+    ]);
+    expect(f.runtime['srv']).toBe(original);
+  });
+
   it('failed runtime add preserves recovery of the settings server', async () => {
     const f = fixture();
     await f.manager.discoverAllMcpTools(f.config);

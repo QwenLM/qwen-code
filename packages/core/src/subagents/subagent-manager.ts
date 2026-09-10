@@ -1240,7 +1240,15 @@ export class SubagentManager {
         ...sessionServers,
         ...(config.mcpServers as Record<string, MCPServerConfig>),
       };
-      subagentContext.getMcpServers = () => merged;
+      // Preserve inherited recipe identity for registries that borrow the
+      // parent's transports. SDK-only discovery does not acquire the other
+      // servers, so those tools still need their original source on refresh.
+      const mergedRecipes: Record<string, MCPServerConfig> = {
+        ...runtimeContext.getMcpServers(false),
+        ...(config.mcpServers as Record<string, MCPServerConfig>),
+      };
+      subagentContext.getMcpServers = (includeExtensionMetadata = true) =>
+        includeExtensionMetadata ? merged : mergedRecipes;
       if (runtimeContext.getMcpTransportPool()) {
         // This registry acquires its own pool projections. Its discovery and
         // teardown must not remove the parent's prompts or resources.

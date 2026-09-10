@@ -122,15 +122,16 @@ function isMcpDeadSessionHttpError(error: unknown): boolean {
  * EXECUTION_TIMEOUT would turn a recoverable transport failure into a hard
  * error the user has to retry by hand.
  *
- * Deliberately checks for a *recorded* DISCONNECTED rather than
+ * Deliberately checks for a *known* DISCONNECTED rather than
  * `getMCPServerStatus(...) !== CONNECTED`: that getter reports DISCONNECTED
  * for servers it has never seen, so the simpler comparison would misroute
- * every timeout from a server whose status was never registered. Default to
- * "timeout" and only divert on positive evidence the transport is dead.
+ * every timeout from a server whose status was never registered. The caller
+ * supplies connection-scoped status when available. Default to "timeout"
+ * and only divert on positive evidence the transport is dead.
  */
 function isExecutionTimeoutFailure(
   error: unknown,
-  serverName: string,
+  status: MCPServerStatus | undefined,
   signal: AbortSignal,
 ): boolean {
   // A `-32001` that lands while the parent signal is aborted is the SDK's
@@ -151,11 +152,7 @@ function isExecutionTimeoutFailure(
   if (MCP_DEAD_SESSION_ERROR_PATTERN.test(getErrorMessage(error))) {
     return false;
   }
-  const statuses = getAllMCPServerStatuses();
-  return !(
-    statuses.has(serverName) &&
-    statuses.get(serverName) === MCPServerStatus.DISCONNECTED
-  );
+  return status !== MCPServerStatus.DISCONNECTED;
 }
 
 const PARENT_ABORT_OUTCOME = Symbol('parent_abort_outcome');
@@ -219,6 +216,8 @@ type ToolParams = Record<string, unknown>;
  * keeping the dependency contained in mcp-client.ts.
  */
 export interface McpDirectClient {
+  /** The SDK clears this getter when this particular connection closes. */
+  readonly transport?: object;
   callTool(
     params: {
       name: string;
@@ -558,11 +557,20 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     return this.isConnectionError(error);
   }
 
+  private getConnectionStatus(): MCPServerStatus | undefined {
+    if (this.mcpClient && 'transport' in this.mcpClient) {
+      return this.mcpClient.transport
+        ? MCPServerStatus.CONNECTED
+        : MCPServerStatus.DISCONNECTED;
+    }
+    // A name-only status cannot identify one of several pooled transports.
+    return this.reconnectOnError
+      ? getAllMCPServerStatuses().get(this.serverName)
+      : undefined;
+  }
+
   private isConnectionError(error: unknown): boolean {
-    if (
-      getAllMCPServerStatuses().get(this.serverName) ===
-      MCPServerStatus.DISCONNECTED
-    ) {
+    if (this.getConnectionStatus() === MCPServerStatus.DISCONNECTED) {
       return true;
     }
 
@@ -731,7 +739,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       // execution timeout regardless of what the transport thinks.
       if (
         idleTimeoutWon ||
-        isExecutionTimeoutFailure(error, this.serverName, signal)
+        isExecutionTimeoutFailure(error, this.getConnectionStatus(), signal)
       ) {
         throw new StructuredToolError(
           getErrorMessage(error),
@@ -858,7 +866,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
-      if (isExecutionTimeoutFailure(error, this.serverName, signal)) {
+      if (
+        isExecutionTimeoutFailure(error, this.getConnectionStatus(), signal)
+      ) {
         throw new StructuredToolError(
           getErrorMessage(error),
           ToolErrorType.EXECUTION_TIMEOUT,
