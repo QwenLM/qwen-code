@@ -668,6 +668,11 @@ class PolicyDwsChannel extends DwsChannel {
     return [...(this as unknown as { documentSet: Set<string> }).documentSet];
   }
 
+  seedProcessedMessages(keys: string[]): void {
+    this.cursor.processedMessages = [...keys];
+    this.saveCursor();
+  }
+
   seedPendingDocumentNotifications(count: number): void {
     this.cursor.pendingDocumentNotifications = Array.from(
       { length: count },
@@ -1025,6 +1030,37 @@ describe('DwsChannel', () => {
     expect(channel.processedMessageIds()).toContain('cid-1\0already-answered');
   });
 
+  it('keeps enabled-source dedup keys when discarding a full parked document queue', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ dmPolicy: 'disabled' }),
+    );
+    const sentinelKey = 'cid-1\0already-answered-mention';
+    channel.seedProcessedMessages([
+      sentinelKey,
+      ...Array.from(
+        { length: 4_999 },
+        (_unused, index) => `cid-1\0filler-${index}`,
+      ),
+    ]);
+    channel.seedPendingDocumentNotifications(5_000);
+    client.mentionedMessages = [
+      message(
+        'user_im_message_receive_at',
+        'already-answered-mention',
+        'do not dispatch twice',
+      ),
+    ];
+
+    await channel.poll();
+    await channel.poll();
+
+    expect(channel.processedMessageIds()).toContain(sentinelKey);
+    expect(channel.pendingDocumentNotifications()).toEqual([]);
+    expect(bridge.prompt).not.toHaveBeenCalled();
+  });
+
   it('clears capacity waiters after a disabled-source discard wakes them', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(
@@ -1276,7 +1312,7 @@ describe('DwsChannel', () => {
     );
   });
 
-  it('clears source-policy floors and watermarks when the authenticated profile changes', async () => {
+  it('keeps source-policy floors but restarts watermarks when the authenticated profile changes', async () => {
     const name = 'profile-source-policy-dws';
     const now = vi.spyOn(Date, 'now').mockReturnValue(20_000);
     try {
@@ -1302,13 +1338,13 @@ describe('DwsChannel', () => {
       await second.poll();
 
       expect(secondClient.listMentionedMessages).toHaveBeenCalledWith(
-        15_000,
+        20_000,
         20_000,
         expect.any(AbortSignal),
         '0',
       );
       expect(secondClient.listDirectMessages).toHaveBeenCalledWith(
-        15_000,
+        20_000,
         20_000,
         expect.any(AbortSignal),
         '0',
@@ -7890,7 +7926,15 @@ describe('DwsChannel', () => {
       now.mockReturnValue(30_000);
       const restartedClient = new FakeDwsClient();
       restartedClient.identity.profile = 'corp-two';
-      const { channel: restarted } = await readyPolicyChannel(
+      restartedClient.directMessages = [
+        message(
+          'user_im_message_receive_o2o_all',
+          'disabled-window-cross-profile',
+          'must stay disabled',
+          { eventTime: 15_000 },
+        ),
+      ];
+      const { channel: restarted, bridge } = await readyPolicyChannel(
         restartedClient,
         makeConfig({ profile: 'corp-two', groupPolicy: 'disabled' }),
         name,
@@ -7904,6 +7948,30 @@ describe('DwsChannel', () => {
         expect.any(AbortSignal),
         '0',
       );
+
+      // The earlier connect's re-enable floor is policy-scoped and survives
+      // the profile switch, so a stale redelivery from inside the disabled
+      // window must be discarded without pulling the watermark back.
+      await restartedClient.emit(
+        0,
+        message(
+          'user_im_message_receive_o2o_all',
+          'late-stale-cross-profile-redelivery',
+          'do not reopen disabled history',
+          { eventTime: 8_000 },
+        ),
+      );
+      expect(restarted.notificationWatermark()).toBe(30_000);
+
+      await restarted.poll();
+
+      expect(restartedClient.listDirectMessages).toHaveBeenLastCalledWith(
+        25_000,
+        30_000,
+        expect.any(AbortSignal),
+        '0',
+      );
+      expect(bridge.prompt).not.toHaveBeenCalled();
     } finally {
       now.mockRestore();
     }
@@ -7946,6 +8014,60 @@ describe('DwsChannel', () => {
       const { channel: second, bridge } = await readyPolicyChannel(
         secondClient,
         makeConfig({ profile: 'corp-two', groupPolicy: 'disabled' }),
+        name,
+      );
+
+      await second.poll();
+
+      expect(secondClient.listDirectMessages).toHaveBeenCalledWith(
+        20_000,
+        20_000,
+        expect.any(AbortSignal),
+        '0',
+      );
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('keeps a same-connect direct re-enable boundary across a profile switch without a configured profile', async () => {
+    const name = 're-enable-direct-profile-switch-no-profile-dws';
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      const firstClient = new FakeDwsClient();
+      firstClient.identity = {
+        profile: 'corp-one',
+        selfSenderIds: ['open-account-one'],
+      };
+      const { channel: first } = await readyPolicyChannel(
+        firstClient,
+        makeConfig({
+          profile: 'corp-one',
+          groupPolicy: 'disabled',
+          dmPolicy: 'disabled',
+        }),
+        name,
+      );
+      first.disconnect();
+
+      now.mockReturnValue(20_000);
+      const secondClient = new FakeDwsClient();
+      secondClient.identity = {
+        profile: 'corp-two',
+        selfSenderIds: ['open-account-two'],
+      };
+      secondClient.directMessages = [
+        message(
+          'user_im_message_receive_o2o_all',
+          'disabled-era-before-profile-switch-no-profile',
+          'do not replay this disabled-era message',
+          { eventTime: 19_999 },
+        ),
+      ];
+      const { channel: second, bridge } = await readyPolicyChannel(
+        secondClient,
+        makeConfig({ groupPolicy: 'disabled' }),
         name,
       );
 
@@ -8194,6 +8316,60 @@ describe('DwsChannel', () => {
       const { channel: second, bridge } = await readyPolicyChannel(
         secondClient,
         makeConfig({ profile: 'corp-two', dmPolicy: 'disabled' }),
+        name,
+      );
+
+      await second.poll();
+
+      expect(secondClient.listMentionedMessages).toHaveBeenCalledWith(
+        20_000,
+        20_000,
+        expect.any(AbortSignal),
+        '0',
+      );
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('keeps a same-connect group re-enable boundary across a profile switch without a configured profile', async () => {
+    const name = 're-enable-group-profile-switch-no-profile-dws';
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      const firstClient = new FakeDwsClient();
+      firstClient.identity = {
+        profile: 'corp-one',
+        selfSenderIds: ['open-account-one'],
+      };
+      const { channel: first } = await readyPolicyChannel(
+        firstClient,
+        makeConfig({
+          profile: 'corp-one',
+          groupPolicy: 'disabled',
+          dmPolicy: 'disabled',
+        }),
+        name,
+      );
+      first.disconnect();
+
+      now.mockReturnValue(20_000);
+      const secondClient = new FakeDwsClient();
+      secondClient.identity = {
+        profile: 'corp-two',
+        selfSenderIds: ['open-account-two'],
+      };
+      secondClient.mentionedMessages = [
+        message(
+          'user_im_message_receive_at',
+          'disabled-era-mention-before-profile-switch-no-profile',
+          'do not replay this disabled-era mention',
+          { eventTime: 19_999 },
+        ),
+      ];
+      const { channel: second, bridge } = await readyPolicyChannel(
+        secondClient,
+        makeConfig({ dmPolicy: 'disabled' }),
         name,
       );
 
@@ -8567,6 +8743,47 @@ describe('DwsChannel', () => {
 
     expect(second.pendingDocumentNotifications()).toEqual([]);
     expect(secondClient.readDocument).not.toHaveBeenCalled();
+    expect(bridge.prompt).not.toHaveBeenCalled();
+  });
+
+  it('discards parked document notifications on re-enable after the disabling connect failed', async () => {
+    const name = 'disabled-failed-connect-parked-docs-dws';
+    const firstClient = new FakeDwsClient();
+    const { channel: first } = await readyPolicyChannel(
+      firstClient,
+      makeConfig({ groupPolicy: 'disabled' }),
+      name,
+    );
+    first.seedPendingDocumentNotifications(1);
+    first.disconnect();
+
+    const disabledClient = new FakeDwsClient();
+    disabledClient.assertAuthenticated.mockRejectedValueOnce(
+      new Error('DWS credential expired'),
+    );
+    const disabled = new PolicyDwsChannel(
+      name,
+      makeConfig({ groupPolicy: 'disabled', dmPolicy: 'disabled' }),
+      makeBridge(),
+      undefined,
+      disabledClient,
+    );
+    channels.push(disabled);
+    await expect(disabled.connect()).rejects.toThrow('DWS credential expired');
+
+    const restartedClient = new FakeDwsClient();
+    const { channel: restarted, bridge } = await readyPolicyChannel(
+      restartedClient,
+      makeConfig({ groupPolicy: 'disabled' }),
+      name,
+    );
+
+    expect(restarted.pendingDocumentNotifications()).toEqual([]);
+
+    await restarted.poll();
+
+    expect(restarted.pendingDocumentNotifications()).toEqual([]);
+    expect(restartedClient.readDocument).not.toHaveBeenCalled();
     expect(bridge.prompt).not.toHaveBeenCalled();
   });
 

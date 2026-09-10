@@ -901,35 +901,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     if (this.alignSourcePolicyState(this.connectionStartedAt)) {
       this.saveCursor();
     }
-    // A boundary written by this connect's own align must be captured even
-    // when an authenticated profile already exists: the identity reset below
-    // otherwise wipes a floor the same connect just wrote. An older floor
-    // with a known selfProfile is deliberately not captured, so a profile
-    // switch never inherits the previous identity's history window.
-    const initialProfileMentionBoundary =
-      (this.cursor.selfProfile === undefined ||
-        this.cursor.mentionHistoryFloor === this.connectionStartedAt) &&
-      this.cursor.groupMessagesEnabled === true &&
-      this.cursor.mentionHistoryFloor !== undefined &&
-      this.cursor.mentionWatermark !== undefined
-        ? {
-            floor: this.cursor.mentionHistoryFloor,
-            watermark: this.cursor.mentionWatermark,
-            profile: this.cursor.mentionHistoryFloorProfile,
-          }
-        : undefined;
-    const initialProfileNotificationBoundary =
-      (this.cursor.selfProfile === undefined ||
-        this.cursor.notificationHistoryFloor === this.connectionStartedAt) &&
-      this.cursor.directMessagesEnabled === true &&
-      this.cursor.notificationHistoryFloor !== undefined &&
-      this.cursor.notificationWatermark !== undefined
-        ? {
-            floor: this.cursor.notificationHistoryFloor,
-            watermark: this.cursor.notificationWatermark,
-            profile: this.cursor.notificationHistoryFloorProfile,
-          }
-        : undefined;
     await this.client.assertCompatible?.(this.pollAbortController.signal);
     if (generation !== this.lifecycleGeneration) {
       throw new Error('DWS channel connection was cancelled.');
@@ -962,40 +933,29 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.processedMessages = [];
       this.cursor.pairingNotifications = [];
       this.cursor.inboundFailures = [];
-      this.cursor.notificationWatermark = undefined;
-      this.cursor.mentionWatermark = undefined;
-      this.cursor.notificationHistoryFloor = undefined;
-      this.cursor.mentionHistoryFloor = undefined;
-      this.cursor.notificationHistoryFloorProfile = undefined;
-      this.cursor.mentionHistoryFloorProfile = undefined;
+      // History floors are policy-scoped, not identity-scoped: they survive
+      // this reset so a stale redelivery cannot reopen a disabled window. A
+      // watermark survives only alongside a floor whose tag is absent or
+      // matches the new identity — otherwise it is the old account's served
+      // position, and the window restarts from this connect.
+      if (
+        this.cursor.notificationHistoryFloor === undefined ||
+        (this.cursor.notificationHistoryFloorProfile !== undefined &&
+          this.cursor.notificationHistoryFloorProfile !== identity.profile)
+      ) {
+        this.cursor.notificationWatermark = undefined;
+      }
+      if (
+        this.cursor.mentionHistoryFloor === undefined ||
+        (this.cursor.mentionHistoryFloorProfile !== undefined &&
+          this.cursor.mentionHistoryFloorProfile !== identity.profile)
+      ) {
+        this.cursor.mentionWatermark = undefined;
+      }
       this.cursor.groupMessagesEnabled = undefined;
       this.cursor.directMessagesEnabled = undefined;
       this.cursor.notificationCheckpoint = undefined;
       this.cursor.mentionCheckpoint = undefined;
-      if (
-        initialProfileMentionBoundary !== undefined &&
-        (initialProfileMentionBoundary.profile === undefined ||
-          initialProfileMentionBoundary.profile === identity.profile)
-      ) {
-        this.cursor.mentionHistoryFloor = initialProfileMentionBoundary.floor;
-        this.cursor.mentionWatermark = initialProfileMentionBoundary.watermark;
-        this.cursor.mentionHistoryFloorProfile =
-          initialProfileMentionBoundary.profile;
-        this.cursor.groupMessagesEnabled = true;
-      }
-      if (
-        initialProfileNotificationBoundary !== undefined &&
-        (initialProfileNotificationBoundary.profile === undefined ||
-          initialProfileNotificationBoundary.profile === identity.profile)
-      ) {
-        this.cursor.notificationHistoryFloor =
-          initialProfileNotificationBoundary.floor;
-        this.cursor.notificationWatermark =
-          initialProfileNotificationBoundary.watermark;
-        this.cursor.notificationHistoryFloorProfile =
-          initialProfileNotificationBoundary.profile;
-        this.cursor.directMessagesEnabled = true;
-      }
     }
     this.documentSet.clear();
     for (const documentId of this.cursor.documentIds ?? []) {
@@ -1628,11 +1588,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     if (!directMessagesEnabled) {
       const pendingDocumentNotifications =
         this.cursor.pendingDocumentNotifications ?? [];
-      for (const pending of pendingDocumentNotifications) {
-        this.markProcessedMessage(messageKey(pending));
-        cursorChanged = true;
-      }
       if (pendingDocumentNotifications.length > 0) {
+        this.markDiscardedKeys(
+          pendingDocumentNotifications.map((pending) => messageKey(pending)),
+        );
+        cursorChanged = true;
         process.stderr.write(
           `[Channel:${this.name}] discarded ${pendingDocumentNotifications.length} pending DWS document notification(s) because direct-message access is disabled.\n`,
         );
@@ -2103,8 +2063,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.mentionHistoryFloor = referenceTime;
       // The configured profile is the identity this client is guaranteed to
       // resolve to; a stale persisted selfProfile must not win the tag.
-      this.cursor.mentionHistoryFloorProfile =
-        this.configuredProfile ?? this.cursor.selfProfile;
+      this.cursor.mentionHistoryFloorProfile = this.configuredProfile;
       process.stderr.write(
         `[Channel:${this.name}] group-message history restarts at ${referenceTime}; earlier history will not be fetched\n`,
       );
@@ -2120,8 +2079,21 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.notificationWatermark =
         referenceTime + NOTIFICATION_HISTORY_OVERLAP_MS;
       this.cursor.notificationHistoryFloor = referenceTime;
-      this.cursor.notificationHistoryFloorProfile =
-        this.configuredProfile ?? this.cursor.selfProfile;
+      this.cursor.notificationHistoryFloorProfile = this.configuredProfile;
+      const parkedDocumentNotifications =
+        this.cursor.pendingDocumentNotifications ?? [];
+      if (parkedDocumentNotifications.length > 0) {
+        // The poll-side discard never ran when the disabling connect failed,
+        // and replay consults neither the source policy nor the floor — so
+        // the re-enable transition itself must retire the parked work.
+        this.markDiscardedKeys(
+          parkedDocumentNotifications.map((pending) => messageKey(pending)),
+        );
+        this.cursor.pendingDocumentNotifications = [];
+        process.stderr.write(
+          `[Channel:${this.name}] discarded ${parkedDocumentNotifications.length} pending DWS document notification(s) parked while direct-message access was disabled.\n`,
+        );
+      }
       process.stderr.write(
         `[Channel:${this.name}] direct-message history restarts at ${referenceTime}; earlier history will not be fetched\n`,
       );
@@ -3047,31 +3019,36 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
   }
 
-  private discardDisabledPendingMessages(): boolean {
-    const pending = this.cursor.pendingMessages ?? [];
-    const disabled = pending.filter(
-      (item) => !this.isImSourceEnabled(item.source),
-    );
-    if (disabled.length === 0) return false;
+  // Discarded keys sit at the eviction front so that later ordinary marks
+  // evict them before any preserved enabled-source dedup key.
+  private markDiscardedKeys(keys: string[]): void {
     const processed = new Set(this.cursor.processedMessages);
     const availableSlots = Math.max(
       0,
       MAX_PROCESSED_ITEMS - this.cursor.processedMessages.length,
     );
     const keysToMark: string[] = [];
-    for (let index = disabled.length - 1; index >= 0; index -= 1) {
-      const key = messageKey(disabled[index]!.message);
+    for (let index = keys.length - 1; index >= 0; index -= 1) {
+      const key = keys[index]!;
       if (processed.has(key)) continue;
       if (keysToMark.length >= availableSlots) break;
       processed.add(key);
       keysToMark.push(key);
     }
-    // Discarded keys sit at the eviction front so that later ordinary marks
-    // evict them before any preserved enabled-source dedup key.
+    if (keysToMark.length === 0) return;
     this.cursor.processedMessages = [
       ...keysToMark.reverse(),
       ...this.cursor.processedMessages,
     ].slice(-MAX_PROCESSED_ITEMS);
+  }
+
+  private discardDisabledPendingMessages(): boolean {
+    const pending = this.cursor.pendingMessages ?? [];
+    const disabled = pending.filter(
+      (item) => !this.isImSourceEnabled(item.source),
+    );
+    if (disabled.length === 0) return false;
+    this.markDiscardedKeys(disabled.map((item) => messageKey(item.message)));
     const disabledKeys = new Set(
       disabled.map((item) => messageKey(item.message)),
     );
