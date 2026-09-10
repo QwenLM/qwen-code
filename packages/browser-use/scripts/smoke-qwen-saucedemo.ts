@@ -230,9 +230,6 @@ await withManagedChrome('sauce', async (chrome) => {
       checkoutCompletionObserved:
         completion.url === 'https://www.saucedemo.com/checkout-complete.html' &&
         completion.snapshot.includes('Thank you for your order!'),
-      trustedInputPathObserved:
-        joinedCode.includes('.type(') && joinedCode.includes('.click('),
-      tabFinalized: joinedCode.includes('.finalize('),
       cartMatchesLowestThree,
       reportedTotalIsExpected:
         joinedOutput.includes('Total: $36.69') &&

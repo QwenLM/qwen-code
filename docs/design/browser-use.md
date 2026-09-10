@@ -277,6 +277,10 @@ takes precedence if a derived tab is observed through both paths.
 `tabs.finalize()` validates the complete `keep` set before closing anything. An
 unknown, stale, or duplicate entry aborts finalization so a malformed keep list
 cannot accidentally close a page the model intended to preserve.
+Derived-tab synchronization attempts each attachment independently. If one
+attachment or the discovery query fails, finalization still cleans up the other
+known tabs according to their dispositions, then reports the failure. A failed
+attachment does not authorize closing an unregistered tab.
 
 The first release adds no separate Browser Use authorization or process
 authentication layer.
@@ -316,6 +320,11 @@ version-sensitive. Every Playwright upgrade must pass a real Chrome smoke test
 that takes an AI snapshot and acts on one of its returned refs. Existing
 workspace consumers remain on their current Playwright versions; this feature
 does not require a repository-wide upgrade.
+
+The managed preflight validates screenshot MIME type and decoded JPEG clip
+dimensions. The SauceDemo smoke checks checkout state and prices; source-code
+mentions of input or finalization methods are not evidence that those actions
+ran, so its result does not claim to verify trusted input or tab finalization.
 
 ## Product decisions
 

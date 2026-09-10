@@ -8,6 +8,7 @@
 import { createServer } from 'node:http';
 import { ChromeExtensionTransport } from '../src/bridge/index.js';
 import { PlaywrightRuntime } from '../src/playwright/playwright-runtime.js';
+import { jpegDimensions } from '../src/playwright/runtime-helpers.js';
 import {
   CHROME_BRIDGE_PROTOCOL_VERSION,
   CHROME_EXTENSION_ID,
@@ -83,10 +84,11 @@ try {
         String(screenshot['base64']),
         'base64',
       );
+      const dimensions = jpegDimensions(screenshotBytes);
       assert(
-        screenshotBytes.subarray(1, 4).toString('ascii') === 'PNG' &&
-          screenshotBytes.readUInt32BE(16) === 100 &&
-          screenshotBytes.readUInt32BE(20) === 50,
+        screenshot['mimeType'] === 'image/jpeg' &&
+          dimensions.width === 100 &&
+          dimensions.height === 50,
         'Screenshot did not preserve the CSS-pixel clip contract',
       );
       await runtime.dispatch('playwright.evaluate', {

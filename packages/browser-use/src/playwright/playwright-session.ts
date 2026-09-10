@@ -393,9 +393,13 @@ export class PlaywrightSession {
     const providers = providerTabs(
       await this.bridge.request('tabs.queryDerived'),
     );
-    for (const provider of providers) {
-      await this.registerTab(provider, 'created', false);
-    }
+    const results = await Promise.allSettled(
+      providers.map((provider) => this.registerTab(provider, 'created', false)),
+    );
+    const failed = results.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (failed !== undefined) throw failed.reason;
   }
 
   private async tabInfo(tab: TabState): Promise<TabInfo> {
@@ -421,7 +425,7 @@ export class PlaywrightSession {
 
   async finalizeTabs(keep: FinalizeTabDisposition[]): Promise<void> {
     await this.registration;
-    await this.syncDerivedTabs();
+    const results = await Promise.allSettled([this.syncDerivedTabs()]);
     await this.registration;
     const dispositions = new Map<string, FinalizeTabStatus>();
     for (const { tabId, status } of keep) {
@@ -445,7 +449,7 @@ export class PlaywrightSession {
         }
         await this.closeTab(tab);
       });
-    const results = await Promise.allSettled(operations);
+    results.push(...(await Promise.allSettled(operations)));
     const failed = results.find(
       (result): result is PromiseRejectedResult => result.status === 'rejected',
     );

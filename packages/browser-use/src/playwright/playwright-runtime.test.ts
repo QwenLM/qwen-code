@@ -1162,6 +1162,96 @@ describe('PlaywrightRuntime command contracts', () => {
     expect(crashed.request).toHaveBeenCalledWith('tabs.close', { tabId: 17 });
   });
 
+  it.each(['created', 'claimed', 'deliverable', 'handoff'] as const)(
+    'preserves %s disposition and cleans healthy popups after an attachment failure',
+    async (disposition) => {
+      const fixture = await runtimeFixture();
+      let tab: TabInfo;
+      if (disposition === 'claimed') {
+        const candidates = (await fixture.runtime.dispatch(
+          'browser.user.openTabs',
+          { browserId: 'chrome' },
+        )) as Array<{ id: string }>;
+        tab = (await fixture.runtime.dispatch('browser.user.claimTab', {
+          browserId: 'chrome',
+          tab: candidates[0],
+        })) as TabInfo;
+      } else {
+        tab = await createTab(fixture.runtime);
+      }
+      fixture.derivedTabs.push({ providerTabId: 22 }, { providerTabId: 23 });
+      const request = fixture.request.getMockImplementation()!;
+      fixture.request.mockImplementation(async (method, params = {}) => {
+        if (method === 'tabs.attach' && params.tabId === 22) {
+          throw new Error('Popup attachment failed');
+        }
+        return await request(method, params);
+      });
+
+      await expect(
+        fixture.runtime.dispatch('tabs.finalize', {
+          browserId: 'chrome',
+          keep:
+            disposition === 'handoff' || disposition === 'deliverable'
+              ? [{ tabId: tab.id, status: disposition }]
+              : [],
+        }),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining('Popup attachment failed'),
+      });
+
+      expect(fixture.request).toHaveBeenCalledWith('tabs.close', { tabId: 23 });
+      expect(fixture.request).not.toHaveBeenCalledWith('tabs.close', {
+        tabId: 22,
+      });
+      if (disposition === 'handoff') {
+        expect(fixture.request).not.toHaveBeenCalledWith('tabs.close', {
+          tabId: 17,
+        });
+        expect(fixture.request).not.toHaveBeenCalledWith('tabs.release', {
+          tabId: 17,
+        });
+        await expect(
+          fixture.runtime.dispatch('tab.url', { tabId: tab.id }),
+        ).resolves.toBe('about:blank');
+      } else {
+        expect(fixture.request).toHaveBeenCalledWith(
+          disposition === 'created' ? 'tabs.close' : 'tabs.release',
+          { tabId: 17 },
+        );
+        if (disposition !== 'created') {
+          expect(fixture.request).not.toHaveBeenCalledWith('tabs.close', {
+            tabId: 17,
+          });
+        }
+        await expect(
+          fixture.runtime.dispatch('tab.url', { tabId: tab.id }),
+        ).rejects.toMatchObject({ code: 'STALE_TAB' });
+      }
+    },
+  );
+
+  it('cleans known tabs and reports a failed derived-tab query', async () => {
+    const fixture = await runtimeFixture();
+    await createTab(fixture.runtime);
+    const request = fixture.request.getMockImplementation()!;
+    fixture.request.mockImplementation(async (method, params = {}) => {
+      if (method === 'tabs.queryDerived')
+        throw new Error('Derived query failed');
+      return await request(method, params);
+    });
+
+    await expect(
+      fixture.runtime.dispatch('tabs.finalize', {
+        browserId: 'chrome',
+        keep: [],
+      }),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('Derived query failed'),
+    });
+    expect(fixture.request).toHaveBeenCalledWith('tabs.close', { tabId: 17 });
+  });
+
   it('finalizes an agent-created popup after its opener closes', async () => {
     const fixture = await runtimeFixture();
     await createTab(fixture.runtime);
@@ -1242,6 +1332,35 @@ describe('PlaywrightRuntime command contracts', () => {
   it('validates every kept tab before finalization mutates Chrome', async () => {
     const fixture = await runtimeFixture();
     const tab = await createTab(fixture.runtime);
+
+    await expect(
+      fixture.runtime.dispatch('tabs.finalize', {
+        browserId: 'chrome',
+        keep: [
+          { tabId: tab.id, status: 'deliverable' },
+          { tabId: tab.id, status: 'handoff' },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(fixture.request).not.toHaveBeenCalledWith(
+      'tabs.close',
+      expect.anything(),
+    );
+    expect(fixture.request).not.toHaveBeenCalledWith(
+      'tabs.release',
+      expect.anything(),
+    );
+  });
+
+  it('rejects an invalid keep set without cleanup even when synchronization fails', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    const request = fixture.request.getMockImplementation()!;
+    fixture.request.mockImplementation(async (method, params = {}) => {
+      if (method === 'tabs.queryDerived')
+        throw new Error('Derived query failed');
+      return await request(method, params);
+    });
 
     await expect(
       fixture.runtime.dispatch('tabs.finalize', {
