@@ -11567,6 +11567,146 @@ describe('LlmChat', async () => {
         }
       });
 
+      it('persists the delivered prefix when a continuation closes without new visible text', async () => {
+        // R11-1: the acceptance gate measured completeness with this attempt's
+        // own `contentText`. A continuation attempt that closes carrying only a
+        // thought part therefore has `contentText === ''`, the gate declines,
+        // and no other arm owns the failure — replay needs an empty delivered
+        // prefix, continuation is vetoed by the very close this attempt
+        // mirrored, and the rate-limit, overflow and invalid-stream arms do not
+        // match a status-less frame. The turn threw, and the prose the caller
+        // already watched stream reached neither `this.history` nor the JSONL
+        // record, so the next request and `--resume` both continued as if it had
+        // never been said. The identical attempt without the trailing error is
+        // accepted and persisted, which is what makes this the gate's doing
+        // rather than the provider's.
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+          const upstreamError = Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          });
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('Here is the game: ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield {
+                  candidates: [
+                    {
+                      content: {
+                        role: 'model',
+                        parts: [
+                          { text: 'Double-checking the rules.', thought: true },
+                        ],
+                      },
+                      finishReason: 'STOP',
+                    },
+                  ],
+                } as unknown as GenerateContentResponse;
+                throw upstreamError;
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            { message: 'write a game' },
+            'prompt-continuation-closes-without-new-text',
+          );
+
+          const collecting = drainCollecting(stream);
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(60_000);
+          const { caughtError } = await collecting;
+
+          expect(caughtError).toBeUndefined();
+          // The closed answer is the turn's outcome: the prefix the caller
+          // already saw reaches both durable layers, as a clean close would.
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          expect(recordedText(recordAssistantTurn)).toBe('Here is the game: ');
+          const historyText = chatWithRecording
+            .getHistory()
+            .at(-1)
+            ?.parts?.find(
+              (part) => part.text !== undefined && !part.thought,
+            )?.text;
+          expect(historyText).toBe('Here is the game: ');
+          // Nothing was refused: the turn completed rather than reporting a
+          // recovery decision it never had to make.
+          expect(mockDebugLoggerWarn).not.toHaveBeenCalledWith(
+            'Transport stream retry not taken',
+            expect.anything(),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('propagates a trailing failure from a continuation attempt that delivered nothing at all', async () => {
+        // The other side of the R11-1 conjunct. The turn does have delivered
+        // text and this attempt did close, so a turn-scoped reading of
+        // completeness would accept it — but the attempt contributed nothing
+        // of its own, and accepting hands the turn to the empty-response
+        // validation below, which throws `InvalidStreamError` and so moves the
+        // failure onto the invalid-stream retry budget: a different error and a
+        // further attempt for what is still the same status-less frame. The
+        // gate declines instead and the frame propagates as itself.
+        vi.useFakeTimers();
+        try {
+          const upstreamError = Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          });
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('Here is the game: ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                // A finish chunk carrying no candidate content at all.
+                yield {
+                  candidates: [{ finishReason: 'STOP' }],
+                } as unknown as GenerateContentResponse;
+                throw upstreamError;
+              })(),
+            )
+            // Tripwire: consumed only if the failure is reclassified onto the
+            // invalid-stream budget and re-sent.
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('a regenerated answer', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'write a game' },
+            'prompt-continuation-attempt-delivered-nothing',
+          );
+
+          const collecting = drainCollecting(stream);
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(60_000);
+          const { caughtError } = await collecting;
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          // The frame itself, not `Model stream ended with empty response
+          // text.` out of the validation block.
+          expect((caughtError as Error)?.message).toBe("'id'");
+          expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+            'Transport stream retry not taken',
+            expect.objectContaining({
+              retryDecision: 'skipped_terminal_finish_reason',
+            }),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('dedupes replayed overlap in the recorded turn too', async () => {
         vi.useFakeTimers();
         try {

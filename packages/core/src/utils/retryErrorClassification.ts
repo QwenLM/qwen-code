@@ -313,8 +313,18 @@ function isAllocatedQuotaExceeded(providerCode?: string): boolean {
 // transient failure that is never retried — the bug this branch exists to fix —
 // so open-ended sub-code qualifiers such as `InvalidParameter.Range` are left
 // out on purpose.
+//
+// The credential, entitlement, missing-model and billing spellings are `type`
+// values the Anthropic SDK maps to 401/403/404 (400 for billing), every one of
+// which the HTTP-status branch above already fails fast on. A gateway relaying
+// one into an already-200 stream loses the status, and this list is what keeps
+// the verdict the same instead of spending the ladder on it. The union's
+// transient members stay out on purpose: `api_error`, `timeout_error` and
+// OpenAI's `server_error` remain retryable through the request-id branch
+// below, while `rate_limit_error` and `overloaded_error` are caught earlier by
+// the rate-limit arm and its Retry-After-aware delay.
 const PERMANENT_PROVIDER_CODE_PATTERN =
-  /^(?:response[_-]?data[_-]?inspection[_-]?failed|data[_-]?inspection[_-]?failed|content[_-]?filter|invalid[_-]?api[_-]?key|arrearage|insufficient[_-]?quota|model[._-]?access[_-]?denied|invalid[_-]?request[_-]?error|invalid[_-]?parameter(?:[_-]?error)?|context[_-]?length[_-]?exceeded)$/i;
+  /^(?:response[_-]?data[_-]?inspection[_-]?failed|data[_-]?inspection[_-]?failed|content[_-]?filter|invalid[_-]?api[_-]?key|arrearage|insufficient[_-]?quota|model[._-]?access[_-]?denied|invalid[_-]?request[_-]?error|authentication[_-]?error|permission[_-]?error|not[_-]?found[_-]?error|billing[_-]?error|invalid[_-]?parameter(?:[_-]?error)?|context[_-]?length[_-]?exceeded|request[_-]?too[_-]?large)$/i;
 
 function isPermanentProviderCode(providerCode?: string): boolean {
   return (

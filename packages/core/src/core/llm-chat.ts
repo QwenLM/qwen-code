@@ -5853,6 +5853,43 @@ export class LlmChat {
       .join('')
       .trim();
 
+    // Completeness is a property of the turn, not of the attempt. On a
+    // continuation the visible text already delivered lives in
+    // `transportContinuationPrefix`, and the merge that folds it back in runs
+    // below — and only once `streamError` is null. Measuring this gate with the
+    // attempt's own `contentText` therefore refused exactly the attempt that
+    // closes a continuation without adding prose (a thought part and STOP), and
+    // no other arm owns that failure: replay needs an empty delivered prefix,
+    // continuation is vetoed by this very close, and the rate-limit, overflow
+    // and invalid-stream arms do not match a status-less frame. The prose the
+    // caller watched stream then reached neither history nor the JSONL record.
+    //
+    // The attempt must still have contributed something of its own. One that
+    // delivered nothing at all keeps the path it has today, where the error
+    // propagates instead of being accepted into the empty-response validation
+    // below. With no prefix the conjuncts reduce to `contentText`, so every
+    // non-continuation shape is decided exactly as before.
+    //
+    // Guarded on `streamError` because only the gate below reads this, and the
+    // merge it mirrors is a dedup pass over the delivered prefix: without the
+    // guard every successful continuation turn would pay it twice, once here
+    // and once in the merge block.
+    const completedText =
+      streamError !== null && transportContinuationPrefix
+        ? mergeDeliveredPrefix(transportContinuationPrefix, contentText)
+        : contentText;
+    // Shared with the stream-validation block below, and hoisted rather than
+    // duplicated: this gate nulls `streamError`, which is what lets that block
+    // run, so accepting a turn it would then reject only swaps the error class
+    // and the retry budget it rides, without saving the turn. `contentText`
+    // cannot change between the two reads on any path where that block still
+    // runs — its only reassignment below sits inside the XML tool-call
+    // recovery, which sets `hasToolCall` and so skips the block.
+    const hasAnyContent = contentText || thoughtText;
+    const lacksVisibleToolResultProgress =
+      isToolResultContinuation &&
+      (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
+
     // A failure that lands after the model already closed its answer —
     // typically a gateway error frame pushed into an already-200 stream
     // while the SDK was absorbing trailing usage metadata — must not fail
@@ -5867,7 +5904,9 @@ export class LlmChat {
       streamError !== null &&
       !hasToolCall &&
       closedFinishReason !== undefined &&
-      contentText
+      completedText &&
+      hasAnyContent &&
+      !lacksVisibleToolResultProgress
     ) {
       // Only the failure classes the transport recovery gates admit can be
       // swallowed here. Anything else reached this point precisely because
@@ -6043,11 +6082,9 @@ export class LlmChat {
     // tool call, so they retry (#7039) — and once that retry budget is
     // exhausted the quiet completion is accepted rather than failing the
     // run (#9026): some model families legitimately end turns silently
-    // after a tool result.
-    const hasAnyContent = contentText || thoughtText;
-    const lacksVisibleToolResultProgress =
-      isToolResultContinuation &&
-      (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
+    // after a tool result. Both bindings this reads are computed above the
+    // trailing-failure acceptance gate, which shares them (see the comment
+    // there for why sharing them is the point).
     let acceptedQuietToolResultCompletion = false;
     if (
       streamError === null &&

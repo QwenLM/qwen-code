@@ -556,6 +556,27 @@ describe('classifyRetryError', () => {
       reason: 'permanent-provider-code',
     });
     expect(isRetryableUpstreamError(permanent)).toBe(false);
+
+    // The credential member of the same union, which the SDK maps to 401 when
+    // a status survives: relaying it status-less must not change the verdict,
+    // or a dead key costs the whole ladder before it surfaces.
+    const authFrame = JSON.stringify({
+      type: 'error',
+      error: { type: 'authentication_error', message: 'invalid x-api-key' },
+      request_id: 'gw-trace-3',
+    });
+    const unauthenticated = AnthropicAPIError.generate(
+      undefined,
+      `SSE Error: ${authFrame}`,
+      authFrame,
+      { 'request-id': 'header-trace-3' },
+    );
+
+    expect(classifyRetryError(unauthenticated)).toMatchObject({
+      diagnosis: 'fail-fast',
+      reason: 'permanent-provider-code',
+    });
+    expect(isRetryableUpstreamError(unauthenticated)).toBe(false);
   });
 
   it('classifies a status-less provider body embedded in the message as retryable', () => {
@@ -644,6 +665,19 @@ describe('classifyRetryError', () => {
       'InvalidParameter',
       // OpenAI's `.type` spelling for a malformed request.
       'invalid_parameter_error',
+      // The rest of the pinned Anthropic `ErrorObject` union whose verdict can
+      // never change on a re-send: credentials, entitlement, a model that does
+      // not exist, and billing. A gateway relaying one of them into an
+      // already-200 stream supplies an id and no status, so without these the
+      // request-id branch walks the whole ladder for a verdict that was fixed
+      // on arrival.
+      'authentication_error',
+      'permission_error',
+      'not_found_error',
+      'billing_error',
+      // Recoverable by compaction, never by re-sending the identical payload —
+      // the reasoning that already puts `context_length_exceeded` on this list.
+      'request_too_large',
       // Recoverable by compaction, never by re-sending the identical payload.
       'context_length_exceeded',
     ];
@@ -695,13 +729,24 @@ describe('classifyRetryError', () => {
 
   it('does not treat every provider type as permanent', () => {
     // `.type` also carries transient values; matching it against the same
-    // anchored list is what keeps a server-side fault retryable.
-    expect(
-      classifyRetryError({ type: 'server_error', requestID: 'req-1' }),
-    ).toMatchObject({
-      diagnosis: 'retryable',
-      reason: 'upstream-error-without-status',
-    });
+    // anchored list is what keeps a server-side fault retryable. These are the
+    // transient members of the pinned Anthropic `ErrorObject` union plus
+    // OpenAI's `server_error` — exactly what the permanent spellings must not
+    // swallow. `timeout_error` is the one a broad `.*_error` alternative would
+    // have caught, turning a gateway timeout into a fail-fast.
+    for (const type of ['api_error', 'timeout_error', 'server_error']) {
+      expect(classifyRetryError({ type, requestID: 'req-1' })).toMatchObject({
+        diagnosis: 'retryable',
+        reason: 'upstream-error-without-status',
+      });
+    }
+    // The throttles keep their own arm, which owns the Retry-After-aware delay.
+    for (const type of ['rate_limit_error', 'overloaded_error']) {
+      expect(classifyRetryError({ type, requestID: 'req-1' })).toMatchObject({
+        diagnosis: 'retryable',
+        reason: 'rate-limit',
+      });
+    }
   });
 
   it('keeps an unrecognised upstream code retryable', () => {
