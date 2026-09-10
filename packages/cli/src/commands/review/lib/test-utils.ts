@@ -78,7 +78,7 @@ export function isolateOperatorReviewSettings(): {
   };
 }
 
-/** Seed the report `parse-args` tees, so the effort fallback has something to read. */
+/** Seed the report `parse-args --out` writes, so the effort fallback has something to read. */
 export function seedParseArgs(dir: string, effort: unknown): void {
   mkdirSync(join(dir, dirname(PARSE_ARGS_REPORT)), { recursive: true });
   writeFileSync(

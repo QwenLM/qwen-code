@@ -24,8 +24,10 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -127,6 +129,11 @@ vi.mock('./compose-review.js', async (importOriginal) => {
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: stdoutMock,
   writeStderrLine: stderrMock,
+  // The receipt catch writes through the SAFE helper — its contract is that
+  // a review which DID post never fails there. A partial mock without it
+  // turns that catch into a `TypeError` thrown out of a posted review, and
+  // the suite would only notice by never reaching the branch.
+  writeStderrLineSafe: stderrMock,
 }));
 
 import { runSubmit } from './submit.js';
@@ -2852,6 +2859,40 @@ describe('the Aone submit receipt (producer half of the audit contract)', () => 
   afterEach(() => {
     process.exitCode = undefined;
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not write the receipt through a symlinked `.qwen/tmp`, and says so',
+    () => {
+      // The receipt is a standalone submit's first write into `.qwen/tmp`,
+      // so the shared entry guard runs here too. Best-effort by contract:
+      // the refusal stays inside the receipt's catch, the review is posted,
+      // nothing lands where the link points — and the operator is told,
+      // because cleanup's bypass audit reads this receipt and a missing one
+      // earns them a bypass warning for their own sanctioned review.
+      // The scratch directory MOVES behind the link rather than being
+      // emptied: the anchor gate reads the captured diff this suite seeded
+      // there, so a link to an empty directory would refuse the post and
+      // the round would never reach the receipt at all.
+      const scratch = join(tmp, '.qwen', 'tmp');
+      const victim = join(tmp, '.qwen', 'tmp-victim');
+      renameSync(scratch, victim);
+      symlinkSync(victim, scratch);
+      try {
+        expect(() =>
+          runSubmit(base(), 'unknown', { defaultComment: false }),
+        ).not.toThrow();
+        expect(
+          readdirSync(victim).filter((f) => f.includes('submit-receipt')),
+        ).toEqual([]);
+        expect(stderrMock.mock.calls.flat().join('\n')).toContain(
+          'could not record the receipt',
+        );
+      } finally {
+        rmSync(scratch, { force: true });
+        renameSync(victim, scratch);
+      }
+    },
+  );
 
   it('vouches for every posted comment id, including the summary', () => {
     expect(() =>

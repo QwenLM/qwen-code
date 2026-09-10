@@ -15,7 +15,9 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -82,6 +84,10 @@ const writeStderrSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: writeStdoutSpy,
   writeStderrLine: writeStderrSpy,
+  // The receipt catches use the SAFE writer — their contract is that a
+  // review which DID post never fails there — so a partial mock without it
+  // is a load-time failure for every test that reaches one.
+  writeStderrLineSafe: writeStderrSpy,
 }));
 vi.mock('../../utils/version.js', () => ({
   getCliVersion: vi.fn().mockResolvedValue('0.21.2'),
@@ -3766,6 +3772,33 @@ describe('submit receipt (producer half of the audit contract)', () => {
     expect(receipt.event).toBe('COMMENT');
     expect(typeof receipt.postedAt).toBe('string');
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not write the receipt through a symlinked .qwen/tmp',
+    () => {
+      // The receipt is a standalone submit's first write into `.qwen/tmp`,
+      // so the shared entry guard runs here too. Best-effort by contract:
+      // the refusal stays inside the receipt's catch, the review is posted,
+      // and nothing lands where the link points.
+      const victim = realpathSync(mkdtempSync(join(tmpdir(), 'victim-')));
+      try {
+        mkdirSync(join(dir, '.qwen'), { recursive: true });
+        symlinkSync(victim, join(dir, '.qwen', 'tmp'));
+        ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+        runSubmit(authorizedPost());
+        expect(readdirSync(victim)).toEqual([]);
+        // …and it SAYS so: cleanup's bypass audit reads this receipt, and a
+        // missing one earns the operator a bypass warning for their own
+        // sanctioned review. A silent catch is the defect, not the refusal.
+        expect(writeStderrSpy.mock.calls.flat().join('\n')).toContain(
+          'could not record the receipt',
+        );
+      } finally {
+        rmSync(join(dir, '.qwen', 'tmp'), { force: true });
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('accumulates ids across two submits in the same window (drift restart)', () => {
     ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));

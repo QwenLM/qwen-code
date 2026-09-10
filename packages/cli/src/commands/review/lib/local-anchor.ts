@@ -349,7 +349,7 @@ export function hashWorktreeFiles(
  * never equals a real answer — an unavailable probe must not certify the
  * state it could not read.
  */
-function renderingAttributes(
+export function renderingAttributes(
   repoRoot: string,
   paths: readonly string[],
 ): Record<string, string> {

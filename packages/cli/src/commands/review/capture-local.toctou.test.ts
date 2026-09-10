@@ -17,7 +17,9 @@ import {
   writeFileSync,
   readFileSync,
   existsSync,
+  mkdirSync,
   realpathSync,
+  symlinkSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -78,7 +80,13 @@ let repo: string;
 let cwd: string;
 let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
 
+let savedIdentity: string | undefined;
+
 beforeEach(() => {
+  // A candidate is written only under a published identity (an anchor
+  // certified by nobody is withheld), so the fixtures publish one.
+  savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+  process.env['QWEN_CODE_MODEL_IDENTITY'] = 'fixture-model@1a2b3c4d';
   stderrLines.length = 0;
   captures.length = 0;
   hashPasses.length = 0;
@@ -98,6 +106,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  if (savedIdentity === undefined)
+    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+  else process.env['QWEN_CODE_MODEL_IDENTITY'] = savedIdentity;
   process.chdir(cwd);
   rmSync(repo, { recursive: true, force: true });
   gitIsolation.dispose();
@@ -307,5 +318,68 @@ describe('capture-local — TOCTOU candidate withholding', () => {
       ),
     ).toBe(true);
     expect(stderrLines.join('\n')).not.toContain('candidate is withheld');
+  });
+});
+
+describe('capture-local — the withheld candidate is not announced', () => {
+  it('omits cacheCandidatePath from the plan and removes a stale file', () => {
+    // Step 8 branches on the field's presence; announcing a path to a file
+    // this run deliberately withheld sends it promoting an earlier round's
+    // candidate.
+    const stale = join(
+      repo,
+      '.qwen/tmp/qwen-review-local-cache-candidate.json',
+    );
+    // PLANT an earlier round's candidate: without it the removal assertion
+    // passes even when the removal itself is deleted.
+    mkdirSync(join(repo, '.qwen/tmp'), { recursive: true });
+    writeFileSync(
+      stale,
+      JSON.stringify({ v: 1, target: 'local', stale: true }),
+    );
+    captures.push({ diff: DIFF_A }, { diff: Buffer.from('moved mid-hash\n') });
+    run();
+    const plan = JSON.parse(
+      readFileSync(join(repo, 'plan.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect('cacheCandidatePath' in plan).toBe(false);
+    expect(existsSync(stale)).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'a symlinked `.qwen/tmp` is refused before the withhold branch can remove through it',
+    () => {
+      // The removal side of the redirected-scratch-directory threat: a link
+      // to a directory holding the deterministic candidate name, and a
+      // withhold that would have deleted the VICTIM file. The round is
+      // refused at the directory, before the capture — so the victim is
+      // intact, no plan is written, and the removal guard below the write
+      // is the second line, not the first.
+      const victim = realpathSync(mkdtempSync(join(tmpdir(), 'victim-')));
+      const planted = join(victim, 'qwen-review-local-cache-candidate.json');
+      writeFileSync(planted, 'ORIGINAL');
+      mkdirSync(join(repo, '.qwen'), { recursive: true });
+      symlinkSync(victim, join(repo, '.qwen/tmp'));
+      try {
+        captures.push(
+          { diff: DIFF_A },
+          { diff: Buffer.from('moved mid-hash\n') },
+        );
+        expect(() => run()).toThrow(/tmp is a symbolic link/);
+        expect(readFileSync(planted, 'utf8')).toBe('ORIGINAL');
+        expect(existsSync(join(repo, 'plan.json'))).toBe(false);
+      } finally {
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('announces the path when the candidate IS written', () => {
+    captures.push({ diff: DIFF_A }, { diff: Buffer.from(DIFF_A) });
+    run();
+    const plan = JSON.parse(
+      readFileSync(join(repo, 'plan.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(plan['cacheCandidatePath']).toContain('cache-candidate.json');
   });
 });

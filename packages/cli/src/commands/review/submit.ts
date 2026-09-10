@@ -46,8 +46,12 @@
 import type { CommandModule } from 'yargs';
 import { roundModelIdFrom } from './lib/round-model.js';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
-import { mkdirSync, readFileSync } from 'node:fs';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { readFileSync } from 'node:fs';
+import {
+  writeStdoutLine,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import {
@@ -57,7 +61,7 @@ import {
   resolveGhHost,
   setGhHost,
 } from './lib/gh.js';
-import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
+import { ensureReviewTmpDir, tmpFile } from './lib/paths.js';
 import {
   parseReceiptCommentIds,
   parseReceiptIds,
@@ -162,7 +166,7 @@ function recordAoneReceipt(pr: number, newIds: number[], event: string): void {
     const receiptPath = tmpFile(`pr-${pr}`, 'submit-receipt.json');
     const priorIds = readReceiptIds(receiptPath, parseReceiptCommentIds);
     const commentIds = [...new Set([...priorIds, ...newIds])];
-    mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+    ensureReviewTmpDir('submit');
     atomicWriteFileSync(
       receiptPath,
       `${JSON.stringify({
@@ -172,8 +176,16 @@ function recordAoneReceipt(pr: number, newIds: number[], event: string): void {
         postedAt: new Date().toISOString(),
       })}\n`,
     );
-  } catch {
-    /* audit metadata only — the post itself succeeded */
+  } catch (err) {
+    // Audit metadata only — the post itself succeeded — but never silent:
+    // cleanup's bypass audit reads this receipt, and a missing one earns the
+    // operator a bypass warning for their own sanctioned review. The SAFE
+    // writer: this catch's contract is that a review which DID post never
+    // fails here, and `writeStderrLine` throws on EPIPE.
+    writeStderrLineSafe(
+      `submit: could not record the receipt (${(err as Error).message}); ` +
+        `cleanup's bypass audit will not see this review's ids.`,
+    );
   }
 }
 
@@ -1702,7 +1714,7 @@ function submit(
       const receiptPath = tmpFile(`pr-${args.pr}`, 'submit-receipt.json');
       const priorIds = readReceiptIds(receiptPath, parseReceiptIds);
       const reviewIds = [...new Set([...priorIds, reviewId])];
-      mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+      ensureReviewTmpDir('submit');
       atomicWriteFileSync(
         receiptPath,
         `${JSON.stringify({
@@ -1713,8 +1725,13 @@ function submit(
         })}\n`,
       );
     }
-  } catch {
-    /* audit metadata only — the post itself succeeded */
+  } catch (err) {
+    // Audit metadata only — the post itself succeeded — but never silent,
+    // and never through the throwing writer (see recordAoneReceipt).
+    writeStderrLineSafe(
+      `submit: could not record the receipt (${(err as Error).message}); ` +
+        `cleanup's bypass audit will not see this review's id.`,
+    );
   }
   writeStderrLine(
     `Posted ${event} to ${args.repo}#${args.pr} — ${auth.why}` +

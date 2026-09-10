@@ -11,7 +11,16 @@
 // command that reports it stopped saying a file was skipped.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  readFileSync,
+  existsSync,
+  readdirSync,
+  realpathSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { seedParseArgs } from './lib/test-utils.js';
@@ -74,8 +83,21 @@ function capture(over: Record<string, unknown> = {}) {
   });
 }
 
+let savedIdentity: string | undefined;
+
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'capture-local-'));
+  // Every real round runs under a published identity, and the candidate is
+  // withheld without one (an anchor certified by nobody is refused at
+  // promotion) — so the fixtures publish one, and the test about the
+  // empty case blanks it itself.
+  savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+  process.env['QWEN_CODE_MODEL_IDENTITY'] = 'fixture-model@1a2b3c4d';
+  // `realpathSync`: several path comparisons in this command family resolve
+  // real paths against lexical ones, and `tmpdir()` IS a symlink on macOS
+  // (`/var/folders/…` → `/private/var/folders/…`). Without the wrap a test
+  // can fail on a developer's Mac while CI stays green on its real-path
+  // TMPDIR — the trap this directory's sibling suites hit.
+  dir = realpathSync(mkdtempSync(join(tmpdir(), 'capture-local-')));
   cwd = process.cwd();
   process.chdir(dir);
   errs = [];
@@ -91,6 +113,9 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  if (savedIdentity === undefined)
+    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+  else process.env['QWEN_CODE_MODEL_IDENTITY'] = savedIdentity;
   process.chdir(cwd);
   rmSync(dir, { recursive: true, force: true });
 });
@@ -139,6 +164,70 @@ describe('capture-local (command boundary)', () => {
     expect(plan.untrackedFiles).toEqual(['src/pay.ts']);
     expect(existsSync(plan.diffPathAbsolute)).toBe(true);
     expect(readFileSync(plan.diffPathAbsolute, 'utf8')).toBe(DIFF);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses the round on a symlinked `.qwen/tmp`, before writing anything',
+    () => {
+      // The scratch directory is deterministic and in-repo: a contributor
+      // branch can commit `.qwen/tmp` (or `.qwen`) as a link — gitignore
+      // does not stop `git add -f` — and every side file of the round (the
+      // diff, the plan, the stop sidecar, the candidate) would land wherever
+      // it points, with the plan then read back from there. Guarding the
+      // writers one at a time re-found the class every round; the round is
+      // refused at the directory instead, and nothing reaches the victim.
+      const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'victim-')));
+      mkdirSync(join(dir, '.qwen'), { recursive: true });
+      symlinkSync(elsewhere, join(dir, '.qwen', 'tmp'));
+      try {
+        capture();
+        expect(() => run(join(dir, 'plan.json'))).toThrow(
+          /^capture-local: .*tmp is a symbolic link/s,
+        );
+        expect(existsSync(join(dir, 'plan.json'))).toBe(false);
+        expect(readdirSync(elsewhere)).toEqual([]);
+
+        // `.qwen` itself as the link: same refusal, same empty victim.
+        rmSync(join(dir, '.qwen'), { recursive: true, force: true });
+        symlinkSync(elsewhere, join(dir, '.qwen'));
+        capture();
+        expect(() => run(join(dir, 'plan.json'))).toThrow(
+          /^capture-local: \.qwen is a symbolic link/,
+        );
+        expect(readdirSync(elsewhere)).toEqual([]);
+      } finally {
+        rmSync(elsewhere, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('withholds the cache candidate when the runtime published no identity', () => {
+    // An empty identity never compares equal — the gate reads it as a
+    // mismatch and `cache-commit` refuses it — so a candidate carrying it
+    // could only send Step 8 into a refusal with no branch, losing the
+    // round's ledger with it. Withheld at the source, the absent field
+    // routes the round to the documented fallback instead.
+    process.env['QWEN_CODE_MODEL_IDENTITY'] = '';
+    const savedModel = process.env['QWEN_CODE_MODEL'];
+    process.env['QWEN_CODE_MODEL'] = '';
+    try {
+      capture();
+      run(join(dir, 'plan.json'));
+      const plan = JSON.parse(
+        readFileSync(join(dir, 'plan.json'), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(plan['diffPath']).toBeTruthy();
+      expect('cacheCandidatePath' in plan).toBe(false);
+      expect(
+        existsSync(
+          join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+        ),
+      ).toBe(false);
+      expect(errs.join('\n')).toContain('published no model identity');
+    } finally {
+      if (savedModel === undefined) delete process.env['QWEN_CODE_MODEL'];
+      else process.env['QWEN_CODE_MODEL'] = savedModel;
+    }
   });
 
   it('creates the output directory the caller chose', () => {
@@ -279,6 +368,28 @@ describe('capture-local (command boundary)', () => {
       existsSync(join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json')),
     ).toBe(false);
     expect(errs.join('')).toContain('the cache candidate is withheld');
+  });
+
+  it('escapes the classes JSON.stringify passes raw, not just C0', () => {
+    // This sink kept its own C0+DEL copy of the rule long after `inertText`
+    // was extracted "so the newer sinks cannot each re-derive it (and
+    // re-forget it)" — so U+2028 (a forged second line wherever the message
+    // is re-rendered), the 8-bit C1 introducers and the invisible Cf class
+    // all reached the terminal verbatim and UNQUOTED from here.
+    capture({
+      untracked: [
+        `evil${String.fromCodePoint(0x2028)}fake.ts`,
+        `bidi${String.fromCodePoint(0x202e)}.ts`,
+      ],
+      skipped: [],
+    });
+    run('plan.json');
+
+    const out = errs.join('');
+    expect(out).not.toContain(String.fromCodePoint(0x2028));
+    expect(out).not.toContain(String.fromCodePoint(0x202e));
+    expect(out).toContain('\\u2028');
+    expect(out).toContain('\\u202e');
   });
 
   it('escapes a filename carrying terminal control characters', () => {

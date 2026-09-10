@@ -22,17 +22,19 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  ensureReviewTmpDir,
   repoRelativeOf,
   REVIEW_CACHE_DIR,
-  REVIEW_TMP_DIR,
   tmpFile,
 } from './lib/paths.js';
 import { safeTarget } from '../../utils/paths.js';
@@ -54,6 +56,7 @@ import {
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
 import { gitOpt } from './lib/git.js';
+import { inertText } from './lib/inert-text.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
   changedSince,
@@ -100,16 +103,22 @@ type CaptureLocalResult = PlanReport & {
   skippedFiles: SkippedFile[];
   /** Present only when `--cache` scoped this capture incrementally. */
   incremental?: IncrementalBlock;
-  /** Where this round's content anchor landed — Step 8 promotes it on a clean run. */
-  cacheCandidatePath: string;
   /**
-   * The written candidate's own `stateId`, for Step 8 to CHECK before
-   * promoting. The candidate path is stable per target and local/file
-   * reviews take no lease, so a concurrent same-target run overwrites the
-   * file mid-round — indistinguishable by path, mtime or shape. A candidate
-   * whose stateId no longer matches this field is another run's: treat it
-   * exactly like a withheld candidate and say so (R17-4). Absent when the
-   * candidate was withheld.
+   * Where this round's content anchor landed — Step 8 promotes it on a clean
+   * run. ABSENT when the capture withheld the candidate (a mid-capture tree
+   * change), because Step 8 branches on this field's presence.
+   */
+  cacheCandidatePath?: string;
+  /**
+   * The written candidate's own `stateId`, for Step 8 to pass as
+   * `cache-commit --state-id`. The candidate path is stable per target and
+   * local/file reviews take no lease, so a concurrent same-target run
+   * overwrites the file mid-round — indistinguishable by path, mtime or
+   * shape — and the command refuses a candidate whose stateId is not this
+   * one at the read it promotes from (a check the orchestrator made earlier
+   * would not bind that read). The refusal is treated exactly like a
+   * withheld candidate (R17-4, R24-2). Absent when the candidate was
+   * withheld.
    */
   cacheCandidateStateId?: string;
   /**
@@ -131,11 +140,16 @@ type CaptureLocalResult = PlanReport & {
  * characters and quotes the result; the machine-readable report keeps the real
  * bytes.
  */
-function display(path: string): string {
-  // eslint-disable-next-line no-control-regex
-  const CONTROL = /[\u0000-\u001f\u007f]/;
-  return CONTROL.test(path) ? JSON.stringify(path) : path;
-}
+// …and it is `inertText`, not a copy of it. This function used to carry its
+// own C0+DEL class, which is the narrow one `inertText` was extracted to stop
+// people re-deriving — so U+2028 (a forged second line), the 8-bit C1
+// introducers and the invisible Cf class all passed through here verbatim and
+// UNQUOTED, out of the very sink the extraction's header names as protected.
+// Wrapped, not aliased: `inertText(value, maxChars = 200)` takes a second
+// argument, and this is used as `paths.map(display)` — which hands `map`'s
+// INDEX to `maxChars` and clips the first element to zero characters. The
+// arity is the whole reason for the wrapper.
+const display = (path: string): string => inertText(path);
 
 /**
  * Cached paths that dropped out of THIS capture while still on disk — and
@@ -515,6 +529,11 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   const target =
     sourcePath !== undefined ? safeTarget(sourcePath) : args.target;
 
+  // The scratch directory, refused outright when the workspace redirected
+  // it — before the capture, so nothing is computed for a round that
+  // cannot write (see `ensureReviewTmpDir`).
+  ensureReviewTmpDir('capture-local');
+
   // Visibility-bit sample 0 — BEFORE the first capture. The oracle rides the
   // same both-endpoints discipline as the diffs and hashes below: sampled
   // only after the loop, a bit set through every diff pass and cleared just
@@ -531,11 +550,9 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     includeUntracked: args.untracked,
   });
 
-  // Two directories, and they are not the same one. The diff always lands in
-  // `.qwen/tmp` (its path is ours to choose), but `--out` is the caller's — and
-  // `--out reports/plan.json` is a legal request that answering with the temp
-  // dir turned into an ENOENT from `writeFileSync`.
-  mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+  // `--out` is the caller's directory, not the scratch one: `--out
+  // reports/plan.json` is a legal request that answering with the temp dir
+  // turned into an ENOENT from `writeFileSync`.
   mkdirSync(dirname(resolve(out)), { recursive: true });
 
   const fullPlan = buildDiffPlan(capture.diff.toString('utf8'));
@@ -661,6 +678,12 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // candidate on every round holding a pending deletion — the same
     // conflation that made the convergence stop unreachable.
     hashPasses.every((h) => movedSince(hashPasses[0], h).length === 0);
+  // Read ONCE, above the candidate that records it and the decision that
+  // withholds it: the two must be the same answer, and reading twice made
+  // the invariant ("a written candidate's `lastModelId` is never empty")
+  // hold by coincidence rather than by construction. `fetch-pr` samples it
+  // at the round's start for the same reason.
+  const roundModelId = roundModelIdFrom(process.env);
   const candidate: LocalCacheCandidate = {
     v: 1,
     target,
@@ -675,10 +698,11 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // and each passed the other's gate. That is the identity-channel class
     // the PR flow closed by moving the comparison into the command; a local
     // round is the same contract ("an anchor is honoured only under the model
-    // whose clean verdict certified it") and needs the same treatment. An
-    // empty string means the runtime published nothing, which the gate reads
-    // as a mismatch rather than a pass.
-    lastModelId: roundModelIdFrom(process.env),
+    // whose clean verdict certified it"). Never empty here: the candidate
+    // is withheld outright when the runtime published nothing, because
+    // `cache-commit` refuses an anchor certified by nobody and the plan's
+    // absent field is what routes Step 8 to its documented fallback.
+    lastModelId: roundModelId,
     // What this round could SEE. A later round that sees less cannot certify
     // this one's state: with `--no-untracked` (or a `.gitignore` entry added
     // between rounds) the untracked block never runs and records no `skipped`
@@ -726,7 +750,12 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     const inv = invisibleTracked();
     return inv !== null && inv.length === 0;
   };
-  const cacheCandidatePath = tmpFile(target, 'cache-candidate.json');
+  const candidatePath = tmpFile(target, 'cache-candidate.json');
+  // The field rides the plan ONLY when a candidate exists to promote: Step 8
+  // keys its cache-commit-vs-hand-write branch on the field's presence, and
+  // announcing a path to a file this run deliberately withheld would send it
+  // promoting a stale candidate from an earlier round.
+  let cacheCandidatePath: string | undefined;
   // Read the cache BEFORE the candidate write: the dropped-out-while-on-disk
   // set gates that write (below), and computing it after let a refused
   // anchor's round write a candidate that silently OMITTED the dropped path
@@ -780,18 +809,56 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     treeHeldStill &&
     invisible !== null &&
     invisible.length === 0 &&
-    vanishedPresent.length === 0;
+    vanishedPresent.length === 0 &&
+    // An anchor certified by nobody: the gate reads an empty identity as a
+    // mismatch and `cache-commit` refuses it, so announcing this candidate
+    // would send Step 8 into a refusal with no branch — the round's
+    // findings ledger lost with it — where the absent field routes it to
+    // the documented fallback.
+    roundModelId !== '';
   if (candidateWritten) {
-    writeFileSync(cacheCandidatePath, JSON.stringify(candidate, null, 2));
+    // Guarded as a whole, like the PR flow's candidate write and for the
+    // reason that one states: a convenience artefact must never take the
+    // round with it. The refusal below arrives AFTER the capture, the
+    // hashing and the plan are all done; letting it escape `runCaptureLocal`
+    // — which the yargs handler does not catch — exited non-zero with no
+    // plan, no report and no diff, over a check whose whole cost is supposed
+    // to be the next round's anchor. The pre-guard code wrote here with a
+    // plain `writeFileSync` and could not fail this way at all.
+    try {
+      // noFollow: a planted symlink at this deterministic path would redirect
+      // the candidate write onto its target (see cache-commit's note). The
+      // directory above it is the entry guard's: a redirected `.qwen/tmp`
+      // refused the round before anything was written. That check is at the
+      // capture's entry rather than here, so it answers for the committed
+      // link this threat model names, not for a directory swapped mid-round
+      // by something that already has write access to the tree.
+      atomicWriteFileSync(candidatePath, JSON.stringify(candidate, null, 2), {
+        noFollow: true,
+      });
+      cacheCandidatePath = candidatePath;
+    } catch (err) {
+      // Said out loud, and the field stays absent: Step 8 branches on its
+      // presence, so a silent drop would send it promoting an earlier
+      // round's candidate.
+      writeStderrLine(
+        `Could not write the cache candidate ` +
+          `(${(err as Error).message}); this round cannot anchor the next ` +
+          `one, but the review itself is unaffected.`,
+      );
+    }
   } else {
     // The path is stable per target, so an earlier round's candidate still
     // sits under the `cacheCandidatePath` this plan publishes, and Step 8
     // would promote that stale anchor merged with this round's ledger.
     // Absent IS the withheld state — fail quiet.
     try {
-      unlinkSync(cacheCandidatePath);
+      // Through the real directory the entry guard certified: a planted
+      // `.qwen/tmp` link would have redirected this removal exactly as it
+      // redirects a write, and refused the round instead.
+      rmSync(candidatePath, { force: true });
     } catch {
-      // nothing to remove
+      // The absent field above is the load-bearing half.
     }
     if (!treeHeldStill) {
       writeStderrLine(
@@ -802,12 +869,18 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       );
     } else if (invisible === null || invisible.length > 0) {
       writeStderrLine(invisibleCandidateRefusal(invisible));
-    } else {
+    } else if (vanishedPresent.length > 0) {
       writeStderrLine(
         `The cache candidate is withheld: ${vanishedPresent.length} cached ` +
           `path(s) dropped out of this capture while still on disk, so the ` +
           `candidate would record their absence as reviewed state. The ` +
           `review itself proceeds in full.`,
+      );
+    } else {
+      writeStderrLine(
+        'The runtime published no model identity — the cache candidate is ' +
+          'withheld: an anchor certified by nobody is refused at promotion. ' +
+          'The review itself is unaffected.',
       );
     }
   }
@@ -1281,8 +1354,9 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // `srclink/foo.ts` predicted `srclink_foo.ts.json`, found nothing, and
     // ruled on zero ledger entries over a Critical that still stood.
     cachePath,
-    cacheCandidatePath,
-    ...(candidateWritten ? { cacheCandidateStateId: candidate.stateId } : {}),
+    ...(cacheCandidatePath
+      ? { cacheCandidatePath, cacheCandidateStateId: candidate.stateId }
+      : {}),
     ...planEffortField(args.effort),
   };
 
