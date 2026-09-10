@@ -30816,22 +30816,25 @@ describe('sessionLanguage multi-session propagation', () => {
     let mergedSettings: Record<string, unknown> = {
       tools: { workflowsEnabled: true },
     };
+    let reloadedSettings: Record<string, unknown> = {
+      tools: { workflowsEnabled: false },
+    };
     const settings = {
       get merged() {
         return mergedSettings;
       },
       reloadScopeFromDisk: vi.fn(() => {
-        mergedSettings = { tools: { workflowsEnabled: false } };
+        mergedSettings = reloadedSettings;
       }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
-    let workflowsEnabled = true;
+    let workflowsEnabled: boolean | undefined = true;
     const registryCancel = vi.fn();
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-wf-reload'),
-      isWorkflowsEnabled: vi.fn(() => workflowsEnabled),
-      setWorkflowsEnabled: vi.fn((enabled: boolean) => {
+      isWorkflowsEnabled: vi.fn(() => workflowsEnabled ?? false),
+      setWorkflowsEnabled: vi.fn((enabled: boolean | undefined) => {
         workflowsEnabled = enabled;
       }),
       setDisabledTools: vi.fn(),
@@ -30909,6 +30912,14 @@ describe('sessionLanguage multi-session propagation', () => {
       reason: 'disabled',
     });
     expect(registryCancel).toHaveBeenCalledOnce();
+
+    reloadedSettings = {};
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(
+      (cfg as typeof cfg & { setWorkflowsEnabled: ReturnType<typeof vi.fn> })
+        .setWorkflowsEnabled,
+    ).toHaveBeenLastCalledWith(undefined);
+    expect(workflowsEnabled).toBeUndefined();
 
     mockConnectionState.resolve();
     await agentPromise;
