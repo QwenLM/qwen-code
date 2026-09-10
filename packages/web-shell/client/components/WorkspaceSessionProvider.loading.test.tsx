@@ -196,7 +196,13 @@ it.each(
         );
         root.render(strictMode ? <StrictMode>{tree}</StrictMode> : tree);
       });
-      expect(calls).toEqual(['GET /capabilities']);
+      // The brand fetch rides beside capabilities on its own deferred
+      // channel (#11244), so whether it lands before this assertion is
+      // scheduling-dependent; what this test pins is that the load itself
+      // fetched capabilities exactly once.
+      expect(calls.filter((call) => call !== 'GET /brand')).toEqual([
+        'GET /capabilities',
+      ]);
       expect(observeLiveStateSupport).not.toHaveBeenCalled();
       await act(async () => {
         releaseCapabilities();

@@ -195,7 +195,10 @@ describe('sidebar brand', () => {
   it('treats an empty name as unset rather than blanking the brand row', () => {
     // `""` means "use the built-in name" on the settings surface, so a host
     // that builds its prop the same way must not get an empty sidebar row and
-    // a version tooltip reading " v1.2.3".
+    // a version tooltip reading " v1.2.3". The tooltip lives on the footer
+    // version label, which compact mode intentionally hides below its
+    // breakpoint (#11470) — render wider than that so it exists at all.
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '400');
     renderSidebar({ name: '' });
 
     expect(container.textContent).toContain('Qwen Code');
@@ -205,6 +208,9 @@ describe('sidebar brand', () => {
   });
 
   it('names the version tooltip after the brand', () => {
+    // Same compact-mode breakpoint: the tooltip is on the footer version
+    // label, so the sidebar must render above it.
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '400');
     renderSidebar({ name: 'QiuQiu Code' });
 
     expect(
