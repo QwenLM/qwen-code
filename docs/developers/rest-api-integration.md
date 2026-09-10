@@ -146,10 +146,11 @@ retained event, which is how you catch events fired between create and
 subscribe — notably `model_switch_failed`. On an **attach** (the default
 `sessionScope: "single"` reusing an existing session) that event is the only
 signal that a bad `modelServiceId` was rejected, because the failure is
-deliberately not propagated as an HTTP error. On a **fresh create** — which is
-what `sessionScope: "thread"` in step 2 forces — the `200` body also carries
-`modelApplied: false`, and that is the deterministic one to act on rather than
-an event on a bounded ring.
+deliberately not propagated as an HTTP error. On a **fresh create** that carries
+`modelServiceId` — which step 2's body does not — the `200` body also carries
+`modelApplied`, `false` when the switch was rejected, and that is the
+deterministic one to act on rather than an event on a bounded ring. A create
+without `modelServiceId` has no `modelApplied` key at all.
 
 ```bash
 curl -N http://daemon:4170/session/$SID/events \
@@ -172,13 +173,24 @@ curl -sX POST http://daemon:4170/session/$SID/prompt \
 # → 202 {"promptId":"…","lastEventId":42}
 ```
 
-**5. Answer permission requests.** When the agent wants to run a tool it emits
-`permission_request` and the turn blocks until someone answers or you cancel —
-**by default there is no timeout** (`--permission-response-timeout-ms` defaults
-to `0` = wait indefinitely), so an unanswered request keeps holding a slot in
-the session's prompt queue until you cancel or close the session. Arm your own
-deadline if the flow needs one. Decide up front how your integration answers —
-an auto-approve policy is a security decision, not a default.
+**5. Answer permission requests.** When the agent wants to run a tool _and its
+approval mode asks for confirmation_, it emits `permission_request` and the turn
+blocks until someone answers or you cancel — **by default there is no timeout**
+(`--permission-response-timeout-ms` defaults to `0` = wait indefinitely), so an
+unanswered request keeps holding a slot in the session's prompt queue until you
+cancel or close the session. Arm your own deadline if the flow needs one.
+
+The mode is the child's own Qwen setting `tools.approvalMode`, resolved from the
+daemon host's and the `--workspace` directory's settings; the daemon pins
+nothing at spawn. Its default is `auto`, which approves one class of tool calls
+without asking — those publish no `permission_request` at all — and still asks
+for the rest. An untrusted workspace folder is forced down to `default` (ask),
+which is why one deployment sees these events and another sees none, and
+`GET /capabilities` reports the vote-mediation policy rather than the approval
+mode, so preflight will not tell you which posture you are in. If your
+integration depends on approval gating, pin `tools.approvalMode` explicitly and
+decide up front how it answers: auto-approval can already be in effect without
+anyone having chosen it.
 
 Answer on the session-scoped route: it is routed to the runtime that owns the
 session, so it works whatever the workspace configuration.
