@@ -676,6 +676,11 @@ export function useQueuedPrompts({
         onComplete();
         return;
       }
+      // A settle whose terminal event fired a registered callback is
+      // deliberately not remembered as completed: a registration arriving
+      // after that settle could only ever fire again on a duplicate
+      // terminal event.
+      if (settledServerPromptIdsRef.current.has(promptId)) return;
       completionCallbacksRef.current.set(promptId, onComplete);
     },
     [],
@@ -3189,13 +3194,10 @@ export function useQueuedPrompts({
         }
         completionCallbacksRef.current.delete(target.serverPromptId);
         pendingEchoByPromptIdRef.current.delete(target.serverPromptId);
-        // The confirming snapshot must post-date the DELETE: joining a GET
-        // dispatched before it would re-list the prompt and keep the row its
-        // own removal already deleted.
-        const refreshResult = await refreshPendingPrompts(
-          targetSessionId,
-          refreshRequestSeqRef.current,
-        );
+        // The confirming snapshot must post-date the DELETE: the fence
+        // default refuses to join a GET dispatched before it, which would
+        // re-list the prompt and keep the row its own removal deleted.
+        const refreshResult = await refreshPendingPrompts(targetSessionId);
         if (!isCurrentOwnerTokenRef.current(ownerToken)) return true;
         if (refreshResult.status === 'failed') {
           setQueuedPromptFlags(target.id, {
