@@ -41,6 +41,62 @@ import { isDiscontinuedModel } from './utils/discontinuedModel.js';
 const SESSION_SWITCH_TIMEOUT_MS = 15_000;
 const SESSION_SWITCH_MIN_VISIBLE_MS = 120;
 
+/**
+ * Bounds for the legacy-conversation scan: the allowlisted sessions sit in
+ * the daemon's default catalog (mixed with CLI/browser sessions), paged
+ * newest-first. Ten pages of a hundred keeps the worst case at a thousand
+ * catalog reads while comfortably covering realistic histories.
+ */
+const LEGACY_SESSION_SCAN_PAGE_SIZE = 100;
+const LEGACY_SESSION_SCAN_MAX_PAGES = 10;
+
+/**
+ * Finds the panel's pre-cutover conversations inside the daemon's default
+ * catalog. Those sessions carry no `sourceType` (attribution did not exist
+ * yet), so the vscode-scoped history query never returns them; matching
+ * against the companion's own legacy id list claims back exactly the sessions
+ * this surface recorded, without pulling in unattributed CLI sessions that
+ * merely share the workspace. Throws on catalog errors — the caller decides
+ * the failure policy.
+ */
+async function loadLegacyAllowlistedSessions(
+  daemonClient: DaemonClient,
+  workspaceCwd: string,
+  legacyConversationIds: readonly string[],
+): Promise<DaemonSessionSummary[]> {
+  const remaining = new Set(legacyConversationIds);
+  const found: DaemonSessionSummary[] = [];
+  let cursor: string | undefined;
+  for (
+    let page = 0;
+    page < LEGACY_SESSION_SCAN_MAX_PAGES && remaining.size > 0;
+    page++
+  ) {
+    const result = await daemonClient
+      .workspaceByCwd(workspaceCwd)
+      .listWorkspaceSessionsPage({
+        pageSize: LEGACY_SESSION_SCAN_PAGE_SIZE,
+        cursor,
+        archiveState: 'active',
+        // Unattributed sessions file under the default catalog server-side.
+        sourceType: 'default',
+      });
+    for (const session of result.sessions) {
+      // Sessions stamped `default` belong to the CLI/Web Shell, not to the
+      // pre-attribution companion history this scan exists to recover.
+      if (
+        session.sourceType === undefined &&
+        remaining.delete(session.sessionId)
+      ) {
+        found.push(session);
+      }
+    }
+    if (!result.nextCursor) break;
+    cursor = result.nextCursor;
+  }
+  return found;
+}
+
 const COMPOSER_TOOLBAR_ACTIONS = [
   'approvalMode',
   'contextUsage',
@@ -215,6 +271,14 @@ interface RuntimeConfig {
   editorWorkspaceCwd?: string;
   sessionId?: string;
   hostKind?: 'view' | 'panel';
+  /**
+   * Ids of conversations the pre-cutover companion recorded in VS Code
+   * globalState. Their daemon transcripts carry no source attribution, so the
+   * vscode-scoped history query never surfaces them on its own; the history
+   * list uses these ids as an allowlist to claim matching unattributed daemon
+   * sessions back.
+   */
+  legacyConversationIds?: string[];
 }
 
 function readRuntimeConfig(): RuntimeConfig | null {
@@ -338,6 +402,11 @@ export function EmbeddedApp() {
     | undefined
   >(undefined);
   const sessionSwitchStartedAtRef = useRef(0);
+  // The legacy allowlist is fixed at bootstrap, and a session claimed by a
+  // restore leaves the unattributed catalog for good — so the first
+  // successful scan has converged and the scan must not re-page the default
+  // catalog on every dropdown open. A fresh bootstrap resets it.
+  const legacyScanDoneRef = useRef(false);
   const sessionSwitchTimerRef = useRef<
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
@@ -371,6 +440,11 @@ export function EmbeddedApp() {
     composerRef.current?.clear({ text: true, tags: true });
     composerRef.current?.focus?.();
   }, []);
+
+  // A re-bootstrap delivers a fresh allowlist — reopen the scan for it.
+  useEffect(() => {
+    legacyScanDoneRef.current = false;
+  }, [runtime?.legacyConversationIds]);
 
   useEffect(
     () => () => {
@@ -430,12 +504,42 @@ export function EmbeddedApp() {
             sourceType: VSCODE_SESSION_SOURCE_TYPE,
           });
         const pageSessions = Array.isArray(page.sessions) ? page.sessions : [];
+        // First page only, once per bootstrap: recover the pre-cutover
+        // conversations the daemon files as unattributed. Restoring one
+        // stamps it `vscode` (the daemon fills missing attribution on
+        // restore), so later loads surface it through the ordinary query
+        // above. A scan failure must not take the ordinary history list down
+        // with it — fail open and retry on a later open.
+        const legacyIds = runtime.legacyConversationIds;
+        let legacySessions: DaemonSessionSummary[] = [];
+        if (
+          cursor === undefined &&
+          !legacyScanDoneRef.current &&
+          legacyIds !== undefined &&
+          legacyIds.length > 0
+        ) {
+          try {
+            legacySessions = await loadLegacyAllowlistedSessions(
+              daemonClient,
+              runtime.workspaceCwd,
+              legacyIds,
+            );
+            legacyScanDoneRef.current = true;
+          } catch {
+            legacySessions = [];
+          }
+        }
         setSessions((current) => {
           const merged = new Map(
             current.map((session) => [session.sessionId, session]),
           );
           for (const session of pageSessions) {
             merged.set(session.sessionId, session);
+          }
+          for (const session of legacySessions) {
+            if (!merged.has(session.sessionId)) {
+              merged.set(session.sessionId, session);
+            }
           }
           if (
             runtime.sessionId &&
@@ -463,6 +567,7 @@ export function EmbeddedApp() {
       daemonClient,
       runtime?.sessionId,
       runtime?.workspaceCwd,
+      runtime?.legacyConversationIds,
       sessionListLoading,
       sessionTitle,
       t,
