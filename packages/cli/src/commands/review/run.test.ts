@@ -558,8 +558,34 @@ describe('review run (handler)', () => {
     const done = runHandler();
     // The capture poll snapshots the verdict while the child still runs...
     await vi.advanceTimersByTimeAsync(1_000);
-    // ...then Step 9 runs the REAL cleanup, which sweeps the verdict...
-    runCleanup('local');
+    // ...then Step 9 runs the REAL cleanup, which sweeps the verdict.
+    // POINT ITS HOST-WIDE CAPTURE SWEEP AT AN EMPTY DIRECTORY FIRST: the
+    // sweep is real here while `execFileSync` is a bare mock that never
+    // throws, so every socket it finds reads as successfully killed and is
+    // then UNLINKED from the real filesystem. Until now only the unrelated
+    // `process.kill` spy — returning true for every pid, so no socket ever
+    // looked orphaned — stood between this test and a developer's live
+    // tmux sockets, and nothing said so. An isolated base plus a
+    // /tmp-shaped decoy keeps both scan bases inside the fixture.
+    const sweepBase = mkdtempSync(join(tmpdir(), 'review-run-sweep-'));
+    // BOTH bases: the sweep always scans /tmp as well, and a developer's
+    // /tmp/tmux-<uid> is full of live sockets. A uid nobody owns makes the
+    // /tmp leg find no directory at all, while the env leg lands in this
+    // empty fixture.
+    const fakeUid = 987_654;
+    mkdirSync(join(sweepBase, `tmux-${String(fakeUid)}`), { recursive: true });
+    const realGetuid = process.getuid;
+    process.getuid = () => fakeUid;
+    const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+    process.env['TMUX_TMPDIR'] = sweepBase;
+    try {
+      runCleanup('local');
+    } finally {
+      process.getuid = realGetuid;
+      if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+      else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+      rmSync(sweepBase, { recursive: true, force: true });
+    }
     outs.length = 0; // drop cleanup's "Removed temp file" stdout noise
     // ...and only then does the child exit.
     child.emit('close', 0);

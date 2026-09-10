@@ -19,11 +19,19 @@ import {
   lstatSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
+  type Stats,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  CAPTURE_SERVER_NAME_RE,
+  isNothingToKill,
+  isSocketDirUnusable,
+  resolveOnPath,
+} from './lib/tui-capture.js';
 import {
   clearReviewWorktreeLease,
   isReviewLeaseFile,
@@ -512,6 +520,304 @@ function auditPrWrites(target: string, prNumber: string): void {
 }
 
 /**
+ * Reap the capture servers capture-tui's own reap could not reach: a
+ * SIGKILL'd or OOM'd harness skips finally and the signal net alike, and
+ * the private server then lives until its pane holder's bounded hold loop
+ * expires (up to three hours) — the config-free server has nothing else to
+ * destroy it, so this sweep (or a hand kill-server) is the only reaper in
+ * that window. The launcher's pid rides in the socket name for exactly
+ * this — a socket whose pid is dead is an orphan. A reap that fails is
+ * noted on stderr and suppresses the "Nothing to clean" claim — but does
+ * NOT hold the target-scoped worktree lease: the sweep is host-wide, and
+ * an unrelated review's orphan would otherwise wedge this review's lease
+ * with nothing connecting the two in the output.
+ *
+ * The orphan test is NAME plus a dead launcher pid, and that is sound only
+ * for the model capture-tui states (see its header): absent an active
+ * same-uid adversary, nothing but a crashed capture leaves a capture-named
+ * socket whose launcher pid is dead. A same-uid process that RENAMES a live
+ * foreign socket into a capture-shaped name with a chosen-dead pid defeats
+ * it — the entry is then a plain socket indistinguishable from a real
+ * orphan by every signal a name-addressed sweep can read, and no signal it
+ * could add is out of that adversary's reach (an on-disk pid record is
+ * same-uid writable; a live server's shape is same-uid craftable). That is
+ * the stated non-goal, hardened in #9274, not a defect this sweep can close
+ * from here. The type guard below rejects the redirections that arise
+ * WITHOUT such a rename; it does not pretend to more.
+ */
+function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
+  const uid = process.getuid?.();
+  // tmux is POSIX-only, and so is the socket dir layout below.
+  if (uid === undefined) return { reaped: false, failed: false };
+  // BOTH candidate socket dirs, not one: tmux's own resolution takes the
+  // first USABLE base (TMUX_TMPDIR, else /tmp) — a stale profile-exported
+  // TMUX_TMPDIR pointing at an unusable path means the real sockets live
+  // under /tmp while a single-base sweep scans the wrong directory forever
+  // (measured end-to-end: 'Nothing to clean' with a live orphan).
+  // UNTRIMMED, matching tmux: a whitespace-padded TMUX_TMPDIR is used
+  // verbatim by tmux (measured: socket under '/tmp/x /tmux-<uid>'), so a
+  // trimming sweep scanned a directory tmux never used.
+  const envBase = process.env['TMUX_TMPDIR'];
+  // De-duplicated by the directory the scan actually opens, not the raw
+  // string: an alias of /tmp (`/tmp/`, `/tmp/.`, `//tmp` — the same
+  // profile-exported family this fallback exists for) survived a
+  // string-keyed Set, so both entries joined to the same tmux-<uid> dir and
+  // every socket in it was listed, killed and reported TWICE.
+  const bases: string[] = [];
+  const seen = new Set<string>();
+  for (const base of [envBase || '/tmp', '/tmp']) {
+    const dir = join(base, `tmux-${uid}`);
+    // Keyed on the RESOLVED directory: string normalization collapses
+    // `/tmp/`, `/tmp/.` and `//tmp`, but a TMUX_TMPDIR that is a symlink to
+    // /tmp still named a different string while opening the same directory,
+    // so every socket in it was listed, killed and reported twice.
+    let key = dir;
+    try {
+      key = realpathSync(dir);
+    } catch {
+      // Not there (or unreadable): the raw path is a fine key, and the
+      // scan below reports what it cannot read.
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    bases.push(base);
+  }
+  let reapedAny = false;
+  let failedAny = false;
+  let entries: Array<{ dir: string; name: string }> = [];
+  for (const base of bases) {
+    const dir = join(base, `tmux-${uid}`);
+    try {
+      // readdirSync FIRST, with ENOENT as the only quiet answer: existsSync
+      // swallows EACCES and returns false, so an untraversable ANCESTOR of
+      // this directory made the base look absent and skipped it silently —
+      // past the catch below that exists precisely to be loud about a
+      // directory that could be hiding an orphan, and against both nearby
+      // comments. "Not there" and "not allowed to look" are different
+      // answers and only one of them is safe to ignore.
+      entries = entries.concat(readdirSync(dir).map((name) => ({ dir, name })));
+    } catch (e) {
+      // ENOENT, ENOTDIR and ELOOP are all definite "this base cannot hold a
+      // socket" answers — a TMUX_TMPDIR that is a regular file or a symlink
+      // loop is not a scan failure, and reporting it as one set sweepFailed
+      // permanently and suppressed "Nothing to clean" on a host where there
+      // was, in fact, nothing to clean. EACCES stays loud: that one CAN be
+      // hiding an orphan.
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP') continue;
+      // A directory we cannot READ can be hiding an orphan — that is a
+      // failure to surface, not a silent nothing (the doc contract above:
+      // noted on stderr AND surfaced as failed).
+      failedAny = true;
+      writeStderrLine(
+        `note: could not scan ${dir} for orphaned capture servers: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
+  }
+  // The producer's own anchored shape, not a prefix — see its declaration
+  // for why the whole name has to be matched and why the nonce is pinned by
+  // alphabet rather than length.
+  const orphanRe = CAPTURE_SERVER_NAME_RE;
+  for (const { dir, name } of entries) {
+    const m = orphanRe.exec(name);
+    if (!m) continue;
+    // The sweep matches by NAME; inspect the entry's TYPE before anything
+    // connects to it. A planted entry under a capture-shaped name
+    // redirects the pinned kill-server to whatever socket it resolves to —
+    // including the user's own tmux server — and the exit-0 success branch
+    // then reports "Reaped" while the victim is destroyed (probe-verified
+    // end to end; the planter class is this PR's own documented
+    // daemonized descendant). Three entrances, all rejected here: a
+    // SYMLINK (kill-server follows it to the target), a HARD LINK to a
+    // foreign socket — link() succeeds on a socket and connect(2) is
+    // inode-addressed, so the kill lands on the foreign server race-free
+    // (measured on Linux) — and any non-socket entry. A tmux-created
+    // socket has exactly one link, so nlink > 1 is never an orphan. A
+    // gone entry is nothing to reap.
+    //
+    // What these checks do NOT catch, and cannot: a same-uid process that
+    // RENAMEs a live foreign socket into a capture-shaped name BEFORE the
+    // scan. The result is a plain socket, one link, sitting stably at the
+    // name — nothing here distinguishes it from a real orphan, and nothing
+    // could, because every identity signal is within that adversary's
+    // reach (an on-disk server-pid record is same-uid writable; the
+    // answering server's own shape is same-uid craftable). This is the
+    // active-same-uid boundary capture-tui's header states as a non-goal
+    // (#9274), not a hole these type checks leak: they close the
+    // redirections that need no rename, which is all a name-addressed
+    // sweep can close. The post-kill re-check below is for the narrower
+    // TOCTOU where a swap WINS the race between this lstat and tmux's
+    // connect() after the fork+exec — a rename already in place at scan
+    // time changes nothing between the two reads, so that re-check is
+    // silent on it by design, not by oversight.
+    let entryStat: Stats;
+    try {
+      entryStat = lstatSync(join(dir, name));
+    } catch {
+      continue;
+    }
+    if (
+      entryStat.isSymbolicLink() ||
+      !entryStat.isSocket() ||
+      entryStat.nlink > 1
+    ) {
+      writeStderrLine(
+        `note: not reaping ${name}: not a plain socket — kill-server ` +
+          'would connect whatever this entry resolves to, which may be ' +
+          'an unrelated server',
+      );
+      continue;
+    }
+    let alive = true;
+    try {
+      process.kill(Number(m[1]), 0);
+    } catch (e) {
+      // ESRCH = the pid is dead (the orphan signal). EPERM means the pid
+      // is alive under another user. Both mean "leave it alone" here: the
+      // socket named for it lives in this uid's mode-0700 tmux directory,
+      // so a cross-user pid at that number is pid REUSE, not the launcher —
+      // and reaping on that assumption would kill a server this sweep
+      // cannot prove is ours. Anything else (an EINVAL, a host that
+      // answers oddly) is likewise treated as alive: this sweep only ever
+      // acts on a pid it positively knows is dead.
+      alive = (e as NodeJS.ErrnoException).code !== 'ESRCH';
+    }
+    if (alive) continue;
+    // Same rules as capture-tui's own reap: unlink the socket ONLY when
+    // the server is known dead — a kill that throws can leave it alive,
+    // and an unlinked socket makes a live server unreachable forever — and
+    // one retry before giving up: a transient client-spawn failure (EMFILE
+    // after a long review's many spawns) is the named shape, and the
+    // identical second attempt reaps what otherwise lives out the holder's
+    // bounded three-hour window.
+    // Resolved, never bare — the half the comment below used to claim from
+    // capture-tui's control calls without carrying it. execvp honours the
+    // empty-PATH-element → cwd rule, and `cleanup` runs with the reviewed
+    // worktree as its cwd: on a host whose PATH has an empty element, a
+    // `tmux` committed to the PR under review is what this kill executes,
+    // with the reviewer's environment. Resolved HERE rather than at sweep
+    // start so a host with no tmux and no orphans stays silent.
+    const tmuxBin = resolveOnPath('tmux');
+    if (tmuxBin === undefined) {
+      failedAny = true;
+      writeStderrLine(
+        `note: could not reap orphaned capture server ${name}: tmux is not ` +
+          'reachable at any absolute PATH element, and this sweep will not ' +
+          'resolve it through the current directory',
+      );
+      continue;
+    }
+    let serverDead = false;
+    let dirUnusable = false;
+    for (let attempt = 0; attempt < 2 && !serverDead; attempt++) {
+      try {
+        execFileSync(tmuxBin, ['-L', name, 'kill-server'], {
+          stdio: 'pipe',
+          // The scan finds sockets under BOTH bases, but `-L` re-resolves
+          // the socket directory from THIS process's environment — and tmux
+          // does not fall back when the env base exists (it creates it).
+          // The two sides then disagree: an orphan found under /tmp while a
+          // stale profile-exported TMUX_TMPDIR points elsewhere answered
+          // `error connecting to <env>/tmux-<uid>/<name>` and survived
+          // (measured on 3.3a, with the same call succeeding under the base
+          // it was found in). Kill it where it was FOUND — `dir` is
+          // `<base>/tmux-<uid>`, so its parent is the base tmux wants.
+          env: { ...process.env, TMUX_TMPDIR: dirname(dir) },
+          // Same belt as capture-tui's own control calls: a wedged server
+          // must not hang the whole cleanup behind one socket — SIGKILL,
+          // because a TERM-immune child blocks the sync call past any belt.
+          timeout: 15_000,
+          killSignal: 'SIGKILL',
+        });
+        serverDead = true;
+      } catch (e) {
+        const stderrText = String((e as { stderr?: unknown }).stderr ?? '');
+        // Same rule as capture-tui's own reap: a client-side refusal
+        // establishes nothing about the server, so it must not reach the
+        // unlink below — a live orphan sits behind that socket, and
+        // removing it makes the server unreachable forever while this
+        // sweep reports "Reaped".
+        serverDead = isNothingToKill(stderrText);
+        // ACCUMULATED, like capture-tui's own reap: the reassignment this
+        // replaces let a second attempt that failed for another reason (an
+        // EMFILE spawn failure, the 15s belt) reset the flag and drop the
+        // note's one actionable parenthetical.
+        if (isSocketDirUnusable(stderrText)) dirUnusable = true;
+      }
+    }
+    if (!serverDead) {
+      failedAny = true;
+      writeStderrLine(
+        `note: could not reap orphaned capture server ${name}` +
+          (dirUnusable
+            ? ' (tmux refused before reaching the socket directory — its ' +
+              'permissions or type, not the server)'
+            : '') +
+          ' ' +
+          // WITH the base override: `-L` re-resolves the socket directory
+          // from the invoking environment and does not fall back, so on
+          // the very hosts where this note appears the bare command
+          // resolves elsewhere and answers 'no server running' — reading
+          // as "already gone" while the orphan runs out its window.
+          // Shell-single-quoted, never JSON.stringify: a base carrying $
+          // or a backtick expands at paste time and resolves the wrong
+          // base — the same confusion this note exists to prevent.
+          `(TMUX_TMPDIR='${dirname(dir).replaceAll("'", "'\\''")}' ` +
+          // The name is quoted for the same reason the base above it is, and
+          // belt-and-braces on top of the anchored `orphanRe`: this line is
+          // built to be PASTED, so anything reaching it that a shell would
+          // read runs in the operator's cwd. The regex is the gate; this is
+          // the second wall behind it.
+          `tmux -L '${name.replaceAll("'", "'\\''")}' kill-server to reap it by hand)`,
+      );
+      continue;
+    }
+    // tmux re-resolves the entry at connect(), after the fork+exec, so a
+    // racer can swap it between the guard's lstat and the kill — no
+    // portable close exists on the connect itself. When the entry the
+    // kill ran under is not the one the guard inspected, "Reaped" would
+    // assert a certainty the sweep does not have; name the swap instead.
+    let entryChanged = false;
+    try {
+      const postKill = lstatSync(join(dir, name));
+      entryChanged =
+        postKill.ino !== entryStat.ino || postKill.mode !== entryStat.mode;
+    } catch {
+      // Gone between the kill and the re-check — only a racer removes an
+      // entry this sweep has not unlinked yet.
+      entryChanged = true;
+    }
+    if (entryChanged) {
+      // NEVER unlink here. The entry is no longer the plain socket the guard
+      // inspected — a racer renamed something onto the name in the
+      // connect→re-check window, and that something may be a live server
+      // whose socket, once unlinked, is unreachable forever (no attach, no
+      // `-L` control): the exact harm this function's own unlink rule
+      // ("ONLY when the server is known dead") forbids. Leaving the entry is
+      // self-healing — the next sweep re-examines it — so the WARNING stands
+      // and the socket is left alone.
+      failedAny = true;
+      writeStderrLine(
+        `WARNING: ${name} changed between the type guard and the kill — ` +
+          'the server killed may not be the orphan this sweep matched, so ' +
+          'its socket was left in place; check your tmux servers',
+      );
+    } else {
+      try {
+        rmSync(join(dir, name), { force: true });
+      } catch {
+        // Litter is cosmetic; the server itself is already gone.
+      }
+      writeStdoutLine(`Reaped orphaned capture server: ${name}`);
+    }
+    reapedAny = true;
+  }
+  return { reaped: reapedAny, failed: failedAny };
+}
+
+/**
  * The tripwire's closing guidance, shared by both platform halves — the
  * relay instruction is contract text SKILL.md tells the model to carry
  * verbatim, so it lives in one place (only the target noun differs).
@@ -703,6 +1009,28 @@ function pruneWorktrees(): void {
 }
 
 export function runCleanup(target: string): void {
+  // --- Orphaned capture servers (capture-tui) ---------------------------
+  // Host-wide and target-agnostic, run BEFORE the lease gate: a SIGKILL'd
+  // or OOM'd harness — the shape this sweep exists for — leaves BOTH the
+  // orphan and a lease held by the dead session, and the lease check is
+  // session-id only, so a gated sweep skipped on exactly the cleanup calls
+  // meant to reclaim the orphan and it lived out its bounded three hours
+  // (probe-reproduced). The sweep only touches servers whose launcher pid
+  // is dead — never a leased worktree — so hoisting it takes nothing from
+  // the lease holder. Its reaps stay off removedAny: they are not
+  // target-scoped facts, and a `cleanup pr-N` that found nothing of
+  // pr-N's still answers "Nothing to clean" for pr-N beside the
+  // host-wide "Reaped" line. Its failures DO still suppress that claim —
+  // stderr saying "could not reap" next to stdout's "nothing to clean" is
+  // the two streams contradicting each other, and stdout is the one a
+  // script reads — but never gate the target-scoped lease release, which
+  // keys on failedDestruction alone. It precedes the temp-dir refusal below
+  // for that same reason: the sockets it reaps live under tmux's own socket
+  // directory, never under REVIEW_TMP_DIR, so a redirected temp dir says
+  // nothing about them — and a refusal there must not strand an orphan for
+  // the whole of its bounded window.
+  const { failed: sweepFailed } = reapOrphanedCaptureServers();
+
   // A bare `pr` target's sweep prefix (`qwen-review-pr-`) is a strict prefix
   // of EVERY PR family, and the lease guard lives inside the `pr-<n>` branch
   // below — which a bare `pr` never enters — so one `cleanup pr` deleted
@@ -1060,8 +1388,10 @@ export function runCleanup(target: string): void {
 
   // "Nothing to clean" is a claim about the tree, not about this run's luck. It
   // is only true when there was nothing there — not when there was and we could
-  // not get rid of it, and not when an entry was deliberately kept.
-  if (!removedAny && !failedAny && preserved.size === 0) {
+  // not get rid of it, not when an entry was deliberately kept, and not when
+  // a base could not be scanned at all — an unreadable directory can be
+  // hiding exactly the thing this claim denies.
+  if (!removedAny && !failedAny && !sweepFailed && preserved.size === 0) {
     writeStdoutLine(`Nothing to clean for target "${target}".`);
   }
 }
