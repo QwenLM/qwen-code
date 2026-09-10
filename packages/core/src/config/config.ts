@@ -47,7 +47,10 @@ import {
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { tokenLimit } from '../core/tokenLimits.js';
-import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
+import {
+  getRuntimeContentGenerator,
+  isTopLevelSession,
+} from '../agents/runtime/agent-context.js';
 import type { ExternalAgentExecutor } from '../agents/runtime/subagent-executor.js';
 import { isTieredEffortWireModel } from '../core/modalityDefaults.js';
 import {
@@ -2457,7 +2460,7 @@ export class Config {
   private readonly artifactPublisher: 'local' | 'host' | 'oss' = 'local';
   private readonly artifactHost?: ArtifactHostConfig;
   private readonly artifactOss?: ArtifactOssConfig;
-  private workflowsEnabled = false;
+  private workflowsEnabled: boolean | undefined;
   private readonly sessionWorkflowEnabled: boolean;
   private sessionWorkflowEnabledProvider?: () => boolean;
   private sessionWorkflowPlanRevision?: SessionWorkflowPlanRevision;
@@ -2796,7 +2799,7 @@ export class Config {
     this.artifactPublisher = params.artifactPublisher ?? 'local';
     this.artifactHost = params.artifactHost;
     this.artifactOss = params.artifactOss;
-    this.workflowsEnabled = params.workflowsEnabled ?? false;
+    this.workflowsEnabled = params.workflowsEnabled;
     this.sessionWorkflowEnabled = params.sessionWorkflowEnabled ?? false;
     this.modelProposedGoals = params.modelProposedGoals ?? 'alwaysAsk';
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
@@ -7995,15 +7998,31 @@ export class Config {
 
   isWorkflowsEnabled(): boolean {
     if (this.provisionalWorkspace) return false;
-    // Workflows are experimental and opt-in: enabled via settings or env var
+    // Workflows are opt-in via settings, env, or the bundled review skill.
     // P1 also honors a kill switch: QWEN_CODE_DISABLE_WORKFLOWS=1 forces off
     if (process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
     if (process.env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1') return true;
-    return this.workflowsEnabled;
+    return this.workflowsEnabled ?? false;
   }
 
-  setWorkflowsEnabled(enabled: boolean): void {
+  setWorkflowsEnabled(enabled: boolean | undefined): void {
     this.workflowsEnabled = enabled;
+  }
+
+  async enableReviewWorkflow(): Promise<void> {
+    if (
+      this.workflowsEnabled === false ||
+      !isTopLevelSession() ||
+      this.getBareMode() ||
+      this.provisionalWorkspace ||
+      process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1'
+    ) {
+      return;
+    }
+    if (await this.registerWorkflowTool(this.getToolRegistry())) {
+      this.setWorkflowsEnabled(true);
+      await this.getLlmClient().setTools();
+    }
   }
 
   /**
@@ -9507,6 +9526,55 @@ export class Config {
     return this.onPersistPermissionRuleCallback;
   }
 
+  // Check permission then register a lazy factory; its import runs on first use.
+  private async registerLazyTool(
+    registry: ToolRegistry,
+    toolName: ToolName,
+    factory: ToolFactory,
+  ): Promise<void> {
+    // PermissionManager handles the coreTools allowlist, deny rules, and
+    // the `tools.eager` allowlist in a single check. A tool the active
+    // eager allowlist omits comes back `deferred`, not `disabled`: it is
+    // still registered — listed in `/tools` and loadable via ToolSearch —
+    // but its schema stays out of the eager model request (#9827) without
+    // the tool silently disappearing (#10075).
+    let status: ToolRegistrationStatus = 'registered';
+    try {
+      // Resolve through the getter, not the `permissionManager` field: on
+      // a Config derived via Object.create (e.g. the skill-review and
+      // managed-memory agent shims installed with deriveConfig), the field
+      // resolves through the prototype chain to the base manager and
+      // would silently bypass the scoped override — demoting the shim's
+      // promised tools under an active `tools.eager` allowlist and letting
+      // prepareTools strip them from the forked agent's explicit tool list
+      // (#10075).
+      const permissionManager = this.getPermissionManager();
+      status = permissionManager
+        ? await permissionManager.getToolRegistrationStatus(toolName)
+        : 'registered'; // Should never reach here after initialize(), but safe default.
+    } catch (error) {
+      this.debugLogger.warn(
+        `Failed to check permissions for tool "${toolName}", skipping registration:`,
+        error,
+      );
+      return;
+    }
+    if (status === 'deferred') {
+      registry.registerPermissionDeferredFactory(toolName, factory);
+    } else if (status === 'registered') {
+      registry.registerFactory(toolName, factory);
+    }
+  }
+
+  private async registerWorkflowTool(registry: ToolRegistry): Promise<boolean> {
+    if (registry.getAllToolNames().includes(ToolNames.WORKFLOW)) return true;
+    await this.registerLazyTool(registry, ToolNames.WORKFLOW, async () => {
+      const { WorkflowTool } = await import('../tools/workflow/workflow.js');
+      return new WorkflowTool(this);
+    });
+    return registry.getAllToolNames().includes(ToolNames.WORKFLOW);
+  }
+
   private async registerImageGenerationTool(
     registry: ToolRegistry,
   ): Promise<void> {
@@ -9598,46 +9666,10 @@ export class Config {
       sendSdkMcpMessage,
     );
 
-    // Helper: check permission then register a lazy factory (no module import
-    // happens here — the dynamic import() only runs when the tool is first used).
-    const registerLazy = async (
+    const registerLazy = (
       toolName: ToolName,
       factory: ToolFactory,
-    ): Promise<void> => {
-      // PermissionManager handles the coreTools allowlist, deny rules, and
-      // the `tools.eager` allowlist in a single check. A tool the active
-      // eager allowlist omits comes back `deferred`, not `disabled`: it is
-      // still registered — listed in `/tools` and loadable via ToolSearch —
-      // but its schema stays out of the eager model request (#9827) without
-      // the tool silently disappearing (#10075).
-      let status: ToolRegistrationStatus = 'registered';
-      try {
-        // Resolve through the getter, not the `permissionManager` field: on
-        // a Config derived via Object.create (e.g. the skill-review and
-        // managed-memory agent shims installed with deriveConfig), the field
-        // resolves through the prototype chain to the base manager and
-        // would silently bypass the scoped override — demoting the shim's
-        // promised tools under an active `tools.eager` allowlist and letting
-        // prepareTools strip them from the forked agent's explicit tool list
-        // (#10075).
-        const permissionManager = this.getPermissionManager();
-        status = permissionManager
-          ? await permissionManager.getToolRegistrationStatus(toolName)
-          : 'registered'; // Should never reach here after initialize(), but safe default.
-      } catch (error) {
-        this.debugLogger.warn(
-          `Failed to check permissions for tool "${toolName}", skipping registration:`,
-          error,
-        );
-        return;
-      }
-
-      if (status === 'deferred') {
-        registry.registerPermissionDeferredFactory(toolName, factory);
-      } else if (status === 'registered') {
-        registry.registerFactory(toolName, factory);
-      }
-    };
+    ): Promise<void> => this.registerLazyTool(registry, toolName, factory);
 
     // The synthetic structured_output tool is the terminal contract for
     // --json-schema runs. It must be registered in BOTH the bare-mode
@@ -10038,10 +10070,7 @@ export class Config {
 
     // Register workflow tool when enabled
     if (this.isWorkflowsEnabled()) {
-      await registerLazy(ToolNames.WORKFLOW, async () => {
-        const { WorkflowTool } = await import('../tools/workflow/workflow.js');
-        return new WorkflowTool(this);
-      });
+      await this.registerWorkflowTool(registry);
     }
 
     // Register monitor tool
