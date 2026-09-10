@@ -625,7 +625,12 @@ export interface BindRunSessionInput {
  */
 export async function reserveRunSession(
   projectRoot: string,
-  input: { threadId: string; runId: string; attempt: number; sessionId: string },
+  input: {
+    threadId: string;
+    runId: string;
+    attempt: number;
+    sessionId: string;
+  },
 ): Promise<void> {
   await withAgentStoreTransaction(projectRoot, async (transaction) => {
     const thread = await transaction.readThread(input.threadId);

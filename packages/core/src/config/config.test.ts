@@ -13609,9 +13609,12 @@ describe('applyWorkspaceAgentPersona', () => {
     const agent = await agentSession().createToolRegistry(undefined, {
       skipDiscovery: true,
     });
-    const ordinary = await new Config(baseParams).createToolRegistry(undefined, {
-      skipDiscovery: true,
-    });
+    const ordinary = await new Config(baseParams).createToolRegistry(
+      undefined,
+      {
+        skipDiscovery: true,
+      },
+    );
     for (const name of [
       'thread_post',
       'thread_read',
@@ -13641,7 +13644,12 @@ describe('applyWorkspaceAgentPersona', () => {
       'write_file',
     ]);
     const guard = config.getToolInvocationGuard()!;
-    for (const toolName of ['read_file', 'thread_review', 'write_file', 'glob']) {
+    for (const toolName of [
+      'read_file',
+      'thread_review',
+      'write_file',
+      'glob',
+    ]) {
       const result = await guard({
         callId: 'guard-check',
         toolName,

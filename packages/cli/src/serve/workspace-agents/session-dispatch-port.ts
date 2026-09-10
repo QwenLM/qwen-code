@@ -101,11 +101,7 @@ export function createSessionDispatchPort(
     // is visible, otherwise a live body can be closed while calling a thread
     // tool.
     for (;;) {
-      const status = await getSessionTurnStatus(
-        sessionId,
-        undefined,
-        promptId,
-      );
+      const status = await getSessionTurnStatus(sessionId, undefined, promptId);
       if (
         status?.promptId === promptId &&
         (status.state === 'completed' ||

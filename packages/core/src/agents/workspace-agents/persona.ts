@@ -113,6 +113,25 @@ export async function resolveAgentPersona(
           error: `Agent definition "${agent.agentType}" is unavailable.`,
         };
       }
+      // A definition may name an external agent to run its turns on (#11003).
+      // That is honoured by `SubagentManager.createAgentHeadless`, which a
+      // workspace agent never goes through: it is its own top-level session,
+      // started from `acpAgent.ts` with the persona resolved here. Borrowing
+      // such a definition would take its prompt, model and tools and then run
+      // the turn locally as Qwen — the operator asked for one runtime and got
+      // another, wearing the first one's instructions.
+      //
+      // Refused rather than ignored, on the same reasoning as the rendered
+      // prompt below. A workspace agent that should run elsewhere says so with
+      // `execution: { mode: 'managed-host' }` on its own record, which the
+      // dispatcher honours; an executor block on a borrowed definition is a
+      // misconfiguration, and a silent one is the expensive kind.
+      if (loaded.executor !== undefined) {
+        return {
+          status: 'unavailable',
+          error: `Agent definition "${agent.agentType}" declares an external executor, which a workspace Agent cannot use. Set execution.mode to "managed-host" on the Agent instead, or use a definition without an executor block.`,
+        };
+      }
       const runtime = await manager.convertToRuntimeConfig(loaded, config);
       definitionModel = loaded.model;
       definitionTools = runtime.toolConfig;

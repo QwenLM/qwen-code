@@ -36,10 +36,7 @@ import type { A2AGrant, A2AGrantScope } from './types.js';
  * are explicitly not the default. A grant that cannot express "read-only"
  * would make the safe case unrepresentable and the unsafe one the only option.
  */
-export const A2A_GRANT_SCOPES: readonly A2AGrantScope[] = [
-  'analysis',
-  'full',
-];
+export const A2A_GRANT_SCOPES: readonly A2AGrantScope[] = ['analysis', 'full'];
 
 function hashSecret(secret: string): string {
   return createHash('sha256').update(secret).digest('hex');

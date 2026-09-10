@@ -115,10 +115,7 @@ async function writeCredential(
   await fs.rename(temporary, filePath);
 }
 
-async function requestJson<T>(
-  url: string,
-  init: RequestInit,
-): Promise<T> {
+async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   const result = (await response.json().catch(() => ({}))) as {
     error?: string;
@@ -164,9 +161,7 @@ function modelPrompt(assignment: HostRunAssignment): string {
   const instructions = assignment.agent.instructions?.trim();
   return [
     `You are ${assignment.agent.name}, an independent persistent workspace Agent running on a managed Host.`,
-    instructions
-      ? `Your workspace instructions:\n${instructions}`
-      : undefined,
+    instructions ? `Your workspace instructions:\n${instructions}` : undefined,
     'Work on the assigned task using read-only inspection tools. Do not call thread_* tools on this Host. End with a concise result for the parent Agent or person; the Host will post it back to the shared thread.',
     assignment.prompt,
   ]

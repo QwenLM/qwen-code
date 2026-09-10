@@ -25,7 +25,13 @@
 export interface ThreadSummaryView {
   id: string;
   title: string;
-  status: 'open' | 'in_progress' | 'blocked' | 'in_review' | 'done' | 'cancelled';
+  status:
+    | 'open'
+    | 'in_progress'
+    | 'blocked'
+    | 'in_review'
+    | 'done'
+    | 'cancelled';
   /** The resolver's own sentence. Rendered verbatim; never re-derived. */
   reason: string;
   updatedAt: number;
@@ -135,8 +141,7 @@ export function groupThreads(
     // task is not.
     if (thread.status === 'done' || thread.status === 'cancelled') {
       done.push(thread);
-    }
-    else if (thread.status === 'blocked' || thread.status === 'in_review') {
+    } else if (thread.status === 'blocked' || thread.status === 'in_review') {
       needsYou.push(thread);
     } else if (thread.liveRunCount > 0) running.push(thread);
     else idle.push(thread);

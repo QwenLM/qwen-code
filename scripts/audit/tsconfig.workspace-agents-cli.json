@@ -6,14 +6,10 @@
     "incremental": false,
     "declaration": false,
     "outDir": null,
-    "types": [
-      "node"
-    ],
+    "types": ["node"],
     "baseUrl": "../..",
     "paths": {
-      "@qwen-code/qwen-code-core": [
-        "packages/core/index.ts"
-      ],
+      "@qwen-code/qwen-code-core": ["packages/core/index.ts"],
       "@qwen-code/qwen-code-core/transcriptRecords": [
         "packages/core/src/utils/transcript-records.ts"
       ],
@@ -50,27 +46,17 @@
       "@qwen-code/qwen-code-core/conversationsRuntimeMarker": [
         "packages/core/src/utils/conversations-runtime-marker.ts"
       ],
-      "@qwen-code/qwen-code-core/*": [
-        "packages/core/src/*"
-      ],
-      "@qwen-code/acp-bridge": [
-        "packages/acp-bridge/src/index.ts"
-      ],
-      "@qwen-code/acp-bridge/eventBus": [
-        "packages/acp-bridge/src/eventBus.ts"
-      ],
+      "@qwen-code/qwen-code-core/*": ["packages/core/src/*"],
+      "@qwen-code/acp-bridge": ["packages/acp-bridge/src/index.ts"],
+      "@qwen-code/acp-bridge/eventBus": ["packages/acp-bridge/src/eventBus.ts"],
       "@qwen-code/acp-bridge/inMemoryChannel": [
         "packages/acp-bridge/src/inMemoryChannel.ts"
       ],
-      "@qwen-code/acp-bridge/channel": [
-        "packages/acp-bridge/src/channel.ts"
-      ],
+      "@qwen-code/acp-bridge/channel": ["packages/acp-bridge/src/channel.ts"],
       "@qwen-code/acp-bridge/permission": [
         "packages/acp-bridge/src/permission.ts"
       ],
-      "@qwen-code/acp-bridge/status": [
-        "packages/acp-bridge/src/status.ts"
-      ],
+      "@qwen-code/acp-bridge/status": ["packages/acp-bridge/src/status.ts"],
       "@qwen-code/acp-bridge/externalToolGuard": [
         "packages/acp-bridge/src/externalToolGuard.ts"
       ],
@@ -122,9 +108,7 @@
       "@qwen-code/acp-bridge/bridgeClient": [
         "packages/acp-bridge/src/bridgeClient.ts"
       ],
-      "@qwen-code/acp-bridge/bridge": [
-        "packages/acp-bridge/src/bridge.ts"
-      ],
+      "@qwen-code/acp-bridge/bridge": ["packages/acp-bridge/src/bridge.ts"],
       "@qwen-code/acp-bridge/bridgeFileSystem": [
         "packages/acp-bridge/src/bridgeFileSystem.ts"
       ],
@@ -149,18 +133,10 @@
       "@qwen-code/acp-bridge/transcriptReplay": [
         "packages/acp-bridge/src/transcript-replay.ts"
       ],
-      "@qwen-code/acp-bridge/*": [
-        "packages/acp-bridge/src/*"
-      ],
-      "@qwen-code/channel-base": [
-        "packages/channels/base/src/index.ts"
-      ],
-      "@qwen-code/channel-base/*": [
-        "packages/channels/base/src/*"
-      ],
-      "@lydell/node-pty": [
-        "node_modules/@lydell/node-pty/node-pty.d.ts"
-      ]
+      "@qwen-code/acp-bridge/*": ["packages/acp-bridge/src/*"],
+      "@qwen-code/channel-base": ["packages/channels/base/src/index.ts"],
+      "@qwen-code/channel-base/*": ["packages/channels/base/src/*"],
+      "@lydell/node-pty": ["node_modules/@lydell/node-pty/node-pty.d.ts"]
     }
   },
   "include": [
@@ -173,7 +149,5 @@
     "../../packages/cli/src/serve/capabilities.ts",
     "../../packages/cli/src/serve/server/serve-features.ts"
   ],
-  "exclude": [
-    "../../packages/cli/src/**/*.test.ts"
-  ]
+  "exclude": ["../../packages/cli/src/**/*.test.ts"]
 }

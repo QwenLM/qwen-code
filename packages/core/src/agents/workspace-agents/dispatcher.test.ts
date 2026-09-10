@@ -397,11 +397,14 @@ describe('dispatchOnce', () => {
     const finished = after.runs.find((entry) => entry.id === 'rn_1')!;
     expect(finished.status).toBe('completed');
     expect(finished.consumedMessageIds).toEqual([]);
-    expect(after.deliveryByAgent[ALICE.id]?.committedThroughSequence ?? 0).toBe(0);
+    expect(after.deliveryByAgent[ALICE.id]?.committedThroughSequence ?? 0).toBe(
+      0,
+    );
     expect(
       after.runs.some(
         (entry) =>
-          entry.id !== finished.id && entry.triggerMessageIds.includes(messageId),
+          entry.id !== finished.id &&
+          entry.triggerMessageIds.includes(messageId),
       ),
     ).toBe(true);
   });
@@ -447,7 +450,9 @@ describe('dispatchOnce', () => {
     const resumed = (await readThread(PROJECT_ROOT, thread.id))!.runs[0]!;
     expect(resumed.attempts).toBe(2);
     expect(resumed.usageBaselineTokens).toBe(125);
-    expect(resumed.usageByRound).toEqual([{ attempt: 1, round: 1, tokens: 25 }]);
+    expect(resumed.usageByRound).toEqual([
+      { attempt: 1, round: 1, tokens: 25 },
+    ]);
   });
 
   it('chooses the runtime entry point from the body state', async () => {

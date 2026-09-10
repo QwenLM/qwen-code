@@ -120,12 +120,18 @@ async function collaborationTools({ collaboration, sourceType, subagent }) {
 
 const SESSION_KINDS = [
   { label: 'an ordinary session', sourceType: undefined, subagent: false },
-  { label: "an ordinary session's subagent", sourceType: undefined, subagent: true },
+  {
+    label: "an ordinary session's subagent",
+    sourceType: undefined,
+    subagent: true,
+  },
   { label: 'an agent session', sourceType: 'agent', subagent: false },
   { label: "an agent's subagent", sourceType: 'agent', subagent: true },
 ];
 
-console.log('1. with the switch off, no session kind sees the collaboration tools');
+console.log(
+  '1. with the switch off, no session kind sees the collaboration tools',
+);
 for (const kind of SESSION_KINDS) {
   const tools = await collaborationTools({ collaboration: false, ...kind });
   ok(`${kind.label} sees none`, tools.length === 0, JSON.stringify(tools));
@@ -205,7 +211,9 @@ ok(
   withoutEnv.isAgentCollaborationEnabled() === false,
 );
 
-console.log('\n5. clients can tell, because the capability tag follows the switch');
+console.log(
+  '\n5. clients can tell, because the capability tag follows the switch',
+);
 const TAG = 'agent_collaboration_v1';
 const advertisedOff = M.getAdvertisedServeFeatures(undefined, {});
 const advertisedFalse = M.getAdvertisedServeFeatures(undefined, {

@@ -85,7 +85,10 @@ function contentHashOf(submission: ExternalSubmission): string {
   return hash.digest('hex');
 }
 
-function findByKey(threads: readonly Thread[], key: string): Thread | undefined {
+function findByKey(
+  threads: readonly Thread[],
+  key: string,
+): Thread | undefined {
   return threads.find((thread) => thread.externalIntake?.key === key);
 }
 

@@ -45,7 +45,13 @@ export interface ThreadDetailView {
   priority?: 'urgent' | 'high' | 'normal' | 'low';
   parent?: { id: string; title: string };
   assigneeName?: string;
-  status: 'open' | 'in_progress' | 'blocked' | 'in_review' | 'done' | 'cancelled';
+  status:
+    | 'open'
+    | 'in_progress'
+    | 'blocked'
+    | 'in_review'
+    | 'done'
+    | 'cancelled';
   /** The resolver's sentence. Rendered verbatim. */
   reason: string;
   posts: readonly ThreadPostView[];
@@ -405,7 +411,10 @@ export function ThreadView({
                 {post.outcomes?.map((outcome, index) => {
                   const skipped =
                     outcome.kind === 'skip'
-                      ? explainSkip(outcome.reason ?? '', outcome.agentName ?? '')
+                      ? explainSkip(
+                          outcome.reason ?? '',
+                          outcome.agentName ?? '',
+                        )
                       : undefined;
                   const result = skipped
                     ? `${skipped.what}. ${skipped.fix}`

@@ -1950,7 +1950,9 @@ ok(
   `${rosterBefore} -> ${(await M.readWorkspaceAgents(ROOT)).length}`,
 );
 
-console.log('\n27. server binding: the store names the session before it exists');
+console.log(
+  '\n27. server binding: the store names the session before it exists',
+);
 // Session creation is where an `sourceType: agent` claim gets checked, and the
 // check is "some live run names this session". `bindRunSession` only runs after
 // `start` returns, so unless the id is reserved first, the very first turn of
@@ -1984,7 +1986,8 @@ ok(
 );
 ok(
   'so the binding lookup a session-creation check makes already succeeds',
-  bindingAtStart?.runId === bind1.runId && bindingAtStart?.threadId === bind1.th.id,
+  bindingAtStart?.runId === bind1.runId &&
+    bindingAtStart?.threadId === bind1.th.id,
   JSON.stringify(bindingAtStart),
 );
 ok(
@@ -1999,7 +2002,8 @@ ok(
 );
 ok(
   'a session with no id at all has no binding',
-  (await M.findAgentSessionBinding(ROOT, undefined, bind1.agentId)) === undefined,
+  (await M.findAgentSessionBinding(ROOT, undefined, bind1.agentId)) ===
+    undefined,
 );
 
 // A started run stays live, which is the whole point: its session is being
@@ -2040,17 +2044,16 @@ await M.dispatchOnce(ROOT, {
     return { status: 'started', sessionId: 'sess-late', consumedOnStart: true };
   },
 });
-ok(
-  'a port without plannedSessionId still dispatches',
-  sawUnplanned,
-);
+ok('a port without plannedSessionId still dispatches', sawUnplanned);
 ok(
   'and bindRunSession still records the id it reports',
   (await M.readThread(ROOT, bind2.th.id)).runs.find((r) => r.id === bind2.runId)
     ?.sessionId === 'sess-late',
 );
 
-console.log('\n28. stranded runs: the switch closes them, recovery must not revive');
+console.log(
+  '\n28. stranded runs: the switch closes them, recovery must not revive',
+);
 // Recovery treats a `running` run with no body as a crash and starts it again.
 // A run the operator switched off underneath looks identical to it, so the
 // difference is recorded at the one moment it is knowable: a daemon starting
@@ -2089,10 +2092,7 @@ await M.dispatchOnce(ROOT, {
     return { status: 'started', sessionId: 's', consumedOnStart: true };
   },
 });
-ok(
-  're-enabling does not re-dispatch a stranded run',
-  !restartedStranded,
-);
+ok('re-enabling does not re-dispatch a stranded run', !restartedStranded);
 ok(
   'and it stays terminal across that tick',
   (await M.readThread(ROOT, st1.th.id)).runs.find((r) => r.id === st1.runId)
@@ -2141,15 +2141,19 @@ ok(
 ok(
   'the five required operations are all named',
   M.A2A_REQUIRED_OPERATIONS.length === 5 &&
-    ['sendMessage', 'getTask', 'listTasks', 'cancelTask', 'getAuthenticatedExtendedAgentCard'].every(
-      (op) => M.A2A_REQUIRED_OPERATIONS.includes(op),
-    ),
+    [
+      'sendMessage',
+      'getTask',
+      'listTasks',
+      'cancelTask',
+      'getAuthenticatedExtendedAgentCard',
+    ].every((op) => M.A2A_REQUIRED_OPERATIONS.includes(op)),
   JSON.stringify(M.A2A_REQUIRED_OPERATIONS),
 );
 ok(
   'every optional operation is gated on a capability flag it needs',
-  Object.values(M.A2A_OPTIONAL_OPERATIONS).every((cap) =>
-    cap === 'streaming' || cap === 'pushNotifications',
+  Object.values(M.A2A_OPTIONAL_OPERATIONS).every(
+    (cap) => cap === 'streaming' || cap === 'pushNotifications',
   ),
   JSON.stringify(M.A2A_OPTIONAL_OPERATIONS),
 );
@@ -2162,9 +2166,12 @@ ok(
 ok(
   'the four terminal states are the four the spec calls terminal',
   M.A2A_TERMINAL_STATES.size === 4 &&
-    ['TASK_STATE_COMPLETED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED', 'TASK_STATE_REJECTED'].every(
-      (state) => M.A2A_TERMINAL_STATES.has(state),
-    ),
+    [
+      'TASK_STATE_COMPLETED',
+      'TASK_STATE_FAILED',
+      'TASK_STATE_CANCELED',
+      'TASK_STATE_REJECTED',
+    ].every((state) => M.A2A_TERMINAL_STATES.has(state)),
   JSON.stringify([...M.A2A_TERMINAL_STATES]),
 );
 
@@ -2222,8 +2229,16 @@ ok(
 // character inside one must not be able to forge another caller's key.
 ok(
   'a caller cannot forge another key by smuggling a separator into an id',
-  M.externalRequestKey({ callerId: 'a', targetAgentId: 'b:c', messageId: 'd' }) !==
-    M.externalRequestKey({ callerId: 'a', targetAgentId: 'b', messageId: 'c:d' }),
+  M.externalRequestKey({
+    callerId: 'a',
+    targetAgentId: 'b:c',
+    messageId: 'd',
+  }) !==
+    M.externalRequestKey({
+      callerId: 'a',
+      targetAgentId: 'b',
+      messageId: 'c:d',
+    }),
 );
 for (const missing of ['callerId', 'targetAgentId', 'messageId']) {
   ok(
@@ -2281,7 +2296,11 @@ const submission = {
   acceptanceCriteria: 'A summary naming the top-level packages',
 };
 const first = await M.acceptExternalSubmission(ROOT, submission);
-ok('a first submission is accepted', first.outcome === 'accepted', first.outcome);
+ok(
+  'a first submission is accepted',
+  first.outcome === 'accepted',
+  first.outcome,
+);
 ok(
   'and lands as a thread aimed at the named agent',
   first.thread.assigneeAgentId === 'ag_ext',
@@ -2365,7 +2384,8 @@ ok(
 );
 ok(
   'locally raised threads belong to no external caller',
-  oneList.every((t) => t.externalIntake) && twoList.every((t) => t.externalIntake),
+  oneList.every((t) => t.externalIntake) &&
+    twoList.every((t) => t.externalIntake),
 );
 ok(
   "a caller cannot read another caller's thread by id",
@@ -2435,7 +2455,7 @@ const cancelled = await M.cancelExternalThreadForCaller(
   'client-one',
   toCancel.thread.id,
 );
-ok('cancelling this caller\'s own task succeeds', cancelled !== undefined);
+ok("cancelling this caller's own task succeeds", cancelled !== undefined);
 ok(
   'the thread is terminal afterwards',
   M.isThreadTerminal(cancelled.thread.status) &&
@@ -2518,13 +2538,13 @@ ok(
 );
 ok(
   'and that task is still live',
-  !M.isThreadTerminal(
-    (await M.readThread(ROOT, otherCancel.thread.id)).status,
-  ),
+  !M.isThreadTerminal((await M.readThread(ROOT, otherCancel.thread.id)).status),
 );
 
 // Cancelling something already finished must not rewrite how it ended.
-const cancelDoneThread = await M.createThread(ROOT, { title: 'Finished elsewhere' });
+const cancelDoneThread = await M.createThread(ROOT, {
+  title: 'Finished elsewhere',
+});
 await M.writeThread(ROOT, {
   ...(await M.readThread(ROOT, cancelDoneThread.id)),
   status: 'done',
@@ -2551,7 +2571,12 @@ ok(
 console.log('\n32. the five required A2A operations, over the local store');
 await M.updateWorkspaceAgents(ROOT, (a) => [
   ...a,
-  { id: 'ag_open', name: 'opened', createdAt: 1, description: 'Read-only analysis' },
+  {
+    id: 'ag_open',
+    name: 'opened',
+    createdAt: 1,
+    description: 'Read-only analysis',
+  },
   { id: 'ag_closed', name: 'notopened', createdAt: 1 },
 ]);
 const a2aIssued = await M.issueA2AGrant(ROOT, {
@@ -2560,7 +2585,10 @@ const a2aIssued = await M.issueA2AGrant(ROOT, {
   scope: 'analysis',
 });
 const a2aA = { callerId: 'partner-a', secret: a2aIssued.secret };
-ok('issuing a grant returns the secret exactly once', typeof a2aIssued.secret === 'string' && a2aIssued.secret.length > 20);
+ok(
+  'issuing a grant returns the secret exactly once',
+  typeof a2aIssued.secret === 'string' && a2aIssued.secret.length > 20,
+);
 ok(
   'and never stores it — only a digest is persisted',
   !JSON.stringify(await M.listA2AGrants(ROOT)).includes(a2aIssued.secret),
@@ -2577,7 +2605,11 @@ const a2aSent = await M.a2aSendMessage(ROOT, a2aA, {
   title: 'Analyse the sample repo',
   body: 'List the top-level packages',
 });
-ok('an authorized caller can submit work', a2aSent.ok === true, JSON.stringify(a2aSent));
+ok(
+  'an authorized caller can submit work',
+  a2aSent.ok === true,
+  JSON.stringify(a2aSent),
+);
 ok(
   'and gets a Task whose contextId is the thread tree, not the thread',
   a2aSent.value.contextId === a2aSent.value.id,
@@ -2600,7 +2632,10 @@ const a2aResent = await M.a2aSendMessage(ROOT, a2aA, {
   title: 'Analyse the sample repo',
   body: 'List the top-level packages',
 });
-ok('resending the same message yields the same task', a2aResent.ok && a2aResent.value.id === a2aSent.value.id);
+ok(
+  'resending the same message yields the same task',
+  a2aResent.ok && a2aResent.value.id === a2aSent.value.id,
+);
 const a2aConflicting = await M.a2aSendMessage(ROOT, a2aA, {
   agentId: 'ag_open',
   messageId: 'm-1',
@@ -2626,21 +2661,56 @@ ok('and listed for it', a2aListed.ok && a2aListed.value.length === 1);
 const badSecret = { callerId: 'partner-a', secret: 'not-the-secret' };
 ok(
   'a wrong secret is refused',
-  (await M.a2aSendMessage(ROOT, badSecret, { agentId: 'ag_open', messageId: 'm-2', title: 't', body: 'b' })).kind === 'refused',
+  (
+    await M.a2aSendMessage(ROOT, badSecret, {
+      agentId: 'ag_open',
+      messageId: 'm-2',
+      title: 't',
+      body: 'b',
+    })
+  ).kind === 'refused',
 );
 ok(
   'an agent this caller was not granted is refused',
-  (await M.a2aSendMessage(ROOT, a2aA, { agentId: 'ag_closed', messageId: 'm-3', title: 't', body: 'b' })).kind === 'refused',
+  (
+    await M.a2aSendMessage(ROOT, a2aA, {
+      agentId: 'ag_closed',
+      messageId: 'm-3',
+      title: 't',
+      body: 'b',
+    })
+  ).kind === 'refused',
 );
 ok(
   'and an unknown agent is refused the same way, revealing nothing',
-  (await M.a2aSendMessage(ROOT, a2aA, { agentId: 'ag_nonexistent', messageId: 'm-4', title: 't', body: 'b' })).kind ===
-    (await M.a2aSendMessage(ROOT, a2aA, { agentId: 'ag_closed', messageId: 'm-5', title: 't', body: 'b' })).kind,
+  (
+    await M.a2aSendMessage(ROOT, a2aA, {
+      agentId: 'ag_nonexistent',
+      messageId: 'm-4',
+      title: 't',
+      body: 'b',
+    })
+  ).kind ===
+    (
+      await M.a2aSendMessage(ROOT, a2aA, {
+        agentId: 'ag_closed',
+        messageId: 'm-5',
+        title: 't',
+        body: 'b',
+      })
+    ).kind,
 );
 const unknownCaller = { callerId: 'stranger', secret: a2aIssued.secret };
 ok(
   'a caller holding a valid secret it was not issued is refused',
-  (await M.a2aSendMessage(ROOT, unknownCaller, { agentId: 'ag_open', messageId: 'm-6', title: 't', body: 'b' })).kind === 'refused',
+  (
+    await M.a2aSendMessage(ROOT, unknownCaller, {
+      agentId: 'ag_open',
+      messageId: 'm-6',
+      title: 't',
+      body: 'b',
+    })
+  ).kind === 'refused',
 );
 
 // a2aA second authorized client shares the queue but not the work.
@@ -2663,41 +2733,82 @@ ok(
   (await M.a2aGetTask(ROOT, a2aB, a2aSent.value.id)).kind === 'not_found',
 );
 ok(
-  "nor cancel it",
+  'nor cancel it',
   (await M.a2aCancelTask(ROOT, a2aB, a2aSent.value.id)).kind === 'not_found',
 );
 const listedB = await M.a2aListTasks(ROOT, a2aB, 'ag_open');
 ok(
   'and lists only its own',
-  listedB.ok && listedB.value.length === 1 && listedB.value[0].id === sentB.value.id,
+  listedB.ok &&
+    listedB.value.length === 1 &&
+    listedB.value[0].id === sentB.value.id,
 );
 
 // Scope. a2aA read-only grant may not do full-scope work.
 const a2aScoped = await M.checkA2AGrant(ROOT, {
-  callerId: 'partner-a', agentId: 'ag_open', secret: a2aIssued.secret, required: 'full',
+  callerId: 'partner-a',
+  agentId: 'ag_open',
+  secret: a2aIssued.secret,
+  required: 'full',
 });
-ok('an analysis grant does not satisfy a full-scope call', a2aScoped.ok === false && a2aScoped.reason === 'out_of_scope');
+ok(
+  'an analysis grant does not satisfy a full-scope call',
+  a2aScoped.ok === false && a2aScoped.reason === 'out_of_scope',
+);
 const fullIssued = await M.issueA2AGrant(ROOT, {
-  callerId: 'partner-c', agentId: 'ag_open', scope: 'full',
+  callerId: 'partner-c',
+  agentId: 'ag_open',
+  scope: 'full',
 });
 const fullCheck = await M.checkA2AGrant(ROOT, {
-  callerId: 'partner-c', agentId: 'ag_open', secret: fullIssued.secret, required: 'analysis',
+  callerId: 'partner-c',
+  agentId: 'ag_open',
+  secret: fullIssued.secret,
+  required: 'analysis',
 });
 ok('but a full grant satisfies an analysis call', fullCheck.ok === true);
 
 // Expiry and revocation are different things and both must bite.
 const a2aExpired = await M.issueA2AGrant(ROOT, {
-  callerId: 'partner-d', agentId: 'ag_open', scope: 'analysis', expiresAt: 1,
+  callerId: 'partner-d',
+  agentId: 'ag_open',
+  scope: 'analysis',
+  expiresAt: 1,
 });
 ok(
   'an expired grant is refused',
-  (await M.a2aSendMessage(ROOT, { callerId: 'partner-d', secret: a2aExpired.secret }, { agentId: 'ag_open', messageId: 'm-7', title: 't', body: 'b' })).kind === 'refused',
+  (
+    await M.a2aSendMessage(
+      ROOT,
+      { callerId: 'partner-d', secret: a2aExpired.secret },
+      { agentId: 'ag_open', messageId: 'm-7', title: 't', body: 'b' },
+    )
+  ).kind === 'refused',
 );
-ok('revoking a grant reports that it was there', (await M.revokeA2AGrant(ROOT, { callerId: 'partner-b', agentId: 'ag_open' })) === true);
-ok('revoking twice reports that it was not', (await M.revokeA2AGrant(ROOT, { callerId: 'partner-b', agentId: 'ag_open' })) === false);
+ok(
+  'revoking a grant reports that it was there',
+  (await M.revokeA2AGrant(ROOT, {
+    callerId: 'partner-b',
+    agentId: 'ag_open',
+  })) === true,
+);
+ok(
+  'revoking twice reports that it was not',
+  (await M.revokeA2AGrant(ROOT, {
+    callerId: 'partner-b',
+    agentId: 'ag_open',
+  })) === false,
+);
 ok(
   'a revoked caller can no longer submit',
-  (await M.a2aSendMessage(ROOT, a2aB, { agentId: 'ag_open', messageId: 'm-8', title: 't', body: 'b' })).kind === 'refused',
+  (
+    await M.a2aSendMessage(ROOT, a2aB, {
+      agentId: 'ag_open',
+      messageId: 'm-8',
+      title: 't',
+      body: 'b',
+    })
+  ).kind === 'refused',
 );
 ok(
   'nor read the work it had already submitted',
@@ -2709,18 +2820,37 @@ ok(
 );
 
 // Re-issuing replaces rather than accumulating.
-const a2aReissued = await M.issueA2AGrant(ROOT, { callerId: 'partner-a', agentId: 'ag_open', scope: 'analysis' });
+const a2aReissued = await M.issueA2AGrant(ROOT, {
+  callerId: 'partner-a',
+  agentId: 'ag_open',
+  scope: 'analysis',
+});
 ok(
   'the old secret stops working when a grant is re-issued',
-  (await M.a2aSendMessage(ROOT, a2aA, { agentId: 'ag_open', messageId: 'm-9', title: 't', body: 'b' })).kind === 'refused',
+  (
+    await M.a2aSendMessage(ROOT, a2aA, {
+      agentId: 'ag_open',
+      messageId: 'm-9',
+      title: 't',
+      body: 'b',
+    })
+  ).kind === 'refused',
 );
 ok(
   'and the new one works',
-  (await M.a2aSendMessage(ROOT, { callerId: 'partner-a', secret: a2aReissued.secret }, { agentId: 'ag_open', messageId: 'm-10', title: 't', body: 'b' })).ok === true,
+  (
+    await M.a2aSendMessage(
+      ROOT,
+      { callerId: 'partner-a', secret: a2aReissued.secret },
+      { agentId: 'ag_open', messageId: 'm-10', title: 't', body: 'b' },
+    )
+  ).ok === true,
 );
 ok(
   'with exactly one grant for that pair, not two',
-  (await M.listA2AGrants(ROOT)).filter((g) => g.callerId === 'partner-a' && g.agentId === 'ag_open').length === 1,
+  (await M.listA2AGrants(ROOT)).filter(
+    (g) => g.callerId === 'partner-a' && g.agentId === 'ag_open',
+  ).length === 1,
 );
 
 // A retired agent is not a way in, even with a live grant. Needs an agent with
@@ -2732,7 +2862,9 @@ await M.updateWorkspaceAgents(ROOT, (a) => [
   { id: 'ag_retiree', name: 'retiree', createdAt: 1 },
 ]);
 const retireeGrant = await M.issueA2AGrant(ROOT, {
-  callerId: 'partner-e', agentId: 'ag_retiree', scope: 'analysis',
+  callerId: 'partner-e',
+  agentId: 'ag_retiree',
+  scope: 'analysis',
 });
 const retireeCaller = { callerId: 'partner-e', secret: retireeGrant.secret };
 ok(
@@ -2745,7 +2877,14 @@ ok(
 );
 ok(
   'after which the same live grant admits nobody',
-  (await M.a2aSendMessage(ROOT, retireeCaller, { agentId: 'ag_retiree', messageId: 'm-11', title: 't', body: 'b' })).kind === 'refused',
+  (
+    await M.a2aSendMessage(ROOT, retireeCaller, {
+      agentId: 'ag_retiree',
+      messageId: 'm-11',
+      title: 't',
+      body: 'b',
+    })
+  ).kind === 'refused',
 );
 ok(
   'and its tasks are no longer readable through it either',
@@ -2764,30 +2903,35 @@ const codexTurn = (status, items, error) => ({
 
 ok(
   'a file change is a result',
-  M.classifyCodexTurn(codexTurn('completed', ['commandExecution', 'fileChange'])).kind ===
-    'result_ready',
+  M.classifyCodexTurn(
+    codexTurn('completed', ['commandExecution', 'fileChange']),
+  ).kind === 'result_ready',
 );
 ok(
   'so is an explicit review completion',
-  M.classifyCodexTurn(codexTurn('completed', ['enteredReviewMode', 'exitedReviewMode'])).kind ===
-    'result_ready',
+  M.classifyCodexTurn(
+    codexTurn('completed', ['enteredReviewMode', 'exitedReviewMode']),
+  ).kind === 'result_ready',
 );
 ok(
   'and the evidence names which item made it one',
   JSON.stringify(
-    M.classifyCodexTurn(codexTurn('completed', ['fileChange', 'fileChange'])).evidence,
+    M.classifyCodexTurn(codexTurn('completed', ['fileChange', 'fileChange']))
+      .evidence,
   ) === '["fileChange"]',
 );
 
 // The rule's whole purpose.
 ok(
   'an assistant message is NOT a result, however finished it sounds',
-  M.classifyCodexTurn(codexTurn('completed', ['agentMessage'])).kind === 'unclosed',
+  M.classifyCodexTurn(codexTurn('completed', ['agentMessage'])).kind ===
+    'unclosed',
 );
 ok(
   'nor are commands run, searches made or plans written',
   ['commandExecution', 'webSearch', 'plan', 'reasoning', 'mcpToolCall'].every(
-    (item) => M.classifyCodexTurn(codexTurn('completed', [item])).kind === 'unclosed',
+    (item) =>
+      M.classifyCodexTurn(codexTurn('completed', [item])).kind === 'unclosed',
   ),
 );
 ok(
@@ -2798,41 +2942,51 @@ ok(
 // task the plan opens externally, lands here.
 ok(
   'a read-only analysis therefore waits for a person',
-  M.classifyCodexTurn(codexTurn('completed', ['commandExecution', 'agentMessage'])).kind ===
-    'unclosed',
+  M.classifyCodexTurn(
+    codexTurn('completed', ['commandExecution', 'agentMessage']),
+  ).kind === 'unclosed',
 );
 
 ok(
   'an interrupted turn is neither a result nor a failure',
-  M.classifyCodexTurn(codexTurn('interrupted', ['fileChange'])).kind === 'interrupted',
+  M.classifyCodexTurn(codexTurn('interrupted', ['fileChange'])).kind ===
+    'interrupted',
 );
 ok(
   'a failed turn keeps the error Codex gave',
   (() => {
     const out = M.classifyCodexTurn(
-      codexTurn('failed', [], { message: 'boom', codexErrorInfo: 'UsageLimitExceeded' }),
+      codexTurn('failed', [], {
+        message: 'boom',
+        codexErrorInfo: 'UsageLimitExceeded',
+      }),
     );
     return out.kind === 'failed' && out.codexErrorInfo === 'UsageLimitExceeded';
   })(),
 );
 ok(
   'and a failed turn is a failure even if it produced a deliverable first',
-  M.classifyCodexTurn(codexTurn('failed', ['fileChange'], { message: 'boom' })).kind === 'failed',
+  M.classifyCodexTurn(codexTurn('failed', ['fileChange'], { message: 'boom' }))
+    .kind === 'failed',
 );
 
 ok(
   'a delivered result closes for review, not as a silent success',
-  M.codexOutcomeToCloseKind(M.classifyCodexTurn(codexTurn('completed', ['fileChange']))) ===
-    'review',
+  M.codexOutcomeToCloseKind(
+    M.classifyCodexTurn(codexTurn('completed', ['fileChange'])),
+  ) === 'review',
 );
 ok(
   'a vague Codex turn is recorded exactly as a vague local one is',
-  M.codexOutcomeToCloseKind(M.classifyCodexTurn(codexTurn('completed', ['agentMessage']))) ===
-    'unclosed',
+  M.codexOutcomeToCloseKind(
+    M.classifyCodexTurn(codexTurn('completed', ['agentMessage'])),
+  ) === 'unclosed',
 );
 ok(
   'and an interrupted or failed turn claims no close kind at all',
-  M.codexOutcomeToCloseKind(M.classifyCodexTurn(codexTurn('interrupted', []))) === undefined &&
+  M.codexOutcomeToCloseKind(
+    M.classifyCodexTurn(codexTurn('interrupted', [])),
+  ) === undefined &&
     M.codexOutcomeToCloseKind(
       M.classifyCodexTurn(codexTurn('failed', [], { message: 'x' })),
     ) === undefined,
@@ -2844,7 +2998,9 @@ ok(
   ),
 );
 
-console.log('\n34. Host leases: a vanished worker must not overwrite its successor (P4)');
+console.log(
+  '\n34. Host leases: a vanished worker must not overwrite its successor (P4)',
+);
 // A managed Host reaches out and nothing reaches in, so the daemon cannot tell
 // a Host that is thinking from one whose network died. Work it holds has to
 // become available again on its own — and the danger in that is the first Host
@@ -2854,51 +3010,93 @@ const T0 = 1_000_000;
 
 const got = await M.acquireRunLease(
   ROOT,
-  { threadId: leaseThread.th.id, runId: leaseThread.runId, hostId: 'host-a', ttlMs: 1000 },
+  {
+    threadId: leaseThread.th.id,
+    runId: leaseThread.runId,
+    hostId: 'host-a',
+    ttlMs: 1000,
+  },
   T0,
 );
-ok('a Host can take a lease on live work', got.ok === true, JSON.stringify(got));
-ok('the lease names the attempt it is for', got.value.attempt === 1, String(got.value?.attempt));
+ok(
+  'a Host can take a lease on live work',
+  got.ok === true,
+  JSON.stringify(got),
+);
+ok(
+  'the lease names the attempt it is for',
+  got.value.attempt === 1,
+  String(got.value?.attempt),
+);
 ok(
   "a second Host is refused while the first's lease is live",
-  (await M.acquireRunLease(
-    ROOT,
-    { threadId: leaseThread.th.id, runId: leaseThread.runId, hostId: 'host-b' },
-    T0 + 500,
-  )).reason === 'held_by_other_host',
+  (
+    await M.acquireRunLease(
+      ROOT,
+      {
+        threadId: leaseThread.th.id,
+        runId: leaseThread.runId,
+        hostId: 'host-b',
+      },
+      T0 + 500,
+    )
+  ).reason === 'held_by_other_host',
 );
 ok(
   'and being refused does not disturb the holder',
-  (await M.checkRunLease(
-    ROOT,
-    { threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: got.value.leaseId },
-    T0 + 500,
-  )).ok === true,
+  (
+    await M.checkRunLease(
+      ROOT,
+      {
+        threadId: leaseThread.th.id,
+        runId: leaseThread.runId,
+        leaseId: got.value.leaseId,
+      },
+      T0 + 500,
+    )
+  ).ok === true,
 );
 
 // Heartbeats extend a hold; they do not revive a lapsed one.
 const renewed = await M.renewRunLease(
   ROOT,
-  { threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: got.value.leaseId, ttlMs: 1000 },
+  {
+    threadId: leaseThread.th.id,
+    runId: leaseThread.runId,
+    leaseId: got.value.leaseId,
+    ttlMs: 1000,
+  },
   T0 + 500,
 );
 ok('a live lease renews', renewed.ok === true);
 ok('and the window moves with it', renewed.value.expiresAt === T0 + 1500);
 ok(
   'a lapsed lease does not renew — that is the case the window exists to notice',
-  (await M.renewRunLease(
-    ROOT,
-    { threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: got.value.leaseId },
-    T0 + 99_999,
-  )).reason === 'stale_lease',
+  (
+    await M.renewRunLease(
+      ROOT,
+      {
+        threadId: leaseThread.th.id,
+        runId: leaseThread.runId,
+        leaseId: got.value.leaseId,
+      },
+      T0 + 99_999,
+    )
+  ).reason === 'stale_lease',
 );
 ok(
   "and one Host cannot renew another's lease",
-  (await M.renewRunLease(
-    ROOT,
-    { threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: 'someone-elses' },
-    T0 + 600,
-  )).reason === 'stale_lease',
+  (
+    await M.renewRunLease(
+      ROOT,
+      {
+        threadId: leaseThread.th.id,
+        runId: leaseThread.runId,
+        leaseId: 'someone-elses',
+      },
+      T0 + 600,
+    )
+  ).reason === 'stale_lease',
 );
 
 // The whole point: reclaim, then refuse the ghost.
@@ -2914,19 +3112,31 @@ ok(
 );
 ok(
   "the vanished Host's write is now refused",
-  (await M.checkRunLease(
-    ROOT,
-    { threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: got.value.leaseId },
-    T0 + 100_000,
-  )).reason === 'stale_lease',
+  (
+    await M.checkRunLease(
+      ROOT,
+      {
+        threadId: leaseThread.th.id,
+        runId: leaseThread.runId,
+        leaseId: got.value.leaseId,
+      },
+      T0 + 100_000,
+    )
+  ).reason === 'stale_lease',
 );
 ok(
   'while the new holder may write',
-  (await M.checkRunLease(
-    ROOT,
-    { threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: reclaimed.value.leaseId },
-    T0 + 100_000,
-  )).ok === true,
+  (
+    await M.checkRunLease(
+      ROOT,
+      {
+        threadId: leaseThread.th.id,
+        runId: leaseThread.runId,
+        leaseId: reclaimed.value.leaseId,
+      },
+      T0 + 100_000,
+    )
+  ).ok === true,
 );
 
 // The subtler case: same Host, run restarted. An id from the previous attempt
@@ -2940,19 +3150,31 @@ await M.writeThread(ROOT, {
 });
 ok(
   'a lease from the previous attempt is refused even though its id matches',
-  (await M.checkRunLease(
-    ROOT,
-    { threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: reclaimed.value.leaseId },
-    T0 + 100_000,
-  )).reason === 'attempt_moved_on',
+  (
+    await M.checkRunLease(
+      ROOT,
+      {
+        threadId: leaseThread.th.id,
+        runId: leaseThread.runId,
+        leaseId: reclaimed.value.leaseId,
+      },
+      T0 + 100_000,
+    )
+  ).reason === 'attempt_moved_on',
 );
 ok(
   'and it cannot be renewed back into currency either',
-  (await M.renewRunLease(
-    ROOT,
-    { threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: reclaimed.value.leaseId },
-    T0 + 100_000,
-  )).reason === 'attempt_moved_on',
+  (
+    await M.renewRunLease(
+      ROOT,
+      {
+        threadId: leaseThread.th.id,
+        runId: leaseThread.runId,
+        leaseId: reclaimed.value.leaseId,
+      },
+      T0 + 100_000,
+    )
+  ).reason === 'attempt_moved_on',
 );
 
 // Giving it back early, and only your own.
@@ -2962,34 +3184,54 @@ const third = await M.acquireRunLease(
   T0 + 200_000,
 );
 ok(
-  "a Host cannot release a lease it does not hold",
-  (await M.releaseRunLease(ROOT, {
-    threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: 'not-mine',
-  })).reason === 'stale_lease',
+  'a Host cannot release a lease it does not hold',
+  (
+    await M.releaseRunLease(ROOT, {
+      threadId: leaseThread.th.id,
+      runId: leaseThread.runId,
+      leaseId: 'not-mine',
+    })
+  ).reason === 'stale_lease',
 );
 ok(
   'but can hand its own back before the window ends',
-  (await M.releaseRunLease(ROOT, {
-    threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: third.value.leaseId,
-  })).ok === true,
+  (
+    await M.releaseRunLease(ROOT, {
+      threadId: leaseThread.th.id,
+      runId: leaseThread.runId,
+      leaseId: third.value.leaseId,
+    })
+  ).ok === true,
 );
 ok(
   'after which the work is immediately available again',
-  (await M.acquireRunLease(
-    ROOT,
-    { threadId: leaseThread.th.id, runId: leaseThread.runId, hostId: 'host-d' },
-    T0 + 200_001,
-  )).ok === true,
+  (
+    await M.acquireRunLease(
+      ROOT,
+      {
+        threadId: leaseThread.th.id,
+        runId: leaseThread.runId,
+        hostId: 'host-d',
+      },
+      T0 + 200_001,
+    )
+  ).ok === true,
 );
 
 // Terminal work is not leasable: a Host would do work nothing will accept.
 const finished = await startFor('Already finished');
-await M.finishRun(ROOT, finished.th.id, finished.runId, { status: 'completed' });
+await M.finishRun(ROOT, finished.th.id, finished.runId, {
+  status: 'completed',
+});
 ok(
   'a terminal run cannot be leased',
-  (await M.acquireRunLease(ROOT, {
-    threadId: finished.th.id, runId: finished.runId, hostId: 'host-a',
-  })).reason === 'not_leasable',
+  (
+    await M.acquireRunLease(ROOT, {
+      threadId: finished.th.id,
+      runId: finished.runId,
+      hostId: 'host-a',
+    })
+  ).reason === 'not_leasable',
 );
 
 console.log('\n35. one glance answers the three questions (P5)');
@@ -3020,21 +3262,35 @@ const p5Summary = M.view.summariseWorkspaceWork(
       ? { kind: 'external', callerId: 'partner-a' }
       : { kind: 'local' },
 );
-ok('waiting work is queued', p5Summary.queued.map((t) => t.id).join() === 't-queued');
-ok('live work is running', p5Summary.running.map((t) => t.id).join() === 't-running');
+ok(
+  'waiting work is queued',
+  p5Summary.queued.map((t) => t.id).join() === 't-queued',
+);
+ok(
+  'live work is running',
+  p5Summary.running.map((t) => t.id).join() === 't-running',
+);
 ok(
   'a question and finished work both read as needing a person',
-  p5Summary.needsAnswer.map((t) => t.id).sort().join() === 't-blocked,t-review',
+  p5Summary.needsAnswer
+    .map((t) => t.id)
+    .sort()
+    .join() === 't-blocked,t-review',
   JSON.stringify(p5Summary.needsAnswer.map((t) => t.id)),
 );
 ok(
   'done and cancelled are both over',
-  p5Summary.finished.map((f) => f.thread.id).sort().join() === 't-cancelled,t-done',
+  p5Summary.finished
+    .map((f) => f.thread.id)
+    .sort()
+    .join() === 't-cancelled,t-done',
 );
 ok(
   'and each finished item says whose it is',
-  p5Summary.finished.find((f) => f.thread.id === 't-done').owner.callerId === 'partner-a' &&
-    p5Summary.finished.find((f) => f.thread.id === 't-cancelled').owner.kind === 'local',
+  p5Summary.finished.find((f) => f.thread.id === 't-done').owner.callerId ===
+    'partner-a' &&
+    p5Summary.finished.find((f) => f.thread.id === 't-cancelled').owner.kind ===
+      'local',
 );
 ok(
   'sub-threads are folded into their parent, not listed as work of their own',
@@ -3044,8 +3300,11 @@ ok(
 );
 ok(
   'every thread lands in exactly one place, so nothing is counted twice',
-  p5Summary.queued.length + p5Summary.running.length + p5Summary.needsAnswer.length +
-    p5Summary.finished.length === 6,
+  p5Summary.queued.length +
+    p5Summary.running.length +
+    p5Summary.needsAnswer.length +
+    p5Summary.finished.length ===
+    6,
 );
 // A blocked thread mid-teardown still shows a live run. Saying "running" there
 // makes a person wait for something that will not happen.
@@ -3058,9 +3317,8 @@ ok(
 );
 ok(
   'and with no owner function everything is simply local',
-  M.view
-    .summariseWorkspaceWork([p5Row('t-done2', 'done')])
-    .finished[0].owner.kind === 'local',
+  M.view.summariseWorkspaceWork([p5Row('t-done2', 'done')]).finished[0].owner
+    .kind === 'local',
 );
 
 console.log('\n36. Host pickup selection (added after the lease work)');
@@ -3242,7 +3500,10 @@ const secondForX = await workFor('ag_hx', 'Second for host 1');
 await M.updateWorkspaceAgents(ROOT, (a) =>
   a.map((agent) =>
     agent.id === 'ag_hx'
-      ? { ...agent, execution: { mode: 'managed-host', hostIds: ['host-1', 'host-3'] } }
+      ? {
+          ...agent,
+          execution: { mode: 'managed-host', hostIds: ['host-1', 'host-3'] },
+        }
       : agent,
   ),
 );
@@ -3257,7 +3518,11 @@ await M.updateWorkspaceAgents(ROOT, (a) =>
     agent.id === 'ag_hx' ? { ...agent, maxConcurrentRuns: 2 } : agent,
   ),
 );
-const peerUnderRaisedLimit = await M.pickupRunForHost(ROOT, 'host-3', 2_001_100);
+const peerUnderRaisedLimit = await M.pickupRunForHost(
+  ROOT,
+  'host-3',
+  2_001_100,
+);
 ok(
   'and takes the waiting run once the limit allows a second',
   peerUnderRaisedLimit?.runId === secondForX.runId,
@@ -3290,18 +3555,33 @@ const resultOf = (over = {}) => ({
 // closed by an earlier assertion.
 ok(
   'a result under a lease id nobody holds is refused',
-  (await M.applyHostRunResult(ROOT, resultOf({ leaseId: 'not-a-lease' }), 3_000_100))
-    .reason === 'stale_lease',
+  (
+    await M.applyHostRunResult(
+      ROOT,
+      resultOf({ leaseId: 'not-a-lease' }),
+      3_000_100,
+    )
+  ).reason === 'stale_lease',
 );
 ok(
   'a result naming a different Host is refused even with the right lease id',
-  (await M.applyHostRunResult(ROOT, resultOf({ hostId: 'host-other' }), 3_000_100))
-    .reason === 'stale_lease',
+  (
+    await M.applyHostRunResult(
+      ROOT,
+      resultOf({ hostId: 'host-other' }),
+      3_000_100,
+    )
+  ).reason === 'stale_lease',
 );
 ok(
   'a result for a previous attempt is refused, and says so distinctly',
-  (await M.applyHostRunResult(ROOT, resultOf({ attempt: resTaken.attempt - 1 }), 3_000_100))
-    .reason === 'attempt_moved_on',
+  (
+    await M.applyHostRunResult(
+      ROOT,
+      resultOf({ attempt: resTaken.attempt - 1 }),
+      3_000_100,
+    )
+  ).reason === 'attempt_moved_on',
 );
 ok(
   'a result for a run that does not exist is refused',
@@ -3317,12 +3597,23 @@ ok(
 
 // The legitimate write.
 const applied = await M.applyHostRunResult(ROOT, resultOf(), 3_000_200);
-ok('the holder may report its result', applied.ok === true, JSON.stringify(applied));
-ok('and it is not a replay the first time', applied.value.alreadyApplied === false);
+ok(
+  'the holder may report its result',
+  applied.ok === true,
+  JSON.stringify(applied),
+);
+ok(
+  'and it is not a replay the first time',
+  applied.value.alreadyApplied === false,
+);
 const afterResult = (await M.readThread(ROOT, resWork.threadId)).runs.find(
   (r) => r.id === resWork.runId,
 );
-ok('the run reaches a terminal status', afterResult.status === 'completed', afterResult.status);
+ok(
+  'the run reaches a terminal status',
+  afterResult.status === 'completed',
+  afterResult.status,
+);
 ok(
   'carrying the close kind the Host reported, not an implicit success',
   afterResult.closeKind === 'review',
@@ -3376,7 +3667,11 @@ ok('a failed result applies', failed.ok === true, JSON.stringify(failed));
 const failedRun = (await M.readThread(ROOT, failWork.threadId)).runs.find(
   (r) => r.id === failWork.runId,
 );
-ok('and the run is failed, not completed', failedRun.status === 'failed', failedRun.status);
+ok(
+  'and the run is failed, not completed',
+  failedRun.status === 'failed',
+  failedRun.status,
+);
 ok(
   'with the reason the Host gave, and no close kind invented for it',
   failedRun.error === 'the sandbox died' && failedRun.closeKind === undefined,
@@ -3429,6 +3724,59 @@ ok(
   !(await M.listThreads(ROOT)).threads.some(
     (t) => t.title === 'Nobody owns me',
   ),
+);
+
+console.log(
+  '\n40. a definition that names another runtime is not silently ignored',
+);
+// Subagent definitions gained an `executor` block (#11003): the turn runs on an
+// external agent over ACP. Workspace agents borrow a definition's prompt, model
+// and tool config through `agentType`, but they never go through
+// `createAgentHeadless`, which is the only thing that honours an executor — so
+// an executor attached this way cannot take effect.
+await M.updateWorkspaceAgents(ROOT, (a) => [
+  ...a,
+  { id: 'ag_ext_exec', name: 'extexec', createdAt: 1, agentType: 'delegated' },
+]);
+const executorCfg = {
+  getProjectRoot: () => ROOT,
+  getSubagentManager: () => ({
+    loadSubagent: async () => ({
+      name: 'delegated',
+      executor: { command: 'claude', args: [] },
+    }),
+    convertToRuntimeConfig: async () => ({
+      promptConfig: { systemPrompt: 'BASE' },
+      toolConfig: { tools: ['*'] },
+    }),
+  }),
+};
+const executorPersona = await M.resolveAgentPersona(executorCfg, 'ag_ext_exec');
+ok(
+  'resolution refuses rather than running the turn locally under a foreign prompt',
+  executorPersona.status !== 'resolved',
+  JSON.stringify(executorPersona.status),
+);
+ok(
+  'and the refusal says what was ignored, so the misconfiguration is findable',
+  /executor/i.test(executorPersona.error ?? ''),
+  String(executorPersona.error),
+);
+// The same definition without the executor block still resolves, so this is a
+// refusal of one field and not of borrowed definitions generally.
+const plainCfg = {
+  getProjectRoot: () => ROOT,
+  getSubagentManager: () => ({
+    loadSubagent: async () => ({ name: 'delegated' }),
+    convertToRuntimeConfig: async () => ({
+      promptConfig: { systemPrompt: 'BASE' },
+      toolConfig: { tools: ['*'] },
+    }),
+  }),
+};
+ok(
+  'the same definition without an executor still resolves',
+  (await M.resolveAgentPersona(plainCfg, 'ag_ext_exec')).status === 'resolved',
 );
 
 await fs.rm(tmp, { recursive: true, force: true });

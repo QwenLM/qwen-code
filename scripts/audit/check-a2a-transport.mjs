@@ -175,8 +175,16 @@ const message = (messageId, text) => ({
   message: { messageId, role: 'ROLE_USER', parts: [{ text }] },
 });
 const message0 = () => message('m-version', 'probe');
-const asA = { callerId: 'partner-a', agentId: 'ag_open', secret: grantA.secret };
-const asB = { callerId: 'partner-b', agentId: 'ag_open', secret: grantB.secret };
+const asA = {
+  callerId: 'partner-a',
+  agentId: 'ag_open',
+  secret: grantA.secret,
+};
+const asB = {
+  callerId: 'partner-b',
+  agentId: 'ag_open',
+  secret: grantB.secret,
+};
 
 console.log('1. the public card is for discovery, not enumeration');
 const cardResponse = await fetch(`${origin}/.well-known/agent-card.json`);
@@ -254,7 +262,11 @@ const refusals = [
   ],
 ];
 for (const [label, response] of refusals) {
-  ok(`${label} is refused`, response.body.error !== undefined, JSON.stringify(response.body).slice(0, 120));
+  ok(
+    `${label} is refused`,
+    response.body.error !== undefined,
+    JSON.stringify(response.body).slice(0, 120),
+  );
 }
 const codes = new Set(refusals.map(([, r]) => r.body.error?.code));
 ok(
@@ -272,7 +284,11 @@ ok(
 console.log('\n4. work goes in and comes back');
 const sent = await rpc('SendMessage', message('m-1', 'Summarise it'), asA);
 const task = sent.body.result?.task ?? sent.body.result;
-ok('an authorized caller submits work', sent.body.error === undefined, JSON.stringify(sent.body).slice(0, 200));
+ok(
+  'an authorized caller submits work',
+  sent.body.error === undefined,
+  JSON.stringify(sent.body).slice(0, 200),
+);
 ok(
   'and gets a task back',
   typeof task?.id === 'string',
@@ -300,7 +316,11 @@ ok(
 const threadsNow = (await M.listThreads(projectRoot)).threads;
 ok(
   'and the store holds one piece of work, not two',
-  threadsNow.filter((t) => t.externalIntake?.messageId === 'm-1' && t.externalIntake?.callerId === 'partner-a').length === 1,
+  threadsNow.filter(
+    (t) =>
+      t.externalIntake?.messageId === 'm-1' &&
+      t.externalIntake?.callerId === 'partner-a',
+  ).length === 1,
 );
 
 const conflicting = await rpc(
@@ -347,10 +367,15 @@ ok('nor cancel it', bCancelsA.body.error !== undefined);
 const bReadsNothing = await rpc('GetTask', { id: 'th_does_not_exist' }, asB);
 ok(
   'and a task that is not yours is indistinguishable from one that does not exist',
-  JSON.stringify(bReadsA.body.error) === JSON.stringify(bReadsNothing.body.error),
+  JSON.stringify(bReadsA.body.error) ===
+    JSON.stringify(bReadsNothing.body.error),
   `${JSON.stringify(bReadsA.body.error)} vs ${JSON.stringify(bReadsNothing.body.error)}`,
 );
-const bCancelsNothing = await rpc('CancelTask', { id: 'th_does_not_exist' }, asB);
+const bCancelsNothing = await rpc(
+  'CancelTask',
+  { id: 'th_does_not_exist' },
+  asB,
+);
 ok(
   'and cancelling either answers the same way too',
   JSON.stringify(bCancelsA.body.error) ===
@@ -366,7 +391,11 @@ ok(
 );
 
 console.log('\n6. what is not implemented is refused, not faked');
-const streamed = await rpc('SendStreamingMessage', message('m-2', 'stream it'), asA);
+const streamed = await rpc(
+  'SendStreamingMessage',
+  message('m-2', 'stream it'),
+  asA,
+);
 ok(
   'streaming is refused, matching the capability the card advertises',
   streamed.body.error !== undefined,
@@ -376,7 +405,11 @@ ok(
 console.log('\n7. cancellation reaches the caller as CANCELED');
 const cancelled = await rpc('CancelTask', { id: task.id }, asA);
 const cancelledTask = cancelled.body.result?.task ?? cancelled.body.result;
-ok('the owner may cancel', cancelled.body.error === undefined, JSON.stringify(cancelled.body).slice(0, 200));
+ok(
+  'the owner may cancel',
+  cancelled.body.error === undefined,
+  JSON.stringify(cancelled.body).slice(0, 200),
+);
 ok(
   'and the task reports TASK_STATE_CANCELED',
   cancelledTask?.status?.state === 'TASK_STATE_CANCELED',

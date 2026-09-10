@@ -17,7 +17,6 @@ import {
   searchWorkspaceSessionsForResponse,
 } from '../server/session-list.js';
 
-
 async function writeStoredSession(
   workspace: string,
   sessionId: string,

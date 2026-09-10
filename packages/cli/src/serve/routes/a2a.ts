@@ -10,6 +10,7 @@ import {
   TaskState,
   taskStateFromJSON,
   type ListTasksResponse,
+  type StreamResponse,
   type Task,
 } from '@a2a-js/sdk';
 import {
@@ -131,6 +132,14 @@ function fail(failure: A2AFailure): never {
         message: `Message id was already used for different content. Existing task: ${failure.existingTaskId}.`,
         metadata: { existingTaskId: failure.existingTaskId },
       });
+    default: {
+      // `A2AFailure` is a closed union, so this is unreachable today. It is
+      // here so that adding a member is a compile error at the one place that
+      // decides what a caller is told, rather than a silent fall-through that
+      // returns success for a failure.
+      const unreachable: never = failure;
+      throw new Error(`Unmapped A2A failure: ${JSON.stringify(unreachable)}`);
+    }
   }
 }
 
@@ -309,7 +318,7 @@ function unsupported(): JsonRpcUnsupportedOperationError {
   });
 }
 
-function requestHandler(registry: WorkspaceRegistry): A2ARequestHandler {
+function requestHandler(_registry: WorkspaceRegistry): A2ARequestHandler {
   return {
     getAgentCard: async () => publicCard('http://localhost'),
 
@@ -409,7 +418,11 @@ function requestHandler(registry: WorkspaceRegistry): A2ARequestHandler {
       return result;
     },
 
-    sendMessageStream: async function* () {
+    // Declared with the generator signature the interface requires, but it
+    // refuses before yielding: the capability is advertised false, so a client
+    // that follows the card never calls it, and one that ignores the card is
+    // told rather than left waiting on a stream that will not come.
+    sendMessageStream(): AsyncGenerator<StreamResponse, void, undefined> {
       throw unsupported();
     },
     createTaskPushNotificationConfig: async () => {
@@ -424,7 +437,7 @@ function requestHandler(registry: WorkspaceRegistry): A2ARequestHandler {
     deleteTaskPushNotificationConfig: async () => {
       throw unsupported();
     },
-    resubscribe: async function* () {
+    resubscribe(): AsyncGenerator<StreamResponse, void, undefined> {
       throw unsupported();
     },
   };

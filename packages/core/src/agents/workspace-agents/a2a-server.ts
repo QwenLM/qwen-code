@@ -51,7 +51,9 @@ export type A2AFailure =
   | { kind: 'conflict'; existingTaskId: string }
   | { kind: 'invalid'; detail: string };
 
-export type A2AResult<T> = { ok: true; value: T } | { ok: false } & A2AFailure;
+export type A2AResult<T> =
+  | { ok: true; value: T }
+  | ({ ok: false } & A2AFailure);
 
 /** The A2A `Task` this daemon publishes, in the shape the spec names. */
 export interface A2ATaskView {
@@ -123,12 +125,21 @@ export async function a2aSendMessage(
   },
 ): Promise<A2AResult<A2ATaskView>> {
   if (!request.messageId || !request.body) {
-    return { ok: false, kind: 'invalid', detail: 'messageId and body required' };
+    return {
+      ok: false,
+      kind: 'invalid',
+      detail: 'messageId and body required',
+    };
   }
   // Submitting work is `analysis` scope: it is the least a caller can be
   // granted and still be useful, so a read-only grant can do it. What the
   // agent is then allowed to *do* is the agent's own tool policy, not this.
-  const auth = await authorize(projectRoot, caller, request.agentId, 'analysis');
+  const auth = await authorize(
+    projectRoot,
+    caller,
+    request.agentId,
+    'analysis',
+  );
   if (!auth.ok) return { ok: false, kind: 'refused' };
   try {
     const accepted = await acceptExternalSubmission(projectRoot, {
@@ -170,7 +181,8 @@ export async function a2aGetTask(
     caller.callerId,
     taskId,
   );
-  if (!thread || !thread.externalIntake) return { ok: false, kind: 'not_found' };
+  if (!thread || !thread.externalIntake)
+    return { ok: false, kind: 'not_found' };
   const auth = await authorize(
     projectRoot,
     caller,
