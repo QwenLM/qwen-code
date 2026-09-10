@@ -36295,6 +36295,75 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
+  it('never promotes a queued mid-turn message once the session is closing', async () => {
+    const releases: Array<() => void> = [];
+    const closeStarted = deferred<void>();
+    const closeGate = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((r) => {
+          releases.push(r);
+        });
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: async (method) => {
+        if (method !== 'qwen/control/session/close') return {};
+        closeStarted.resolve();
+        return closeGate.promise;
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const send = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'occupy the turn' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+    const admission = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'queued behind the turn',
+      { clientId: session.clientId },
+      'closing-queued',
+      { rejectIfIdle: true },
+    );
+    expect(admission).toEqual({ accepted: true, messageId: 'closing-queued' });
+
+    const close = bridge.closeSession(session.sessionId);
+    await closeStarted.promise;
+    // The turn settles while the session is closing: nothing the queue still
+    // holds may be promoted into the FIFO.
+    releases[0]!();
+    await send;
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(releases).toHaveLength(1);
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
+    // The message stays queued (the teardown will discard it): a promotion
+    // attempt would splice it and the closing sendPrompt gate would drop it,
+    // vanishing it from every ring.
+    expect(bridge.getMidTurnMessages(session.sessionId)).toEqual({
+      messages: [
+        expect.objectContaining({
+          messageId: 'closing-queued',
+          text: 'queued behind the turn',
+        }),
+      ],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+
+    closeGate.resolve({});
+    await close;
+    await bridge.shutdown();
+  });
+
   it('promotes a stable-id request that reaches an idle session', async () => {
     const { factory, release } = hangingPromptFactory();
     const bridge = makeBridge({ channelFactory: factory });

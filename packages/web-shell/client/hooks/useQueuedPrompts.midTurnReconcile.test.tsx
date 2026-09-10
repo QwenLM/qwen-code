@@ -12022,4 +12022,182 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await harness.dispose();
     }
   });
+
+  it('echoes the real payload when a cleared first-time image submission still runs', async () => {
+    let resolveFirst: ((value: { promptId: string }) => void) | undefined;
+    sdkMock.actions.submitPrompt
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockImplementation(() => new Promise(() => {}));
+    sdkMock.actions.removePendingPrompt.mockResolvedValue({
+      removed: false,
+    });
+    const image = { data: 'aGVsbG8=', media_type: 'image/png' } as const;
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'idle' });
+      // An image-only submission whose admission is still in flight.
+      await act(async () => {
+        harness.result().enqueuePrompt('', [image]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(1);
+      // The user clears the queue before the admission lands: the row drops
+      // locally, and the body can only hand the prompt to the daemon's
+      // removal path once the id arrives.
+      act(() => {
+        harness.result().clearQueuedPrompts();
+      });
+      expect(harness.result().queuedPrompts).toEqual([]);
+      // A turn is active by the time the admission resolves — the daemon
+      // has already started the prompt, so the removal is refused.
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        resolveFirst?.({ promptId: 'prompt-1' });
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.removePendingPrompt).toHaveBeenCalledWith(
+        'prompt-1',
+        { sessionId: 'session-a' },
+      );
+      // An unrelated submission is in flight, so the started event's raw
+      // echo is suppressed and the start parks — the payload must come from
+      // the body's stash, not from the event's '[image]' rendering.
+      await act(async () => {
+        sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+          (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+            opts?.onAdmissionStarted?.();
+            return Promise.resolve({
+              accepted: false,
+              reason: 'session_idle',
+            });
+          },
+        );
+        harness.result().enqueuePrompt('unrelated');
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-1',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-1',
+              text: '[image]',
+            },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
+        '',
+        [{ data: 'aGVsbG8=', mimeType: 'image/png' }],
+        { promptId: 'prompt-1' },
+        undefined,
+      );
+      // The settle must not echo the placeholder a second time.
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'turn_complete',
+            promptId: 'prompt-1',
+            data: { sessionId: 'session-a', promptId: 'prompt-1' },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('restores a claimed draft when the submission fails before admission starts', async () => {
+    let rejectSecond: ((error: Error) => void) | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false, reason: 'session_idle' });
+      },
+    );
+    sdkMock.actions.submitPrompt
+      .mockResolvedValueOnce({ promptId: 'prompt-1' })
+      .mockImplementationOnce(
+        () =>
+          new Promise((_, reject) => {
+            rejectSecond = reject;
+          }),
+      );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts.mockResolvedValue({
+          pendingPrompts: [
+            {
+              promptId: 'prompt-1',
+              text: 'same text',
+              queuedAt: Date.now(),
+              state: 'running' as const,
+              originatorClientId: CLIENT_ID,
+            },
+          ],
+        });
+        harness.result().enqueuePrompt('same text');
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      // The identical resubmission is in flight when a sync whose snapshot
+      // predates its admission claims the row for the displayed prompt.
+      await act(async () => {
+        harness.result().enqueuePrompt('same text');
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-other',
+            originatorClientId: 'client-other',
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-other',
+              text: 'someone else',
+            },
+          },
+        ]);
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      expect(harness.result().queuedPrompts).toEqual([]);
+      // Nothing reached the daemon, so the failure path still owns the
+      // claimed row: the draft is restored and the failure reported.
+      await act(async () => {
+        rejectSecond?.(new Error('network lost'));
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+      });
+      expect(harness.editor.setText).toHaveBeenCalledWith('same text');
+      expect(harness.reportError).toHaveBeenCalledTimes(1);
+      expect(harness.reportError).toHaveBeenCalledWith(
+        expect.any(Error),
+        'queue.queueFailed',
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
 });

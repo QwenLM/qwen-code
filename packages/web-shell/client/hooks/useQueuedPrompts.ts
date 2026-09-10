@@ -2140,10 +2140,9 @@ export function useQueuedPrompts({
               return;
             }
             // The daemon returned this prompt id for this very row, so binding
-            // to it is not a guess even when the snapshot is missing: the
-            // started event corrects the state label when it lands, while an
-            // unbound row can be neither echoed, nor cleared against the
-            // daemon, nor deleted by the user.
+            // to it is not a guess: the started event corrects the state label
+            // when it lands, while an unbound row can be neither echoed, nor
+            // cleared against the daemon, nor deleted by the user.
             const bindRowToPrompt = () => {
               const next = queuedPromptsRef.current.map((item) =>
                 item.id === localId
@@ -2266,14 +2265,36 @@ export function useQueuedPrompts({
               if (!refreshedInBody) void refreshPendingPrompts(targetSessionId);
               return;
             }
+            // The removal can still fail — a started prompt is not
+            // removable — and the started event carries only rendered text,
+            // so keep the payload under the daemon's id until the outcome:
+            // a failed removal replays the echo from here instead of
+            // dropping to the placeholder.
+            if (
+              (prompt.images?.length ?? 0) > 0 ||
+              (prompt.files?.length ?? 0) > 0 ||
+              (prompt.inputAnnotations?.length ?? 0) > 0
+            ) {
+              pendingEchoByPromptIdRef.current.set(result.promptId, prompt);
+              while (pendingEchoByPromptIdRef.current.size > 200) {
+                const oldestEcho = pendingEchoByPromptIdRef.current
+                  .keys()
+                  .next().value;
+                if (typeof oldestEcho !== 'string') break;
+                pendingEchoByPromptIdRef.current.delete(oldestEcho);
+              }
+            }
             sessionActions
               .removePendingPrompt(result.promptId, {
                 sessionId: targetSessionId,
               })
               .then(
                 (removeResult) => {
-                  if (!removeResult.removed)
+                  if (removeResult.removed) {
+                    pendingEchoByPromptIdRef.current.delete(result.promptId);
+                  } else {
                     void refreshPendingPrompts(targetSessionId);
+                  }
                 },
                 () => {
                   void refreshPendingPrompts(targetSessionId);
