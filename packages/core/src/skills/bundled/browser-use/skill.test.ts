@@ -54,7 +54,7 @@ describe('bundled browser-use skill', () => {
     expect(skill).not.toContain('domSnapshot({ filter:');
   });
 
-  it('outputs screenshot metadata before the image in one cell', async () => {
+  it('passes the complete screenshot and metadata to emitImage', async () => {
     const example = [...skill.matchAll(/```js\n([\s\S]*?)```/g)].find(
       ([, code]) => code.includes('tab.screenshot()'),
     )?.[1];
@@ -85,9 +85,6 @@ describe('bundled browser-use skill', () => {
     });
 
     expect(screenshot).toHaveBeenCalledTimes(1);
-    expect(output).toEqual([
-      { text: JSON.stringify(shot.metadata) },
-      { image: { bytes: shot.bytes, mimeType: shot.mimeType } },
-    ]);
+    expect(output).toEqual([{ image: shot }]);
   });
 });

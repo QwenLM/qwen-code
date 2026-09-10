@@ -154,9 +154,14 @@ than model-facing options.
 Viewport screenshots return JPEG bytes, a MIME type, and metadata carrying the
 original image dimensions, viewport, device pixel ratio, and CSS-pixel coordinate
 space so visual coordinates remain usable when a model client resizes the
-preview. The skill outputs the metadata with `nodeRepl.write()` before passing
-only the bytes and MIME type to `nodeRepl.emitImage()` in the same cell. This uses
-the existing Node REPL output APIs without extending its image protocol.
+preview. The skill passes the complete screenshot to `nodeRepl.emitImage()`.
+Metadata travels on the image event and is returned immediately before each
+retained image, independently of the ordinary text output budget. Rejected or
+omitted images do not leave metadata behind. There is no metadata-specific size
+cap; the existing protocol-frame and client output limits still apply.
+Node REPL distribution/version synchronization is deferred to a follow-up that
+will consider bundling the MCP server with Qwen Code. This protocol support is
+not available in the published 0.1.2 and 0.1.3 packages verified for this change.
 Viewport screenshots are limited by their encoded byte size rather than rejected
 from viewport dimensions alone. Explicit clips and full-page captures retain a
 pixel budget because their dimensions are caller-controlled or potentially

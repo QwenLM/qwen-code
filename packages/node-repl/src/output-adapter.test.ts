@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   convertOutcomeToMcpResult,
+  MAX_MODEL_IMAGES,
   MAX_MODEL_TEXT_TOKENS,
 } from './output-adapter.js';
 import {
@@ -73,15 +74,124 @@ describe('convertOutcomeToMcpResult', () => {
     expect(image?.data).toBe(PNG_BASE64);
   });
 
+  it('places image metadata immediately before the image', () => {
+    const result = convertOutcomeToMcpResult(
+      outcome({
+        status: 'ok',
+        events: [
+          {
+            type: 'image',
+            data: PNG_BASE64,
+            mimeType: 'image/png',
+            metadata: '{"width":1,"height":1,"coordinateSpace":"css-pixels"}',
+          },
+        ],
+      }),
+    );
+
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: '[image metadata] {"width":1,"height":1,"coordinateSpace":"css-pixels"}\n',
+      },
+      { type: 'image', data: PNG_BASE64, mimeType: 'image/png' },
+    ]);
+  });
+
+  it.each(['before', 'after'])(
+    'preserves image metadata with oversized prose %s the image',
+    (position) => {
+      const metadata = JSON.stringify({ label: '界'.repeat(20000) });
+      const text = {
+        type: 'text' as const,
+        kind: 'write' as const,
+        text: 'x'.repeat(500_000),
+      };
+      const image = {
+        type: 'image' as const,
+        data: PNG_BASE64,
+        mimeType: 'image/png',
+        metadata,
+      };
+      const result = convertOutcomeToMcpResult(
+        outcome({
+          status: 'ok',
+          events: position === 'before' ? [text, image] : [image, text],
+        }),
+      );
+      const imageIndex = result.content.findIndex((b) => b.type === 'image');
+      expect(imageIndex).toBeGreaterThan(0);
+      expect(result.content[imageIndex - 1]).toEqual({
+        type: 'text',
+        text: `[image metadata] ${metadata}\n`,
+      });
+      expect(textOf(result)).toContain('truncated');
+      const imageWithoutMetadata = {
+        type: 'image' as const,
+        data: PNG_BASE64,
+        mimeType: 'image/png',
+      };
+      const withoutMetadata = convertOutcomeToMcpResult(
+        outcome({
+          status: 'ok',
+          events:
+            position === 'before'
+              ? [text, imageWithoutMetadata]
+              : [imageWithoutMetadata, text],
+        }),
+      );
+      expect(textOf(result).replace(`[image metadata] ${metadata}\n`, '')).toBe(
+        textOf(withoutMetadata),
+      );
+    },
+  );
+
+  it('keeps metadata paired only with images inside the output count limit', () => {
+    const result = convertOutcomeToMcpResult(
+      outcome({
+        status: 'ok',
+        events: Array.from({ length: MAX_MODEL_IMAGES + 1 }, (_, index) => ({
+          type: 'image' as const,
+          data: PNG_BASE64,
+          mimeType: 'image/png',
+          metadata: JSON.stringify({ index }),
+        })),
+      }),
+    );
+    for (let index = 0; index < MAX_MODEL_IMAGES; index++) {
+      expect(result.content[index * 2]).toEqual({
+        type: 'text',
+        text: `[image metadata] ${JSON.stringify({ index })}\n`,
+      });
+      expect(result.content[index * 2 + 1]).toEqual({
+        type: 'image',
+        data: PNG_BASE64,
+        mimeType: 'image/png',
+      });
+    }
+    expect(textOf(result)).not.toContain(
+      JSON.stringify({ index: MAX_MODEL_IMAGES }),
+    );
+    expect(textOf(result)).toContain('1 image(s) omitted');
+  });
+
   it('rejects an image whose bytes do not match the declared MIME', () => {
     const result = convertOutcomeToMcpResult(
       outcome({
         status: 'ok',
-        events: [{ type: 'image', data: PNG_BASE64, mimeType: 'image/jpeg' }],
+        events: [
+          {
+            type: 'image',
+            data: PNG_BASE64,
+            mimeType: 'image/jpeg',
+            metadata: '{"rejected":true}',
+          },
+        ],
       }),
     );
     expect(result.content.some((b) => b.type === 'image')).toBe(false);
     expect(textOf(result)).toContain('image rejected');
+    expect(textOf(result)).not.toContain('rejected":true');
   });
 
   it('folds non-ok status into isError with a leading status note', () => {
@@ -162,15 +272,17 @@ describe('convertOutcomeToMcpResult', () => {
             type: 'image',
             data: big.toString('base64'),
             mimeType: 'image/png',
+            metadata: '{"tooLarge":true}',
           },
         ],
       }),
     );
     expect(result.content.some((b) => b.type === 'image')).toBe(false);
     expect(textOf(result)).toMatch(/exceeds/);
+    expect(textOf(result)).not.toContain('tooLarge');
   });
 
-  it('keeps the whole result within the token budget when every notice fires', () => {
+  it('keeps prose within the token budget when every notice fires', () => {
     const huge = 'x'.repeat(400_000);
     const events = [
       { type: 'text' as const, kind: 'write' as const, text: huge },
