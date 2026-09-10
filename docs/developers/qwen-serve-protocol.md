@@ -2787,7 +2787,9 @@ session SSE stream after `lastEventId` and correlate `turn_complete` or
 
 `turn_complete.data.stopReason` carries the ACP `StopReason` the agent
 returned — `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` or
-`cancelled`. **Treat the field as an open string**: it is typed `string` on the
+`cancelled` — where `cancelled` may also be originated by the daemon itself
+for a prompt it aborted without the agent running it (queued-prompt removal,
+caller disconnect, drain/teardown). **Treat the field as an open string**: it is typed `string` on the
 wire, the ACP set can grow, and a client that exhaustively switches on it will
 break on the next addition.
 
