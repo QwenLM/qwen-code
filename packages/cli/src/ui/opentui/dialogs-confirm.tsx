@@ -41,7 +41,14 @@ import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.j
 import type {
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
+  ToolEditConfirmationDetails,
+  ToolExecuteConfirmationDetails,
+  ToolInfoConfirmationDetails,
+  ToolMcpConfirmationDetails,
+  ToolPlanConfirmationDetails,
 } from '@qwen-code/qwen-code-core/tools/tools.js';
+import { buildHumanReadableRuleLabel } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { toOriginalKey } from './key-map.js';
@@ -88,34 +95,179 @@ interface OutcomeOption {
   value: ToolConfirmationOutcome;
 }
 
+interface ConfirmationPrompt {
+  question: string;
+  options: OutcomeOption[];
+}
+
 /**
- * Builds the approval choices for a tool call, honoring `hideAlwaysAllow`
- * (explicit-interaction / PM ask rules that a persisted allow rule must not
- * replace). Cancel is always present so the user can always decline.
+ * Confirmation types that reach the outcome list. Written out rather than
+ * derived with `Exclude`: {@link ToolCallConfirmationDetails} intersects the
+ * union with the `autoModeFallback` bag, and `Exclude` does not distribute over
+ * that shape — it would silently keep ask_user_question in the union and the
+ * exhaustiveness check below would never fire.
  */
-export function buildOutcomeOptions(
-  details: ToolCallConfirmationDetails,
+type SelectableConfirmationDetails = (
+  | ToolEditConfirmationDetails
+  | ToolExecuteConfirmationDetails
+  | ToolMcpConfirmationDetails
+  | ToolInfoConfirmationDetails
+  | ToolPlanConfirmationDetails
+) &
+  Pick<ToolCallConfirmationDetails, 'autoModeFallback'>;
+
+/**
+ * The allow-once / scoped-always-allow / decline list shared by the exec, mcp,
+ * and info confirmations. The always-allow labels carry ink's human-readable
+ * rule description so the user can see the scope being granted — `run 'touch *'
+ * commands` rather than a bare "Always allow" — and are offered only when the
+ * caller says they may be.
+ */
+function allowOnceOrAlways(
+  permissionRules: string[] | undefined,
+  showAlwaysAllow: boolean,
 ): OutcomeOption[] {
   const options: OutcomeOption[] = [
     { label: t('Yes, allow once'), value: ToolConfirmationOutcome.ProceedOnce },
   ];
-  // hideAlwaysAllow lives on only some union members (not ask_user_question).
-  const hideAlways =
-    'hideAlwaysAllow' in details && details.hideAlwaysAllow === true;
-  if (!hideAlways) {
+  if (showAlwaysAllow) {
+    const action = permissionRules?.length
+      ? buildHumanReadableRuleLabel(permissionRules)
+      : '';
     options.push(
       {
-        label: t('Always allow in this project'),
+        label: action
+          ? t('Always allow {{action}} in this project', { action })
+          : t('Always allow in this project'),
         value: ToolConfirmationOutcome.ProceedAlwaysProject,
       },
       {
-        label: t('Always allow for this user'),
+        label: action
+          ? t('Always allow {{action}} for this user', { action })
+          : t('Always allow for this user'),
         value: ToolConfirmationOutcome.ProceedAlwaysUser,
       },
     );
   }
-  options.push({ label: t('No (esc)'), value: ToolConfirmationOutcome.Cancel });
+  options.push({
+    label: t('No, suggest changes (esc)'),
+    value: ToolConfirmationOutcome.Cancel,
+  });
   return options;
+}
+
+function buildTypePrompt(
+  details: SelectableConfirmationDetails,
+  showAlwaysAllow: boolean,
+): ConfirmationPrompt {
+  switch (details.type) {
+    case 'edit': {
+      const options: OutcomeOption[] = [
+        {
+          label: t('Yes, allow once'),
+          value: ToolConfirmationOutcome.ProceedOnce,
+        },
+      ];
+      if (showAlwaysAllow) {
+        options.push({
+          label: t('Yes, allow always'),
+          value: ToolConfirmationOutcome.ProceedAlways,
+        });
+      }
+      options.push({
+        label: t('No, suggest changes (esc)'),
+        value: ToolConfirmationOutcome.Cancel,
+      });
+      return { question: t('Apply this change?'), options };
+    }
+    case 'exec':
+      return {
+        question: t("Allow execution of: '{{command}}'?", {
+          command: details.rootCommand,
+        }),
+        options: allowOnceOrAlways(details.permissionRules, showAlwaysAllow),
+      };
+    case 'mcp':
+      return {
+        question: t(
+          'Allow execution of MCP tool "{{tool}}" from server "{{server}}"?',
+          { tool: details.toolName, server: details.serverName },
+        ),
+        options: allowOnceOrAlways(details.permissionRules, showAlwaysAllow),
+      };
+    case 'info':
+      return {
+        question: t('Do you want to proceed?'),
+        options: allowOnceOrAlways(details.permissionRules, showAlwaysAllow),
+      };
+    case 'plan':
+      return {
+        question: details.title,
+        options: [
+          {
+            label: t('Yes, restore previous mode ({{mode}})', {
+              mode: details.prePlanMode ?? 'default',
+            }),
+            value: ToolConfirmationOutcome.RestorePrevious,
+          },
+          {
+            label: t('Yes, and auto-accept edits'),
+            value: ToolConfirmationOutcome.ProceedAlways,
+          },
+          {
+            label: t('Yes, and manually approve edits'),
+            value: ToolConfirmationOutcome.ProceedOnce,
+          },
+          {
+            label: t('No, keep planning (esc)'),
+            value: ToolConfirmationOutcome.Cancel,
+          },
+        ],
+      };
+    default: {
+      const exhaustive: never = details;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * Builds the question line and the approval choices for a tool call, matching
+ * ink's per-type lists.
+ *
+ * `hideAlwaysAllow` (explicit-interaction / PM ask rules that a persisted allow
+ * rule must not replace) suppresses the always-allow rows, and so does an
+ * untrusted folder: granting a durable rule for a workspace the user has not
+ * trusted is not a decision the dialog may offer. Cancel is always present so
+ * the user can always decline.
+ */
+export function buildConfirmationPrompt(
+  details: SelectableConfirmationDetails,
+  isTrustedFolder: boolean,
+): ConfirmationPrompt {
+  const hideAlways = details.hideAlwaysAllow === true;
+  const prompt = buildTypePrompt(details, isTrustedFolder && !hideAlways);
+
+  // An AUTO-mode call that fell back to manual confirmation because the
+  // classifier was unavailable offers to leave AUTO mode as part of approving.
+  const reason = details.autoModeFallback?.reason;
+  if (
+    reason === 'classifier_unavailable' ||
+    reason === 'consecutive_unavailable'
+  ) {
+    const cancelIndex = prompt.options.findIndex(
+      (option) => option.value === ToolConfirmationOutcome.Cancel,
+    );
+    prompt.options.splice(
+      cancelIndex === -1 ? prompt.options.length : cancelIndex,
+      0,
+      {
+        label: t('Switch to Default Mode and allow once (recommended)'),
+        value: ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+      },
+    );
+  }
+  return prompt;
 }
 
 /** Renders a colored diff body within a bounded row window. */
@@ -240,7 +392,7 @@ function ConfirmationBody({
           </text>
           {details.warnings?.map((warning, i) => (
             <text key={`${i}`} fg={C.yellow}>
-              {sanitizeTerminalText(warning)}
+              {sanitizeTerminalText(`⚠ ${warning}`)}
             </text>
           ))}
           <DiffBody fileDiff={details.fileDiff} />
@@ -254,7 +406,7 @@ function ConfirmationBody({
           </text>
           {details.warnings?.map((warning, i) => (
             <text key={`${i}`} fg={C.yellow}>
-              {sanitizeTerminalText(warning)}
+              {sanitizeTerminalText(`⚠ ${warning}`)}
             </text>
           ))}
         </box>
@@ -262,38 +414,37 @@ function ConfirmationBody({
     case 'mcp':
       return (
         <box flexDirection="column">
-          <text>
+          <text fg={C.accent}>
             {sanitizeTerminalText(
-              t(
-                'Allow execution of MCP tool "{{tool}}" from server "{{server}}"?',
-                {
-                  tool: details.toolName,
-                  server: details.serverName,
-                },
-              ),
+              t('MCP Server: {{server}}', { server: details.serverName }),
             )}
           </text>
-          <text fg={C.accent} attributes={1}>
-            {sanitizeTerminalText(details.toolDisplayName)}
-          </text>
-          <text fg={C.dim}>
+          <text fg={C.accent}>
             {sanitizeTerminalText(
-              `${details.serverName} · ${details.toolName}`,
+              t('Tool: {{tool}}', { tool: details.toolName }),
             )}
           </text>
         </box>
       );
-    case 'info':
+    case 'info': {
+      // A single URL identical to the prompt would be listed twice.
+      const displayUrls =
+        details.urls !== undefined &&
+        !(details.urls.length === 1 && details.urls[0] === details.prompt);
       return (
         <box flexDirection="column">
           <TextBody text={details.prompt} />
-          {details.urls?.map((url, i) => (
-            <text key={`${i}`} fg={C.dim}>
-              {sanitizeTerminalText(url)}
-            </text>
-          ))}
+          {displayUrls && details.urls?.length ? (
+            <box flexDirection="column" marginTop={1}>
+              <text>{sanitizeTerminalText(t('URLs to fetch:'))}</text>
+              {details.urls.map((url, i) => (
+                <text key={`${i}`}>{sanitizeTerminalText(` - ${url}`)}</text>
+              ))}
+            </box>
+          ) : null}
         </box>
       );
+    }
     case 'plan':
       return <TextBody text={details.plan} />;
     case 'ask_user_question':
@@ -331,7 +482,6 @@ function OutcomeSelect(props: {
   );
   const select = useDialogSelect<OutcomeItem>({
     items,
-    numbers: false,
     onSelect: (value) => props.onChoose(value),
   });
   return (
@@ -339,7 +489,6 @@ function OutcomeSelect(props: {
       items={items}
       activeIndex={select.activeIndex}
       scrollOffset={select.scrollOffset}
-      showNumbers={false}
       onHover={select.highlightIndex}
       onWheel={(direction) =>
         select.setActiveIndex(
@@ -356,6 +505,8 @@ function OutcomeSelect(props: {
 
 export interface OpenTuiToolConfirmationProps {
   call: PendingToolConfirmation;
+  /** Read for folder trust, which gates the always-allow rows. */
+  config: Config;
   /** Called after the call has been settled (approved, declined, or answered). */
   onSettled: () => void;
 }
@@ -366,7 +517,7 @@ export interface OpenTuiToolConfirmationProps {
  * other type shows its body plus the outcome list.
  */
 export function OpenTuiToolConfirmation(props: OpenTuiToolConfirmationProps) {
-  const { call, onSettled } = props;
+  const { call, config, onSettled } = props;
   const details = call.confirmationDetails;
 
   const settledRef = useRef(false);
@@ -409,7 +560,7 @@ export function OpenTuiToolConfirmation(props: OpenTuiToolConfirmationProps) {
     );
   }
 
-  const options = buildOutcomeOptions(details);
+  const prompt = buildConfirmationPrompt(details, config.isTrustedFolder());
   return (
     <DialogFrame borderColor={C.yellow}>
       <box flexDirection="column">
@@ -419,8 +570,9 @@ export function OpenTuiToolConfirmation(props: OpenTuiToolConfirmationProps) {
         <box marginTop={1} marginBottom={1}>
           <ConfirmationBody details={details} />
         </box>
+        <text fg={C.text}>{sanitizeTerminalText(prompt.question)}</text>
         <OutcomeSelect
-          options={options}
+          options={prompt.options}
           onChoose={(outcome) => settle(outcome)}
         />
         <FooterHint

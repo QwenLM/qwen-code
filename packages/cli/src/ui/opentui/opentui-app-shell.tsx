@@ -763,6 +763,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           <OpenTuiToolConfirmation
             key={activeToolCall.callId}
             call={activeToolCall}
+            config={config}
             onSettled={() => onToolCallSettled?.(activeToolCall.callId)}
           />
         ) : activeModal ? (
