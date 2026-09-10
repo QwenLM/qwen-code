@@ -483,6 +483,7 @@ function applyDaemonTranscriptEvent(
       break;
     case 'session.metadata.changed':
     case 'session.artifact.changed':
+    case 'session.source.changed':
     case 'session.available_commands':
       // Intentional no-op against `blocks[]`.
       break;
@@ -1006,6 +1007,10 @@ function upsertToolBlock(
   const bytesBefore = retainedBefore ? estimateBlockBytes(retainedBefore) : 0;
   const existing = getWritableBlockById(state, existingId);
   if (existing?.kind === 'tool') {
+    if (event.subagentSessionReady !== undefined) {
+      existing.subagentSessionReady =
+        existing.subagentSessionReady === true || event.subagentSessionReady;
+    }
     if (event.title !== undefined) existing.title = event.title;
     if (event.status !== undefined) existing.status = event.status;
     if (event.rawInput !== undefined) {
@@ -1148,6 +1153,9 @@ function upsertToolBlock(
     }),
     ...(resultPreview ? { resultPreview } : {}),
     ...(isBackgroundToolOutput(rawOutput) ? { background: true } : {}),
+    ...(event.subagentSessionReady !== undefined
+      ? { subagentSessionReady: event.subagentSessionReady }
+      : {}),
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
@@ -1238,7 +1246,7 @@ function discardToolBlock(
  * The task-display projection carries exactly these two `executionMode`
  * literals. Fail closed: any other value (corrupted recording, future runtime
  * mode) must fall back to the legacy argument/status heuristic instead of
- * forcing a classification. Both consumer-side whitelists — webui's
+ * forcing a classification. Both consumer-side whitelists — Web Shell's
  * `projectSubagentToolUpdate` and web-shell's `daemonToolBlockToToolCall` —
  * call this single guard so live-summary and recorded-transcript clients
  * accept the same literal set; when a third mode lands, extend it here once.
@@ -1267,6 +1275,7 @@ function compactTaskExecutionOutput(
     'taskDescription',
     'status',
     'executionMode',
+    'subagentSessionReady',
     'terminateReason',
     'tokenCount',
     'executionSummary',

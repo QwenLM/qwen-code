@@ -128,6 +128,43 @@ describe('buildReplay', () => {
     expect(replay.started.get('k1')).toHaveLength(2);
     expect(replay.started.get('k2')).toHaveLength(1);
     expect(replay.results.has('k2')).toBe(false); // started but never resulted
+    expect(replay.failed.size).toBe(0);
+  });
+
+  // The record that separates "this agent failed" from "the run stopped with
+  // this agent in flight". Both leave a `started` with no `result`; only the
+  // first leaves a `failed`.
+  it('uses the latest attempt to classify a key while retaining its result', () => {
+    const entries: JournalEntry[] = [
+      { type: 'started', key: 'k1', agentId: '1' },
+      { type: 'failed', key: 'k1', agentId: '1' },
+      { type: 'started', key: 'k1', agentId: '2' }, // retried on a resume
+      { type: 'result', key: 'k1', agentId: '2', result: 'recovered' },
+      { type: 'started', key: 'k2', agentId: '3' },
+      { type: 'failed', key: 'k2', agentId: '3' },
+    ];
+    const replay = buildReplay(entries);
+    // A later start supersedes the earlier failure classification. That
+    // attempt can succeed or remain interrupted, but it is no longer the
+    // failed attempt represented by the older record.
+    expect(replay.results.get('k1')?.result).toBe('recovered');
+    expect(replay.failed.has('k1')).toBe(false);
+    expect(replay.failed.has('k2')).toBe(true);
+    expect(replay.results.has('k2')).toBe(false);
+  });
+
+  // A journal written by a newer build must not break this one: unknown
+  // records are ignored, and everything else in the file still replays.
+  it('skips entry types it does not know', () => {
+    const entries = [
+      { type: 'started', key: 'k1', agentId: '1' },
+      { type: 'from-the-future', key: 'k1', agentId: '1' },
+      { type: 'result', key: 'k1', agentId: '1', result: 'ok' },
+    ] as unknown as JournalEntry[];
+    const replay = buildReplay(entries);
+    expect(replay.results.get('k1')?.result).toBe('ok');
+    expect(replay.started.get('k1')).toHaveLength(1);
+    expect(replay.failed.size).toBe(0);
   });
 });
 
@@ -154,6 +191,31 @@ describe('WorkflowJournal', () => {
     expect(replay.started.get('k1')).toHaveLength(1);
   });
 
+  it('round-trips a failed record through the file', async () => {
+    const j = new WorkflowJournal(path.join(dir, 'sub', 'journal.jsonl'));
+    await j.append({ type: 'started', key: 'k1', agentId: '1' });
+    await j.append({ type: 'failed', key: 'k1', agentId: '1' });
+
+    const replay = await j.load();
+    expect(replay.failed.has('k1')).toBe(true);
+    expect(replay.results.has('k1')).toBe(false);
+    // The record is on disk in the same one-JSON-object-per-line shape as
+    // the others — this file is documented for humans to read.
+    const written = await fs.readFile(
+      path.join(dir, 'sub', 'journal.jsonl'),
+      'utf8',
+    );
+    expect(
+      written
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l)),
+    ).toEqual([
+      { type: 'started', key: 'k1', agentId: '1' },
+      { type: 'failed', key: 'k1', agentId: '1' },
+    ]);
+  });
+
   it('drain waits for fire-and-forget appends', async () => {
     const j = new WorkflowJournal(path.join(dir, 'sub', 'journal.jsonl'));
     void j.append({ type: 'started', key: 'k1', agentId: '1' });
@@ -176,6 +238,55 @@ describe('WorkflowJournal', () => {
     const replay = await j.load();
     expect(replay.results.size).toBe(0);
     expect(replay.started.size).toBe(0);
+    expect(replay.failed.size).toBe(0);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses symlinked roots and run directories',
+    async () => {
+      const outside = path.join(dir, 'outside');
+      await fs.mkdir(outside);
+      const rootLink = path.join(dir, 'root-link');
+      await fs.symlink(outside, rootLink, 'dir');
+      const rootJournal = new WorkflowJournal(
+        path.join(rootLink, 'wf_1', 'journal.jsonl'),
+        rootLink,
+      );
+      await expect(rootJournal.ensureExists()).resolves.toBe(false);
+
+      const root = path.join(dir, 'runs');
+      await fs.mkdir(root);
+      await fs.symlink(outside, path.join(root, 'wf_2'), 'dir');
+      const runJournal = new WorkflowJournal(
+        path.join(root, 'wf_2', 'journal.jsonl'),
+        root,
+      );
+      await expect(runJournal.ensureExists()).resolves.toBe(false);
+      await expect(fs.readdir(outside)).resolves.toEqual([]);
+    },
+  );
+
+  it('heals an existing journal mode to 0600', async () => {
+    if (process.platform === 'win32') return;
+    const journalPath = path.join(dir, 'wf_1', 'journal.jsonl');
+    await fs.mkdir(path.dirname(journalPath));
+    await fs.writeFile(journalPath, '{}\n', { mode: 0o644 });
+
+    await expect(
+      new WorkflowJournal(journalPath, dir).ensureExists(),
+    ).resolves.toBe(true);
+
+    expect((await fs.stat(journalPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it('removes the empty run directory with a never-registered journal', async () => {
+    const journalPath = path.join(dir, 'wf_1', 'journal.jsonl');
+    const journal = new WorkflowJournal(journalPath, dir);
+    await expect(journal.ensureExists()).resolves.toBe(true);
+
+    await journal.remove();
+
+    await expect(fs.access(path.dirname(journalPath))).rejects.toThrow();
   });
 });
 

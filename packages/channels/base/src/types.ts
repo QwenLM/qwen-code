@@ -40,18 +40,6 @@ export interface GroupConfig {
   groupHistoryLimit?: number;
 }
 
-export interface BlockStreamingChunkConfig {
-  /** Minimum characters before emitting a block. Default: 400. */
-  minChars?: number;
-  /** Force-emit when buffer exceeds this size. Default: 1000. */
-  maxChars?: number;
-}
-
-export interface BlockStreamingCoalesceConfig {
-  /** Emit buffered text after this many ms of inactivity. Default: 1500. */
-  idleMs?: number;
-}
-
 export interface ChannelConfig {
   type: ChannelType;
   token: string;
@@ -80,13 +68,6 @@ export interface ChannelConfig {
 
   /** Poll interval in ms for polling adapters. Default: 60000. */
   pollInterval?: number;
-
-  /** Enable block streaming — emit completed blocks as separate messages. */
-  blockStreaming?: 'on' | 'off';
-  /** Chunk size bounds for block streaming. */
-  blockStreamingChunk?: BlockStreamingChunkConfig;
-  /** Idle coalescing for block streaming. */
-  blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
 }
 
 export interface Attachment {
@@ -111,6 +92,14 @@ export interface Envelope {
   text: string;
   /** User-authored text to display when `text` contains model-only context. */
   displayText?: string;
+  /**
+   * `text` is an adapter-synthesized placeholder (`(image)`, `(voice
+   * message)`, `(file: …)`) rather than something the user typed.
+   *
+   * It is never recorded as quoted group history, where it would reach
+   * the next prompt as if a member had typed it.
+   */
+  syntheticText?: true;
   threadId?: string;
   /** Platform-specific message ID for response correlation. */
   messageId?: string;
@@ -240,6 +229,24 @@ export interface ChannelUserInputRequestContext {
   submitOptionId: string;
   onSettled(listener: (reason: UserInputSettlementReason) => void): () => void;
   respond(response: ChannelUserInputResponse): Promise<boolean>;
+}
+
+export type ChannelPermissionDecision = 'allow_once' | 'allow_always' | 'deny';
+
+export interface ChannelPermissionRequestContext {
+  requestId: string;
+  sessionId: string;
+  runId: string;
+  owner: ChannelPromptOwner;
+  target: SessionTarget;
+  precedingSegmentId?: string;
+  title: string;
+  decisions: Array<{
+    kind: ChannelPermissionDecision;
+    label: string;
+  }>;
+  onSettled(listener: (reason: UserInputSettlementReason) => void): () => void;
+  respond(decision: ChannelPermissionDecision): Promise<boolean>;
 }
 
 export interface ChannelOutputSegmentContext {
@@ -422,6 +429,8 @@ export interface ChannelConfigValueFieldDescriptor
   kind: 'string' | 'secret';
   required?: boolean;
   envResolvable?: boolean;
+  /** Render the field as a multi-line text area in management UIs. */
+  multiline?: boolean;
   properties?: never;
 }
 
@@ -430,6 +439,7 @@ export interface ChannelConfigPlainValueFieldDescriptor
   kind: 'boolean' | 'string-list' | 'record';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
   properties?: never;
 }
 
@@ -438,6 +448,7 @@ export interface ChannelConfigEnumFieldDescriptor
   kind: 'enum';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
   options: ReadonlyArray<{ value: string; label: string }>;
   properties?: never;
 }
@@ -447,6 +458,7 @@ export interface ChannelConfigNumberFieldDescriptor
   kind: 'number';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
   exclusiveMinimum?: number;
   properties?: never;
 }
@@ -456,16 +468,21 @@ export interface ChannelConfigObjectFieldDescriptor
   kind: 'object';
   required?: false;
   envResolvable?: never;
+  multiline?: never;
   properties: readonly ChannelConfigNestedFieldDescriptor[];
 }
 
 export type ChannelConfigNestedFieldDescriptor =
-  | (Omit<ChannelConfigValueFieldDescriptor, 'kind' | 'envResolvable'> & {
+  | (Omit<
+      ChannelConfigValueFieldDescriptor,
+      'kind' | 'envResolvable' | 'multiline'
+    > & {
       kind: Exclude<
         ChannelConfigFieldKind,
         'secret' | 'enum' | 'number' | 'object'
       >;
       envResolvable?: never;
+      multiline?: never;
     })
   | (Omit<ChannelConfigEnumFieldDescriptor, 'kind' | 'envResolvable'> & {
       kind: 'enum';

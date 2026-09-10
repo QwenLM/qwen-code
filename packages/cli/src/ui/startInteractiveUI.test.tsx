@@ -16,10 +16,16 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render as renderDom, waitFor } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import type { Config } from '@qwen-code/qwen-code-core';
-import type { LoadedSettings } from '../config/settings.js';
+import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
 
 const registerSession = vi.hoisted(() => vi.fn());
+
+/**
+ * What `registerSession` reports for the interactive UI: the record
+ * landed, in the one shared slot a single-session process owns.
+ */
+const REGISTERED = { registered: true, slot: 'shared' };
 const registerCleanup = vi.hoisted(() => vi.fn());
 const inkRender = vi.hoisted(() => vi.fn());
 const lastPeerInboxFailure = vi.hoisted(() => ({ value: null as unknown }));
@@ -145,7 +151,7 @@ type TestConfig = Config & {
 };
 
 function makeConfig(): TestConfig {
-  const trackSessionRegistration = vi.fn((registration: Promise<boolean>) => {
+  const trackSessionRegistration = vi.fn((registration: Promise<unknown>) => {
     void registration.catch(() => undefined);
   });
   return {
@@ -185,25 +191,29 @@ describe('startInteractiveUI session registration', () => {
     vi.clearAllMocks();
   });
 
-  it('registers the session with its id, target dir, and CLI version', async () => {
-    registerSession.mockResolvedValue(true);
+  it('registers the session with its id, target dir, CLI version, and kind', async () => {
+    registerSession.mockResolvedValue(REGISTERED);
     const config = makeConfig();
 
     await start(config);
 
+    // `kind` is stated rather than left to the default: this is the one
+    // registrant a listing describes as someone sitting at a terminal,
+    // and it is the only place that claim is made.
     expect(registerSession).toHaveBeenCalledWith({
       sessionId: 'session-123',
       cwd: '/work/app',
       qwenVersion: '9.9.9',
+      kind: 'tui',
     });
     expect(config.trackSessionRegistration).toHaveBeenCalledTimes(1);
     await expect(
       config.trackSessionRegistration.mock.calls[0]?.[0],
-    ).resolves.toBe(true);
+    ).resolves.toEqual(REGISTERED);
   });
 
   it('arms teardown before serialized registry cleanup', async () => {
-    registerSession.mockResolvedValue(true);
+    registerSession.mockResolvedValue(REGISTERED);
     const config = makeConfig();
     await start(config);
 
@@ -215,7 +225,7 @@ describe('startInteractiveUI session registration', () => {
   });
 
   it('does not await a stalled registration before returning startup', async () => {
-    registerSession.mockReturnValue(new Promise<boolean>(() => undefined));
+    registerSession.mockReturnValue(new Promise(() => undefined));
     const config = makeConfig();
 
     const result = await Promise.race([
@@ -250,7 +260,7 @@ describe('startInteractiveUI cross-session messaging', () => {
     vi.clearAllMocks();
     lastPeerInboxFailure.value = null;
     observedPeerInboxFailure.value = null;
-    registerSession.mockResolvedValue(true);
+    registerSession.mockResolvedValue(REGISTERED);
     peerMessagingStart.mockResolvedValue({
       close: vi.fn().mockResolvedValue(undefined),
     });
@@ -311,6 +321,33 @@ describe('startInteractiveUI cross-session messaging', () => {
       getHeldExpiryMs: () => number | null;
     };
     expect(never.getHeldExpiryMs()).toBeNull();
+  });
+
+  it('wires the effective inbound-policy scope into the gate', async () => {
+    const settings = {
+      merged: {
+        ui: { hideWindowTitle: true },
+        agents: {
+          crossSessionMessaging: true,
+          crossSessionInbound: 'hold',
+        },
+      },
+      isTrusted: true,
+      workspaceSettingsActive: true,
+      forScope: (scope: SettingScope) => ({
+        settings:
+          scope === SettingScope.Workspace
+            ? { agents: { crossSessionInbound: 'hold' } }
+            : {},
+      }),
+    } as unknown as LoadedSettings;
+
+    await start(makeConfig(), settings);
+    await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
+    const options = peerMessagingStart.mock.calls[0]?.[0] as {
+      getPolicyScope: () => string | undefined;
+    };
+    expect(options.getPolicyScope()).toBe('workspace');
   });
 
   it('forwards the inbox token, not only the address, into the record', async () => {

@@ -20,15 +20,15 @@ import {
   type ReactNode,
 } from 'react';
 import { useRenderer, useKeyboard } from '@opentui/react';
+import { APPROVAL_MODES } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { OutputStyleDefinition } from '@qwen-code/qwen-code-core/core/output-styles.js';
 import {
   applyReasoningEffort,
-  APPROVAL_MODES,
   REASONING_EFFORT_TIERS,
-  type ApprovalMode,
-  type OutputStyleDefinition,
-  type ReasoningEffort,
-  type Config,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
+import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
@@ -37,6 +37,7 @@ import {
 } from '../commands/output-style-utils.js';
 import { toOriginalKey } from './key-map.js';
 import { C } from './theme.js';
+import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
 
 function useEsc(onClose: () => void) {
   const renderer = useRenderer();
@@ -185,13 +186,14 @@ export function OpenTuiEffortDialog(props: {
   onClose: () => void;
 }) {
   const { config, settings, onClose } = props;
-  const tiers = REASONING_EFFORT_TIERS as ReasoningEffort[];
-  // Pre-select the live tier only when one is configured; an unset effort
-  // starts at the top (ink EffortDialog initialIndex parity).
+  const tiers = config
+    ? [...getReasoningEffortsForConfig(config)]
+    : (REASONING_EFFORT_TIERS as ReasoningEffort[]);
+  // Pre-select the live tier only when this model exposes it; an unset or
+  // out-of-range effort starts at the top (ink EffortDialog parity).
   const currentEffort = config?.getReasoningEffort?.();
-  const [sel, setSel] = useState(
-    currentEffort ? Math.max(0, tiers.indexOf(currentEffort)) : 0,
-  );
+  const configuredIndex = currentEffort ? tiers.indexOf(currentEffort) : -1;
+  const [sel, setSel] = useState(Math.max(0, configuredIndex));
   useEsc(onClose);
   const pick = () => {
     const effort = tiers[sel];
@@ -228,6 +230,11 @@ export function OpenTuiEffortDialog(props: {
         }
         onPick={pick}
       />
+      {currentEffort && configuredIndex === -1 ? (
+        <text fg={C.dim}>
+          {`${currentEffort} is not available for this model — using the model/provider default.`}
+        </text>
+      ) : null}
     </Shell>
   );
 }

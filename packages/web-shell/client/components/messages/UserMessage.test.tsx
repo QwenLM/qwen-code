@@ -119,6 +119,29 @@ describe('UserMessage', () => {
     expect(renderUserMessageContent).not.toHaveBeenCalled();
   });
 
+  it('linkifies URLs inside a scheduled-task prompt', () => {
+    const content =
+      'Scheduled task: Check incidents\n' +
+      'Task ID: task-2\n' +
+      'Schedule: 0 * * * *\n' +
+      'Triggered at: 2026-08-26T07:27:00.000Z\n' +
+      'Trigger: scheduled\n' +
+      'Session: new chat for this run\n\n' +
+      'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.\n\n' +
+      'check https://status.example.com/incidents, then reply';
+    const container = render(<UserMessage content={content} />);
+
+    const message = container.querySelector(
+      '[data-web-shell-scheduled-task-run-message]',
+    );
+    expect(message).not.toBeNull();
+    const link = message?.querySelector(
+      'a[href="https://status.example.com/incidents"]',
+    );
+    expect(link).not.toBeNull();
+    expect(container.textContent).toContain(', then reply');
+  });
+
   it('renders an accessible retry action for a failed send', () => {
     const onRetrySend = vi.fn();
     const container = render(
@@ -261,6 +284,72 @@ describe('UserMessage', () => {
 
     expect(container.querySelector('[title="@b.test"]')).toBeNull();
     expect(container.textContent).toContain('a@b.test');
+  });
+
+  it('linkifies URLs in text parts from a host-provided parser', () => {
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          parseUserMessageContent: () => [
+            { type: 'text', text: 'see https://example.com/parsed ' },
+            {
+              type: 'tag',
+              tag: {
+                id: 'file:readme',
+                kind: 'file',
+                value: 'readme',
+                serialized: '@file:readme',
+              },
+            },
+          ],
+        }}
+      >
+        <UserMessage content="see https://example.com/parsed @file:readme" />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(
+      container.querySelector('a[href="https://example.com/parsed"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('readme');
+  });
+
+  it('renders URLs in message text as external links', () => {
+    const container = render(
+      <UserMessage content="see https://example.com/docs, then reply" />,
+    );
+
+    const link = container.querySelector(
+      '[data-web-shell-user-bubble] a[href="https://example.com/docs"]',
+    );
+    expect(link).not.toBeNull();
+    expect(link?.getAttribute('target')).toBe('_blank');
+    expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(container.textContent).toContain(
+      'see https://example.com/docs, then reply',
+    );
+  });
+
+  it('renders URLs as links alongside annotated reference chips', () => {
+    const content = 'open https://example.com with @ext:browser';
+    const container = render(
+      <UserMessage
+        content={content}
+        inputAnnotations={[
+          referenceAnnotation(content, '@ext:browser', {
+            id: '@ext:browser',
+            kind: 'extension',
+            value: 'browser',
+            serialized: '@ext:browser',
+          }),
+        ]}
+      />,
+    );
+
+    expect(
+      container.querySelector('a[href="https://example.com"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[title="@ext:browser"]')).not.toBeNull();
   });
 
   it('keeps references as text without input annotations', () => {
@@ -484,6 +573,26 @@ describe('UserMessage', () => {
     ).toContain('flash');
   });
 
+  it.each([
+    ['report.HTML', 'text/html', 'HTML', 'html'],
+    ['README', 'text/plain', 'text/plain', 'file-text'],
+    ['LICENSE', '', 'FILE', 'file'],
+  ])('renders attachment metadata for %s', (name, mimeType, type, icon) => {
+    const container = render(
+      <UserMessage content="" files={[{ name, mimeType }]} />,
+    );
+    const card = container.querySelector('[data-web-shell-user-files]');
+    expect(card?.querySelector(`[title="${name}"]`)?.textContent).toBe(name);
+    expect(card?.querySelector(`[title="${type}"]`)?.textContent).toBe(type);
+    expect(
+      card?.querySelector(
+        icon === 'file-text'
+          ? 'svg.lucide-file-text'
+          : `[data-file-type-icon="${icon}"]`,
+      ),
+    ).not.toBeNull();
+  });
+
   it('previews a sent text attachment when its chip is clicked', () => {
     const onAttachmentPreview = vi.fn();
     const container = render(
@@ -632,6 +741,8 @@ describe('UserMessage', () => {
       name: 'notes.txt',
       workspacePath: 'docs/notes.txt',
     });
+    expect(container.querySelector('svg.lucide-file-text')).not.toBeNull();
+    expect(container.textContent).toContain('docs/notes.txt');
   });
 
   it('does not make a sent directory tag previewable', () => {
@@ -864,11 +975,14 @@ describe('UserMessage', () => {
           },
         }}
       >
-        <UserMessage content="raw <broken /> content" />
+        <UserMessage content="raw <broken /> https://example.com/x" />
       </WebShellCustomizationProvider>,
     );
 
-    expect(container.textContent).toBe('raw <broken /> content');
+    expect(container.textContent).toBe('raw <broken /> https://example.com/x');
+    expect(
+      container.querySelector('a[href="https://example.com/x"]'),
+    ).not.toBeNull();
     warn.mockRestore();
   });
 

@@ -24,6 +24,7 @@ import {
   PeerInboxFailureContext,
   PeerMessagingContext,
 } from '../peerMessaging/PeerMessagingContext.js';
+import { inboundPolicyScope } from '../peerMessaging/inbound-policy-scope.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { isValidSessionId } from '../config/config.js';
 import type { InitializationResult } from '../core/initializer.js';
@@ -442,6 +443,7 @@ export async function startInteractiveUI(
       sessionId: config.getSessionId(),
       cwd: config.getTargetDir(),
       qwenVersion: version,
+      kind: 'tui',
     }),
   );
 
@@ -474,6 +476,7 @@ export async function startInteractiveUI(
               | undefined,
           getHeldExpiryMs: () =>
             parseHeldExpiry(settings.merged.agents?.crossSessionHeldExpiry),
+          getPolicyScope: () => inboundPolicyScope(settings),
           updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
             config.updateSessionRegistryIpcPath(ipcPath, ipcToken),
           getSessionId: () => config.getSessionId(),

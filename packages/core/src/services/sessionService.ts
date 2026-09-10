@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  restoreSessionSources,
+  type SessionSourcesRestoreState,
+} from './session-sources.js';
+
 import { Storage } from '../config/storage.js';
 import {
   commitUsageBeforeTranscriptDeletion,
@@ -380,7 +385,7 @@ export interface ConversationRecord {
 /**
  * Data structure for resuming an existing session.
  */
-export interface ResumedSessionData {
+export interface ResumedSessionData extends SessionSourcesRestoreState {
   conversation: ConversationRecord;
   filePath: string;
   /** UUID of the last completed message - new messages should use this as parentUuid */
@@ -407,7 +412,7 @@ const SESSION_LIST_CANCEL_YIELD_INTERVAL = 128;
 
 /**
  * Maximum character length for a session custom title.
- * Shared across CLI, WebUI, VSCode, and ACP.
+ * Shared across CLI, browser, VS Code, and ACP clients.
  */
 export const SESSION_TITLE_MAX_LENGTH = 200;
 
@@ -2867,9 +2872,12 @@ export class SessionService {
   /**
    * Reads all records from a session file.
    */
-  private async readAllRecords(filePath: string): Promise<ChatRecord[]> {
+  private async readAllRecords(
+    filePath: string,
+    onIncompleteRead?: () => void,
+  ): Promise<ChatRecord[]> {
     try {
-      return await jsonl.read<ChatRecord>(filePath);
+      return await jsonl.read<ChatRecord>(filePath, { onIncompleteRead });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         debugLogger.error('Error reading session file:', error);
@@ -2916,6 +2924,32 @@ export class SessionService {
     sessionId: string,
   ): Promise<ResumedSessionData | undefined> {
     return this.loadSessionFromState(sessionId, 'active');
+  }
+
+  async readSessionSources(
+    sessionId: string,
+  ): Promise<SessionSourcesRestoreState> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`))
+      throw new Error('Invalid source session ID');
+    const filePath = this.getSessionFilePath(sessionId, 'active');
+    try {
+      await fs.promises.stat(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+      return { sourcesUnavailable: true };
+    }
+    const { records, complete } =
+      await jsonl.readLinesWithIntegrity<ChatRecord>(filePath, Infinity);
+    if (!complete) return { sourcesUnavailable: true };
+    if (
+      records[0] &&
+      !(await this.sessionBelongsToCurrentProject(
+        records[0].sessionId,
+        records[0].cwd,
+      ))
+    )
+      throw new Error('Source session workspace does not match');
+    return restoreSessionSources(records, sessionId);
   }
 
   async readRestoreProjection(
@@ -2979,7 +3013,10 @@ export class SessionService {
   ): Promise<ResumedSessionData | undefined> {
     const filePath = this.getSessionFilePath(sessionId, state);
 
-    const records = await this.readAllRecords(filePath);
+    let sourceReadComplete = true;
+    const records = await this.readAllRecords(filePath, () => {
+      sourceReadComplete = false;
+    });
     if (records.length === 0) {
       return;
     }
@@ -3052,6 +3089,9 @@ export class SessionService {
       filePath,
       lastCompletedUuid: lastMessage.uuid,
       fileHistorySnapshots,
+      ...(sourceReadComplete
+        ? restoreSessionSources(records, firstRecord.sessionId)
+        : { sourcesUnavailable: true as const }),
       ...(artifactSnapshot ? { artifactSnapshot } : {}),
       historyGaps: gaps.length > 0 ? gaps : undefined,
     };
@@ -3718,7 +3758,7 @@ export class SessionService {
 
       // Append a custom_title system record. `renameSession` is the
       // fallback path when no live recording service is attached (e.g., from
-      // the WebUI or VSCode extension). Callers pass `titleSource='auto'`
+      // Web Shell or the VS Code extension). Callers pass `titleSource='auto'`
       // only when the title came from the auto-generator; defaults to
       // 'manual' for explicit user renames.
       const titleRecord: ChatRecord = {
@@ -3842,7 +3882,8 @@ export class SessionService {
       (record) =>
         !(
           record.type === 'system' &&
-          (record.subtype === 'parent_session' ||
+          (record.subtype === 'session_sources_snapshot' ||
+            record.subtype === 'parent_session' ||
             record.subtype === 'session_source' ||
             record.subtype === 'turn_result' ||
             (options.source && record.subtype === 'custom_title'))

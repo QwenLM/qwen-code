@@ -7,6 +7,7 @@
 import { describe, it, expect, expectTypeOf } from 'vitest';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   HELD_EXPIRY_OPTIONS,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   OutputFormat,
@@ -328,6 +329,10 @@ describe('SettingsSchema', () => {
         { value: 'hold', label: 'Hold for review' },
         { value: 'refuse', label: 'Refuse' },
       ]);
+      expect(crossSessionInbound.description).toContain(
+        'user-minted controllers',
+      );
+      expect(crossSessionInbound.description).toContain('child processes');
     });
 
     it('should offer exactly the hold lifetimes core knows how to parse', () => {
@@ -372,6 +377,20 @@ describe('SettingsSchema', () => {
       expect(timeout.minimum).toBe(1);
       expect(timeout.maximum).toBe(2_147_483_647);
       expect(timeout.requiresRestart).toBe(true);
+      expect(timeout.showInDialog).toBe(false);
+    });
+
+    it('should define goalCheckpointTimeoutSeconds as a bounded integer', () => {
+      const timeout =
+        getSettingsSchema().model.properties.goalCheckpointTimeoutSeconds;
+
+      expect(timeout).toBeDefined();
+      expect(timeout.type).toBe('integer');
+      expect(timeout.category).toBe('Model');
+      expect(timeout.default).toBeUndefined();
+      expect(timeout.minimum).toBe(1);
+      expect(timeout.maximum).toBe(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP);
+      expect(timeout.requiresRestart).toBe(false);
       expect(timeout.showInDialog).toBe(false);
     });
 
@@ -602,6 +621,24 @@ describe('SettingsSchema', () => {
       ).toBe(false);
     });
 
+    it('should define the web shell brand as deployment-only configuration', () => {
+      const brand = getSettingsSchema().ui.properties.brand;
+
+      expect(brand.type).toBe('object');
+      // Edited in settings.json, not from the in-browser Settings page: brand
+      // is deployment identity, not a preference one viewer of a workspace
+      // should be able to change for everyone else.
+      expect(brand.showInDialog).toBe(false);
+
+      const { name, logoPath } = brand.properties;
+      expect(name.type).toBe('string');
+      expect(name.default).toBe('');
+      expect(name.showInDialog).toBe(false);
+      expect(logoPath.type).toBe('string');
+      expect(logoPath.default).toBe('');
+      expect(logoPath.showInDialog).toBe(false);
+    });
+
     it('should define Markdown render mode as a user-facing UI enum', () => {
       const renderMode = getSettingsSchema().ui.properties.renderMode;
 
@@ -632,6 +669,18 @@ describe('SettingsSchema', () => {
       expect(mouseTracking.default).toBe(true);
       expect(mouseTracking.showInDialog).toBe(true);
       expect(mouseTracking.requiresRestart).toBe(true);
+    });
+
+    it('should have showToolCallArgs in ui settings', () => {
+      const showToolCallArgs =
+        getSettingsSchema().ui.properties.showToolCallArgs;
+      expect(showToolCallArgs).toBeDefined();
+      expect(showToolCallArgs.type).toBe('boolean');
+      // Default must stay false — the compact tool view is the baseline.
+      expect(showToolCallArgs.default).toBe(false);
+      expect(showToolCallArgs.showInDialog).toBe(true);
+      // Read at render time, so no restart is needed.
+      expect(showToolCallArgs.requiresRestart).toBe(false);
     });
 
     it('should expose response tokens/sec as an opt-in UI setting', () => {

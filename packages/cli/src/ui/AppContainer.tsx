@@ -25,9 +25,11 @@ import {
   type UIActions,
 } from './contexts/UIActionsContext.js';
 import { ConfigContext } from './contexts/ConfigContext.js';
+import type { Part } from '@google/genai';
 import {
   type HistoryItem,
   type HistoryItemUser,
+  type IndividualToolCallDisplay,
   ToolCallStatus,
   type HistoryItemWithoutId,
 } from './types.js';
@@ -42,9 +44,12 @@ import {
   ideContextStore,
   createDebugLogger,
   describeDeliveryStatus,
+  describeDropReason,
+  PEER_ADMISSION_LIMITS,
   parseHeldExpiry,
   describeHoldCause,
   describePeerInboxFailure,
+  flattenPeerLabel,
   getErrorMessage,
   getAllMemoryFilenames,
   ShellExecutionService,
@@ -266,6 +271,7 @@ import {
   MAX_ACCEPTED_BACKLOG,
   type PeerMessaging,
 } from '../peerMessaging/peer-messaging.js';
+import { inboundPolicyScope } from '../peerMessaging/inbound-policy-scope.js';
 import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 import {
   requestConsentInteractive,
@@ -328,17 +334,20 @@ function isCompressionPending(pendingHistoryItems: HistoryItemWithoutId[]) {
 }
 
 export function isInputActiveForState({
+  isConfigInitialized,
   initError,
   isProcessing,
   hasPendingCompression,
   streamingState,
 }: {
+  isConfigInitialized: boolean;
   initError: unknown;
   isProcessing: boolean;
   hasPendingCompression: boolean;
   streamingState: StreamingState;
 }) {
   return (
+    isConfigInitialized &&
     !initError &&
     (!isProcessing || hasPendingCompression) &&
     (streamingState === StreamingState.Idle ||
@@ -626,6 +635,41 @@ export function getSpeculativeToolResult(response: unknown): {
     text: String(result),
     status: hasError ? ToolCallStatus.Error : ToolCallStatus.Success,
   };
+}
+
+/**
+ * Builds the tool display rows for an accepted speculation.
+ *
+ * Extracted from the submit handler so the fourth `IndividualToolCallDisplay`
+ * builder is unit-testable like its siblings (`mapToDisplay`, the resume path,
+ * the agent-view adapter) — in particular that it carries the raw `args` that
+ * `ui.showToolCallArgs` renders.
+ */
+export function buildSpeculativeToolDisplays(
+  toolCalls: Part[],
+  toolResults: Part[],
+): IndividualToolCallDisplay[] {
+  return toolCalls.map((tc, i) => {
+    const name = tc.functionCall?.name ?? 'unknown';
+    const args = (tc.functionCall?.args ?? {}) as Record<string, unknown>;
+    const resp = toolResults[i]?.functionResponse?.response;
+    const speculativeResult = getSpeculativeToolResult(resp);
+    return {
+      callId: `spec-${name}-${i}`,
+      name,
+      description:
+        Object.entries(args)
+          .map(([k, v]) => `${k}: ${String(v).slice(0, 80)}`)
+          .join(', ') || name,
+      // Carried like the live, resume and agent-view builders so
+      // `ui.showToolCallArgs` renders the args row for an accepted
+      // speculation too.
+      args,
+      resultDisplay: speculativeResult.text.slice(0, 500),
+      status: speculativeResult.status,
+      confirmationDetails: undefined,
+    };
+  });
 }
 
 function getResponseCandidateTokens(
@@ -2665,10 +2709,14 @@ export const AppContainer = (props: AppContainerProps) => {
           type: MessageType.INFO,
           text:
             `Held a message from ${
-              newest.selfSent
-                ? 'a process this session started'
-                : 'another session'
-            } (${describeHoldCause(newest.cause)}). ` +
+              newest.controller
+                ? `a trusted controller (${flattenPeerLabel(
+                    newest.controller.label,
+                  )})`
+                : newest.selfSent
+                  ? 'a process this session started'
+                  : 'another session'
+            } (${describeHoldCause(newest.cause, newest.policyScope)}). ` +
             `${held.length} waiting — /peers to review.`,
         },
         Date.now(),
@@ -2687,14 +2735,52 @@ export const AppContainer = (props: AppContainerProps) => {
   // them, and nothing here needs to remember what was announced.
   useEffect(() => {
     if (!peerMessaging) return;
-    return peerMessaging.onReceipt(({ status, address, previous }) => {
+    return peerMessaging.onReceipt((receipt) => {
+      const { status, address, previous } = receipt;
       if (status === 'delivered' && previous !== 'held') return;
+      // A dropped receipt can stand for a burst, so it says how many
+      // rather than repeating itself — the whole reason the far side
+      // folded it was to keep a flood from becoming this many lines.
+      if (status === 'dropped') {
+        const count = receipt.dropped ?? 1;
+        const why = receipt.dropReason
+          ? ` — ${describeDropReason(receipt.dropReason)}`
+          : '';
+        // A repeat is the one reason that does not mean "unsent": the
+        // receiver turned it away *because* the identical text was
+        // already accepted there. Advising a fold would have the model
+        // reword it and get the same instruction delivered twice.
+        const advice =
+          receipt.dropReason === 'duplicate'
+            ? count === 1
+              ? ' The identical message was accepted there within the last ' +
+                `${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} s, so there is nothing to re-send.`
+              : ' The identical messages were accepted there within the last ' +
+                `${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} s, so there is nothing to re-send.`
+            : count === 1
+              ? ' Treat it as unsent; fold what still matters into one later message.'
+              : ' Treat them as unsent; fold what still matters into one later message.';
+        historyManager.addItem(
+          {
+            type: MessageType.INFO,
+            text:
+              count === 1
+                ? `Message to ${address}: it was dropped at that session's inbox${why}.${advice}`
+                : `Messages to ${address}: ${count} were dropped at that session's inbox${why}.${advice}`,
+          },
+          Date.now(),
+        );
+        return;
+      }
       // The wire text for `expired` speaks of a held message, which is
       // only right when the message was held. A delivery corrected to
-      // expired means the session exited with it unread; an expiry with
-      // no delivery at all means the gate could not queue it (its accept
-      // backlog was full) or the session went away — the peer may well be
-      // alive, so the notice must not claim it exited.
+      // expired means the session exited with it unread. An expiry with
+      // no delivery at all usually means the message arrived as that
+      // session was shutting down — but `previous` records what this
+      // sender *heard*, not what the receiver did, and a `held` receipt
+      // can be lost to the outbound ceiling under exactly the flood this
+      // feature is about, so the claim stays disjunctive and keeps the
+      // advice.
       const detail =
         status !== 'expired'
           ? describeDeliveryStatus(status)
@@ -2702,11 +2788,71 @@ export const AppContainer = (props: AppContainerProps) => {
             ? 'That session exited before it read your message; it was not delivered.'
             : previous === 'held'
               ? describeDeliveryStatus(status)
-              : 'Your message expired without being delivered; that session was too busy to queue it, or has exited. Retry once it is idle.';
+              : 'Your message was not delivered; that session was shutting down, or could not keep it. Retry once it is idle.';
       historyManager.addItem(
         {
           type: MessageType.INFO,
           text: `Message to ${address}: ${detail}`,
+        },
+        Date.now(),
+      );
+    });
+  }, [historyManager, peerMessaging]);
+
+  // Say when a peer is being turned away at this session's own inbox.
+  // Already throttled to one line per sender per minute, carrying the
+  // count of what it stands for: a message about a flood that scaled
+  // with the flood would do to the transcript what the flood was going
+  // to do anyway.
+  useEffect(() => {
+    if (!peerMessaging) return;
+    return peerMessaging.onDropped(({ frame, origin, reason, suppressed }) => {
+      const name = flattenPeerLabel(frame.fromName ?? '');
+      const address = frame.from ? flattenPeerLabel(frame.from) : '';
+      // Same attribution the delivered envelope uses, and for the same
+      // reason: a controller is named by the label its user gave it, and
+      // a sender's own `fromName` never decides which of the three this
+      // line calls it.
+      // The trust category first, then whatever the sender called itself.
+      // `fromName` is peer-chosen and not unique, so a line that led with
+      // it could read as the user's own session — and the two sibling
+      // lines (the held notice above, and the delivered envelope) both
+      // state the category.
+      const who =
+        name.length > 0 ? (address ? `${name} (${address})` : name) : address;
+      const selfSentWho = name || address;
+      const sender = origin.controller
+        ? `a trusted controller (${flattenPeerLabel(origin.controller.label)})`
+        : origin.selfSent
+          ? selfSentWho
+            ? `a process this session started (${selfSentWho})`
+            : 'a process this session started'
+          : who
+            ? `another session (${who})`
+            : 'another session';
+      // A rate limit has two walls and the verdict does not say which, so
+      // the wording names the one thing that is certainly true: this
+      // session is over its limit. Asserting the *sender's* own rate
+      // would accuse a peer that sent one message while somebody else
+      // filled the shared bucket.
+      const cause =
+        reason === 'rate-limited'
+          ? 'this session is taking peer messages faster than it accepts them'
+          : reason === 'duplicate'
+            ? `it repeated its previous message within ${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} s`
+            : "this session's queue of undelivered peer messages is full";
+      historyManager.addItem(
+        {
+          type: MessageType.INFO,
+          text:
+            `Dropped a message from ${sender}: ${cause}.` +
+            // Not "similar": once the session-wide notice budget is spent
+            // the count carries other senders' and other reasons' drops
+            // too, and naming one peer beside a total that is not its own
+            // is how the wrong peer gets blamed for a flood.
+            (suppressed > 0
+              ? ` (+${suppressed} more dropped during this notice window)`
+              : ''),
         },
         Date.now(),
       );
@@ -2739,23 +2885,30 @@ export const AppContainer = (props: AppContainerProps) => {
     peerMessaging?.reevaluate('approval-mode-changed');
   }, [approvalModeForPeers, peerMessaging]);
 
-  // Both settings reload live (`requiresRestart: false`), and both change
-  // what the gate would decide for messages already parked. Nothing else
-  // re-runs it: parking under `never` arms no timer at all, so a later
-  // edit to `1m` would otherwise leave the backlog held until session
-  // exit while `/peers` counted down from the new value.
+  // Both settings reload live (`requiresRestart: false`). Policy and expiry
+  // change the verdict for parked messages; a scope-only change refreshes
+  // the explanation shown for them. Nothing else re-runs the gate: parking
+  // under `never` arms no timer at all, so a later edit to `1m` would
+  // otherwise leave the backlog held until session exit while `/peers`
+  // counted down from the new value.
   //
-  // Keyed on the parsed lifetime and the policy rather than on any
-  // settings edit, because `reevaluate` also settles a parked backlog as
-  // `denied` under a refuse policy -- an unrelated key edit must not
+  // Keyed on the parsed lifetime, policy, and effective scope rather than
+  // on any settings edit, because `reevaluate` also settles a parked backlog
+  // as `denied` under a refuse policy -- an unrelated key edit must not
   // discard the user's backlog.
   const heldExpiryForPeers = parseHeldExpiry(
     settings.merged.agents?.crossSessionHeldExpiry,
   );
   const inboundPolicyForPeers = settings.merged.agents?.crossSessionInbound;
+  const inboundPolicyScopeForPeers = inboundPolicyScope(settings);
   useEffect(() => {
     peerMessaging?.reevaluate('held-expiry-changed');
-  }, [heldExpiryForPeers, inboundPolicyForPeers, peerMessaging]);
+  }, [
+    heldExpiryForPeers,
+    inboundPolicyForPeers,
+    inboundPolicyScopeForPeers,
+    peerMessaging,
+  ]);
 
   // Notify remote input watcher when TUI becomes idle so it can
   // retry queued commands that were deferred while TUI was busy.
@@ -3115,23 +3268,10 @@ export const AppContainer = (props: AppContainerProps) => {
                     const toolResults =
                       nextMsg?.parts?.filter((p) => p.functionResponse) ?? [];
 
-                    const tools = toolCalls.map((tc, i) => {
-                      const name = tc.functionCall?.name ?? 'unknown';
-                      const args = tc.functionCall?.args ?? {};
-                      const resp = toolResults[i]?.functionResponse?.response;
-                      const speculativeResult = getSpeculativeToolResult(resp);
-                      return {
-                        callId: `spec-${name}-${i}`,
-                        name,
-                        description:
-                          Object.entries(args)
-                            .map(([k, v]) => `${k}: ${String(v).slice(0, 80)}`)
-                            .join(', ') || name,
-                        resultDisplay: speculativeResult.text.slice(0, 500),
-                        status: speculativeResult.status,
-                        confirmationDetails: undefined,
-                      };
-                    });
+                    const tools = buildSpeculativeToolDisplays(
+                      toolCalls,
+                      toolResults,
+                    );
 
                     const toolGroupItem: HistoryItemWithoutId = {
                       type: 'tool_group' as const,
@@ -3466,12 +3606,14 @@ export const AppContainer = (props: AppContainerProps) => {
   /**
    * Determines if the input prompt should be active and accept user input.
    * Input is disabled during:
+   * - Configuration and chat initialization
    * - Initialization errors
    * - Slash command processing, except pending compression where input can queue
    * - Tool confirmations (WaitingForConfirmation state)
    * - Any future streaming states not explicitly allowed
    */
   const isInputActive = isInputActiveForState({
+    isConfigInitialized,
     initError,
     isProcessing,
     hasPendingCompression,

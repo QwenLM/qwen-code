@@ -63,6 +63,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/worktree-reset',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/worktree-reset',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/branch',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/branch',
@@ -198,6 +204,24 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/artifacts/:artifactId',
     attribution: 'handler_resolved',
     route: 'DELETE /session/:id/artifacts/:artifactId',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/sources',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/sources',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/sources',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/sources',
+  },
+  {
+    method: 'DELETE',
+    path: '/session/:id/sources/:sourceId',
+    attribution: 'handler_resolved',
+    route: 'DELETE /session/:id/sources/:sourceId',
   },
   {
     method: 'POST',

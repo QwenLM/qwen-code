@@ -53,6 +53,7 @@ import {
   getAgentCancellationReason,
   getAgentCurrentToolHint,
   getAgentDescription,
+  getSubagentDetailsUnavailableReason,
   getAgentDisplayStatus,
   getAgentType,
   getTaskExecutionRecord,
@@ -494,7 +495,8 @@ function getAgentDisplayInfo(
     0;
 
   const stats = taskExec?.['executionSummary'] as
-    Record<string, unknown> | undefined;
+    | Record<string, unknown>
+    | undefined;
   const elapsed =
     stats && typeof stats['totalDurationMs'] === 'number'
       ? formatDurationMs(stats['totalDurationMs'])
@@ -1058,6 +1060,7 @@ function areToolLinePropsEqual(
     a.callId === b.callId &&
     a.toolName === b.toolName &&
     a.status === b.status &&
+    a.subagentSessionReady === b.subagentSessionReady &&
     a.startTime === b.startTime &&
     a.endTime === b.endTime &&
     a.subContent === b.subContent &&
@@ -1083,6 +1086,7 @@ function areSubToolsEqual(
       a.callId !== b.callId ||
       a.toolName !== b.toolName ||
       a.status !== b.status ||
+      a.subagentSessionReady !== b.subagentSessionReady ||
       a.endTime !== b.endTime ||
       a.rawOutput !== b.rawOutput ||
       a.args !== b.args ||
@@ -1164,9 +1168,9 @@ export const ToolLine = memo(function ToolLine({
   const hasApproval = approval?.toolCallId === tool.callId;
   const isHostOwnedEditApproval = Boolean(
     hostOwnsEditDiffPreview &&
-    hasApproval &&
-    approval?.hasDiffPreview &&
-    isEditToolName(approval?.toolName ?? tool.toolName),
+      hasApproval &&
+      approval?.hasDiffPreview &&
+      isEditToolName(approval?.toolName ?? tool.toolName),
   );
   const locksPendingEditApproval = isHostOwnedEditApproval;
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
@@ -1211,10 +1215,10 @@ export const ToolLine = memo(function ToolLine({
     toolContainsCallId(tool, approval.toolCallId);
   const waitingForApproval = Boolean(
     isHostOwnedEditApproval ||
-    (hostOwnsEditDiffPreview &&
-      hasSubToolApproval &&
-      approval?.hasDiffPreview &&
-      isEditToolName(approval.toolName ?? '')),
+      (hostOwnsEditDiffPreview &&
+        hasSubToolApproval &&
+        approval?.hasDiffPreview &&
+        isEditToolName(approval.toolName ?? '')),
   );
   const isRunningTool = isActiveToolStatus(tool.status);
   const showsLiveElapsed =
@@ -1274,6 +1278,7 @@ export const ToolLine = memo(function ToolLine({
     // show yet — keep the row compact and non-openable; the approval dialog
     // is the single source of interaction.
     const approvalPending = !!hasApproval;
+    const unavailableReason = getSubagentDetailsUnavailableReason(tool);
     const panel = (
       <SubAgentPanel
         tool={tool}
@@ -1304,7 +1309,7 @@ export const ToolLine = memo(function ToolLine({
         </>
       );
       return (
-        <div className={styles.line}>
+        <div className={styles.line} data-transcript-tool-call-id={tool.callId}>
           {approvalPending ? (
             <div
               className={`${styles.lineMain} ${styles.lineButton}`}
@@ -1316,7 +1321,11 @@ export const ToolLine = memo(function ToolLine({
             <button
               type="button"
               className={`${styles.lineMain} ${styles.lineExpandable} ${styles.lineButton}`}
-              onClick={() => subagentDetails.onOpen(tool)}
+              aria-disabled={!!unavailableReason || undefined}
+              title={unavailableReason ? t(unavailableReason) : undefined}
+              onClick={() => {
+                if (!unavailableReason) subagentDetails.onOpen(tool);
+              }}
             >
               {rowContent}
               <span className={styles.lineChevronRight} aria-hidden="true" />
@@ -1326,13 +1335,19 @@ export const ToolLine = memo(function ToolLine({
       );
     }
     return (
-      <div className={styles.line}>
+      <div className={styles.line} data-transcript-tool-call-id={tool.callId}>
         {!hideHeader && (
           <div
             className={`${styles.lineMain} ${
               approvalPending ? '' : styles.lineExpandable
             }`}
-            onClick={approvalPending ? undefined : () => setExpanded(!expanded)}
+            aria-disabled={!!unavailableReason || undefined}
+            title={unavailableReason ? t(unavailableReason) : undefined}
+            onClick={
+              approvalPending || unavailableReason
+                ? undefined
+                : () => setExpanded(!expanded)
+            }
           >
             <AgentIcon />
             <StatusIcon status={isComplete ? info.status : tool.status} />
@@ -1444,7 +1459,7 @@ export const ToolLine = memo(function ToolLine({
     expanded && !detailView && (!isTodo || (!hasTodoList && !result));
 
   return (
-    <div className={styles.line}>
+    <div className={styles.line} data-transcript-tool-call-id={tool.callId}>
       {hideHeader && isRunningTool && elapsed && (
         <div className={styles.lineMain}>
           <ToolHeaderExtra
@@ -1822,11 +1837,15 @@ export const ToolGroup = memo(function ToolGroup({
   );
   const opensMonitorDetails = Boolean(
     !compactSummary &&
-    singleMonitor &&
-    monitorDetailsAvailable &&
-    !monitorDetailsUnavailable,
+      singleMonitor &&
+      monitorDetailsAvailable &&
+      !monitorDetailsUnavailable,
   );
   const opensToolDetails = opensSubagentDetails || opensMonitorDetails;
+  const unavailableReason =
+    !compactSummary && singleSubagent
+      ? getSubagentDetailsUnavailableReason(singleSubagent)
+      : undefined;
   const summaryIconTool = hasRunningTool ? (activeTool ?? tools[0]) : tools[0];
   const hasApprovalTool =
     pendingApproval?.toolCallId &&
@@ -1874,10 +1893,11 @@ export const ToolGroup = memo(function ToolGroup({
         <button
           type="button"
           disabled={documentMode}
+          aria-disabled={!!unavailableReason || undefined}
           tabIndex={documentMode ? -1 : undefined}
           className={styles.chatSummary}
           onClick={() => {
-            if (documentMode) return;
+            if (documentMode || unavailableReason) return;
             if (opensSubagentDetails && singleSubagent && subagentDetails) {
               subagentDetails.onOpen(singleSubagent);
               return;
@@ -1892,11 +1912,13 @@ export const ToolGroup = memo(function ToolGroup({
             documentMode || opensToolDetails ? undefined : chatExpanded
           }
           title={
-            documentMode || opensToolDetails
-              ? undefined
-              : showGroupContent
-                ? t('tool.collapseHint')
-                : t('tool.expand')
+            unavailableReason
+              ? t(unavailableReason)
+              : documentMode || opensToolDetails
+                ? undefined
+                : showGroupContent
+                  ? t('tool.collapseHint')
+                  : t('tool.expand')
           }
         >
           <span

@@ -98,7 +98,10 @@ function renderToolGroup(
     beforeToolCallId?: string;
   }>,
   renderModeOrCompactSummary:
-    'interactive' | 'readonly' | 'document' | boolean = 'interactive',
+    | 'interactive'
+    | 'readonly'
+    | 'document'
+    | boolean = 'interactive',
   onOpenSubagent?: (tool: ACPToolCall) => void,
   onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
   language: 'en' | 'zh-CN' = 'en',
@@ -1890,6 +1893,51 @@ describe('tool row rendering', () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(['line', 'summary'] as const)(
+    'keeps the %s unavailable until the subagent session is ready',
+    (mode) => {
+      const onOpen = vi.fn();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const render = (subagentSessionReady: boolean) => {
+        const tool = makeTool({
+          toolName: 'agent',
+          status: 'in_progress',
+          title: undefined,
+          subagentSessionReady,
+        });
+        act(() =>
+          root.render(
+            <I18nProvider language="zh-CN">
+              <SubagentDetailsProvider onOpen={onOpen}>
+                {mode === 'line' ? (
+                  <ToolLine tool={tool} />
+                ) : (
+                  <ToolGroup tools={[tool]} />
+                )}
+              </SubagentDetailsProvider>
+            </I18nProvider>,
+          ),
+        );
+        return tool;
+      };
+      render(false);
+      const button = container.querySelector('button')!;
+      expect(button.getAttribute('aria-disabled')).toBe('true');
+      expect(button.title).toBe('创建中');
+      button.focus();
+      expect(document.activeElement).toBe(button);
+      act(() => button.click());
+      expect(onOpen).not.toHaveBeenCalled();
+      const ready = render(true);
+      expect(button.hasAttribute('aria-disabled')).toBe(false);
+      act(() => button.click());
+      expect(onOpen).toHaveBeenCalledExactlyOnceWith(ready);
+    },
+  );
 
   it('opens on-demand agent details without mounting inline content', () => {
     const onOpen = vi.fn();

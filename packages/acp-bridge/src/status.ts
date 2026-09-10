@@ -25,6 +25,7 @@ export interface ServeWorkspaceRuntimeStatus {
   runtimeEpoch: number;
   capabilities?: {
     mcp?: ServeWorkspaceRuntimeCapabilityStatus;
+    skills?: ServeWorkspaceRuntimeCapabilityStatus;
   };
 }
 
@@ -546,6 +547,7 @@ export interface ServeWorkspaceSkillsStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   skills: ServeWorkspaceSkillStatus[];
   errors?: ServeStatusCell[];
 }
@@ -942,6 +944,12 @@ export interface ServeSessionWorkflowTaskStatus {
   dispatches: ServeWorkflowDispatchStatusEntry[];
   agentsDispatched: number;
   agentsCompleted: number;
+  /**
+   * Journaled agent() calls a resume ran live again, because the previous run
+   * failed them or was interrupted with them in flight. Absent on snapshots
+   * created before respawns were counted; treat as 0.
+   */
+  agentsRespawned?: number;
   tokensSpent: number;
   tokenBudgetTotal: number | null;
   recentLogs: string[];

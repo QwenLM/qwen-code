@@ -14,6 +14,7 @@ import {
   ChannelWorkerControlError,
   createChannelWorkerManager,
 } from './channel-worker-manager.js';
+import { ChannelControlWorkspaceLimitError } from './channel-control-capacity.js';
 import { ChannelWorkerStartupError } from './channel-worker-supervisor.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { ServeChannelSelection } from './types.js';
@@ -132,6 +133,39 @@ function setup(group = fakeGroup()) {
 }
 
 describe('createChannelWorkerManager', () => {
+  it('rejects 26 resolved owners before reserving a lease', async () => {
+    const test = setup();
+    test.resolveGroups.mockResolvedValue(
+      Array.from({ length: 26 }, (_, index) => ({
+        workspaceCwd: `/ws/${index}`,
+        selection: { mode: 'names', names: [`bot-${index}`] },
+      })),
+    );
+    await expect(
+      test.manager.setSelection({ mode: 'names', names: ['many'] }),
+    ).rejects.toMatchObject({
+      code: 'channel_control_workspace_limit_reached',
+    });
+    expect(test.reserveLease).not.toHaveBeenCalled();
+    expect(test.createGroup).not.toHaveBeenCalled();
+    expect(test.manager.committedChannelNames()).toEqual([]);
+  });
+
+  it('preserves capacity errors from reconciliation and retains committed selection', async () => {
+    const test = setup();
+    await test.manager.setSelection({ mode: 'names', names: ['existing'] });
+    vi.mocked(test.group.reconcile).mockRejectedValue(
+      new ChannelControlWorkspaceLimitError(),
+    );
+    await expect(
+      test.manager.setSelection({ mode: 'names', names: ['candidate'] }),
+    ).rejects.toMatchObject({
+      code: 'channel_control_workspace_limit_reached',
+    });
+    expect(test.manager.committedChannelNames()).toEqual(['existing']);
+    expect(test.group.stop).not.toHaveBeenCalled();
+  });
+
   it('exposes committed channel names in selection order', async () => {
     const test = setup();
     const selection: ServeChannelSelection = {
