@@ -3783,7 +3783,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       owner,
       `runtime recycle requested by session ${JSON.stringify(sessionId)}`,
     );
-    if (!owner.isDying) await ensureChannel('recovery');
+    if (!owner.isDying) {
+      try {
+        await ensureChannel('recovery');
+      } catch (error) {
+        // The two-generation cap refused the replacement spawn. Leaving the
+        // owner draining here would strand the workspace with no active
+        // generation (the draining owner never empties while its unresponsive
+        // session is still attached), so roll the owner back to active and let
+        // it keep serving as a degraded fallback until a generation drains.
+        if (error instanceof BridgeRuntimeRecyclingError) {
+          owner.state = 'active';
+          owner.retireWhenSessionsDrain = false;
+        }
+        throw error;
+      }
+    }
   }
 
   async function retireChannelOnTimeout(

@@ -30,6 +30,7 @@ import {
   BranchWhilePromptActiveError,
   InvalidClientIdError,
   BridgeChannelQuarantinedError,
+  BridgeRuntimeRecyclingError,
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
@@ -32089,6 +32090,53 @@ describe('createAcpSessionBridge', () => {
         'sess-drain-a',
       );
       expect(gen1.killed).toBe(false);
+
+      await bridge.shutdown();
+    });
+
+    it('rolls a recycle target back to active when the generation cap refuses the replacement', async () => {
+      const gen1 = makeChannel({
+        newSessionImpl: async () => ({ sessionId: 'sess-gen1' }),
+      });
+      let gen2SessionCount = 0;
+      const gen2 = makeChannel({
+        newSessionImpl: async () => ({
+          sessionId: `sess-gen2-${++gen2SessionCount}`,
+        }),
+      });
+      let channelSpawns = 0;
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          channelSpawns++ === 0 ? gen1.channel : gen2.channel,
+        sessionScope: 'thread',
+      });
+
+      const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(first.sessionId).toBe('sess-gen1');
+
+      // Recycle the first session: gen1 drains, recovery spawns gen2 (active).
+      await bridge.requestRuntimeRecycle!(first.sessionId);
+      expect(channelSpawns).toBe(2);
+
+      // A fresh session attaches to the active gen2.
+      const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(second.sessionId).toBe('sess-gen2-1');
+
+      // Recycling gen2's session leaves both generations draining, so the
+      // replacement hits the two-generation cap. The recycle must reject and
+      // roll gen2 back to active rather than stranding the workspace with no
+      // active generation.
+      await expect(
+        bridge.requestRuntimeRecycle!(second.sessionId),
+      ).rejects.toBeInstanceOf(BridgeRuntimeRecyclingError);
+
+      // gen2 rolled back to active: a third session attaches without spawning
+      // a third generation.
+      const third = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(third.sessionId).toBe('sess-gen2-2');
+      expect(channelSpawns).toBe(2);
+      expect(gen1.killed).toBe(false);
+      expect(gen2.killed).toBe(false);
 
       await bridge.shutdown();
     });
