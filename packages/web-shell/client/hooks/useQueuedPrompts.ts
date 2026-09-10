@@ -640,53 +640,6 @@ export function useQueuedPrompts({
     setQueuedPrompts(next);
   }, []);
 
-  const hideSettledServerPrompt = useCallback(
-    (promptId: string) => {
-      // A start whose raw-text echo was suppressed (an unrelated unbound
-      // submission was in flight) outlives its submit body's own consume;
-      // settling is the last chance to show the message at all. Only an
-      // unechoed park is consumed: an echoed one stays as the "already
-      // started" marker late admissions dedupe against. And a matching
-      // unbound submission means this prompt's own admission is still in
-      // flight — its body will echo the full payload when it lands.
-      const parkedText = pendingStartedByPromptIdRef.current.get(promptId);
-      if (
-        parkedText !== undefined &&
-        !displayedServerPromptIdsRef.current.has(promptId) &&
-        !queuedPromptsRef.current.some(
-          (item) =>
-            !item.serverPromptId &&
-            item.serverState === 'submitting' &&
-            pendingPromptTextsMatch(item.text, parkedText),
-        )
-      ) {
-        pendingStartedByPromptIdRef.current.delete(promptId);
-        displayedServerPromptIdsRef.current.add(promptId);
-        store.appendLocalUserMessage(parkedText, undefined, { promptId });
-      }
-      displayedServerPromptIdsRef.current.delete(promptId);
-      // A settled prompt will never start, so no echo is owed for it and its
-      // stashed attachments must not stay reachable — unless a start is
-      // parked behind an in-flight removal, whose failure arm replays from
-      // that stash.
-      if (!startedDuringRemovalRef.current.has(promptId)) {
-        pendingEchoByPromptIdRef.current.delete(promptId);
-      }
-      settledServerPromptIdsRef.current.add(promptId);
-      while (
-        settledServerPromptIdsRef.current.size > MAX_COMPLETED_PROMPT_IDS
-      ) {
-        const oldestPromptId = settledServerPromptIdsRef.current
-          .values()
-          .next().value;
-        if (typeof oldestPromptId !== 'string') break;
-        settledServerPromptIdsRef.current.delete(oldestPromptId);
-      }
-      removeDaemonOwnedPrompt(promptId);
-    },
-    [removeDaemonOwnedPrompt, store],
-  );
-
   latestSessionIdRef.current = sessionId;
   latestWorkspaceCwdRef.current = workspaceCwd;
   latestConnectedRef.current = connected;
@@ -935,6 +888,69 @@ export function useQueuedPrompts({
       }
     },
     [appendLocalQueuedPrompt, store],
+  );
+
+  const hideSettledServerPrompt = useCallback(
+    (promptId: string) => {
+      // A start whose raw-text echo was suppressed (an unrelated unbound
+      // submission was in flight) outlives its submit body's own consume;
+      // settling is the last chance to show the message at all. Only an
+      // unechoed park is consumed: an echoed one stays as the "already
+      // started" marker late admissions dedupe against, a second terminal
+      // event for the same prompt must not re-append it, and a matching
+      // unbound submission means this prompt's own admission is still in
+      // flight — its body will echo the full payload when it lands.
+      const parkedText = pendingStartedByPromptIdRef.current.get(promptId);
+      if (
+        parkedText !== undefined &&
+        !settledServerPromptIdsRef.current.has(promptId) &&
+        !displayedServerPromptIdsRef.current.has(promptId) &&
+        !queuedPromptsRef.current.some(
+          (item) =>
+            !item.serverPromptId &&
+            item.serverState === 'submitting' &&
+            pendingPromptTextsMatch(item.text, parkedText),
+        )
+      ) {
+        pendingStartedByPromptIdRef.current.delete(promptId);
+        // The parked text is the daemon's rendering: for a payload the event
+        // cannot reproduce, echo the stashed or row-held full payload
+        // instead of the placeholder.
+        const full =
+          pendingEchoByPromptIdRef.current.get(promptId) ??
+          queuedPromptsRef.current.find(
+            (item) =>
+              item.serverPromptId === promptId &&
+              item.payloadCompleteness !== 'summary-only',
+          );
+        if (full) {
+          appendLocalQueuedPrompt(full, promptId);
+        } else {
+          displayedServerPromptIdsRef.current.add(promptId);
+          store.appendLocalUserMessage(parkedText, undefined, { promptId });
+        }
+      }
+      displayedServerPromptIdsRef.current.delete(promptId);
+      // A settled prompt will never start, so no echo is owed for it and its
+      // stashed attachments must not stay reachable — unless a start is
+      // parked behind an in-flight removal, whose failure arm replays from
+      // that stash.
+      if (!startedDuringRemovalRef.current.has(promptId)) {
+        pendingEchoByPromptIdRef.current.delete(promptId);
+      }
+      settledServerPromptIdsRef.current.add(promptId);
+      while (
+        settledServerPromptIdsRef.current.size > MAX_COMPLETED_PROMPT_IDS
+      ) {
+        const oldestPromptId = settledServerPromptIdsRef.current
+          .values()
+          .next().value;
+        if (typeof oldestPromptId !== 'string') break;
+        settledServerPromptIdsRef.current.delete(oldestPromptId);
+      }
+      removeDaemonOwnedPrompt(promptId);
+    },
+    [appendLocalQueuedPrompt, removeDaemonOwnedPrompt, store],
   );
 
   const refreshPendingPrompts = useCallback(
@@ -1696,6 +1712,12 @@ export function useQueuedPrompts({
         }
         void refreshPendingPrompts();
       } else if (event.type === 'turn_complete') {
+        // The settle path consumes the suppression park, so read both
+        // started markers first: a cancelled turn for a started prompt
+        // still counts as completed for a callback registered later.
+        const startedBeforeSettle =
+          pendingStartedByPromptIdRef.current.has(promptId) ||
+          startedDuringRemovalRef.current.has(promptId);
         hideSettledServerPrompt(promptId);
         const callback = completionCallbacksRef.current.get(promptId);
         completionCallbacksRef.current.delete(promptId);
@@ -1703,11 +1725,7 @@ export function useQueuedPrompts({
           callback();
         } else if (
           event.data.stopReason !== 'cancelled' ||
-          pendingStartedByPromptIdRef.current.has(promptId) ||
-          // A start parked behind an in-flight removal proves the prompt ran
-          // even when the turn was cancelled: remember it so a callback
-          // registered after the removal fails still fires.
-          startedDuringRemovalRef.current.has(promptId)
+          startedBeforeSettle
         ) {
           rememberCompletedPromptId(promptId);
         }
