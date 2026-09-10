@@ -5920,13 +5920,63 @@ describe('SessionService', () => {
       },
     );
 
-    it('does not commit a fork after its tracked snapshot has been reclaimed', async () => {
+    it.each(['file', 'directory', 'references'])(
+      'forks the conversation while preserving a saved-page record with missing %s',
+      async (missing) => {
+        const oldId = '11111111-1111-4111-8111-111111111119';
+        const newId = '22222222-2222-4222-8222-222222222229';
+        const page = await seedSavedPage(oldId);
+        const file = fileURLToPath(page.url!);
+        await fs.promises.rm(
+          missing === 'file'
+            ? file
+            : missing === 'directory'
+              ? realPath.dirname(file)
+              : realPath.join(realPath.dirname(file), 'references'),
+          { recursive: true },
+        );
+        const warnings: string[] = [];
+        const forkService = new SessionService(cwd, {
+          runtimeBaseDir: realTmpDir,
+          onWarning: (message) => warnings.push(message),
+        });
+
+        await forkService.forkSession(oldId, newId);
+
+        const forked = await forkService.loadSession(newId);
+        expect(
+          forked?.conversation.messages.map((record) => record.uuid),
+        ).toEqual(['u1', 'u2']);
+        expect(forked?.artifactSnapshot?.artifacts).toEqual([
+          expect.objectContaining({
+            id: stableSessionArtifactId(newId, `managed:${page.managedId}`),
+            url: page.url,
+            managedId: page.managedId,
+            metadata: page.metadata,
+            createdAt: '2026-04-22T00:00:02.000Z',
+          }),
+        ]);
+        expect(warnings).toEqual([
+          expect.stringContaining('missing snapshot storage'),
+        ]);
+        expect(
+          (await forkService.loadSession(oldId))?.conversation.messages,
+        ).toHaveLength(2);
+      },
+    );
+
+    it('does not commit a fork when snapshot ownership bookkeeping fails', async () => {
       const oldId = '11111111-1111-4111-8111-111111111119';
       const newId = '22222222-2222-4222-8222-222222222229';
       const page = await seedSavedPage(oldId);
-      await deleteArtifactSnapshot(page, realTmpDir, oldId);
+      const references = realPath.join(
+        realPath.dirname(fileURLToPath(page.url!)),
+        'references',
+      );
+      await fs.promises.rm(references, { recursive: true });
+      await fs.promises.writeFile(references, 'not a directory');
       await expect(service.forkSession(oldId, newId)).rejects.toMatchObject({
-        code: 'ENOENT',
+        code: 'ENOTDIR',
       });
       await expect(
         fs.promises.stat(

@@ -4169,12 +4169,19 @@ export class SessionService {
       }
 
       for (const artifact of artifactSnapshots) {
-        await retainArtifactSnapshot(
-          artifact,
-          this.storage.getRuntimeBaseDir(),
-          newSessionId,
-          operationId,
-        );
+        try {
+          await retainArtifactSnapshot(
+            artifact,
+            this.storage.getRuntimeBaseDir(),
+            newSessionId,
+            operationId,
+          );
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          this.warn(
+            `branch ${newSessionId} retained saved webpage record ${artifact.id} with missing snapshot storage; its content may be unavailable`,
+          );
+        }
       }
       try {
         await fs.promises.link(stagedTranscriptPath, targetPath);
