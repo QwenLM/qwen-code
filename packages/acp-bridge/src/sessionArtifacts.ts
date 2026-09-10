@@ -286,6 +286,8 @@ export class SessionArtifactStore {
     string,
     PersistedSessionArtifact
   >();
+  // Failed removals or partial restores can leave ownership without a live record.
+  private readonly pendingSnapshotRemovals = new Set<string>();
   private lastRestoreWarnings: string[] = [];
   private lastRestoreWarningDetails: SessionArtifactWarningDetail[] = [];
 
@@ -404,6 +406,11 @@ export class SessionArtifactStore {
         }
       }
       const changes: SessionArtifactChange[] = [];
+      let rollbackArtifacts: DaemonSessionArtifact[] = [];
+      const rollback = async () => {
+        this.restoreState(before);
+        await this.reclaimSnapshotFiles(rollbackArtifacts);
+      };
       try {
         for (const normalized of coalesceByIdentity(normalizedResults)) {
           const artifact = this.applyStickyEphemeralOverride(normalized);
@@ -483,14 +490,17 @@ export class SessionArtifactStore {
             .filter((change) => change.action === 'created')
             .map((change) => change.artifactId),
         );
-        for (const change of changes) {
-          if (change.action !== 'removed' && change.artifact) {
-            await retainArtifactSnapshot(
-              change.artifact,
-              this.runtimeBaseDir,
-              this.sessionId,
-            );
-          }
+        rollbackArtifacts = changes.flatMap((change) =>
+          change.action !== 'removed' && change.artifact
+            ? [change.artifact]
+            : [],
+        );
+        for (const artifact of rollbackArtifacts) {
+          await retainArtifactSnapshot(
+            artifact,
+            this.runtimeBaseDir,
+            this.sessionId,
+          );
         }
         const overflowRemoved = await this.evictOverflow(
           createdIds,
@@ -512,7 +522,7 @@ export class SessionArtifactStore {
           try {
             persistenceWarnings = await this.persistChanges(changes, true);
           } catch (error) {
-            this.restoreState(before);
+            await rollback();
             const artifactIds = changes
               .filter(shouldCommitBeforeDurablePersistence)
               .map((change) => change.artifactId);
@@ -570,7 +580,7 @@ export class SessionArtifactStore {
           persistenceStrict ||
           error instanceof SessionArtifactAuthorizationError
         ) {
-          this.restoreState(before);
+          await rollback();
         }
         throw error;
       }
@@ -896,6 +906,9 @@ export class SessionArtifactStore {
           insertSeq: ++this.insertSeq,
         });
       }
+      if (!warnings.some(isArtifactSnapshotCompletenessWarning)) {
+        this.pendingSnapshotRemovals.clear();
+      }
       const evicted = await this.evictOverflow(new Set(), []);
       if (evicted.removed.length > 0) {
         warnings.push('restored artifact list pruned to live limit');
@@ -914,11 +927,17 @@ export class SessionArtifactStore {
         ...snapshot.artifacts.map((artifact) => artifact.id),
         ...preservedLiveEphemeralArtifacts.map((artifact) => artifact.id),
       ]);
-      await this.reclaimSnapshotFiles(
-        [...previousState.artifacts.values()].filter(
-          (artifact) => !restoredIds.has(artifact.id),
-        ),
+      const discarded = [...previousState.artifacts.values()].filter(
+        (artifact) => !restoredIds.has(artifact.id),
       );
+      if (warnings.some(isArtifactSnapshotCompletenessWarning)) {
+        for (const artifact of previousState.artifacts.values()) {
+          const id = getWebPreviewSnapshotId(artifact);
+          if (id) this.pendingSnapshotRemovals.add(id);
+        }
+      } else {
+        await this.reclaimSnapshotFiles(discarded);
+      }
       this.setLastRestoreWarnings(warnings);
       return warnings;
     });
@@ -941,6 +960,7 @@ export class SessionArtifactStore {
         this.persistenceSeq = sequence;
         this.durableEventsSinceSnapshot = 0;
         this.consecutiveSnapshotFailures = 0;
+        this.pendingSnapshotRemovals.clear();
         return [];
       } catch (error) {
         writeStderrLine(
@@ -1021,6 +1041,7 @@ export class SessionArtifactStore {
     tombstonedClientIds: Map<string, string | undefined>;
     stickyEphemeralIds: Set<string>;
     markerArtifacts: Map<string, PersistedSessionArtifact>;
+    pendingSnapshotRemovals: Set<string>;
     lastRestoreWarnings: string[];
     lastRestoreWarningDetails: SessionArtifactWarningDetail[];
   } {
@@ -1040,6 +1061,7 @@ export class SessionArtifactStore {
       tombstonedClientIds: new Map(this.tombstonedClientIds),
       stickyEphemeralIds: new Set(this.stickyEphemeralIds),
       markerArtifacts: new Map(this.markerArtifacts),
+      pendingSnapshotRemovals: new Set(this.pendingSnapshotRemovals),
       lastRestoreWarnings: [...this.lastRestoreWarnings],
       lastRestoreWarningDetails: [...this.lastRestoreWarningDetails],
     };
@@ -1056,6 +1078,7 @@ export class SessionArtifactStore {
     tombstonedClientIds: Map<string, string | undefined>;
     stickyEphemeralIds: Set<string>;
     markerArtifacts: Map<string, PersistedSessionArtifact>;
+    pendingSnapshotRemovals: Set<string>;
     lastRestoreWarnings: string[];
     lastRestoreWarningDetails: SessionArtifactWarningDetail[];
   }): void {
@@ -1083,6 +1106,10 @@ export class SessionArtifactStore {
     this.markerArtifacts.clear();
     for (const [id, artifact] of state.markerArtifacts) {
       this.markerArtifacts.set(id, artifact);
+    }
+    this.pendingSnapshotRemovals.clear();
+    for (const id of state.pendingSnapshotRemovals) {
+      this.pendingSnapshotRemovals.add(id);
     }
     this.setLastRestoreWarnings(state.lastRestoreWarnings);
     this.lastRestoreWarningDetails = [...state.lastRestoreWarningDetails];
@@ -1135,6 +1162,9 @@ export class SessionArtifactStore {
       await this.persistence.recordEvent(payload);
       this.persistenceSeq = sequence;
       for (const change of durableChanges) {
+        const snapshotId =
+          change.artifact && getWebPreviewSnapshotId(change.artifact);
+        if (snapshotId) this.pendingSnapshotRemovals.delete(snapshotId);
         if (change.action === 'removed') continue;
         const stored = this.artifacts.get(change.artifactId);
         if (!stored) continue;
@@ -1182,6 +1212,7 @@ export class SessionArtifactStore {
       this.persistenceSeq = sequence;
       this.durableEventsSinceSnapshot = 0;
       this.consecutiveSnapshotFailures = 0;
+      this.pendingSnapshotRemovals.clear();
     } catch (error) {
       this.consecutiveSnapshotFailures = Math.min(
         this.consecutiveSnapshotFailures + 1,
@@ -1251,6 +1282,9 @@ export class SessionArtifactStore {
     for (const change of changes) {
       if (change.action === 'removed') {
         removalNotPersisted = true;
+        const snapshotId =
+          change.artifact && getWebPreviewSnapshotId(change.artifact);
+        if (snapshotId) this.pendingSnapshotRemovals.add(snapshotId);
         if (change.reason === 'explicit') {
           this.rememberTombstone(change);
           this.stickyEphemeralIds.delete(change.artifactId);
@@ -1973,6 +2007,7 @@ export class SessionArtifactStore {
       const id = getWebPreviewSnapshotId(artifact);
       if (
         !id ||
+        this.pendingSnapshotRemovals.has(id) ||
         [...this.artifacts.values()].some(
           (kept) => getWebPreviewSnapshotId(kept) === id,
         )

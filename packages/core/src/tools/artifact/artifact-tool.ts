@@ -36,7 +36,10 @@ import {
 } from './html.js';
 import { artifactIdFromPath, type ArtifactPublisher } from './publisher.js';
 import { createArtifactPublisher } from './create-publisher.js';
-import { saveArtifactSnapshot } from './artifact-snapshots.js';
+import {
+  deleteArtifactSnapshot,
+  saveArtifactSnapshot,
+} from './artifact-snapshots.js';
 
 /** Opens a URL in the browser. Injectable so tests don't launch a browser. */
 export type UrlOpener = (
@@ -264,15 +267,25 @@ class ArtifactToolInvocation extends BaseToolInvocation<
     const saveVersion = this.config.isArtifactSnapshotsEnabled();
     if (saveVersion) {
       try {
-        artifacts.push(
-          await saveArtifactSnapshot(
-            html,
-            title,
-            url,
-            this.config.getSessionId(),
-            this.config.storage.getRuntimeBaseDir(),
-          ),
+        const sessionId = this.config.getSessionId();
+        const runtimeBaseDir = this.config.storage.getRuntimeBaseDir();
+        const snapshot = await saveArtifactSnapshot(
+          html,
+          title,
+          url,
+          sessionId,
+          runtimeBaseDir,
         );
+        if (signal.aborted) {
+          await deleteArtifactSnapshot(snapshot, runtimeBaseDir, sessionId);
+          const message = `Published artifact "${title}" to ${url}, but its historical version was discarded because the request was cancelled.`;
+          return {
+            llmContent: message,
+            returnDisplay: message,
+            resultFilePaths: filePath ? [filePath] : undefined,
+          };
+        }
+        artifacts.push(snapshot);
       } catch (err) {
         const message = `Published artifact "${title}" to ${url}, but its historical version could not be saved: ${getErrorMessage(err)}`;
         return {

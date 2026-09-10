@@ -160,6 +160,58 @@ describe('ArtifactTool', () => {
     ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it.each(['after publication', 'during snapshot write'])(
+    'reclaims only the new snapshot when cancelled %s',
+    async (abortPoint) => {
+      const earlierFile = await writeFragment('earlier.html', '<p>Earlier</p>');
+      const earlier = await tool
+        .build({ file_path: earlierFile })
+        .execute(signal);
+      const priorSnapshot = earlier.artifacts![1]!;
+      const runtime = path.join(outDir, 'runtime');
+      const root = path.join(runtime, 'artifacts', 'snapshots');
+      const beforeDirectories = await fs.readdir(root);
+      const beforeHtml = await readArtifactSnapshot(priorSnapshot, runtime);
+      const file = await writeFragment('cancel.html', '<p>Published</p>');
+      const controller = new AbortController();
+      if (abortPoint === 'after publication') {
+        openSpy.mockImplementationOnce(async () => controller.abort());
+      } else {
+        const writeFile = fs.writeFile;
+        vi.spyOn(fs, 'writeFile').mockImplementation(
+          async (file, data, options) => {
+            await writeFile(file, data, options);
+            if (
+              String(file).startsWith(root + path.sep) &&
+              path.basename(String(file)) === 'index.html'
+            ) {
+              controller.abort();
+            }
+          },
+        );
+      }
+
+      const result = await tool
+        .build({ file_path: file })
+        .execute(controller.signal);
+
+      expect(controller.signal.aborted).toBe(true);
+      expect(result.artifacts).toBeUndefined();
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Published artifact');
+      expect(result.llmContent).not.toContain(
+        'Artifact publishing was cancelled',
+      );
+      expect(await fs.readFile(result.resultFilePaths![0], 'utf8')).toContain(
+        '<p>Published</p>',
+      );
+      expect(await fs.readdir(root)).toEqual(beforeDirectories);
+      await expect(readArtifactSnapshot(priorSnapshot, runtime)).resolves.toBe(
+        beforeHtml,
+      );
+    },
+  );
+
   it('reports a saved-version failure even when latest publication succeeded', async () => {
     const file = await writeFragment('page.html', '<p>Published</p>');
     await fs.writeFile(path.join(outDir, 'runtime'), 'not a directory');

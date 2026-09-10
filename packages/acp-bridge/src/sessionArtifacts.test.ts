@@ -9,7 +9,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs, type BigIntStats, type Stats } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   SessionArtifactAuthorizationError,
   SessionArtifactStore,
@@ -18,6 +18,8 @@ import {
 import {
   rebuildSessionArtifactSnapshot,
   readArtifactSnapshot,
+  retainArtifactSnapshot,
+  deleteArtifactSnapshot,
   stableSessionArtifactId,
   type RebuiltSessionArtifactSnapshot,
   type SessionArtifactEventRecordPayload,
@@ -6573,6 +6575,334 @@ describe('SessionArtifactStore', () => {
         );
       },
     );
+
+    it.each(['strict persistence', 'durable transition', 'capacity'])(
+      'releases new ownership after %s rollback and preserves existing owners',
+      async (failure) => {
+        let failWrites = false;
+        const live = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          maxArtifacts: failure === 'strict persistence' ? 200 : 1,
+          persistence: {
+            ...persistence,
+            recordEvent: async () => {
+              if (failWrites) throw new Error('disk full');
+            },
+          },
+        });
+        const prior = await saved('owner', 'prior');
+        if (failure !== 'capacity') {
+          await live.upsertMany([prior], {
+            strict: true,
+            trustedPublisher: true,
+          });
+        }
+        const before = (await live.list()).artifacts;
+        const pages = [await saved('owner', 'new')];
+        if (failure === 'capacity') pages.push(await saved('owner', 'second'));
+        for (const page of pages) {
+          await retainArtifactSnapshot(page, workspace, 'producer');
+        }
+        failWrites = true;
+        const result = live.upsertMany(
+          [
+            ...(failure === 'capacity'
+              ? []
+              : [{ ...prior, title: 'Attempted update' }]),
+            ...pages,
+          ],
+          { strict: failure !== 'durable transition', trustedPublisher: true },
+        );
+        if (failure === 'durable transition') {
+          await expect(result).resolves.toMatchObject({
+            changes: [],
+            warnings: [
+              'artifact durable removal not persisted; live changes rolled back',
+            ],
+          });
+        } else {
+          await expect(result).rejects.toThrow(
+            failure === 'capacity' ? 'artifact store is full' : 'disk full',
+          );
+        }
+        expect((await live.list()).artifacts).toEqual(before);
+        if (failure !== 'capacity') {
+          await expect(readArtifactSnapshot(prior, workspace)).resolves.toBe(
+            'prior',
+          );
+          expect(
+            await fs.readdir(
+              path.join(path.dirname(fileURLToPath(prior.url)), 'references'),
+            ),
+          ).toEqual([createHash('sha256').update('owner').digest('hex')]);
+        }
+        for (const page of pages) {
+          expect(
+            await fs.readdir(
+              path.join(path.dirname(fileURLToPath(page.url)), 'references'),
+            ),
+          ).toEqual([createHash('sha256').update('producer').digest('hex')]);
+          await deleteArtifactSnapshot(page, workspace, 'producer');
+          await expect(
+            fs.stat(path.dirname(fileURLToPath(page.url))),
+          ).rejects.toMatchObject({ code: 'ENOENT' });
+        }
+      },
+    );
+
+    it('cleans the whole batch when retaining its first snapshot fails after writing its reference', async () => {
+      const first = await saved('owner', 'first');
+      const second = await saved('owner', 'second');
+      await retainArtifactSnapshot(second, workspace, 'owner');
+      const live = store('owner');
+      const references = path.join(
+        path.dirname(fileURLToPath(first.url)),
+        'references',
+      );
+      const writeFile = fs.writeFile;
+      const spy = vi
+        .spyOn(fs, 'writeFile')
+        .mockImplementation(async (...args) => {
+          await writeFile(...args);
+          if (path.dirname(String(args[0])) === references) {
+            throw new Error('reference write failed');
+          }
+        });
+      try {
+        await expect(
+          live.upsertMany([first, second], {
+            strict: true,
+            trustedPublisher: true,
+          }),
+        ).rejects.toThrow('reference write failed');
+        expect((await live.list()).artifacts).toEqual([]);
+        for (const page of [first, second]) {
+          await expect(
+            fs.stat(path.dirname(fileURLToPath(page.url))),
+          ).rejects.toMatchObject({ code: 'ENOENT' });
+        }
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it.each([false, true])(
+      'protects failed durable pruning through rollback after partial restore: %s',
+      async (partialRestore) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        const live = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          maxArtifacts: 1,
+          persistence: {
+            ...persistence,
+            recordEvent: async () => {
+              throw new Error('disk full');
+            },
+          },
+        });
+        await expect(
+          live.restore(snapshot('owner', [first, second])),
+        ).resolves.toContain(
+          'artifact removal not persisted; live removal kept',
+        );
+        if (partialRestore) {
+          await expect(
+            live.restore(
+              snapshot('owner', [{ ...first, id: 'abcdef1234567890' }, second]),
+            ),
+          ).resolves.toContain(
+            'skipped artifact with mismatched id abcdef1234567890',
+          );
+        }
+        await expect(
+          live.upsertMany([first], { strict: true, trustedPublisher: true }),
+        ).rejects.toThrow('disk full');
+        expect((await live.list()).artifacts.map((page) => page.id)).toEqual([
+          second.id,
+        ]);
+        await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+          'first',
+        );
+        await expect(readArtifactSnapshot(second, workspace)).resolves.toBe(
+          'second',
+        );
+      },
+    );
+
+    it.each(['event', 'snapshot', 'restore'])(
+      'stops protecting an old failed removal after a complete %s commit',
+      async (commit) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        await retainArtifactSnapshot(first, workspace, 'fork');
+        let failWrites = true;
+        const live = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          maxArtifacts: 1,
+          persistence: {
+            ...persistence,
+            recordEvent: async () => {
+              if (failWrites) throw new Error('disk full');
+            },
+          },
+        });
+        await live.restore(snapshot('owner', [first, second]));
+        failWrites = false;
+        if (commit === 'event') {
+          await live.upsertMany([first], {
+            strict: true,
+            trustedPublisher: true,
+          });
+          await live.remove(first.id);
+        } else if (commit === 'snapshot') {
+          await expect(live.recordSnapshot()).resolves.toEqual([]);
+        } else {
+          await expect(
+            live.restore(snapshot('owner', [second])),
+          ).resolves.toEqual([]);
+        }
+        failWrites = true;
+        await expect(
+          live.upsertMany([first], { strict: true, trustedPublisher: true }),
+        ).rejects.toThrow('disk full');
+        expect(
+          await fs.readdir(
+            path.join(path.dirname(fileURLToPath(first.url)), 'references'),
+          ),
+        ).toEqual([createHash('sha256').update('fork').digest('hex')]);
+        await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+          'first',
+        );
+      },
+    );
+
+    it('releases a failed reintroduction after successful durable removal', async () => {
+      const page = await saved('owner', 'shared');
+      let failWrites = false;
+      const live = new SessionArtifactStore({
+        sessionId: 'owner',
+        workspaceCwd: workspace,
+        runtimeBaseDir: workspace,
+        persistence: {
+          ...persistence,
+          recordEvent: async () => {
+            if (failWrites) throw new Error('disk full');
+          },
+        },
+      });
+      await live.restore(snapshot('owner', [page]));
+      await retainArtifactSnapshot(page, workspace, 'fork');
+      await live.remove(page.id);
+      failWrites = true;
+      await expect(
+        live.upsertMany([page], { strict: true, trustedPublisher: true }),
+      ).rejects.toThrow('disk full');
+      expect((await live.list()).artifacts).toEqual([]);
+      expect(
+        await fs.readdir(
+          path.join(path.dirname(fileURLToPath(page.url)), 'references'),
+        ),
+      ).toEqual([createHash('sha256').update('fork').digest('hex')]);
+      await deleteArtifactSnapshot(page, workspace, 'fork');
+      await expect(
+        fs.stat(path.dirname(fileURLToPath(page.url))),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it.each(['id', 'title'])(
+      'preserves history skipped due to %s through partial restore and later rollback',
+      async (invalidField) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        const live = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          persistence: {
+            ...persistence,
+            recordEvent: async () => {
+              throw new Error('disk full');
+            },
+          },
+        });
+        await live.restore(snapshot('owner', [first, second]));
+        await expect(
+          live.restore(
+            snapshot('owner', [
+              invalidField === 'id'
+                ? { ...first, id: 'abcdef1234567890' }
+                : { ...first, title: '' },
+              second,
+            ]),
+          ),
+        ).resolves.toContain(
+          invalidField === 'id'
+            ? 'skipped artifact with mismatched id abcdef1234567890'
+            : 'skipped artifact restore: title is required',
+        );
+        expect((await live.list()).artifacts.map((page) => page.id)).toEqual([
+          second.id,
+        ]);
+        await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+          'first',
+        );
+        await expect(
+          live.upsertMany([first], { strict: true, trustedPublisher: true }),
+        ).rejects.toThrow('disk full');
+        await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+          'first',
+        );
+        await expect(readArtifactSnapshot(second, workspace)).resolves.toBe(
+          'second',
+        );
+      },
+    );
+
+    it('preserves pending durable history dropped from a later successful batch', async () => {
+      const first = await saved('owner', 'first');
+      const second = await saved('owner', 'second');
+      const third = await saved('owner', 'third');
+      let failWrites = true;
+      const live = new SessionArtifactStore({
+        sessionId: 'owner',
+        workspaceCwd: workspace,
+        runtimeBaseDir: workspace,
+        maxArtifacts: 1,
+        persistence: {
+          ...persistence,
+          recordEvent: async () => {
+            if (failWrites) throw new Error('disk full');
+          },
+        },
+      });
+      await live.restore(snapshot('owner', [first, second]));
+      failWrites = false;
+      const result = await live.upsertMany([third, first], {
+        trustedPublisher: true,
+      });
+      expect(result.warnings).toContain(
+        'dropped 1 newly created artifacts because the store is full',
+      );
+      expect((await live.list()).artifacts.map((page) => page.id)).toEqual([
+        third.id,
+      ]);
+      await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+        'first',
+      );
+      await expect(
+        readArtifactSnapshot(second, workspace),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(readArtifactSnapshot(third, workspace)).resolves.toBe(
+        'third',
+      );
+    });
 
     it('reclaims discarded rewind history only after a complete restore', async () => {
       const first = await saved('owner', 'first');

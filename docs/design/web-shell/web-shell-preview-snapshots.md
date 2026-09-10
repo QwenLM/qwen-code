@@ -12,11 +12,18 @@ daemon.
 ## Design
 
 In managed ACP sessions with chat recording enabled, each successful `Artifact`
-publication also writes a separate, immutable local HTML snapshot. Ordinary CLI
+publication also attempts to write a separate, immutable local HTML snapshot. Ordinary CLI
 publication and sessions without recording do not create historical files. The
 existing publisher continues to update its stable latest URL. The snapshot contains the exact wrapped HTML published in that invocation,
 including inline styles, scripts, data, and embedded assets. Each invocation
 gets a new ID, even when the source path or content is unchanged.
+
+If snapshot storage fails, the published URL remains valid and the tool reports
+that the historical version could not be saved. If cancellation arrives after
+publication while the snapshot is being saved, the tool releases that new
+snapshot and returns no artifact descriptors for the cancelled request. It
+still reports the successful publication truthfully; other saved versions are
+unaffected.
 
 Snapshot bytes live under the producing runtime's storage directory in
 `artifacts/snapshots/<UUID>/index.html`. Exclusive creation prevents overwrites.
@@ -47,6 +54,17 @@ bytes needed by the durable history. Old snapshots without reference metadata
 are kept conservatively because their other fork owners cannot be established.
 Files left by a process crash before descriptor persistence or a failed cleanup
 are also kept; this change does not add an orphan-file collector.
+
+An artifact batch that rolls back releases its discarded snapshots' session
+references, including candidates dropped from the live change list during
+eviction. It preserves snapshots still owned by the restored live records or
+by other sessions. Snapshots whose removal failed to persist remain protected
+even when absent from the live list. An incomplete restore also protects prior
+snapshots that it skips instead of treating them as a completed rewind. This
+protection is part of rollback state
+and is cleared by a subsequent successful durable change or complete snapshot
+or restore. This keeps failed batches from leaking references without deleting
+bytes still needed by recorded history.
 
 The new `GET /session/:id/artifacts/:artifactId/content` route is
 **live-session-owner scoped**, with the same owner resolution, client filtering,
@@ -106,7 +124,12 @@ session data, open each original message, exercise inline interaction, close
 and reload, and make the source/latest page unavailable. Test owner isolation,
 forged descriptors, symlinks, truncation and checksum mismatch. Fork with missing
 snapshot bytes or reference storage and verify the conversation and descriptor
-survive; other reference errors must not commit a partial fork. Run the global
+survive; other reference errors must not commit a partial fork. Inject batch
+persistence, capacity and reference-sync failures and verify that rollback
+releases new ownership while preserving existing and pending durable owners.
+Cancel after publication and during snapshot writing; verify that the new
+snapshot is reclaimed, earlier versions survive, and the published URL remains
+readable. Run the global
 CLI baseline first, then build/typecheck/bundle, focused unit tests and the
 browser scenario on the local daemon. See
 `.qwen/e2e-tests/web-shell-preview-snapshots.md` for commands and results.
