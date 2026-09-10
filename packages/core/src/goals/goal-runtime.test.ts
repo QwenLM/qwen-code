@@ -6622,6 +6622,47 @@ describe('goal runtime', () => {
       expect(host.inputs[3]).not.toHaveProperty('windDown');
     });
 
+    it('still admits a user turn once the ceiling is already spent', async () => {
+      // Three surfaces promise this -- the settings row, the schema
+      // description and the `turnBudget` doc comment -- and nothing held it:
+      // `beginTurn` gates only on the Goal being active, and `spentBudget` sits
+      // in the same closure, so a plausible "stop admitting turns at the
+      // ceiling" edit would silently discard the user's message instead.
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal: fakeGoalJournal(),
+        turnBudgetGrant: 1,
+        tokenBudgetGrant: Number.POSITIVE_INFINITY,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      // One automatic turn spends the window, and the gate grants the hand-off.
+      await finishDelivered(runtime, host.started[0]!);
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'active',
+        turnCount: 1,
+        turnBudget: 1,
+      });
+      expect(host.inputs[1]).toMatchObject({ windDown: true });
+
+      // The user types with the ceiling already spent and the hand-off in
+      // flight. The turn is reserved, not refused.
+      expect(runtime.beginTurn('real-user')).toBeUndefined();
+      await finishDelivered(runtime, host.started[1]!);
+
+      const userPermit = runtime.permitForTurn('real-user');
+      expect(userPermit).toBeDefined();
+      expect(runtime.getSnapshot().goal?.status).toBe('active');
+
+      // And the stop still arrives once the user's own turn is done.
+      await runtime.finishTurn(userPermit!);
+      await vi.waitFor(() => {
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+      });
+      expect(runtime.getSnapshot().goal?.limitKind).toBe('turn_budget');
+    });
+
     it('counts user-driven turns toward the turn ceiling', async () => {
       const host = fakeGoalTurnHost();
       const runtime = createGoalRuntime({
@@ -6854,6 +6895,37 @@ describe('goal runtime', () => {
           activeTimeMs: 60_000,
           activeTimeBudgetMs: 1_800_000,
         });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('re-reads the time ceiling when a queued continuation is finally delivered', async () => {
+      // The time ceiling is the only one whose spent state can change between
+      // queueing and delivery: spend and turn count are committed by
+      // `finishTurn` before the gate runs, but elapsed active time keeps
+      // accruing while the continuation sits queued with no host to flush it.
+      // A continuation queued under the ceiling and delivered past it must be
+      // the hand-off, not a full work turn a whole window late.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(1_000);
+        const host = fakeGoalTurnHost();
+        const runtime = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          activeTimeBudgetGrantMs: 60_000,
+          tokenBudgetGrant: Number.POSITIVE_INFINITY,
+        });
+        // Queued with the ceiling unspent and no host to deliver it.
+        await runtime.dispatch({ action: 'create', objective: 'ship' });
+        expect(host.inputs).toHaveLength(0);
+
+        // The window runs out while the continuation waits.
+        vi.setSystemTime(121_000);
+        runtime.bindHost(host);
+
+        expect(host.inputs).toHaveLength(1);
+        expect(host.inputs[0]).toMatchObject({ windDown: true });
       } finally {
         vi.useRealTimers();
       }

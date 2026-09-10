@@ -298,6 +298,13 @@ describe('SettingsUtils', () => {
           expect(validateSettingValue(definition, 0)).toBe(
             'Value must not be 0',
           );
+          // `-0` is what `Number()` returns for `-0`, `-0.0`, `-.0` and
+          // `-0e0`, and `JSON.stringify` writes it as `0`. Letting it through
+          // persists the excluded value and aborts every later startup in that
+          // scope, with `/config` unreachable to repair it.
+          expect(validateSettingValue(definition, -0)).toBe(
+            'Value must not be 0',
+          );
           expect(validateSettingValue(definition, -1)).toBeUndefined();
           expect(validateSettingValue(definition, 1)).toBeUndefined();
         }

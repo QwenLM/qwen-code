@@ -182,9 +182,26 @@ the record still change because they explicitly whitelist its fields.
 - **Two out-of-core whitelists.** The SDK's hand-copied union and the Web
   Shell's mapper each enumerate `limitKind` by value. Missing either drops the
   new kinds silently rather than loudly.
-- **Default off means no behavioural change.** With both settings unset, no
-  Goal carries either field and `spentBudget` reduces to the existing token
-  check.
+- **Default off means no new stop.** With both settings unset, no Goal carries
+  either field and `spentBudget` reduces to the existing token check, so no
+  Goal stops for a reason it would not have stopped for before. One thing does
+  change with the settings unset: restoring an `active` Goal now rebases
+  `updatedAt` to the restore, so the elapsed figure no longer counts the time
+  the process was down. That figure is what the footer pill, `get_goal` and the
+  legacy `durationMs` projection report, so a restored Goal reads lower than it
+  used to. The old reading charged offline time as active time; the new one
+  drops it, and drops with it any active time in the interrupted turn that no
+  journal write had committed.
+
+- **Active time is measured between recorded transitions.** `activeTimeMs` is
+  committed by journal writes, and `dispose()` writes nothing, so a window that
+  ends without a Goal transition is not charged. A Goal left `active` while the
+  user does unrelated work, then restarted, resumes with the elapsed figure it
+  last committed. The record cannot do better without persisting an exit
+  timestamp: with the rebase, offline time is excluded and so is that tail;
+  without it, the tail is charged and so is every hour the process was down.
+  The tail is the smaller error and the one that fails safe, so the ceiling can
+  under-count across restarts rather than stop a Goal for time nobody spent.
 
 ## Validation
 
@@ -226,8 +243,9 @@ the record still change because they explicitly whitelist its fields.
 
 ## Acceptance criteria
 
-- With both settings unset, a Goal's record carries neither field and its
-  behaviour is unchanged.
+- With both settings unset, a Goal's record carries neither field and no Goal
+  stops for a new reason. The elapsed figure a restored `active` Goal reports
+  changes: offline time is no longer counted.
 - A Goal that reaches either ceiling receives exactly one wind-down turn, then
   settles as `usage_limited` with the matching `limitKind` and a `lastReason`
   naming the budget.

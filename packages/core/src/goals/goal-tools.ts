@@ -933,7 +933,7 @@ export class ProposeGoalTool extends BaseDeclarativeTool<
             type: 'string',
             minLength: 1,
             maxLength: PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS,
-            description: `The objective to propose, written so the Goal verifier can judge it from the transcript (e.g. "Outcome: … Done when: 1) npm test exits 0 (paste the summary line) … Must not: … Budget: as model guidance, stop as blocked after 20 turns; use model.goalMaxTurns or model.goalMaxActiveMinutes for an enforced ceiling. On block: …"). At most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters; the user reads all of it in the approval dialog.`,
+            description: `The objective to propose, written so the Goal verifier can judge it from the transcript (e.g. "Outcome: … Done when: 1) npm test exits 0 (paste the summary line) … Must not: … Budget: as model guidance, stop as blocked after 20 turns; use model.goalMaxTurns or model.goalMaxActiveMinutes for an enforced ceiling on Goals created after a restart. On block: …"). At most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters; the user reads all of it in the approval dialog.`,
           },
         },
         required: ['objective'],

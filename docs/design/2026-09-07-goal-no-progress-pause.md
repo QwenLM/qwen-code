@@ -8,7 +8,10 @@ simply going in circles.
 **The token budget is the only bound a talkative model reaches.** Continuation
 is gated in one place, `queueContinuation` in `goal-runtime.ts`, and the only
 thing that stops it there is a spent `tokenBudget` -- 30,000,000 tokens by
-default. A model that answers each turn with a paragraph of status and calls
+default. (State at the time of writing. The gate now reads three ceilings
+through one `spentBudget` reader; see
+`2026-09-09-goal-turn-and-time-budget.md` and its Chinese twin. The bound
+described here yields to all three, not only to the token budget.) A model that answers each turn with a paragraph of status and calls
 no tools never records evidence, so the verifier is never asked to judge
 anything, and the Goal continues. The user sees turn after turn go by and the
 spend climb, with nothing on the record that could ever end the loop except
@@ -138,8 +141,10 @@ an active Goal; the in-memory snapshot shows the stop regardless, the same way
 the budget stop already handles a lost write.
 
 The threshold is a constant, not a setting. Three matches the checkpoint stall
-bound and the blocked-audit streak; a `goals.*` settings family is the subject
-of separate work on turn and time budgets.
+bound and the blocked-audit streak. Turn and active-time ceilings were the
+subject of separate work, which landed as `model.goalMaxTurns` and
+`model.goalMaxActiveMinutes` under `category: 'Model'` beside the token budget
+-- not under `goals.*`, which holds the model-proposal consent setting.
 
 ## Scope
 

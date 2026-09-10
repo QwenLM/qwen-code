@@ -2383,7 +2383,7 @@ const EN: Messages = {
     'The goal starts in a new session and runs until its condition holds.',
   'goals.condition': 'Condition',
   'goals.conditionPlaceholder':
-    'e.g. `npm test` exits 0 and `npm run lint` reports no warnings (paste the output); do not modify test files; as model guidance, stop as blocked after 20 turns (use model.goalMaxTurns for an enforced ceiling)',
+    'e.g. `npm test` exits 0 and `npm run lint` reports no warnings (paste the output); do not modify test files; as model guidance, stop as blocked after 20 turns (use model.goalMaxTurns for an enforced ceiling; it applies after a restart, to Goals created afterwards)',
   'goals.cancel': 'Cancel',
   'goals.create': 'Set goal',
   'goals.creating': 'Starting…',
@@ -5858,7 +5858,7 @@ const ZH: Messages = {
   'goals.newHint': '目标会在一个新会话中启动，并持续运行直到条件满足。',
   'goals.condition': '条件',
   'goals.conditionPlaceholder':
-    '例如：`npm test` 退出码为 0 且 `npm run lint` 无告警（贴出输出）；不得修改测试文件；模型参考 20 轮内未达成则以 blocked 结束（强制上限请配置 model.goalMaxTurns）',
+    '例如：`npm test` 退出码为 0 且 `npm run lint` 无告警（贴出输出）；不得修改测试文件；模型参考 20 轮内未达成则以 blocked 结束（强制上限请配置 model.goalMaxTurns，重启后生效，且只对之后新建的 Goal 生效）',
   'goals.cancel': '取消',
   'goals.create': '设置目标',
   'goals.creating': '正在启动…',

@@ -191,6 +191,11 @@ describe('bundled goal-draft skill', () => {
     expect(body).toContain(
       'Do not claim that writing it configures a timer or changes the Goal token budget',
     );
+    // Naming the settings without their timing sends a reader to bound a Goal
+    // that is already running, which neither setting can do.
+    expect(body).toContain(
+      'takes effect after a restart and only for Goals created afterwards',
+    );
     expect(body).toContain('Preserve a user-specified budget');
     expect(body).toContain('mark the default `[ASSUMPTION]` in Context');
     // The self-check must enforce the marking, and the strong exemplar must
