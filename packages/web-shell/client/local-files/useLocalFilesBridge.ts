@@ -265,18 +265,19 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
    */
   const generationRef = useRef(0);
   /**
-   * Bumped by every bridge build in startBridge(): the epoch a rebind
-   * continuation captures so a connect that binds a NEW grant while the
-   * continuation is parked on its store/permission awaits invalidates it.
-   * disconnect()/unmount already invalidate it via generationRef; a fresh
-   * bind must too, or the continuation rebuilds the bridge over the handle
-   * the user just replaced.
+   * Bumped at every binding startBridge() call — below the live-bridge
+   * exemption, so a bind that stops at the needs-session exit invalidates
+   * too: the epoch a rebind continuation captures so a connect that binds
+   * a NEW grant while the continuation is parked on its store/permission
+   * awaits invalidates it. disconnect()/unmount already invalidate it via
+   * generationRef; a fresh bind must too, or the continuation rebuilds the
+   * bridge over the handle the user just replaced.
    */
   const handleEpochRef = useRef(0);
   /**
-   * Bumped at both connect() save sites: the epoch a parked restore()
-   * continuation compares against, because a connect that commits a save
-   * while restore() is parked has superseded its store.load() — including
+   * Bumped at both connect() save sites: the epoch parked restore() and
+   * rebind continuations compare against, because a connect that commits a
+   * save while one is parked has superseded its store.load() — including
    * on the same-entry early return, which never builds a bridge and so
    * never bumps handleEpochRef.
    */
@@ -307,6 +308,16 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
    * with no live bridge, or the rebind effect over an entry-identity match.
    */
   const foreignRecordRef = useRef(false);
+  /**
+   * The record handle behind the name the panel currently shows, stashed by
+   * every status write that names the record without retaining its handle
+   * in handleRef. revoke() uses it as ownership evidence when no bound
+   * handle exists: the shown name was read out of the record itself, so a
+   * name comparison could never detect a peer's same-basename swap.
+   */
+  const namedRecordRef = useRef<FileSystemDirectoryHandle | undefined>(
+    undefined,
+  );
 
   const stopBridge = useCallback(() => {
     const bridge = bridgeRef.current;
@@ -412,6 +423,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       if (blocker !== null) {
         // Name the grant: the panel's Disconnect — the only store.clear()
         // caller — must stay reachable over a persisted handle.
+        namedRecordRef.current = handle;
         setStatus({ phase: 'unavailable', blocker, rootName: handle.name });
         return;
       }
@@ -419,6 +431,10 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       // exist at this moment, and losing the handle here would leave the
       // rebind effect with nothing to start.
       handleRef.current = handle;
+      // A newly bound grant invalidates any parked rebind continuation,
+      // even when the bind stops at the needs-session exit and builds no
+      // bridge.
+      handleEpochRef.current += 1;
       const targetSession = optionsRef.current.sessionId;
       if (targetSession === undefined) {
         setStatus({
@@ -464,8 +480,10 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       bridgeSelectorKeyRef.current = selectorKeyOf(current.workspaceSelector);
       bridgeHandleNameRef.current = handle.name;
       bridgeHandleRef.current = handle;
-      // A newly bound grant invalidates any parked rebind continuation.
-      handleEpochRef.current += 1;
+      // The bridge's onState writes name this handle: keep the ownership
+      // evidence alive for a revoke that outlives the bridge itself (a
+      // stopped bridge gates bridgeHandleRef out of the decision).
+      namedRecordRef.current = handle;
       void bridge.start();
     },
     [stopBridge],
@@ -491,6 +509,10 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
           return prev;
         }
         const rootName = recordRootName(persisted.name);
+        // The stash follows the name: a write that does not name the record
+        // must not point the revoke's ownership evidence at it. Idempotent
+        // under a double-invoked updater (same prev, same persisted).
+        if (rootName !== undefined) namedRecordRef.current = persisted;
         return rootName === undefined
           ? { phase: 'unavailable', blocker: prev.blocker }
           : { ...prev, rootName };
@@ -500,13 +522,15 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     if (!store) return;
     const generation = generationRef.current;
     const saveEpoch = saveEpochRef.current;
-    // Every await below re-checks all three: a disconnect or unmount must
-    // win over the parked continuation, and a connect that committed a save
-    // while it was parked has superseded this load — every connect exit that
-    // binds or rebuilds saves first, so the save epoch also covers builds.
+    // Every await below re-checks both epochs: a disconnect or unmount must
+    // win over the parked continuation (disconnect() bumps the generation
+    // first), and a connect that committed a save while it was parked has
+    // superseded this load — every connect exit that binds or rebuilds saves
+    // first, so the save epoch also covers builds. The detach latch is NOT
+    // folded in here: it owns the explicit naming branch below, and gating
+    // on it would keep that branch from ever writing rootName.
     const staleRestore = () =>
       generationRef.current !== generation ||
-      detachedRef.current ||
       saveEpochRef.current !== saveEpoch;
     const stored = await store.load();
     if (!stored || staleRestore()) return;
@@ -519,6 +543,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       // UI reports a connected bridge. `connect()` re-reads the store instead.
       // Needs a real click; an effect cannot supply the activation.
       const rootName = recordRootName(stored.name);
+      if (rootName !== undefined) namedRecordRef.current = stored;
       setStatus({
         phase: 'needs-gesture',
         blocker: null,
@@ -535,6 +560,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       // clobbered by this parked continuation.
       const blocker = capabilityRef.current.blocker;
       const rootName = recordRootName(stored.name);
+      if (rootName !== undefined) namedRecordRef.current = stored;
       setStatus(
         blocker !== null
           ? {
@@ -554,7 +580,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     // win on BOTH exits: re-binding would resurrect the grant behind it,
     // and falling through would rebuild the bridge over a record a peer
     // wrote while this continuation was parked.
-    if (staleRestore()) return;
+    if (staleRestore() || detachedRef.current) return;
     if (sameEntry) {
       // The record holds the very entry the live bridge serves; the rebind
       // effect re-running alongside this restore owns the latch reset.
@@ -638,10 +664,15 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     let cancelled = false;
     const generation = generationRef.current;
     const epoch = handleEpochRef.current;
+    // A connect that commits a save while this continuation is parked has
+    // superseded its record load even when it builds no bridge: the
+    // same-entry early return bumps only the save epoch.
+    const saveEpoch = saveEpochRef.current;
     const staleRebind = () =>
       cancelled ||
       generationRef.current !== generation ||
-      handleEpochRef.current !== epoch;
+      handleEpochRef.current !== epoch ||
+      saveEpochRef.current !== saveEpoch;
     const rebind = async () => {
       let recordIsForeign = false;
       if (store) {
@@ -789,6 +820,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         if (permission.requested) {
           connectWroteStatusRef.current = true;
           const rootName = recordRootName(stored.name);
+          if (rootName !== undefined) namedRecordRef.current = stored;
           setStatus({
             phase: 'needs-gesture',
             blocker: null,
@@ -805,8 +837,12 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       if (result.kind === 'unavailable') {
         // Name the record-backed grant: the failure write must not hide the
         // panel's Disconnect, the only revoke path, over a persisted handle.
-        const rootName = recordRootName((await store?.load())?.name);
+        const record = await store?.load();
+        const rootName = recordRootName(record?.name);
         if (stale()) return;
+        if (record !== undefined && rootName !== undefined) {
+          namedRecordRef.current = record;
+        }
         connectWroteStatusRef.current = true;
         setStatus({
           phase: 'unavailable',
@@ -816,8 +852,12 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         return;
       }
       if (result.kind === 'failed') {
-        const rootName = recordRootName((await store?.load())?.name);
+        const record = await store?.load();
+        const rootName = recordRootName(record?.name);
         if (stale()) return;
+        if (record !== undefined && rootName !== undefined) {
+          namedRecordRef.current = record;
+        }
         connectWroteStatusRef.current = true;
         setStatus({
           phase: 'failed',
@@ -877,7 +917,16 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     // The handle object this mount bound, captured before the clear below:
     // revoke() decides whether the record is a peer's grant by entry
     // identity against it, because basenames collide across directories.
-    const boundHandle = handleRef.current ?? bridgeHandleRef.current;
+    // bridgeHandleRef outlives its bridge (nothing clears it), so it counts
+    // only while a bridge exists — after a disconnect released the grant,
+    // the stale stamp would condemn the next record the panel names.
+    const boundHandle =
+      handleRef.current ??
+      (bridgeRef.current !== undefined ? bridgeHandleRef.current : undefined);
+    // Captured with boundHandle: a deferred revoke re-enters long after the
+    // click, and a connect that bound in between must not overwrite the
+    // evidence for the grant the user clicked to release.
+    const namedHandle = namedRecordRef.current;
     const parkedBeforeStop =
       bridgeRef.current?.getState().phase === 'held-elsewhere' ||
       statusRef.current.phase === 'held-elsewhere';
@@ -1007,14 +1056,17 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         !foreignRecordRef.current &&
         connectBoundHandleRef.current !== undefined &&
         (await sameEntryOrFalse(connectBoundHandleRef.current, current));
-      // Decide "the record is a peer's grant" by entry identity against the
-      // handle this mount bound; only a mount holding no handle object at
-      // all (withheld, needs-gesture) falls back to the name it was shown.
+      // Decide "the record is a peer's grant" by entry identity. A mount
+      // holding no bound handle falls back to the handle its last naming
+      // write loaded — never to the shown name, which was read out of the
+      // record itself and could never detect a peer's same-basename swap.
+      // With no ownership evidence at all, refuse rather than clear.
+      const identity = boundHandle ?? namedHandle;
       const foreignRecord =
         current !== undefined &&
-        (boundHandle !== undefined
-          ? !(await sameEntryOrFalse(current, boundHandle))
-          : name !== undefined && current.name !== name);
+        (identity !== undefined
+          ? !(await sameEntryOrFalse(current, identity))
+          : true);
       if (
         current !== undefined &&
         !ownWrite &&

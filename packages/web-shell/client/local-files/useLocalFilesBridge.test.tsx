@@ -783,8 +783,11 @@ describe('useLocalFilesBridge restore', () => {
     await hB.flush();
     await hB.flush();
     expect(hB.sockets).toHaveLength(0);
-    expect(hB.get().status.phase).not.toBe('connecting');
-    expect(hB.get().status.phase).not.toBe('connected');
+    expect(hB.get().status).toEqual({
+      phase: 'idle',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
     hB.unmount();
   });
 
@@ -852,8 +855,11 @@ describe('useLocalFilesBridge restore', () => {
     await hB.flush();
     await hB.flush();
     expect(hB.sockets).toHaveLength(0);
-    expect(hB.get().status.phase).not.toBe('connecting');
-    expect(hB.get().status.phase).not.toBe('connected');
+    expect(hB.get().status).toEqual({
+      phase: 'idle',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
 
     releaseRequest('prompt');
     await act(async () => {
@@ -918,8 +924,11 @@ describe('useLocalFilesBridge restore', () => {
     await hB.flush();
     await hB.flush();
     expect(hB.sockets).toHaveLength(0);
-    expect(hB.get().status.phase).not.toBe('connecting');
-    expect(hB.get().status.phase).not.toBe('connected');
+    expect(hB.get().status).toEqual({
+      phase: 'idle',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
     expect(await store.load()).toBe(handle);
     hB.unmount();
   });
@@ -3780,6 +3789,124 @@ describe('useLocalFilesBridge restore', () => {
     h.unmount();
   });
 
+  it('refuses to clear a swapped same-named record the panel only named', async () => {
+    // The panel names the stored grant but never binds it (a prompt-state
+    // permission needs a real click), so no handle object is retained in
+    // handleRef and no bridge exists.
+    const original = fakeHandle('project', { query: 'prompt' });
+    const store = fakeStore(original);
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => original),
+      store,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status).toEqual({
+      phase: 'needs-gesture',
+      blocker: null,
+      rootName: 'project',
+    });
+
+    // A peer swaps the origin-global slot for a different directory with the
+    // same basename. The name the panel shows was read back out of that very
+    // record, so a name comparison could never catch the swap; the revoke
+    // must decide against the handle the naming write loaded.
+    const swapped = fakeHandle('project', { query: 'prompt' });
+    await store.save(swapped);
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(swapped);
+    h.unmount();
+  });
+
+  it('refuses to clear a record it never bound nor named', async () => {
+    // No record at mount: the panel shows bare idle and never names
+    // anything, so no ownership evidence exists at all.
+    const store = fakeStore();
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => fakeHandle('unused')),
+      store,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status).toEqual({ phase: 'idle', blocker: null });
+
+    // A peer's grant lands with no naming write in this mount: clearing it
+    // would be the bystander wipe, so the revoke must fail closed.
+    const peer = fakeHandle('peer', { query: 'granted' });
+    await store.save(peer);
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(peer);
+    h.unmount();
+  });
+
+  it('clears a newly named record after an earlier grant was released', async () => {
+    const alpha = fakeHandle('alpha', { query: 'granted' });
+    const store = fakeStore();
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => alpha),
+      store,
+    });
+    await h.flush();
+    await act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+    expect(h.get().status.phase).toBe('connected');
+
+    // The first release clears the record and detaches this mount.
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(1);
+
+    // A peer grants a different directory, and this mount's reconnect names
+    // it without binding (the permission re-ask is dismissed). The released
+    // grant's stale bridge stamp must not decide the next revoke: the record
+    // the panel names is the one the user is asking to release.
+    const beta = fakeHandle('beta', { query: 'prompt', request: 'prompt' });
+    await store.save(beta);
+    await act(async () => {
+      await h.get().connect();
+    });
+    expect(h.get().status).toEqual({
+      phase: 'needs-gesture',
+      blocker: null,
+      rootName: 'beta',
+    });
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(2);
+    expect(await store.load()).toBeUndefined();
+    h.unmount();
+  });
+
   it('clears its own record once the peer puts the same entry back', async () => {
     const mine = fakeHandle('project', { query: 'granted' });
     const store = fakeStore(mine);
@@ -4340,6 +4467,82 @@ describe('useLocalFilesBridge restore', () => {
     h.unmount();
   });
 
+  it('drops a rebind continuation a concurrent same-entry reconnect superseded', async () => {
+    const mine = fakeHandle('project', { query: 'granted' });
+    const store = fakeStore(mine);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+    await h.flush();
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+    expect(h.get().status.phase).toBe('connected');
+
+    // Twin of the restore-side supersede case, but the gate parks the
+    // REBIND effect's identity check (call 1; restore's longer chain is
+    // call 2). The reconnect takes the same-entry early return — a committed
+    // save but no bridge build — so only the save epoch can invalidate the
+    // parked continuation before it re-latches the record foreign.
+    let calls = 0;
+    let releaseSame!: (value: boolean) => void;
+    const sameGate = new Promise<boolean>((resolve) => {
+      releaseSame = resolve;
+    });
+    mine.isSameEntry = vi.fn((other: unknown) => {
+      calls += 1;
+      if (calls === 1) return sameGate;
+      return Promise.resolve(other === mine);
+    }) as unknown as typeof mine.isSameEntry;
+    const foreign = fakeHandle('project', { query: 'granted' });
+    await store.save(foreign);
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    await act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+    await act(async () => {
+      releaseSame(false);
+      await Promise.resolve();
+    });
+    await h.flush();
+
+    expect(h.get().status.rootName).toBe('project');
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    h.unmount();
+  });
+
   it('reconciles the panel when a deferred revoke is declined with its connect still in flight', async () => {
     const mine = fakeHandle('ai_coding', { query: 'denied' });
     const store = fakeStore(mine);
@@ -4513,6 +4716,70 @@ describe('useLocalFilesBridge restore', () => {
     await h.flush();
     expect(h.sockets).toHaveLength(2);
     expect(h.get().status.rootName).toBe('gamma');
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    h.unmount();
+  });
+
+  it('invalidates a parked rebind when restore binds the record without a session', async () => {
+    const mine = fakeHandle('mine', { query: 'granted' });
+    const store = fakeStore(mine);
+    const h = render({
+      sessionId: undefined,
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => mine),
+      store,
+    });
+    await h.flush();
+    await h.flush();
+    // The record bound, but with no session nothing built a bridge.
+    expect(h.get().status).toEqual({
+      phase: 'needs-session',
+      blocker: null,
+      rootName: 'mine',
+    });
+    expect(h.sockets).toHaveLength(0);
+
+    // A peer's different-entry record lands; park the rebind effect on the
+    // permission re-check of the in-memory handle.
+    const peer = fakeHandle('peer', { query: 'granted' });
+    await store.save(peer);
+    let releaseQuery!: (state: PermissionState) => void;
+    const queryGate = new Promise<PermissionState>((resolve) => {
+      releaseQuery = resolve;
+    });
+    mine.queryPermission = vi.fn(() => queryGate);
+    h.rerender({ withheldBlocker: 'workspace-resolving' });
+    await h.flush();
+    h.rerender({ withheldBlocker: undefined });
+    await h.flush();
+    await h.flush();
+
+    // restore() re-binds the record's own handle; with no session the bind
+    // stops at needs-session and never reaches a bridge build, but it must
+    // still invalidate the parked continuation.
+    expect(h.get().status).toEqual({
+      phase: 'needs-session',
+      blocker: null,
+      rootName: 'peer',
+    });
+
+    // Resuming the parked rebind must not roll the bind — and the panel —
+    // back to the replaced in-memory handle.
+    await act(async () => {
+      releaseQuery('granted');
+      await Promise.resolve();
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status).toEqual({
+      phase: 'needs-session',
+      blocker: null,
+      rootName: 'peer',
+    });
     await act(async () => {
       await h.get().disconnect();
     });
