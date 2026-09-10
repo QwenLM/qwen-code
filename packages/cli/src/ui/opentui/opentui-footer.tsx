@@ -116,11 +116,7 @@ export function OpenTuiLoadingIndicator({
   );
   const phraseText = truncateToWidth(phrase, phraseBudget);
   return (
-    <box
-      paddingLeft={1}
-      paddingRight={1}
-      flexDirection={isNarrow ? 'column' : 'row'}
-    >
+    <box paddingLeft={2} flexDirection={isNarrow ? 'column' : 'row'}>
       <box flexDirection="row">
         <Spinner />
         <text fg={C.dim}>
@@ -140,6 +136,9 @@ export interface OpenTuiFooterProps {
   approvalMode?: ApprovalMode;
   /** `!` shell mode: takes the hint slot over the steer/approval segments. */
   shellModeActive?: boolean;
+  /** Armed two-press quit warning: takes the bottom hint slot and gates the
+   * status line off, as it does in ink. */
+  exitHint?: string | null;
 }
 
 /** The status line (ink `Footer` parity). */
@@ -150,6 +149,7 @@ export function OpenTuiFooter({
   sessionName = null,
   approvalMode,
   shellModeActive = false,
+  exitHint = null,
 }: OpenTuiFooterProps) {
   const { width } = useTerminalDimensions();
   const targetDir = config.getTargetDir();
@@ -189,27 +189,51 @@ export function OpenTuiFooter({
     : [streaming ? t('Enter to steer · Ctrl+Q to queue') : null, modeLabel]
         .filter((segment): segment is string => segment !== null)
         .join(' · ');
-  const hintSegments = [
-    modeHint || null,
+  const queuedHint =
     queueLength > 0
       ? `⏳ ${t('{{count}} queued', { count: String(queueLength) })}`
-      : null,
-  ].filter((segment): segment is string => segment !== null);
-  const footerLine2 = hintSegments.join(' · ');
+      : null;
+  const hintSegments = [modeHint || null, queuedHint].filter(
+    (segment): segment is string => segment !== null,
+  );
+  // ink renders the badge as a sibling text node beginning with a literal
+  // space, so it joins the hint with one space — unlike the ' · ' that ink's
+  // leftBottomContent puts between its own segments.
+  const footerLine2 = hintSegments.join(' ');
 
   // ink renders these two rows under different wrap policies: the status line
   // is `wrap="wrap"` inside a two-line `overflow="hidden"` box, so a narrow
   // terminal pushes the model segment onto a second row instead of dropping
   // it; the hint row is `wrap="truncate"`, so it cannot grow the footer
   // mid-turn (#8667/#8666).
-  const rowBudget = Math.max(0, width - 2);
+  const rowBudget = Math.max(0, width - 4);
   const statusLines = wrapAnsi(footerLine1, Math.max(1, rowBudget), {
     trim: false,
     hard: true,
   }).split('\n');
 
+  // ink gives the armed quit warning the footer's bottom hint slot and gates
+  // its status line off while the warning is up, so the warning reads directly
+  // under the composer with nothing above it. The queued-message segment sits
+  // beside the warning rather than inside the hint it replaces, so it stays.
+  if (exitHint) {
+    const warningLine = [exitHint, queuedHint]
+      .filter((segment): segment is string => segment !== null)
+      .join(' ');
+    return (
+      <box
+        flexDirection="column"
+        paddingLeft={2}
+        paddingRight={2}
+        flexShrink={0}
+      >
+        <text fg={C.yellow}>{truncateToWidth(warningLine, rowBudget)}</text>
+      </box>
+    );
+  }
+
   return (
-    <box flexDirection="column" paddingLeft={1} paddingRight={1} flexShrink={0}>
+    <box flexDirection="column" paddingLeft={2} paddingRight={2} flexShrink={0}>
       <text fg={C.dim}>{statusLines[0]}</text>
       {statusLines[1] && <text fg={C.dim}>{statusLines[1]}</text>}
       {footerLine2 && (

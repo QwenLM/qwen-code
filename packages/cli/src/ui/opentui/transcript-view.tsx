@@ -21,7 +21,6 @@ import { AgentStatus } from '@qwen-code/qwen-code-core';
 import { C, SYNTAX } from './theme.js';
 import {
   AnsiRows,
-  MESSAGE_ICON,
   TOOL_CARD_DESCRIPTION_ROWS,
   TodoRows,
   assistantMessageMeta,
@@ -86,7 +85,7 @@ export function OpenTuiTranscriptView({
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
   return (
-    <box flexDirection="column">
+    <box flexDirection="column" marginLeft={2} marginRight={2}>
       {items.map((item) => (
         <TranscriptItem
           key={item.id}
@@ -140,7 +139,9 @@ function TranscriptItem({
     case 'info':
       return (
         <box flexDirection="row">
-          <text fg={C.dim}>{`${MESSAGE_ICON.CIRCLE_FILLED} `}</text>
+          {/* A wrapped message would otherwise shrink the prefix and drop its
+              trailing space. */}
+          <text fg={C.dim} flexShrink={0}>{`${ICON.CIRCLE_FILLED} `}</text>
           <text fg={C.dim} {...selectionProps()}>
             {sanitizeTerminalText(item.text)}
           </text>
@@ -150,9 +151,12 @@ function TranscriptItem({
       return <ErrorRow text={item.text} hint={item.hint} />;
     case 'warning':
       return (
-        <text fg={C.yellow} {...selectionProps()}>
-          {sanitizeTerminalText(item.text)}
-        </text>
+        <box flexDirection="row">
+          <text fg={C.yellow} flexShrink={0}>{`${ICON.TRIANGLE} `}</text>
+          <text fg={C.yellow} {...selectionProps()}>
+            {sanitizeTerminalText(item.text)}
+          </text>
+        </box>
       );
     case 'retry':
       return (
@@ -444,18 +448,17 @@ function CompactionRow({
 
 function ErrorRow({ text, hint }: { text: string; hint?: string }) {
   return (
-    <box flexDirection="column">
-      <box flexDirection="row">
-        <text fg={C.red}>{`${ICON.CROSS} `}</text>
-        <text fg={C.red} {...selectionProps()}>
-          {sanitizeTerminalText(text)}
-        </text>
-      </box>
-      {hint ? (
-        <text fg={C.accent} {...selectionProps()}>
-          {sanitizeTerminalText(hint)}
-        </text>
-      ) : null}
+    <box flexDirection="row">
+      {/* ink's error prefix is a literal ✕, not the shared ICON.CROSS. */}
+      <text fg={C.red} flexShrink={0}>
+        {'✕ '}
+      </text>
+      <text fg={C.red} {...selectionProps()}>
+        {sanitizeTerminalText(text)}
+        {hint ? (
+          <span fg={C.dim}>{` (${sanitizeTerminalText(hint)})`}</span>
+        ) : null}
+      </text>
     </box>
   );
 }
@@ -579,8 +582,8 @@ function LegacyGoalCard({ legacy }: { legacy: LiveGoalLegacyData }) {
 function AwayRecapRow({ text }: { text: string }) {
   return (
     <box flexDirection="row">
-      <text fg={C.dim}>{`${ICON.REFERENCE} `}</text>
-      <text fg={C.dim} attributes={1}>
+      <text fg={C.dim} flexShrink={0}>{`${ICON.REFERENCE} `}</text>
+      <text fg={C.dim} attributes={1} flexShrink={0}>
         {'recap: '}
       </text>
       <text fg={C.dim} attributes={4} {...selectionProps()}>

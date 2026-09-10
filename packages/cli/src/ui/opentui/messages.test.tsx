@@ -346,17 +346,19 @@ describe('capToolCardDescription (transcript card flood bound)', () => {
 });
 
 describe('message meta (ink glyph/color parity)', () => {
+  // ink's ICON table appends U+FE0E to force the text presentation; the
+  // selector is invisible in source, so it must not be stripped as a typo.
   it('keeps the user/assistant prefixes', () => {
     expect(userMessageMeta().glyph).toBe('>');
-    expect(assistantMessageMeta().glyph).toBe('◆');
+    expect(assistantMessageMeta().glyph).toBe('◆\uFE0E');
   });
 
   it('keeps the thinking collapse hint semantics', () => {
     const live = thinkingMeta(false, false, true);
-    expect(live.icon).toBe('∵');
+    expect(live.icon).toBe('∵\uFE0E');
     expect(live.collapsed).toBe(false);
     const collapsed = thinkingMeta(true, false, true);
-    expect(collapsed.icon).toBe('∴');
+    expect(collapsed.icon).toBe('∴\uFE0E');
     expect(collapsed.hint).toContain('ctrl+o');
   });
 

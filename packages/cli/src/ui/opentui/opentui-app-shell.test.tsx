@@ -43,7 +43,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import { OpenTuiApp } from './opentui-app-shell.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
-import { hasSlashCommandPathSeparator } from '../utils/commandUtils.js';
+import {
+  CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
+  hasSlashCommandPathSeparator,
+} from '../utils/commandUtils.js';
 import {
   ApprovalMode,
   ToolConfirmationOutcome,
@@ -239,7 +242,9 @@ vi.mock('../hooks/useAutoAcceptIndicator.js', () => ({
   emitAutoModeEntryNotices: mocks.state.emitAutoModeEntryNotices,
 }));
 
-const CONFIG = {} as unknown as Config;
+const CONFIG = {
+  getContextFilePaths: () => [],
+} as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
 const getSessionStats = () => ({}) as unknown as SessionStatsState;
 
@@ -339,6 +344,27 @@ describe('OpenTuiApp shell wiring', () => {
     });
     await settle();
     expect(screen.getByText('footer')).toBeTruthy();
+  });
+
+  it('keeps an armed quit warning mounted while a dialog hides the footer', async () => {
+    // A dialog unmounts the composer, so nothing intercepts Ctrl+C and the
+    // app-level guard still arms. The warning has to survive the footer's
+    // dialog gate, or a second press exits with nothing ever shown.
+    renderApp({ exitHint: 'Press Ctrl+C again to exit.' });
+    await settle();
+    expect(screen.getByText('footer')).toBeTruthy();
+
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'help' },
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/help');
+    expect(screen.getByText('dialog:help')).toBeTruthy();
+    expect(screen.queryByText('input-prompt')).toBeNull();
+    expect(screen.getByText('footer')).toBeTruthy();
+    expect(mocks.state.footerProps?.['exitHint']).toBe(
+      'Press Ctrl+C again to exit.',
+    );
   });
 
   it('builds one host, and one dispatcher, across re-renders', async () => {
@@ -577,6 +603,45 @@ describe('OpenTuiApp shell wiring', () => {
       undefined,
       { submittedPrompt: 'summarize @src/a.ts' },
     );
+  });
+
+  it('announces the context files once per visible transcript', async () => {
+    const onTranscriptEvent = vi.fn();
+    renderApp({
+      config: {
+        getContextFilePaths: () => ['/repo/AGENTS.md'],
+      } as unknown as Config,
+      onTranscriptEvent,
+      onSubmitPrompt: vi.fn(),
+    });
+    await settle();
+    mocks.state.handleResult = false;
+
+    const announced = () =>
+      onTranscriptEvent.mock.calls
+        .map(([event]) => event as { type?: string; text?: string })
+        .filter((event) => event.type === 'info')
+        .map((event) => event.text)
+        .filter((text) => text?.startsWith(CONTEXT_FILES_ANNOUNCEMENT_PREFIX));
+
+    await submit('first prompt');
+    expect(announced()).toEqual(['Read context files: /repo/AGENTS.md']);
+
+    // The files stay attached for the whole session, so ink announces them
+    // once rather than on every prompt.
+    await submit('second prompt');
+    expect(announced()).toEqual(['Read context files: /repo/AGENTS.md']);
+
+    // A clear wipes the emitted row, so ink re-arms and announces again.
+    const host = mocks.state.host as { clearItems: () => void };
+    await act(async () => {
+      host.clearItems();
+    });
+    await submit('third prompt');
+    expect(announced()).toEqual([
+      'Read context files: /repo/AGENTS.md',
+      'Read context files: /repo/AGENTS.md',
+    ]);
   });
 
   it('reports a not-wired notice for a plain prompt when no seam is provided', async () => {
@@ -1556,6 +1621,7 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     return { config, writes };
   }
 
+  /** The Windows bare-Tab fallback is the one cycle route the composer keeps. */
   async function cycleOnce() {
     const cycle = mocks.state.inputProps?.['onCycleApprovalMode'] as
       | (() => void)
@@ -1567,6 +1633,59 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
       cycle();
     });
   }
+
+  /** Drives the shell's own useKeyboard registration; the mock pushes a fresh
+   * handler per render, so only the last one is the live subscription. */
+  async function pressKey(key: Record<string, unknown>) {
+    const handler = mocks.state.keyboardHandlers.at(-1);
+    if (!handler) {
+      throw new Error('shell registered no keyboard handler');
+    }
+    const event = { preventDefault: vi.fn(), ...key };
+    await act(async () => {
+      handler(event);
+    });
+    return event;
+  }
+
+  const pressShiftTab = () =>
+    pressKey({ name: 'tab', shift: true, sequence: '\x1b[Z' });
+
+  it('cycles the mode on Shift+Tab', async () => {
+    const { config, writes } = fakeConfig(ApprovalMode.DEFAULT);
+    renderApp({ config, approvalMode: ApprovalMode.DEFAULT });
+    await settle();
+    await pressShiftTab();
+    expect(writes).toEqual([ApprovalMode.AUTO_EDIT]);
+  });
+
+  it('leaves a bare Tab to the composer', async () => {
+    const { config, writes } = fakeConfig(ApprovalMode.DEFAULT);
+    renderApp({ config, approvalMode: ApprovalMode.DEFAULT });
+    await settle();
+    await pressKey({ name: 'tab', sequence: '\t' });
+    expect(writes).toEqual([]);
+  });
+
+  it('still cycles while a dialog has the composer unmounted', async () => {
+    // ink keeps useAutoAcceptIndicator mounted at App level, so Shift+Tab cycles
+    // through /help too. The composer owning the keystroke dropped it: the
+    // ternary unmounts the composer whenever a dialog is open.
+    const { config, writes } = fakeConfig(ApprovalMode.YOLO);
+    renderApp({ config, approvalMode: ApprovalMode.YOLO });
+    await settle();
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'help' },
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/help');
+    expect(screen.getByText('dialog:help')).toBeTruthy();
+    expect(screen.queryByText('input-prompt')).toBeNull();
+
+    await pressShiftTab();
+    // YOLO is the last entry of core's APPROVAL_MODES, so it wraps to PLAN.
+    expect(writes).toEqual([ApprovalMode.PLAN]);
+  });
 
   it('writes the next mode and repaints both chrome rows', async () => {
     const { config, writes } = fakeConfig(ApprovalMode.DEFAULT);

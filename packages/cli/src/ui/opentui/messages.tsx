@@ -27,7 +27,7 @@
 
 import { C } from './theme.js';
 import { TOOL_DISPLAY_BY_NAME } from '../utils/tool-display-map.js';
-import { ICON } from '../constants.js';
+import { ICON, TOOL_STATUS } from '../constants.js';
 import {
   getCachedStringWidth,
   sanitizeMultilineForDisplay,
@@ -37,24 +37,6 @@ import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
 import type { LiveToolItem } from './live-session-model.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
-
-/** The original TOOL_STATUS glyphs (ui/constants.ts). */
-export const TOOL_STATUS = {
-  SUCCESS: '✓',
-  PENDING: 'o',
-  EXECUTING: '⊷',
-  CONFIRMING: '?',
-  CANCELED: '-',
-  ERROR: 'x',
-} as const;
-
-/** The original narrow-presentation icons (ui/constants.ts). */
-export const MESSAGE_ICON = {
-  DIAMOND: '◆',
-  THEREFORE: '∴',
-  BECAUSE: '∵',
-  CIRCLE_FILLED: '●',
-} as const;
 
 /** Width the ink ToolStatusIndicator reserves for the glyph column. */
 export const STATUS_INDICATOR_WIDTH = 2;
@@ -414,7 +396,7 @@ export function userMessageMeta(): { glyph: string; color: string } {
 
 export function assistantMessageMeta(): { glyph: string; color: string } {
   // AssistantMessage → ICON.DIAMOND prefix, theme.text.accent.
-  return { glyph: MESSAGE_ICON.DIAMOND, color: C.purple };
+  return { glyph: ICON.DIAMOND, color: C.purple };
 }
 
 export interface ThinkingMeta {
@@ -441,7 +423,7 @@ export function thinkingMeta(
     : '(ctrl+o to expand)';
   if (!done) {
     return {
-      icon: MESSAGE_ICON.BECAUSE,
+      icon: ICON.BECAUSE,
       label: 'Thinking…',
       hint: '',
       color: C.dim,
@@ -450,7 +432,7 @@ export function thinkingMeta(
   }
   if (!expanded) {
     return {
-      icon: MESSAGE_ICON.THEREFORE,
+      icon: ICON.THEREFORE,
       label: 'Thought',
       hint: expandHint,
       color: C.dim,
@@ -458,7 +440,7 @@ export function thinkingMeta(
     };
   }
   return {
-    icon: MESSAGE_ICON.THEREFORE,
+    icon: ICON.THEREFORE,
     label: 'Thought',
     hint: '(ctrl+o to collapse)',
     color: C.dim,

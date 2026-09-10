@@ -28,6 +28,7 @@ import { act, render, screen } from '@testing-library/react';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
 import {
   addWorkspaceDirectory,
+  applyModelSelection,
   removeWorkspaceDirectory,
 } from './dialog-data.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
@@ -153,7 +154,7 @@ vi.mock('./dialog-data.js', () => ({
   applyExtensionUpdateCheck: async () => null,
   buildModelEntries: () => [],
   computeModelDialogInitialKey: () => undefined,
-  applyModelSelection: async () => ({ ok: true as const }),
+  applyModelSelection: vi.fn(async () => ({ ok: true as const })),
   applyThemeSelection: () => ({ applied: undefined, error: undefined }),
 }));
 
@@ -205,9 +206,13 @@ vi.mock('./dialogs-misc.js', () => ({
   OpenTuiTrustDialog: mocks.stub('trust'),
 }));
 
-const CONFIG = {} as unknown as Config;
+const CONFIG = { getModel: () => 'fake-model' } as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
-const HOST = { handleResume: async () => {} } as unknown as OpenTuiAppHost;
+const addItem = vi.fn();
+const HOST = {
+  handleResume: async () => {},
+  addItem,
+} as unknown as OpenTuiAppHost;
 
 function mount(
   request: OpenTuiDialogRequest,
@@ -441,6 +446,66 @@ describe('OpenTuiDialogMount routing', () => {
       for (const handler of mocks.state.keyboardHandlers)
         handler({ name: 'escape' });
     });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes the kept-model row once when Escape arrives twice', () => {
+    const onClose = vi.fn();
+    mount({ dialog: 'model', mode: 'primary' }, { onClose });
+    const close = dialogProp('model', 'onClose');
+    close();
+    close();
+    expect(addItem).toHaveBeenCalledTimes(1);
+    expect(addItem.mock.calls[0]![0]).toMatchObject({
+      text: expect.stringContaining('Kept model as'),
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds the kept-model row while a pick is still being applied', async () => {
+    let settle!: (outcome: { ok: true; message?: string }) => void;
+    vi.mocked(applyModelSelection).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const onClose = vi.fn();
+    mount({ dialog: 'model', mode: 'primary' }, { onClose });
+    dialogProp('model', 'onSelect')('fake-model');
+    dialogProp('model', 'onClose')();
+    expect(addItem).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    await act(async () => {
+      settle({ ok: true, message: 'Model set to fake-model' });
+    });
+    expect(addItem).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a repeat pick while one is applying and after it lands', async () => {
+    let settle!: (outcome: { ok: true; message?: string }) => void;
+    vi.mocked(applyModelSelection).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    );
+    // A spy never unmounts the dialog, so the post-commit pick below is the one
+    // route that reaches the committed half of the guard.
+    const onClose = vi.fn();
+    mount({ dialog: 'model', mode: 'primary' }, { onClose });
+    const select = dialogProp('model', 'onSelect');
+    select('fake-model');
+    select('fake-model');
+    expect(applyModelSelection).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      settle({ ok: true, message: 'Model set to fake-model' });
+    });
+    select('fake-model');
+    expect(applyModelSelection).toHaveBeenCalledTimes(1);
+    expect(addItem).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 

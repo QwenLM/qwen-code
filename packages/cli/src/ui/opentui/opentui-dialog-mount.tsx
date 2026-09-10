@@ -22,7 +22,7 @@
  * handling is per-case.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import type {
   ApprovalMode,
@@ -34,6 +34,8 @@ import type { SlashCommand } from '../commands/types.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
 import { toOriginalKey } from './key-map.js';
+import { t } from '../../i18n/index.js';
+import { MessageType } from '../types.js';
 import { HelpOverlay } from './help-overlay.js';
 import {
   buildHelpCommandsLines,
@@ -244,6 +246,14 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
 
   // --- model dialog error (kept open on failed selection) -----------------
   const [modelError, setModelError] = useState<string | null>(null);
+  // ink ModelDialog's three guards: `committed` keeps a successful pick from
+  // also announcing the model that survived, and from starting a second switch,
+  // while the latch plus in-flight flag keep a second Escape — or a second
+  // Enter landing mid-apply — from doing either again. None resets: this mount
+  // unmounts when the dialog closes.
+  const modelSelectionCommittedRef = useRef(false);
+  const modelCloseLatchRef = useRef(false);
+  const modelSelectionInFlightRef = useRef(false);
 
   // --- help overlay interaction -------------------------------------------
   const [helpTab, setHelpTab] = useState<HelpTab>('general');
@@ -576,6 +586,11 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         entries,
         mode: request.mode,
       });
+      // ink writes all three model outcomes to the transcript — a pick, an
+      // escape, an auxiliary pick — so the row outlives the dialog. The shell's
+      // notify slot is transient and closes with it.
+      const reportModel = (text: string) =>
+        host.addItem({ type: MessageType.INFO, text }, Date.now());
       return (
         <OpenTuiModelDialog
           entries={entries}
@@ -584,8 +599,42 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           initialKey={initialKey}
           errorMessage={modelError}
           availableTerminalHeight={props.availableTerminalHeight}
-          onClose={onClose}
+          onClose={() => {
+            if (
+              modelCloseLatchRef.current ||
+              modelSelectionInFlightRef.current
+            ) {
+              return;
+            }
+            modelCloseLatchRef.current = true;
+            // ink ModelDialog.closeWithoutSelection: escaping the primary
+            // picker reports the model that survived. The auxiliary pickers
+            // stay silent there too.
+            if (
+              request.mode === 'primary' &&
+              !modelSelectionCommittedRef.current
+            ) {
+              reportModel(
+                t('Kept model as {{model}}', {
+                  model:
+                    config.getActiveRuntimeModelSnapshot?.()?.modelId ||
+                    config.getModel(),
+                }),
+              );
+            }
+            onClose();
+          }}
           onSelect={(selectionKey) => {
+            // ink ModelDialog.handleSelect: a pick already applying — or one
+            // that landed — must not start another, or two switches race and
+            // both report.
+            if (
+              modelSelectionInFlightRef.current ||
+              modelSelectionCommittedRef.current
+            ) {
+              return;
+            }
+            modelSelectionInFlightRef.current = true;
             void applyModelSelection({
               config,
               settings,
@@ -593,15 +642,21 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
               mode: request.mode,
               selectionKey,
               persistScope: request.persistScope,
-            }).then((outcome) => {
-              if (outcome.ok) {
-                setModelError(null);
-                if (outcome.message) notify(outcome.message);
-                onClose();
-              } else {
-                setModelError(outcome.error);
-              }
-            });
+            })
+              .then((outcome) => {
+                if (outcome.ok) {
+                  modelSelectionCommittedRef.current = true;
+                  modelCloseLatchRef.current = true;
+                  setModelError(null);
+                  if (outcome.message) reportModel(outcome.message);
+                  onClose();
+                } else {
+                  setModelError(outcome.error);
+                }
+              })
+              .finally(() => {
+                modelSelectionInFlightRef.current = false;
+              });
           }}
         />
       );

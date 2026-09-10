@@ -215,9 +215,10 @@ export interface InputPromptProps {
    */
   onSuggestionsVisibilityChange?: (visible: boolean) => void;
   /**
-   * Shift+Tab cycles the approval mode (ink `useAutoAcceptIndicator`). The
-   * shell owns the mode; the composer owns the keystroke, because it is the
-   * only place that knows whether Tab was already spent on a completion.
+   * Cycles the approval mode (ink `useAutoAcceptIndicator`). The shell owns
+   * Shift+Tab itself, so this is only the Windows bare-Tab fallback — the one
+   * route that has to stay here, because the composer is the only place that
+   * knows whether Tab was already spent on a completion.
    */
   onCycleApprovalMode?: () => void;
 }
@@ -1024,14 +1025,17 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       return;
     }
 
-    // Shift+Tab cycles the approval mode (ink useAutoAcceptIndicator). Both Tab
-    // consumers above return, so a free Tab reaching here is why the Windows
-    // fallback needs no guard of its own (ink threads shouldBlockTab, #4171).
+    // Windows cannot tell Shift+Tab from a bare Tab in some terminals, so there
+    // a free Tab cycles the mode too (ink useAutoAcceptIndicator, #4171). Both
+    // Tab consumers above return, which is why this needs no shouldBlockTab
+    // guard of its own. A real Shift+Tab belongs to the shell: it has to keep
+    // cycling while a dialog or a confirmation has this composer unmounted.
     if (
+      process.platform === 'win32' &&
       key.name === 'tab' &&
       !key.ctrl &&
       !key.meta &&
-      (key.shift || process.platform === 'win32')
+      !key.shift
     ) {
       key.preventDefault();
       onCycleApprovalMode?.();
@@ -1144,7 +1148,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     }
   }, []);
 
-  const columns = Math.max(width - 2, 1);
+  const columns = Math.max(width, 1);
   const dashLine = '─'.repeat(columns);
   const { visible, startIndex, hasMoreAbove, hasMoreBelow } = suggestionWindow(
     suggestions,
@@ -1169,22 +1173,24 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       .filter(Boolean)
       .join(' ').length;
   const slashColumn = completionModeRef.current === CompletionMode.SLASH;
+  // The half-width cap applies to ink's `contentWidth` — the row after the
+  // 2-column active marker — not to the terminal width.
   const labelColumnWidth = slashColumn
     ? Math.min(
         Math.max(...suggestions.map(fullLabelWidth), 0),
-        Math.floor(columns * 0.5),
+        Math.floor(Math.max(columns - 2, 1) * 0.5),
       )
     : 0;
-  // What a row actually has left for description text: the dropdown box nests
-  // its own one-column margins inside the composer's (2), the active marker
-  // takes 2, and the description pays a 2-column gutter. Over-allocating here
-  // does not clip — it wraps the tail onto a second row and doubles the height.
-  const descriptionWidth = Math.max(columns - 6 - labelColumnWidth, 1);
+  // What a row actually has left for description text: the dropdown box sits
+  // two columns in on each side, the active marker takes 2, and the description
+  // pays a 2-column gutter. Over-allocating here does not clip — it wraps the
+  // tail onto a second row and doubles the height.
+  const descriptionWidth = Math.max(columns - 8 - labelColumnWidth, 1);
 
   return (
-    <box flexDirection="column" marginLeft={1} marginRight={1}>
+    <box flexDirection="column">
       {attachments.length > 0 && (
-        <box flexDirection="column" paddingLeft={1}>
+        <box flexDirection="column" paddingLeft={2}>
           {attachments.map((a) => (
             <text key={a.id} fg={C.purple}>{`📎 ${a.filename}`}</text>
           ))}
@@ -1227,7 +1233,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         />
       </box>
       {showDropdown && (
-        <box flexDirection="column" marginLeft={1} marginRight={1}>
+        <box flexDirection="column" marginLeft={2} marginRight={2}>
           {loadingSuggestions && <text fg={C.dim}>Loading suggestions...</text>}
           {hasMoreAbove && <text fg={C.text}>▲</text>}
           {visible.map((suggestion, index) => {
@@ -1245,7 +1251,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
                 </box>
                 <box
                   flexShrink={slashColumn ? 0 : 1}
-                  {...(slashColumn ? { width: labelColumnWidth } : {})}
+                  // `"auto"` rather than omitting the attribute: @opentui resets
+                  // a removed prop by assigning null, which its width setter
+                  // type-guards away, so the slash column would stay stuck on
+                  // every `@` row after one slash completion.
+                  width={slashColumn ? labelColumnWidth : 'auto'}
                 >
                   {/* Separate flex children, not one text: an over-long hint then
                       wraps in the width left after the label. Char wrap matches

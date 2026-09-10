@@ -375,7 +375,7 @@ describe('useOpenTuiLiveTurn streaming counters', () => {
       },
       { type: 'tool-args', id: 'c1', args: '{"command":"ls"}' },
       // Tool-generated, not model-generated: ink leaves it out of the estimate.
-      { type: 'tool-output', id: 'c1', delta: 'a lot of stdout' },
+      { type: 'tool-output', id: 'c1', output: 'a lot of stdout' },
       { type: 'tool-end', id: 'c1', success: true, summary: '' },
     ]);
     const { result } = renderTurn();

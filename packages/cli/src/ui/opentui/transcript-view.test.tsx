@@ -235,6 +235,22 @@ describe('OpenTuiTranscriptView', () => {
     expect(container.textContent).toContain('$ git status');
   });
 
+  it('renders an error on one row with ink’s inline parenthesised hint', () => {
+    const { container } = render(
+      <OpenTuiTranscriptView
+        items={[
+          {
+            kind: 'error',
+            id: 'e1',
+            text: 'Model not found',
+            hint: 'try /model',
+          },
+        ]}
+      />,
+    );
+    expect(container.textContent).toContain('✕ Model not found (try /model)');
+  });
+
   it('strips bidi overrides from arena file lists and group labels (R1-26)', () => {
     const { container } = render(
       <OpenTuiTranscriptView

@@ -135,7 +135,7 @@ export function transcribeSession(
           events.push({
             type: 'tool-output',
             id,
-            delta: renderResultDisplay(r.resultDisplay),
+            output: renderResultDisplay(r.resultDisplay),
           });
         }
       }

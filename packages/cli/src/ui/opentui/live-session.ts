@@ -849,7 +849,7 @@ export async function* livePromptEvents(
         compactToolResultDisplayForHistory(chunk),
       );
       return display
-        ? [{ type: 'tool-output', id: callId, delta: display }]
+        ? [{ type: 'tool-output', id: callId, output: display }]
         : [];
     };
 

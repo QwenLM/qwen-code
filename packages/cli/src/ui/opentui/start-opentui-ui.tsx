@@ -228,15 +228,16 @@ function OpenTuiEntryApp({
   const renderMain = useCallback(
     () => (
       <box flexDirection="column" flexGrow={1}>
+        {/* The transcript box carries two columns of margin on each side, so
+            its content budget is 4 short of the terminal width. */}
         <OpenTuiTranscriptView
           items={live.items}
-          availableWidth={width}
+          availableWidth={Math.max(0, width - 4)}
           availableTerminalHeight={height}
         />
-        {exitHint ? <text>{exitHint}</text> : null}
       </box>
     ),
-    [live.items, width, height, exitHint],
+    [live.items, width, height],
   );
 
   const handleRenderError = useCallback(
@@ -287,6 +288,7 @@ function OpenTuiEntryApp({
       onTranscriptEvent={applyEvent}
       onStartNewSession={handleStartNewSession}
       updateNotice={updateNotice}
+      exitHint={exitHint}
       availableTerminalHeight={height}
       streaming={live.streaming}
       streamingCharsRef={live.streamingCharsRef}

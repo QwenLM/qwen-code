@@ -329,7 +329,7 @@ describe('OpenTuiFooter', () => {
       />,
     );
     expect(container.textContent).toContain(
-      'Enter to steer · Ctrl+Q to queue · Auto mode (shift + tab to cycle) · ⏳ 2 queued',
+      'Enter to steer · Ctrl+Q to queue · Auto mode (shift + tab to cycle) ⏳ 2 queued',
     );
   });
 
@@ -350,6 +350,27 @@ describe('OpenTuiFooter', () => {
     // The queue badge is a separate child of ink's hint row, so it survives
     // the mode taking the slot ahead of it.
     expect(text).toContain('⏳ 2 queued');
+  });
+
+  it('gives the armed quit warning the footer, dropping the status row', () => {
+    const { container } = render(
+      <OpenTuiFooter
+        config={fakeConfig()}
+        streaming={false}
+        approvalMode={ApprovalMode.YOLO}
+        queueLength={2}
+        exitHint="Press Ctrl+C again to exit."
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('Press Ctrl+C again to exit.');
+    expect(text).not.toContain('qwen3-coder-plus');
+    expect(text).not.toContain('git:(main)');
+    expect(text).not.toContain('YOLO');
+    // The queue badge is a sibling of the hint the warning replaces, not part
+    // of it, so it stays visible while the warning is armed — joined by the
+    // single space its leading literal space produces in ink.
+    expect(text).toContain('Press Ctrl+C again to exit. ⏳ 2 queued');
   });
 
   it('shows the context indicator only after tokens are used', () => {

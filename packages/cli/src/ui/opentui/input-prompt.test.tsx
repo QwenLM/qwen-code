@@ -1565,10 +1565,10 @@ describe('OpenTuiInputPrompt completion dropdown (F-19)', () => {
   });
 
   // The mocked useTerminalDimensions reports width 80, so a row has
-  // columns = 78 and a description keeps 78 - 6 (nested margins, active marker,
-  // gutter) minus whatever the widest label column took. Asserting the exact
-  // surviving prefix is what pins that arithmetic: jsdom has no layout, so an
-  // over-allocated budget only shows up as a wrapped row on a real terminal.
+  // columns = 80 and a description keeps 80 - 8 (dropdown margins, active
+  // marker, gutter) minus whatever the widest label column took. Asserting the
+  // exact surviving prefix is what pins that arithmetic: jsdom has no layout, so
+  // an over-allocated budget only shows up as a wrapped row on a real terminal.
   async function dropdownText(command: Record<string, unknown>) {
     mocks.state.slashCommands = [command];
     const { container } = render(
@@ -1590,7 +1590,7 @@ describe('OpenTuiInputPrompt completion dropdown (F-19)', () => {
   });
 
   it('counts the badge toward the label column, not on top of it', async () => {
-    // `stuck [Skill]` is 13 wide, so the description keeps 78 - 6 - 13 = 59
+    // `stuck [Skill]` is 13 wide, so the description keeps 80 - 8 - 13 = 59
     // columns and truncateToWidth leaves 58 x's plus the ellipsis. Without the
     // badge in the measurement the same row would keep 66.
     const text = await dropdownText({
@@ -1647,7 +1647,7 @@ describe('OpenTuiInputPrompt completion dropdown (F-19)', () => {
   });
 });
 
-describe('OpenTuiInputPrompt Shift+Tab approval-mode cycle (F-2)', () => {
+describe('OpenTuiInputPrompt Windows Tab approval-mode fallback (F-2)', () => {
   beforeEach(() => {
     mocks.state.inputHandlers.length = 0;
     mocks.state.keyboardHandlers.length = 0;
@@ -1691,15 +1691,19 @@ describe('OpenTuiInputPrompt Shift+Tab approval-mode cycle (F-2)', () => {
     }
   }
 
-  it('cycles on Shift+Tab', async () => {
+  it('leaves a real Shift+Tab to the shell', async () => {
+    // The shell broadcasts Shift+Tab to every useKeyboard subscriber, this
+    // composer included, so cycling here too would advance the mode twice.
     let cycles = 0;
     renderWithCycle(() => {
       cycles += 1;
     });
-    await act(async () => {
-      lastKeyboardHandler()(shiftTab);
+    await withPlatform('win32', async () => {
+      await act(async () => {
+        lastKeyboardHandler()(shiftTab);
+      });
     });
-    expect(cycles).toBe(1);
+    expect(cycles).toBe(0);
   });
 
   it('leaves a bare Tab alone off Windows', async () => {

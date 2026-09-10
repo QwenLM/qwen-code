@@ -1,0 +1,457 @@
+# OpenTUI parity defect sweep — frame-level acceptance against ink
+
+[English](2026-09-10-opentui-parity-defect-sweep.md) | [简体中文](2026-09-10-opentui-parity-defect-sweep.zh-CN.md)
+
+Design doc for the defect sweep that followed the OpenTUI migration's tenth
+batch. The migration had been declared complete on the strength of its unit
+and integration suites, but a first look at the running renderer next to ink
+showed a UI that did not read as the same product: no banner, a footer that
+did not match, missing loading states. Those three were restored separately;
+this document covers what a systematic frame-by-frame comparison found behind
+them, and the fixes that came out of it. Plan paragraphs and the running gap
+ledger live in [#8662](https://github.com/QwenLM/qwen-code/issues/8662).
+
+## Problem
+
+Code correctness had been established; perceptual equivalence had not. The
+two renderers share their command layer, their tool layer and their history
+model, so a test that asserts on state passes identically for both while the
+screen they paint diverges. Three groups of gaps, all observed on a real pty
+rather than inferred from source:
+
+1. **Decisions the confirmation dialog took away from the user.** Every tool
+   confirmation was answered from one generic four-row list. The always-allow
+   rows did not say what they were allowing, were offered in an untrusted
+   folder where a durable rule should not be on the table at all, and plan and
+   edit confirmations were offered the wrong outcome sets outright. Behind
+   that sat a silent process-wide failure: every OpenTUI session lost
+   AST-based shell analysis, so permission rules came back empty and
+   command-safety classification dropped to its conservative fallback.
+2. **Chrome that did not line up.** The footer truncated its status row to one
+   line, the loading indicator advertised a token estimate no caller ever
+   supplied, popups spanned the terminal edge to edge, the completion dropdown
+   sized its columns without counting the source badge it never populated, and
+   Shift+Tab was advertised by the footer but unbound.
+3. **Conversation rows this renderer never produced.** The context-file
+   announcement, the extension-refresh notice and the model-dialog cancel
+   notice all exist in ink and reached the transcript there; here they were
+   either never emitted or emitted into a channel that draws nothing. Two
+   glyph tables had also been copied rather than imported, and the copies had
+   drifted from ink's presentation-selector suffixes.
+
+A fourth group was found while fixing the first three, and is structural
+rather than cosmetic: a removed layout prop is not reset by the renderer's
+reconciler, so the dialog and the composer — two `<box>` elements occupying
+the same slot — leaked each other's margins and widths.
+
+## Method — the observation channel is a reconstructed screen, compared as a sequence
+
+Raw pty bytes cannot be diffed. A renderer that repaints in place emits cursor
+addresses, erasures and partial cells, so the same screen arrives as two
+different byte streams and two different screens can arrive as the same one.
+The harness therefore drives each renderer through an identical scripted
+scenario under a pty, reconstructs the screen at each declared checkpoint, and
+writes that reconstruction out as fixed-width text. Comparison happens on the
+reconstruction.
+
+Each scenario runs twice, once per renderer, from the same bundle and the same
+boot arguments, and checkpoints are declared by the scenario rather than
+sampled on a timer, so both legs are captured at the same point in the script
+rather than at the same wall-clock moment. Fourteen scenarios cover boot, a
+narrow terminal, typing and completion, `@` completion, mid-stream indicators,
+a tool run under auto-approval, a tool confirmation, the slash dialogs, the
+approval-mode cycle, the auto-mode boot notice, an error path, a resize, clear
+and exit, and a long hold that cycles the loading phrases.
+
+Two properties of the comparison matter for reading the results.
+
+**Vertical anchoring is not comparable.** This renderer anchors the composer to
+the bottom of the terminal; ink places it under the conversation. Every
+absolute row index therefore differs by construction, and a diff that aligns on
+rows reports the anchoring choice on every capture instead of the defect under
+test. The comparison strips blank rows and diffs the two resulting sequences
+with a longest-common-subsequence pass, which is invariant to where the block
+sits and sensitive to what it contains.
+
+**A divergence needs a control arm before it is attributed.** The OpenTUI leg
+runs under a different runtime than the ink leg, so any divergence is a
+candidate for "the renderer did it" and "the runtime did it" at once. Where
+that ambiguity mattered, a third leg ran ink under the OpenTUI runtime. It
+reproduced the missing shell-crawler diagnostics on ink, which moved that
+finding out of the renderer's column; it did not reproduce the missing
+extension-refresh notice, which stayed in.
+
+## Decision 1 — the confirmation dialog asks ink's per-type question
+
+The dialog now builds its option list from the confirmation's own type rather
+than from one shared shape. An execution approval names the command root it is
+about to permit, so "always allow" says what it will cover later; a plan
+confirmation offers to restore the approval mode it replaced; an edit
+confirmation offers the session-wide allow-always that an edit actually
+supports instead of the project and user persistence outcomes it does not. The
+durable-scope rows are withheld in an untrusted folder, because a permission
+rule for a workspace the user has not trusted is not a decision the dialog
+should be putting in front of them. Rows are numbered and a digit key picks
+one, matching the inline prompt.
+
+## Decision 2 — the shell AST parser must be warm before the renderer boots
+
+The renderer's constructor installs a bare `globalThis.window` to hang its
+animation-frame shim on. The parser's UMD wrapper probes
+`window.document.currentScript` when it is first evaluated, so the first
+dynamic import after that point throws — and the parser latches that failure
+for the rest of the process. The import is therefore forced during startup,
+while `window` is still undefined, ahead of any renderer construction.
+
+This needed one line from the core package: a re-export on its index so the
+startup path can reach the warm-up helper without a deep import. The parser
+stays dynamically imported everywhere else, so the deferred-runtime invariant
+is unchanged. The change is committed on its own for that reason — it is the
+only edit in this sweep that crosses into core.
+
+## Decision 3 — the footer keeps ink's status rows and the loading indicator gets a real estimate
+
+The status row wraps inside a two-line budget instead of truncating to one, so
+a narrow terminal pushes the model segment onto a second row the way ink does
+rather than dropping it. The hint row stays truncated, because a row that can
+grow would resize the footer mid-turn and move the composer under the user's
+cursor. The hint row also carries the approval-mode name that the composer
+stopped drawing: ink uses that text as an accessibility label rather than a
+visible row, and this renderer has no accessibility surface, so the text has
+to be visible somewhere or it is nowhere.
+
+The loading indicator declared a character counter and a receiving flag as
+props that no caller set, which pinned its output-token estimate at zero and
+its direction arrow permanently down. Both now come from the live turn and
+count model text, thoughts and tool-call arguments as ink does, falling back
+to the waiting phase when tool results go to the model.
+
+## Decision 4 — dropdown columns are derived, and Shift+Tab is a shell-level binding
+
+The dropdown's label column follows the mode being completed. A slash list
+shares one half-width column so descriptions line up; a file list does not,
+because ink only shares a column where a row carries a description to line up
+against, and clamping a plain path to half the width wrapped it mid-word onto
+a second row. The row budget also accounts for the dropdown nesting its own
+side margins inside the composer's, which had left two columns too many for
+the description and wrapped its tail.
+
+A label and its argument hint were concatenated into one run, so a hint too
+long for the column word-wrapped the whole string and grew the row to three
+lines. They are laid out as separate children and broken at the column edge,
+which puts the continuation at the hint's own offset.
+
+Shift+Tab was unbound, so the footer advertised a shortcut that did nothing.
+The binding lives in the shell rather than the composer: ink mounts its mode
+indicator at app level, disabled only for one tab view, so the cycle keeps
+working while a dialog or a confirmation has the composer unmounted. The
+composer keeps only the Windows bare-Tab fallback, which is the one route that
+has to know whether Tab was already spent accepting a completion. The cycle
+order comes from the shared list of modes rather than a copy of the enum's
+declaration order, so it cannot drift from the one ink walks.
+
+## Decision 5 — the auto-mode notice is gated where both routes into auto mode meet
+
+ink gates its auto-mode entry notices on the session not already holding the
+mode. The rotation could never violate that, so the guard looked redundant
+here and was left out — but the approval-mode dialog opens with the current
+mode already selected, so a bare Enter re-picks it. The first-time message
+survives a re-pick because it is acknowledged in settings; the notice listing
+the allow rules auto mode stripped does not, and reprinted on every re-pick.
+The gate now sits where both routes meet.
+
+## Decision 6 — popups get ink's geometry, and the help dialog gets a window it can page
+
+Every popup spanned the terminal edge to edge while ink wraps its popups in a
+two-column margin and caps their width, so a border ran from column 2 to
+column 97 and stopped there. The wrapper now supplies both, which is what
+makes a dialog read as a dialog rather than a full-screen mode. The
+confirmations deliberately stay outside it: their body measures the terminal
+width to estimate how its text wraps, so narrowing the box without narrowing
+that measurement would corrupt the estimate.
+
+The help dialog opened on its command list rather than its overview, and its
+tab keys did not match the ones the footer advertised. The overview is now the
+opening tab, Tab and Shift+Tab cycle in the two directions the hint promises,
+the arrow and page keys move the command window and are inert on a tab that
+has none, and no other key closes or navigates — closing on a bare letter key
+meant a typo dismissed the dialog.
+
+That command window was a fixed eighteen rows whatever the terminal height,
+which is more than the body budget leaves once the tab's introduction line,
+its gap and the scroll hint are counted. The overflow had been resolved by
+dropping the gap and clipping the hint away entirely, so the scroll position
+the hint reports was simply absent. The window is now sized to what the budget
+leaves after that chrome, and paging moves by the window actually on screen.
+Below a 42-row terminal this shows a shorter list than ink does, which is the
+smaller loss: ink keeps its eighteen rows and clips the hint instead.
+
+The model dialog drew its detail rule twenty characters wide against ink's
+full-width one and showed no line under a model's title. ink folds the runtime
+and discontinued markers into the row description as well as the title, so a
+runtime model with nothing of its own to say still gets an explanatory line;
+the entries now carry that, and the rule is spelled out to the frame's inner
+width because there is no single-sided border here to draw one with.
+
+## Decision 7 — a tool's streamed output is a cumulative snapshot, not an increment
+
+The stream event that carries a tool's output was shaped like the text and
+thinking deltas beside it, so consumers appended. The scheduler does not
+stream increments: it emits the whole display produced so far on each chunk
+and then a final result carrying the whole display again, so appending painted
+the tail of the output twice. The event is renamed to say what it holds, and
+the card replaces rather than accumulates.
+
+The reducer that folds these events has no production caller — only its own
+test file. That predates this sweep; the rename forced the edit, and wiring or
+removing the reducer is out of scope here.
+
+## Decision 8 — the transcript, composer and footer share one inset
+
+ink insets its conversation, its composer and its footer by the same two
+columns. Here the transcript had no inset while the composer and footer had
+one each, and the composer's frame sat one column right and one column narrow
+of ink's. All three now take the same inset, and the composer keeps a one-row
+gap above it, which is what separates a submitted prompt from the answer
+arriving under it.
+
+## Decision 9 — the error row is one line, with ink's literal cross
+
+The error row was two stacked rows: the message, then the hint underneath. ink
+renders one row with the hint inline in parentheses, and its prefix is a
+literal cross at U+2715 rather than the shared icon table's U+2716 — the two
+glyphs are one code point apart and visually distinct, so importing the table
+here would have been the wrong kind of reuse. The row is flattened, the hint
+moves inline as a secondary-coloured segment, and the prefix stays a literal
+with a comment saying why it is not the shared constant.
+
+## Decision 10 — the armed quit warning takes the footer's hint slot
+
+The two-press exit warning was drawn inside the transcript, above the
+composer, so the user was told to press Ctrl+C again in a place they were not
+looking. ink gives the warning the footer's bottom hint slot and gates its
+status line off while the warning is up, so it reads directly under the
+composer with nothing above it. The footer now takes the warning as a prop and
+returns just that row, truncated to the same budget as the hint it replaces.
+The queued-message segment is a sibling of that hint rather than part of it,
+so it stays visible while the warning is armed.
+
+Moving the warning into the footer also hands it the footer's own gate, which
+hides the whole footer while a dialog, a modal, a tool confirmation or the
+completion dropdown is up. The warning overrides that gate. A dialog unmounts
+the composer here, so nothing intercepts Ctrl+C and the guard still arms; left
+gated, a second press would exit with the warning never having been on screen.
+
+Being a sibling also decides the separator. ink renders the badge as a text
+node of its own whose content begins with a literal space, so the row reads
+with one space where the segments of ink's own hint are joined by `' · '`.
+Both joins the badge participates in — the hint row and the armed-warning row
+— use the single space. The mode segment keeps its internal `' · '`, which is
+the one ink puts between the segments of that hint.
+
+## Decision 11 — a removed layout prop is not reset, so the two branches need keys
+
+The renderer's margin and width setters ignore the `null` its reconciler passes
+for a removed prop. The dialog branch and the composer branch are both a
+`<box>` in the same slot, so without keys React reuses one instance and diffs
+props — and the previous branch's layout stays stuck on the node. Opening a
+dialog left the composer's margins behind; closing it left the dialog's width
+behind. Both branches now carry an explicit key, and the one width that has to
+be relinquished rather than replaced is set to its auto value instead of being
+removed.
+
+Sites that only ever set a prop, or only ever remove it, are unaffected and
+were surveyed rather than changed. No renderer-level test was added: the
+behaviour lives in the reconciler, and reproducing it needs a real render
+surface, which the pty matrix already covers.
+
+## Decision 12 — the glyph tables are imported, not copied
+
+Two tables of status and message glyphs had been copied into this renderer.
+Both are exported by ink's constants module, and both copies had drifted: the
+message icons were missing the presentation selectors ink appends to force the
+text rendering of characters that default to emoji. The copies are deleted and
+ink's tables imported, which is what makes the drift impossible rather than
+merely fixed. The selectors are invisible in source, so the tests that assert
+them say so in a comment.
+
+## Decision 13 — three notices ink draws and this renderer did not
+
+The extension-refresh notice never appeared because the watcher latches during
+startup, before this renderer mounts, and a latch does not re-emit: subscribing
+alone drops the one notice that tells the user to run `/reload-plugins`. The
+latch is now replayed on subscribe. The replay is keyed on the latch owner
+rather than the construction, because the shell rebuilds its dispatcher
+whenever its host identity changes and the latch outlives that rebuild —
+without the key the notice printed once per rebuild, which the frames caught
+as two identical rows.
+
+The context-file announcement is a one-shot latch in ink: the files stay
+attached for the whole session, so it is announced on the first submission that
+reaches a model and not on every prompt. ink re-arms that latch in three places
+— a session-id change, a history replacement and a clear-screen — because each
+of those wipes the emitted row while the files stay attached. All three funnel
+through one point here, where the visible transcript is cleared or replaced,
+so the re-arm lives there. ink's history-replacement path also reconciles the
+latch against the replayed history; that is not ported, because this renderer's
+resume replay carries no info rows at all, which would make the reconciliation
+a permanently false branch.
+
+The model dialog's cancel notice was emitted into a feedback channel that
+draws nothing rather than into the transcript. It now lands as a transcript
+row, matching ink's "kept model as …".
+
+## Decision 14 — a row's glyph prefix must not be shrinkable
+
+The transcript rows that carry a glyph gutter build it as a separate flex
+child beside the message, which is what gives the wrapped message ink's
+hanging indent. That child is shrinkable by default, and a shrink is exactly
+what happens when the message's first wrapped line fills the row: at 60
+columns the warning row measured 57 columns inside a 56-column box, its
+prefix had been reduced to one column so the space after the glyph was gone,
+and the continuation started one column left of the info row above it, which
+had two columns of headroom and so was never shrunk.
+
+The prefix is now non-shrinkable. The same frame then measures 55 columns
+inside the box, keeps its space, and its continuation lines up with the info
+row at ink's column. This was verified by rebuild and re-capture, not by
+inspection: the two rows differ only in message length, so the shrinking row
+is the control for the one that was not shrinking.
+
+ink turns out to do the same thing. Its shared status renderer puts the
+prefix in its own row child with an explicit width and an explicit
+non-shrinkable flag, and lets the message take the remainder, which is the
+arrangement the measurement above reconstructs. So this is not a workaround
+for a layout engine's default but a piece of the reference that had not been
+ported, and the frame evidence and the source now agree.
+
+The fix is applied to the four row shapes in the transcript that use it —
+info, warning, error and the away recap, the last of which has two fixed
+prefixes and so needs both marked. It is deliberately not applied to the
+matching prefixes inside the statistics and authentication dialogs: those sit
+in a fixed-width bordered box with its own width budget, no capture there
+shows the defect, and changing them would be an unverified edit.
+
+## Decision 15 — the model dialog's three close guards
+
+Closing the model dialog without a selection announced the model that
+survived, on every path that closed it. That collapses outcomes ink keeps
+apart: leaving an auxiliary picker — voice, vision, compaction, image or the
+fast model — announced too, and a second Escape after the first, or one
+landing while a switch was still being applied, announced again.
+
+ink guards the announcement with three pieces of state: a flag recording that
+a switch committed, a latch recording that the close path already ran, and an
+in-flight flag spanning the await. The close path returns early if either the
+latch or the in-flight flag is set, and announces only for the main picker
+when nothing committed. This renderer now carries the same three with the
+same early return, and its auxiliary test is the negation of the picker's mode
+being the main one — the same five modes ink enumerates, since the mode is a
+required field and cannot silently fall through. None of the three is reset:
+the mount unmounts when the dialog closes, so a fresh open starts from fresh
+state.
+
+Two of the three also guard the pick itself: ink's select handler returns early
+when a switch is applying or one already committed, because a second Enter
+before the first apply settles would start a second switch, and both would
+report. On the close path the latch always fires first, so that early return is
+the one place where the committed flag decides an outcome.
+
+The announcement also moved out of the shell's notify slot and into the
+transcript. ink writes all three of the dialog's outcomes — a pick, an
+escape, an auxiliary pick — as transcript rows, so a row outlives the dialog;
+the notify slot is a bare line inside the dialog area and closes with it.
+
+## Coverage boundary
+
+What was verified, and how far the verification reaches:
+
+- **Geometry, row content, row order, row count and glyph identity**, on a
+  reconstructed screen, for fourteen scenarios at 100×40 and, for the narrow
+  and resize scenarios, at 60×24. Both legs from one bundle and one set of
+  boot arguments.
+- **Colour was not verified.** The reconstruction is text. Several rows are
+  known to differ only in which theme token they use, and a styled capture
+  exists that could settle it but was not read.
+- **The composer's one-row gap is source-grounded only.** Under bottom
+  anchoring it is not separable from the anchoring itself in a frame
+  comparison.
+- **The quit warning's queued segment is unit-tested only.** No scenario
+  queues a message and then arms the warning. Nor does any scenario produce a
+  durable queue at all: ink's badge survives only as a single transient of its
+  own submit path in the raw stream, and never reaches a captured frame in
+  either leg.
+- **The non-shrinkable row prefix is verified by re-capture only.** The
+  unit-test runtime stubs the renderer's graphics surface, so it cannot
+  exercise layout; a test there could only echo the prop back.
+- **Two structural divergences are recorded and deliberately not fixed here.**
+  The banner is persistent in this renderer and scrolls out of the viewport in
+  ink, which is a product decision inherited from the restore work rather than
+  a defect introduced by it. The same overlay model has a second symptom: a
+  dialog here does not reflow the conversation, so rows that ink pushes out of
+  the viewport when a tall dialog opens stay visible underneath it here. The
+  tool confirmation is drawn as a bordered box below the conversation here and
+  inline within it in ink; matching that means relocating the confirmation into
+  the transcript and rerouting focus while the composer stays mounted, which is
+  a change to the approval path rather than to its appearance.
+- **One divergence is intentional.** The update check reports a skipped check
+  with its reason here, while ink reports a failed automatic update. Both
+  renderers share the emission path; ink's subscriber is registered after the
+  background task emits, so ink loses the soft warning and shows the later
+  hard failure instead. Removing a legitimate warning to match a subscription
+  race is not what aligning to ink means, so the warning stays.
+- **One cosmetic divergence is recorded, not fixed.** When the context-file
+  list contains a path longer than the terminal width, ink moves that path to
+  a line of its own and then breaks it; this renderer breaks it in place. Both
+  produce three rows with the same hanging indent and the same text. Matching
+  the break points would mean reimplementing the wrap algorithm the renderer
+  already provides.
+- **One last resort is deliberately not reproduced.** The kept-model
+  announcement reads the runtime snapshot's identifier and falls back to the
+  configured one, which is what ink does. ink then falls back a third time, to
+  a hardcoded default model identifier, when the configured one reads empty.
+  That cannot happen here, so the third tier is left out rather than importing
+  a constant to cover an impossible case.
+- **A replayed extension notice cannot carry its reason.** The latch this
+  renderer replays from exposes no accessor for it, so a reload that failed
+  before this renderer mounted is announced with the plain change wording
+  rather than the failed one. Both wordings send the user to the same command,
+  and recovering the reason would mean adding a public accessor to the shared
+  state for a distinction with no different action behind it.
+
+## Follow-ups
+
+- The `@` completion here asks only the file index. ink also completes
+  sessions, MCP resources and extensions, and draws a category bar to switch
+  between them. That is a feature gap rather than a parity defect and belongs
+  in its own change.
+- The mid-turn queue is counted here but never shown. Its length reaches the
+  footer badge and the composer's up key at the top edge pops it back for
+  editing, but ink also lists the queued texts above the composer — three at a
+  time, each collapsed to one line, with an overflow row and a hint shown for
+  the first few times the queue fills. Porting that needs a non-destructive
+  snapshot of the queue, which today can only be read by draining it.
+- The shell-crawler diagnostics that print when the search binary is missing
+  are now explained. The renderer library replaces the global console with a
+  capture stream and folds console output into its own in-renderer console, so
+  those warnings never reach the terminal; ink has no such interception and
+  lets them land in the scrollback. The trigger is environmental — the search
+  binary is only a shell alias on the test machine, so a spawned lookup fails.
+  The diagnostics are not lost, but they are unreachable here because this
+  renderer never binds the library's console toggle. Whether to expose that
+  console is an open question.
+- The shell card keeps the whole output where ink shortens it. Both renderers
+  write the same raw string to the model's history, but ink compacts the copy
+  it puts on screen once that copy passes a retention limit. No scenario here
+  produces output that long, so the gap is reasoned rather than observed, and
+  closing it also raises whether the intermediate streaming snapshots should
+  exist at all — ink discards shell progress instead of showing it.
+- The help dialog's reserved-row constant does not describe the rows actually
+  observed on screen, and the window height this renderer shows below a 42-row
+  terminal is bounded rather than matched.
+- The loading indicator has no subagent token rollup and no tokens-per-second
+  segment, both of which ink shows.
+- The theme mode helpers have no production caller, so this renderer always
+  paints its dark palette.
+- Two dialog list widgets remain where one would do; consolidating them touches
+  numbering, colour and scroll arrows at once.
