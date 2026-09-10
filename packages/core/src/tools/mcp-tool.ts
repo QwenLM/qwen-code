@@ -433,14 +433,17 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
    * `handleReconnectOnError` (correctly — the call must not be replayed),
    * so without this the dead connection would linger until a manual
    * `/mcp reconnect` that Channel/daemon operators cannot run (#11272).
-   * Only fires when the recorded status actually says the transport is
-   * gone; a healthy server's cancel path stays untouched.
+   * Only fires on a *recorded* DISCONNECTED — `getMCPServerStatus`
+   * defaults unknown names to DISCONNECTED, and a misfire would delete the
+   * server's tools from the registry mid-session. Same form as
+   * `isExecutionTimeoutFailure`. A healthy server's cancel stays untouched.
    */
   private scheduleRecoveryAfterAbort(): void {
     if (!this.cliConfig) {
       return;
     }
-    if (getMCPServerStatus(this.serverName) !== MCPServerStatus.DISCONNECTED) {
+    const statuses = getAllMCPServerStatuses();
+    if (statuses.get(this.serverName) !== MCPServerStatus.DISCONNECTED) {
       return;
     }
     debugLogger.info(
@@ -448,9 +451,34 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         `re-arming connection in background for the next call`,
     );
     // Fire-and-forget: this call is already throwing its abort error; the
-    // rediscovery outcome only affects the NEXT tool call. attemptReconnect
-    // never throws and logs its own failures.
-    void this.attemptReconnect();
+    // rediscovery outcome only affects the NEXT tool call. Recovery keeps
+    // the registry and the model's tool declarations in step — the same
+    // two-step handshake `reconcileMcpServerAcrossLiveConfigs` and
+    // background MCP discovery use (`discoverToolsForServer` then
+    // `setTools()`). Non-interactive surfaces (ACP/Channel) have no
+    // `mcp-client-update` subscriber, so without the trailing `setTools()`
+    // the re-registered tools would never reach the model (#11272).
+    // `skipHistoryReveal` matches a background refresh: there is no user
+    // turn to reveal history into.
+    void this.reconnectAndRefreshDeclarations();
+  }
+
+  private async reconnectAndRefreshDeclarations(): Promise<void> {
+    try {
+      await this.attemptReconnect();
+    } finally {
+      try {
+        const llmClient = this.cliConfig?.getLlmClient();
+        if (llmClient?.isInitialized()) {
+          await llmClient.setTools({ skipHistoryReveal: true });
+        }
+      } catch (error) {
+        debugLogger.error(
+          `Refreshing tool declarations for MCP server '${this.serverName}' ` +
+            `after abort recovery failed: ${error}`,
+        );
+      }
+    }
   }
 
   private async handleReconnectOnError(

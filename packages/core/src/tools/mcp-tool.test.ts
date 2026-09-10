@@ -2334,11 +2334,16 @@ describe('DiscoveredMCPTool', () => {
 
       const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
       const ensureTool = vi.fn().mockResolvedValue(retryTool);
+      const setTools = vi.fn().mockResolvedValue(undefined);
       const mockConfig = {
         isTrustedFolder: () => true,
         getToolRegistry: () => ({
           discoverToolsForServer,
           ensureTool,
+        }),
+        getLlmClient: () => ({
+          isInitialized: () => true,
+          setTools,
         }),
       };
 
@@ -2377,6 +2382,11 @@ describe('DiscoveredMCPTool', () => {
       // together with the cancel stays dead until a manual reconnect that
       // Channel/daemon operators cannot run (#11272).
       expect(retryClient.callTool).not.toHaveBeenCalled();
+      // The model's tool declarations are refreshed too — non-interactive
+      // surfaces (ACP/Channel) have no `mcp-client-update` subscriber, so a
+      // registry-only re-registration would never reach the model.
+      await vi.waitFor(() => expect(setTools).toHaveBeenCalledTimes(1));
+      expect(setTools).toHaveBeenCalledWith({ skipHistoryReveal: true });
     });
 
     it('should not trigger background recovery on abort while the server is connected', async () => {
@@ -2417,6 +2427,50 @@ describe('DiscoveredMCPTool', () => {
 
       // A cancel against a healthy server must stay a pure cancel: no retry,
       // no reconnect churn.
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+    });
+
+    it('should not trigger background recovery on abort when no status was ever recorded', async () => {
+      // `getMCPServerStatus` defaults unknown names to DISCONNECTED; the
+      // recovery gate must require a *recorded* DISCONNECTED so a server
+      // whose status was never registered cannot have its tools wiped by
+      // a cancel (same trap `isExecutionTimeoutFailure` guards against).
+      const params = { param: 'test' };
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(abortError),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+        }),
+      };
+
+      // No updateMCPServerStatus call: the name is absent from the map.
+      removeMCPServerStatus(serverName);
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const controller = new AbortController();
+      const invocation = tool.build(params);
+      const execution = invocation.execute(controller.signal);
+      controller.abort();
+      await expect(execution).rejects.toThrow('The operation was aborted');
+
       expect(discoverToolsForServer).not.toHaveBeenCalled();
     });
 
@@ -2882,6 +2936,9 @@ describe('DiscoveredMCPTool', () => {
       expect(rejection).not.toMatchObject({
         errorType: ToolErrorType.EXECUTION_TIMEOUT,
       });
+      await vi.waitFor(() =>
+        expect(discoverToolsForServer).toHaveBeenCalledTimes(1),
+      );
     });
 
     it('does not classify a direct -32001 that races with a parent abort as a timeout', async () => {
