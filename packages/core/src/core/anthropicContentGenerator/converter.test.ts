@@ -4421,4 +4421,82 @@ describe('AnthropicContentConverter', () => {
       });
     });
   });
+
+  // https://github.com/QwenLM/qwen-code/issues/9453
+  //
+  // The OpenAI Responses generator stashes an opaque reasoning-replay payload
+  // in the shared `Part.thoughtSignature` field (responses-converter.ts:
+  // `encodeReasoningSignature({ id, encrypted_content })`). That payload is
+  // only meaningful to the Responses API; after a provider switch it must not
+  // reach the Anthropic wire as a native `thinking.signature`, while the
+  // visible reasoning summary is kept.
+  describe('cross-provider reasoning replay metadata', () => {
+    const responsesReplaySignature = JSON.stringify({
+      id: 'rs_68c6c0c9ff5c8191a29b2e78c1a40c83',
+      encrypted_content: 'gAAAAABvcmVhc29uaW5nLXJlcGxheS1wYXlsb2Fk',
+    });
+
+    // A native Anthropic signature is an opaque token: it never starts with
+    // '{' and never parses as the Responses replay payload shape.
+    const anthropicNativeSignature =
+      'EqQBCgIYAhIkAc6dE9c2eN8aBf1c5d7e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6E=';
+
+    const buildRequest = (thoughtSignature: string) => ({
+      model: 'models/test',
+      contents: [
+        { role: 'user' as const, parts: [{ text: 'First' }] },
+        {
+          role: 'model' as const,
+          parts: [
+            {
+              text: 'Reasoning summary',
+              thought: true,
+              thoughtSignature,
+            },
+            { text: 'Visible answer' },
+          ],
+        },
+        { role: 'user' as const, parts: [{ text: 'Second' }] },
+      ],
+    });
+
+    it('forwards a native Anthropic thinking signature unchanged', () => {
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        buildRequest(anthropicNativeSignature),
+        { enableCacheControl: false },
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: 'Reasoning summary',
+            signature: anthropicNativeSignature,
+          },
+          { type: 'text', text: 'Visible answer' },
+        ],
+      });
+    });
+
+    it('does not forward a Responses replay payload as a native signature', () => {
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        buildRequest(responsesReplaySignature),
+        { enableCacheControl: false },
+      );
+
+      const blocks = messages[1]!.content as Array<{
+        type: string;
+        thinking?: string;
+        signature?: string;
+      }>;
+      const thinkingBlock = blocks.find((b) => b.type === 'thinking');
+
+      // The foreign replay payload must not be sent as a native signature...
+      expect(thinkingBlock?.signature).toBeUndefined();
+      // ...but the visible reasoning summary survives.
+      expect(thinkingBlock?.thinking).toBe('Reasoning summary');
+      expect(blocks).toContainEqual({ type: 'text', text: 'Visible answer' });
+    });
+  });
 });

@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { LlmContentGenerator } from './llm-content-generator.js';
 import { GoogleGenAI } from '@google/genai';
+import type { Part } from '@google/genai';
 import type { Config } from '../../config/config.js';
 
 const mockReportLlmRequest = vi.hoisted(() => vi.fn());
@@ -796,5 +797,96 @@ describe('LlmContentGenerator', () => {
     expect(functionResponseParts[2].text).toBe(
       'Unsupported media type for Gemini: video/mp4.',
     );
+  });
+
+  // https://github.com/QwenLM/qwen-code/issues/9453
+  //
+  // The OpenAI Responses generator stashes an opaque reasoning-replay payload
+  // in the shared `Part.thoughtSignature` field. That payload is only
+  // meaningful to the Responses API, so after a provider switch it must not
+  // travel on the Gemini wire as if it were a Gemini-native signature — while
+  // the visible reasoning summary and `thought: true` marker are kept.
+  describe('cross-provider reasoning replay metadata', () => {
+    const responsesReplaySignature = JSON.stringify({
+      id: 'rs_68c6c0c9ff5c8191a29b2e78c1a40c83',
+      encrypted_content: 'gAAAAABvcmVhc29uaW5nLXJlcGxheS1wYXlsb2Fk',
+    });
+
+    // A Gemini-native thoughtSignature is an opaque token: it never starts
+    // with '{' and never parses as the Responses replay payload shape.
+    const geminiNativeSignature =
+      'Ck0BShsIxKq3wOa2tgUQ5LK0BhjOqrfA5ra2BRABGAIiQB9Z7xKq3wOa2tgU';
+
+    const buildRequest = (thoughtSignature: string) => ({
+      model: 'gemini-2.5-pro',
+      contents: [
+        { role: 'user' as const, parts: [{ text: 'First' }] },
+        {
+          role: 'model' as const,
+          parts: [
+            { text: 'Reasoning summary', thought: true, thoughtSignature },
+            { text: 'Visible answer' },
+          ],
+        },
+        { role: 'user' as const, parts: [{ text: 'Second' }] },
+      ],
+    });
+
+    it('preserves a native Gemini thoughtSignature', async () => {
+      await generator.generateContent(
+        buildRequest(geminiNativeSignature),
+        'prompt-id',
+      );
+
+      const calledWith =
+        mockGoogleGenAI.models.generateContent.mock.calls[0][0];
+      const thoughtPart = calledWith.contents[1].parts[0];
+
+      expect(thoughtPart.thoughtSignature).toBe(geminiNativeSignature);
+      expect(thoughtPart.thought).toBe(true);
+      expect(thoughtPart.text).toBe('Reasoning summary');
+    });
+
+    it('strips a Responses replay payload but keeps the visible reasoning text', async () => {
+      await generator.generateContent(
+        buildRequest(responsesReplaySignature),
+        'prompt-id',
+      );
+
+      const calledWith =
+        mockGoogleGenAI.models.generateContent.mock.calls[0][0];
+      const thoughtPart = calledWith.contents[1].parts[0];
+
+      expect(thoughtPart.thoughtSignature).toBeUndefined();
+      expect(thoughtPart.thought).toBe(true);
+      expect(thoughtPart.text).toBe('Reasoning summary');
+      expect(calledWith.contents[1].parts[1].text).toBe('Visible answer');
+    });
+
+    it('does not mutate the caller-owned history part', async () => {
+      // Hold the part by identity rather than re-deriving it from the request,
+      // so this asserts the caller's own object was not touched.
+      const historyPart: Part = {
+        text: 'Reasoning summary',
+        thought: true,
+        thoughtSignature: responsesReplaySignature,
+      };
+
+      await generator.generateContent(
+        {
+          model: 'gemini-2.5-pro',
+          contents: [
+            { role: 'user', parts: [{ text: 'First' }] },
+            { role: 'model', parts: [historyPart, { text: 'Visible answer' }] },
+            { role: 'user', parts: [{ text: 'Second' }] },
+          ],
+        },
+        'prompt-id',
+      );
+
+      // The strip is wire-only: persisted history keeps the payload so a
+      // later switch back to the Responses API can still replay it.
+      expect(historyPart.thoughtSignature).toBe(responsesReplaySignature);
+    });
   });
 });

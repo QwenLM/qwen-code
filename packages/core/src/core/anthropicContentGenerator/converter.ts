@@ -27,6 +27,7 @@ import {
 } from '../../utils/schemaConverter.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
+import { isResponsesReasoningSignature } from '../../utils/thoughtUtils.js';
 
 type AnthropicMessageParam = Anthropic.MessageParam;
 // `scope: 'global'` is sent under the `prompt-caching-scope-2026-01-05` beta
@@ -610,8 +611,23 @@ export class AnthropicContentConverter {
             'thoughtSignature' in part &&
             typeof part.thoughtSignature === 'string'
           ) {
-            (thinkingBlock as { signature?: string }).signature =
-              part.thoughtSignature;
+            // `thoughtSignature` carries no origin marker, so a Responses-API
+            // reasoning replay payload (`{"id":…,"encrypted_content":…}`)
+            // reaches here unchanged after a provider switch. It is not an
+            // Anthropic signature — forwarding it puts a foreign opaque blob
+            // on the wire as `thinking.signature`. Drop the payload and keep
+            // the visible reasoning text set above, mirroring the fallback
+            // `responses-converter.ts` already applies in the other direction
+            // for an unreplayable signature.
+            // https://github.com/QwenLM/qwen-code/issues/9453
+            if (isResponsesReasoningSignature(part.thoughtSignature)) {
+              debugLogger.debug(
+                'Dropping a Responses reasoning replay payload from thoughtSignature; keeping thinking text unsigned',
+              );
+            } else {
+              (thinkingBlock as { signature?: string }).signature =
+                part.thoughtSignature;
+            }
           }
           contentBlocks.push(thinkingBlock as AnthropicContentBlockParam);
         }
