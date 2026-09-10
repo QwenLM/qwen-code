@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getEventListeners } from 'node:events';
 import { promises as fs } from 'node:fs';
@@ -166,6 +168,106 @@ describe('WorkflowRunner', () => {
         .splice(0)
         .map((root) => fs.rm(root, { recursive: true, force: true })),
     );
+  });
+
+  async function generatedReview(script: string) {
+    const { config, registry } = configWithRegistry();
+    const root = await makeStorageRoot();
+    stubStorage(config, root);
+    const scriptPath = path.join(
+      root,
+      'generated',
+      'review',
+      'session',
+      `qwen-review-0123456789-${createHash('sha256').update(script).digest('hex')}.js`,
+    );
+    await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+    await fs.writeFile(scriptPath, script);
+    resolveSavedWorkflowScriptMock.mockResolvedValue({ scriptPath, script });
+    return { config, registry, scriptPath };
+  }
+
+  it('dispatches a generated review through a ten-agent window before any result returns', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_WORKFLOW_CONCURRENCY', undefined);
+    vi.stubEnv('QWEN_CODE_MAX_TOOL_CONCURRENCY', undefined);
+    vi.stubEnv('QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS', undefined);
+    vi.stubEnv('QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES', undefined);
+    vi.stubEnv('QWEN_REVIEW_DEADLINE_EPOCH', undefined);
+    const { config, scriptPath } = await generatedReview(
+      'return await parallel(args.map((p) => () => agent(p)));',
+    );
+    const started: string[] = [];
+    const releases: Array<() => void> = [];
+    createProductionDispatchMock.mockReturnValue(async (prompt: string) => {
+      started.push(prompt);
+      await new Promise<void>((resolve) => {
+        releases.push(resolve);
+      });
+      return prompt;
+    });
+    const controller = new AbortController();
+    try {
+      const handle = await WorkflowRunner.start({
+        config,
+        scriptPath,
+        args: Array.from({ length: 11 }, (_, i) => String(i)),
+        signal: controller.signal,
+      });
+      await vi.waitFor(() => expect(started).toHaveLength(10));
+      expect(started).toEqual(Array.from({ length: 10 }, (_, i) => String(i)));
+      expect(createProductionDispatchMock.mock.calls[0]?.[4]).toEqual({
+        max_turns: 500,
+        max_time_minutes: 100,
+      });
+      releases[0]!();
+      await vi.waitFor(() => expect(started).toHaveLength(11));
+      releases.forEach((release) => release());
+      expect((await handle.completion).ok).toBe(true);
+    } finally {
+      controller.abort();
+      releases.forEach((release) => release());
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps an ordinary workflow on generic dispatch bounds despite review metadata', async () => {
+    const { config } = configWithRegistry();
+    createProductionDispatchMock.mockReturnValue(async () => 'done');
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script:
+        "export const meta = { name: 'review-step-3a', description: 'review' }; return await agent('read');",
+      args: undefined,
+    });
+    expect((await handle.completion).ok).toBe(true);
+    expect(createProductionDispatchMock.mock.calls[0]?.[4]).toBeUndefined();
+  });
+
+  it('runs beyond the generic thirty-minute limit and aborts at the review limit', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_WORKFLOW_SECONDS', undefined);
+    vi.stubEnv('QWEN_REVIEW_DEADLINE_EPOCH', undefined);
+    const { config, registry, scriptPath } = await generatedReview(
+      'await new Promise(() => {})',
+    );
+    vi.useFakeTimers();
+    try {
+      const handle = await WorkflowRunner.start({
+        config,
+        scriptPath,
+        signal: new AbortController().signal,
+        args: undefined,
+        dispatch: async () => 'unused',
+      });
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+      expect(registry.get(handle.runId)?.status).toBe('running');
+      await vi.advanceTimersByTimeAsync((6 * 60 - 30) * 60 * 1000);
+      expect((await handle.completion).ok).toBe(false);
+      expect(registry.get(handle.runId)?.status).toBe('failed');
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    }
   });
 
   it('passes the registry approval bridge only to production dispatch', async () => {

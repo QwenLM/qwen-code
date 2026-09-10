@@ -1251,7 +1251,10 @@ describe('DaemonWorkspaceProvider', () => {
     });
   });
 
-  it('throws when useDaemonWorkspace is used without provider', async () => {
+  // Exercises the strict hook with no provider above it. Helper-local
+  // container/root — the describe-scoped pair stays owned by
+  // renderWithProvider, and no mounted tree leaks past the helper's return.
+  function renderBareConsumer(): Error | undefined {
     let error: Error | undefined;
 
     function Harness() {
@@ -1263,17 +1266,281 @@ describe('DaemonWorkspaceProvider', () => {
       return null;
     }
 
-    container = document.createElement('div');
-    document.body.appendChild(container);
-    root = createRoot(container);
-
-    await act(async () => {
-      root?.render(<Harness />);
+    const bareContainer = document.createElement('div');
+    document.body.appendChild(bareContainer);
+    const bareRoot = createRoot(bareContainer);
+    act(() => {
+      bareRoot.render(<Harness />);
     });
+    act(() => {
+      bareRoot.unmount();
+    });
+    bareContainer.remove();
+    return error;
+  }
 
-    expect(error?.message).toContain(
+  it('throws when useDaemonWorkspace is used without provider', () => {
+    expect(renderBareConsumer()?.message).toContain(
       'useDaemonWorkspace must be used within DaemonWorkspaceProvider',
     );
+  });
+
+  describe('useDaemonWorkspace guard diagnostics', () => {
+    const REGISTRY_KEY = '__qwenWebShellDaemonWorkspaceProviderCopies';
+    type Registry = Map<string, 'rendered' | 'provided'>;
+
+    function readRegistry(): Registry {
+      const scope = globalThis as typeof globalThis & {
+        [REGISTRY_KEY]?: Registry;
+      };
+      const registry = scope[REGISTRY_KEY];
+      if (!registry) throw new Error('provider copy registry missing');
+      return registry;
+    }
+
+    function swapRegistry(next: Registry): () => void {
+      const scope = globalThis as typeof globalThis & {
+        [REGISTRY_KEY]?: Registry;
+      };
+      const saved = scope[REGISTRY_KEY];
+      scope[REGISTRY_KEY] = next;
+      return () => {
+        scope[REGISTRY_KEY] = saved;
+      };
+    }
+
+    it('reports the consumer as outside the subtree once this module copy rendered a provider', async () => {
+      await renderWithProvider(null);
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+
+      // A same-element re-render skips the contextValue memo (its deps are
+      // unchanged), so only the render-phase record runs — the copy must not
+      // downgrade from 'provided' because of it.
+      act(() => {
+        root?.render(
+          <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170">
+            {null}
+          </DaemonWorkspaceProvider>,
+        );
+      });
+
+      expect(renderBareConsumer()?.message).toContain(
+        'outside its live subtree',
+      );
+    });
+
+    it('reports when no provider has rendered in this page', () => {
+      const restore = swapRegistry(new Map());
+      try {
+        expect(renderBareConsumer()?.message).toContain(
+          'no DaemonWorkspaceProvider has rendered in this page',
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('reports duplicate module copies with both copy ids', () => {
+      const restore = swapRegistry(
+        new Map([['https://example.test/stale-chunk.js#abc123', 'provided']]),
+      );
+      try {
+        const error = renderBareConsumer();
+
+        expect(error?.message).toContain(
+          'https://example.test/stale-chunk.js#abc123',
+        );
+        expect(error?.message).toContain('duplicate copies');
+        // The hook's own id carries its module URL, so the message points at
+        // the offending chunk — a bare random id would fail this.
+        expect(error?.message).toMatch(/DaemonWorkspaceProvider\.tsx#/);
+      } finally {
+        restore();
+      }
+    });
+
+    it('reports duplicate copies even when this copy also rendered a provider', async () => {
+      await renderWithProvider(null);
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      const registry = readRegistry();
+      registry.set('https://example.test/second-copy.js#zz99', 'provided');
+      try {
+        const error = renderBareConsumer();
+
+        expect(error?.message).toContain('duplicate copies');
+        expect(error?.message).toContain(
+          'https://example.test/second-copy.js#zz99',
+        );
+      } finally {
+        registry.delete('https://example.test/second-copy.js#zz99');
+      }
+    });
+
+    it('reports a provider that rendered without an active client', async () => {
+      // Isolate from earlier tests: this module copy is already 'provided' in
+      // the ambient registry, and 'provided' is terminal.
+      const restore = swapRegistry(new Map());
+      let error: Error | undefined;
+
+      function Harness() {
+        try {
+          useDaemonWorkspace();
+        } catch (e) {
+          error = e as Error;
+        }
+        return null;
+      }
+
+      try {
+        container = document.createElement('div');
+        document.body.appendChild(container);
+        root = createRoot(container);
+        await act(async () => {
+          root?.render(
+            <DaemonWorkspaceProvider
+              baseUrl="http://127.0.0.1:4170"
+              autoConnect={false}
+            >
+              <Harness />
+            </DaemonWorkspaceProvider>,
+          );
+        });
+
+        expect(error?.message).toContain('without an active client');
+      } finally {
+        restore();
+      }
+    });
+
+    it('never evicts the live copy when foreign copies accumulate past the cap', async () => {
+      const restore = swapRegistry(new Map());
+      try {
+        await renderWithProvider(null);
+        await act(async () => {
+          await new Promise((r) => setTimeout(r, 0));
+        });
+        const registry = readRegistry();
+        const ownId = [...registry.keys()][0];
+        if (!ownId) throw new Error('live copy was not registered');
+        // 8 === MAX_TRACKED_PROVIDER_COPIES in the provider module.
+        for (let i = 0; i < 8; i++) {
+          registry.set(`https://example.test/copy-${i}.js#x${i}`, 'provided');
+        }
+
+        // A re-render that skips the contextValue memo re-records the live
+        // copy; the eviction must target the oldest *foreign* entry.
+        act(() => {
+          root?.render(
+            <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170">
+              {null}
+            </DaemonWorkspaceProvider>,
+          );
+        });
+
+        expect(registry.size).toBe(8);
+        expect(registry.has(ownId)).toBe(true);
+      } finally {
+        restore();
+      }
+    });
+
+    it('still names the no-active-client cause when a copy that provided loses its client', async () => {
+      const restore = swapRegistry(new Map());
+      let error: Error | undefined;
+
+      function Harness() {
+        try {
+          useDaemonWorkspace();
+        } catch (e) {
+          error = e as Error;
+        }
+        return null;
+      }
+
+      try {
+        container = document.createElement('div');
+        document.body.appendChild(container);
+        root = createRoot(container);
+        await act(async () => {
+          root?.render(
+            <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170">
+              <Harness />
+            </DaemonWorkspaceProvider>,
+          );
+        });
+        await act(async () => {
+          await new Promise((r) => setTimeout(r, 0));
+        });
+        expect(error).toBeUndefined();
+
+        // The copy stays 'provided' (terminal), so the message must admit the
+        // lost-client cause rather than only naming placement.
+        await act(async () => {
+          root?.render(
+            <DaemonWorkspaceProvider
+              baseUrl="http://127.0.0.1:4170"
+              autoConnect={false}
+            >
+              <Harness />
+            </DaemonWorkspaceProvider>,
+          );
+        });
+
+        expect(error?.message).toContain('no active client');
+      } finally {
+        restore();
+      }
+    });
+
+    it('registers this module copy once across context recomputes', async () => {
+      const restore = swapRegistry(new Map());
+      try {
+        let context: DaemonWorkspaceContextValue | undefined;
+
+        function Harness() {
+          context = useOptionalDaemonWorkspace();
+          return null;
+        }
+
+        await renderWithProvider(<Harness />);
+        await act(async () => {
+          await new Promise((r) => setTimeout(r, 0));
+        });
+        await act(async () => {
+          await context?.refreshCapabilities?.();
+        });
+
+        expect(readRegistry().size).toBe(1);
+      } finally {
+        restore();
+      }
+    });
+
+    it('bounds the registry so repeated module re-evaluation cannot grow it without limit', async () => {
+      const seeded: Registry = new Map(
+        Array.from({ length: 8 }, (_, i) => [
+          `https://example.test/copy-${i}.js#x`,
+          'provided' as const,
+        ]),
+      );
+      const restore = swapRegistry(seeded);
+      try {
+        await renderWithProvider(null);
+        await act(async () => {
+          await new Promise((r) => setTimeout(r, 0));
+        });
+
+        const registry = readRegistry();
+        expect(registry.size).toBe(8);
+        expect(registry.has('https://example.test/copy-0.js#x')).toBe(false);
+      } finally {
+        restore();
+      }
+    });
   });
 
   it('exposes workspace actions', async () => {
