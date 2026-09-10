@@ -618,6 +618,28 @@ describe('sub-session launcher', () => {
     }
   });
 
+  it('runs a scheduled-task child when its selected model is applied', async () => {
+    const fake = makeFakeBridge({ modelApplied: true });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await expect(
+      launcher.launch({
+        prompt: 'scheduled child task',
+        completion: 'sent',
+        model: 'model-x',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+        callerSessionId: 'caller-1',
+      }),
+    ).resolves.toEqual({ sessionId: 'sub-1' });
+
+    expect(fake.prompts).toHaveLength(1);
+    expect(fake.closes).toEqual([]);
+  });
+
   it('keeps a non-scheduled sub-session on the default model when selection fails', async () => {
     const fake = makeFakeBridge({ modelApplied: false });
     const launcher = createSubSessionLauncher({
@@ -630,6 +652,8 @@ describe('sub-session launcher', () => {
         prompt: 'run the task',
         completion: 'sent',
         model: 'missing-model',
+        sourceType: 'default',
+        sourceId: 'agent-run-7',
         callerSessionId: 'caller-1',
       }),
     ).resolves.toEqual({ sessionId: 'sub-1' });

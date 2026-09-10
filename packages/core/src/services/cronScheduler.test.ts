@@ -32,7 +32,11 @@ const readGate = vi.hoisted(() => ({
 // Same shape for updateCronTasks, so a test can hold a tick's fire
 // persist in flight while stop() runs. Only the scheduler's direct
 // calls hit this gate — the real module's internal callers (addCronTask,
-// removeCronTasks) bind the unmocked function.
+// removeCronTasks) bind the unmocked function. `fail` runs the caller's
+// mutator for its side effects but returns the input array, so the
+// tasks-file write is skipped (updateCronTasks reads an unchanged
+// reference as a no-op) before the injected error is thrown; any
+// deletionIds tombstone write still lands.
 const updateGate = vi.hoisted(() => ({
   block: null as Promise<void> | null,
   onHit: null as (() => void) | null,
@@ -1916,7 +1920,7 @@ describe('CronScheduler', () => {
       // The fire's removal write landed: the consumed one-shot is gone.
       expect(await readCronTasks(tmpDir)).toEqual([]);
 
-      // Only the restore write fails (the mock writes through, then throws).
+      // Only the restore write fails (the mock skips the tasks write, then throws).
       updateGate.fail = Object.assign(new Error('ENOSPC: disk full'), {
         code: 'ENOSPC',
       });

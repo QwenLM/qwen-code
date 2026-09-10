@@ -1926,6 +1926,8 @@ describe('StandaloneSessionService', () => {
           parentSessionId: sessionId,
           promptId: 'prompt-child',
           modelServiceId: 'missing-model',
+          sourceType: 'default',
+          sourceId: 'agent-run-7',
         },
         'child task',
       ),
