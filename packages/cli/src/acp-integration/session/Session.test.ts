@@ -1676,6 +1676,54 @@ describe('Session', () => {
       session.dispose();
     });
 
+    it('drains a shell notification stranded when the owning prompt errors out', async () => {
+      let rejectPrompt!: (reason: Error) => void;
+      mockChat.sendMessageStream = vi.fn().mockReturnValue(
+        new Promise((_resolve, reject) => {
+          rejectPrompt = reject;
+        }),
+      );
+      createReportingSession();
+      const notify =
+        mockBackgroundShellRegistry.setNotificationCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { shellId: string; status: string },
+        ) => void;
+
+      // Start a prompt and let it reach the model send before the shell
+      // completes, so the completion notification queues while the prompt is
+      // still pending.
+      const promptPromise = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalledOnce(),
+      );
+
+      notify('Shell completed.', '<task-notification />', {
+        shellId: 'shell-stranded',
+        status: 'completed',
+      });
+      await vi.waitFor(() =>
+        expect(holdIds('shell')).toEqual(['background-shells']),
+      );
+
+      // The prompt then fails with a plain provider error (not loop detection
+      // or a stop guard), which previously stranded the queued notification.
+      rejectPrompt(new Error('provider failed'));
+      await expect(promptPromise).rejects.toThrow('provider failed');
+
+      await vi.waitFor(() =>
+        expect(session.collectActiveWorkHolds()).toEqual([]),
+      );
+      expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
     it('releases the shell hold after a cancelled continuation exits', async () => {
       let releaseNotification!: () => void;
       const notificationGate = new Promise<void>((resolve) => {
