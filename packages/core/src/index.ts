@@ -823,3 +823,4 @@ export {
 
 export * from './services/session-sources.js';
 export { RecordSourceTool } from './tools/record-source.js';
+export { resolveReviewWorkflowConcurrency } from './agents/runtime/review-workflow.js';
