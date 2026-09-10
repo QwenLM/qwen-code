@@ -20,19 +20,26 @@ Initialization retains only `textDocumentSync`. Numeric Full/Incremental imply
 open/close support; options honor `openClose` and `change` independently. Full
 sends the new text. Incremental replaces the entire previous document range,
 using UTF-16 code units and treating CRLF, LF, and CR as line breaks. None or an
-absent capability does not authorize change notifications. Only successful
-notification delivery records a snapshot. A server without `openClose` receives
+absent capability does not authorize change notifications. Only notification sends that do not throw record a snapshot (not a server ACK). A server without `openClose` receives
 neither `didOpen` nor orphan `didChange`; it retains ownership of disk loading
 and remains queryable after edits. If a client-opened file changes without change
 support, synchronization raises an unsupported-sync error and skips the request.
-Read and thrown notification failures skip the request without advancing state.
+Read and unsupported-change failures close the opened document, release its text,
+and fail the observing call. A failed close retains only a pending-close error and
+version; subsequent synchronization (including workspace diagnostics) retries the
+close before any reopen. A successful close allows later calls to recover. Versions
+remain monotonic across same-connection close/reopen, including identical text.
+Only connection replacement resets versions. Ordinary thrown change sends retain
+the prior snapshot and retryable version. No send return is an acknowledgement.
 
 TypeScript warmup delegates delivery to the same service helper. Forced warmup
 sends a capability-supported `didChange` even for unchanged text, advancing its
-version without duplicate `didOpen`. If no notification can be delivered, the
+version without duplicate `didOpen`. Already-current supported warmup still settles without warning. If no notification
+is supported (including forced unchanged warmup without change support), the
 manager warns with the server and capability and records the warmup attempt to
 avoid repeated discovery scans. Actual callback/read/send failures are caught
-and do not mark the handle warm. Normal unchanged queries send nothing. Only
+and leave the handle retryable, including after a failed forced attempt. A delayed
+warmup cannot mark a replacement connection warm. Normal unchanged queries send nothing. Only
 new opens trigger document-query delay/retry; changes do not. Workspace symbol
 warmup distinguishes finding a usable file from sending an open: a disk-reading
 server still gets indexing delay and empty-result retry when a file is available,
@@ -42,7 +49,7 @@ settles only when notifications were delivered.
 Call hierarchy items carry an optional client `documentRevision` field, echoed
 unchanged through the tool's JSON and native client. Native incoming/outgoing
 calls require valid provenance rather than applying stale offsets to fresh text.
-A small HMAC over the actual normalized LSP item parameters, server name, text,
+A small HMAC over the actual normalized LSP item parameters, server name, text digest,
 and delivered version binds the item to a concrete connection. Signing recursively
 sorts JSON object keys while preserving array order, so equivalent tool JSON is
 accepted regardless of key order while changed values remain invalid. A `WeakMap`
@@ -53,18 +60,33 @@ signing results; sibling synchronization or replacement cannot certify an old
 response as new. Incoming/outgoing calls validate before and after warmup and
 again after the request. Stale, missing, modified or unknown provenance rejects
 with an actionable “prepare call hierarchy again” tool failure, never “no calls”.
-Items are not re-prepared automatically at old offsets or guessed by name.
+Fresh cross-file prepare results are certified by observing their own file inside
+the synchronous signing loop, where no await separates the response from the
+observation; an unreadable result file stays unsigned. Certifying a result's own
+file sends no notification and issues no supplemental request. The query target is
+still snapshotted before its request and bound to the original handle/connection
+across awaits.
+Returned offsets are never used for automatic prepare, nor are names guessed.
 Nested incoming/outgoing items get provenance only when their file was observed
 before the request; unobserved nested files remain displayable, but need explicit
-prepare at a current location before traversal. Non-file URIs have no verifiable
-disk snapshot and likewise cannot be traversed with native provenance.
+prepare at a current location before traversal. Unrelated drifted or unreadable nested files also remain unsigned without dropping
+healthy siblings. Root freshness and connection changes still reject the whole
+request, even for an empty result or request error. Non-file URIs remain unsigned
+and report “cannot be traversed; prepare at a file location instead”, not a
+retryable stale error. Ordinary non-file requests pass through unchanged.
 
 ## Boundaries
 
-- Workspace symbols remain warmup-only. Workspace diagnostics additionally
+- Workspace symbols remain warmup-only. Optional warmup failures log and do not
+  cancel symbol search. Successful disk-reader discovery is connection-local;
+  readability is rechecked without retaining delivered text, removed candidates
+  trigger rediscovery and missing candidates are not negatively cached. Workspace diagnostics additionally
   synchronize already tracked documents for each queried server, inside the
   result-limited loop (default limit 100). They neither discover more documents
-  nor synchronize servers skipped after the limit. The tool's optional top-symbol
+  nor synchronize servers skipped after the limit. Reconnection resync opens every
+  tracked URI, then settles once on new opens only (no delay for didChange).
+  Replacement during that await rejects rather than querying an unsynchronized
+  connection. A fixed delay does not prove server analysis has completed. Pending closes are retried without rediscovering documents. The tool's optional top-symbol
   reference lookup is document-targeted and also synchronizes.
 - No file watchers, edit-time feedback, IDE buffers, installation, workspace-wide
   dependency freshness, or diagnostic push/pull redesign. Reads observe disk
@@ -87,14 +109,24 @@ disk snapshot and likewise cannot be traversed with native provenance.
 
 ## Costs
 
-Each target synchronization reads and compares complete disk text even when size
-and mtime are unchanged. Retained snapshots cost memory proportional to delivered
+Synchronizable target queries read and compare complete disk text even when size
+and mtime are unchanged. Non-notifiable, untracked ordinary targets skip that
+read; hierarchy provenance still observes disk. Retained snapshots cost memory proportional to delivered
 documents per server connection until tracking is cleared. Hierarchy requests
-capture snapshot references and hash the relevant text/parameters; connection
+reuse immutable snapshot text digests and capture references once per traversal.
+Each pre-warmup/post-warmup/post-response/error checkpoint reobserves disk;
+per-result batches share only synchronous per-URI observations, never across awaits.
+HMACs remain per item and include canonical parameters, text digest and version; connection
 secrets are weakly held, with no growth per issued item. Unchanged normal queries
 send no notification. Both Full and Incremental send all new text; Incremental
 also scans old text for its range. A minimal diff is an upgrade only if large-file
-measurements justify it. No broad performance improvement is claimed.
+measurements justify it. The 20-item same-URI traversal test requires three target reads (one at each
+happy-path checkpoint), not one per item; error paths add a fresh observation.
+After prepare, 20-item traversal constructs 23 small HMACs (3 root validations
+plus 20 items), and hashes text zero times for the retained snapshot, once for
+an untracked disk-reader snapshot. These are test assertions, not real-server
+latency guarantees.
+This is an observation-bound guarantee, not atomicity against external writers.
 
 ## Verification and filenames
 
@@ -110,8 +142,24 @@ in-flight response races. Workspace diagnostic ordering, result-limit scoping,
 and symbol retries are pinned. Actual-client/tool tests reject deleted tracked
 files, thrown sends, and unsupported workspace changes, including after an
 earlier server returned results, while preserving ordinary pull-request catches. Initialization tests exercise capability production through startup.
-Mutation checks must kill the R1-5/6/8/10/11/12/13/15 mutants; raising
-`DEFAULT_LSP_WARMUP_DELAY_MS` to 300 must leave the R1-14 reload cases green.
+Mutation checks must kill each named mutant, all in `native-lsp-service.ts`
+unless another file is named, with the listed test going red: R1-5,
+`ensureDocumentSynchronized` returns a constant `true` instead of the open flag
+(`does not delay or retry an empty query after didChange`); R1-6, the manager
+warmup catch in `lsp-server-manager.ts` rethrows instead of returning
+(`contains TypeScript warmup callback failures`); R1-8, the snapshot write moves
+before the `didOpen` send (`retries a failed second-document didOpen at version
+1`); R1-10, hover sends the end position instead of the start (`sends the
+requested hover URI and start position`); R1-11, synchronization reads the first
+tracked document instead of the requested URI (`keeps text and versions
+independent for two documents`); R1-12, the delegated language ID loses
+precedence over the extension-derived one (`preserves the extension-derived
+language ID in a TSX-only warmup`); R1-13, reload also clears the untouched
+server's tracking (`retains the unchanged server snapshot when only its sibling
+reloads`); R1-15, forced warmup passes `false` instead of the force flag
+(`forces unchanged TypeScript warmup with a monotonic didChange before retry`).
+R1-14 is the negative control: raising `DEFAULT_LSP_WARMUP_DELAY_MS` to 300 in
+`constants.ts` must leave `preserves replayed snapshots` green.
 
 The touched service and manager and their collocated unit tests were renamed to
 kebab-case per AGENTS.md. Their barrel exports, native client type imports,

@@ -142,6 +142,26 @@ describe('LspServerManager', () => {
     );
   });
 
+  it('does not latch a replacement connection after an obsolete warmup delay', async () => {
+    vi.useFakeTimers();
+    const manager = createTrustedManager();
+    vi.spyOn(
+      manager as unknown as { findFirstTypescriptFile(): string | undefined },
+      'findFirstTypescriptFile',
+    ).mockReturnValue(path.resolve('main.ts'));
+    const handle: LspServerHandle = {
+      config: { ...serverConfig, name: 'typescript' },
+      status: 'READY',
+      textDocumentSync: 1,
+      connection: createMockConnection(),
+    };
+    const pending = manager.warmupTypescriptServer(handle, () => true);
+    handle.connection = createMockConnection();
+    await vi.runAllTimersAsync();
+    await pending;
+    expect(handle.warmedUp).not.toBe(true);
+  });
+
   it.each<LspTextDocumentSync | undefined>([
     0,
     1,

@@ -1124,7 +1124,7 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
               documentRevision: {
                 type: 'string',
                 description:
-                  'Client freshness token. Echo unchanged; if absent or stale, prepare call hierarchy again.',
+                  'Client freshness token. Echo unchanged; if absent or stale for a file URI, prepare call hierarchy again. Non-file items cannot be traversed; prepare at a file location instead.',
               },
               detail: { type: 'string' },
               uri: { type: 'string' },

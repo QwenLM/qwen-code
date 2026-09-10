@@ -49,7 +49,7 @@ import type {
 import * as path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as fs from 'node:fs';
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -88,6 +88,16 @@ class StaleCallHierarchyItemError extends Error {
   }
 }
 
+interface DocumentSnapshot {
+  readonly text: string;
+  readonly version: number;
+}
+
+interface CallHierarchyRevision {
+  checkpoint(): void;
+  sign(item: LspCallHierarchyItem): string | undefined;
+}
+
 export class NativeLspService {
   private config: CoreConfig;
   private workspaceContext: WorkspaceContext;
@@ -97,10 +107,13 @@ export class NativeLspService {
   private configLoader: LspConfigLoader;
   private serverManager: LspServerManager;
   private normalizer: LspResponseNormalizer;
-  private openedDocuments = new Map<
+  private openedDocuments = new Map<string, Map<string, DocumentSnapshot>>();
+  private documentLifecycles = new Map<
     string,
-    Map<string, { text: string; version: number }>
+    Map<string, { version: number; pendingClose?: { error: unknown } }>
   >();
+  private workspaceSymbolFiles = new WeakMap<LspConnectionInterface, string>();
+  private snapshotDigests = new WeakMap<DocumentSnapshot, string>();
   private callHierarchySecrets = new WeakMap<LspConnectionInterface, Buffer>();
   private lastConnections = new Map<string, LspConnectionInterface>();
   private reinitializeQueue: Promise<unknown> = Promise.resolve();
@@ -306,6 +319,7 @@ export class NativeLspService {
   private clearDocumentTrackingForServers(serverNames: string[]): void {
     for (const name of serverNames) {
       this.openedDocuments.delete(name);
+      this.documentLifecycles.delete(name);
       this.lastConnections.delete(name);
     }
   }
@@ -387,6 +401,7 @@ export class NativeLspService {
     this.reinitializeAbortController?.abort();
     await this.serverManager.stopAll();
     this.openedDocuments.clear();
+    this.documentLifecycles.clear();
     this.lastConnections.clear();
   }
 
@@ -527,19 +542,21 @@ export class NativeLspService {
     }
     if (this.lastConnections.get(serverName) !== handle.connection) {
       this.openedDocuments.delete(serverName);
+      this.documentLifecycles.delete(serverName);
     }
 
-    // Read failures must reach the query's catch, not permit a stale request.
-    const filePath = fileURLToPath(uri);
-    const text = fs.readFileSync(filePath, 'utf-8');
     const documents =
       this.openedDocuments.get(serverName) ??
-      new Map<string, { text: string; version: number }>();
-    const previous = documents.get(uri);
-    if (previous?.text === text && !force) {
-      return { sent: false, opened: false };
+      new Map<string, DocumentSnapshot>();
+    const lifecycles =
+      this.documentLifecycles.get(serverName) ??
+      new Map<string, { version: number; pendingClose?: { error: unknown } }>();
+    this.documentLifecycles.set(serverName, lifecycles);
+    const lifecycle = lifecycles.get(uri);
+    if (lifecycle?.pendingClose) {
+      this.closeUnsynchronizableDocument(serverName, handle, uri);
     }
-
+    const previous = documents.get(uri);
     const sync = handle.textDocumentSync;
     const change = typeof sync === 'number' ? sync : (sync?.change ?? 0);
     const openClose =
@@ -547,7 +564,26 @@ export class NativeLspService {
     if (!previous && !openClose) {
       return { sent: false, opened: false };
     }
-    const version = previous ? previous.version + 1 : 1;
+    let filePath: string;
+    let text: string;
+    try {
+      filePath = fileURLToPath(uri);
+      text = fs.readFileSync(filePath, 'utf-8');
+    } catch (error) {
+      if (previous) {
+        lifecycles.set(uri, {
+          version: previous.version,
+          pendingClose: { error },
+        });
+        documents.delete(uri);
+        this.closeUnsynchronizableDocument(serverName, handle, uri);
+      }
+      throw error;
+    }
+    if (previous?.text === text && !force) {
+      return { sent: false, opened: false };
+    }
+    const version = (previous?.version ?? lifecycle?.version ?? 0) + 1;
     if (!previous && openClose) {
       handle.connection.send({
         jsonrpc: '2.0',
@@ -567,9 +603,16 @@ export class NativeLspService {
     } else if (previous) {
       if (change !== 1 && change !== 2) {
         if (previous.text === text) return { sent: false, opened: false };
-        throw new Error(
+        const error = new Error(
           `LSP server ${serverName} cannot synchronize changed document ${uri}: textDocumentSync.change is None or absent`,
         );
+        lifecycles.set(uri, {
+          version: previous.version,
+          pendingClose: { error },
+        });
+        documents.delete(uri);
+        this.closeUnsynchronizableDocument(serverName, handle, uri);
+        throw error;
       }
       const contentChange: { text: string; range?: LspRange } = { text };
       if (change === 2) {
@@ -595,9 +638,39 @@ export class NativeLspService {
       });
     }
     documents.set(uri, { text, version });
+    lifecycles.set(uri, { version });
     this.openedDocuments.set(serverName, documents);
     this.lastConnections.set(serverName, handle.connection);
     return { sent: true, opened: !previous && openClose };
+  }
+
+  private closeUnsynchronizableDocument(
+    serverName: string,
+    handle: LspServerHandle & { connection: LspConnectionInterface },
+    uri: string,
+  ): void {
+    const lifecycle = this.documentLifecycles.get(serverName)?.get(uri);
+    if (!lifecycle?.pendingClose) return;
+    const originalError = lifecycle.pendingClose.error;
+    const connection = this.lastConnections.get(serverName);
+    if (
+      connection !== handle.connection ||
+      this.serverManager.getHandles().get(serverName) !== handle
+    ) {
+      throw originalError;
+    }
+    try {
+      connection.send({
+        jsonrpc: '2.0',
+        method: 'textDocument/didClose',
+        params: { textDocument: { uri } },
+      });
+    } catch {
+      // No duplicate didOpen while a close is known to have failed. A void
+      // send is not an acknowledgement; transport failure reporting is separate.
+      throw originalError;
+    }
+    delete lifecycle.pendingClose;
   }
 
   private resolveLanguageId(
@@ -631,17 +704,37 @@ export class NativeLspService {
       return true;
     }
 
-    const filePath = this.findWorkspaceFileForServer(handle);
-    if (!filePath) {
-      return false;
+    const connection = handle.connection;
+    let filePath = this.workspaceSymbolFiles.get(connection);
+    if (filePath) {
+      try {
+        fs.accessSync(filePath, fs.constants.R_OK);
+      } catch {
+        this.workspaceSymbolFiles.delete(connection);
+        filePath = undefined;
+      }
     }
+    filePath ??= this.findWorkspaceFileForServer(handle);
+    if (!filePath) return false;
 
     const uri = pathToFileURL(filePath).toString();
-    await this.ensureDocumentSynchronized(
-      serverName,
-      handle as LspServerHandle & { connection: LspConnectionInterface },
-      uri,
-    );
+    try {
+      // Even disk-reading servers need a readable discovery candidate, but
+      // ordinary queries need not read text that cannot be delivered.
+      fs.accessSync(filePath, fs.constants.R_OK);
+      await this.ensureDocumentSynchronized(
+        serverName,
+        handle as LspServerHandle & { connection: LspConnectionInterface },
+        uri,
+      );
+    } catch (error) {
+      debugLogger.warn(
+        `LSP workspace symbol warmup skipped for ${uri}:`,
+        error,
+      );
+      return false;
+    }
+    this.workspaceSymbolFiles.set(connection, filePath);
     await this.delay(DEFAULT_LSP_WORKSPACE_SYMBOL_WARMUP_DELAY_MS);
     return true;
   }
@@ -1206,20 +1299,25 @@ export class NativeLspService {
     name: string,
     handle: LspServerHandle & { connection: LspConnectionInterface },
     uri: string,
-  ): (item: LspCallHierarchyItem) => string | undefined {
+    observeSignedTargets = false,
+  ): CallHierarchyRevision {
     const connection = handle.connection;
-    if (
-      !connection ||
-      handle.status !== 'READY' ||
-      this.serverManager.getHandles().get(name) !== handle
-    ) {
-      throw new StaleCallHierarchyItemError();
-    }
-    const readText = (target: string): string => {
+    const assertActive = () => {
+      if (
+        !connection ||
+        handle.connection !== connection ||
+        handle.status !== 'READY' ||
+        this.serverManager.getHandles().get(name) !== handle
+      ) {
+        throw new StaleCallHierarchyItemError();
+      }
+    };
+    assertActive();
+    const readText = (target: string): string | undefined => {
       try {
         return fs.readFileSync(fileURLToPath(target), 'utf-8');
       } catch {
-        throw new StaleCallHierarchyItemError();
+        return undefined;
       }
     };
     const snapshots = new Map(
@@ -1227,58 +1325,105 @@ export class NativeLspService {
         ? this.openedDocuments.get(name)
         : undefined,
     );
+    // Observations are shared only within one synchronous checkpoint/batch.
+    const observations = new Map<string, string | undefined>();
     if (!snapshots.has(uri) && uri.startsWith('file://')) {
-      snapshots.set(uri, {
-        text: readText(uri),
-        version: 0,
-      });
+      const text = readText(uri);
+      observations.set(uri, text);
+      if (text !== undefined)
+        snapshots.set(uri, {
+          text,
+          version:
+            this.lastConnections.get(name) === connection
+              ? (this.documentLifecycles.get(name)?.get(uri)?.version ?? 0)
+              : 0,
+        });
     }
+    const isFresh = (target: string): boolean => {
+      assertActive();
+      const snapshot = snapshots.get(target);
+      if (!snapshot) return false;
+      const current =
+        this.lastConnections.get(name) === connection
+          ? this.openedDocuments.get(name)?.get(target)
+          : undefined;
+      const lifecycle =
+        this.lastConnections.get(name) === connection
+          ? this.documentLifecycles.get(name)?.get(target)
+          : undefined;
+      if (!observations.has(target)) observations.set(target, readText(target));
+      return (
+        !lifecycle?.pendingClose &&
+        (current?.version ?? lifecycle?.version ?? 0) === snapshot.version &&
+        (!current || current.text === snapshot.text) &&
+        // A previously delivered snapshot must still be open, not just identical on disk.
+        (snapshot.version === 0 || current === snapshot) &&
+        observations.get(target) === snapshot.text
+      );
+    };
+    const assertRoot = () => {
+      assertActive();
+      if (uri.startsWith('file://') && !isFresh(uri))
+        throw new StaleCallHierarchyItemError();
+    };
+    assertRoot();
     let secret = this.callHierarchySecrets.get(connection);
     if (!secret) {
       secret = randomBytes(32);
       this.callHierarchySecrets.set(connection, secret);
     }
-    return (item) => {
-      const snapshot = snapshots.get(item.uri);
-      // A returned item in an unobserved file needs an explicit prepare first.
-      if (!snapshot) return undefined;
-      const current =
-        this.lastConnections.get(name) === connection
-          ? this.openedDocuments.get(name)?.get(item.uri)
-          : undefined;
-      if (
-        this.serverManager.getHandles().get(name) !== handle ||
-        handle.connection !== connection ||
-        handle.status !== 'READY' ||
-        (current?.version ?? 0) !== snapshot.version ||
-        (current && current.text !== snapshot.text) ||
-        readText(item.uri) !== snapshot.text
-      ) {
-        throw new StaleCallHierarchyItemError();
-      }
-      return createHmac('sha256', secret)
-        .update(
-          JSON.stringify(
-            sortJsonValue([
-              name,
-              this.normalizer.toCallHierarchyItemParams(item),
-              snapshot,
-            ]),
-          ),
-        )
-        .digest('hex');
+    return {
+      checkpoint: () => {
+        observations.clear();
+        assertRoot();
+      },
+      sign: (item) => {
+        assertActive();
+        if (!item.uri.startsWith('file://')) return undefined;
+        if (observeSignedTargets && !snapshots.has(item.uri)) {
+          // Signing is synchronous after the response, so a prepare result in a
+          // file this connection never delivered can still be observed here.
+          const text = readText(item.uri);
+          observations.set(item.uri, text);
+          if (text !== undefined) snapshots.set(item.uri, { text, version: 0 });
+        }
+        if (!isFresh(item.uri)) {
+          if (item.uri === uri) throw new StaleCallHierarchyItemError();
+          return undefined;
+        }
+        const snapshot = snapshots.get(item.uri)!;
+        let digest = this.snapshotDigests.get(snapshot);
+        if (!digest) {
+          digest = createHash('sha256').update(snapshot.text).digest('hex');
+          this.snapshotDigests.set(snapshot, digest);
+        }
+        return createHmac('sha256', secret)
+          .update(
+            JSON.stringify(
+              sortJsonValue([
+                name,
+                this.normalizer.toCallHierarchyItemParams(item),
+                { digest, version: snapshot.version },
+              ]),
+            ),
+          )
+          .digest('hex');
+      },
     };
   }
 
   private validateCallHierarchyItem(
-    name: string,
-    handle: LspServerHandle & { connection: LspConnectionInterface },
     item: LspCallHierarchyItem,
+    revision: CallHierarchyRevision,
   ): void {
+    if (!item.uri.startsWith('file://')) {
+      throw new Error(
+        `Call hierarchy item ${item.uri} has no verifiable disk snapshot and cannot be traversed; prepare call hierarchy at a file location instead.`,
+      );
+    }
     if (
       !item.documentRevision ||
-      item.documentRevision !==
-        this.captureCallHierarchyRevision(name, handle, item.uri)(item)
+      item.documentRevision !== revision.sign(item)
     ) {
       throw new StaleCallHierarchyItemError();
     }
@@ -1299,58 +1444,93 @@ export class NativeLspService {
     };
 
     for (const [name, handle] of handles) {
+      const connection = handle.connection;
+      let revision: CallHierarchyRevision | undefined;
       try {
+        let originalText: string | undefined;
+        if (location.uri.startsWith('file://')) {
+          try {
+            originalText = fs.readFileSync(
+              fileURLToPath(location.uri),
+              'utf-8',
+            );
+          } catch (error) {
+            // Shared synchronization owns cleanup of previously opened targets.
+            this.synchronizeDocument(name, handle, location.uri);
+            throw error;
+          }
+        }
+        const assertOriginal = () => {
+          if (
+            handle.connection !== connection ||
+            handle.status !== 'READY' ||
+            this.serverManager.getHandles().get(name) !== handle
+          ) {
+            throw new StaleCallHierarchyItemError();
+          }
+          if (originalText !== undefined) {
+            let current: string;
+            try {
+              current = fs.readFileSync(fileURLToPath(location.uri), 'utf-8');
+            } catch {
+              throw new StaleCallHierarchyItemError();
+            }
+            if (current !== originalText)
+              throw new StaleCallHierarchyItemError();
+          }
+        };
         await this.warmupAndTrack(name, handle);
+        assertOriginal();
         const justOpened = await this.ensureDocumentSynchronized(
           name,
           handle,
           location.uri,
         );
-
-        const revision = this.captureCallHierarchyRevision(
+        assertOriginal();
+        revision = this.captureCallHierarchyRevision(
           name,
           handle,
           location.uri,
+          true,
         );
-        let response = await handle.connection.request(
+        let response = await connection.request(
           'textDocument/prepareCallHierarchy',
           requestParams,
         );
-
+        revision.checkpoint();
         if (
           this.isEmptyResponse(response) &&
           this.shouldRetryAfterOpen(justOpened, handle)
         ) {
           await this.delay(DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS);
-          response = await handle.connection.request(
+          revision.checkpoint();
+          response = await connection.request(
             'textDocument/prepareCallHierarchy',
             requestParams,
           );
+          revision.checkpoint();
         }
-
-        const candidates = Array.isArray(response)
-          ? response
-          : response
-            ? [response]
-            : [];
-        const items: LspCallHierarchyItem[] = [];
-        for (const item of candidates) {
-          const normalized = this.normalizer.normalizeCallHierarchyItem(
-            item,
-            name,
-          );
-          if (normalized) {
-            normalized.documentRevision = revision(normalized);
-            items.push(normalized);
-            if (items.length >= limit) {
-              return items.slice(0, limit);
-            }
+        const normalize = (value: unknown): LspCallHierarchyItem[] => {
+          const items: LspCallHierarchyItem[] = [];
+          for (const candidate of Array.isArray(value)
+            ? value
+            : value
+              ? [value]
+              : []) {
+            const item = this.normalizer.normalizeCallHierarchyItem(
+              candidate,
+              name,
+            );
+            if (item) items.push(item);
+            if (items.length >= limit) break;
           }
-        }
-        if (items.length > 0) {
           return items.slice(0, limit);
-        }
+        };
+        const items = normalize(response);
+        for (const item of items) item.documentRevision = revision.sign(item);
+        if (items.length > 0) return items;
       } catch (error) {
+        revision?.checkpoint();
         if (error instanceof StaleCallHierarchyItemError) throw error;
         debugLogger.warn(
           `LSP textDocument/prepareCallHierarchy failed for ${name}:`,
@@ -1375,14 +1555,15 @@ export class NativeLspService {
     if (handles.length !== 1) throw new StaleCallHierarchyItemError();
 
     for (const [name, handle] of handles) {
-      this.validateCallHierarchyItem(name, handle, item);
-      await this.warmupAndTrack(name, handle);
-      this.validateCallHierarchyItem(name, handle, item);
       const revision = this.captureCallHierarchyRevision(
         name,
         handle,
         item.uri,
       );
+      this.validateCallHierarchyItem(item, revision);
+      await this.warmupAndTrack(name, handle);
+      revision.checkpoint();
+      this.validateCallHierarchyItem(item, revision);
       try {
         const response = await handle.connection.request(
           'callHierarchy/incomingCalls',
@@ -1390,7 +1571,8 @@ export class NativeLspService {
             item: this.normalizer.toCallHierarchyItemParams(item),
           },
         );
-        this.validateCallHierarchyItem(name, handle, item);
+        revision.checkpoint();
+        this.validateCallHierarchyItem(item, revision);
         if (!Array.isArray(response)) {
           continue;
         }
@@ -1398,7 +1580,7 @@ export class NativeLspService {
         for (const call of response) {
           const normalized = this.normalizer.normalizeIncomingCall(call, name);
           if (normalized) {
-            normalized.from.documentRevision = revision(normalized.from);
+            normalized.from.documentRevision = revision.sign(normalized.from);
             calls.push(normalized);
             if (calls.length >= limit) {
               return calls.slice(0, limit);
@@ -1409,7 +1591,8 @@ export class NativeLspService {
           return calls.slice(0, limit);
         }
       } catch (error) {
-        this.validateCallHierarchyItem(name, handle, item);
+        revision.checkpoint();
+        this.validateCallHierarchyItem(item, revision);
         if (error instanceof StaleCallHierarchyItemError) throw error;
         debugLogger.warn(
           `LSP callHierarchy/incomingCalls failed for ${name}:`,
@@ -1434,14 +1617,15 @@ export class NativeLspService {
     if (handles.length !== 1) throw new StaleCallHierarchyItemError();
 
     for (const [name, handle] of handles) {
-      this.validateCallHierarchyItem(name, handle, item);
-      await this.warmupAndTrack(name, handle);
-      this.validateCallHierarchyItem(name, handle, item);
       const revision = this.captureCallHierarchyRevision(
         name,
         handle,
         item.uri,
       );
+      this.validateCallHierarchyItem(item, revision);
+      await this.warmupAndTrack(name, handle);
+      revision.checkpoint();
+      this.validateCallHierarchyItem(item, revision);
       try {
         const response = await handle.connection.request(
           'callHierarchy/outgoingCalls',
@@ -1449,7 +1633,8 @@ export class NativeLspService {
             item: this.normalizer.toCallHierarchyItemParams(item),
           },
         );
-        this.validateCallHierarchyItem(name, handle, item);
+        revision.checkpoint();
+        this.validateCallHierarchyItem(item, revision);
         if (!Array.isArray(response)) {
           continue;
         }
@@ -1457,7 +1642,7 @@ export class NativeLspService {
         for (const call of response) {
           const normalized = this.normalizer.normalizeOutgoingCall(call, name);
           if (normalized) {
-            normalized.to.documentRevision = revision(normalized.to);
+            normalized.to.documentRevision = revision.sign(normalized.to);
             calls.push(normalized);
             if (calls.length >= limit) {
               return calls.slice(0, limit);
@@ -1468,7 +1653,8 @@ export class NativeLspService {
           return calls.slice(0, limit);
         }
       } catch (error) {
-        this.validateCallHierarchyItem(name, handle, item);
+        revision.checkpoint();
+        this.validateCallHierarchyItem(item, revision);
         if (error instanceof StaleCallHierarchyItemError) throw error;
         debugLogger.warn(
           `LSP callHierarchy/outgoingCalls failed for ${name}:`,
@@ -1543,9 +1729,39 @@ export class NativeLspService {
     const results: LspFileDiagnostics[] = [];
 
     for (const [name, handle] of handles) {
+      const connection = handle.connection;
       await this.warmupAndTrack(name, handle);
-      for (const uri of this.openedDocuments.get(name)?.keys() ?? []) {
-        this.synchronizeDocument(name, handle, uri);
+      // Querying a connection that never received the replayed documents can
+      // return empty diagnostics, which the tool would display as clean.
+      if (
+        handle.connection !== connection ||
+        handle.status !== 'READY' ||
+        this.serverManager.getHandles().get(name) !== handle
+      ) {
+        throw new Error(`LSP server ${name} connection is no longer active`);
+      }
+      const trackedUris = [...(this.openedDocuments.get(name)?.keys() ?? [])];
+      if (this.lastConnections.get(name) !== connection) {
+        this.openedDocuments.delete(name);
+        this.documentLifecycles.delete(name);
+        this.lastConnections.set(name, connection);
+      }
+      for (const [uri, lifecycle] of this.documentLifecycles.get(name) ?? []) {
+        if (lifecycle.pendingClose)
+          this.closeUnsynchronizableDocument(name, handle, uri);
+      }
+      let openedAny = false;
+      for (const uri of trackedUris) {
+        openedAny =
+          this.synchronizeDocument(name, handle, uri).opened || openedAny;
+      }
+      if (openedAny) await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
+      if (
+        handle.connection !== connection ||
+        handle.status !== 'READY' ||
+        this.serverManager.getHandles().get(name) !== handle
+      ) {
+        throw new Error(`LSP server ${name} connection is no longer active`);
       }
 
       try {

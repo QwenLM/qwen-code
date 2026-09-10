@@ -280,6 +280,9 @@ export class LspServerManager {
     if (handle.warmedUp && !force) {
       return;
     }
+    // A failed forced attempt must stay retryable instead of latching warm.
+    if (force) handle.warmedUp = false;
+    const connection = handle.connection;
     const tsFile = this.findFirstTypescriptFile();
     if (!tsFile) {
       return;
@@ -295,7 +298,12 @@ export class LspServerManager {
           : 'typescript';
     try {
       const sent = synchronizeDocument(uri, languageId);
-      if (!sent) {
+      if (handle.connection !== connection) return;
+      const sync = handle.textDocumentSync;
+      const change = typeof sync === 'number' ? sync : (sync?.change ?? 0);
+      const openClose =
+        typeof sync === 'number' ? sync !== 0 : (sync?.openClose ?? false);
+      if (!sent && (!openClose || (force && change !== 1 && change !== 2))) {
         debugLogger.warn(
           `TypeScript server ${handle.config.name} warm-up delivered no notification (textDocumentSync=${JSON.stringify(handle.textDocumentSync)})`,
         );
@@ -306,8 +314,8 @@ export class LspServerManager {
       await new Promise((resolve) =>
         setTimeout(resolve, DEFAULT_LSP_WARMUP_DELAY_MS),
       );
-      // Only mark as warmed up after successful completion
-      handle.warmedUp = true;
+      // Only mark the connection whose warmup has actually settled.
+      if (handle.connection === connection) handle.warmedUp = true;
     } catch (error) {
       // Do not set warmedUp to true on failure, allowing retry
       debugLogger.warn('TypeScript server warm-up failed:', error);
