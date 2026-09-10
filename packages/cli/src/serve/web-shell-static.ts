@@ -20,7 +20,7 @@ export { resolveWebShellDir } from './web-shell-resolver.js';
  * UI loads same-origin module scripts plus the inline performance.measure
  * patch baked into `index.html`, runs shiki/mermaid (eval + wasm + blob
  * workers), pulls katex fonts/images as `data:`, and streams SSE
- * (`connect-src 'self'`). `frame-ancestors 'none'` + `X-Frame-Options: DENY`
+ * (same origin plus the explicitly selected daemon). `frame-ancestors 'none'` + `X-Frame-Options: DENY`
  * still block clickjacking. Tightening `script-src` (drop `'unsafe-inline'`
  * via a hash, externalise the inline patch) is a follow-up, not a blocker for
  * a loopback-default local tool.
@@ -112,7 +112,7 @@ export function buildWebShellCsp(
   const fa = frameAncestors.length
     ? `frame-ancestors ${frameAncestors.join(' ')}`
     : "frame-ancestors 'none'";
-  const frameSrc = `frame-src ${frameSrcOrigins.join(' ')}`;
+  const frameSrc = `frame-src blob: ${frameSrcOrigins.join(' ')}`;
   const connectSrc = `connect-src 'self' ${connectOrigins.join(' ')}`.trim();
   return [...WEB_SHELL_CSP_DIRECTIVES, connectSrc, frameSrc, fa].join('; ');
 }
