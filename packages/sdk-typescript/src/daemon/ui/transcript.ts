@@ -25,8 +25,11 @@ import {
   DAEMON_PLAN_TOOL_CALL_ID,
   isUnrecognizedDiagnosticReason,
 } from './types.js';
-import { createDaemonToolPreview } from './toolPreview.js';
-import { detachString, isRecord } from './utils.js';
+import {
+  createDaemonToolPreview,
+  createDaemonToolResultPreview,
+} from './toolPreview.js';
+import { detachString, getFirstString, isRecord } from './utils.js';
 
 const DEFAULT_MAX_BLOCKS = 1_000;
 /**
@@ -277,6 +280,7 @@ function userBlockForAttachment(
     event.meta,
     event.sourceRecordIds,
     event.promptId,
+    event.segmentId,
   ) as DaemonTextTranscriptBlock;
   appendBlock(next, block);
   next.activeUserBlockId = block.id;
@@ -337,7 +341,11 @@ function applyDaemonTranscriptEvent(
       if (event.meta) block.meta = { ...block.meta, ...event.meta };
       block.images = [
         ...(block.images ?? []),
-        { data: event.data, mimeType: event.mimeType },
+        {
+          data: event.data,
+          mimeType: event.mimeType,
+          ...(event.attachmentId ? { attachmentId: event.attachmentId } : {}),
+        },
       ];
       next.retainedBytes += estimateBlockBytes(block) - bytesBefore;
       break;
@@ -475,6 +483,7 @@ function applyDaemonTranscriptEvent(
       break;
     case 'session.metadata.changed':
     case 'session.artifact.changed':
+    case 'session.source.changed':
     case 'session.available_commands':
       // Intentional no-op against `blocks[]`.
       break;
@@ -628,18 +637,27 @@ function clearActiveAssistant(
 }
 
 /**
- * Fold a round's token usage onto the active top-level assistant block.
+ * Fold a round's token usage onto the latest top-level assistant block in the
+ * current user turn. A tool update finalizes the active text block before the
+ * model stream's trailing usage frame arrives, so the active pointer alone is
+ * not sufficient.
  * Subagent usage stays part of the spawning turn's total for compatibility.
  * Summary projections route it to the parent tool before calling this helper.
  *
- * No active block (a rare usage frame with no preceding top-level assistant
- * text) drops the count rather than minting a stray empty block.
+ * A turn with no preceding top-level assistant text still drops the count
+ * rather than crossing a user boundary or minting a stray empty block.
  */
 function applyAssistantUsage(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
 ): void {
-  const block = getWritableBlockById(state, state.activeAssistantBlockId);
+  if (isLegacySubagentUsageDuplicate(state, event)) return;
+  const activeBlockId =
+    state.activeAssistantBlockId ??
+    (event.parentToolCallId
+      ? undefined
+      : latestTopLevelAssistantBlockIdInCurrentTurn(state));
+  const block = getWritableBlockById(state, activeBlockId);
   if (!block || block.kind !== 'assistant') return;
   const prev = block.usage;
   block.usage = {
@@ -648,6 +666,46 @@ function applyAssistantUsage(
     cachedTokens: (prev?.cachedTokens ?? 0) + (event.usage.cachedTokens ?? 0),
   };
   block.updatedAt = state.now;
+}
+
+function isLegacySubagentUsageDuplicate(
+  state: DaemonTranscriptState,
+  event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
+): boolean {
+  if (event.parentToolCallId || !event.sourceRecordIds?.length) return false;
+  const sourceRecordIds = new Set(event.sourceRecordIds);
+  for (let i = state.blocks.length - 1; i >= 0; i -= 1) {
+    const block = state.blocks[i]!;
+    if (block.kind === 'user' && !block.parentToolCallId) return false;
+    if (
+      block.kind !== 'tool' ||
+      !block.sourceRecordIds?.some((id) => sourceRecordIds.has(id))
+    ) {
+      continue;
+    }
+    const rawOutput = isRecord(block.rawOutput) ? block.rawOutput : undefined;
+    const summary =
+      rawOutput && isRecord(rawOutput['executionSummary'])
+        ? rawOutput['executionSummary']
+        : undefined;
+    return (
+      summary?.['inputTokens'] === event.usage.inputTokens &&
+      summary['outputTokens'] === event.usage.outputTokens &&
+      (summary['cachedTokens'] ?? 0) === (event.usage.cachedTokens ?? 0)
+    );
+  }
+  return false;
+}
+
+function latestTopLevelAssistantBlockIdInCurrentTurn(
+  state: DaemonTranscriptState,
+): string | undefined {
+  for (let i = state.blocks.length - 1; i >= 0; i -= 1) {
+    const block = state.blocks[i]!;
+    if (block.kind === 'user' && !block.parentToolCallId) return undefined;
+    if (block.kind === 'assistant' && !block.parentToolCallId) return block.id;
+  }
+  return undefined;
 }
 
 function applySubagentUsageToParentTool(
@@ -758,7 +816,16 @@ function appendTextDelta(
     existing.kind === kind &&
     canMergeTextDelta(existing, event)
   ) {
-    existing.text = appendBoundedText(state, existing, text);
+    const separator =
+      kind === 'user' &&
+      existing.text.length > 0 &&
+      text.length > 0 &&
+      existing.segmentId !== event.segmentId &&
+      !existing.text.endsWith('\n') &&
+      !text.startsWith('\n')
+        ? '\n'
+        : '';
+    existing.text = appendBoundedText(state, existing, separator + text);
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
     if (event.serverTimestamp !== undefined) {
@@ -772,6 +839,9 @@ function appendTextDelta(
     // attaching the branch checkpoint) still matches the merged block.
     if (existing.promptId === undefined && event.promptId !== undefined) {
       existing.promptId = event.promptId;
+    }
+    if (event.segmentId !== undefined) {
+      existing.segmentId = event.segmentId;
     }
     if (kind === 'assistant' && event.branchRecordId) {
       existing.branchRecordId = event.branchRecordId;
@@ -793,6 +863,7 @@ function appendTextDelta(
     'meta' in event ? event.meta : undefined,
     event.sourceRecordIds,
     event.promptId,
+    event.segmentId,
   );
   if (kind === 'assistant' && event.branchRecordId) {
     block.branchRecordId = event.branchRecordId;
@@ -835,17 +906,30 @@ function canMergeTextDelta(
   ) {
     return false;
   }
-  if (existing.meta?.qwenDiscreteMessage === true) return false;
+  const sameRecordedUser =
+    existing.kind === 'user' &&
+    (existing.sourceRecordIds?.length ?? 0) > 0 &&
+    (event.sourceRecordIds?.length ?? 0) > 0;
+  if (!sameRecordedUser && existing.meta?.qwenDiscreteMessage === true) {
+    return false;
+  }
   if (
     existing.promptId !== undefined &&
     event.promptId !== undefined &&
     existing.promptId !== event.promptId
   )
     return false;
+  if (!sameRecordedUser && existing.segmentId !== event.segmentId) {
+    return false;
+  }
   if (!stringArraysEqual(existing.sourceRecordIds, event.sourceRecordIds)) {
     return false;
   }
-  return !('meta' in event) || event.meta?.qwenDiscreteMessage !== true;
+  return (
+    sameRecordedUser ||
+    !('meta' in event) ||
+    event.meta?.qwenDiscreteMessage !== true
+  );
 }
 
 function findFinalVisibleAssistantForPrompt(
@@ -923,6 +1007,10 @@ function upsertToolBlock(
   const bytesBefore = retainedBefore ? estimateBlockBytes(retainedBefore) : 0;
   const existing = getWritableBlockById(state, existingId);
   if (existing?.kind === 'tool') {
+    if (event.subagentSessionReady !== undefined) {
+      existing.subagentSessionReady =
+        existing.subagentSessionReady === true || event.subagentSessionReady;
+    }
     if (event.title !== undefined) existing.title = event.title;
     if (event.status !== undefined) existing.status = event.status;
     if (event.rawInput !== undefined) {
@@ -985,6 +1073,25 @@ function upsertToolBlock(
         }
       }
       existing.rawOutput = rawOutput;
+      if (isBackgroundToolOutput(rawOutput)) existing.background = true;
+    }
+    const resultPreview =
+      event.resultPreview ??
+      createDaemonToolResultPreview(
+        rawOutput ?? existing.rawOutput,
+        event.content ?? existing.content,
+        {
+          toolName: event.toolName ?? existing.toolName,
+          toolKind: event.toolKind ?? existing.toolKind,
+        },
+      );
+    if (resultPreview) existing.resultPreview = resultPreview;
+    else if (
+      event.resultPreview !== undefined ||
+      rawOutput !== undefined ||
+      event.content !== undefined
+    ) {
+      delete existing.resultPreview;
     }
     existing.sourceRecordIds = unionStrings(
       existing.sourceRecordIds,
@@ -1027,6 +1134,12 @@ function upsertToolBlock(
     state.toolBlockByCallId[event.parentToolCallId] !== TRIMMED_TOOL_BLOCK_ID
       ? state.toolBlockByCallId[event.parentToolCallId]
       : undefined;
+  const resultPreview =
+    event.resultPreview ??
+    createDaemonToolResultPreview(rawOutput, event.content, {
+      toolName: event.toolName,
+      toolKind: event.toolKind,
+    });
   const block: DaemonToolTranscriptBlock = {
     id: allocateBlockId(state, 'tool'),
     kind: 'tool',
@@ -1038,6 +1151,11 @@ function upsertToolBlock(
       toolName: event.toolName,
       toolKind: event.toolKind,
     }),
+    ...(resultPreview ? { resultPreview } : {}),
+    ...(isBackgroundToolOutput(rawOutput) ? { background: true } : {}),
+    ...(event.subagentSessionReady !== undefined
+      ? { subagentSessionReady: event.subagentSessionReady }
+      : {}),
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
@@ -1048,6 +1166,7 @@ function upsertToolBlock(
     ...(event.sourceRecordIds
       ? { sourceRecordIds: [...event.sourceRecordIds] }
       : {}),
+    ...(event.segmentId ? { segmentId: event.segmentId } : {}),
     ...(event.details ? { details: event.details } : {}),
     ...(!compactTaskOutput && event.content !== undefined
       ? { content: event.content }
@@ -1092,6 +1211,10 @@ function upsertToolBlock(
   clearActiveText(state, event.parentToolCallId);
 }
 
+function isBackgroundToolOutput(value: unknown): boolean {
+  return isRecord(value) && value['status'] === 'background';
+}
+
 function discardToolBlock(
   state: DaemonTranscriptState,
   toolCallId: string,
@@ -1119,6 +1242,21 @@ function discardToolBlock(
   }
 }
 
+/**
+ * The task-display projection carries exactly these two `executionMode`
+ * literals. Fail closed: any other value (corrupted recording, future runtime
+ * mode) must fall back to the legacy argument/status heuristic instead of
+ * forcing a classification. Both consumer-side whitelists — Web Shell's
+ * `projectSubagentToolUpdate` and web-shell's `daemonToolBlockToToolCall` —
+ * call this single guard so live-summary and recorded-transcript clients
+ * accept the same literal set; when a third mode lands, extend it here once.
+ */
+export function isTaskExecutionMode(
+  value: unknown,
+): value is 'foreground' | 'background' {
+  return value === 'foreground' || value === 'background';
+}
+
 function compactTaskExecutionOutput(
   rawOutput: unknown,
   retainSubagentBlocks: boolean,
@@ -1136,9 +1274,12 @@ function compactTaskExecutionOutput(
     'subagentColor',
     'taskDescription',
     'status',
+    'executionMode',
+    'subagentSessionReady',
     'terminateReason',
     'tokenCount',
     'executionSummary',
+    'skills',
   ]) {
     if (rawOutput[key] !== undefined) compact[key] = rawOutput[key];
   }
@@ -1213,7 +1354,11 @@ function appendShellBlock(
 ): void {
   if (!event.text) return;
   const last = state.blocks[state.blocks.length - 1];
-  if (last?.kind === 'shell' && last.stream === event.stream) {
+  if (
+    last?.kind === 'shell' &&
+    last.stream === event.stream &&
+    last.segmentId === event.segmentId
+  ) {
     const writable = getWritableBlockById(state, last.id);
     if (writable?.kind === 'shell') {
       writable.text = appendBoundedText(state, writable, event.text);
@@ -1235,6 +1380,7 @@ function appendShellBlock(
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
+    ...(event.segmentId ? { segmentId: event.segmentId } : {}),
     ...(event.stream ? { stream: event.stream } : {}),
   };
   appendBlock(state, block);
@@ -1250,6 +1396,7 @@ function appendUserShellBlock(
   if (
     last?.kind === 'user_shell' &&
     last.stream === event.stream &&
+    last.segmentId === event.segmentId &&
     !state.pendingUserShellCommand
   ) {
     const writable = getWritableBlockById(state, last.id);
@@ -1279,6 +1426,7 @@ function appendUserShellBlock(
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
+    ...(event.segmentId ? { segmentId: event.segmentId } : {}),
     ...(event.stream ? { stream: event.stream } : {}),
   };
   state.pendingUserShellCommand = undefined;
@@ -1296,11 +1444,15 @@ function upsertPermissionBlock(
   const preview = createDaemonToolPreview(event.toolCall, {
     title: event.title,
   });
+  const toolIdentity = getPermissionToolIdentity(event.toolCall);
   if (existing?.kind === 'permission') {
     existing.title = event.title;
     existing.options = event.options.map((option) => ({ ...option }));
     existing.toolCall = event.toolCall;
     existing.preview = preview;
+    if (toolIdentity.toolCallId) existing.toolCallId = toolIdentity.toolCallId;
+    if (toolIdentity.toolName) existing.toolName = toolIdentity.toolName;
+    if (toolIdentity.toolKind) existing.toolKind = toolIdentity.toolKind;
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
     return;
@@ -1313,6 +1465,7 @@ function upsertPermissionBlock(
     title: event.title,
     options: event.options.map((option) => ({ ...option })),
     preview,
+    ...toolIdentity,
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
@@ -1320,6 +1473,7 @@ function upsertPermissionBlock(
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
+    ...(event.segmentId ? { segmentId: event.segmentId } : {}),
     ...(event.sessionId ? { sessionId: event.sessionId } : {}),
     ...(event.toolCall !== undefined ? { toolCall: event.toolCall } : {}),
   };
@@ -1375,6 +1529,7 @@ function resolvePermissionBlock(
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
+    ...(event.segmentId ? { segmentId: event.segmentId } : {}),
   };
   appendBlock(state, block);
   state.permissionBlockByRequestId[event.requestId] = block.id;
@@ -1469,6 +1624,7 @@ function appendStatusBlock(
     ...(event?.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
+    ...(event?.segmentId ? { segmentId: event.segmentId } : {}),
     ...(event?.type === 'error' && event.code ? { code: event.code } : {}),
     ...(event?.type === 'error' && event.promptId
       ? { promptId: event.promptId }
@@ -1524,6 +1680,7 @@ function appendPromptCancelledBlock(
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
+    ...(event.segmentId ? { segmentId: event.segmentId } : {}),
   };
   appendBlock(state, block);
   clearActiveText(state);
@@ -1538,6 +1695,7 @@ function createTextBlock(
   meta?: Record<string, unknown>,
   sourceRecordIds?: readonly string[],
   promptId?: string,
+  segmentId?: string,
 ): DaemonTextTranscriptBlock {
   const blockId = allocateBlockId(state, kind);
   return {
@@ -1550,6 +1708,7 @@ function createTextBlock(
     ...(eventId !== undefined ? { eventId } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(sourceRecordIds ? { sourceRecordIds: [...sourceRecordIds] } : {}),
+    ...(segmentId ? { segmentId } : {}),
     ...(promptId ? { promptId } : {}),
     ...(meta ? { meta: { ...meta } } : {}),
   };
@@ -1992,6 +2151,7 @@ function cloneBlockForWrite(
     return {
       ...block,
       preview: cloneJsonLike(block.preview),
+      resultPreview: cloneJsonLike(block.resultPreview),
       content: cloneJsonLike(block.content),
       locations: cloneJsonLike(block.locations),
       rawInput: cloneJsonLike(block.rawInput),
@@ -2005,6 +2165,29 @@ function allocateBlockId(state: DaemonTranscriptState, prefix: string): string {
   const id = `${prefix}-${state.nextOrdinal}`;
   state.nextOrdinal += 1;
   return id;
+}
+
+function getPermissionToolIdentity(toolCall: unknown): {
+  toolCallId?: string;
+  toolName?: string;
+  toolKind?: string;
+} {
+  if (!isRecord(toolCall)) return {};
+  const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
+  const toolCallId = getFirstString(toolCall, ['toolCallId', 'id']);
+  const toolName =
+    getFirstString(meta, ['toolName']) ??
+    getFirstString(toolCall, ['toolName', 'name']);
+  const toolKind = getFirstString(toolCall, ['kind']);
+  const identity: {
+    toolCallId?: string;
+    toolName?: string;
+    toolKind?: string;
+  } = {};
+  if (toolCallId) identity.toolCallId = toolCallId;
+  if (toolName) identity.toolName = toolName;
+  if (toolKind) identity.toolKind = toolKind;
+  return identity;
 }
 
 function clearActiveText(

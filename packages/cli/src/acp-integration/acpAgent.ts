@@ -5,9 +5,11 @@
  */
 
 import {
+  type ContentGeneratorConfig,
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
+  hasVertexProjectConfigured,
   BTW_MAX_INPUT_LENGTH,
   buildBtwCacheSafeParams,
   buildBtwPrompt,
@@ -18,7 +20,7 @@ import {
   createDebugLogger,
   generateSessionRecap,
   findProviderById,
-  getAllGeminiMdFilenames,
+  getAllMemoryFilenames,
   getAutoMemoryRoot,
   getUserAutoMemoryRoot,
   getDefaultBaseUrlForProtocol,
@@ -36,6 +38,7 @@ import {
   SessionWriterUnavailableError,
   SESSION_TITLE_MAX_LENGTH,
   Storage,
+  readAgentTrace,
   tokenLimit,
   getMCPDiscoveryState,
   getMCPServerStatus,
@@ -66,6 +69,7 @@ import {
   MCPOAuthProvider,
   MCPOAuthTokenStorage,
   InvalidSessionTranscriptCursorError,
+  InvalidSessionTranscriptTurnAnchorError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
   SessionTranscriptReader,
@@ -77,6 +81,7 @@ import {
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
+  normalizeDerivedBranchTitle,
   BranchPointInvalidError,
   parseGoalSnapshotV2,
   parseGoalStateCause,
@@ -93,7 +98,6 @@ import {
   normalizeSnapshotPayload,
   startEventLoopLagMonitor,
   refreshMemoryInstruction,
-  applyReasoningEffort,
   REASONING_EFFORT_TIERS,
   addDaemonRequestAttribute,
   extractDaemonTraceContext,
@@ -122,7 +126,6 @@ import {
   type ProviderConfig,
   type ProviderModelConfig,
   type ProviderSetupInputs,
-  type ReasoningEffort,
   type ResumedSessionData,
   type SelectiveSessionRestoreOptions,
   type SendSdkMcpMessage,
@@ -133,10 +136,25 @@ import {
   type WorkspaceRememberContextMode,
   type ChatRecord,
   type ToolInvocationGuard,
+  type WorkflowParams,
+  type WorkflowToolResult,
+  type WorkflowRunRegistry,
+  getWorkflowTaskMutationKey,
+  isTerminalWorkflowStatus,
+  tryWithWorkflowTaskMutation,
+  listSavedWorkflows,
+  resolveSavedWorkflowScript,
+  extractAndStripMeta,
+  listWorkflowSnapshots,
   type TurnResultRecordPayload,
+  sessionIdContext,
+  registerSession,
+  SessionSourceService,
+  SessionSourceError,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import { isDeepStrictEqual } from 'node:util';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   AgentSideConnection,
@@ -187,15 +205,13 @@ import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   CHANNEL_PROMPT_META_KEY,
 } from '@qwen-code/channel-base';
-import { observeAcpToolResultWire } from '../utils/tool-result-boundary-diagnostics.js';
+import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
-import { pipeline } from 'node:stream/promises';
 import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { createGunzip } from 'node:zlib';
 import type { LoadedSettings } from '../config/settings.js';
 import {
   loadSettings,
@@ -225,12 +241,20 @@ import {
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import { isCompatibleLiveSessionSource } from '../runtime/live-session-source.js';
+import {
+  getConversationDirectoryName,
+  hasVerifiableInode,
+  isSameConversationPath,
+  isSameDirectoryIdentity,
+} from '../utils/conversation-directory-identity.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import {
   buildDisabledSkillNamesProvider,
+  buildEnabledSkillNamesProvider,
   loadCliConfig,
+  parseApprovalModeValue,
   SessionIdConflictError,
 } from '../config/config.js';
 import { resolveSkillSettings } from '../config/skill-settings.js';
@@ -246,7 +270,7 @@ import {
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
 } from './extension-skills.js';
-import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import { Session, registerCreateSubSessionTool } from './session/Session.js';
 import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
@@ -257,10 +281,33 @@ import {
   type ChildHeapProbe,
 } from './child-heap-probe.js';
 import {
-  getModelConfiguration,
+  applyReasoningSelection,
+  buildModelReasoningConfigOption,
+  buildModelReasoningConfigPreview,
+  clearReasoningRequestOverrides,
+  getConfiguredModelReasoning,
+  getDefaultReasoningConfig,
+  getGptReasoningOverrideState,
+  isReasoningSelectionSupported,
+  PERSIST_REASONING_SELECTION_META_KEY,
+  parseReasoningSelection,
+  resolvePersistedReasoningConfigState,
+  REASONING_SELECTION_PERSISTED_META_KEY,
+  REASONING_EFFORT_DEFAULT,
+  REASONING_EFFORT_NAMES,
+  REASONING_EFFORT_NONE,
   type ModelReasoningConfiguration,
+  type ReasoningSelection,
 } from './model-configuration.js';
-import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
+import {
+  deleteManagedSkill,
+  installManagedSkill,
+  setManagedSkillEnabled,
+} from './skill-management.js';
+import {
+  buildSessionAgentsStatus,
+  buildSessionTasksStatus,
+} from './session/tasksSnapshot.js';
 import {
   collectHistoryReplayUpdates,
   copyCumulativeUsage,
@@ -269,6 +316,7 @@ import {
   replayTranscriptRecordPage,
 } from './session/history-replay-page.js';
 import {
+  ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
   getCurrentAcpModelId,
   parseAcpBaseModelId,
@@ -279,11 +327,13 @@ import {
   resolveOutputLanguageOrPreserveAuto,
   getOutputLanguageFilePath,
   writeOutputLanguageAndRegisterPath,
-} from '../utils/languageUtils.js';
+} from '../i18n/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
-import { runExitCleanup } from '../utils/cleanup.js';
-import { startNonInteractiveOpenAILogHousekeeping } from '../utils/housekeeping/scheduler.js';
+import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
+import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
+import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
   setLanguageAsync,
@@ -292,7 +342,6 @@ import {
 } from '../i18n/index.js';
 import {
   isWorkspaceTrusted,
-  isFolderTrustEnabled,
   loadTrustedFolders,
 } from '../config/trustedFolders.js';
 import {
@@ -317,6 +366,11 @@ import {
   type ServeSessionContextStatus,
   type ServeSessionSupportedCommandsStatus,
   type ServeSessionLspStatus,
+  type ServeSessionAgentsStatus,
+  type ServeSessionAgentTrace,
+  type ServeSessionResourcesStatus,
+  type ServeSessionSavedWorkflowDetail,
+  type ServeSessionSavedWorkflowStatus,
   type ServeSessionTasksStatus,
   type ServeStatus,
   type ServeStatusCell,
@@ -350,15 +404,19 @@ import {
   SHELL_EXECUTING_TOOL_NAMES,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
+  DAEMON_OWNED_STANDALONE_CREATION_KEY,
+  isReservedStandaloneSessionSourceType,
   parseSessionSource,
   SESSION_SOURCE_META_KEY,
-} from '@qwen-code/acp-bridge';
+} from '@qwen-code/acp-bridge/sessionSource';
 import {
   ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
   ACTIVE_WORK_HEARTBEAT_META_KEY,
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_HOLD_CATEGORIES,
   ACTIVE_WORK_LEGACY_HOLD_CATEGORIES,
+  CHANNEL_LIVENESS_META_KEY,
+  CHANNEL_LIVENESS_VERSION,
   clampActiveWorkIntervalMs,
   type ActiveWorkHoldV1,
   CHANNEL_STARTUP_PROFILE_META_KEY,
@@ -367,8 +425,11 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_SUBMITTED_PROMPT_META_KEY,
+  SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
+  DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_MAX_BYTES,
@@ -379,10 +440,13 @@ import {
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
+  SESSION_INITIALIZATION_DEADLINE_META_KEY,
+  SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   isValidTrustedModelPrompt,
   WORKTREE_MCP_DEFER_META_KEY,
   type ClientMcpOverWsRuntimeConfig,
+  type BridgeConversationDirectoryExpectation,
   type BridgeLoadReplayEnvelope,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
@@ -412,6 +476,26 @@ import {
   type GenerationEvent,
 } from './generation.js';
 
+type SessionOwnedWorkflowTool = {
+  buildSessionOwnedBackground(
+    params: Omit<WorkflowParams, 'run_in_background'>,
+    workflowName?: string,
+  ): {
+    execute(signal: AbortSignal): Promise<WorkflowToolResult>;
+  };
+};
+
+function isSessionOwnedWorkflowTool(
+  value: unknown,
+): value is SessionOwnedWorkflowTool {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'buildSessionOwnedBackground' in value &&
+    typeof value.buildSessionOwnedBackground === 'function'
+  );
+}
+
 const debugLogger = createDebugLogger('ACP_AGENT');
 const QWEN_ACP_LOCAL_READ_ROOTS_ENV = 'QWEN_ACP_LOCAL_READ_ROOTS';
 const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
@@ -420,16 +504,7 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
-const ACP_REASONING_EFFORT_DEFAULT = 'default';
-const ACP_REASONING_EFFORT_NONE = 'none';
-const ACP_REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
-  xhigh: 'Extra high',
-  max: 'Max',
-};
-
+const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
@@ -777,6 +852,10 @@ function buildAcpLocalReadRoots(config: Config): string[] {
     // Saved plan files (see ReadFileTool.getDefaultPermission for why the
     // plans dir must be readable without a confirmation prompt).
     config.getPlansDir(),
+    Storage.getUserWorkflowsDir(),
+    // Workflow run artifacts: resume journals, run snapshots, and persisted
+    // inline scripts named by workflow results and notifications.
+    config.storage.getWorkflowRunsDir(),
     ...defaultAcpOnlyLocalReadRoots(),
     ...parseAcpLocalReadRootsEnv(),
   ];
@@ -1097,6 +1176,7 @@ export function selectVisibleHistoryRecords(
 interface SessionSource {
   sourceType: string;
   sourceId?: string;
+  daemonOwnedStandaloneCreation?: true;
 }
 
 function getSessionSource(params: {
@@ -1111,6 +1191,9 @@ function getSessionSource(params: {
     sourceType: value['sourceType'],
     ...(typeof value['sourceId'] === 'string'
       ? { sourceId: value['sourceId'] }
+      : {}),
+    ...(value[DAEMON_OWNED_STANDALONE_CREATION_KEY] === true
+      ? { daemonOwnedStandaloneCreation: true }
       : {}),
   };
 }
@@ -1137,19 +1220,10 @@ function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
   return value as number;
 }
 
-function deriveForkBaseName(
-  name: unknown,
-  recording: { getCurrentCustomTitle(): string | undefined } | undefined,
-  sessionId: string,
-): string {
-  if (typeof name === 'string' && name.trim().length > 0) {
-    return name.trim();
-  }
-  const existingTitle = recording?.getCurrentCustomTitle();
-  const stripped = existingTitle
-    ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
-    .trim();
-  return stripped && stripped.length > 0 ? stripped : sessionId.slice(0, 8);
+function normalizeRequestedBranchName(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim();
+  return normalized || undefined;
 }
 function createHiddenWorkspaceMemoryConfig(config: Config): Config {
   return new Proxy(config, {
@@ -1210,6 +1284,7 @@ export const AUTH_PREFLIGHT_ENV_KEYS: Readonly<
   Record<string, readonly string[]>
 > = {
   openai: ['OPENAI_API_KEY'],
+  'openai-responses': ['OPENAI_API_KEY'],
   anthropic: ['ANTHROPIC_API_KEY'],
   gemini: ['GEMINI_API_KEY'],
   'vertex-ai': ['GOOGLE_API_KEY'],
@@ -1237,52 +1312,6 @@ type QwenMemoryPaths = {
   userMemoryFile: string;
   projectMemoryFile: string;
   autoMemoryDir: string;
-};
-
-type QwenSkillInstallRequest = {
-  id: string;
-  slug: string;
-  name: string;
-  description?: string;
-  sourceUrl: string;
-  scope: 'global';
-};
-
-type QwenSkillDeleteRequest = {
-  slug: string;
-  scope: 'global';
-};
-
-type QwenSkillSetEnabledRequest = {
-  slug: string;
-  enabled: boolean;
-  scope: 'global' | 'project';
-};
-
-type QwenManagedSkillFile = {
-  skillDir: string;
-  skillFile: string;
-  content: string;
-};
-
-const PROJECT_SKILL_DIRS = ['.qwen', '.agents'] as const;
-const SKILLS_DIR = 'skills';
-
-type DownloadedSkillFile = {
-  relativePath: string;
-  content: Uint8Array;
-};
-
-type DownloadedSkill = {
-  skillContent: string;
-  files: DownloadedSkillFile[];
-};
-
-type GitHubBlobSkillUrl = {
-  owner: string;
-  repo: string;
-  ref: string;
-  filePath: string;
 };
 
 type QwenSettingsScope = 'user' | 'workspace';
@@ -1326,6 +1355,7 @@ type QwenMcpServerConfig = {
   url?: string;
   headers?: Record<string, string>;
   timeout?: number;
+  versionNegotiation?: 'auto' | 'legacy';
   trust?: boolean;
   description?: string;
   includeTools?: string[];
@@ -1362,7 +1392,7 @@ const QWEN_CORE_SETTING_DEFINITIONS = {
   'general.language': { type: 'string' },
   'tools.approvalMode': {
     type: 'enum',
-    values: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
+    values: APPROVAL_MODES,
   },
   'general.vimMode': { type: 'boolean' },
   'general.enableAutoUpdate': { type: 'boolean' },
@@ -1486,738 +1516,6 @@ function readRequiredString(value: unknown, fieldName: string): string {
     );
   }
   return stringValue;
-}
-
-// Skill slugs are used to build filesystem paths under `<globalQwenDir>/skills`.
-// The character allowlist below already excludes `/` and `\`, but `.` and `..`
-// would still slip through and let `path.join` traverse out of the skills dir
-// (e.g. slug `..` resolves to the global config dir). Reject them explicitly.
-function validateSkillSlug(slug: string): void {
-  if (
-    !slug ||
-    slug === '.' ||
-    slug === '..' ||
-    slug.includes('/') ||
-    slug.includes(path.sep) ||
-    !/^[a-zA-Z0-9._-]+$/.test(slug)
-  ) {
-    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
-  }
-}
-
-function readSkillInstallRequest(
-  params: Record<string, unknown>,
-): QwenSkillInstallRequest {
-  const skillParams = toRecord(params['skill']);
-  const input = Object.keys(skillParams).length > 0 ? skillParams : params;
-  const slug = readRequiredString(input['slug'], 'skill.slug');
-  validateSkillSlug(slug);
-
-  const scope = readOptionalString(input['scope'], 'skill.scope') ?? 'global';
-  if (scope !== 'global') {
-    throw RequestError.invalidParams(
-      undefined,
-      'Only global skill installation is supported',
-    );
-  }
-
-  const description = readOptionalString(
-    input['description'],
-    'skill.description',
-  );
-  return {
-    id: readOptionalString(input['id'], 'skill.id') ?? slug,
-    slug,
-    name: readOptionalString(input['name'], 'skill.name') ?? slug,
-    ...(description ? { description } : {}),
-    sourceUrl: readRequiredString(input['sourceUrl'], 'skill.sourceUrl'),
-    scope,
-  };
-}
-
-function readSkillSlugRequest(
-  params: Record<string, unknown>,
-): QwenSkillDeleteRequest {
-  const skillParams = toRecord(params['skill']);
-  const input = Object.keys(skillParams).length > 0 ? skillParams : params;
-  const slug = readRequiredString(input['slug'], 'skill.slug');
-  validateSkillSlug(slug);
-
-  const scope = readOptionalString(input['scope'], 'skill.scope') ?? 'global';
-  if (scope !== 'global') {
-    throw RequestError.invalidParams(
-      undefined,
-      'Only global skill management is supported',
-    );
-  }
-
-  return { slug, scope };
-}
-
-function readSkillSetEnabledRequest(
-  params: Record<string, unknown>,
-): QwenSkillSetEnabledRequest {
-  const skillParams = toRecord(params['skill']);
-  const input = Object.keys(skillParams).length > 0 ? skillParams : params;
-  const slug = readRequiredString(input['slug'], 'skill.slug');
-  validateSkillSlug(slug);
-
-  const scope = readOptionalString(input['scope'], 'skill.scope') ?? 'global';
-  if (scope !== 'global' && scope !== 'project') {
-    throw RequestError.invalidParams(
-      undefined,
-      'Only global or project skill management is supported',
-    );
-  }
-
-  if (typeof input['enabled'] !== 'boolean') {
-    throw RequestError.invalidParams(
-      undefined,
-      'Invalid skill.enabled: expected boolean',
-    );
-  }
-  return {
-    slug,
-    scope,
-    enabled: input['enabled'],
-  };
-}
-
-function splitSkillMarkdown(content: string): {
-  frontmatter: string;
-  body: string;
-} {
-  const normalized = content.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
-  const match = normalized.match(/^---\n([\s\S]*?)\n---(?:\n|$)([\s\S]*)$/);
-  if (!match) {
-    throw RequestError.invalidParams(
-      undefined,
-      'Invalid skill file: missing YAML frontmatter',
-    );
-  }
-  return {
-    frontmatter: match[1],
-    body: match[2],
-  };
-}
-
-function setSkillFrontmatterEnabled(content: string, enabled: boolean): string {
-  const { frontmatter, body } = splitSkillMarkdown(content);
-
-  // Surgically add/remove only the top-level `disable-model-invocation:` line
-  // instead of round-tripping the whole frontmatter through a YAML
-  // parse/stringify. The minimal core YAML serializer drops comments and
-  // flattens nested structures (e.g. `hooks:`), so reserializing here would
-  // corrupt hooks-bearing skills and strip user comments. Working on the raw
-  // text leaves every other byte untouched.
-  const lines = frontmatter.split('\n');
-  const disabledLineIndex = lines.findIndex((line) =>
-    /^disable-model-invocation\s*:/.test(line),
-  );
-
-  if (enabled) {
-    if (disabledLineIndex !== -1) {
-      lines.splice(disabledLineIndex, 1);
-    }
-  } else if (disabledLineIndex !== -1) {
-    lines[disabledLineIndex] = 'disable-model-invocation: true';
-  } else {
-    let insertIndex = lines.length;
-    while (insertIndex > 0 && lines[insertIndex - 1].trim() === '') {
-      insertIndex -= 1;
-    }
-    lines.splice(insertIndex, 0, 'disable-model-invocation: true');
-  }
-
-  const nextFrontmatter = lines.join('\n');
-  return `---\n${nextFrontmatter}\n---\n${body}`;
-}
-
-// Skill downloads must come from the GitHub host set. Restricting the host
-// here prevents the client-supplied `sourceUrl` from driving server-side
-// fetches at internal/loopback/link-local endpoints (SSRF), e.g.
-// `http://169.254.169.254/` cloud-metadata or `http://localhost:<port>/`.
-const ALLOWED_SKILL_SOURCE_HOSTS = new Set([
-  'github.com',
-  'raw.githubusercontent.com',
-  'codeload.github.com',
-  'api.github.com',
-]);
-
-function assertAllowedSkillSourceUrl(sourceUrl: string): void {
-  let parsed: URL;
-  try {
-    parsed = new URL(sourceUrl);
-  } catch {
-    throw RequestError.invalidParams(
-      undefined,
-      'Skill sourceUrl must be a valid URL',
-    );
-  }
-  // Require HTTPS: a plaintext http: fetch of skill content (which can include
-  // executable hooks) is MITM-able by a network-position attacker, so the host
-  // allowlist alone is not sufficient. All supported GitHub hosts serve HTTPS.
-  if (parsed.protocol !== 'https:') {
-    throw RequestError.invalidParams(
-      undefined,
-      'Skill sourceUrl must be an HTTPS URL',
-    );
-  }
-  if (!ALLOWED_SKILL_SOURCE_HOSTS.has(parsed.hostname)) {
-    throw RequestError.invalidParams(
-      undefined,
-      'Skill sourceUrl host is not allowed (only github.com sources are supported)',
-    );
-  }
-}
-
-function parseGitHubBlobSkillUrl(sourceUrl: string): GitHubBlobSkillUrl | null {
-  const parsed = new URL(sourceUrl);
-  // HTTPS-only, consistent with assertAllowedSkillSourceUrl (skill content can
-  // include executable hooks, so plaintext http: is MITM-able).
-  if (parsed.protocol !== 'https:') {
-    throw RequestError.invalidParams(
-      undefined,
-      'Skill sourceUrl must be an HTTPS URL',
-    );
-  }
-
-  if (parsed.hostname !== 'github.com') return null;
-  const parts = parsed.pathname.split('/').filter(Boolean);
-  if (parts.length < 5 || parts[2] !== 'blob') return null;
-
-  const owner = parts[0];
-  const repo = parts[1];
-  const ref = parts[3];
-  const filePathParts = parts.slice(4);
-  if (!owner || !repo || !ref || filePathParts.length === 0) return null;
-
-  return {
-    owner,
-    repo,
-    ref,
-    filePath: filePathParts.join('/'),
-  };
-}
-
-function toRawGitHubUrl(githubUrl: GitHubBlobSkillUrl): string {
-  return `https://raw.githubusercontent.com/${githubUrl.owner}/${githubUrl.repo}/${githubUrl.ref}/${githubUrl.filePath}`;
-}
-
-function encodeGitHubPath(filePath: string): string {
-  if (!filePath || filePath === '.') return '';
-  return filePath.split('/').map(encodeURIComponent).join('/');
-}
-
-function readTarString(
-  archive: Uint8Array,
-  offset: number,
-  length: number,
-): string {
-  const bytes = archive.subarray(offset, offset + length);
-  const nul = bytes.indexOf(0);
-  const end = nul >= 0 ? nul : bytes.length;
-  return Buffer.from(bytes.subarray(0, end)).toString('utf8').trim();
-}
-
-function readTarSize(archive: Uint8Array, offset: number): number {
-  const raw = readTarString(archive, offset + 124, 12);
-  return raw ? Number.parseInt(raw, 8) : 0;
-}
-
-function isZeroTarBlock(archive: Uint8Array, offset: number): boolean {
-  for (let i = 0; i < 512; i += 1) {
-    if (archive[offset + i] !== 0) return false;
-  }
-  return true;
-}
-
-function readTarPath(archive: Uint8Array, offset: number): string {
-  const name = readTarString(archive, offset, 100);
-  const prefix = readTarString(archive, offset + 345, 155);
-  return prefix ? `${prefix}/${name}` : name;
-}
-
-function stripArchiveRoot(filePath: string): string {
-  const parts = filePath.split('/').filter(Boolean);
-  return parts.length > 1 ? parts.slice(1).join('/') : '';
-}
-
-// Bound the work done on untrusted skill archives so a malicious or oversized
-// download cannot exhaust memory. Decompression is streamed (createGunzip) and
-// aborted the moment the cumulative inflated size crosses the cap, so a
-// decompression bomb can never fully inflate into memory.
-const MAX_SKILL_DOWNLOAD_BYTES = 100 * 1024 * 1024; // 100 MB compressed
-const MAX_SKILL_DECOMPRESSED_BYTES = 500 * 1024 * 1024; // 500 MB decompressed
-// Bounds for the GitHub Contents-API directory walk (the archive path is
-// already bounded by the byte caps above).
-const MAX_SKILL_API_DIR_DEPTH = 16;
-const MAX_SKILL_API_FILE_COUNT = 2000;
-
-// Sentinel so the streaming decompression's size-limit abort can be told apart
-// from a genuine gunzip/format error in the catch below.
-class DecompressedSizeExceededError extends Error {}
-
-export async function extractFilesFromTarGz(
-  archiveBytes: Uint8Array,
-  directoryPath: string,
-  // Limits are injectable so the size-guard branches can be exercised in tests
-  // without allocating the 100MB/500MB production thresholds.
-  limits: {
-    maxCompressedBytes?: number;
-    maxDecompressedBytes?: number;
-  } = {},
-): Promise<DownloadedSkillFile[]> {
-  const maxCompressedBytes =
-    limits.maxCompressedBytes ?? MAX_SKILL_DOWNLOAD_BYTES;
-  const maxDecompressedBytes =
-    limits.maxDecompressedBytes ?? MAX_SKILL_DECOMPRESSED_BYTES;
-
-  if (archiveBytes.length > maxCompressedBytes) {
-    throw RequestError.invalidParams(
-      undefined,
-      'Skill archive exceeds the maximum allowed size',
-    );
-  }
-
-  let archive: Buffer;
-  try {
-    // Stream the inflate so we can abort as soon as the cumulative output
-    // exceeds the cap, instead of materializing the entire decompressed buffer
-    // first (a ~1000:1 gzip ratio could otherwise inflate a small archive to
-    // many GB before any post-hoc length check fires).
-    const chunks: Buffer[] = [];
-    let total = 0;
-    await pipeline(
-      // Wrap in an array so the whole archive is emitted as a single chunk;
-      // `Readable.from(uint8array)` would otherwise iterate it byte-by-byte.
-      Readable.from([Buffer.from(archiveBytes)]),
-      createGunzip(),
-      new Writable({
-        write(chunk: Buffer, _enc, cb) {
-          total += chunk.length;
-          if (total > maxDecompressedBytes) {
-            cb(new DecompressedSizeExceededError());
-            return;
-          }
-          chunks.push(chunk);
-          cb();
-        },
-      }),
-    );
-    archive = Buffer.concat(chunks);
-  } catch (error) {
-    if (error instanceof DecompressedSizeExceededError) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Decompressed skill archive exceeds the maximum allowed size',
-      );
-    }
-    throw RequestError.invalidParams(
-      undefined,
-      `Failed to decompress skill archive: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-  }
-
-  const normalizedDirectory = directoryPath.replace(/^\/+|\/+$/g, '');
-  // Treat '.' (SKILL.md at the repository root) as the empty prefix; otherwise
-  // the prefix becomes './' and never matches the root-stripped archive paths
-  // (e.g. 'SKILL.md'), yielding zero extracted files.
-  const directoryPrefix =
-    normalizedDirectory && normalizedDirectory !== '.'
-      ? `${normalizedDirectory}/`
-      : '';
-  const files: DownloadedSkillFile[] = [];
-
-  for (let offset = 0; offset + 512 <= archive.length; ) {
-    if (isZeroTarBlock(archive, offset)) break;
-
-    const fullPath = readTarPath(archive, offset);
-    const typeFlag = String.fromCharCode(archive[offset + 156] || 0);
-    const size = readTarSize(archive, offset);
-    const dataOffset = offset + 512;
-    const nextOffset = dataOffset + Math.ceil(size / 512) * 512;
-
-    if (typeFlag === '0' || typeFlag === '\0') {
-      const repoPath = stripArchiveRoot(fullPath);
-      if (repoPath.startsWith(directoryPrefix)) {
-        const relativePath = repoPath.slice(directoryPrefix.length);
-        if (relativePath) {
-          files.push({
-            relativePath,
-            content: archive.subarray(dataOffset, dataOffset + size),
-          });
-        }
-      }
-    }
-
-    offset = nextOffset;
-  }
-
-  return files;
-}
-
-// GitHub host suffixes a download may legitimately redirect to (raw/codeload
-// commonly 302 to their object CDN for geo/CDN routing). Redirects to anything
-// outside these are rejected, preserving the SSRF guard while not breaking
-// real downloads.
-const ALLOWED_REDIRECT_HOST_SUFFIXES = [
-  '.githubusercontent.com',
-  '.github.com',
-  // Note: '.github.io' is intentionally excluded — *.github.io are
-  // user-controlled GitHub Pages sites, so allowing redirects there would
-  // reopen the SSRF/exfiltration surface this allowlist exists to close.
-];
-
-function isAllowedSkillFetchHost(hostname: string): boolean {
-  if (ALLOWED_SKILL_SOURCE_HOSTS.has(hostname)) return true;
-  return ALLOWED_REDIRECT_HOST_SUFFIXES.some((suffix) =>
-    hostname.endsWith(suffix),
-  );
-}
-
-/**
- * Fetch that follows redirects manually, validating every hop stays on an
- * allowed GitHub host over HTTPS. This keeps the SSRF protection of
- * `redirect: 'manual'` (a malicious repo cannot bounce the fetch to an internal
- * endpoint) while still following GitHub's legitimate CDN redirects, which
- * plain `redirect: 'manual'` would surface as a download failure.
- */
-export async function fetchAllowedGitHub(
-  url: string,
-  init: RequestInit = {},
-  maxRedirects = 5,
-): Promise<Response> {
-  let current = url;
-  for (let hop = 0; hop <= maxRedirects; hop += 1) {
-    const response = await fetch(current, { ...init, redirect: 'manual' });
-    if (response.status < 300 || response.status >= 400) {
-      return response;
-    }
-    const location = response.headers?.get('location');
-    if (!location) return response;
-    let next: URL;
-    try {
-      next = new URL(location, current);
-    } catch {
-      throw RequestError.invalidParams(
-        undefined,
-        'Skill download redirected to an invalid URL',
-      );
-    }
-    if (next.protocol !== 'https:' || !isAllowedSkillFetchHost(next.hostname)) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Skill download redirected to a disallowed host',
-      );
-    }
-    current = next.toString();
-  }
-  throw RequestError.invalidParams(
-    undefined,
-    'Skill download exceeded the maximum number of redirects',
-  );
-}
-
-// Read a response body while enforcing a hard byte cap against the *actual*
-// streamed bytes. The Content-Length pre-checks at the call sites are advisory
-// only — a server that omits the header (chunked transfer, CDN redirect) could
-// otherwise stream an arbitrarily large body straight into memory via
-// `arrayBuffer()`.
-async function readBodyWithLimit(
-  response: Response,
-  maxBytes: number,
-): Promise<Uint8Array> {
-  const body = response.body;
-  if (!body) {
-    const buf = new Uint8Array(await response.arrayBuffer());
-    if (buf.byteLength > maxBytes) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Skill download exceeds the maximum allowed size',
-      );
-    }
-    return buf;
-  }
-
-  const reader = body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel();
-      throw RequestError.invalidParams(
-        undefined,
-        'Skill download exceeds the maximum allowed size',
-      );
-    }
-    chunks.push(value);
-  }
-
-  const result = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return result;
-}
-
-async function fetchBytes(url: string): Promise<Uint8Array> {
-  const response = await fetchAllowedGitHub(url);
-  if (!response.ok) {
-    throw RequestError.invalidParams(
-      undefined,
-      `Failed to download skill (${response.status})`,
-    );
-  }
-
-  const contentLength = response.headers?.get('content-length');
-  if (contentLength) {
-    const declaredSize = Number.parseInt(contentLength, 10);
-    if (
-      Number.isFinite(declaredSize) &&
-      declaredSize > MAX_SKILL_DOWNLOAD_BYTES
-    ) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Skill download exceeds the maximum allowed size',
-      );
-    }
-  }
-
-  return readBodyWithLimit(response, MAX_SKILL_DOWNLOAD_BYTES);
-}
-
-async function downloadSingleSkillFile(
-  sourceUrl: string,
-): Promise<DownloadedSkill> {
-  const githubUrl = parseGitHubBlobSkillUrl(sourceUrl);
-  const fetchUrl = githubUrl ? toRawGitHubUrl(githubUrl) : sourceUrl;
-  const content = await fetchBytes(fetchUrl);
-  return {
-    skillContent: Buffer.from(content).toString('utf8'),
-    files: [{ relativePath: 'SKILL.md', content }],
-  };
-}
-
-async function downloadGitHubSkillDirectoryFromArchive(
-  githubUrl: GitHubBlobSkillUrl,
-  directoryPath: string,
-): Promise<DownloadedSkillFile[]> {
-  const archiveUrl = `https://codeload.github.com/${githubUrl.owner}/${githubUrl.repo}/tar.gz/${encodeURIComponent(
-    githubUrl.ref,
-  )}`;
-  const response = await fetchAllowedGitHub(archiveUrl, {
-    headers: {
-      'User-Agent': 'qwen-code',
-    },
-  });
-  if (!response.ok) {
-    throw RequestError.invalidParams(
-      undefined,
-      `Failed to download GitHub skill archive (${response.status})`,
-    );
-  }
-
-  // Reject oversized archives by declared Content-Length before buffering the
-  // whole body into memory, mirroring the guard in fetchBytes.
-  const contentLength = response.headers?.get('content-length');
-  if (contentLength) {
-    const declaredSize = Number.parseInt(contentLength, 10);
-    if (
-      Number.isFinite(declaredSize) &&
-      declaredSize > MAX_SKILL_DOWNLOAD_BYTES
-    ) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Skill archive exceeds the maximum allowed size',
-      );
-    }
-  }
-
-  return extractFilesFromTarGz(
-    await readBodyWithLimit(response, MAX_SKILL_DOWNLOAD_BYTES),
-    directoryPath,
-  );
-}
-
-async function fetchGitHubDirectoryItems(
-  githubUrl: GitHubBlobSkillUrl,
-  directoryPath: string,
-): Promise<unknown[]> {
-  const encodedPath = encodeGitHubPath(directoryPath);
-  const apiUrl = `https://api.github.com/repos/${githubUrl.owner}/${githubUrl.repo}/contents/${encodedPath}?ref=${encodeURIComponent(githubUrl.ref)}`;
-  const response = await fetchAllowedGitHub(apiUrl, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'qwen-code',
-    },
-  });
-  if (!response.ok) {
-    throw RequestError.invalidParams(
-      undefined,
-      `Failed to list GitHub skill files (${response.status})`,
-    );
-  }
-
-  const data = await response.json();
-  if (!Array.isArray(data)) {
-    throw RequestError.invalidParams(
-      undefined,
-      'GitHub skill URL must point to a directory-backed SKILL.md file',
-    );
-  }
-  return data;
-}
-
-async function downloadGitHubSkillDirectoryFromApi(
-  githubUrl: GitHubBlobSkillUrl,
-  directoryPath: string,
-  relativeRoot = '',
-  // Bound the recursive API walk so a crafted repo (deeply nested dirs, huge
-  // file counts, or large cumulative size) can't exhaust memory/time. The
-  // archive fallback already enforces size caps; this gives the API path
-  // equivalent guards.
-  depth = 0,
-  budget: { files: number; bytes: number } = { files: 0, bytes: 0 },
-): Promise<DownloadedSkillFile[]> {
-  if (depth > MAX_SKILL_API_DIR_DEPTH) {
-    throw RequestError.invalidParams(
-      undefined,
-      'Skill directory nesting exceeds the maximum allowed depth',
-    );
-  }
-  const items = await fetchGitHubDirectoryItems(githubUrl, directoryPath);
-  const files: DownloadedSkillFile[] = [];
-
-  for (const item of items) {
-    const record = toRecord(item);
-    const name = readRequiredString(record['name'], 'github.name');
-    const itemPath = readRequiredString(record['path'], 'github.path');
-    const type = readRequiredString(record['type'], 'github.type');
-    const relativePath = relativeRoot
-      ? path.posix.join(relativeRoot, name)
-      : name;
-
-    if (type === 'dir') {
-      files.push(
-        ...(await downloadGitHubSkillDirectoryFromApi(
-          githubUrl,
-          itemPath,
-          relativePath,
-          depth + 1,
-          budget,
-        )),
-      );
-      continue;
-    }
-
-    if (type !== 'file') continue;
-    budget.files += 1;
-    if (budget.files > MAX_SKILL_API_FILE_COUNT) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Skill directory contains too many files',
-      );
-    }
-    const downloadUrl = readRequiredString(
-      record['download_url'],
-      'github.download_url',
-    );
-    // SSRF defense: the API-provided download_url is attacker-influenced, so
-    // run it through the same host allowlist + HTTPS check as the initial URL.
-    assertAllowedSkillSourceUrl(downloadUrl);
-    const content = await fetchBytes(downloadUrl);
-    budget.bytes += content.length;
-    if (budget.bytes > MAX_SKILL_DECOMPRESSED_BYTES) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Skill directory exceeds the maximum allowed size',
-      );
-    }
-    files.push({
-      relativePath,
-      content,
-    });
-  }
-
-  return files;
-}
-
-async function downloadGitHubSkillDirectory(
-  githubUrl: GitHubBlobSkillUrl,
-  directoryPath: string,
-): Promise<DownloadedSkillFile[]> {
-  const apiFiles = await downloadGitHubSkillDirectoryFromApi(
-    githubUrl,
-    directoryPath,
-  ).catch((error) => {
-    debugLogger.warn(
-      'GitHub API directory listing failed, falling back to archive download:',
-      error,
-    );
-    return null;
-  });
-  if (apiFiles) return apiFiles;
-
-  return downloadGitHubSkillDirectoryFromArchive(githubUrl, directoryPath);
-}
-
-async function downloadSkill(sourceUrl: string): Promise<DownloadedSkill> {
-  assertAllowedSkillSourceUrl(sourceUrl);
-  const githubUrl = parseGitHubBlobSkillUrl(sourceUrl);
-  if (!githubUrl || path.posix.basename(githubUrl.filePath) !== 'SKILL.md') {
-    return downloadSingleSkillFile(sourceUrl);
-  }
-
-  const skillDirectory = path.posix.dirname(githubUrl.filePath);
-  const files = await downloadGitHubSkillDirectory(githubUrl, skillDirectory);
-  const skillFile = files.find((file) => file.relativePath === 'SKILL.md');
-  if (!skillFile) {
-    throw RequestError.invalidParams(
-      undefined,
-      'GitHub skill directory does not contain SKILL.md',
-    );
-  }
-
-  return {
-    skillContent: Buffer.from(skillFile.content).toString('utf8'),
-    files,
-  };
-}
-
-function resolveSkillInstallPath(
-  skillDir: string,
-  relativePath: string,
-): string {
-  const root = path.resolve(skillDir);
-  const target = path.resolve(skillDir, relativePath);
-  if (target !== root && !target.startsWith(root + path.sep)) {
-    throw RequestError.invalidParams(
-      undefined,
-      `Invalid skill file path: ${relativePath}`,
-    );
-  }
-  return target;
-}
-
-// Builds the per-skill directory and asserts (defense-in-depth, on top of
-// validateSkillSlug) that it stays strictly under the managed skills root, so a
-// crafted slug can never make install/delete operate on `<globalQwenDir>` itself.
-function resolveManagedSkillDir(skillsBaseDir: string, slug: string): string {
-  const root = path.resolve(skillsBaseDir);
-  const skillDir = path.resolve(skillsBaseDir, slug);
-  if (!skillDir.startsWith(root + path.sep)) {
-    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
-  }
-  return skillDir;
 }
 
 function readStringArray(value: unknown, fieldName: string): string[] {
@@ -2564,6 +1862,46 @@ function readCoreSettingValues(
   return values;
 }
 
+/**
+ * Folds a raw `tools.approvalMode` settings value into the mode
+ * unrestricted live sessions must converge on. Parseable values are
+ * normalized exactly the way boot accepts them (parseApprovalModeValue
+ * trims, lowercases, and maps the legacy `auto_edit`/`autoedit` aliases), so
+ * reload convergence agrees with the settings file for every boot-accepted
+ * spelling. A MISSING or falsy key folds to AUTO — the same default
+ * loadCliConfig derives in either case — so a key deletion reaches live
+ * sessions on reload instead of pinning a stale privileged mode until daemon
+ * restart.
+ * A PRESENT but unparseable value returns undefined: boot rejects that file
+ * outright (loadCliConfig has no catch around parseApprovalModeValue), so
+ * folding it to AUTO would silently escalate the approval gate for every
+ * live session; the reload loop keeps sessions on their current modes until
+ * the file is corrected. Restricted (safe/bare) sessions ignore the file at
+ * boot entirely; the reload loop converges them on DEFAULT separately.
+ */
+function foldReloadApprovalMode(raw: unknown): ApprovalMode | undefined {
+  if (!raw) {
+    return ApprovalMode.AUTO;
+  }
+  if (typeof raw === 'string') {
+    try {
+      return parseApprovalModeValue(raw);
+    } catch {
+      // Present but unparseable: boot would reject the file (see above).
+    }
+  }
+  return undefined;
+}
+
+/**
+ * True when a session's config derives from a restricted mode: safe/bare
+ * sessions ignore `tools.approvalMode` at boot (loadCliConfig pins them to
+ * DEFAULT), so reload must never converge them on a file-derived mode.
+ */
+function isRestrictedApprovalModeConfig(config: Config): boolean {
+  return config.isSafeMode?.() === true || config.getBareMode?.() === true;
+}
+
 export function normalizeCoreSettingValue(
   key: QwenCoreSettingKey,
   value: unknown,
@@ -2683,6 +2021,19 @@ function normalizeMcpServerConfig(value: unknown): QwenMcpServerConfig {
   if (typeof cwd === 'string' && cwd.trim()) server.cwd = cwd.trim();
   const timeout = normalizeOptionalNumber(input['timeout']);
   if (timeout !== undefined) server.timeout = timeout;
+  const versionNegotiation = toMcpVersionNegotiation(
+    input['versionNegotiation'],
+  );
+  if (
+    input['versionNegotiation'] !== undefined &&
+    versionNegotiation === undefined
+  ) {
+    throw RequestError.invalidParams(
+      undefined,
+      'MCP versionNegotiation must be auto or legacy',
+    );
+  }
+  server.versionNegotiation = versionNegotiation;
   if (typeof input['trust'] === 'boolean') server.trust = input['trust'];
   server.includeTools = normalizeStringArray(input['includeTools']);
   server.excludeTools = normalizeStringArray(input['excludeTools']);
@@ -2721,6 +2072,7 @@ function toStoredMcpServerConfig(
   const result: Record<string, unknown> = {};
   for (const key of [
     'timeout',
+    'versionNegotiation',
     'trust',
     'description',
     'includeTools',
@@ -2751,6 +2103,7 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       httpUrl: server['httpUrl'],
       headers: normalizeStringRecord(server['headers']),
       timeout: normalizeOptionalNumber(server['timeout']),
+      versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -2770,6 +2123,7 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       url: server['url'],
       headers: normalizeStringRecord(server['headers']),
       timeout: normalizeOptionalNumber(server['timeout']),
+      versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -2791,6 +2145,7 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       cwd: typeof server['cwd'] === 'string' ? server['cwd'] : undefined,
       env: normalizeStringRecord(server['env']),
       timeout: normalizeOptionalNumber(server['timeout']),
+      versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -2805,6 +2160,12 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
     };
   }
   return undefined;
+}
+
+function toMcpVersionNegotiation(
+  value: unknown,
+): 'auto' | 'legacy' | undefined {
+  return value === 'auto' || value === 'legacy' ? value : undefined;
 }
 
 function redactSecretRecord(
@@ -3054,7 +2415,7 @@ async function resolvePreferredMemoryFile(
   dir: string,
   fallbackFilename: string,
 ): Promise<string> {
-  for (const filename of getAllGeminiMdFilenames()) {
+  for (const filename of getAllMemoryFilenames()) {
     const filePath = path.join(dir, filename);
     try {
       await fs.access(filePath);
@@ -3071,7 +2432,7 @@ async function resolveQwenMemoryPaths(params: {
   cwd: string;
   projectRoot: string;
 }): Promise<QwenMemoryPaths> {
-  const fallbackFilename = getAllGeminiMdFilenames()[0] ?? 'QWEN.md';
+  const fallbackFilename = getAllMemoryFilenames()[0] ?? 'QWEN.md';
   const userMemoryFile = await resolvePreferredMemoryFile(
     Storage.getGlobalQwenDir(),
     fallbackFilename,
@@ -3358,17 +2719,24 @@ export async function runAcpAgent(
   argv: CliArgs,
   options?: {
     privateParentCapability?: string;
+    conversationsRuntimeProvenance?: boolean;
     externalToolGuardRequired?: boolean;
     externalToolGuardProviderAttached?: boolean;
   },
 ) {
+  // Conversations-runtime provenance, accepted by the CLI entry point only in
+  // ACP mode with the private parent capability present. Frozen for the
+  // process lifetime alongside the writer-lease snapshot.
+  const conversationsRuntimeProvenance =
+    options?.conversationsRuntimeProvenance === true;
   // Freeze the restart-required writer protocol before the first await.
   // Per-request settings reloads must not mix leased and legacy writers
   // within one ACP process lifetime.
   const sessionWriterLeaseEnabledAtStartup =
-    typeof config.isSessionWriterLeaseEnabled === 'function'
+    conversationsRuntimeProvenance ||
+    (typeof config.isSessionWriterLeaseEnabled === 'function'
       ? config.isSessionWriterLeaseEnabled()
-      : settings.merged.experimental?.sessionWriterLease === true;
+      : settings.merged.experimental?.sessionWriterLease === true);
   const privateParentCapability =
     options === undefined
       ? process.env[PRIVATE_ACP_CAPABILITY_ENV]
@@ -3401,7 +2769,7 @@ export async function runAcpAgent(
   beginAcpBootstrapConfigProfiling();
   try {
     await config.initialize({
-      skipGeminiInitialization: true,
+      skipLlmInitialization: true,
       // Bootstrap skips MCP discovery — each session runs its own
       // pool-routed discovery, so bootstrap-level spawns would be
       // redundant subprocess leaks (W119).
@@ -3413,7 +2781,7 @@ export async function runAcpAgent(
   } finally {
     endAcpBootstrapConfigProfiling();
   }
-  // The ACP path exits gemini.tsx before its startup-warning printing runs,
+  // The ACP path exits llm.tsx before its startup-warning printing runs,
   // so config warnings (including initialize-time ones like the WebSearch
   // enablement notice) would otherwise vanish. stderr lands in the client's
   // logs without interfering with the ACP protocol on stdout.
@@ -3523,10 +2891,17 @@ export async function runAcpAgent(
         sessionWriterLeaseEnabledAtStartup,
         managedToolInvocationGuard,
         externalToolGuardProviderAttached,
+        conversationsRuntimeProvenance,
       );
       return agentInstance;
     }, stream);
     markAcpStartup('transportSetupEnd');
+    // Read at call time rather than captured: the connection sets
+    // `agentInstance` when it builds the agent, and this runs first. The
+    // inbox is bound by the first hosted session, but it has to be closed
+    // on every path out — including a bare signal, which reaches neither
+    // `disposeSessions` nor `finishManagedShutdown`.
+    registerCleanup(() => agentInstance?.closePeerMessaging());
   } catch (err) {
     eventLoopMonitor.dispose();
     throw err;
@@ -3932,23 +3307,231 @@ interface ActivePromptCall {
 }
 
 function isOwnerOnlyDirectory(stats: Stats): boolean {
-  if (process.platform === 'win32') return false;
   if (stats.isSymbolicLink() || !stats.isDirectory()) return false;
+  if (process.platform === 'win32') {
+    // Node's fs.Stats exposes no ownership or permission bits on Windows, so
+    // the POSIX mode/uid check has no equivalent here. Containment then rests
+    // on the structural checks around this predicate — symlink rejection and
+    // dev/ino identity across the realpath round trip — the same trade-off
+    // serve/live/discovery.ts already makes on this platform.
+    return true;
+  }
   if (typeof process.getuid === 'function' && stats.uid !== process.getuid()) {
     return false;
   }
   return (stats.mode & 0o077) === 0;
 }
 
+/**
+ * Deliberately local, NOT the module's `hasRootIdentity`: the wire
+ * expectation payload `{ device, inode }` carries no `inodeVerifiable`
+ * field, so verifiability must keep being derived from `inode !== 0` here
+ * (the parser admits only safe integers >= 0, so the two derivations
+ * coincide). The comparison itself must stay in lockstep with
+ * `hasRootIdentity` in utils/conversation-directory-identity.ts.
+ */
+function hasExpectedManagedDirectoryIdentity(
+  stats: Stats,
+  expected: { device: number; inode: number },
+): boolean {
+  const inodeVerifiable = hasVerifiableInode(stats.ino);
+  return (
+    stats.dev === expected.device &&
+    inodeVerifiable === (expected.inode !== 0) &&
+    (!inodeVerifiable || stats.ino === expected.inode)
+  );
+}
+
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return (
+    actual.length === expected.length &&
+    actual.every((key, index) => key === expected[index])
+  );
+}
+
+function isManagedConversationPath(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    !value.includes('\0') &&
+    path.isAbsolute(value)
+  );
+}
+
+function isManagedConversationIdentityNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function parseConversationDirectoryExpectation(
+  value: unknown,
+): BridgeConversationDirectoryExpectation | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !isObjectRecord(value) ||
+    !hasOnlyKeys(value, ['canonicalSessionId', 'root', 'child'])
+  ) {
+    throw RequestError.invalidParams(
+      undefined,
+      'Invalid managed conversation directory expectation',
+    );
+  }
+  const canonicalSessionId = value['canonicalSessionId'];
+  const root = value['root'];
+  const child = value['child'];
+  const parsedSessionId = parseCallerSuppliedSessionId(canonicalSessionId);
+  if (
+    parsedSessionId.kind !== 'valid' ||
+    parsedSessionId.sessionId !== canonicalSessionId ||
+    !isObjectRecord(root) ||
+    !hasOnlyKeys(root, ['canonicalPath', 'device', 'inode']) ||
+    !isManagedConversationPath(root['canonicalPath']) ||
+    !isManagedConversationIdentityNumber(root['device']) ||
+    !isManagedConversationIdentityNumber(root['inode']) ||
+    !isObjectRecord(child) ||
+    !hasOnlyKeys(child, ['name', 'canonicalPath', 'device', 'inode']) ||
+    typeof child['name'] !== 'string' ||
+    child['name'] !== getConversationDirectoryName(canonicalSessionId) ||
+    !isManagedConversationPath(child['canonicalPath']) ||
+    !isManagedConversationIdentityNumber(child['device']) ||
+    !isManagedConversationIdentityNumber(child['inode']) ||
+    !isSameConversationPath(
+      path.dirname(child['canonicalPath']),
+      root['canonicalPath'],
+    ) ||
+    path.basename(child['canonicalPath']) !== child['name']
+  ) {
+    throw RequestError.invalidParams(
+      undefined,
+      'Invalid managed conversation directory expectation',
+    );
+  }
+  return {
+    canonicalSessionId,
+    root: {
+      canonicalPath: root['canonicalPath'],
+      device: root['device'],
+      inode: root['inode'],
+    },
+    child: {
+      name: child['name'],
+      canonicalPath: child['canonicalPath'],
+      device: child['device'],
+      inode: child['inode'],
+    },
+  };
+}
+
+function managedConversationDirectoryError(missing: boolean): RequestError {
+  return new RequestError(
+    -32004,
+    missing
+      ? 'The standalone working directory is missing.'
+      : 'The standalone working directory identity is compromised.',
+    {
+      errorKind: missing
+        ? 'working_directory_missing'
+        : 'working_directory_compromised',
+    },
+  );
+}
+
+async function assertManagedConversationDirectoryIdentity(
+  expectation: BridgeConversationDirectoryExpectation,
+): Promise<void> {
+  let rootBefore: Stats;
+  let canonicalRoot: string;
+  let rootAfter: Stats;
+  try {
+    rootBefore = await fs.lstat(expectation.root.canonicalPath);
+    canonicalRoot = await fs.realpath(expectation.root.canonicalPath);
+    rootAfter = await fs.lstat(canonicalRoot);
+  } catch (error) {
+    throw managedConversationDirectoryError(
+      (error as NodeJS.ErrnoException).code === 'ENOENT',
+    );
+  }
+  if (
+    !isOwnerOnlyDirectory(rootBefore) ||
+    !isOwnerOnlyDirectory(rootAfter) ||
+    !isSameConversationPath(canonicalRoot, expectation.root.canonicalPath) ||
+    !hasExpectedManagedDirectoryIdentity(rootBefore, expectation.root) ||
+    !hasExpectedManagedDirectoryIdentity(rootAfter, expectation.root)
+  ) {
+    throw managedConversationDirectoryError(false);
+  }
+
+  let childBefore: Stats;
+  let canonicalChild: string;
+  let childAfter: Stats;
+  try {
+    childBefore = await fs.lstat(expectation.child.canonicalPath);
+    canonicalChild = await fs.realpath(expectation.child.canonicalPath);
+    childAfter = await fs.lstat(canonicalChild);
+  } catch (error) {
+    throw managedConversationDirectoryError(
+      (error as NodeJS.ErrnoException).code === 'ENOENT',
+    );
+  }
+  if (
+    !isOwnerOnlyDirectory(childBefore) ||
+    !isOwnerOnlyDirectory(childAfter) ||
+    !isSameConversationPath(canonicalChild, expectation.child.canonicalPath) ||
+    !hasExpectedManagedDirectoryIdentity(childBefore, expectation.child) ||
+    !hasExpectedManagedDirectoryIdentity(childAfter, expectation.child)
+  ) {
+    throw managedConversationDirectoryError(false);
+  }
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
+  /**
+   * Cross-session messaging for every session this process hosts.
+   *
+   * One inbox, not one per session: the address is a socket, the sessions
+   * are told apart by the `toSessionId` every sender pins on its frame,
+   * and binding a socket per session would multiply file descriptors by
+   * the session count for no added reach.
+   *
+   * Outbound only for now. Inbound is refused rather than held, because a
+   * hold is a question put to a person and nobody is watching a hold list
+   * on a daemon-managed session's behalf; a sender is told so at once
+   * instead of waiting out an expiry.
+   */
+  private peerMessagingStart: Promise<PeerMessaging | null> | null = null;
+  // Set by closePeerMessaging: a retry must not resurrect an inbox after
+  // teardown ran.
+  private peerMessagingClosed = false;
+  /**
+   * Sessions already given a record. A session is published once, but a
+   * reload can hand the same id back through the same path, and two
+   * records for one session would be two names for it in every listing.
+   */
+  private readonly registeredSessions = new Set<string>();
+  private inboxAddress: { ipcPath: string; ipcToken: string } | null = null;
+  private modelProviderReloadRevision = 0;
   private readonly historyMutationTails = new Map<string, Promise<void>>();
   private readonly startingSessionIds = new Set<string>();
+  /**
+   * R7-10: workflow registries of sessions already removed from
+   * `this.sessions` whose runs have not finished settling. Consulted by
+   * `isWorkflowRunLiveOutsideSession` so a delete-history cannot delete
+   * an orphaned live run out from under itself. Pruned as they drain.
+   */
+  private readonly detachedWorkflowRegistries = new Set<WorkflowRunRegistry>();
   private activePromptCalls = new Map<string, Set<ActivePromptCall>>();
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
   private workspaceMcpDiscoveryError: string | undefined;
-  private workspaceExtensionStatusRefreshPromise: Promise<void> | undefined;
+  private readonly workspaceExtensionStatusRefreshes = new Map<
+    boolean,
+    Promise<void>
+  >();
   private readonly pendingMcpAuthentications = new Map<
     string,
     PendingMcpAuthentication
@@ -3971,6 +3554,29 @@ class QwenAgent implements Agent {
   >();
   private readonly pendingConfigCleanup = new Map<string, Set<Config>>();
   private readonly initializingConfigs = new Set<Config>();
+  private sessionWorkflowEnabledOverride: boolean | undefined;
+  /**
+   * The last file-derived approval mode each live session actually
+   * converged on, seeded with the session's boot-derived mode at
+   * publication. `workspaceReload` compares the reloaded disk value against
+   * this — not against each session's live mode — because approval mode has
+   * runtime-only writers (`ExitPlanModeTool` approved plan exits, ACP
+   * `session/set_mode`, the `sessionApprovalMode` ext) that never persist,
+   * so a live session legitimately diverges from the file mid-workflow and
+   * an unchanged file must not clobber those transitions. The record lives
+   * on the daemon so it survives a `this.settings` cache swap, and per
+   * session because one daemon-wide baseline cannot represent a partially
+   * applied convergence: while a session skipped mid-flip still waits for
+   * its value, the file can round-trip back to the old baseline and strand
+   * the already-flipped sessions on the intermediate mode. An entry advances
+   * only when that session successfully converges, so skipped sessions and
+   * failed applies retry on the next reload, and an unparseable file value
+   * (undefined fold) is never recorded.
+   */
+  private readonly sessionApprovalModeConverged = new Map<
+    string,
+    ApprovalMode
+  >();
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
   /** Set once the daemon negotiates active-work reporting; one per channel. */
@@ -4172,6 +3778,10 @@ class QwenAgent implements Agent {
 
   async finishManagedShutdown(configs: Config[]): Promise<void> {
     const failures: unknown[] = [];
+    // Ahead of the session teardown below: the expiry receipts an inbox
+    // owes its senders travel over the socket, and its own record clear
+    // is a patch the records must still be there for.
+    await this.closePeerMessaging();
     for (const [sessionId, session] of [...this.sessions]) {
       await this.removeStoredSessionEntry(sessionId, session, failures, {
         shutdownConfig: false,
@@ -4207,20 +3817,28 @@ class QwenAgent implements Agent {
     return this.workspaceMcpDiscoveryConfig ?? this.config;
   }
 
-  private refreshBootstrapExtensionStatus(): Promise<void> {
-    if (this.workspaceExtensionStatusRefreshPromise) {
-      return this.workspaceExtensionStatusRefreshPromise;
-    }
+  private refreshBootstrapExtensionStatus(skillsOnly = false): Promise<void> {
+    const inFlight = this.workspaceExtensionStatusRefreshes.get(skillsOnly);
+    if (inFlight) return inFlight;
 
     const promise = (async () => {
       const errors: unknown[] = [];
+      if (skillsOnly) {
+        try {
+          this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+        } catch (error) {
+          errors.push(error);
+        }
+      }
       try {
         await this.config.getExtensionManager().refreshCache();
       } catch (error) {
         errors.push(error);
       }
       try {
-        await this.config.getSkillManager()?.refreshCache();
+        await this.config
+          .getSkillManager()
+          ?.refreshCache(skillsOnly ? { throwOnError: true } : undefined);
       } catch (error) {
         errors.push(error);
       }
@@ -4232,10 +3850,10 @@ class QwenAgent implements Agent {
         );
       }
     })();
-    this.workspaceExtensionStatusRefreshPromise = promise;
+    this.workspaceExtensionStatusRefreshes.set(skillsOnly, promise);
     const clear = () => {
-      if (this.workspaceExtensionStatusRefreshPromise === promise) {
-        this.workspaceExtensionStatusRefreshPromise = undefined;
+      if (this.workspaceExtensionStatusRefreshes.get(skillsOnly) === promise) {
+        this.workspaceExtensionStatusRefreshes.delete(skillsOnly);
       }
     };
     void promise.then(clear, clear);
@@ -4262,9 +3880,9 @@ class QwenAgent implements Agent {
         const registry = config.getToolRegistry();
         if (operation === 'discover') {
           await registry?.discoverToolsForServer(serverName);
-          const geminiClient = config.getGeminiClient?.();
-          if (geminiClient?.isInitialized?.()) {
-            await geminiClient.setTools?.();
+          const llmClient = config.getLlmClient?.();
+          if (llmClient?.isInitialized?.()) {
+            await llmClient.setTools?.();
           }
         } else if (operation === 'disable') {
           await registry?.disableMcpServer(serverName);
@@ -4329,55 +3947,62 @@ class QwenAgent implements Agent {
     settings: LoadedSettings,
   ): Promise<void> {
     if (this.workspaceMcpDiscoveryConfig) return;
-    const cwd = this.config.getTargetDir();
-    const config = await this.runWithPinnedRuntimeBaseDir(settings, cwd, () =>
-      loadCliConfig(
-        settings.merged,
-        {
-          ...this.argv,
-          sessionId: 'workspace-mcp-discovery',
-          resume: undefined,
-          continue: false,
-          chatRecording: false,
-        },
-        cwd,
-        undefined,
-        {
-          userHooks: settings.getUserHooks(),
-          projectHooks: settings.getProjectHooks(),
-        },
-        buildDisabledSkillNamesProvider(settings),
-      ),
-    );
-    config.setMcpTransportPool(this.mcpPool);
-    try {
-      await config.initialize({
-        skipGeminiInitialization: true,
-        skipFileCheckpointing: true,
-        skipHooks: true,
-        skipSkillManager: true,
-        skipMcpDiscovery: true,
-        lenientToolWarmup: true,
-      });
-      const manager = config.getToolRegistry()?.getMcpClientManager();
-      if (!manager) {
-        throw new Error('MCP client manager is unavailable');
-      }
-      await manager.discoverAllMcpToolsIncremental(config);
-      if (manager.getDiscoveryState() === MCPDiscoveryState.NOT_STARTED) {
-        throw new Error(
-          'MCP discovery did not start. The workspace may not be trusted.',
-        );
-      }
-      this.workspaceMcpDiscoveryConfig = config;
-    } catch (error) {
+    return sessionIdContext.run('workspace-mcp-discovery', async () => {
+      const cwd = this.config.getTargetDir();
+      const config = await this.runWithPinnedRuntimeBaseDir(settings, cwd, () =>
+        loadCliConfig(
+          settings.merged,
+          {
+            ...this.argv,
+            sessionId: 'workspace-mcp-discovery',
+            resume: undefined,
+            continue: false,
+            chatRecording: false,
+          },
+          cwd,
+          undefined,
+          {
+            userHooks: settings.getUserHooks(),
+            projectHooks: settings.getProjectHooks(),
+          },
+          buildDisabledSkillNamesProvider(settings),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          buildEnabledSkillNamesProvider(settings),
+        ),
+      );
+      config.setMcpTransportPool(this.mcpPool);
       try {
-        await config.getToolRegistry()?.stop();
-      } catch {
-        // Preserve the initialization failure that made this config unusable.
+        await config.initialize({
+          skipLlmInitialization: true,
+          skipFileCheckpointing: true,
+          skipHooks: true,
+          skipSkillManager: true,
+          skipMcpDiscovery: true,
+          lenientToolWarmup: true,
+        });
+        const manager = config.getToolRegistry()?.getMcpClientManager();
+        if (!manager) {
+          throw new Error('MCP client manager is unavailable');
+        }
+        await manager.discoverAllMcpToolsIncremental(config);
+        if (manager.getDiscoveryState() === MCPDiscoveryState.NOT_STARTED) {
+          throw new Error(
+            'MCP discovery did not start. The workspace may not be trusted.',
+          );
+        }
+        this.workspaceMcpDiscoveryConfig = config;
+      } catch (error) {
+        try {
+          await config.getToolRegistry()?.stop();
+        } catch {
+          // Preserve the initialization failure that made this config unusable.
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   }
 
   private initializeWorkspaceMcpDiscovery(): { accepted: boolean } {
@@ -4443,6 +4068,10 @@ class QwenAgent implements Agent {
           config.setAllowedMcpServers(gating.allowed);
           config.setPendingMcpServers(gating.pending);
           await config.reinitializeMcpServers(mcpServers);
+          const llmClient = config.getLlmClient?.();
+          if (llmClient?.isInitialized?.()) {
+            await llmClient.setTools?.();
+          }
         } catch (error) {
           syncErrors.push(error);
         }
@@ -4503,9 +4132,9 @@ class QwenAgent implements Agent {
           }
           await Promise.all(
             this.getLiveMcpConfigs(serverName).map(async (config) => {
-              const geminiClient = config.getGeminiClient?.();
-              if (geminiClient?.isInitialized?.()) {
-                await geminiClient.setTools?.();
+              const llmClient = config.getLlmClient?.();
+              if (llmClient?.isInitialized?.()) {
+                await llmClient.setTools?.();
               }
             }),
           );
@@ -4565,6 +4194,15 @@ class QwenAgent implements Agent {
     } catch (error) {
       cleanupErrors.push(error);
     }
+    // Before the Config shuts down, which does not touch the registry:
+    // a record left behind advertises a session that is gone, and peers
+    // would keep addressing it until this process exits.
+    this.registeredSessions.delete(sessionId);
+    try {
+      await session.getConfig().unregisterSessionRegistry();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
     if (options.shutdownConfig !== false) {
       try {
         await session.getConfig().shutdown({ shutdownTelemetry: false });
@@ -4583,6 +4221,26 @@ class QwenAgent implements Agent {
       cleanupErrors.push(error);
     }
     this.sessions.delete(sessionId);
+    this.sessionApprovalModeConverged.delete(sessionId);
+    // R7-10: the registry outlives the session map entry while its runs
+    // settle. Keep it reachable so the liveness gate still sees them.
+    // Retention is bookkeeping, not cleanup: a Config that cannot answer
+    // must not turn a successful close into a shutdown failure.
+    try {
+      // Prune here as well as on the delete-history path: a daemon that
+      // closes sessions mid-run but never deletes history would otherwise
+      // retain every one of their registries for its whole lifetime.
+      this.pruneDrainedWorkflowRegistries();
+      const registry = session.getConfig().getWorkflowRunRegistry?.();
+      if (registry && QwenAgent.isWorkflowRegistryDraining(registry)) {
+        this.detachedWorkflowRegistries.add(registry);
+      }
+    } catch (error) {
+      debugLogger.warn(
+        `Session ${sessionId}: could not retain its workflow registry for liveness checks:`,
+        error,
+      );
+    }
     // A Session missing from the next snapshot is how the daemon learns the
     // child released it — including when it never saw our close response.
     this.activeWorkReporter?.notifyChanged();
@@ -4902,6 +4560,156 @@ class QwenAgent implements Agent {
     await this.closeStoredSession(sessionId, opts);
   }
 
+  /**
+   * Bind the one inbox every session this process hosts shares.
+   *
+   * Not awaited: binding a socket must not delay the first prompt, and a
+   * session published before it resolves still registers — the address
+   * is patched into every record when it arrives (`publishInboxAddress`).
+   */
+  private startPeerMessaging(): void {
+    if (this.peerMessagingStart) return;
+    // A closed inbox stays closed: teardown runs on every exit path, and
+    // a session registered after it must not resurrect the socket.
+    if (this.peerMessagingClosed) return;
+    // Imported statically on purpose. The transport's own imports are all
+    // inside this file's existing static closure, so lazy-loading it buys
+    // nothing — and a dynamic import of the core barrel turns it into a
+    // code-splitting entry, which re-partitions the shared chunks and can
+    // land modules the ACP fast path must not load (iconv-lite's tables)
+    // in a chunk this file then imports statically.
+    this.peerMessagingStart = (async () => {
+      try {
+        const messaging = await PeerMessaging.start({
+          // Inbound is refused outright, so neither the approval mode nor
+          // the parity rule it feeds is ever consulted. Stated rather than
+          // left to a default: what a daemon-managed session may be told
+          // is settled here and nowhere else.
+          getApprovalMode: () => null,
+          getPolicySetting: () => 'refuse',
+          updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
+            this.publishInboxAddress(ipcPath, ipcToken),
+          ownsSessionId: (id) => {
+            // The map key froze when the session was published, while
+            // the record a sender reads follows the Config's live id —
+            // /clear swaps the id under a running session. Test both, so
+            // a frame pinned to either spelling is answered by the
+            // session that holds it.
+            const wanted = normalizeSessionIdForLookup(id);
+            return (
+              this.sessions.has(wanted) ||
+              [...this.sessions.values()].some(
+                (session) =>
+                  normalizeSessionIdForLookup(
+                    session.getConfig().getSessionId(),
+                  ) === wanted,
+              )
+            );
+          },
+        });
+        // A bind that could not start is not "started": the next hosted
+        // session retries rather than the process staying dark until exit.
+        if (messaging === null) this.peerMessagingStart = null;
+        return messaging;
+      } catch (error) {
+        debugLogger.error(
+          '[ACP] cross-session messaging failed to start:',
+          error,
+        );
+        this.peerMessagingStart = null;
+        return null;
+      }
+    })();
+  }
+
+  /** Close the inbox and stop advertising it. Safe to call more than once. */
+  async closePeerMessaging(): Promise<void> {
+    this.peerMessagingClosed = true;
+    const pending = this.peerMessagingStart;
+    if (!pending) return;
+    this.peerMessagingStart = null;
+    try {
+      await (await pending)?.close();
+    } catch (error) {
+      debugLogger.debug(
+        `[ACP] closing cross-session messaging failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    this.inboxAddress = null;
+  }
+
+  /**
+   * Give a newly published session a registry record of its own.
+   *
+   * Only when that session's own settings turn messaging on. A record
+   * with no inbox behind it would put a name in every peer's listing
+   * that can be addressed and never answered, which is worse than not
+   * appearing at all — the interactive UI registers unconditionally
+   * because its record also answers "what is running right now", a
+   * question nobody asks of a session a daemon is driving.
+   */
+  private registerHostedSession(
+    sessionId: string,
+    config: Config,
+    settings: LoadedSettings,
+  ): void {
+    // Each session's own settings decide: one process can host sessions
+    // from more than one workspace, and a record exists to be addressed,
+    // so it is written only when that session's settings turn messaging
+    // on. The process's startup settings answer for nobody else.
+    if (settings.merged.agents?.crossSessionMessaging !== true) return;
+    // Bound by the first session that needs it rather than at startup: an
+    // ACP process with no session has nothing to advertise and nobody to
+    // receive for, and this is also the first moment the agent exists.
+    this.startPeerMessaging();
+    if (this.registeredSessions.has(sessionId)) return;
+    this.registeredSessions.add(sessionId);
+    config.trackSessionRegistration(
+      registerSession({
+        sessionId,
+        cwd: config.getTargetDir(),
+        qwenVersion: config.getCliVersion() ?? null,
+        // What spawned this process, as far as it can tell: the daemon
+        // marks the children it starts, and anything else running
+        // `qwen --acp` is a client driving it directly.
+        kind: process.env[QWEN_CODE_SERVE_ENV] === '1' ? 'serve' : 'headless',
+        // One record per session rather than one per process: they have
+        // separate ids, names and working directories.
+        slot: 'own',
+      }),
+    );
+    if (this.inboxAddress) {
+      void config.updateSessionRegistryIpcPath(
+        this.inboxAddress.ipcPath,
+        this.inboxAddress.ipcToken,
+      );
+    }
+  }
+
+  /**
+   * Write the inbox address into every hosted session's record.
+   *
+   * They share one address, so this runs once per bind rather than once
+   * per session, and again with `undefined` at close so no record
+   * advertises a socket that is gone.
+   */
+  private async publishInboxAddress(
+    ipcPath: string | undefined,
+    ipcToken?: string,
+  ): Promise<void> {
+    this.inboxAddress =
+      ipcPath !== undefined && ipcToken !== undefined
+        ? { ipcPath, ipcToken }
+        : null;
+    await Promise.allSettled(
+      [...this.sessions.values()].map((session) =>
+        session.getConfig().updateSessionRegistryIpcPath(ipcPath, ipcToken),
+      ),
+    );
+  }
+
   async disposeSessions(): Promise<void> {
     this.activeWorkReporter?.dispose();
     this.activeWorkReporter = undefined;
@@ -4913,6 +4721,12 @@ class QwenAgent implements Agent {
       controller.abort();
     }
     this.workspaceGenerationControllers.clear();
+    // After the aborts, so a slow inbox drain cannot keep a running turn
+    // executing tools after the client is gone; ahead of the record
+    // teardown below, because the close's address clear is a patch the
+    // records must still be there for (the ordering
+    // finishManagedShutdown states).
+    await this.closePeerMessaging();
     await Promise.allSettled(
       [...this.sessions.entries()].map(([sessionId, session]) =>
         this.discardStoredSessionIfCurrent(sessionId, session, {
@@ -4937,6 +4751,7 @@ class QwenAgent implements Agent {
     private readonly sessionWriterLeaseEnabledAtStartup = false,
     private readonly managedToolInvocationGuard?: ToolInvocationGuard,
     private readonly externalToolGuardProviderAttached = false,
+    private readonly conversationsRuntimeProvenance = false,
   ) {
     // Pool kill switch via env var so operators can A/B compare or
     // roll back without rebuilding. `run-qwen-serve.ts` sets this when
@@ -4971,12 +4786,75 @@ class QwenAgent implements Agent {
     }
   }
 
+  /**
+   * Single choke point for pinning the runtime root of an operation to a
+   * settings object and a cwd. Every caller in this class goes through here
+   * rather than calling `runWithAcpRuntimeOutputDir` directly, so the routing
+   * is composed in exactly one place. Which settings to pin with is still the
+   * caller's decision at this level: callers that already hold deliberately
+   * scoped settings (workspace MCP discovery, live-session scope checks,
+   * session creation) pass them in. Per-request session-management handlers
+   * (list, delete, rename, transcript page, transcript turn index, settled
+   * turn status, and the non-live branch of loadUpdates) must not make that
+   * decision themselves — they use `runWithPinnedRuntimeBaseDirForRequest`
+   * below. Session load and
+   * resume resolve the request's settings at the call site deliberately,
+   * under profiler instrumentation, because they adopt those settings for
+   * the session afterwards.
+   */
   private runWithPinnedRuntimeBaseDir<T>(
     settings: LoadedSettings,
     cwd: string,
     operation: () => T,
   ): T {
     return runWithAcpRuntimeOutputDir(settings, cwd, operation);
+  }
+
+  /**
+   * Per-request form of `runWithPinnedRuntimeBaseDir` for handlers that act
+   * on a caller-supplied cwd. It resolves the settings for THAT cwd itself,
+   * so the "which settings pin this operation" decision is made here, once,
+   * and a handler cannot reach the pin with the process-wide `this.settings`
+   * cache — the bug class fixed in #10095 (three handlers composed the
+   * routing by hand and pinned another workspace's runtime root). The
+   * operation receives the resolved settings for handlers that also need
+   * them inside the pinned scope.
+   */
+  private runWithPinnedRuntimeBaseDirForRequest<T>(
+    cwd: string,
+    operation: (settings: LoadedSettings) => T,
+  ): T {
+    const settings = loadSettingsCached(cwd);
+    return this.runWithPinnedRuntimeBaseDir(settings, cwd, () =>
+      operation(settings),
+    );
+  }
+
+  /**
+   * Whether an ungated restore replay (qwen/session/loadUpdates) may
+   * finalize dangling tool calls. A session with an active turn — a client
+   * prompt or an autonomous goal/cron/notification turn — may still owe the
+   * trailing call's result, so the replay keeps it pending and lets the
+   * live stream deliver it (#9704). Samples the turn state before the
+   * transcript read and again at replay time so a turn that starts or
+   * settles inside the read window is seen. Not for the live loadSession
+   * path: that restore runs under the close gate, which drains active
+   * turns, blocks new ones, and reports closing=true — so isTurnIdle()
+   * there is structurally false and would keep genuinely abandoned calls
+   * pending forever.
+   */
+  private finalizeDanglingForRestore(
+    session: Session | undefined,
+    turnIdleBeforeRead: boolean,
+  ): boolean {
+    const idleAtReplay = session?.isTurnIdle() ?? true;
+    const finalize = turnIdleBeforeRead && idleAtReplay;
+    // Template literal, not printf-style placeholders: createDebugLogger's
+    // formatArgs does no util.format substitution, it space-joins the args.
+    debugLogger.debug(
+      `[ACP] restore replay finalizeDangling=${finalize} (idleBeforeRead=${turnIdleBeforeRead}, idleAtReplay=${idleAtReplay}) session=${session?.getId() ?? '(non-live)'}`,
+    );
+    return finalize;
   }
 
   private async assertLiveSessionScope(
@@ -5151,6 +5029,13 @@ class QwenAgent implements Agent {
           )
         : ACTIVE_WORK_LEGACY_HOLD_CATEGORIES
       : undefined;
+    const requestedChannelLiveness = args._meta?.[CHANNEL_LIVENESS_META_KEY];
+    const channelLivenessRequested =
+      requestedChannelLiveness !== null &&
+      typeof requestedChannelLiveness === 'object' &&
+      !Array.isArray(requestedChannelLiveness) &&
+      (requestedChannelLiveness as Record<string, unknown>)['v'] ===
+        CHANNEL_LIVENESS_VERSION;
     if (activeWorkIntervalMs !== undefined) {
       this.activeWorkReporter?.dispose();
       this.activeWorkReporter = new ActiveWorkReporter(
@@ -5180,6 +5065,13 @@ class QwenAgent implements Agent {
             },
           }
         : {}),
+      ...(channelLivenessRequested
+        ? {
+            [CHANNEL_LIVENESS_META_KEY]: {
+              v: CHANNEL_LIVENESS_VERSION,
+            },
+          }
+        : {}),
     };
     return Object.keys(responseMeta).length > 0
       ? { ...response, _meta: responseMeta }
@@ -5203,7 +5095,11 @@ class QwenAgent implements Agent {
 
     await clearCachedCredentialFile();
     try {
-      await this.config.refreshAuth(method);
+      await this.refreshAuthWithPersistedReasoning(
+        this.config,
+        this.settings,
+        method,
+      );
       this.settings.setValue(
         SettingScope.User,
         'security.auth.selectedType',
@@ -5236,6 +5132,49 @@ class QwenAgent implements Agent {
     };
   }
 
+  private createSessionInitializationDeadline(raw: unknown):
+    | {
+        signal: AbortSignal;
+        dispose: () => void;
+      }
+    | undefined {
+    if (raw === undefined || !this.isTrustedManagedParent()) return undefined;
+    if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw <= 0) {
+      throw RequestError.invalidParams(
+        { errorKind: 'invalid_session_initialization_deadline' },
+        `\`_meta["${SESSION_INITIALIZATION_DEADLINE_META_KEY}"]\` must be a positive safe integer`,
+      );
+    }
+
+    const remainingMs = raw - Date.now();
+    if (remainingMs > 2_147_483_647) {
+      throw RequestError.invalidParams(
+        { errorKind: 'invalid_session_initialization_deadline' },
+        `\`_meta["${SESSION_INITIALIZATION_DEADLINE_META_KEY}"]\` exceeds the supported timer range`,
+      );
+    }
+
+    const controller = new AbortController();
+    const timeoutError = new RequestError(
+      ACP_ERROR_CODES.INTERNAL_ERROR,
+      'Session initialization deadline exceeded',
+      { errorKind: SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND },
+    );
+    let timer: NodeJS.Timeout | undefined;
+    if (remainingMs <= 0) {
+      controller.abort(timeoutError);
+    } else {
+      timer = setTimeout(() => controller.abort(timeoutError), remainingMs);
+      timer.unref();
+    }
+    return {
+      signal: controller.signal,
+      dispose: () => {
+        if (timer) clearTimeout(timer);
+      },
+    };
+  }
+
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const { cwd, mcpServers } = params;
     const parsedSessionId = parseCallerSuppliedSessionId(
@@ -5253,8 +5192,29 @@ class QwenAgent implements Agent {
     const releaseStartingSessionId = requestedSessionId
       ? this.reserveStartingSessionId(requestedSessionId)
       : undefined;
+    let initializationDeadline:
+      | { signal: AbortSignal; dispose: () => void }
+      | undefined;
     try {
+      initializationDeadline = this.createSessionInitializationDeadline(
+        params._meta?.[SESSION_INITIALIZATION_DEADLINE_META_KEY],
+      );
+      initializationDeadline?.signal.throwIfAborted();
       const sessionSource = getSessionSource(params);
+      const provisionalStandalone = isReservedStandaloneSessionSourceType(
+        sessionSource?.sourceType,
+      );
+      if (
+        sessionSource &&
+        isReservedStandaloneSessionSourceType(sessionSource.sourceType) &&
+        (sessionSource.daemonOwnedStandaloneCreation !== true ||
+          !this.isTrustedManagedParent())
+      ) {
+        throw RequestError.invalidParams(
+          undefined,
+          '`standalone` is reserved for daemon-owned session creation',
+        );
+      }
       const parentContext = extractDaemonTraceContext(params);
       return await withDaemonSpan(
         'qwen-code.daemon.session_start',
@@ -5271,6 +5231,8 @@ class QwenAgent implements Agent {
             loadSettingsCached(cwd),
           );
           this.settings = settings;
+          const deferMcpDiscovery = shouldDeferMcpDiscovery(params);
+          const configProviderRevision = this.modelProviderReloadRevision;
           const config = await profiler.time('config_setup', () =>
             this.newSessionConfig(
               cwd,
@@ -5279,19 +5241,36 @@ class QwenAgent implements Agent {
               sessionSource,
               requestedSessionId,
               undefined,
-              shouldDeferMcpDiscovery(params)
-                ? { skipMcpDiscovery: true }
+              initializationDeadline || deferMcpDiscovery
+                ? {
+                    ...(initializationDeadline
+                      ? { signal: initializationDeadline.signal }
+                      : {}),
+                    ...(deferMcpDiscovery ? { skipMcpDiscovery: true } : {}),
+                  }
                 : undefined,
             ),
           );
           let session: Session;
           try {
-            await profiler.time('auth', () => this.ensureAuthenticated(config));
-            profiler.timeSync('file_system_setup', () =>
-              this.setupFileSystem(config),
-            );
+            initializationDeadline?.signal.throwIfAborted();
+            if (!provisionalStandalone) {
+              await profiler.time('auth', () =>
+                this.ensureAuthenticated(config, settings),
+              );
+              initializationDeadline?.signal.throwIfAborted();
+              profiler.timeSync('file_system_setup', () =>
+                this.setupFileSystem(config),
+              );
+            }
             session = await profiler.time('session_register', () =>
-              this.createAndStoreSession(config, settings),
+              this.createAndStoreSession(config, settings, undefined, {
+                deferWorkspaceActivation: provisionalStandalone,
+                ...(initializationDeadline
+                  ? { signal: initializationDeadline.signal }
+                  : {}),
+                configProviderRevision,
+              }),
             );
           } catch (error) {
             return this.cleanupAfterRequestFailure(error, async () => {
@@ -5309,12 +5288,16 @@ class QwenAgent implements Agent {
             sessionId: session.getId(),
             models: this.buildAvailableModels(config),
             modes: this.buildModesData(config),
-            configOptions: this.buildConfigOptions(config),
+            configOptions: this.buildConfigOptions(
+              config,
+              session.getDefaultReasoningConfig(),
+            ),
           }));
         },
         parentContext ? { parentContext } : {},
       );
     } finally {
+      initializationDeadline?.dispose();
       releaseStartingSessionId?.();
     }
   }
@@ -5346,6 +5329,19 @@ class QwenAgent implements Agent {
   ): Promise<LoadSessionResponse> {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
+    const provisionalStandalone = isReservedStandaloneSessionSourceType(
+      sessionSource?.sourceType,
+    );
+    if (
+      provisionalStandalone &&
+      (sessionSource?.daemonOwnedStandaloneCreation !== true ||
+        !this.isTrustedManagedParent())
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`standalone` is reserved for daemon-owned session restore',
+      );
+    }
     const restoreOptions = loadRestoreOptions(params);
     // The daemon already knows it will decline the re-hang (no attached
     // client, fork restore): emit no hint and don't skip finalizing the
@@ -5354,6 +5350,10 @@ class QwenAgent implements Agent {
     const suppressRestoreAskUserQuestion =
       (params._meta as Record<string, unknown> | null | undefined)?.[
         DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY
+      ] === true;
+    const suppressWorktreeContextRestore =
+      (params._meta as Record<string, unknown> | null | undefined)?.[
+        DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY
       ] === true;
     const withRestoreHint = <
       T extends { _meta?: Record<string, unknown> | null },
@@ -5383,7 +5383,10 @@ class QwenAgent implements Agent {
                 ({
                   modes: this.buildModesData(config),
                   models: this.buildAvailableModels(config),
-                  configOptions: this.buildConfigOptions(config),
+                  configOptions: this.buildConfigOptions(
+                    config,
+                    liveSession.getDefaultReasoningConfig(),
+                  ),
                   ...(projection?.artifactSnapshot
                     ? { artifactSnapshot: projection.artifactSnapshot }
                     : {}),
@@ -5405,6 +5408,13 @@ class QwenAgent implements Agent {
                 replayState: replayPage.replay,
                 goalBootstrap: replayGoalBootstrap(projection),
                 suppressRestoreAskUserQuestion,
+                // The restore gate already drained active turns and blocks
+                // new ones (and a drain timeout rejects before replay), so
+                // a trailing unmatched call here is genuinely abandoned —
+                // finalize it. The turn-activity guard cannot be sampled
+                // under the gate: isTurnIdle() is structurally false while
+                // the close gate is held (#9704).
+                finalizeDangling: true,
                 ...(restoreOptions.replay.kind === 'recent'
                   ? {
                       limits: {
@@ -5493,6 +5503,7 @@ class QwenAgent implements Agent {
       // agent-level readers at this request's workspace.
       this.settings = settings;
 
+      const configProviderRevision = this.modelProviderReloadRevision;
       const config = await profiler.time('config_setup', () =>
         this.newSessionConfig(
           params.cwd,
@@ -5529,7 +5540,10 @@ class QwenAgent implements Agent {
         profiler.timeSync('response_build', () => ({
           modes: this.buildModesData(config),
           models: this.buildAvailableModels(config),
-          configOptions: this.buildConfigOptions(config),
+          configOptions: this.buildConfigOptions(
+            config,
+            getDefaultReasoningConfig(config, settings),
+          ),
           ...(projection?.runtime.artifactSnapshot
             ? { artifactSnapshot: projection.runtime.artifactSnapshot }
             : {}),
@@ -5542,16 +5556,37 @@ class QwenAgent implements Agent {
             : {}),
         })) as LoadSessionResponse;
       try {
-        await profiler.time('restore_session_model', () =>
-          restoreSessionModelThenAuthenticate(config, projection, () =>
-            profiler.time('auth', () => this.ensureAuthenticated(config)),
-          ),
-        );
-        profiler.timeSync('file_system_setup', () =>
-          this.setupFileSystem(config),
-        );
+        if (!provisionalStandalone) {
+          await profiler.time('restore_session_model', () =>
+            restoreSessionModelThenAuthenticate(config, projection, () =>
+              profiler.time('auth', () =>
+                this.ensureAuthenticated(config, settings),
+              ),
+            ),
+          );
+          profiler.timeSync('file_system_setup', () =>
+            this.setupFileSystem(config),
+          );
+        }
         await profiler.time('session_register', () =>
           this.createAndStoreSession(config, settings, undefined, {
+            deferWorkspaceActivation: provisionalStandalone,
+            configProviderRevision,
+            ...(provisionalStandalone
+              ? {
+                  beforeDeferredWorkspaceActivation: () =>
+                    profiler.time('restore_session_model', () =>
+                      restoreSessionModelThenAuthenticate(
+                        config,
+                        projection,
+                        () =>
+                          profiler.time('auth', () =>
+                            this.ensureAuthenticated(config, settings),
+                          ),
+                      ),
+                    ),
+                }
+              : {}),
             enableLiveScreenContext: isCompatibleLiveSessionSource(
               sessionSource ?? {},
             ),
@@ -5648,7 +5683,7 @@ class QwenAgent implements Agent {
                 );
               }
             },
-            beforeSessionCreate: () => {
+            beforeSessionPublish: () => {
               response = buildResponse();
             },
             primeSession: (createdSession) => {
@@ -5715,7 +5750,9 @@ class QwenAgent implements Agent {
                 }
               }
               await profiler.time('post_replay_services', async () => {
-                await this.#restoreWorktreeOnResume(config, createdSession);
+                if (!provisionalStandalone && !suppressWorktreeContextRestore) {
+                  await this.#restoreWorktreeOnResume(config, createdSession);
+                }
                 await this.#restoreBackgroundAgentsOnResume(
                   config,
                   createdSession,
@@ -5777,11 +5814,28 @@ class QwenAgent implements Agent {
   ): Promise<ResumeSessionResponse> {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
+    const provisionalStandalone = isReservedStandaloneSessionSourceType(
+      sessionSource?.sourceType,
+    );
+    if (
+      provisionalStandalone &&
+      (sessionSource?.daemonOwnedStandaloneCreation !== true ||
+        !this.isTrustedManagedParent())
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`standalone` is reserved for daemon-owned session restore',
+      );
+    }
     // Same daemon-decline suppression as loadSessionWithProfiler: no hint,
     // and the replay finalize-skip stays aligned with the re-hang decision.
     const suppressRestoreAskUserQuestion =
       (params._meta as Record<string, unknown> | null | undefined)?.[
         DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY
+      ] === true;
+    const suppressWorktreeContextRestore =
+      (params._meta as Record<string, unknown> | null | undefined)?.[
+        DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY
       ] === true;
     const withRestoreHint = <
       T extends { _meta?: Record<string, unknown> | null },
@@ -5813,7 +5867,10 @@ class QwenAgent implements Agent {
                   ({
                     modes: this.buildModesData(config),
                     models: this.buildAvailableModels(config),
-                    configOptions: this.buildConfigOptions(config),
+                    configOptions: this.buildConfigOptions(
+                      config,
+                      liveSession.getDefaultReasoningConfig(),
+                    ),
                     ...(projection?.artifactSnapshot
                       ? { artifactSnapshot: projection.artifactSnapshot }
                       : {}),
@@ -5843,6 +5900,7 @@ class QwenAgent implements Agent {
       profiler.setSessionId(sessionId);
       this.settings = settings;
 
+      const configProviderRevision = this.modelProviderReloadRevision;
       const config = await profiler.time('config_setup', () =>
         this.newSessionConfig(
           params.cwd,
@@ -5862,25 +5920,49 @@ class QwenAgent implements Agent {
       const projection = config.consumeSessionRestoreProjection?.();
       let response: ResumeSessionResponse | undefined;
       try {
-        await profiler.time('restore_session_model', () =>
-          restoreSessionModelThenAuthenticate(config, projection, () =>
-            profiler.time('auth', () => this.ensureAuthenticated(config)),
-          ),
-        );
-        profiler.timeSync('file_system_setup', () =>
-          this.setupFileSystem(config),
-        );
+        if (!provisionalStandalone) {
+          await profiler.time('restore_session_model', () =>
+            restoreSessionModelThenAuthenticate(config, projection, () =>
+              profiler.time('auth', () =>
+                this.ensureAuthenticated(config, settings),
+              ),
+            ),
+          );
+          profiler.timeSync('file_system_setup', () =>
+            this.setupFileSystem(config),
+          );
+        }
         await profiler.time('session_register', () =>
           this.createAndStoreSession(config, settings, undefined, {
+            deferWorkspaceActivation: provisionalStandalone,
+            configProviderRevision,
+            ...(provisionalStandalone
+              ? {
+                  beforeDeferredWorkspaceActivation: () =>
+                    profiler.time('restore_session_model', () =>
+                      restoreSessionModelThenAuthenticate(
+                        config,
+                        projection,
+                        () =>
+                          profiler.time('auth', () =>
+                            this.ensureAuthenticated(config, settings),
+                          ),
+                      ),
+                    ),
+                }
+              : {}),
             enableLiveScreenContext: isCompatibleLiveSessionSource(
               sessionSource ?? {},
             ),
             replayHistory: false,
-            beforeSessionCreate: () => {
+            beforeSessionPublish: () => {
               response = profiler.timeSync('response_build', () => ({
                 modes: this.buildModesData(config),
                 models: this.buildAvailableModels(config),
-                configOptions: this.buildConfigOptions(config),
+                configOptions: this.buildConfigOptions(
+                  config,
+                  getDefaultReasoningConfig(config, settings),
+                ),
                 ...(projection?.runtime.artifactSnapshot
                   ? { artifactSnapshot: projection.runtime.artifactSnapshot }
                   : {}),
@@ -5897,7 +5979,9 @@ class QwenAgent implements Agent {
             },
             beforeStartPostReplayServices: async (createdSession) => {
               await profiler.time('post_replay_services', async () => {
-                await this.#restoreWorktreeOnResume(config, createdSession);
+                if (!provisionalStandalone && !suppressWorktreeContextRestore) {
+                  await this.#restoreWorktreeOnResume(config, createdSession);
+                }
                 await this.#restoreBackgroundAgentsOnResume(
                   config,
                   createdSession,
@@ -5975,7 +6059,11 @@ class QwenAgent implements Agent {
     // (same pattern filesystem.ts uses for `_meta.bom` / `_meta.encoding`).
     const size = normalizeAcpSessionListSize(params._meta?.['size']);
 
-    const result = await runWithAcpRuntimeOutputDir(this.settings, cwd, () => {
+    // Per-request settings: `this.settings` is a "latest loaded" cache, so in
+    // a multi-workspace daemon it may hold another workspace's
+    // advanced.runtimeOutputDir and this listing would scan the wrong runtime
+    // root (returning an empty/foreign list for this cwd).
+    const result = await this.runWithPinnedRuntimeBaseDirForRequest(cwd, () => {
       const sessionService = new SessionService(cwd);
       return sessionService.listSessions({
         cursor: numericCursor,
@@ -6015,7 +6103,9 @@ class QwenAgent implements Agent {
         `Session not found for id: ${sessionId}`,
       );
     }
-    return session.setMode({ ...params, sessionId });
+    return this.runInSessionContext(session, () =>
+      session.setMode({ ...params, sessionId }),
+    );
   }
 
   async unstable_setSessionModel(
@@ -6029,7 +6119,9 @@ class QwenAgent implements Agent {
         `Session not found for id: ${sessionId}`,
       );
     }
-    return await session.setModel({ ...params, sessionId });
+    return await this.runInSessionContext(session, () =>
+      session.setModel({ ...params, sessionId }),
+    );
   }
 
   async setSessionConfigOption(
@@ -6046,92 +6138,157 @@ class QwenAgent implements Agent {
       );
     }
 
-    switch (configId) {
-      case 'mode': {
-        await this.setSessionMode({
-          sessionId,
-          modeId: value as string,
-        });
-        break;
-      }
-      case 'model': {
-        await session.setModel(
-          {
+    return this.runInSessionContext(session, async () => {
+      switch (configId) {
+        case 'mode': {
+          await this.setSessionMode({
             sessionId,
-            modelId: value as string,
-          },
-          { persistDefault: false },
-        );
-        break;
-      }
-      case 'reasoning_effort': {
-        const modelReasoning = this.getModelReasoningConfiguration(
-          session.getConfig(),
-        );
-        if (modelReasoning) {
-          const effortValues = modelReasoning.toggleOnly
-            ? undefined
-            : modelReasoning.efforts;
-          const selected =
-            value === ACP_REASONING_EFFORT_NONE
-              ? ACP_REASONING_EFFORT_NONE
-              : modelReasoning.toggleOnly
-                ? value === ACP_REASONING_EFFORT_DEFAULT
-                  ? ACP_REASONING_EFFORT_DEFAULT
-                  : undefined
-                : effortValues?.find((effort) => effort === value);
-          if (!selected) {
-            const choices = [
-              ACP_REASONING_EFFORT_NONE,
-              ...(effortValues ?? [ACP_REASONING_EFFORT_DEFAULT]),
-            ];
-            throw RequestError.invalidParams(
-              undefined,
-              `Unknown reasoning effort: ${value}. Choose one of: ${choices.join(', ')}`,
-            );
-          }
-          const generation = session.getConfig().getContentGeneratorConfig();
-          if (selected === ACP_REASONING_EFFORT_NONE) {
-            generation.reasoning = false;
-          } else if (selected === ACP_REASONING_EFFORT_DEFAULT) {
-            generation.reasoning = undefined;
-          } else {
-            const current = generation.reasoning;
-            generation.reasoning = {
-              ...(current || {}),
-              effort: selected,
-            };
-          }
+            modeId: value as string,
+          });
           break;
         }
-        const effort =
-          value === ACP_REASONING_EFFORT_DEFAULT
-            ? undefined
-            : REASONING_EFFORT_TIERS.find((tier) => tier === value);
-        if (value !== ACP_REASONING_EFFORT_DEFAULT && effort === undefined) {
-          throw RequestError.invalidParams(
-            undefined,
-            `Unknown reasoning effort: ${value}. Choose one of: ${ACP_REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
+        case 'model': {
+          await session.setModel(
+            {
+              sessionId,
+              modelId: value as string,
+            },
+            { persistDefault: false },
           );
+          break;
         }
-        if (!applyReasoningEffort(session.getConfig(), effort)) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Reasoning effort cannot be applied while thinking is disabled',
+        case 'reasoning_effort': {
+          const config = session.getConfig();
+          const generation = config.getContentGeneratorConfig();
+          const defaultReasoning = session.getDefaultReasoningConfig();
+          const option = this.buildConfigOptions(config, defaultReasoning).find(
+            (candidate) => candidate.id === 'reasoning_effort',
           );
-        }
-        break;
-      }
-      default:
-        throw RequestError.invalidParams(
-          undefined,
-          `Unsupported configId: ${configId}`,
-        );
-    }
+          const modelReasoning = this.getModelReasoningConfiguration(config);
+          const selected = parseReasoningSelection(value);
+          const choices =
+            option?.options.flatMap((choice) =>
+              'value' in choice
+                ? [choice.value]
+                : choice.options.map((nested) => nested.value),
+            ) ?? [];
+          if (
+            !option ||
+            !selected ||
+            (selected !== REASONING_EFFORT_DEFAULT &&
+              !choices.includes(selected))
+          ) {
+            const allowedChoices = modelReasoning
+              ? choices
+              : [
+                  REASONING_EFFORT_DEFAULT,
+                  ...choices.filter(
+                    (choice) => choice !== REASONING_EFFORT_DEFAULT,
+                  ),
+                ];
+            throw RequestError.invalidParams(
+              undefined,
+              option
+                ? `Unknown reasoning effort: ${String(value)}. Choose one of: ${allowedChoices.join(', ')}`
+                : 'Reasoning is not supported by the current model',
+            );
+          }
 
-    return {
-      configOptions: this.buildConfigOptions(session.getConfig()),
-    };
+          const persist =
+            params._meta?.[PERSIST_REASONING_SELECTION_META_KEY] === true;
+          const tierSelected =
+            selected !== REASONING_EFFORT_NONE &&
+            selected !== REASONING_EFFORT_DEFAULT;
+          if (
+            !modelReasoning &&
+            tierSelected &&
+            generation.reasoning === false
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Reasoning effort cannot be applied while thinking is disabled',
+            );
+          }
+          const previous = {
+            reasoning: generation.reasoning,
+            extra_body: generation.extra_body,
+            samplingParams: generation.samplingParams,
+          };
+          const rebuildable = config
+            .getModelsConfig?.()
+            ?.getGenerationConfig?.();
+          const previousRebuildableReasoning = rebuildable?.reasoning;
+          try {
+            if (modelReasoning && !modelReasoning.toggleOnly) {
+              clearReasoningRequestOverrides(generation);
+            }
+            applyReasoningSelection(config, selected, defaultReasoning);
+            if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
+              config.setReasoningEffort?.(
+                selected === REASONING_EFFORT_DEFAULT
+                  ? defaultReasoning
+                    ? defaultReasoning.effort
+                    : undefined
+                  : selected,
+              );
+            }
+            const configOptions = this.buildConfigOptions(
+              config,
+              defaultReasoning,
+            );
+            const confirmedValue = configOptions.find(
+              (candidate) => candidate.id === 'reasoning_effort',
+            )?.currentValue;
+            const confirmed =
+              selected === REASONING_EFFORT_DEFAULT
+                ? confirmedValue !== undefined
+                : confirmedValue === selected;
+            if (
+              !confirmed ||
+              (tierSelected &&
+                getGptReasoningOverrideState(generation, modelReasoning)
+                  ?.blocksTierChange)
+            ) {
+              throw RequestError.invalidParams(
+                undefined,
+                modelReasoning
+                  ? `Reasoning selection was not applied: ${selected}`
+                  : 'Reasoning effort cannot be applied while thinking is disabled',
+              );
+            }
+            if (persist) {
+              session.persistReasoningSelection(selected);
+            }
+            session.setSessionReasoningSelection(
+              persist ? undefined : selected,
+            );
+            return {
+              configOptions,
+              ...(persist
+                ? { _meta: { [REASONING_SELECTION_PERSISTED_META_KEY]: true } }
+                : {}),
+            };
+          } catch (error) {
+            Object.assign(generation, previous);
+            if (rebuildable)
+              rebuildable.reasoning = previousRebuildableReasoning;
+            throw error;
+          }
+        }
+        default:
+          throw RequestError.invalidParams(
+            undefined,
+            `Unsupported configId: ${configId}`,
+          );
+      }
+
+      return {
+        configOptions: this.buildConfigOptions(
+          session.getConfig(),
+          session.getDefaultReasoningConfig(),
+        ),
+      };
+    });
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
@@ -6148,13 +6305,30 @@ class QwenAgent implements Agent {
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
     const suppliedPromptDisplayText = meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    const submittedPrompt =
+      this.privateParentState === 'trusted'
+        ? meta[DAEMON_SUBMITTED_PROMPT_META_KEY]
+        : meta[SUBMITTED_PROMPT_META_KEY];
     const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
+    const suppliedGoalProposalApproval = meta['qwen.goalProposalApproval'];
     const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
     delete meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
     delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    delete meta[SUBMITTED_PROMPT_META_KEY];
+    delete meta[DAEMON_SUBMITTED_PROMPT_META_KEY];
+    if (typeof submittedPrompt === 'string' && suppliedChannelPrompt !== true) {
+      meta[DAEMON_SUBMITTED_PROMPT_META_KEY] = submittedPrompt;
+    }
     delete meta[CHANNEL_PROMPT_META_KEY];
+    delete meta['qwen.goalProposalApproval'];
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedGoalProposalApproval === true
+    ) {
+      meta['qwen.goalProposalApproval'] = true;
+    }
     delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     // The user-facing display projection is caller-controlled metadata; honor
     // it only for trusted parents (the daemon bridge re-injects the trusted
@@ -6263,20 +6437,22 @@ class QwenAgent implements Agent {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    try {
-      await session.cancelPendingPrompt();
-    } catch (error) {
-      if (!isNotCurrentlyGeneratingCancelError(error)) {
-        throw error;
+    await this.runInSessionContext(session, async () => {
+      try {
+        await session.cancelPendingPrompt();
+      } catch (error) {
+        if (!isNotCurrentlyGeneratingCancelError(error)) {
+          throw error;
+        }
       }
-    }
-    // Prompt calls still waiting at Session admission are tracked in
-    // activePromptCalls but have no session pendingPrompt yet, so
-    // cancelPendingPrompt cannot see them. Abort their controllers too, or a
-    // cancelled prompt would run in full once admission frees.
-    for (const call of this.activePromptCalls.get(sessionId) ?? []) {
-      call.controller.abort();
-    }
+      // Prompt calls still waiting at Session admission are tracked in
+      // activePromptCalls but have no session pendingPrompt yet, so
+      // cancelPendingPrompt cannot see them. Abort their controllers too, or a
+      // cancelled prompt would run in full once admission frees.
+      for (const call of this.activePromptCalls.get(sessionId) ?? []) {
+        call.controller.abort();
+      }
+    });
   }
 
   private loadPermissionSettings(cwd: string): LoadedSettings {
@@ -6548,10 +6724,12 @@ class QwenAgent implements Agent {
 
   private async buildWorkspaceMcpStatus(
     config: Config,
+    scope: 'workspace' | 'session' = 'workspace',
+    sessionSettings?: LoadedSettings,
   ): Promise<ServeWorkspaceMcpStatus> {
     try {
       const workspaceCwd = this.workspaceCwd(config);
-      const settings = loadSettings(config.getTargetDir());
+      const settings = sessionSettings ?? loadSettings(config.getTargetDir());
       const userServers = settings.user?.settings.mcpServers ?? {};
       const systemDefaultServers =
         settings.systemDefaults?.settings.mcpServers ?? {};
@@ -6560,7 +6738,8 @@ class QwenAgent implements Agent {
 
       // Pool snapshot for per-server `entryCount` + `entrySummary`.
       // Captured once outside the per-server loop. Absent when the
-      // pool is disabled.
+      // pool is disabled. Session snapshots intentionally omit these
+      // workspace aggregates so another session cannot affect the result.
       let poolByName: Record<
         string,
         {
@@ -6572,30 +6751,33 @@ class QwenAgent implements Agent {
           }>;
         }
       > = {};
-      try {
-        const snap = this.mcpPool?.getSnapshot();
-        if (snap) poolByName = snap.byName;
-      } catch (err) {
-        // Pool snapshot failures must not crash the wider status —
-        // surface to stderr so silent regressions are visible without
-        // depending on `debugLogger.debug` operator opt-in (matches
-        // the budget-accounting fail-loud pattern below).
-        process.stderr.write(
-          `qwen serve: pool snapshot for workspace MCP status failed: ` +
-            `${err instanceof Error ? err.message : String(err)}\n`,
-        );
+      if (scope === 'workspace') {
+        try {
+          const snap = this.mcpPool?.getSnapshot();
+          if (snap) poolByName = snap.byName;
+        } catch (err) {
+          // Pool snapshot failures must not crash the wider status —
+          // surface to stderr so silent regressions are visible without
+          // depending on `debugLogger.debug` operator opt-in (matches
+          // the budget-accounting fail-loud pattern below).
+          process.stderr.write(
+            `qwen serve: pool snapshot for workspace MCP status failed: ` +
+              `${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
       }
 
       // Pull live accounting + budget config. When the workspace-scoped
       // budget controller is active, prefer its accounting. Manager
-      // fall-back keeps the legacy per-session cell shape.
+      // fall-back keeps the legacy per-session cell shape. Session snapshots
+      // always use their Config's manager rather than workspace accounting.
       let clientCount: number | undefined;
       let clientBudget: number | undefined;
       let budgetMode: ServeMcpBudgetMode | undefined;
       let refusedSet: ReadonlySet<string> = new Set<string>();
       let budgetCellScope: 'workspace' | 'session' = 'session';
       const wsBudget = this.workspaceMcpBudget;
-      if (wsBudget !== undefined) {
+      if (scope === 'workspace' && wsBudget !== undefined) {
         budgetCellScope = 'workspace';
         clientCount = wsBudget.getReservedCount();
         clientBudget = wsBudget.getBudget();
@@ -6621,7 +6803,8 @@ class QwenAgent implements Agent {
         }
       }
 
-      const sharedTokenStorage = new MCPOAuthTokenStorage();
+      const sharedTokenStorage =
+        scope === 'workspace' ? new MCPOAuthTokenStorage() : undefined;
 
       return {
         v: STATUS_SCHEMA_VERSION,
@@ -6631,15 +6814,31 @@ class QwenAgent implements Agent {
         servers: await Promise.all(
           Object.entries(servers).map(async ([name, server]) => {
             const disabled = config.isMcpServerDisabled(name);
-            let hasOAuthTokens = false;
-            try {
-              const credentials = await sharedTokenStorage.getCredentials(name);
-              hasOAuthTokens = credentials !== null;
-            } catch {
-              // Match CLI: token lookup errors should not break /mcp status.
+            let hasOAuthTokens: boolean | undefined;
+            if (sharedTokenStorage) {
+              hasOAuthTokens = false;
+              try {
+                const credentials =
+                  await sharedTokenStorage.getCredentials(name);
+                hasOAuthTokens = credentials !== null;
+              } catch {
+                // Match CLI: token lookup errors should not break /mcp status.
+              }
             }
-            const rawStatus = this.getMcpServerStatus(config, name);
+            const poolRow = poolByName[name];
+            const rawStatus = poolRow
+              ? poolRow.entrySummary.some(
+                  (entry) => entry.status === MCPServerStatus.CONNECTED,
+                )
+                ? MCPServerStatus.CONNECTED
+                : poolRow.entrySummary.some(
+                      (entry) => entry.status === MCPServerStatus.CONNECTING,
+                    )
+                  ? MCPServerStatus.CONNECTING
+                  : MCPServerStatus.DISCONNECTED
+              : this.getMcpServerStatus(config, name);
             const requiresAuth =
+              scope === 'workspace' &&
               rawStatus !== MCPServerStatus.CONNECTED &&
               (mcpServerRequiresOAuth.get(name) === true ||
                 (server.oauth?.enabled === true && !hasOAuthTokens));
@@ -6659,7 +6858,7 @@ class QwenAgent implements Agent {
               mcpStatus: this.mcpStatus(rawStatus),
               transport: this.mcpTransport(server),
               disabled,
-              hasOAuthTokens,
+              ...(hasOAuthTokens !== undefined ? { hasOAuthTokens } : {}),
               ...(requiresAuth ? { requiresAuth: true } : {}),
             };
             if (isGatedMcpScope(server.scope)) {
@@ -6676,14 +6875,16 @@ class QwenAgent implements Agent {
                 }
               }
             }
-            if (this.pendingMcpAuthentications.has(name)) {
-              out.authenticationState = 'pending';
-            } else {
-              const authentication = this.mcpAuthenticationResults.get(name);
-              if (authentication) {
-                out.authenticationState = authentication.state;
-                if (authentication.error) {
-                  out.authenticationError = authentication.error;
+            if (scope === 'workspace') {
+              if (this.pendingMcpAuthentications.has(name)) {
+                out.authenticationState = 'pending';
+              } else {
+                const authentication = this.mcpAuthenticationResults.get(name);
+                if (authentication) {
+                  out.authenticationState = authentication.state;
+                  if (authentication.error) {
+                    out.authenticationError = authentication.error;
+                  }
                 }
               }
             }
@@ -6774,7 +6975,6 @@ class QwenAgent implements Agent {
               }
             }
             // Pool entries enrichment.
-            const poolRow = poolByName[name];
             if (poolRow) {
               out.entryCount = poolRow.entryCount;
               out.entrySummary = poolRow.entrySummary.map((e) => ({
@@ -6792,10 +6992,12 @@ class QwenAgent implements Agent {
               out.resourceCount = this.resolveServerMcpResources(
                 config,
                 name,
+                scope === 'workspace',
               ).length;
               out.promptCount = this.resolveServerMcpPrompts(
                 config,
                 name,
+                scope === 'workspace',
               ).length;
             }
             return out;
@@ -6819,7 +7021,7 @@ class QwenAgent implements Agent {
               ),
             }
           : {}),
-        ...(this.workspaceMcpDiscoveryError
+        ...(scope === 'workspace' && this.workspaceMcpDiscoveryError
           ? {
               errors: [
                 this.errorCell(
@@ -6982,12 +7184,14 @@ class QwenAgent implements Agent {
    * workspace `Config`'s `ResourceRegistry` is authoritative in
    * single-session mode, but in pool mode resources are registered into
    * per-session registries (`SessionMcpView.applyResources`), leaving the
-   * workspace registry empty. Fall back to the first active session that
-   * has this server's resources.
+   * workspace registry empty. Workspace snapshots may fall back to the first
+   * active session that has this server's resources; exact session snapshots
+   * disable that fallback.
    */
   private resolveServerMcpResources(
     config: Config,
     serverName: string,
+    allowSessionFallback = true,
   ): DiscoveredMCPResource[] {
     // Defensive optional-call mirrors useAtCompletion.ts: a partial Config
     // (older snapshot or a test stub) may not expose the registry accessor,
@@ -6996,6 +7200,9 @@ class QwenAgent implements Agent {
     const resources =
       config.getResourceRegistry?.()?.getResourcesByServer(serverName) ?? [];
     if (resources.length > 0) {
+      return resources;
+    }
+    if (!allowSessionFallback) {
       return resources;
     }
     for (const session of this.getActiveSessions()) {
@@ -7026,11 +7233,15 @@ class QwenAgent implements Agent {
   private resolveServerMcpPrompts(
     config: Config,
     serverName: string,
+    allowSessionFallback = true,
   ): DiscoveredMCPPrompt[] {
     // Defensive optional-call — see resolveServerMcpResources.
     const prompts =
       config.getPromptRegistry?.()?.getPromptsByServer(serverName) ?? [];
     if (prompts.length > 0) {
+      return prompts;
+    }
+    if (!allowSessionFallback) {
       return prompts;
     }
     for (const session of this.getActiveSessions()) {
@@ -7221,6 +7432,7 @@ class QwenAgent implements Agent {
 
   private async buildWorkspaceSkillsStatus(
     config: Config,
+    settings: LoadedSettings = this.settings,
   ): Promise<ServeWorkspaceSkillsStatus> {
     const skillManager = config.getSkillManager();
     if (!skillManager) {
@@ -7248,7 +7460,7 @@ class QwenAgent implements Agent {
           skills: [],
         };
       }
-      const resolved = resolveSkillSettings(this.settings);
+      const resolved = resolveSkillSettings(settings);
       const disablements = new Map(
         Array.from(config.getDisabledSkillNames(), (name) => {
           const normalizedName = name.trim().toLowerCase();
@@ -7265,20 +7477,16 @@ class QwenAgent implements Agent {
           `${skill.level}:${skill.extensionName ?? ''}:${skill.name}`,
           mapSkillConfigToStatus(skill, disablements, {
             disabled: isInactiveExtensionSkill(skill, inactiveSkillRefs),
+            enabled: config.isSkillEnabled(skill),
           }),
         ]),
       );
       for (const extension of config.getExtensions()) {
         if (extension.isActive) continue;
         for (const skill of extension.skills ?? []) {
-          const extensionName = extension.displayName ?? extension.name;
+          const extensionName = extension.name;
           const key = `extension:${extensionName}:${skill.name}`;
-          if (
-            skillsByKey.has(`extension:${extension.name}:${skill.name}`) ||
-            skillsByKey.has(key)
-          ) {
-            continue;
-          }
+          if (skillsByKey.has(key)) continue;
           skillsByKey.set(
             key,
             mapSkillConfigToStatus(
@@ -7286,6 +7494,7 @@ class QwenAgent implements Agent {
                 ...skill,
                 level: 'extension',
                 extensionName,
+                extensionDisplayName: extension.displayName,
               },
               disablements,
               { disabled: true },
@@ -7312,11 +7521,31 @@ class QwenAgent implements Agent {
     }
   }
 
+  private async buildSessionResourcesStatus(
+    sessionId: string,
+  ): Promise<ServeSessionResourcesStatus> {
+    const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
+    const settings = session.getSettings();
+    const [skills, mcp] = await Promise.all([
+      this.buildWorkspaceSkillsStatus(config, settings),
+      this.buildWorkspaceMcpStatus(config, 'session', settings),
+    ]);
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      workspaceCwd: this.workspaceCwd(config),
+      skills,
+      mcp,
+    };
+  }
+
   private buildWorkspaceProvidersStatus(
     config: Config,
   ): ServeWorkspaceProvidersStatus {
     try {
       const workspaceCwd = this.workspaceCwd(config);
+      const settings = loadSettingsCached(workspaceCwd);
       const currentAuthType = config.getAuthType?.();
       const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
       const currentModelId = activeRuntimeSnapshot
@@ -7356,6 +7585,34 @@ class QwenAgent implements Agent {
 
         const isCurrent =
           currentAuth === model.authType && currentAcpModelId === modelId;
+        const resolved =
+          !model.isRuntimeModel && !modelId.startsWith(ACP_ROUTE_ID_PREFIX)
+            ? config.getResolvedModelConfig?.(
+                model.authType,
+                model.id,
+                model.registryBaseUrl ?? model.baseUrl,
+              )
+            : undefined;
+        const configOptions =
+          model.isRuntimeModel || modelId.startsWith(ACP_ROUTE_ID_PREFIX)
+            ? undefined
+            : buildModelReasoningConfigPreview(
+                model.id,
+                resolvePersistedReasoningConfigState(
+                  model.id,
+                  settings.merged.model?.reasoningEffort,
+                  resolved?.generationConfig.thinkingMandatory === true,
+                  model.capabilities?.reasoning,
+                ),
+                model.capabilities?.reasoning,
+                resolved
+                  ? {
+                      ...resolved.generationConfig,
+                      model: model.id,
+                      baseUrl: resolved.baseUrl,
+                    }
+                  : undefined,
+              );
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -7373,6 +7630,7 @@ class QwenAgent implements Agent {
           ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
           isCurrent,
           isRuntime: model.isRuntimeModel === true,
+          ...(configOptions ? { configOptions } : {}),
         };
         provider.models.push(providerModel);
         if (isCurrent) provider.current = true;
@@ -7491,6 +7749,25 @@ class QwenAgent implements Agent {
         if (resolvedApiKey) {
           hasToken = true;
         }
+      }
+      // Keyless Vertex: a configured project selects the ADC path, but it is
+      // routing configuration, not evidence that a usable credential exists.
+      // Report indeterminate rather than a confirmed token and let the session
+      // boot settle it.
+      if (
+        !hasToken &&
+        authType === AuthType.USE_VERTEX_AI &&
+        hasVertexProjectConfigured()
+      ) {
+        return this.acpCell('auth', {
+          status: 'unknown',
+          hint: 'Vertex AI is configured for Application Default Credentials; whether they resolve is only known at session start.',
+          detail: {
+            source: String(authType),
+            hasToken: 'unknown' as const,
+            envVarCandidates: apiKeyVars,
+          },
+        });
       }
       // No env-var registration → either OAuth-style auth (qwen-oauth) or
       // a custom provider whose key is sourced from settings rather than
@@ -7831,7 +8108,10 @@ class QwenAgent implements Agent {
       state: {
         models: this.buildAvailableModels(config),
         modes: this.buildModesData(config),
-        configOptions: this.buildConfigOptions(config),
+        configOptions: this.buildConfigOptions(
+          config,
+          session.getDefaultReasoningConfig(),
+        ),
       },
     };
   }
@@ -7899,19 +8179,124 @@ class QwenAgent implements Agent {
     sessionId: string,
   ): Promise<ServeSessionSupportedCommandsStatus> {
     const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
     const { availableCommands, availableSkills } =
-      await buildAvailableCommandsSnapshot(session.getConfig());
+      await session.buildAvailableCommandsSnapshot();
+    const workflowsEnabled = this.canUseWorkflowControls(config);
+    const savedWorkflows = workflowsEnabled
+      ? (await listSavedWorkflows(config)).map(({ name, source }) => ({
+          name,
+          source,
+        }))
+      : [];
     return {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
-      availableCommands,
+      availableCommands:
+        workflowsEnabled || !config.isWorkflowsEnabled()
+          ? availableCommands
+          : availableCommands.filter((command) => command.name !== 'workflows'),
       availableSkills: availableSkills ?? [],
+      workflowsEnabled,
+      savedWorkflows,
     };
   }
 
-  private buildSessionTasksStatus(sessionId: string): ServeSessionTasksStatus {
+  private canUseWorkflowControls(config: Config): boolean {
+    return (
+      config.isWorkflowsEnabled() &&
+      !config.getBareMode() &&
+      (!config.getFolderTrustFeature() || config.getFolderTrust())
+    );
+  }
+
+  private async buildSessionTasksStatus(
+    sessionId: string,
+    includeWorkflows = false,
+  ): Promise<ServeSessionTasksStatus> {
     const session = this.sessionOrThrow(sessionId);
-    return buildSessionTasksStatus(sessionId, session.getConfig());
+    return buildSessionTasksStatus(
+      sessionId,
+      session.getConfig(),
+      Date.now(),
+      includeWorkflows ? await session.refreshWorkflowHistory() : [],
+      { includeWorkflows },
+    );
+  }
+
+  private async buildSessionAgentsStatus(
+    sessionId: string,
+  ): Promise<ServeSessionAgentsStatus> {
+    const session = this.sessionOrThrow(sessionId);
+    const status = await buildSessionAgentsStatus(
+      session.getConfig().getSessionId(),
+      session.getConfig(),
+    );
+    return { ...status, sessionId };
+  }
+
+  private async buildSessionAgentTrace(
+    sessionId: string,
+    rootAgentId?: string,
+  ): Promise<ServeSessionAgentTrace> {
+    const session = this.sessionOrThrow(sessionId);
+    const persistedSessionId = session.getConfig().getSessionId();
+    const trace = await readAgentTrace(
+      session.getConfig().storage.getProjectDir(),
+      persistedSessionId,
+      rootAgentId,
+    );
+    return { v: STATUS_SCHEMA_VERSION, sessionId, ...trace };
+  }
+
+  /**
+   * Resolve one saved workflow for display. Fails closed to `workflow: null`
+   * on every miss — unknown name, illegal name, unreadable file, or Workflow
+   * controls unavailable — so the daemon never has to distinguish them and
+   * cannot be used to probe the filesystem by name.
+   */
+  private async buildSessionSavedWorkflowStatus(
+    sessionId: string,
+    name: string,
+  ): Promise<ServeSessionSavedWorkflowStatus> {
+    const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
+    const envelope = (
+      workflow: ServeSessionSavedWorkflowDetail | null,
+    ): ServeSessionSavedWorkflowStatus => ({
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      name,
+      workflow,
+    });
+    if (!this.canUseWorkflowControls(config)) return envelope(null);
+    const entry = (await listSavedWorkflows(config)).find(
+      (candidate) => candidate.name === name,
+    );
+    if (!entry) return envelope(null);
+    let script: string;
+    try {
+      script = (await resolveSavedWorkflowScript(name, config)).script;
+    } catch {
+      return envelope(null);
+    }
+    let meta: ServeSessionSavedWorkflowDetail['meta'] = null;
+    let metaError: string | undefined;
+    try {
+      meta = extractAndStripMeta(script).meta;
+    } catch (error) {
+      metaError = error instanceof Error ? error.message : String(error);
+    }
+    return envelope({
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      name: entry.name,
+      source: entry.source,
+      scriptPath: entry.scriptPath,
+      script,
+      meta,
+      ...(metaError !== undefined ? { metaError } : {}),
+    });
   }
 
   private buildSessionLspStatus(sessionId: string): ServeSessionLspStatus {
@@ -7951,12 +8336,29 @@ class QwenAgent implements Agent {
     const createdAt = session.getCreatedAt();
 
     const models: ServeSessionStatsStatus['models'] = {};
-    for (const [name, m] of Object.entries(metrics.models)) {
+    // Per-instance subagent token totals (keyed by unique invocation id), so
+    // repeated calls of the same agent type stay distinguishable. Output as a
+    // structured array with readable type/name labels from sourceMeta.
+    for (const [name, rawMetrics] of Object.entries(metrics.models)) {
+      const m = metrics.statsModels?.[name] ?? rawMetrics;
       models[name] = {
         api: { ...m.api },
         tokens: { ...m.tokens },
       };
     }
+    const sources: ServeSessionStatsStatus['sources'] = [];
+    for (const [id, source] of Object.entries(metrics.sourceMetrics ?? {})) {
+      const meta = metrics.sourceMeta?.[id];
+      sources.push({
+        id,
+        type: meta?.type ?? '',
+        name: meta?.name ?? id,
+        tokens: { ...source.tokens },
+      });
+    }
+    sources.sort(
+      (a, b) => b.tokens.total - a.tokens.total || a.id.localeCompare(b.id),
+    );
 
     const byName: ServeSessionStatsStatus['tools']['byName'] = {};
     for (const [name, t] of Object.entries(metrics.tools.byName)) {
@@ -8002,6 +8404,7 @@ class QwenAgent implements Agent {
       durationMs: now - createdAt,
       promptCount: session.getTurnCount(),
       models,
+      sources,
       tools: {
         totalCalls: metrics.tools.totalCalls,
         totalSuccess: metrics.tools.totalSuccess,
@@ -8291,255 +8694,25 @@ class QwenAgent implements Agent {
     }
   }
 
-  private async installSkillFromUrl(
-    request: QwenSkillInstallRequest,
-  ): Promise<Record<string, unknown>> {
-    const skillManager = this.config.getSkillManager();
-    if (!skillManager) {
-      throw RequestError.invalidParams(
-        undefined,
-        'SkillManager is not available',
-      );
-    }
-
-    const download = await downloadSkill(request.sourceUrl);
-    const skillsBaseDir = path.join(Storage.getGlobalQwenDir(), 'skills');
-    const skillDir = resolveManagedSkillDir(skillsBaseDir, request.slug);
-    const skillFile = path.join(skillDir, 'SKILL.md');
-    const parsed = skillManager.parseSkillContent(
-      download.skillContent,
-      skillFile,
-      'user',
-    );
-    if (parsed.name !== request.slug) {
-      throw RequestError.invalidParams(
-        undefined,
-        `Skill name "${parsed.name}" does not match requested slug "${request.slug}"`,
-      );
-    }
-
-    // Install atomically: stage all files in a sibling temp directory, then
-    // swap it in with a single rename. A mid-write failure (disk full,
-    // permission error) therefore leaves the previously installed skill
-    // intact instead of deleting it up front and ending up with a partial
-    // install. Removing the old dir before writing also dropped orphaned
-    // files from older versions; the rename preserves that property.
-    const stagingDir = `${skillDir}.installing-${process.pid}-${Date.now()}`;
-    try {
-      await fs.rm(stagingDir, { recursive: true, force: true });
-      for (const file of download.files) {
-        const targetPath = resolveSkillInstallPath(
-          stagingDir,
-          file.relativePath,
-        );
-        await fs.mkdir(path.dirname(targetPath), { recursive: true });
-        await fs.writeFile(targetPath, file.content);
-      }
-      // stagingDir is a sibling of skillDir (same filesystem), so the rename
-      // is atomic; the only gap is between the rm and rename, during which
-      // the fully-staged copy still exists for recovery.
-      await fs.rm(skillDir, { recursive: true, force: true });
-      await fs.rename(stagingDir, skillDir);
-    } catch (error) {
-      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
-      throw error;
-    }
-    await skillManager.refreshCache();
-
-    return {
-      id: request.id,
-      slug: parsed.name,
-      installed: true,
-      installedPath: skillFile,
-      sourceUrl: request.sourceUrl,
-    };
+  private runInSessionContext<T>(session: Session, fn: () => T): T {
+    // Use the Config's session id spelling (not the lowercased lookup form
+    // stored on the Session object) so the context matches the binding in
+    // Session.ts and the debug log filename on disk.
+    return sessionIdContext.run(session.getConfig().getSessionId(), fn);
   }
 
-  private async deleteGlobalSkill(
-    request: QwenSkillDeleteRequest,
-  ): Promise<Record<string, unknown>> {
-    const skillManager = this.config.getSkillManager();
-    if (!skillManager) {
-      throw RequestError.invalidParams(
-        undefined,
-        'SkillManager is not available',
-      );
-    }
-
-    const { skillDir, skillFile, content } = await this.readManagedSkillFile(
-      request.slug,
-      'global',
-      skillManager,
+  private isSessionScopedExtMethod(method: string): boolean {
+    return (
+      method === PROMPT_CANCEL_METHOD ||
+      method === TODO_STOP_GUARD_QUEUE_RELEASE_METHOD ||
+      method.startsWith('qwen/control/session/') ||
+      method.startsWith('qwen/status/session/') ||
+      method.startsWith('qwen/session/') ||
+      method === 'deleteSession' ||
+      method === 'renameSession' ||
+      method === 'rewindSession' ||
+      method === 'restoreSessionHistory'
     );
-    const parsed = skillManager.parseSkillContent(content, skillFile, 'user');
-    if (parsed.name !== request.slug) {
-      throw RequestError.invalidParams(
-        undefined,
-        `Skill name "${parsed.name}" does not match requested slug "${request.slug}"`,
-      );
-    }
-
-    // Guard the recursive delete: readManagedSkillFile's generic fallback can
-    // resolve skillDir from listSkills() to an arbitrary path. Only ever remove
-    // the directory that directly contains the SKILL.md we just validated, and
-    // never a filesystem root or the global Qwen dir itself, so a malformed
-    // skill entry can't trigger a destructive rm of a shared/parent directory.
-    const resolvedSkillDir = path.resolve(skillDir);
-    const resolvedSkillFile = path.resolve(skillFile);
-    const globalDir = path.resolve(Storage.getGlobalQwenDir());
-    const isDedicatedSkillDir =
-      resolvedSkillFile === path.join(resolvedSkillDir, 'SKILL.md');
-    if (
-      !isDedicatedSkillDir ||
-      resolvedSkillDir === path.parse(resolvedSkillDir).root ||
-      resolvedSkillDir === globalDir
-    ) {
-      throw RequestError.invalidParams(
-        undefined,
-        `Refusing to delete unexpected skill directory: ${skillDir}`,
-      );
-    }
-
-    await fs.rm(skillDir, { recursive: true, force: true });
-    await skillManager.refreshCache();
-    return {
-      slug: request.slug,
-      deleted: true,
-    };
-  }
-
-  private async readManagedSkillFile(
-    slug: string,
-    scope: QwenSkillSetEnabledRequest['scope'],
-    skillManager: NonNullable<ReturnType<Config['getSkillManager']>>,
-    cwd?: string,
-  ): Promise<QwenManagedSkillFile> {
-    if (scope === 'global') {
-      const qwenSkillDir = resolveManagedSkillDir(
-        path.join(Storage.getGlobalQwenDir(), 'skills'),
-        slug,
-      );
-      const qwenSkillFile = path.join(qwenSkillDir, 'SKILL.md');
-      const qwenContent = await fs
-        .readFile(qwenSkillFile, 'utf8')
-        .catch(() => undefined);
-      if (qwenContent !== undefined) {
-        return {
-          skillDir: qwenSkillDir,
-          skillFile: qwenSkillFile,
-          content: qwenContent,
-        };
-      }
-    }
-
-    if (scope === 'project' && cwd?.trim()) {
-      const projectSkill = await this.findProjectSkillFileFromCwd(
-        slug,
-        cwd,
-        skillManager,
-      );
-      if (projectSkill) return projectSkill;
-    }
-
-    const level = scope === 'project' ? 'project' : 'user';
-    const skill = (await skillManager.listSkills({ level })).find(
-      (candidate) => candidate.name === slug,
-    );
-    const skillFile = skill?.filePath;
-    if (!skillFile) {
-      throw RequestError.invalidParams(
-        undefined,
-        `${scope === 'project' ? 'Project' : 'Global'} skill not found: ${slug}`,
-      );
-    }
-
-    const content = await fs.readFile(skillFile, 'utf8').catch(() => {
-      throw RequestError.invalidParams(
-        undefined,
-        `${scope === 'project' ? 'Project' : 'Global'} skill not found: ${slug}`,
-      );
-    });
-    return {
-      skillDir: path.dirname(skillFile),
-      skillFile,
-      content,
-    };
-  }
-
-  private async findProjectSkillFileFromCwd(
-    slug: string,
-    cwd: string,
-    skillManager: NonNullable<ReturnType<Config['getSkillManager']>>,
-  ): Promise<QwenManagedSkillFile | undefined> {
-    const projectRoot = path.resolve(cwd);
-    for (const configDir of PROJECT_SKILL_DIRS) {
-      const baseDir = path.join(projectRoot, configDir, SKILLS_DIR);
-      const skills = await skillManager.loadSkillsFromDir(baseDir, 'project');
-      const skill = skills.find((candidate) => candidate.name === slug);
-      const skillFile = skill?.filePath;
-      if (!skillFile) continue;
-
-      const content = await fs.readFile(skillFile, 'utf8').catch(() => {
-        throw RequestError.invalidParams(
-          undefined,
-          `Project skill not found: ${slug}`,
-        );
-      });
-      return {
-        skillDir: path.dirname(skillFile),
-        skillFile,
-        content,
-      };
-    }
-    return undefined;
-  }
-
-  private async setGlobalSkillEnabled(
-    request: QwenSkillSetEnabledRequest,
-    cwd?: string,
-  ): Promise<Record<string, unknown>> {
-    const skillManager = this.config.getSkillManager();
-    if (!skillManager) {
-      throw RequestError.invalidParams(
-        undefined,
-        'SkillManager is not available',
-      );
-    }
-
-    const { skillFile, content } = await this.readManagedSkillFile(
-      request.slug,
-      request.scope,
-      skillManager,
-      cwd,
-    );
-    const level = request.scope === 'project' ? 'project' : 'user';
-    const parsed = skillManager.parseSkillContent(content, skillFile, level);
-    if (parsed.name !== request.slug) {
-      throw RequestError.invalidParams(
-        undefined,
-        `Skill name "${parsed.name}" does not match requested slug "${request.slug}"`,
-      );
-    }
-
-    const nextContent = setSkillFrontmatterEnabled(content, request.enabled);
-    skillManager.parseSkillContent(nextContent, skillFile, level);
-    // Defense-in-depth (consistent with deleteGlobalSkill): readManagedSkillFile's
-    // generic fallback can resolve skillFile from listSkills() to an arbitrary
-    // path. We only ever write back to the SKILL.md manifest we just read and
-    // whose parsed name matched the slug, so refuse to write anything else.
-    if (path.basename(skillFile) !== 'SKILL.md') {
-      throw RequestError.invalidParams(
-        undefined,
-        `Refusing to write to unexpected skill file: ${skillFile}`,
-      );
-    }
-    await fs.writeFile(skillFile, nextContent, 'utf8');
-    await skillManager.refreshCache();
-    return {
-      slug: request.slug,
-      enabled: request.enabled,
-      installedPath: skillFile,
-    };
   }
 
   async extMethod(
@@ -8564,8 +8737,46 @@ class QwenAgent implements Agent {
           'Background notifications require a trusted private ACP parent',
         );
       }
+      const sessionId = normalizedParams['sessionId'];
+      const session =
+        typeof sessionId === 'string' && sessionId.length > 0
+          ? this.sessions.get(sessionId)
+          : undefined;
+      if (
+        typeof sessionId === 'string' &&
+        sessionId.length > 0 &&
+        this.isSessionScopedExtMethod(method) &&
+        (session !== undefined || SESSION_ID_RE.test(sessionId))
+      ) {
+        return await sessionIdContext.run(
+          session?.getConfig().getSessionId() ?? sessionId,
+          () => this.extMethodInternal(method, normalizedParams),
+        );
+      }
+
       return await this.extMethodInternal(method, normalizedParams);
     } catch (error) {
+      if (
+        [
+          'qwen/session/sources/list',
+          'qwen/session/sources/upsert',
+          'qwen/session/sources/remove',
+          'qwen/session/sources/copy',
+        ].includes(method)
+      ) {
+        if (!(error instanceof SessionSourceError)) {
+          debugLogger.error('[ACP] Session source ext-method error:', error);
+        }
+        return {
+          sourceError:
+            error instanceof SessionSourceError
+              ? { code: error.code, message: error.message }
+              : {
+                  code: 'source_persistence_unavailable',
+                  message: 'Session source operation failed',
+                },
+        };
+      }
       const writerError = getSessionWriterError(error);
       if (writerError) {
         throw new RequestError(writerError.rpcCode, writerError.message, {
@@ -8583,9 +8794,22 @@ class QwenAgent implements Agent {
     const requestedCwd =
       typeof params['cwd'] === 'string' ? params['cwd'] : undefined;
     const cwd = requestedCwd || process.cwd();
-    const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
-
     switch (method) {
+      case SERVE_STATUS_EXT_METHODS.channelPing: {
+        const nonce = params['nonce'];
+        if (
+          params['v'] !== CHANNEL_LIVENESS_VERSION ||
+          typeof nonce !== 'number' ||
+          !Number.isSafeInteger(nonce) ||
+          nonce < 0
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid channel liveness ping',
+          );
+        }
+        return { v: CHANNEL_LIVENESS_VERSION, nonce };
+      }
       case PROMPT_CANCEL_METHOD: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -8682,7 +8906,12 @@ class QwenAgent implements Agent {
             this.config
               .getModelsConfig()
               .syncAfterAuthRefresh(authType, modelId, baseUrl),
-          refreshAuth: (authType) => this.config.refreshAuth(authType),
+          refreshAuth: (authType) =>
+            this.refreshAuthWithPersistedReasoning(
+              this.config,
+              this.settings,
+              authType,
+            ),
         });
         const effectiveModelId =
           (adapter.getValue('model.name') as string | undefined) ??
@@ -8700,16 +8929,13 @@ class QwenAgent implements Agent {
         };
       }
       case 'qwen/skills/install': {
-        return this.installSkillFromUrl(readSkillInstallRequest(params));
+        return installManagedSkill(this.config, params);
       }
       case 'qwen/skills/delete': {
-        return this.deleteGlobalSkill(readSkillSlugRequest(params));
+        return deleteManagedSkill(this.config, params);
       }
       case 'qwen/skills/setEnabled': {
-        return this.setGlobalSkillEnabled(
-          readSkillSetEnabledRequest(params),
-          requestedCwd,
-        );
+        return setManagedSkillEnabled(this.config, params, requestedCwd);
       }
       case 'qwen/settings/getMemory': {
         const settings = loadSettings(cwd);
@@ -8897,10 +9123,45 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        return this.buildSessionTasksStatus(sessionId) as unknown as Record<
-          string,
-          unknown
-        >;
+        const session = this.sessionOrThrow(sessionId);
+        return (await this.buildSessionTasksStatus(
+          sessionId,
+          params['includeWorkflows'] === true &&
+            this.canUseWorkflowControls(session.getConfig()),
+        )) as unknown as Record<string, unknown>;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionAgents: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return (await this.buildSessionAgentsStatus(
+          sessionId,
+        )) as unknown as Record<string, unknown>;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionAgentTrace: {
+        const sessionId = params['sessionId'];
+        const rootAgentId = params['rootAgentId'];
+        if (
+          typeof sessionId !== 'string' ||
+          sessionId.length === 0 ||
+          (rootAgentId !== undefined &&
+            (typeof rootAgentId !== 'string' ||
+              rootAgentId.length === 0 ||
+              rootAgentId.length > 500))
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid sessionId or rootAgentId',
+          );
+        }
+        return (await this.buildSessionAgentTrace(
+          sessionId,
+          rootAgentId,
+        )) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionLspStatus: {
         const sessionId = params['sessionId'];
@@ -8914,6 +9175,38 @@ class QwenAgent implements Agent {
           string,
           unknown
         >;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionResources: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return (await this.buildSessionResourcesStatus(
+          sessionId,
+        )) as unknown as Record<string, unknown>;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionSavedWorkflow: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const name = params['name'];
+        if (typeof name !== 'string' || name.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing name',
+          );
+        }
+        return (await this.buildSessionSavedWorkflowStatus(
+          sessionId,
+          name,
+        )) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionTranscript: {
         const sessionId = params['sessionId'];
@@ -8930,6 +9223,26 @@ class QwenAgent implements Agent {
             'Invalid transcript cursor',
           );
         }
+        const rawAtRecordId = params['atRecordId'];
+        if (
+          rawAtRecordId !== undefined &&
+          (typeof rawAtRecordId !== 'string' || rawAtRecordId.length === 0)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript turn anchor',
+          );
+        }
+        const rawSnapshot = params['snapshot'];
+        if (
+          rawSnapshot !== undefined &&
+          (typeof rawSnapshot !== 'string' || rawSnapshot.length === 0)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript snapshot',
+          );
+        }
         const rawBeforeRecordId = params['beforeRecordId'];
         if (
           rawBeforeRecordId !== undefined &&
@@ -8941,7 +9254,12 @@ class QwenAgent implements Agent {
             'Invalid transcript record boundary',
           );
         }
-        if (rawCursor !== undefined && rawBeforeRecordId !== undefined) {
+        if (
+          rawCursor !== undefined &&
+          (rawBeforeRecordId !== undefined ||
+            rawAtRecordId !== undefined ||
+            rawSnapshot !== undefined)
+        ) {
           throw RequestError.invalidParams(
             undefined,
             'Transcript cursor and record boundary are mutually exclusive',
@@ -8966,6 +9284,27 @@ class QwenAgent implements Agent {
             'Transcript record boundary and direction are mutually exclusive',
           );
         }
+        if (
+          rawAtRecordId !== undefined &&
+          (rawBeforeRecordId !== undefined ||
+            rawDirection !== undefined ||
+            rawSnapshot === undefined)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Transcript turn anchor requires its snapshot and no other anchor',
+          );
+        }
+        if (
+          rawSnapshot !== undefined &&
+          rawAtRecordId === undefined &&
+          rawBeforeRecordId === undefined
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Transcript snapshot requires a record anchor',
+          );
+        }
         const rawLimit = params['limit'];
         if (
           rawLimit !== undefined &&
@@ -8980,8 +9319,7 @@ class QwenAgent implements Agent {
         }
 
         try {
-          const settings = loadSettingsCached(cwd);
-          return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+          const readTranscriptPage = async (settings: LoadedSettings) => {
             if (rawDirection === 'backward') {
               await this.sessions
                 .get(sessionId)
@@ -8996,6 +9334,12 @@ class QwenAgent implements Agent {
               ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
               ...(typeof rawBeforeRecordId === 'string'
                 ? { beforeRecordId: rawBeforeRecordId }
+                : {}),
+              ...(typeof rawAtRecordId === 'string'
+                ? { atRecordId: rawAtRecordId }
+                : {}),
+              ...(typeof rawSnapshot === 'string'
+                ? { snapshot: rawSnapshot }
                 : {}),
               ...(rawDirection === 'backward'
                 ? { direction: rawDirection }
@@ -9032,11 +9376,22 @@ class QwenAgent implements Agent {
               ...(replay.replayError !== undefined
                 ? { partial: true, replayError: replay.replayError }
                 : {}),
+              ...(page.targetRecordId
+                ? { targetRecordId: page.targetRecordId }
+                : {}),
+              ...(page.hasOlder !== undefined
+                ? { hasOlder: page.hasOlder }
+                : {}),
             } as Record<string, unknown>;
-          });
+          };
+          return await this.runWithPinnedRuntimeBaseDirForRequest(
+            cwd,
+            readTranscriptPage,
+          );
         } catch (error) {
           if (
             error instanceof InvalidSessionTranscriptCursorError ||
+            error instanceof InvalidSessionTranscriptTurnAnchorError ||
             error instanceof RangeError
           ) {
             throw new RequestError(
@@ -9046,7 +9401,9 @@ class QwenAgent implements Agent {
                 errorKind:
                   error instanceof InvalidSessionTranscriptCursorError
                     ? 'invalid_transcript_cursor'
-                    : 'invalid_transcript_limit',
+                    : error instanceof InvalidSessionTranscriptTurnAnchorError
+                      ? 'invalid_turn_anchor'
+                      : 'invalid_transcript_limit',
               },
             );
           }
@@ -9073,7 +9430,119 @@ class QwenAgent implements Agent {
             });
           }
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-            if (typeof rawCursor === 'string') {
+            if (
+              typeof rawCursor === 'string' ||
+              typeof rawSnapshot === 'string'
+            ) {
+              throw new RequestError(
+                -32010,
+                `Transcript snapshot is unavailable for session ${sessionId}`,
+                {
+                  errorKind: 'transcript_snapshot_unavailable',
+                  sessionId,
+                },
+              );
+            }
+            throw RequestError.resourceNotFound(`session:${sessionId}`);
+          }
+          throw error;
+        }
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionTurnIndex: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const rawSnapshot = params['snapshot'];
+        if (
+          rawSnapshot !== undefined &&
+          (typeof rawSnapshot !== 'string' || rawSnapshot.length === 0)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript snapshot',
+          );
+        }
+        const rawStart = params['start'];
+        if (
+          rawStart !== undefined &&
+          (!Number.isSafeInteger(rawStart) ||
+            (rawStart as number) < 0 ||
+            rawSnapshot === undefined)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript turn index start',
+          );
+        }
+        const rawLimit = params['limit'];
+        if (
+          rawLimit !== undefined &&
+          (!Number.isSafeInteger(rawLimit) ||
+            (rawLimit as number) < 1 ||
+            (rawLimit as number) > SESSION_TRANSCRIPT_MAX_LIMIT)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript limit',
+          );
+        }
+
+        try {
+          const readTurnIndexPage = async () => {
+            if (rawSnapshot === undefined) {
+              await this.sessions
+                .get(sessionId)
+                ?.getConfig()
+                .getChatRecordingService()
+                ?.flush();
+            }
+            return (await new SessionTranscriptReader(cwd).readTurnIndexPage(
+              sessionId,
+              {
+                ...(typeof rawSnapshot === 'string'
+                  ? { snapshot: rawSnapshot }
+                  : {}),
+                ...(typeof rawStart === 'number' ? { start: rawStart } : {}),
+                ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
+              },
+            )) as unknown as Record<string, unknown>;
+          };
+          return await this.runWithPinnedRuntimeBaseDirForRequest(
+            cwd,
+            readTurnIndexPage,
+          );
+        } catch (error) {
+          if (
+            error instanceof InvalidSessionTranscriptCursorError ||
+            error instanceof RangeError
+          ) {
+            throw new RequestError(-32602, error.message, {
+              errorKind:
+                error instanceof InvalidSessionTranscriptCursorError
+                  ? 'invalid_transcript_cursor'
+                  : 'invalid_transcript_limit',
+            });
+          }
+          if (error instanceof SessionTranscriptSnapshotUnavailableError) {
+            throw new RequestError(-32010, error.message, {
+              errorKind: 'transcript_snapshot_unavailable',
+              sessionId,
+            });
+          }
+          if (error instanceof SessionTranscriptTooLargeError) {
+            throw new RequestError(-32011, error.message, {
+              errorKind: 'transcript_too_large',
+              sessionId,
+              snapshotSize: error.snapshotSize,
+              maxBytes: error.maxBytes,
+            });
+          }
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            if (typeof rawSnapshot === 'string') {
               throw new RequestError(
                 -32010,
                 `Transcript snapshot is unavailable for session ${sessionId}`,
@@ -9197,6 +9666,14 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(undefined, 'Invalid contextMode');
         }
         const contextMode: WorkspaceRememberContextMode = rawContextMode;
+        const rawScope = params['scope'];
+        if (
+          rawScope !== undefined &&
+          rawScope !== 'project' &&
+          rawScope !== 'user'
+        ) {
+          throw RequestError.invalidParams(undefined, 'Invalid scope');
+        }
         if (!this.config.isManagedMemoryAvailable()) {
           throw new RequestError(
             -32009,
@@ -9216,6 +9693,7 @@ class QwenAgent implements Agent {
             projectRoot,
             content: content.trim(),
             contextMode,
+            ...(rawScope ? { scope: rawScope } : {}),
             abortSignal: childSignal,
           });
           if (result.filesTouched.length > 0) {
@@ -9288,6 +9766,14 @@ class QwenAgent implements Agent {
             'Query exceeds maximum size',
           );
         }
+        const rawScope = params['scope'];
+        if (
+          rawScope !== undefined &&
+          rawScope !== 'project' &&
+          rawScope !== 'user'
+        ) {
+          throw RequestError.invalidParams(undefined, 'Invalid scope');
+        }
         if (!this.config.isManagedMemoryAvailable()) {
           throw new RequestError(
             -32009,
@@ -9308,6 +9794,7 @@ class QwenAgent implements Agent {
             .forget(projectRoot, trimmedQuery, {
               config: hiddenConfig,
               abortSignal: childSignal,
+              ...(rawScope ? { scope: rawScope } : {}),
             });
           return {
             summary:
@@ -9591,9 +10078,9 @@ class QwenAgent implements Agent {
           });
           await Promise.all(
             this.getLiveMcpConfigs(serverName).map(async (liveConfig) => {
-              const geminiClient = liveConfig.getGeminiClient?.();
-              if (geminiClient?.isInitialized?.()) {
-                await geminiClient.setTools?.();
+              const llmClient = liveConfig.getLlmClient?.();
+              if (llmClient?.isInitialized?.()) {
+                await llmClient.setTools?.();
               }
             }),
           );
@@ -10050,6 +10537,124 @@ class QwenAgent implements Agent {
         }
         return { requestId, cancelled };
       }
+      case 'qwen/session/sources/list':
+      case 'qwen/session/sources/upsert':
+      case 'qwen/session/sources/remove':
+      case 'qwen/session/sources/copy': {
+        if (!this.isTrustedManagedParent()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Sources require a trusted private ACP parent',
+          );
+        }
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !sessionId) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid source sessionId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const sourceConfig = session.getConfig();
+        const service = sourceConfig.getSessionSourceService();
+        if (
+          method === 'qwen/session/sources/copy' &&
+          !service &&
+          !sourceConfig.getChatRecordingService()
+        ) {
+          return { warnings: [] };
+        }
+        if (!service)
+          throw new SessionSourceError(
+            'source_persistence_unavailable',
+            'Session sources unavailable',
+          );
+        if (method === 'qwen/session/sources/list')
+          return { ...(await service.list()) };
+        if (method === 'qwen/session/sources/upsert')
+          return { ...(await service.upsert(params['input'])) };
+        if (method === 'qwen/session/sources/remove') {
+          const sourceId = params['sourceId'];
+          if (
+            typeof sourceId !== 'string' ||
+            !sourceId ||
+            sourceId.length > 200
+          )
+            throw new SessionSourceError('invalid_source', 'Invalid source ID');
+          return { ...(await service.remove(sourceId)) };
+        }
+        const targetSessionId = params['targetSessionId'];
+        const targetCwd = params['targetCwd'];
+        const attachmentIds = params['attachmentIds'];
+        if (
+          typeof targetSessionId !== 'string' ||
+          !SESSION_ID_RE.test(targetSessionId) ||
+          targetSessionId === sessionId ||
+          typeof targetCwd !== 'string' ||
+          path.resolve(targetCwd) !==
+            path.resolve(sourceConfig.storage.getProjectRoot()) ||
+          !Array.isArray(attachmentIds) ||
+          attachmentIds.some((id) => typeof id !== 'string')
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid source copy target',
+          );
+        }
+        const sources = (await service.list()).sources;
+        if (!sources.length) return { warnings: [] };
+        const targetData = await sourceConfig
+          .getSessionService()
+          .loadSession(targetSessionId);
+        if (
+          !targetData?.conversation.messages.some(
+            (record) => record.forkedFrom?.sessionId === sessionId,
+          )
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Source copy target is not a fork of this session',
+          );
+        }
+        let temporaryConfig: Config | undefined;
+        try {
+          const targetConfig =
+            this.sessions.get(targetSessionId)?.getConfig() ??
+            (temporaryConfig = await this.newSessionConfig(
+              targetCwd,
+              [],
+              loadSettings(targetCwd),
+              undefined,
+              targetSessionId,
+              true,
+              {
+                skipMcpDiscovery: true,
+                skipHooks: true,
+                skipSkillManager: true,
+                skipFileCheckpointing: true,
+                lenientToolWarmup: true,
+              },
+            ));
+          const targetService = targetConfig.getSessionSourceService();
+          if (!targetService)
+            throw new SessionSourceError(
+              'source_persistence_unavailable',
+              'Target sources unavailable',
+            );
+          return await targetService.copyFrom(
+            sources,
+            attachmentIds as string[],
+          );
+        } finally {
+          if (temporaryConfig) {
+            try {
+              await this.cleanupUnstoredConfig(temporaryConfig);
+            } catch (error) {
+              debugLogger.warn('Failed to clean up source copy config:', error);
+            }
+          }
+        }
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -10197,6 +10802,21 @@ class QwenAgent implements Agent {
             'error' in source ? source.error : 'Invalid or missing sourceType',
           );
         }
+        if (isReservedStandaloneSessionSourceType(source.sourceType)) {
+          const standaloneSession = this.sessionOrThrow(sessionId);
+          if (
+            params[DAEMON_OWNED_STANDALONE_CREATION_KEY] !== true ||
+            this.privateParentState !== 'trusted' ||
+            !isReservedStandaloneSessionSourceType(
+              standaloneSession.getConfig().getSessionSourceType(),
+            )
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              '`standalone` is reserved for daemon-owned session creation',
+            );
+          }
+        }
         const session = this.sessionOrThrow(sessionId);
         if (isCompatibleLiveSessionSource(source)) {
           await session.enableLiveScreenContext();
@@ -10310,6 +10930,7 @@ class QwenAgent implements Agent {
         const status = params['status'];
         const kind = params['kind'];
         const toolUseId = params['toolUseId'];
+        const label = params['label'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw RequestError.invalidParams(
             undefined,
@@ -10373,6 +10994,17 @@ class QwenAgent implements Agent {
             'Invalid background notification toolUseId',
           );
         }
+        if (
+          label !== undefined &&
+          (typeof label !== 'string' ||
+            label.trim().length === 0 ||
+            label.length > 256)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid background notification label',
+          );
+        }
         const session = this.sessionOrThrow(sessionId);
         const result = await session.enqueueBackgroundNotification({
           displayText,
@@ -10381,6 +11013,7 @@ class QwenAgent implements Agent {
           status,
           kind,
           ...(typeof toolUseId === 'string' ? { toolUseId } : {}),
+          ...(typeof label === 'string' ? { label } : {}),
         });
         return { sessionId, accepted: result.accepted };
       }
@@ -10448,10 +11081,59 @@ class QwenAgent implements Agent {
             'Invalid managed relocation capability',
           );
         }
+        const conversationDirectoryExpectation =
+          parseConversationDirectoryExpectation(
+            params['conversationDirectoryExpectation'],
+          );
+        if (
+          conversationDirectoryExpectation !== undefined &&
+          managedRelocation !== 'live-conversation'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Managed conversation directory expectation requires managed relocation',
+          );
+        }
         const allowedRoots = params['allowedRoots'];
 
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
+        const standalone = isReservedStandaloneSessionSourceType(
+          config.getSessionSourceType(),
+        );
+        if (
+          standalone &&
+          (managedRelocation !== 'live-conversation' ||
+            conversationDirectoryExpectation === undefined)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Standalone relocation requires an exact managed directory expectation',
+          );
+        }
+        if (conversationDirectoryExpectation !== undefined) {
+          if (
+            this.privateParentState !== 'trusted' ||
+            conversationDirectoryExpectation.canonicalSessionId !==
+              normalizeSessionIdForLookup(sessionId) ||
+            !Array.isArray(allowedRoots) ||
+            allowedRoots.length !== 1 ||
+            typeof allowedRoots[0] !== 'string' ||
+            !isSameConversationPath(
+              allowedRoots[0],
+              conversationDirectoryExpectation.root.canonicalPath,
+            ) ||
+            !isSameConversationPath(
+              targetPath,
+              conversationDirectoryExpectation.child.canonicalPath,
+            )
+          ) {
+            throw managedConversationDirectoryError(false);
+          }
+          await assertManagedConversationDirectoryIdentity(
+            conversationDirectoryExpectation,
+          );
+        }
 
         // Restrictive sandbox check
         if (config.isRestrictiveSandbox()) {
@@ -10465,12 +11147,18 @@ class QwenAgent implements Agent {
         try {
           stats = await fs.stat(targetPath);
         } catch {
+          if (conversationDirectoryExpectation !== undefined) {
+            throw managedConversationDirectoryError(true);
+          }
           throw new RequestError(-32002, `Directory not found: ${targetPath}`, {
             errorKind: 'directory_not_found',
             path: targetPath,
           });
         }
         if (!stats.isDirectory()) {
+          if (conversationDirectoryExpectation !== undefined) {
+            throw managedConversationDirectoryError(false);
+          }
           throw new RequestError(-32002, `Not a directory: ${targetPath}`, {
             errorKind: 'directory_not_found',
             path: targetPath,
@@ -10478,7 +11166,17 @@ class QwenAgent implements Agent {
         }
 
         // Canonicalize path
-        const canonicalPath = await fs.realpath(targetPath);
+        let canonicalPath: string;
+        try {
+          canonicalPath = await fs.realpath(targetPath);
+        } catch (error) {
+          if (conversationDirectoryExpectation !== undefined) {
+            throw managedConversationDirectoryError(
+              (error as NodeJS.ErrnoException).code === 'ENOENT',
+            );
+          }
+          throw error;
+        }
 
         let containmentRoots = allowedRoots;
         let managedTrustAllowed = false;
@@ -10511,6 +11209,9 @@ class QwenAgent implements Agent {
             canonicalRoot = await fs.realpath(rootPath);
             rootAfter = await fs.lstat(canonicalRoot);
           } catch {
+            if (conversationDirectoryExpectation !== undefined) {
+              throw managedConversationDirectoryError(false);
+            }
             throw new RequestError(
               -32004,
               'Live managed relocation requires an owner-only allowed root',
@@ -10520,9 +11221,20 @@ class QwenAgent implements Agent {
           if (
             !isOwnerOnlyDirectory(rootBefore) ||
             !isOwnerOnlyDirectory(rootAfter) ||
-            rootBefore.dev !== rootAfter.dev ||
-            rootBefore.ino !== rootAfter.ino
+            !isSameDirectoryIdentity(rootBefore, rootAfter) ||
+            (conversationDirectoryExpectation !== undefined &&
+              (!isSameConversationPath(
+                canonicalRoot,
+                conversationDirectoryExpectation.root.canonicalPath,
+              ) ||
+                !hasExpectedManagedDirectoryIdentity(
+                  rootAfter,
+                  conversationDirectoryExpectation.root,
+                )))
           ) {
+            if (conversationDirectoryExpectation !== undefined) {
+              throw managedConversationDirectoryError(false);
+            }
             throw new RequestError(
               -32004,
               'Live managed relocation requires an owner-only allowed root',
@@ -10535,7 +11247,12 @@ class QwenAgent implements Agent {
           try {
             targetBefore = await fs.lstat(targetPath);
             targetAfter = await fs.lstat(canonicalPath);
-          } catch {
+          } catch (error) {
+            if (conversationDirectoryExpectation !== undefined) {
+              throw managedConversationDirectoryError(
+                (error as NodeJS.ErrnoException).code === 'ENOENT',
+              );
+            }
             throw new RequestError(
               -32004,
               'Live managed relocation requires an owner-only direct child',
@@ -10546,13 +11263,24 @@ class QwenAgent implements Agent {
           if (
             !isOwnerOnlyDirectory(targetBefore) ||
             !isOwnerOnlyDirectory(targetAfter) ||
-            targetBefore.dev !== targetAfter.dev ||
-            targetBefore.ino !== targetAfter.ino ||
+            !isSameDirectoryIdentity(targetBefore, targetAfter) ||
+            (conversationDirectoryExpectation !== undefined &&
+              (!isSameConversationPath(
+                canonicalPath,
+                conversationDirectoryExpectation.child.canonicalPath,
+              ) ||
+                !hasExpectedManagedDirectoryIdentity(
+                  targetAfter,
+                  conversationDirectoryExpectation.child,
+                ))) ||
             relativeTarget.length === 0 ||
             relativeTarget.startsWith('..') ||
             path.isAbsolute(relativeTarget) ||
             relativeTarget.includes(path.sep)
           ) {
+            if (conversationDirectoryExpectation !== undefined) {
+              throw managedConversationDirectoryError(false);
+            }
             throw new RequestError(
               -32004,
               'Live managed relocation requires an owner-only direct child',
@@ -10564,6 +11292,9 @@ class QwenAgent implements Agent {
           try {
             rootFinal = await fs.lstat(canonicalRoot);
           } catch {
+            if (conversationDirectoryExpectation !== undefined) {
+              throw managedConversationDirectoryError(false);
+            }
             throw new RequestError(
               -32004,
               'Live managed relocation allowed root changed during validation',
@@ -10572,9 +11303,16 @@ class QwenAgent implements Agent {
           }
           if (
             !isOwnerOnlyDirectory(rootFinal) ||
-            rootFinal.dev !== rootAfter.dev ||
-            rootFinal.ino !== rootAfter.ino
+            !isSameDirectoryIdentity(rootFinal, rootAfter) ||
+            (conversationDirectoryExpectation !== undefined &&
+              !hasExpectedManagedDirectoryIdentity(
+                rootFinal,
+                conversationDirectoryExpectation.root,
+              ))
           ) {
+            if (conversationDirectoryExpectation !== undefined) {
+              throw managedConversationDirectoryError(false);
+            }
             throw new RequestError(
               -32004,
               'Live managed relocation allowed root changed during validation',
@@ -10595,6 +11333,9 @@ class QwenAgent implements Agent {
             return !rel.startsWith('..') && !path.isAbsolute(rel);
           });
           if (!contained) {
+            if (conversationDirectoryExpectation !== undefined) {
+              throw managedConversationDirectoryError(false);
+            }
             throw new RequestError(
               -32004,
               `Path outside allowed roots: ${canonicalPath}`,
@@ -10608,7 +11349,19 @@ class QwenAgent implements Agent {
         const validateTrust = () => {
           if (
             managedTrustAllowed ||
-            !isFolderTrustEnabled(this.settings.merged)
+            // Folder-trust enablement is bound to the workspace this session
+            // was admitted under: `config.getFolderTrust()` is
+            // `security.folderTrust.enabled` from that workspace, set once at
+            // construction and never moved by `relocateWorkingDirectory`.
+            // Deliberately NOT the process-wide `this.settings` cache (holds
+            // another workspace's value in a multi-workspace daemon — the bug
+            // this fixes), and deliberately NOT a live re-read keyed on the
+            // current cwd: a cd moves `targetDir` into a subdirectory that
+            // carries no `.qwen/settings.json`, so a cwd-keyed read resolves
+            // disabled after the first cd and disarms the gate for the rest of
+            // the session. `security.folderTrust.enabled` is `requiresRestart`,
+            // so binding it at admission matches its declared semantics.
+            !config.getFolderTrust()
           ) {
             trustValidated = true;
             return;
@@ -10633,7 +11386,10 @@ class QwenAgent implements Agent {
         );
         try {
           const settledPreviousCwd = config.getTargetDir();
-          if (canonicalPath === settledPreviousCwd) {
+          if (
+            canonicalPath === settledPreviousCwd &&
+            conversationDirectoryExpectation === undefined
+          ) {
             return {
               previousCwd: settledPreviousCwd,
               newCwd: canonicalPath,
@@ -10650,6 +11406,16 @@ class QwenAgent implements Agent {
             SESSION_DRAIN_TIMEOUT_MS,
             'close',
           );
+          if (
+            conversationDirectoryExpectation !== undefined &&
+            session.hasStandaloneRelocationBlockers()
+          ) {
+            throw new RequestError(
+              -32602,
+              'Cannot relocate while standalone background work is active',
+              { errorKind: 'session_busy' },
+            );
+          }
 
           // Relocate working directory (skip process.chdir and artifact
           // migration for ACP — storage stays at the bound workspace so
@@ -10660,6 +11426,18 @@ class QwenAgent implements Agent {
             canonicalPath,
             { skipProcessChdir: true, skipArtifactMigration: true },
           );
+          if (conversationDirectoryExpectation !== undefined) {
+            await assertManagedConversationDirectoryIdentity(
+              conversationDirectoryExpectation,
+            );
+            session.installPendingManagedConversationBinding(
+              conversationDirectoryExpectation,
+              () =>
+                assertManagedConversationDirectoryIdentity(
+                  conversationDirectoryExpectation,
+                ),
+            );
+          }
           if (relocation.memoryRefreshError) {
             warnings.push(
               `Memory refresh failed: ${
@@ -10681,7 +11459,7 @@ class QwenAgent implements Agent {
 
           try {
             await config
-              .getGeminiClient()
+              .getLlmClient()
               ?.addWorkingDirectoryChangedContext(
                 settledPreviousCwd,
                 canonicalPath,
@@ -10703,9 +11481,54 @@ class QwenAgent implements Agent {
           releaseGate();
         }
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingCommit:
+      case SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingRelease: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (this.privateParentState !== 'trusted') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Managed conversation binding requires a trusted private ACP parent',
+          );
+        }
+        const expectation = parseConversationDirectoryExpectation(
+          params['conversationDirectoryExpectation'],
+        );
+        if (
+          expectation === undefined ||
+          expectation.canonicalSessionId !==
+            normalizeSessionIdForLookup(sessionId)
+        ) {
+          throw managedConversationDirectoryError(false);
+        }
+        const session = this.sessionOrThrow(sessionId);
+        if (
+          !isReservedStandaloneSessionSourceType(
+            session.getConfig().getSessionSourceType(),
+          )
+        ) {
+          throw managedConversationDirectoryError(false);
+        }
+        await assertManagedConversationDirectoryIdentity(expectation);
+        if (
+          method ===
+          SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingCommit
+        ) {
+          await session.commitManagedConversationBinding(expectation);
+          return { sessionId, committed: true };
+        }
+        await session.releaseManagedConversationBinding(expectation);
+        return { sessionId, released: true };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionApprovalMode: {
         const sessionId = params['sessionId'];
         const mode = params['mode'];
+        const planMode = params['planMode'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw RequestError.invalidParams(
             undefined,
@@ -10721,11 +11544,24 @@ class QwenAgent implements Agent {
             `Invalid approval mode; allowed: ${APPROVAL_MODES.join(', ')}`,
           );
         }
+        if (
+          planMode !== undefined &&
+          (typeof planMode !== 'boolean' || mode === ApprovalMode.PLAN)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'planMode must be a boolean with a non-plan execution mode',
+          );
+        }
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         const previous = config.getApprovalMode();
         try {
-          config.setApprovalMode(mode as ApprovalMode);
+          if (typeof planMode === 'boolean') {
+            config.setPlanMode(planMode, mode as ApprovalMode);
+          } else {
+            config.setApprovalMode(mode as ApprovalMode);
+          }
         } catch (err) {
           // `TrustGateError` is the core's structured rejection for
           // untrusted-folder + privileged-mode. We re-raise it as a
@@ -10746,8 +11582,45 @@ class QwenAgent implements Agent {
             session.clearActiveTodoPlanRevision();
           }
           session.clearTodoStopGuardTrust();
+        } else if (previous === 'plan') {
+          session.clearActiveTodoPlanRevision();
         }
-        return { previous, current };
+        return {
+          previous,
+          current,
+          ...(current === ApprovalMode.PLAN
+            ? {
+                planExecutionMode:
+                  config.getPlanExecutionMode?.() ?? config.getPrePlanMode?.(),
+              }
+            : {}),
+        };
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow: {
+        const enabled = params['enabled'];
+        if (typeof enabled !== 'boolean') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing Session Workflow setting',
+          );
+        }
+        // Same-value guard: the settings POST routes push the post-write
+        // *effective* value, and a system-scope settings file can shadow a
+        // workspace write, so the effective value can equal the override
+        // already pinned here. Re-applying would clear every live session's
+        // active plan revision even though the gate never changed (the
+        // workspaceReload twin above guards its no-op case the same way).
+        // This only covers the already-pinned case: on the first write the
+        // override is still `undefined`, so the per-session no-op decision
+        // inside applySessionWorkflowOverrideToLiveSessions catches a first
+        // write whose pushed value matches what live sessions already derive
+        // from settings.
+        if (this.sessionWorkflowEnabledOverride === enabled) {
+          return { enabled, sessionsUpdated: 0 };
+        }
+        const sessionsUpdated =
+          this.applySessionWorkflowOverrideToLiveSessions(enabled);
+        return { enabled, sessionsUpdated };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionLanguage: {
         const sessionId = params['sessionId'];
@@ -10851,7 +11724,7 @@ class QwenAgent implements Agent {
                   );
                 }
                 await cfg.refreshHierarchicalMemory();
-                await cfg.getGeminiClient()?.refreshSystemInstruction();
+                await cfg.getLlmClient()?.refreshSystemInstruction();
               }),
             );
             const failedCount = results.filter(
@@ -10868,6 +11741,71 @@ class QwenAgent implements Agent {
         }
 
         return { language: resolvedLanguage, outputLanguage, refreshed };
+      }
+      case SERVE_CONTROL_EXT_METHODS.userLanguage: {
+        // Sessionless counterpart of `sessionLanguage`. The daemon process
+        // already persisted `general.language` / `general.outputLanguage`
+        // and the global output-language.md before fanning out, so this
+        // handler performs no settings or file writes — doing them here
+        // would race the daemon and sibling runtimes on the shared user
+        // settings file. Project-bound output-language files are left
+        // alone: those sessions keep their override.
+        const language = params['language'];
+        const syncOutputLanguage = params['syncOutputLanguage'] === true;
+
+        const allowedLanguages = [
+          ...SUPPORTED_LANGUAGES.map((l) => l.code),
+          'auto',
+        ];
+        if (
+          typeof language !== 'string' ||
+          !allowedLanguages.includes(language)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Invalid language; must be one of: ${allowedLanguages.join(', ')}`,
+          );
+        }
+
+        try {
+          await setLanguageAsync(language);
+        } catch (err) {
+          debugLogger.warn('setLanguageAsync failed:', err);
+          throw new RequestError(
+            -32603,
+            `Failed to switch UI language: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+
+        const resolvedLanguage = getCurrentLanguage();
+
+        // Pick up what the daemon just persisted so this process stops
+        // serving a stale merged view.
+        this.settings.reloadScopeFromDisk(SettingScope.User);
+
+        // UI-language-only switches do not change the system instruction;
+        // refresh sessions only when the output language moved.
+        let sessions = 0;
+        let failed = 0;
+        if (syncOutputLanguage) {
+          const allSessions = [...this.sessions.values()];
+          const results = await Promise.allSettled(
+            allSessions.map(async (s) => {
+              const cfg = s.getConfig();
+              await cfg.refreshHierarchicalMemory();
+              await cfg.getLlmClient()?.refreshSystemInstruction();
+            }),
+          );
+          sessions = results.length;
+          failed = results.filter((r) => r.status === 'rejected').length;
+          if (failed > 0) {
+            debugLogger.warn(
+              `User language refresh failed for ${failed}/${results.length} session(s)`,
+            );
+          }
+        }
+
+        return { language: resolvedLanguage, sessions, failed };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionRecap: {
         // Generate a one-sentence "where did I leave off" summary.
@@ -11047,7 +11985,7 @@ class QwenAgent implements Agent {
         let hasHistory = false;
         try {
           hasHistory =
-            (config.getGeminiClient().getHistoryShallow() ?? []).length > 0;
+            (config.getLlmClient().getHistoryShallow() ?? []).length > 0;
         } catch (error) {
           debugLogger.debug('Failed to read history before /fork:', error);
         }
@@ -11088,7 +12026,7 @@ class QwenAgent implements Agent {
         }
 
         try {
-          config.getGeminiClient().addHistory({
+          config.getLlmClient().addHistory({
             role: 'user',
             parts: [
               {
@@ -11121,10 +12059,10 @@ class QwenAgent implements Agent {
         }
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
-        const geminiClient = config.getGeminiClient()!;
+        const llmClient = config.getLlmClient()!;
         const outputText =
           typeof params['output'] === 'string' ? params['output'] : '';
-        geminiClient.addHistory({
+        llmClient.addHistory({
           role: 'user',
           parts: [
             {
@@ -11153,11 +12091,12 @@ class QwenAgent implements Agent {
         if (
           taskKind !== 'agent' &&
           taskKind !== 'shell' &&
-          taskKind !== 'monitor'
+          taskKind !== 'monitor' &&
+          taskKind !== 'workflow'
         ) {
           throw RequestError.invalidParams(
             undefined,
-            'taskKind must be "agent", "shell", or "monitor"',
+            'taskKind must be "agent", "shell", "monitor", or "workflow"',
           );
         }
         debugLogger.info(
@@ -11218,11 +12157,272 @@ class QwenAgent implements Agent {
             );
             return { cancelled: true, status: task.status };
           }
+          case 'workflow': {
+            if (!this.canUseWorkflowControls(config)) {
+              return { cancelled: false, reason: 'disabled' };
+            }
+            const registry = config.getWorkflowRunRegistry();
+            const task = registry.get(taskId);
+            // A reserved-but-unregistered run has no entry yet: the runner
+            // is still loading its script or replaying its journal. The
+            // liveness gate already treats that window as live; cancel
+            // must too, or the client is told "not_found" about a run it
+            // can see starting, and cannot stop it until it registers.
+            // A retry reuses its runId, so during ITS starting window the
+            // old terminal entry is still there — a live reservation
+            // shadowed by a terminal entry is the same starting run, not
+            // a "not_running" one.
+            if (
+              (!task || isTerminalWorkflowStatus(task.status)) &&
+              registry.isStarting?.(taskId)
+            ) {
+              registry.cancelStarting(taskId);
+              debugLogger.info(
+                `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=starting`,
+              );
+              return { cancelled: true, status: 'cancelled' };
+            }
+            if (
+              !task ||
+              (task.status !== 'running' &&
+                task.status !== 'pausing' &&
+                task.status !== 'paused')
+            ) {
+              const reason = task ? 'not_running' : 'not_found';
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=${reason} status=${task?.status ?? 'missing'}`,
+              );
+              return { cancelled: false, reason, status: task?.status };
+            }
+            const handle = registry.getHandle(taskId);
+            registry.cancel(taskId, Date.now());
+            if (handle) await handle.completion;
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
+            );
+            return { cancelled: true, status: task.status };
+          }
           default: {
             const exhaustive: never = taskKind;
             throw new Error(`Unhandled task kind: ${exhaustive}`);
           }
         }
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const taskId = params['taskId'];
+        if (typeof taskId !== 'string' || taskId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing taskId',
+          );
+        }
+        const action = params['action'];
+        if (
+          action !== 'pause' &&
+          action !== 'resume' &&
+          action !== 'retry' &&
+          action !== 'rerun' &&
+          action !== 'delete-history' &&
+          action !== 'run-saved'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'action must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        if (!this.canUseWorkflowControls(config)) {
+          return { changed: false };
+        }
+        const mutationClaim =
+          action === 'run-saved'
+            ? getWorkflowTaskMutationKey(config, taskId, 'saved')
+            : getWorkflowTaskMutationKey(config, taskId);
+        if (action === 'delete-history') {
+          const attempt = await tryWithWorkflowTaskMutation(
+            mutationClaim,
+            async () => {
+              const changed = await session.deleteWorkflowHistory(taskId);
+              if (changed) {
+                // Every session shares the one store: drop the sibling
+                // registries' terminal entries too, or a retry from a
+                // sibling re-persists the just-deleted run — and mark the
+                // deletion in each sibling's history, or a sibling refresh
+                // that began reading the directory before this delete
+                // landed merges the stale listing and republishes the run.
+                for (const [siblingId, sibling] of this.sessions) {
+                  if (siblingId === sessionId) continue;
+                  sibling
+                    .getConfig()
+                    .getWorkflowRunRegistry()
+                    .removeTerminal(taskId);
+                  sibling.noteExternalWorkflowDeletion(taskId);
+                }
+              }
+              return { changed };
+            },
+          );
+          if (!attempt.acquired) {
+            return { changed: false };
+          }
+          return attempt.value;
+        }
+        const registry = config.getWorkflowRunRegistry();
+        if (action === 'run-saved') {
+          const attempt = await tryWithWorkflowTaskMutation(
+            mutationClaim,
+            async () => {
+              const savedWorkflow = (await listSavedWorkflows(config)).find(
+                (entry) => entry.name === taskId,
+              );
+              if (!savedWorkflow) return { changed: false };
+              const workflowTool = config
+                .getToolRegistry()
+                .getTool(ToolNames.WORKFLOW);
+              if (!isSessionOwnedWorkflowTool(workflowTool)) {
+                throw RequestError.invalidParams(
+                  undefined,
+                  'The workflow tool is unavailable; cannot run this saved workflow.',
+                );
+              }
+              const result = (await workflowTool
+                .buildSessionOwnedBackground(
+                  {
+                    scriptPath: savedWorkflow.scriptPath,
+                  },
+                  savedWorkflow.name,
+                )
+                .execute(new AbortController().signal)) as WorkflowToolResult;
+              const startedTask = result.workflowRunId
+                ? registry.get(result.workflowRunId)
+                : undefined;
+              return startedTask
+                ? {
+                    changed: true,
+                    status: startedTask.status,
+                    taskId: startedTask.runId,
+                  }
+                : { changed: false };
+            },
+          );
+          if (!attempt.acquired) {
+            return { changed: false };
+          }
+          return attempt.value;
+        }
+        const task = registry.get(taskId);
+        if (!task) return { changed: false };
+        if (action === 'retry' || action === 'rerun') {
+          // A retry reuses its runId over the one journal/snapshot store
+          // every session shares, so "failed with no handle" in THIS
+          // session's registry is not enough: a sibling may have retried
+          // it already and be running it now — the task-global claim is
+          // released as soon as the background start returns, while the
+          // run is still live. Two runners on one runId interleave the
+          // journal and race the snapshot write. Checked synchronously
+          // beside canStart — no await precedes the claim — so the answer
+          // cannot go stale before the claim is taken.
+          const liveElsewhere =
+            action === 'retry' &&
+            (registry.isStarting?.(taskId) === true ||
+              this.isWorkflowRunLiveOutsideSession(sessionId, taskId));
+          const canStart =
+            action === 'retry'
+              ? task.status === 'failed' &&
+                !registry.getHandle(taskId) &&
+                !liveElsewhere
+              : task.status === 'completed' ||
+                task.status === 'failed' ||
+                task.status === 'cancelled';
+          const savedScriptPath = task.scriptPath;
+          if (!canStart || (!task.script && !savedScriptPath)) {
+            return { changed: false, status: task.status };
+          }
+          const attempt = await tryWithWorkflowTaskMutation(
+            mutationClaim,
+            async () => {
+              const workflowTool = config
+                .getToolRegistry()
+                .getTool(ToolNames.WORKFLOW);
+              if (!isSessionOwnedWorkflowTool(workflowTool)) {
+                throw RequestError.invalidParams(
+                  undefined,
+                  `The workflow tool is unavailable; cannot ${action} this run.`,
+                );
+              }
+              let readableScriptPath: string | undefined;
+              if (savedScriptPath) {
+                try {
+                  await resolveSavedWorkflowScript(
+                    { scriptPath: savedScriptPath },
+                    config,
+                  );
+                  readableScriptPath = savedScriptPath;
+                } catch {
+                  readableScriptPath = undefined;
+                }
+              }
+              if (!readableScriptPath && !task.script) {
+                return { changed: false, status: task.status };
+              }
+              const startParams: Omit<WorkflowParams, 'run_in_background'> = {
+                ...(readableScriptPath
+                  ? { scriptPath: readableScriptPath }
+                  : { script: task.script }),
+                args: task.args,
+                ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
+              };
+              const result = (await workflowTool
+                .buildSessionOwnedBackground(
+                  startParams,
+                  readableScriptPath ? task.workflowName : undefined,
+                )
+                .execute(new AbortController().signal)) as WorkflowToolResult;
+              if (action === 'rerun') {
+                const rerunTask = result.workflowRunId
+                  ? registry.get(result.workflowRunId)
+                  : undefined;
+                if (rerunTask) {
+                  registry.setLineage(rerunTask.runId, task.runId, 'rerun');
+                }
+                return rerunTask
+                  ? {
+                      changed: true,
+                      status: rerunTask.status,
+                      taskId: rerunTask.runId,
+                    }
+                  : { changed: false, status: task.status };
+              }
+              // `execute()` reports a start that never registered — a
+              // cancel landing in the retry's starting window, whether from
+              // `cancelStarting` or a session dispose — by omitting
+              // `workflowRunId`, the same shape the rerun and run-saved
+              // branches gate on. Answering `changed: true` there tells the
+              // client a run exists that nothing will ever progress.
+              return result.workflowRunId
+                ? {
+                    changed: true,
+                    status: registry.get(result.workflowRunId)?.status,
+                  }
+                : { changed: false, status: task.status };
+            },
+          );
+          if (!attempt.acquired) {
+            return { changed: false, status: task.status };
+          }
+          return attempt.value;
+        }
+        const changed =
+          action === 'pause' ? registry.pause(taskId) : registry.resume(taskId);
+        return { changed, status: task.status };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionGoalClear: {
         const sessionId = params['sessionId'];
@@ -11349,8 +12549,7 @@ class QwenAgent implements Agent {
           );
         }
         const session = this.sessionOrThrow(sessionId);
-        const settings = loadSettingsCached(cwd);
-        return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+        const readSettledTurnResult = async () => {
           try {
             await session.getConfig().getChatRecordingService()?.flush();
           } catch {
@@ -11423,7 +12622,11 @@ class QwenAgent implements Agent {
             }
             throw error;
           }
-        });
+        };
+        return await this.runWithPinnedRuntimeBaseDirForRequest(
+          cwd,
+          readSettledTurnResult,
+        );
       }
       case SERVE_CONTROL_EXT_METHODS.sessionContinue: {
         const sessionId = params['sessionId'];
@@ -11545,6 +12748,14 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh: {
         const sessionId = params['sessionId'] as string;
         const rawRefreshBootstrap = params['refreshBootstrap'];
+        const rawSkillsOnly = params['skillsOnly'];
+        if (rawSkillsOnly !== undefined && typeof rawSkillsOnly !== 'boolean') {
+          throw RequestError.invalidParams(
+            undefined,
+            'skillsOnly must be a boolean',
+          );
+        }
+        const skillsOnly = rawSkillsOnly === true;
         if (
           rawRefreshBootstrap !== undefined &&
           typeof rawRefreshBootstrap !== 'boolean'
@@ -11565,16 +12776,28 @@ class QwenAgent implements Agent {
             errors.push(error);
           }
         };
+        if (skillsOnly) {
+          await runRefresh(async () => session.reloadSkillSettings());
+        }
         await runRefresh(async () => await extensionManager.refreshCache());
-        await runRefresh(async () => await extensionManager.refreshTools());
+        if (skillsOnly) {
+          await runRefresh(
+            async () =>
+              await config
+                .getSkillManager()
+                ?.refreshCache({ throwOnError: true }),
+          );
+        } else {
+          await runRefresh(async () => await extensionManager.refreshTools());
+        }
         const bootstrapConfig = this.config;
         if (rawRefreshBootstrap !== false && bootstrapConfig !== config) {
           await runRefresh(
-            async () => await this.refreshBootstrapExtensionStatus(),
+            async () => await this.refreshBootstrapExtensionStatus(skillsOnly),
           );
         }
         const discoveryConfig = this.workspaceMcpDiscoveryConfig;
-        if (discoveryConfig && discoveryConfig !== config) {
+        if (!skillsOnly && discoveryConfig && discoveryConfig !== config) {
           const discoveryExtensionManager =
             discoveryConfig.getExtensionManager();
           await runRefresh(
@@ -11585,11 +12808,15 @@ class QwenAgent implements Agent {
           );
         }
         await runRefresh(
-          async () =>
-            await config.getGeminiClient()?.refreshSystemInstruction(),
+          async () => await config.getLlmClient()?.refreshSystemInstruction(),
         );
-        await runRefresh(
-          async () => await session.sendAvailableCommandsUpdate(),
+        await runRefresh(async () =>
+          skillsOnly
+            ? await session.refreshSkillsFromSettings({
+                reloadSettings: false,
+                notifyConfigChanged: false,
+              })
+            : await session.sendAvailableCommandsUpdate(),
         );
         if (errors.length > 0) {
           const details = errors
@@ -11612,8 +12839,12 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        const success = await runWithAcpRuntimeOutputDir(
-          this.settings,
+        // Per-request settings, not the "latest loaded" this.settings cache:
+        // another workspace's advanced.runtimeOutputDir would point this
+        // destructive lookup at the wrong runtime root — silently returning
+        // success:false for a session that exists, or deleting a stale
+        // same-id copy under the wrong root.
+        const success = await this.runWithPinnedRuntimeBaseDirForRequest(
           cwd,
           async () => {
             const sessionService = new SessionService(cwd);
@@ -11662,8 +12893,8 @@ class QwenAgent implements Agent {
           const ok = await liveRecording.recordCustomTitle(title, 'manual');
           return { success: ok };
         }
-        const success = await runWithAcpRuntimeOutputDir(
-          this.settings,
+        // Per-request settings for the same reason as deleteSession above.
+        const success = await this.runWithPinnedRuntimeBaseDirForRequest(
           cwd,
           async () => {
             const sessionService = new SessionService(cwd);
@@ -11876,6 +13107,7 @@ class QwenAgent implements Agent {
         }
 
         const liveSession = this.sessions.get(sessionId);
+        const turnIdleBeforeRead = liveSession?.isTurnIdle() ?? true;
         let replayConfig = this.config;
         let sessionData: ResumedSessionData | undefined;
         if (liveSession) {
@@ -11893,9 +13125,7 @@ class QwenAgent implements Agent {
             : await loadAuthoritative();
           replayConfig = config;
         } else {
-          const settings = loadSettingsCached(cwd);
-          sessionData = await this.runWithPinnedRuntimeBaseDir(
-            settings,
+          sessionData = await this.runWithPinnedRuntimeBaseDirForRequest(
             cwd,
             async () => {
               const sessionService = new SessionService(cwd);
@@ -11917,6 +13147,13 @@ class QwenAgent implements Agent {
           // Read-only history dump never re-hangs the question. Skip
           // finalize only on load/resume that will actually restore.
           suppressRestoreAskUserQuestion: true,
+          // Ungated read: unlike the live loadSession restore (whose gate
+          // drains turns), a turn may still be running here, so guard on
+          // turn activity instead of finalizing unconditionally (#9704).
+          finalizeDangling: this.finalizeDanglingForRestore(
+            liveSession,
+            turnIdleBeforeRead,
+          ),
         });
 
         return {
@@ -12018,11 +13255,31 @@ class QwenAgent implements Agent {
                   const recording = sourceConfig.getChatRecordingService();
                   const sessionService = sourceConfig.getSessionService();
 
-                  const baseName = deriveForkBaseName(
-                    name,
-                    recording,
-                    sessionId,
-                  );
+                  const requestedName = normalizeRequestedBranchName(name);
+                  const sourceCustomTitle =
+                    requestedName === undefined
+                      ? recording?.getCurrentCustomTitle()
+                      : undefined;
+                  const persistedDisplayName =
+                    requestedName === undefined &&
+                    sourceCustomTitle === undefined
+                      ? await sessionService.getSessionDisplayName(sessionId)
+                      : undefined;
+                  const sourceDisplayName =
+                    sourceCustomTitle ?? persistedDisplayName;
+                  const derivedBaseName = sourceCustomTitle
+                    ? normalizeDerivedBranchTitle(sourceCustomTitle)
+                    : sourceDisplayName;
+                  // A base that is empty, whitespace-only, or exactly a
+                  // legacy `(Branch)`/`(Branch N)` token falls back to the
+                  // session-id prefix here, while CLI /branch falls back to
+                  // the first prompt. Deliberate: no picker name survives to
+                  // anchor the family to, and one shared fallback would need
+                  // a prompt-only display-name read on this route.
+                  const baseName =
+                    requestedName ??
+                    (derivedBaseName?.trim() || undefined) ??
+                    sessionId.slice(0, 8);
 
                   const title = await computeUniqueBranchTitle(
                     baseName,
@@ -12060,7 +13317,15 @@ class QwenAgent implements Agent {
         const recording = sourceConfig.getChatRecordingService();
         if (recording) await recording.flush();
         const sessionService = sourceConfig.getSessionService();
-        const title = deriveForkBaseName(name, recording, sessionId);
+        const requestedName = normalizeRequestedBranchName(name);
+        let title = requestedName;
+        if (title === undefined) {
+          const sourceCustomTitle = recording?.getCurrentCustomTitle();
+          title = sourceCustomTitle
+            ? (normalizeDerivedBranchTitle(sourceCustomTitle) ??
+              sessionId.slice(0, 8))
+            : sessionId.slice(0, 8);
+        }
         const newSessionId = randomUUID();
         const fork = () =>
           sessionService.forkSession(sessionId, newSessionId, {
@@ -12362,6 +13627,57 @@ class QwenAgent implements Agent {
           unknown
         >;
       }
+      case SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload: {
+        if (
+          !this.settings.reloadScopesFromDiskAtomically([
+            SettingScope.User,
+            SettingScope.Workspace,
+          ])
+        ) {
+          debugLogger.warn('Model-provider settings reload failed');
+          return { configsRefreshed: 0, configsFailed: 1 };
+        }
+        this.modelProviderReloadRevision += 1;
+        const merged = this.settings.merged;
+        reloadEnvironment(merged, cwd);
+        const providerProtocol = merged.providerProtocol ?? {};
+        let configsRefreshed = 0;
+        let configsFailed = 0;
+
+        const reloadConfig = (config: Config, id: string) => {
+          try {
+            config.reloadModelProvidersConfig(
+              merged.modelProviders,
+              providerProtocol,
+            );
+            configsRefreshed += 1;
+          } catch {
+            configsFailed += 1;
+            debugLogger.warn(`Model-provider reload failed for ${id}`);
+          }
+        };
+
+        reloadConfig(this.config, 'bootstrap');
+        for (const config of this.initializingConfigs) {
+          if (config !== this.config) {
+            reloadConfig(config, `initializing:${config.getSessionId()}`);
+          }
+        }
+        for (const [id, session] of this.sessions) {
+          try {
+            session.reloadModelProvidersFromDisk();
+            configsRefreshed += 1;
+          } catch {
+            configsFailed += 1;
+            debugLogger.warn(`Model-provider reload failed for session ${id}`);
+          }
+        }
+
+        return {
+          configsRefreshed,
+          configsFailed,
+        };
+      }
       case SERVE_CONTROL_EXT_METHODS.workspaceReload: {
         const oldMerged = structuredClone(this.settings.merged);
 
@@ -12374,6 +13690,52 @@ class QwenAgent implements Agent {
         const changed = diffSettingsKeys(oldMerged, newMerged);
         const envChanged =
           envResult.updatedKeys.length > 0 || envResult.removedKeys.length > 0;
+        const providersChanged =
+          changed.has('modelProviders') || changed.has('providerProtocol');
+        if (providersChanged) {
+          this.modelProviderReloadRevision += 1;
+        }
+
+        // A settings-file edit to the Session Workflow gate must reach live
+        // sessions too. The UI ext method pins every Session's provider to the
+        // daemon-held override, so without re-deriving it here a disk change
+        // (hand edit, dotfile sync) would stay masked until daemon restart.
+        const readSessionWorkflow = (merged: Record<string, unknown>) =>
+          (merged as { experimental?: { sessionWorkflow?: unknown } })
+            .experimental?.sessionWorkflow === true;
+        const reloadedSessionWorkflow = readSessionWorkflow(newMerged);
+        // Apply the reloaded gate to live sessions unconditionally. A
+        // merged↔merged diff against `oldMerged` is unreliable here:
+        // `this.settings` is a replaceable "latest loaded" cache that many
+        // handlers swap for a fresh loadSettings instance, and after such a
+        // swap the diff compares two fresh views of the same disk state and
+        // misses a flip the live sessions (which still hold their own,
+        // now-stale LoadedSettings) never saw. The helper makes the no-op
+        // decision per live session — comparing the reloaded disk value
+        // against each session's effective gate — so calling it on every
+        // reload is idempotent, re-pins only the sessions that actually
+        // change, and keeps the daemon-held override equal to the disk
+        // truth (which also covers a disk state that contradicts a
+        // UI-pinned override).
+        this.applySessionWorkflowOverrideToLiveSessions(
+          reloadedSessionWorkflow,
+        );
+
+        // Fold a missing key to the fresh-session default (AUTO for
+        // unrestricted sessions; restricted sessions converge on DEFAULT per
+        // session below) so a key deletion reaches live sessions too. A
+        // present-but-invalid value folds to undefined instead: boot rejects
+        // that file, so reload must not converge live sessions on it either
+        // (folding it to AUTO would silently escalate the approval gate),
+        // and the undefined is never recorded as converged.
+        const reloadedApprovalMode = foldReloadApprovalMode(
+          newMerged.tools?.approvalMode,
+        );
+        if (reloadedApprovalMode === undefined) {
+          debugLogger.warn(
+            'reload: tools.approvalMode holds a value boot would reject; live sessions keep their current modes until the file is corrected',
+          );
+        }
 
         const sessions = [...this.sessions.entries()];
         const refreshed: string[] = [];
@@ -12387,8 +13749,6 @@ class QwenAgent implements Agent {
             }
             const config = session.getConfig();
             const authType = config.getAuthType();
-            const providersChanged =
-              changed.has('modelProviders') || changed.has('providerProtocol');
 
             // Long-lived ACP sessions never restart, so honor providerProtocol
             // changes here too (its requiresRestart only gates the TUI path) and
@@ -12416,6 +13776,7 @@ class QwenAgent implements Agent {
             ) {
               try {
                 await config.switchModel(authType, newModelName);
+                session.reloadReasoningSelection();
               } catch (err) {
                 debugLogger.warn(
                   `reload: switchModel failed for session ${id}: ${err}`,
@@ -12423,12 +13784,21 @@ class QwenAgent implements Agent {
               }
             } else if ((providersChanged || envChanged) && authType) {
               try {
-                await config.refreshAuth(authType);
+                await this.refreshAuthWithPersistedReasoning(
+                  config,
+                  this.settings,
+                  authType,
+                  undefined,
+                  session.getSessionReasoningSelection(),
+                );
+                session.reloadReasoningSelection();
               } catch (err) {
                 debugLogger.warn(
                   `reload: refreshAuth failed for session ${id}: ${err}`,
                 );
               }
+            } else if (changed.has('model')) {
+              session.reloadReasoningSelection();
             }
 
             if (changed.has('tools')) {
@@ -12436,24 +13806,72 @@ class QwenAgent implements Agent {
                 newMerged.tools?.disabled,
               );
               config.setDisabledTools(new Set(disabled));
+            }
 
-              const newMode = newMerged.tools?.approvalMode;
-              if (
-                newMode &&
-                APPROVAL_MODES.includes(newMode as ApprovalMode) &&
-                newMode !== config.getApprovalMode()
-              ) {
+            // `/capabilities` reads `tools.workflowsEnabled` live from
+            // the reloaded settings; a session alive before the reload
+            // was constructed with the old value and would keep
+            // answering canUseWorkflowControls with it, so the
+            // advertisement and the controls it gates would diverge.
+            // The merged view is already workspace-stripped, so a repo
+            // cannot self-grant here any more than at construction.
+            const workflowsWereEnabled = config.isWorkflowsEnabled();
+            config.setWorkflowsEnabled(newMerged.tools?.workflowsEnabled);
+            if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
+              // The `workflows` slash command comes and goes with the
+              // flag; a client holding the old list would keep offering
+              // (or hiding) it.
+              try {
+                await session.sendAvailableCommandsUpdate();
+              } catch (err) {
+                debugLogger.warn(
+                  `reload: sendAvailableCommandsUpdate failed for session ${id}: ${err}`,
+                );
+              }
+            }
+
+            // Apply the reloaded approval mode only when it differs from
+            // what this session last converged on (see the record's
+            // derivation above); the `!== previousMode` guard keeps the
+            // apply idempotent for sessions already at the disk value while
+            // the record still advances, so a later round-trip of the file
+            // re-converges exactly the sessions that moved. An undefined
+            // fold (present-but-invalid file value) is neither applied nor
+            // recorded, so no session converges on a value boot would
+            // reject. Restricted sessions ignore the file at boot
+            // (loadCliConfig pins them to DEFAULT), so reload must converge
+            // them on DEFAULT too — pushing the file value (or the AUTO fold
+            // of a missing key) into a safe-mode session would silently
+            // strip its approval restriction.
+            const reloadedSessionMode = isRestrictedApprovalModeConfig(config)
+              ? ApprovalMode.DEFAULT
+              : reloadedApprovalMode;
+            const previousMode = config.getApprovalMode();
+            const convergedMode = this.sessionApprovalModeConverged.get(id);
+            if (
+              reloadedSessionMode !== undefined &&
+              reloadedSessionMode !== convergedMode
+            ) {
+              if (reloadedSessionMode !== previousMode) {
                 try {
-                  config.setApprovalMode(newMode as ApprovalMode);
-                  if (newMode === 'plan') {
+                  config.setApprovalMode(reloadedSessionMode);
+                  if (reloadedSessionMode === 'plan') {
                     session.clearActiveTodoPlanRevision();
                     session.clearTodoStopGuardTrust();
+                  } else if (previousMode === 'plan') {
+                    session.clearActiveTodoPlanRevision();
                   }
+                  this.sessionApprovalModeConverged.set(
+                    id,
+                    reloadedSessionMode,
+                  );
                 } catch (err) {
                   debugLogger.warn(
                     `reload: setApprovalMode failed for session ${id}: ${err}`,
                   );
                 }
+              } else {
+                this.sessionApprovalModeConverged.set(id, reloadedSessionMode);
               }
             }
 
@@ -12465,7 +13883,7 @@ class QwenAgent implements Agent {
               );
             }
             try {
-              await config.getGeminiClient()?.refreshSystemInstruction();
+              await config.getLlmClient()?.refreshSystemInstruction();
             } catch (err) {
               debugLogger.warn(
                 `reload: refreshSystemInstruction failed for session ${id}: ${err}`,
@@ -12702,25 +14120,44 @@ class QwenAgent implements Agent {
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
   ): Promise<Config> {
+    // Transcript replay is the only recording-disabled Config and must remain
+    // id-less; it borrows the validated target session context from extMethod.
+    const preserveIdlessSession =
+      sessionId === undefined && chatRecording === false;
+    const inheritedSessionId = preserveIdlessSession
+      ? sessionIdContext.getStore()
+      : undefined;
+    // A generated id exists only to bind the debug-log context before Config
+    // construction; loadCliConfig must not treat it as caller-supplied (the
+    // occupancy check is for caller-chosen ids that may have a case-twin).
+    const sessionIdGenerated =
+      sessionId === undefined && !preserveIdlessSession;
+    const effectiveSessionId =
+      sessionId ?? (sessionIdGenerated ? randomUUID() : undefined);
+    const debugSessionId =
+      effectiveSessionId ?? inheritedSessionId ?? 'transcript-replay';
     try {
       this.assertManagedSessionAdmission();
-      return await this.runWithPinnedRuntimeBaseDir(settings, cwd, async () => {
-        await this.retryPendingConfigCleanup(
-          Storage.getRuntimeBaseDir(),
-          sessionId,
-        );
-        return this.newSessionConfigInRuntimeContext(
-          cwd,
-          mcpServers,
-          settings,
-          sessionSource,
-          sessionId,
-          resume,
-          initializeOptions,
-          chatRecording,
-          restoreOptions,
-        );
-      });
+      return await sessionIdContext.run(debugSessionId, () =>
+        this.runWithPinnedRuntimeBaseDir(settings, cwd, async () => {
+          await this.retryPendingConfigCleanup(
+            Storage.getRuntimeBaseDir(),
+            effectiveSessionId,
+          );
+          return this.newSessionConfigInRuntimeContext(
+            cwd,
+            mcpServers,
+            settings,
+            sessionSource,
+            effectiveSessionId,
+            resume,
+            initializeOptions,
+            chatRecording,
+            restoreOptions,
+            sessionIdGenerated,
+          );
+        }),
+      );
     } catch (error) {
       if (error instanceof SessionIdConflictError) {
         throw new RequestError(ACP_ERROR_CODES.INVALID_PARAMS, error.message, {
@@ -12750,7 +14187,11 @@ class QwenAgent implements Agent {
     initializeOptions: ConfigInitializeOptions = {},
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
+    sessionIdGenerated?: boolean,
   ): Promise<Config> {
+    const provisionalWorkspace = isReservedStandaloneSessionSourceType(
+      sessionSource?.sourceType,
+    );
     // ACP/IDE-injected servers are session-level: they must outrank a project
     // `.mcp.json` and stay un-gated. Collect them separately and pass them as
     // `sessionMcpServers` (top precedence tier) rather than merging into
@@ -12822,9 +14263,14 @@ class QwenAgent implements Agent {
     const sessionArg =
       resume === true
         ? { resume: sessionId, sessionId: undefined }
-        : { sessionId, resume: undefined };
+        : {
+            sessionId,
+            sessionIdGenerated: sessionIdGenerated === true || undefined,
+            resume: undefined,
+          };
     const argvForSession = {
       ...this.argv,
+      ...(provisionalWorkspace ? { experimentalLsp: false } : {}),
       // Docker sandbox relaunch injects a fixed --sandbox-session-id into
       // the ACP process argv. Without clearing it, every newSession()
       // inherits the same ID and the second session collides with the
@@ -12862,8 +14308,11 @@ class QwenAgent implements Agent {
       // not process.exit(1) the shared ACP child and every session on its
       // channel. newSessionConfig maps the throw to a RequestError.
       true,
-      this.managedToolInvocationGuard || restoreOptions
+      this.managedToolInvocationGuard || restoreOptions || provisionalWorkspace
         ? {
+            ...(provisionalWorkspace
+              ? { provisionalWorkspace: true as const }
+              : {}),
             ...(this.managedToolInvocationGuard
               ? { toolInvocationGuard: this.managedToolInvocationGuard }
               : {}),
@@ -12882,9 +14331,13 @@ class QwenAgent implements Agent {
               : {}),
           }
         : undefined,
+      buildEnabledSkillNamesProvider(settings),
     );
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
+    }
+    if (this.clientCapabilities?._meta?.['qwen.goalProposals'] === true) {
+      config.setGoalProposalHostSupported(true);
     }
     if (chatRecording !== false) {
       this.initializingConfigs.add(config);
@@ -12892,7 +14345,13 @@ class QwenAgent implements Agent {
     try {
       this.assertManagedSessionAdmission();
       if (this.isTrustedManagedParent()) {
-        config.setSessionWriterReclaimPolicy('never');
+        // A child carrying the Conversations provenance marker writes through
+        // the mandatory session writer lease and may reclaim a provably dead
+        // same-domain writer; ordinary managed children keep the container
+        // contract.
+        config.setSessionWriterReclaimPolicy(
+          this.conversationsRuntimeProvenance ? 'local' : 'never',
+        );
         config.setSessionWriterTakeoverPolicy('certified');
       }
     } catch (error) {
@@ -12956,24 +14415,29 @@ class QwenAgent implements Agent {
       typeof config.setMcpBudgetEventCallback === 'function' &&
       wiredSessionId !== undefined
     ) {
-      const sid = wiredSessionId;
+      const acpSessionId = wiredSessionId;
       config.setMcpBudgetEventCallback((event) => {
-        // Fire-and-forget. `.catch` suppresses unhandled rejections
-        // and logs at debug level for operator visibility.
-        void this.connection
-          .extNotification('qwen/notify/session/mcp-budget-event', {
-            v: 1,
-            sessionId: sid,
-            ...event,
-          })
-          .catch((err: unknown) => {
-            debugLogger.debug(
-              `MCP budget extNotification dropped ` +
-                `(session=${sid}, kind=${event.kind}): ` +
-                `${err instanceof Error ? err.message : String(err)}`,
-            );
-          });
+        sessionIdContext.run(config.getSessionId(), () => {
+          // Fire-and-forget. `.catch` suppresses unhandled rejections
+          // and logs at debug level for operator visibility.
+          void this.connection
+            .extNotification('qwen/notify/session/mcp-budget-event', {
+              v: 1,
+              sessionId: acpSessionId,
+              ...event,
+            })
+            .catch((err: unknown) => {
+              debugLogger.debug(
+                `MCP budget extNotification dropped ` +
+                  `(session=${acpSessionId}, kind=${event.kind}): ` +
+                  `${err instanceof Error ? err.message : String(err)}`,
+              );
+            });
+        });
       });
+    }
+    if (!provisionalWorkspace && chatRecording !== false) {
+      this.bindSessionSourceService(config);
     }
     try {
       await config.initialize({
@@ -12991,12 +14455,53 @@ class QwenAgent implements Agent {
         this.cleanupUnstoredConfig(config),
       );
     }
-    startNonInteractiveOpenAILogHousekeeping(config, settings);
-    // ACP sessions served to WebUI clients are interactive: MCP tools can
+    if (!provisionalWorkspace) {
+      startNonInteractiveOpenAILogHousekeeping(config, settings);
+    }
+    // ACP sessions served to browser clients are interactive: MCP tools can
     // arrive progressively, but session creation/loading must not wait for a
     // slow or wedged server discovery.
-    void this.surfaceMcpFailuresWhenReady(config);
+    if (!provisionalWorkspace) {
+      void this.surfaceMcpFailuresWhenReady(config);
+    }
     return config;
+  }
+
+  private bindSessionSourceService(config: Config): void {
+    if (this.isTrustedManagedParent() && config.getChatRecordingService()) {
+      config.setSessionSourceServiceFactory(() => {
+        const sourceSessionId = config.getSessionId();
+        const recording = config.getChatRecordingService();
+        const sourceSessions = config.getSessionService();
+        const workspaceCwd = config.storage.getProjectRoot();
+        return new SessionSourceService({
+          sessionId: sourceSessionId,
+          workspaceCwd: () => workspaceCwd,
+          load: async () => {
+            if (!recording)
+              throw new SessionSourceError(
+                'source_persistence_unavailable',
+                'Chat recording service unavailable',
+              );
+            await recording.flush();
+            return sourceSessions.readSessionSources(sourceSessionId);
+          },
+          persist: async (snapshot) => {
+            if (!recording)
+              throw new SessionSourceError(
+                'source_persistence_unavailable',
+                'Chat recording service unavailable',
+              );
+            await recording.recordSessionSourcesSnapshot(snapshot);
+          },
+          notify: (revision) =>
+            this.connection.extNotification(
+              'qwen/notify/session/sources-changed',
+              { sessionId: sourceSessionId, revision },
+            ),
+        });
+      });
+    }
   }
 
   private async surfaceMcpFailuresWhenReady(config: Config): Promise<void> {
@@ -13021,7 +14526,45 @@ class QwenAgent implements Agent {
     }
   }
 
-  private async ensureAuthenticated(config: Config): Promise<void> {
+  private async refreshAuthWithPersistedReasoning(
+    config: Config,
+    settings: LoadedSettings,
+    authType: AuthType,
+    isInitialAuth?: boolean,
+    sessionSelection?: ReasoningSelection,
+  ): Promise<void> {
+    await config.refreshAuth(authType, isInitialAuth);
+    const selection =
+      sessionSelection ??
+      parseReasoningSelection(settings.merged.model?.reasoningEffort);
+    if (!selection || selection === REASONING_EFFORT_DEFAULT) {
+      return;
+    }
+    const generation = config.getContentGeneratorConfig?.();
+    const modelId = generation?.model ?? config.getModel();
+    const modelReasoning = getConfiguredModelReasoning(config, modelId);
+    if (
+      !isReasoningSelectionSupported(
+        modelId,
+        selection,
+        generation?.thinkingMandatory === true,
+        modelReasoning,
+      )
+    ) {
+      return;
+    }
+    if (generation && modelReasoning && !modelReasoning.toggleOnly) {
+      clearReasoningRequestOverrides(generation);
+    }
+    if (selection === REASONING_EFFORT_NONE) {
+      applyReasoningSelection(config, REASONING_EFFORT_NONE);
+    }
+  }
+
+  private async ensureAuthenticated(
+    config: Config,
+    settings: LoadedSettings,
+  ): Promise<void> {
     const selectedType = config.getModelsConfig().getCurrentAuthType();
     if (!selectedType) {
       throw RequestError.authRequired(
@@ -13031,7 +14574,12 @@ class QwenAgent implements Agent {
     }
 
     try {
-      await config.refreshAuth(selectedType, true);
+      await this.refreshAuthWithPersistedReasoning(
+        config,
+        settings,
+        selectedType,
+        true,
+      );
     } catch (e) {
       debugLogger.error(`Authentication failed: ${e}`);
       throw RequestError.authRequired(
@@ -13041,6 +14589,38 @@ class QwenAgent implements Agent {
         'Authentication failed: ' + (e as Error).message,
       );
     }
+  }
+
+  /**
+   * Pins the workflow gate of every live Session whose effective gate
+   * actually changes to `enabled`, dropping the bound plan revision on those
+   * sessions, then records `enabled` as the daemon-held override. The no-op
+   * decision is per-session because neither caller's own state can answer it:
+   * on a first UI write the override is still `undefined` although sessions
+   * already derive the pushed value from settings (a shadowed workspace
+   * write), and a reload diff can fire against a stale settings view that the
+   * UI write path never updated. Each session's live value is read BEFORE the
+   * field reassignment below so a pinned provider cannot report the new value
+   * as its "before" state. The provider reads the field rather than capturing
+   * a value so a later re-derivation (a settings-file reload) reaches
+   * sessions that were pinned earlier. Returns the number of sessions whose
+   * gate changed.
+   */
+  private applySessionWorkflowOverrideToLiveSessions(enabled: boolean): number {
+    let sessionsUpdated = 0;
+    for (const session of this.sessions.values()) {
+      const config = session.getConfig();
+      if (config.isSessionWorkflowEnabled?.() === enabled) {
+        continue;
+      }
+      config.setSessionWorkflowEnabledProvider?.(
+        () => this.sessionWorkflowEnabledOverride === true,
+      );
+      session.clearActiveTodoPlanRevision();
+      sessionsUpdated++;
+    }
+    this.sessionWorkflowEnabledOverride = enabled;
+    return sessionsUpdated;
   }
 
   private setupFileSystem(config: Config): void {
@@ -13058,6 +14638,89 @@ class QwenAgent implements Agent {
     config.setFileSystemService(acpFileSystemService);
   }
 
+  /**
+   * All sessions in this child share one workflow snapshot store but each
+   * keeps a private run registry, so one session's history deletion must
+   * see every sibling registry — or it can delete a run another session
+   * is still executing or settling. A handle outlives the terminal
+   * transition until the snapshot write lands, so it blocks too.
+   *
+   * R7-10: iterating `this.sessions` alone left a blind spot the width of
+   * a whole run. A workflow can outlive its owning session's removal —
+   * explicit close/kill/shutdown use force semantics, and a background
+   * run owns a detached controller — so once `removeStoredSessionEntry`
+   * deleted the session, a still-settling run became invisible here and
+   * unreachable by the delete handler's sibling `removeTerminal` loop. A
+   * sibling `delete-history` then passed every check, removed the LIVE
+   * run's journal directory and snapshot, and answered `{changed: true}`;
+   * the orphan kept going and its settlement `writeWorkflowSnapshot`
+   * recreated the file — resurrection, plus a run whose journal was rm'd
+   * under it.
+   *
+   * The repair has two halves. `Session.dispose()` now aborts its
+   * workflow registry the way it already aborts the agent registry, so an
+   * orphan settles instead of running on; and the registry of a removed
+   * session stays reachable here until its runs drain, so the gate keeps
+   * answering for the settlement window that abort cannot compress to
+   * zero (the handle is released only after the snapshot write lands).
+   */
+  private isWorkflowRunLiveOutsideSession(
+    excludeSessionId: string,
+    runId: string,
+  ): boolean {
+    for (const [sessionId, session] of this.sessions) {
+      if (sessionId === excludeSessionId) continue;
+      if (
+        QwenAgent.isWorkflowRunLiveInRegistry(
+          session.getConfig().getWorkflowRunRegistry(),
+          runId,
+        )
+      ) {
+        return true;
+      }
+    }
+    this.pruneDrainedWorkflowRegistries();
+    for (const registry of this.detachedWorkflowRegistries) {
+      if (QwenAgent.isWorkflowRunLiveInRegistry(registry, runId)) return true;
+    }
+    return false;
+  }
+
+  private static isWorkflowRunLiveInRegistry(
+    registry: WorkflowRunRegistry,
+    runId: string,
+  ): boolean {
+    if (registry.isStarting?.(runId)) return true;
+    const entry = registry.get(runId);
+    if (entry && !isTerminalWorkflowStatus(entry.status)) return true;
+    return registry.getHandle(runId) !== undefined;
+  }
+
+  /**
+   * Registries of removed sessions are retained only while they still
+   * hold work — an aborted run keeps its handle until settlement releases
+   * it. Dropping drained ones keeps this from becoming a leak that grows
+   * with every closed session.
+   */
+  private pruneDrainedWorkflowRegistries(): void {
+    for (const registry of this.detachedWorkflowRegistries) {
+      if (!QwenAgent.isWorkflowRegistryDraining(registry)) {
+        this.detachedWorkflowRegistries.delete(registry);
+      }
+    }
+  }
+
+  /** Still holding work: an active entry, or a handle awaiting settlement. */
+  private static isWorkflowRegistryDraining(
+    registry: WorkflowRunRegistry,
+  ): boolean {
+    if (registry.hasRunningEntries?.()) return true;
+    return (
+      registry.list?.().some((entry) => registry.getHandle(entry.runId)) ??
+      false
+    );
+  }
+
   private async createAndStoreSession(
     config: Config,
     settings: LoadedSettings,
@@ -13065,20 +14728,26 @@ class QwenAgent implements Agent {
     options: {
       replayHistory?: boolean;
       enableLiveScreenContext?: boolean;
+      deferWorkspaceActivation?: boolean;
+      configProviderRevision?: number;
+      beforeDeferredWorkspaceActivation?: () => Promise<void>;
       prepareBeforeSessionCreate?: () => Promise<void>;
-      beforeSessionCreate?: () => void;
+      beforeSessionPublish?: () => void;
       primeSession?: (session: Session) => void;
       beforeStartPostReplayServices?: (session: Session) => Promise<void>;
+      signal?: AbortSignal;
     } = {},
   ): Promise<Session> {
+    options.signal?.throwIfAborted();
     this.assertManagedSessionAdmission();
     const sessionId = normalizeSessionIdForLookup(config.getSessionId());
-    const geminiClient = config.getGeminiClient();
-    const needsInitialize = !geminiClient.isInitialized();
+    const llmClient = config.getLlmClient();
+    const needsInitialize = !llmClient.isInitialized();
 
-    if (needsInitialize) {
-      await geminiClient.initialize();
+    if (needsInitialize && options.deferWorkspaceActivation !== true) {
+      await llmClient.initialize(undefined, options.signal);
     }
+    options.signal?.throwIfAborted();
     this.assertManagedSessionAdmission();
 
     if (this.sessions.has(sessionId)) {
@@ -13090,6 +14759,7 @@ class QwenAgent implements Agent {
     }
 
     await options.prepareBeforeSessionCreate?.();
+    options.signal?.throwIfAborted();
     this.assertManagedSessionAdmission();
     if (this.sessions.has(sessionId)) {
       throw new RequestError(
@@ -13098,8 +14768,7 @@ class QwenAgent implements Agent {
         { errorKind: 'session_id_conflict', sessionId },
       );
     }
-    options.beforeSessionCreate?.();
-
+    const workflowHistory = await listWorkflowSnapshots(config);
     const session = new Session(
       sessionId,
       config,
@@ -13107,12 +14776,164 @@ class QwenAgent implements Agent {
       settings,
       (operation) => this.runExclusiveHistoryMutation(sessionId, operation),
       () => this.activeWorkReporter?.notifyChanged(),
+      workflowHistory,
+      (runId) => this.isWorkflowRunLiveOutsideSession(sessionId, runId),
     );
+    const replaySessionHistory = async () => {
+      if (
+        options.replayHistory === false ||
+        !sessionData?.conversation.messages
+      ) {
+        return;
+      }
+      await session.replayHistory(
+        sessionData.conversation.messages,
+        sessionData.historyGaps,
+      );
+      try {
+        await session.publishRecoveredGoalState(
+          sessionData.conversation.messages,
+        );
+      } catch (error) {
+        debugLogger.debug(
+          `Failed to publish recovered Goal state: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    };
+    if (options.deferWorkspaceActivation === true) {
+      session.installManagedConversationActivation(
+        async () => {
+          this.assertManagedSessionAdmission();
+          const settingsReloaded =
+            settings.reloadScopesFromDiskAtomically?.([
+              SettingScope.User,
+              SettingScope.Workspace,
+            ]) !== false;
+          if (settingsReloaded) {
+            reloadEnvironment(settings.merged, config.getTargetDir());
+          } else {
+            debugLogger.warn(
+              'Deferred session settings reload failed; keeping current environment',
+            );
+          }
+          if (options.beforeDeferredWorkspaceActivation) {
+            await options.beforeDeferredWorkspaceActivation();
+          } else {
+            await this.ensureAuthenticated(config, settings);
+          }
+          this.assertManagedSessionAdmission();
+          await config.activateProvisionalWorkspace();
+          this.assertManagedSessionAdmission();
+          this.bindSessionSourceService(config);
+          await config.registerSessionSourceTool();
+          await config.getLlmClient().setTools();
+          this.setupFileSystem(config);
+          config.hydrateSessionRestoreFileHistory?.();
+          if (sessionData?.fileHistorySnapshots?.length) {
+            config
+              .getFileHistoryService()
+              .restoreFromSnapshots(sessionData.fileHistorySnapshots);
+          }
+          await replaySessionHistory();
+          await options.beforeStartPostReplayServices?.(session);
+          await config.getLlmClient().refreshStartupContextReminder();
+          session.installRewriter();
+          config.finalizeSessionRestore?.();
+          startNonInteractiveOpenAILogHousekeeping(config, settings);
+        },
+        () => {
+          void this.surfaceMcpFailuresWhenReady(config);
+        },
+      );
+    }
     let published = false;
     try {
+      // After `new Session` (which wires the spawner the tool needs) and before
+      // the session is published: the permission check is async, and the tool
+      // must be declared before the first prompt can be served.
+      await registerCreateSubSessionTool(config);
+      options.signal?.throwIfAborted();
+      let forceAuthenticationRefresh =
+        options.deferWorkspaceActivation !== true &&
+        options.configProviderRevision !== this.modelProviderReloadRevision;
+      while (true) {
+        const providerReloadRevision = this.modelProviderReloadRevision;
+        const previousModelProviders = settings.merged.modelProviders;
+        const previousProviderProtocol = settings.merged.providerProtocol;
+        const settingsReloaded =
+          settings.reloadScopesFromDiskAtomically?.([
+            SettingScope.User,
+            SettingScope.Workspace,
+          ]) !== false;
+        if (!settingsReloaded) {
+          if (providerReloadRevision !== options.configProviderRevision) {
+            throw new Error(
+              'Unable to reload model-provider settings from disk.',
+            );
+          }
+          debugLogger.warn(
+            'Final model-provider settings reload failed; keeping current settings',
+          );
+        }
+        config.reloadModelProvidersConfig?.(
+          settings.merged.modelProviders,
+          settings.merged.providerProtocol ?? {},
+        );
+        if (options.deferWorkspaceActivation !== true) {
+          const envReload = reloadEnvironment(
+            settings.merged,
+            config.getTargetDir(),
+          );
+          const providerSettingsChanged =
+            !isDeepStrictEqual(
+              previousModelProviders,
+              settings.merged.modelProviders,
+            ) ||
+            !isDeepStrictEqual(
+              previousProviderProtocol,
+              settings.merged.providerProtocol,
+            );
+          if (
+            forceAuthenticationRefresh ||
+            providerSettingsChanged ||
+            envReload.updatedKeys.length > 0 ||
+            envReload.removedKeys.length > 0
+          ) {
+            await this.ensureAuthenticated(config, settings);
+          }
+        }
+        if (providerReloadRevision === this.modelProviderReloadRevision) break;
+        forceAuthenticationRefresh = true;
+      }
+      options.beforeSessionPublish?.();
       options.primeSession?.(session);
-      config.hydrateSessionRestoreFileHistory?.();
+      if (options.deferWorkspaceActivation !== true) {
+        config.hydrateSessionRestoreFileHistory?.();
+      }
+      // Pin the workflow gate synchronously adjacent to publication. A write
+      // that lands while `registerCreateSubSessionTool` is suspended finds
+      // the session in neither the construction-time view nor the ext
+      // handler's live-session loop (it is not in `this.sessions` yet), so
+      // the recorded override must be applied here; from `sessions.set`
+      // onward concurrent writes reach the session through that loop. No
+      // await sits between the pin and the publication, so no write can land
+      // in between.
+      if (this.sessionWorkflowEnabledOverride !== undefined) {
+        config.setSessionWorkflowEnabledProvider?.(
+          () => this.sessionWorkflowEnabledOverride === true,
+        );
+      }
       this.sessions.set(sessionId, session);
+      this.registerHostedSession(sessionId, config, settings);
+      // The session boots converged on the mode its settings derived; later
+      // reloads track convergence from here. Restricted sessions derive
+      // DEFAULT, mirroring the fold the reload loop applies to them.
+      this.sessionApprovalModeConverged.set(
+        sessionId,
+        config.getApprovalMode(),
+      );
       published = true;
       // The Session set itself is part of the snapshot: publish so the daemon
       // learns about this Session from a report rather than inferring it.
@@ -13122,7 +14943,10 @@ class QwenAgent implements Agent {
         await session.enableLiveScreenContext();
       }
 
-      if (sessionData?.fileHistorySnapshots?.length) {
+      if (
+        options.deferWorkspaceActivation !== true &&
+        sessionData?.fileHistorySnapshots?.length
+      ) {
         config
           .getFileHistoryService()
           .restoreFromSnapshots(sessionData.fileHistorySnapshots);
@@ -13134,42 +14958,33 @@ class QwenAgent implements Agent {
           ?.rebuildTurnBoundaries(sessionData.conversation.messages);
       }
 
-      if (
-        options.replayHistory !== false &&
-        sessionData?.conversation.messages
-      ) {
-        await session.replayHistory(
-          sessionData.conversation.messages,
-          sessionData.historyGaps,
-        );
-        // Strictly after replay: Goal recovery ran in the Config constructor,
-        // before this Session existed to subscribe, and replay streams the
-        // pre-migration records. Without this the client's newest goal card
-        // is the legacy `set` one and it shows a phantom running goal until
-        // the next reload. Never fatal — a session that cannot publish its
-        // goal state must still open.
-        try {
-          await session.publishRecoveredGoalState(
-            sessionData.conversation.messages,
-          );
-        } catch (error) {
-          debugLogger.debug(
-            `Failed to publish recovered Goal state: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        }
+      if (options.deferWorkspaceActivation !== true) {
+        await replaySessionHistory();
       }
 
-      await options.beforeStartPostReplayServices?.(session);
+      if (options.deferWorkspaceActivation !== true) {
+        await options.beforeStartPostReplayServices?.(session);
+      }
 
       // Install rewriter AFTER history replay to avoid rewriting historical messages
-      session.installRewriter();
+      if (options.deferWorkspaceActivation !== true) {
+        session.installRewriter();
+      }
 
-      config.finalizeSessionRestore?.();
+      if (options.deferWorkspaceActivation !== true) {
+        config.finalizeSessionRestore?.();
+      }
 
       // After replay and resume-state restoration so a durable cron fire can't
       // interleave with either.
+      if (this.conversationsRuntimeProvenance) {
+        // A Conversations session never fires an unbound durable task; the
+        // daemon keepalive commits exactly one controller binding through the
+        // cross-process task-file transaction first.
+        config
+          .getCronScheduler()
+          .setSkipDurableFire((job) => job.boundSessionId === undefined);
+      }
       session.startCronScheduler();
 
       setTimeout(() => {
@@ -13248,11 +15063,22 @@ class QwenAgent implements Agent {
 
     return {
       currentModeId: currentApprovalMode as ApprovalModeValue,
+      ...(currentApprovalMode === ApprovalMode.PLAN
+        ? {
+            _meta: {
+              planExecutionMode:
+                config.getPlanExecutionMode?.() ?? config.getPrePlanMode?.(),
+            },
+          }
+        : {}),
       availableModes,
     };
   }
 
-  private buildConfigOptions(config: Config): SessionConfigOption[] {
+  private buildConfigOptions(
+    config: Config,
+    defaultReasoning: ContentGeneratorConfig['reasoning'],
+  ): SessionConfigOption[] {
     const currentApprovalMode = config.getApprovalMode();
     const modelOptions = this.buildSelectableModelOptions(config);
     const rawCurrentModelId = (config.getModel() || '').trim();
@@ -13300,94 +15126,167 @@ class QwenAgent implements Agent {
       options: configModelOptions,
     };
 
-    const modelReasoning = this.getModelReasoningConfiguration(config);
+    const modelReasoning = this.getModelReasoningConfiguration(
+      config,
+      currentModelId,
+    );
+
+    if (
+      activeRuntimeSnapshot ||
+      currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) ||
+      !isReasoningSelectionSupported(
+        rawCurrentModelId,
+        REASONING_EFFORT_DEFAULT,
+        false,
+        modelReasoning,
+      )
+    ) {
+      return [modeConfigOption, modelConfigOption];
+    }
+
+    const generation = config.getContentGeneratorConfig?.();
+    if (!generation) {
+      return [modeConfigOption, modelConfigOption];
+    }
     const currentModelEffort = config.getReasoningEffort?.();
-    const reasoningEffortConfigOption: SessionConfigOption = modelReasoning
-      ? {
-          id: 'reasoning_effort',
-          name: 'Reasoning effort',
-          description: `Thinking and reasoning effort for ${rawCurrentModelId}`,
-          category: 'thought_level',
-          type: 'select' as const,
-          currentValue:
-            config.getContentGeneratorConfig().reasoning === false
-              ? ACP_REASONING_EFFORT_NONE
-              : modelReasoning.toggleOnly
-                ? ACP_REASONING_EFFORT_DEFAULT
-                : (modelReasoning.efforts.find(
-                    (effort) => effort === currentModelEffort,
-                  ) ?? modelReasoning.defaultEffort),
-          options: [
-            {
-              value: ACP_REASONING_EFFORT_NONE,
-              name: 'Thinking off',
-              description: 'Disable thinking for this session',
-            },
-            ...(modelReasoning.toggleOnly
-              ? [
-                  {
-                    value: ACP_REASONING_EFFORT_DEFAULT,
-                    name: 'Thinking on',
-                    description: 'Use the model or provider thinking default',
-                  },
-                ]
-              : modelReasoning.efforts.map((effort) => ({
-                  value: effort,
-                  name: ACP_REASONING_EFFORT_NAMES[effort],
-                  description: 'Apply this effort to the next request',
-                }))),
-          ],
-          _meta: {
-            'qwenCode/reasoning': {
-              ...(modelReasoning.toggleOnly
-                ? { toggleOnly: true }
-                : { defaultEffort: modelReasoning.defaultEffort }),
-            },
+    const reasoningOverride = config.getReasoningEffortOverride?.();
+    const reasoningOverrideValue = reasoningOverride
+      ? generation[reasoningOverride.source]?.[reasoningOverride.field]
+      : undefined;
+    const normalizedEffortOverride =
+      reasoningOverride?.field === 'reasoning_effort' &&
+      typeof reasoningOverrideValue === 'string'
+        ? reasoningOverrideValue === 'minimal'
+          ? 'low'
+          : REASONING_EFFORT_TIERS.find(
+              (effort) => effort === reasoningOverrideValue,
+            )
+        : undefined;
+    const normalizedBudgetOverride =
+      reasoningOverride?.field === 'thinking_budget' &&
+      typeof reasoningOverrideValue === 'number' &&
+      Number.isFinite(reasoningOverrideValue) &&
+      reasoningOverrideValue >= 0 &&
+      reasoningOverrideValue <= 262_144
+        ? reasoningOverrideValue <= 4_096
+          ? 'low'
+          : reasoningOverrideValue <= 16_384
+            ? 'medium'
+            : 'xhigh'
+        : undefined;
+    const normalizedOverrideEffort =
+      normalizedEffortOverride ?? normalizedBudgetOverride;
+    const overrideDisablesReasoning =
+      (reasoningOverride?.field === 'enable_thinking' &&
+        reasoningOverrideValue === false) ||
+      (reasoningOverride?.field === 'reasoning_effort' &&
+        reasoningOverrideValue === REASONING_EFFORT_NONE);
+    const gptOverride = getGptReasoningOverrideState(
+      generation,
+      modelReasoning,
+    );
+    const gptEnableOverride =
+      generation.reasoning === false
+        ? getGptReasoningOverrideState(
+            { ...generation, reasoning: undefined },
+            modelReasoning,
+          )
+        : gptOverride;
+    const mandatoryUsesDefaultEffort =
+      generation.thinkingMandatory === true &&
+      (overrideDisablesReasoning ||
+        (generation.reasoning === false &&
+          reasoningOverride?.field === 'reasoning_effort'));
+    const effectiveModelEffort =
+      modelReasoning && !modelReasoning.toggleOnly
+        ? mandatoryUsesDefaultEffort || gptOverride?.useDefaultEffort
+          ? modelReasoning.defaultEffort
+          : normalizedOverrideEffort
+            ? (modelReasoning.efforts?.find(
+                (effort) => effort === normalizedOverrideEffort,
+              ) ?? modelReasoning.defaultEffort)
+            : (gptOverride?.effort ?? currentModelEffort)
+        : currentModelEffort;
+    const reasoningEnabled =
+      generation.reasoning === undefined &&
+      !reasoningOverride &&
+      gptOverride?.enabled === undefined
+        ? undefined
+        : generation.reasoning !== false &&
+          (!reasoningOverride || !overrideDisablesReasoning) &&
+          gptOverride?.enabled !== false;
+    const canDisableReasoning = generation.thinkingMandatory !== true;
+    const reasoningEffortConfigOption: SessionConfigOption = (modelReasoning
+      ? buildModelReasoningConfigOption(
+          rawCurrentModelId,
+          {
+            enabled: reasoningEnabled,
+            effort: effectiveModelEffort,
+            ...(gptEnableOverride?.blocksTierChange
+              ? gptEnableOverride.enabled && defaultReasoning !== false
+                ? { enableValue: REASONING_EFFORT_DEFAULT }
+                : { canEnable: false }
+              : {}),
+            thinkingMandatory: generation.thinkingMandatory === true,
           },
-        }
-      : {
-          id: 'reasoning_effort',
-          name: 'Reasoning effort',
-          description: 'How hard reasoning-capable models should think',
-          category: 'thought_level',
-          type: 'select' as const,
-          currentValue: currentModelEffort ?? ACP_REASONING_EFFORT_DEFAULT,
-          options: [
-            {
-              value: ACP_REASONING_EFFORT_DEFAULT,
-              name: 'Default',
-              description: 'Use the model or provider default',
-            },
-            ...REASONING_EFFORT_TIERS.map((effort) => ({
-              value: effort,
-              name: ACP_REASONING_EFFORT_NAMES[effort],
-              description:
-                'Providers map or clamp the requested tier for the active model',
-            })),
-          ],
-        };
+          modelReasoning,
+        )
+      : undefined) ?? {
+      id: 'reasoning_effort',
+      name: 'Reasoning effort',
+      description: 'How hard reasoning-capable models should think',
+      category: 'thought_level',
+      type: 'select' as const,
+      currentValue:
+        generation.reasoning === false && canDisableReasoning
+          ? REASONING_EFFORT_NONE
+          : (currentModelEffort ?? REASONING_EFFORT_DEFAULT),
+      options: [
+        ...(canDisableReasoning
+          ? [
+              {
+                value: REASONING_EFFORT_NONE,
+                name: 'Thinking off',
+                description: 'Disable thinking for this session',
+              },
+            ]
+          : []),
+        {
+          value: REASONING_EFFORT_DEFAULT,
+          name: 'Default',
+          description: 'Use the model or provider default',
+        },
+        ...REASONING_EFFORT_TIERS.map((effort) => ({
+          value: effort,
+          name: REASONING_EFFORT_NAMES[effort],
+          description:
+            'Providers map or clamp the requested tier for the active model',
+        })),
+      ],
+    };
 
     return [modeConfigOption, modelConfigOption, reasoningEffortConfigOption];
   }
 
   private getModelReasoningConfiguration(
     config: Config,
+    currentAcpModelId?: string,
   ): ModelReasoningConfiguration | undefined {
-    if (
-      config.getActiveRuntimeModelSnapshot?.() ||
-      config.getReasoningEffortOverride?.() ||
-      config.getContentGeneratorConfig().thinkingMandatory === true
-    ) {
+    if (config.getActiveRuntimeModelSnapshot?.()) {
       return undefined;
     }
-    const reasoning = getModelConfiguration(config.getModel())?.reasoning;
-    const currentEffort = config.getReasoningEffort?.();
-    return reasoning?.thinking &&
-      (reasoning.toggleOnly ||
-        !currentEffort ||
-        reasoning.efforts.includes(currentEffort))
-      ? reasoning
-      : undefined;
+    const completeModelId =
+      currentAcpModelId ??
+      getCurrentAcpModelId(
+        this.buildSelectableModelOptions(config),
+        (config.getModel() || '').trim(),
+        config.getAuthType?.(),
+        config.getCurrentModelRegistryBaseUrl?.(),
+      );
+    if (completeModelId.startsWith(ACP_ROUTE_ID_PREFIX)) {
+      return undefined;
+    }
+    return getConfiguredModelReasoning(config);
   }
 
   private buildSelectableModelOptions(config: Config) {

@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { expect, test } from '@playwright/test';
-import type { DaemonEvent } from '@qwen-code/sdk/daemon';
+import { devices, expect, test } from '@playwright/test';
+import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
   permissionRequestEvent,
+  toolCallEvent,
   turnCompleteEvent,
   userTextEvent,
 } from '../utils/mockDaemon';
@@ -30,8 +31,85 @@ const THEMES: readonly VisualTheme[] = ['dark', 'light'];
 
 test.use({ viewport: { ...VISUAL_VIEWPORT } });
 
+function createTerminalTurnErrorScenario(sessionId: string) {
+  return createWebShellDaemonScenario({
+    sessionId,
+    events: [
+      userTextEvent('Summarize the current workspace.', { id: 1 }),
+      {
+        id: 2,
+        v: 1,
+        type: 'turn_error',
+        data: {
+          sessionId,
+          message:
+            'The model provider closed the response stream before the answer finished. Retry the request or copy these details when reporting the failure.',
+          promptId: 'prompt-turn-error-visual',
+        },
+      },
+    ],
+  });
+}
+
 for (const theme of THEMES) {
   test.describe(`web-shell screenshots (${theme})`, () => {
+    test('session overview', async ({ page }, testInfo) => {
+      const workspaceCwd = '/workspace/session-overview';
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd,
+        sessions: [
+          {
+            displayName: 'Review release approval',
+            isWaitingForPermission: true,
+          },
+          {
+            displayName: 'Choose the export format',
+            isWaitingForUserQuestion: true,
+          },
+          { displayName: 'Run the browser tests', hasActivePrompt: true },
+          { displayName: 'Update session documentation' },
+        ].map((session, index) => ({
+          ...session,
+          sessionId: `overview-${index}`,
+          workspaceCwd,
+          updatedAt: '2026-07-01T12:00:00.000Z',
+          branch: {
+            name:
+              index === 0
+                ? 'feature/session-overview-with-complete-metadata-in-constrained-viewports'
+                : 'feature/session-overview',
+            baseBranch: 'main',
+          },
+        })),
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await page
+        .getByRole('button', { name: 'Session Overview', exact: true })
+        .click();
+      await expect(
+        page.locator('[data-web-shell-session-panel]'),
+      ).toContainText('Review release approval');
+      await captureScreenshot(page, `session-overview-${theme}`);
+      await page
+        .getByRole('button', {
+          name: 'Details for Review release approval',
+          exact: true,
+        })
+        .click();
+      await expect(
+        page.getByRole('dialog', {
+          name: 'Review release approval',
+          exact: true,
+        }),
+      ).toBeVisible();
+      await captureScreenshot(page, `session-overview-details-${theme}`);
+    });
+
     test(`session transcript`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         events: [
@@ -63,6 +141,156 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `session-transcript-${theme}`);
     });
 
+    test(`usage-limited goal status`, async ({ page }, testInfo) => {
+      // Seed the compatibility card together with its canonical V2 state, as
+      // emitted by both live goal updates and transcript replay.
+      const usageLimitedGoalEvent: DaemonEvent = {
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'idle',
+                goal: {
+                  goalId: 'goal-visual-usage-limited',
+                  revision: 2,
+                  objective: 'Finish the evaluation suite',
+                  status: 'usage_limited',
+                  limitKind: 'token_budget',
+                  evidenceCursor: { recordId: 'goal-visual-record' },
+                  turnCount: 4,
+                  activeTimeMs: 5000,
+                  tokensUsed: 1000,
+                  createdAt: 1234,
+                  updatedAt: 2345,
+                  lastReason: 'Token budget reached',
+                },
+              },
+              goalStatus: {
+                kind: 'aborted',
+                condition: 'Finish the evaluation suite',
+                iterations: 4,
+                durationMs: 5000,
+                lastReason: 'Token budget reached',
+              },
+            },
+          },
+        },
+      };
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Finish the evaluation suite.', { id: 1 }),
+          usageLimitedGoalEvent,
+          turnCompleteEvent('prompt-goal-usage-limited', { id: 3 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      const messageList = page.locator('[data-web-shell-message-list]');
+      await expect(messageList).toContainText('Goal usage limited');
+      await expect(messageList).toContainText('Token budget reached');
+      await captureScreenshot(page, `goal-usage-limited-${theme}`);
+    });
+
+    // Assertions only, no captures. This scenario injects a fake turn_error so
+    // the error row's Copy affordance (#10001) can be exercised. It is the only
+    // visual test that hovers a message row DELIBERATELY, and its four captures
+    // meant every web-shell preview led with full-height red error images no
+    // matter what the PR touched -- readers repeatedly took the preview for a
+    // live failure.
+    //
+    // Dropping them does not blind the hover timestamp entirely: the parallel
+    // agents test leaves the cursor resting on the group header after
+    // `summary.click()`, so `parallel-agents-expanded` paints the chip through
+    // residual hover and moves when the chip moves. That is incidental rather
+    // than intended coverage, and `visual-capture-contracts.test.ts` is what
+    // actually pins the chip's anchor and background.
+    //
+    // The reveal/hide behaviour is pinned by the opacity assertions below on
+    // every viewport and on touch; the captures added a misleading preview,
+    // not coverage.
+    test(`terminal turn error`, async ({ browser, page }, testInfo) => {
+      const baseURL = resolveBaseURL(testInfo);
+      const scenario = createTerminalTurnErrorScenario(
+        'turn-error-copy-visual',
+      );
+      const daemon = await installScenario(page, scenario, baseURL);
+      await gotoSession(page, scenario, daemon, theme);
+
+      const errorRow = page
+        .locator('[data-web-shell-message-row]')
+        .filter({ hasText: 'The model provider closed the response stream' });
+      const copyButton = errorRow.getByRole('button', {
+        name: 'Copy',
+        exact: true,
+      });
+      const actions = errorRow.locator('[data-web-shell-message-actions]');
+      await expect(actions).toHaveCSS('opacity', '0');
+      await copyButton.focus();
+      await expect(actions).toHaveCSS('opacity', '1');
+      await copyButton.evaluate((button) => button.blur());
+      await expect(actions).toHaveCSS('opacity', '0');
+      await errorRow.hover();
+      await expect(actions).toHaveCSS('opacity', '1');
+
+      await page.setViewportSize({ width: 720, height: 800 });
+      await page.mouse.move(0, 0);
+      await expect(actions).toHaveCSS('opacity', '0');
+      await errorRow.hover();
+      await expect(actions).toHaveCSS('opacity', '1');
+
+      const touchContext = await browser.newContext({
+        ...devices['Pixel 7'],
+        baseURL,
+      });
+      try {
+        const touchPage = await touchContext.newPage();
+        const touchScenario = createTerminalTurnErrorScenario(
+          'turn-error-copy-touch-visual',
+        );
+        const touchDaemon = await installScenario(
+          touchPage,
+          touchScenario,
+          baseURL,
+        );
+        await gotoSession(touchPage, touchScenario, touchDaemon, theme);
+        expect(
+          await touchPage.evaluate(
+            () => window.matchMedia('(hover: none)').matches,
+          ),
+        ).toBe(true);
+        const touchErrorRow = touchPage
+          .locator('[data-web-shell-message-row]')
+          .filter({ hasText: 'The model provider closed the response stream' });
+        const touchCopyButton = touchErrorRow.getByRole('button', {
+          name: 'Copy',
+          exact: true,
+        });
+        await expect(
+          touchErrorRow.locator('[data-web-shell-message-actions]'),
+        ).toHaveCSS('opacity', '1');
+        await expect(touchCopyButton).toBeVisible();
+        // No screenshot here on purpose. Touch is `hover: none`, so the hover
+        // timestamp chip never renders and this view carries zero coverage of
+        // it -- proven by a run that moved the chip and left these two captures
+        // at 0% diff. The assertions above are what guard the touch behaviour
+        // (#10001: actions stay visible without hover); the captures only added
+        // two full-height error screenshots to every preview.
+      } finally {
+        await touchContext.close();
+      }
+    });
+
     test(`parallel agents group`, async ({ page }, testInfo) => {
       // The group renders only when a turn carries two or more background
       // Agent tool calls; seed both as completed so the rows are static and
@@ -71,22 +299,13 @@ for (const theme of THEMES) {
         id: number,
         toolCallId: string,
         description: string,
-      ): DaemonEvent => ({
-        id,
-        v: 1,
-        type: 'session_update',
-        data: {
-          update: {
-            sessionUpdate: 'tool_call',
-            toolCallId,
-            toolName: 'Agent',
-            title: 'Agent',
-            kind: 'other',
-            status: 'completed',
-            rawInput: { description, run_in_background: true },
-          },
-        },
-      });
+      ): DaemonEvent =>
+        toolCallEvent(
+          toolCallId,
+          'Agent',
+          { description, run_in_background: true },
+          { id },
+        );
       const scenario = createWebShellDaemonScenario({
         events: [
           userTextEvent('Split the migration across parallel agents.', {
@@ -793,9 +1012,33 @@ for (const theme of THEMES) {
       // turn this into a cryptic "not visible" failure.
       const primaryCwd = '/tmp/qwen-web-shell-e2e';
       const primarySessionName = 'Run auth migration';
+      const secondaryCwd = '/tmp/qwen-api-service';
+      const secondarySessionName = 'Audit API retries';
+      const sessions = [
+        {
+          sessionId: 'workspace-primary-session',
+          workspaceCwd: primaryCwd,
+          createdAt: '2026-07-03T00:00:00.000Z',
+          updatedAt: '2026-07-03T00:00:00.000Z',
+          displayName: primarySessionName,
+          clientCount: 1,
+          hasActivePrompt: false,
+        },
+        {
+          sessionId: 'workspace-secondary-session',
+          workspaceCwd: secondaryCwd,
+          createdAt: '2026-07-03T00:00:00.000Z',
+          updatedAt: '2026-07-03T00:00:00.000Z',
+          displayName: secondarySessionName,
+          clientCount: 0,
+          hasActivePrompt: false,
+        },
+      ] satisfies DaemonSessionSummary[];
       const scenario = createWebShellDaemonScenario({
         workspaceCwd: primaryCwd,
         displayName: primarySessionName,
+        sessions,
+        sessionId: 'workspace-primary-session',
         capabilities: {
           workspaces: [
             {
@@ -806,7 +1049,7 @@ for (const theme of THEMES) {
             },
             {
               id: 'ws-api',
-              cwd: '/tmp/qwen-api-service',
+              cwd: secondaryCwd,
               primary: false,
               trusted: true,
             },
@@ -831,7 +1074,15 @@ for (const theme of THEMES) {
       // per-workspace fetch. Wait for the loaded session's row before capturing
       // so the async load has settled — otherwise the row list races the
       // screenshot and the capture differs between runs.
-      await expect(sidebar.getByText(primarySessionName)).toBeVisible();
+      const sessionRow = (name: string) =>
+        sidebar.locator('[data-web-shell-session-title]').filter({
+          hasText: name,
+        });
+      await expect(sessionRow(primarySessionName)).toHaveCount(1);
+      await expect(sessionRow(secondarySessionName)).toHaveCount(1);
+      await expect(
+        sessionRow(primarySessionName).locator('..'),
+      ).toHaveAttribute('aria-current', 'page');
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
     });
 
@@ -1038,26 +1289,12 @@ for (const theme of THEMES) {
         },
         events: [
           userTextEvent('Review my changes and save the report.', { id: 1 }),
-          {
-            id: 2,
-            v: 1,
-            type: 'session_update',
-            data: {
-              update: {
-                sessionUpdate: 'tool_call',
-                toolCallId: 'call-record-review',
-                toolName: 'record_artifact',
-                title: 'record_artifact',
-                kind: 'other',
-                status: 'completed',
-                rawInput: {
-                  title: 'Code review result',
-                  workspacePath: reviewPath,
-                },
-                rawOutput: { recorded: true },
-              },
-            },
-          },
+          toolCallEvent(
+            'call-record-review',
+            'record_artifact',
+            { title: 'Code review result', workspacePath: reviewPath },
+            { id: 2, rawOutput: { recorded: true } },
+          ),
           assistantTextEvent('Review saved to the workspace.', { id: 3 }),
           turnCompleteEvent('prompt-review', { id: 4 }),
         ],
@@ -1161,26 +1398,12 @@ for (const theme of THEMES) {
         },
         events: [
           userTextEvent('Open the saved report.', { id: 1 }),
-          {
-            id: 2,
-            v: 1,
-            type: 'session_update',
-            data: {
-              update: {
-                sessionUpdate: 'tool_call',
-                toolCallId: 'call-record-report',
-                toolName: 'record_artifact',
-                title: 'record_artifact',
-                kind: 'other',
-                status: 'completed',
-                rawInput: {
-                  title: 'Summary report',
-                  workspacePath: reportPath,
-                },
-                rawOutput: { recorded: true },
-              },
-            },
-          },
+          toolCallEvent(
+            'call-record-report',
+            'record_artifact',
+            { title: 'Summary report', workspacePath: reportPath },
+            { id: 2, rawOutput: { recorded: true } },
+          ),
           assistantTextEvent('Report saved to the workspace.', { id: 3 }),
           turnCompleteEvent('prompt-drawer', { id: 4 }),
         ],

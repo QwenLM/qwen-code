@@ -5,8 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { customDeepMerge } from './deepMerge.js';
-import { MergeStrategy } from '../config/settingsSchema.js';
+import { customDeepMerge, MergeStrategy } from './deepMerge.js';
 
 describe('customDeepMerge', () => {
   it('should merge simple objects', () => {

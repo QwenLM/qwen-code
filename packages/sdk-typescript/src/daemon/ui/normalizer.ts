@@ -21,6 +21,7 @@ import type {
   NormalizeDaemonEventOptions,
 } from './types.js';
 import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
+import { createDaemonToolResultTextPreview } from './toolPreview.js';
 import {
   capDetails,
   getFirstString,
@@ -44,6 +45,7 @@ type NormalizedEventBase = Pick<
   | 'eventId'
   | 'serverTimestamp'
   | 'sourceRecordIds'
+  | 'segmentId'
   | 'promptId'
   | 'branchRecordId'
   | 'originatorClientId'
@@ -188,13 +190,17 @@ export function normalizeDaemonEvent(
         },
       ];
     case 'slow_client_warning':
-      return [
-        {
-          ...base,
-          type: 'status',
-          text: 'SSE stream is lagging',
-        },
-      ];
+      // The daemon reports this SSE subscriber's queue backing up — a
+      // transport diagnostic, not a user-facing failure. Surfacing it as a
+      // transcript status reads as a broken connection mid-turn, so log the
+      // queue watermarks to the console instead; `client_evicted` remains the
+      // real disconnect signal and flows through its own error path. Fires at
+      // most once per overflow episode (daemon-side hysteresis).
+      if (typeof console !== 'undefined') {
+        // eslint-disable-next-line no-console -- intentional diagnostic for subscriber backpressure
+        console.warn?.('[daemon-ui] SSE stream is lagging', event.data);
+      }
+      return [];
     case 'stream_error': {
       const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       return [
@@ -365,6 +371,19 @@ export function normalizeDaemonEvent(
 
     case 'extensions_changed':
       return normalizeExtensionsChanged(event, base);
+
+    case 'source_changed': {
+      const sessionId = getString(event.data, 'sessionId');
+      const revision = isRecord(event.data)
+        ? event.data['revision']
+        : undefined;
+      return sessionId &&
+        typeof revision === 'number' &&
+        Number.isInteger(revision) &&
+        revision >= 0
+        ? [{ ...base, type: 'session.source.changed', sessionId, revision }]
+        : [];
+    }
 
     case 'artifact_changed':
       return normalizeArtifactChanged(event, base);
@@ -651,11 +670,13 @@ function createBase(
 ): NormalizedEventBase {
   const serverTimestamp = extractServerTimestamp(event);
   const sourceRecordIds = extractSourceRecordIds(event);
+  const segmentId = extractTranscriptSegmentId(event);
   const branchRecordId = extractBranchRecordId(event);
   return {
     ...(event.id !== undefined ? { eventId: event.id } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(sourceRecordIds ? { sourceRecordIds } : {}),
+    ...(segmentId ? { segmentId } : {}),
     ...(event.promptId ? { promptId: event.promptId } : {}),
     ...(branchRecordId ? { branchRecordId } : {}),
     ...(event.originatorClientId
@@ -665,6 +686,19 @@ function createBase(
       ? { rawEvent: { ...event, data: redactSensitiveFields(event.data) } }
       : {}),
   };
+}
+
+function extractTranscriptSegmentId(event: DaemonEvent): string | undefined {
+  if (!isRecord(event.data)) return undefined;
+  const update = getSessionUpdatePayload(event.data);
+  const meta =
+    update && isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    meta && isRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
+  const segmentId = getString(transcript, 'segmentId');
+  return segmentId && segmentId.length <= 512 ? segmentId : undefined;
 }
 
 function extractBranchRecordId(event: DaemonEvent): string | undefined {
@@ -805,12 +839,18 @@ function normalizeSessionUpdate(
             else if (prefix.startsWith('UklGR')) mimeType = 'image/webp';
           }
           if (data) {
+            const contentRecord = isRecord(content) ? content : undefined;
+            const attachmentId =
+              typeof contentRecord?.['attachmentId'] === 'string'
+                ? (contentRecord['attachmentId'] as string)
+                : undefined;
             return [
               {
                 ...base,
                 type: 'user.image.delta',
                 data,
                 mimeType,
+                ...(attachmentId ? { attachmentId } : {}),
                 ...(meta ? { meta } : {}),
               },
             ];
@@ -925,7 +965,8 @@ function normalizeSessionUpdate(
       if (
         getString(update, 'status') === 'in_progress' &&
         getString(update, 'kind') === undefined &&
-        meta?.['shellProgress'] !== undefined
+        (meta?.['shellProgress'] !== undefined ||
+          meta?.subagentProgress === true)
       ) {
         return [];
       }
@@ -967,6 +1008,7 @@ function normalizeSessionUpdate(
     case 'plan':
       return [normalizePlanUpdate(update, base)];
     case 'current_mode_update':
+    case 'session_info_update':
     case 'usage_update':
       return [];
     default:
@@ -1057,6 +1099,13 @@ function normalizeToolUpdate(
   base: NormalizedEventBase,
 ): DaemonUiEvent {
   const metadata = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    metadata && isRecord(metadata['qwenTranscript'])
+      ? metadata['qwenTranscript']
+      : undefined;
+  const resultPreview = createDaemonToolResultTextPreview(
+    getString(transcript, 'resultPreviewText') ?? '',
+  );
   const toolName =
     getString(update, 'toolName') ??
     getString(update, 'name') ??
@@ -1103,6 +1152,11 @@ function normalizeToolUpdate(
       text: `Tool update missing toolCallId${title ? ` (${title})` : ''}`,
     };
   }
+  const subagentSessionReady =
+    isRecord(rawOutput) &&
+    typeof rawOutput['subagentSessionReady'] === 'boolean'
+      ? rawOutput['subagentSessionReady']
+      : metadata?.['subagentSessionReady'];
   const { provenance, serverId } = extractToolProvenance(update, toolName);
   // PR-K (post-rebase): daemon stamps `parentToolCallId` + `subagentType` in
   // `tool_call._meta` when the call was invoked inside a sub-agent
@@ -1138,8 +1192,12 @@ function normalizeToolUpdate(
     ...(serverId ? { serverId } : {}),
     ...(parentToolCallId ? { parentToolCallId } : {}),
     ...(subagentType ? { subagentType } : {}),
+    ...(typeof subagentSessionReady === 'boolean'
+      ? { subagentSessionReady }
+      : {}),
     ...(rawInput !== undefined ? { rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
+    ...(resultPreview ? { resultPreview } : {}),
     ...(rawInput !== undefined
       ? { details: capDetails(stringifyRedactedJson(rawInput)) }
       : rawOutput !== undefined
@@ -1171,6 +1229,7 @@ function normalizePlanUpdate(
   const todoPlan =
     meta && isRecord(meta['qwenTodoPlan']) ? meta['qwenTodoPlan'] : undefined;
   const planId = getString(todoPlan, 'id');
+  const sessionWorkflow = meta?.['qwenSessionWorkflow'] === true;
   return {
     ...base,
     type: 'tool.update',
@@ -1189,6 +1248,7 @@ function normalizePlanUpdate(
       entries,
       ...(stats ? { stats } : {}),
       ...(planId ? { plan: { id: planId, sourceCallId: planCallId } } : {}),
+      ...(sessionWorkflow ? { sessionWorkflow: true } : {}),
     },
   };
 }

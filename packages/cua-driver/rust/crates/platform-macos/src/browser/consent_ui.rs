@@ -264,6 +264,7 @@ mod tests {
             help: None,
             actions: actions.iter().map(|value| (*value).to_owned()).collect(),
             element_ptr: 7,
+            identity: None,
             depth,
             parent_element_index: None,
             frame: None,
@@ -320,6 +321,7 @@ mod tests {
             layer: 0,
             z_index,
             is_on_screen: true,
+            current_space_id: None,
             on_current_space: Some(true),
             space_ids: None,
         };

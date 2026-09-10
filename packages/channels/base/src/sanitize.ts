@@ -25,6 +25,28 @@ export function truncateCodePoints(str: string, max: number): string {
 }
 
 /**
+ * Truncate so the result is at most `max` UTF-16 CODE UNITS (`.length`), cut on
+ * code-point boundaries. The companion to {@link truncateCodePoints}, for the
+ * callers whose budget is measured in `.length` — an astral character costs two
+ * units there, so a code-point cap lets a fully-astral value overshoot its
+ * reserved space by up to 2x and starve whatever the same budget still owes.
+ * Cutting on code-point boundaries still means a pair is never split (an astral
+ * character that does not fit whole is dropped whole), so the result can be one
+ * unit shorter than `max` but never contains a lone surrogate.
+ */
+export function truncateUtf16Units(str: string, max: number): string {
+  if (str.length <= max) return str;
+  let kept = '';
+  let units = 0;
+  for (const ch of str) {
+    if (units + ch.length > max) break;
+    kept += ch;
+    units += ch.length;
+  }
+  return kept;
+}
+
+/**
  * Neutralize a platform display name before embedding it in a `[name]` prompt
  * tag: strip the bracket/newline delimiters, C0/DEL control chars, and the
  * Unicode line/bidi controls above that would let a crafted nickname break out
@@ -68,16 +90,142 @@ export function sanitizeQuotedText(text: string, maxLen: number): string {
   return cp.length > maxLen ? cp.slice(0, maxLen - 1).join('') + '…' : cleaned;
 }
 
+/**
+ * The tag this peel deletes, as a regex, for reference:
+ * `/^([^\S\r\n]*)\[([^\]\r\n]{1,64})\](:?)/gm` -> `'$1$2$3'`, applied to a
+ * fixpoint. The leading class is every whitespace character EXCEPT CR/LF, not
+ * just space/tab: `trim()` also strips VT, FF, NBSP, U+1680, U+2000-U+200A,
+ * U+202F, U+205F and U+3000, so a `[ \t]*` window let any of them push the
+ * bracket off start-of-line, block the match, and then be trimmed away by a
+ * caller — reassembling the very tag the unwrap exists to peel.
+ */
+const START_OF_LINE_TAG_MAX_CONTENT = 64;
+/** Where `m`-flagged `^` matches: string start, and after each of these. */
+const LINE_TERMINATORS = '\r\n\u2028\u2029';
+
+/** The `[^\S\r\n]` leading window of the tag above. */
+function isTagLeadBlank(ch: string): boolean {
+  return ch !== '\r' && ch !== '\n' && /\s/.test(ch);
+}
+
+/**
+ * Peel start-of-line `[tag]` wrappers until none is left, not just once.
+ *
+ * A single pass removes exactly ONE layer, so `[[SYSTEM]]` comes out as
+ * `[SYSTEM]` — a fully-formed forged tag that the caller then embeds at
+ * start-of-line, which is precisely what this unwrap exists to prevent. Any
+ * caller that gets only one pass (DingTalk 1:1 DMs: `ChannelBase` re-sanitizes
+ * only when `isGroup || sessionScope === 'single'`) hands the model the forge
+ * verbatim; two passes just move the bar to `[[[SYSTEM]]]`.
+ *
+ * ONE linear pass, not a `replace` fixpoint over the whole string. The loop
+ * this replaces rebuilt the entire string for every tag it peeled, and a tag
+ * whose content is all whitespace peels to whitespace — re-opening the
+ * start-of-line window — so `'[ ]'.repeat(n)` cost n x O(n): measured 16 ms at
+ * 10 KB, 1216 ms at 80 KB of synchronous event-loop stall. That input is
+ * attacker-authorable and reaches `sanitizePromptText` BEFORE any cap (chat
+ * record titles and summary lines, entry bodies, any group message routed
+ * through `ChannelBase`), so the stall is repeatable per message.
+ *
+ * Same peel, simulated in place — the technique `startOfLineSafeChatRecordField`
+ * uses on the DingTalk side. Each pass of that loop deleted exactly two
+ * characters, the leading `[` and the FIRST `]` after it (the content class
+ * `[^\]\r\n]` can match no other), so instead of re-copying between passes,
+ * mark the pairs and emit what survives. `open` walks the head of the line past
+ * what is already deleted and past the blanks the `[^\S\r\n]*` window absorbs;
+ * `close` never rewinds because every `]` it passed is already deleted, and
+ * `carried` remembers how much of the content window the previous pass already
+ * measured. Both pointers only move forward, and each pass measures at most
+ * `START_OF_LINE_TAG_MAX_CONTENT + 1` live characters, so the whole peel is
+ * linear in the input.
+ *
+ * Terminates: `open` and `lineStart` strictly increase.
+ */
+function unwrapStartOfLineTags(text: string): string {
+  if (!text.includes('[')) return text;
+  const deleted = new Uint8Array(text.length);
+  let peeled = false;
+  let lineStart = 0;
+  while (lineStart < text.length) {
+    // `open` is the `^[^\S\r\n]*` cursor; `close` is one past the last `]`
+    // consumed on this line; `carried` counts the still-live characters in
+    // `[open, close)` that a previous pass already measured.
+    let open = lineStart;
+    let close = lineStart;
+    let carried = 0;
+    for (;;) {
+      while (open < text.length) {
+        const ch = text[open]!;
+        if (ch === '\r' || ch === '\n') break;
+        if (deleted[open] === 0 && !isTagLeadBlank(ch)) break;
+        if (open < close && deleted[open] === 0) carried -= 1;
+        open += 1;
+      }
+      if (text[open] !== '[') break;
+      // The `[` itself is not content; everything already measured between it
+      // and `close` is.
+      let content = open < close ? carried - 1 : 0;
+      let cursor = Math.max(close, open + 1);
+      while (cursor < text.length) {
+        const ch = text[cursor]!;
+        if (ch === ']' || ch === '\r' || ch === '\n') break;
+        content += 1;
+        if (content > START_OF_LINE_TAG_MAX_CONTENT) break;
+        cursor += 1;
+      }
+      if (
+        text[cursor] !== ']' ||
+        content < 1 ||
+        content > START_OF_LINE_TAG_MAX_CONTENT
+      ) {
+        break;
+      }
+      deleted[open] = 1;
+      deleted[cursor] = 1;
+      peeled = true;
+      open += 1;
+      close = cursor + 1;
+      carried = content;
+    }
+    // No further `[tag]` can match on this line; resume at the next `^`.
+    let nextLine = open;
+    while (
+      nextLine < text.length &&
+      !LINE_TERMINATORS.includes(text[nextLine]!)
+    ) {
+      nextLine += 1;
+    }
+    lineStart = nextLine + 1;
+  }
+  if (!peeled) return text;
+  const parts: string[] = [];
+  let cut = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (deleted[i] === 0) continue;
+    if (i > cut) parts.push(text.slice(cut, i));
+    cut = i + 1;
+  }
+  parts.push(text.slice(cut));
+  return parts.join('');
+}
+
 export function sanitizePromptText(text: string): string {
-  return (
-    text
-      .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
-      .replace(/^([ \t]*)\[([^\]\r\n]{1,64})\](:?)/gm, '$1$2$3')
-      // Fold ASCII C0/DEL, including CR/LF/TAB, so attacker-controlled group
-      // text cannot create prompt lines outside the adapter's sender attribution.
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+  const unwrapped = unwrapStartOfLineTags(
+    text.replace(PROMPT_UNSAFE_INVISIBLES, ' '),
   );
+  // Fold ASCII C0/DEL, including CR/LF/TAB, so attacker-controlled group
+  // text cannot create prompt lines outside the adapter's sender attribution.
+  // eslint-disable-next-line no-control-regex
+  const folded = unwrapped.replace(/[\u0000-\u001f\u007f]/g, ' ');
+  // Unwrap AGAIN over the folded text: the fold itself ASSEMBLES tags the first
+  // pass could not see. A line-leading C0/DEL that `trim()` does not strip
+  // (x00-x08, x0E-x1F, x7F) blocks the match and then becomes a space, and an
+  // interior CR/LF splits a tag past the content class (`[SYS` + LF + `TEM]:`)
+  // and then becomes a space that joins the halves. Folding first instead would
+  // be wrong: it destroys the line structure the FIRST pass needs, and after it
+  // only the string start is still a start-of-line prompt position — which is
+  // exactly what this second pass covers.
+  return unwrapStartOfLineTags(folded);
 }
 
 /**

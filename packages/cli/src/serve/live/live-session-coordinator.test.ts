@@ -394,7 +394,7 @@ describe('LiveSessionCoordinator', () => {
     });
     expect(harness.bridge.updateSessionMetadata).toHaveBeenCalledWith(
       'live-new',
-      { displayName: 'Voice chat' },
+      { displayName: 'Voice chat', titleSource: 'auto' },
     );
     expect(harness.host.setCallState).toHaveBeenLastCalledWith(1, 'listening');
 
@@ -1002,6 +1002,36 @@ describe('LiveSessionCoordinator', () => {
     await harness.finishTurn(0, [{ type: 'message', text: '继续完成。' }]);
   });
 
+  it('registers a mixed-case resumed Live session by its canonical id', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const persistedSessionId = sessionId.toUpperCase();
+    const sourceId = LIVE_SESSION_SOURCE_PREFIX + 'mixed-case';
+    const harness = makeHarness({
+      recent: [
+        {
+          sessionId: persistedSessionId,
+          sourceType: 'default',
+          sourceId,
+        } as SessionListItem,
+      ],
+    });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'resume',
+    });
+
+    expect(harness.bridge.resumeSession).toHaveBeenCalledWith({
+      sessionId,
+      workspaceCwd: '/conversations',
+      sourceType: 'default',
+      sourceId,
+    });
+    expect(harness.bridge.resumeSession).not.toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: persistedSessionId }),
+    );
+  });
+
   it('tracks a task session only from a completed built-in create_sub_session result', async () => {
     readPersistedParentSessionId.mockResolvedValue('live-new');
     const harness = makeHarness();
@@ -1036,6 +1066,69 @@ describe('LiveSessionCoordinator', () => {
         },
       ]),
     );
+  });
+
+  it('forwards both an overflow summary and its surviving worker notification', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    const active = (
+      harness.coordinator as unknown as {
+        active?: { workerIds: Set<string> };
+      }
+    ).active;
+    active?.workerIds.add('worker-1');
+
+    harness.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            text: 'Dropped 1 background notification (queue full).',
+          },
+          _meta: {
+            source: 'background_notification',
+            backgroundTask: { kind: 'queue', status: 'dropped' },
+          },
+        },
+      },
+    });
+    harness.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { text: 'Worker completed.' },
+          _meta: {
+            source: 'background_notification',
+            backgroundTask: {
+              taskId: 'worker-1',
+              kind: 'agent',
+              status: 'completed',
+            },
+          },
+        },
+      },
+    });
+    harness.publish({
+      type: 'background_notification_turn_complete',
+      data: { sessionId: 'live-new', reason: 'end_turn' },
+    });
+
+    await waitFor(() =>
+      expect(harness.realtime.sendBackendContext).toHaveBeenCalledOnce(),
+    );
+    const spoken = (
+      harness.realtime.sendBackendContext.mock.calls as unknown as Array<
+        [string]
+      >
+    )[0]?.[0];
+    expect(spoken).toContain('Dropped 1 background notification');
+    expect(spoken).toContain('Worker completed.');
   });
 
   it('keeps Live usable while approved and denied tool permissions resolve', async () => {

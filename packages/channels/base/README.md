@@ -74,7 +74,7 @@ Channel adapters can run in two host modes:
 - `qwen channel start [name]` is the standalone service. It uses `AcpBridge` over a `qwen-code --acp` child process and remains the default channel command.
 - `qwen serve --channel <name>` and `qwen serve --channel all` are experimental daemon-managed modes. Named channels are grouped by owning workspace and `qwen serve` starts one out-of-process worker per owning runtime. Each worker connects back to the daemon through the SDK, and adapters receive a `DaemonChannelBridge`-backed `ChannelAgentBridge` facade. `--channel all` stays primary-only.
 
-In daemon-managed mode, every named channel's `cwd` must resolve to exactly one registered, trusted workspace. Its worker receives that runtime's cwd and environment overlay; an ambiguous or untrusted selection fails instead of using primary. The optional `shellCommand` method is exposed to adapters only when the daemon advertises the `session_shell_command` capability.
+In daemon-managed mode, every named channel's `cwd` must resolve to exactly one registered, trusted workspace. Its worker receives that runtime's cwd and environment overlay; an ambiguous or untrusted selection fails instead of using primary. The optional `btw` and `shellCommand` methods are exposed to adapters only when the daemon advertises the `session_btw` and `session_shell_command` capabilities, respectively.
 
 ## Architecture
 
@@ -89,7 +89,6 @@ Inbound:  Platform message
             → ChannelAgentBridge.prompt() → agent
 
 Outbound: Agent response
-            → BlockStreamer (if enabled: split into blocks at paragraph boundaries)
             → sendMessage() → platform
 ```
 
@@ -103,7 +102,6 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 | --------------- | ------------------------------------------------------------------------------------ |
 | `ChannelBase`   | Abstract base class — extend this to build a channel adapter                         |
 | `AcpBridge`     | Current standalone `qwen channel start` bridge implementation over `qwen-code --acp` |
-| `BlockStreamer` | Progressive multi-message delivery for block streaming                               |
 | `SessionRouter` | Maps senders to agent sessions with configurable scoping                             |
 | `SenderGate`    | DM access control (allowlist / pairing / open)                                       |
 | `GroupGate`     | Group chat policy and @mention gating                                                |
@@ -115,6 +113,7 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 | -------------------- | ------------------------------------------------------------------------ |
 | `Attachment`         | Structured file/image/audio/video attachment                             |
 | `AvailableCommand`   | Agent command advertised through the bridge                              |
+| `ChannelBtwResult`   | BTW result `{ sessionId, answer }`; `answer` can be `null`               |
 | `ChannelAgentBridge` | Adapter-facing bridge contract used by `ChannelBase` and `SessionRouter` |
 | `ChannelConfig`      | Channel configuration from `settings.json`                               |
 | `ChannelPlugin`      | Plugin factory interface (what you export)                               |
@@ -144,16 +143,14 @@ constructor(name: string, config: ChannelConfig, bridge: ChannelAgentBridge, opt
 
 **Provided methods:**
 
-| Method                                            | Description                                                                                                                       |
-| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `handleInbound(envelope)`                         | Route an inbound message through the full pipeline (gate checks, commands, session, prompt). Call this from your message handler. |
-| `setBridge(bridge)`                               | Replace the agent bridge after crash recovery                                                                                     |
-| `registerCommand(name, handler)`                  | Register a custom slash command (e.g. `/mycommand`)                                                                               |
-| `onToolCall(chatId, event)`                       | Hook called on agent tool invocations — override to show indicators                                                               |
-| `onResponseChunk(chatId, chunk, sessionId)`       | Hook called per streaming text chunk — override for progressive display (default: no-op)                                          |
-| `onResponseComplete(chatId, fullText, sessionId)` | Hook called when full response is ready — override to customize delivery (default: `sendMessage()`)                               |
-
-**Block streaming:** When `blockStreaming: "on"` is set in the channel config, the base class automatically splits the agent's streaming response into multiple messages at paragraph boundaries. See [Block Streaming](#block-streaming) below.
+| Method                                                     | Description                                                                                                                                           |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `handleInbound(envelope)`                                  | Route an inbound message through the full pipeline (gate checks, commands, session, prompt). Call this from your message handler.                     |
+| `setBridge(bridge)`                                        | Replace the agent bridge after crash recovery                                                                                                         |
+| `registerCommand(name, handler)`                           | Register a custom slash command (e.g. `/mycommand`)                                                                                                   |
+| `onToolCall(chatId, event)`                                | Hook called on agent tool invocations — override to show indicators                                                                                   |
+| `onResponseChunk(chatId, chunk, sessionId, segment)`       | Hook called per streaming text chunk — override for progressive display while preserving immutable `segment.sourceLabel` attribution (default: no-op) |
+| `onResponseComplete(chatId, fullText, sessionId, segment)` | Hook called when full response is ready — override to customize delivery (default: attributes delivery with `segment.sourceLabel` in named-task mode) |
 
 **Built-in slash commands:** `/clear` (`/reset`, `/new`), `/help`, `/status`
 
@@ -169,7 +166,7 @@ constructor(name: string, config: ChannelConfig, bridge: ChannelAgentBridge, opt
 
 `ChannelAgentBridge` is the adapter-facing contract. Channel adapters, channel plugins, `ChannelBase`, and `SessionRouter` should depend on this type instead of a concrete bridge implementation.
 
-`shellCommand` is optional. Adapters should check for it before enabling `!cmd`-style features because daemon-managed hosts expose it only when the connected daemon supports shell execution.
+`btw` and `shellCommand` are optional. Adapters should check for each before enabling the feature it backs — a BTW side question, or `!cmd`-style shell execution — because daemon-managed hosts expose them only when the connected daemon advertises the matching capability (`session_btw`, `session_shell_command`).
 
 ```typescript
 interface ChannelAgentBridge {
@@ -197,8 +194,17 @@ interface ChannelAgentBridge {
   prompt(
     sessionId: string,
     text: string,
-    options?: { imageBase64?: string; imageMimeType?: string },
+    options?: {
+      images?: Array<{ data: string; mimeType: string }>; // ordered, preferred
+      imageBase64?: string; // legacy fallback (first image only)
+      imageMimeType?: string; // legacy fallback (first image only)
+    },
   ): Promise<string>;
+  btw?(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<ChannelBtwResult>;
   cancelSession(sessionId: string): Promise<void>;
   shellCommand?(
     sessionId: string,
@@ -208,6 +214,8 @@ interface ChannelAgentBridge {
 }
 ```
 
+`prompt` carries images through `options.images` — an ordered array of `{ data, mimeType }` entries delivered to the model in array order. The legacy `imageBase64`/`imageMimeType` pair is a fallback that carries only the first image. Built-in bridges normalize MIME types before use: lowercased, parameters stripped (`image/png; charset=binary` → `image/png`), and the `image/jpg` alias mapped to `image/jpeg`. Daemon-backed bridges upload images to the daemon attachment store and restrict them to its supported subtypes (`image/bmp`, `image/gif`, `image/jpeg`, `image/png`, `image/webp`) and its per-item admission rule (non-empty and at most 8 MiB once decoded); daemons without attachment support take the same images inline in the prompt body, kept under an aggregate base64 budget. Images outside those limits are skipped with a log line instead of failing the turn, while `AcpBridge` delivers any normalized `image/*` inline.
+
 ### AcpBridge
 
 `AcpBridge` is the current implementation used by standalone `qwen channel start`. It manages the `qwen-code --acp` child process and implements `ChannelAgentBridge`.
@@ -216,14 +224,14 @@ interface ChannelAgentBridge {
 constructor(options: { cliEntryPath: string; cwd: string; model?: string })
 ```
 
-| Method                              | Description                                                                                                       |
-| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `start()`                           | Spawn the agent process                                                                                           |
-| `stop()`                            | Kill the agent process                                                                                            |
-| `newSession(cwd)`                   | Create a new ACP session, returns `sessionId`                                                                     |
-| `loadSession(sessionId, cwd)`       | Restore an existing session                                                                                       |
-| `prompt(sessionId, text, options?)` | Send a message to the agent, returns the full response text. Supports optional `imageBase64` and `imageMimeType`. |
-| `isConnected`                       | Whether the agent process is alive                                                                                |
+| Method                              | Description                                                                                                                                                                                                                    |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `start()`                           | Spawn the agent process                                                                                                                                                                                                        |
+| `stop()`                            | Kill the agent process                                                                                                                                                                                                         |
+| `newSession(cwd)`                   | Create a new ACP session, returns `sessionId`                                                                                                                                                                                  |
+| `loadSession(sessionId, cwd)`       | Restore an existing session                                                                                                                                                                                                    |
+| `prompt(sessionId, text, options?)` | Send a message to the agent, returns the full response text. Supports an ordered `images` array (`{ data, mimeType }` per image, preferred), falling back to the legacy `imageBase64`/`imageMimeType` pair for a single image. |
+| `isConnected`                       | Whether the agent process is alive                                                                                                                                                                                             |
 
 **Events** (EventEmitter):
 
@@ -351,27 +359,11 @@ interface Attachment {
 
 `handleInbound()` automatically resolves attachments: images with `data` are sent to the model as vision input, files with `filePath` get their path appended to the prompt text so the agent can read them with its tools.
 
-## Block Streaming
+## Response delivery
 
-When `blockStreaming: "on"` is set in a channel's config, the agent's response is delivered as multiple separate messages instead of one large wall of text. The `BlockStreamer` accumulates streaming chunks and emits completed blocks based on paragraph boundaries and size heuristics.
+For an inbound turn the base class forwards streaming chunks to adapter callbacks and routes the completed response through `onResponseComplete`. Scheduled loop runs, webhook-triggered tasks, and background replies forward chunks the same way but deliver through `pushProactive` / `deliverBackgroundReply`, so an adapter that enables proactive send must not treat `onResponseComplete` as its only delivery seam. Adapters may provide native progressive display, such as updating an existing card in place. Platform length splitting is unchanged.
 
-**Config fields** (on `ChannelConfig`):
-
-| Field                    | Type                     | Default         | Description                                                                 |
-| ------------------------ | ------------------------ | --------------- | --------------------------------------------------------------------------- |
-| `blockStreaming`         | `'on' \| 'off'`          | `'off'`         | Enable/disable block streaming                                              |
-| `blockStreamingChunk`    | `{ minChars, maxChars }` | `{ 400, 1000 }` | `minChars`: don't emit until this size. `maxChars`: force-emit at this size |
-| `blockStreamingCoalesce` | `{ idleMs }`             | `{ 1500 }`      | Emit buffered text after this many ms of silence from the agent             |
-
-**How it works:**
-
-1. Text accumulates as the agent streams its response
-2. When the buffer reaches `minChars` and hits a paragraph break (`\n\n`), that block is sent as a separate message
-3. If the buffer reaches `maxChars` without a paragraph break, it force-splits at the best break point (newline > space)
-4. If the agent goes quiet for `idleMs`, the buffer is flushed (as long as it's past `minChars`)
-5. When the agent finishes, any remaining text is sent immediately regardless of `minChars`
-
-Block streaming and `onResponseChunk` work independently — plugins can override `onResponseChunk` for their own purposes while block streaming handles delivery.
+The obsolete `blockStreaming`, `blockStreamingChunk`, and `blockStreamingCoalesce` settings have been removed. The base class no longer sends separate messages at paragraph boundaries or after an idle timer.
 
 ## Further reading
 

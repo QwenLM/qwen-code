@@ -8,19 +8,24 @@ import {
   useId,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
-import { isAgentTool } from '@qwen-code/webui/daemon-react-sdk';
+import { isAgentTool } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import { PlanExecutionView } from './PlanExecutionView';
 import { isExitPlanApprovalRequest } from '../../utils/todos';
 import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
 import { localizeToolDisplayName } from './toolFormatting';
+import {
+  ThinkingTranslateButton,
+  type SessionContentGenerator,
+} from './AssistantMessage';
 import styles from './ToolApproval.module.css';
 
 interface ToolApprovalProps {
   request: PermissionRequest;
-  onConfirm: (id: string, selectedOption: string) => void;
+  onConfirm: (id: string, selectedOption: string) => void | Promise<void>;
   variant?: 'inline' | 'floating';
+  disabled?: boolean;
   /**
    * Whether this approval should pull keyboard focus to its safe-default option
    * when it becomes the topmost (visible) one — on appearance, or when a panel/
@@ -33,6 +38,8 @@ interface ToolApprovalProps {
    */
   keyboardActive?: boolean;
   planTodos?: readonly TodoItem[];
+  planExecutionMode?: string;
+  generateContent?: SessionContentGenerator;
 }
 
 export function parseTitle(title?: string): {
@@ -220,15 +227,32 @@ export function ToolApproval({
   request,
   onConfirm,
   variant = 'inline',
+  disabled = false,
   keyboardActive = true,
   planTodos = [],
+  planExecutionMode,
+  generateContent,
 }: ToolApprovalProps) {
   const { t } = useI18n();
   const isAgent = isAgentTool(request.toolName);
+  const isExitPlanApproval = isExitPlanApprovalRequest(request);
+  const hasPlanExecutionMode =
+    isExitPlanApproval && planExecutionMode !== undefined;
   const displayOptions = useMemo(
-    () => prepareDisplayOptions(request.options),
-    [request.options],
+    () =>
+      prepareDisplayOptions(
+        hasPlanExecutionMode
+          ? request.options.filter(
+              (option) =>
+                option.id === 'restore_previous' ||
+                option.kind === 'reject_once' ||
+                option.kind === 'reject_always',
+            )
+          : request.options,
+      ),
+    [request.options, hasPlanExecutionMode],
   );
+  const showsPlanWorkflow = planTodos.length > 0 && isExitPlanApproval;
   const safeDefaultIndex = useMemo(
     () => getSafeDefaultIndex(displayOptions, isAgent),
     [displayOptions, isAgent],
@@ -247,11 +271,39 @@ export function ToolApproval({
       if (key) keyCount.set(key, (keyCount.get(key) ?? 0) + 1);
     }
     return (option: PermissionRequest['options'][number]) => {
+      if (hasPlanExecutionMode && option.id === 'restore_previous') {
+        return t('approval.option.executePlan', {
+          mode: t(`mode.label.${planExecutionMode}`),
+        });
+      }
+      if (showsPlanWorkflow || hasPlanExecutionMode) {
+        // An exit_plan_mode approval emits two `allow_once` options, so this
+        // cannot relabel by kind alone: `restore_previous` restores the
+        // pre-plan approval mode (YOLO if the user entered plan from YOLO)
+        // while the plain confirm keeps manual approval. Sharing one label
+        // would hide that difference behind two identical buttons.
+        if (
+          option.kind === 'allow_once' &&
+          option.id !== 'restore_previous' &&
+          option.id !== 'proceed_once_and_switch_to_default'
+        ) {
+          return t('workflow.planReview.confirm');
+        }
+        if (option.kind === 'reject_once' || option.kind === 'reject_always') {
+          return t('workflow.planReview.continuePlanning');
+        }
+      }
       const key = getOptionI18nKey(option);
       if (key && keyCount.get(key) === 1) return t(key);
       return option.label || (key ? t(key) : '');
     };
-  }, [displayOptions, t]);
+  }, [
+    displayOptions,
+    showsPlanWorkflow,
+    hasPlanExecutionMode,
+    planExecutionMode,
+    t,
+  ]);
   const [selected, setSelected] = useState(safeDefaultIndex);
   const requestRef = useRef(request);
   requestRef.current = request;
@@ -281,17 +333,37 @@ export function ToolApproval({
   const parsedTitle = parseTitle(request.title);
   const rawToolName =
     request.toolName || parsedTitle.toolName || request.kind || 'Tool';
-  const toolName = localizeToolDisplayName(rawToolName, t);
-  const descriptionText = getDescriptionText(request);
+  const toolName = showsPlanWorkflow
+    ? t('workflow.planReview.title')
+    : localizeToolDisplayName(rawToolName, t);
+  const descriptionText = showsPlanWorkflow
+    ? undefined
+    : getDescriptionText(request);
   const contentText = extractContentText(request);
+  const showsContent = Boolean(
+    contentText && (request.contentIsInput || contentText !== request.title),
+  );
 
   const confirm = useCallback(
     (optionId: string) => {
-      if (submittedRef.current) return;
+      if (disabled || submittedRef.current) return;
       submittedRef.current = true;
-      onConfirm(requestRef.current.id, optionId);
+      const requestId = requestRef.current.id;
+      const submission = onConfirm(requestId, optionId);
+      if (submission) {
+        void submission.catch(() => {
+          // Re-arm only if the rejected submission still belongs to the
+          // current request. This instance is reused across successive
+          // requests (no key at the mount sites), and a submission can
+          // reject late (up to the action timeout); a stale rejection would
+          // otherwise disarm the successor's double-submit guard mid-flight.
+          if (requestRef.current.id === requestId) {
+            submittedRef.current = false;
+          }
+        });
+      }
     },
-    [onConfirm],
+    [onConfirm, disabled],
   );
 
   const focusOption = useCallback((index: number) => {
@@ -362,9 +434,9 @@ export function ToolApproval({
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
       if (
-        e.key !== 'Escape' &&
         e.target instanceof Element &&
-        e.target.closest('[data-plan-interactive]')
+        ((e.key !== 'Escape' && e.target.closest('[data-plan-interactive]')) ||
+          e.target.closest('[data-approval-shortcuts-ignore]'))
       ) {
         return;
       }
@@ -405,16 +477,14 @@ export function ToolApproval({
 
   const isExec = isExecKind(request);
   const command = getCommandFromRawInput(request);
-  const showsCommandBlock = Boolean(
-    (isExec && command) || (contentText && contentText !== request.title),
-  );
-  const isExitPlanApproval = isExitPlanApprovalRequest(request);
-  const showsPlanWorkflow = planTodos.length > 0 && isExitPlanApproval;
-  const questionText = isAgent
-    ? t('approval.launchAgentQuestion')
-    : isExec
-      ? t('approval.execQuestion', { tool: toolName })
-      : t('approval.changeQuestion');
+  const showsCommandBlock = Boolean((isExec && command) || showsContent);
+  const questionText = showsPlanWorkflow
+    ? t('workflow.planReview.question')
+    : isAgent
+      ? t('approval.launchAgentQuestion')
+      : isExec
+        ? t('approval.execQuestion', { tool: toolName })
+        : t('approval.changeQuestion');
 
   return (
     <div
@@ -422,7 +492,7 @@ export function ToolApproval({
       className={
         variant === 'floating'
           ? `${styles.approval} ${styles.floating}${
-              showsPlanWorkflow ? ` ${styles.floatingWorkflow}` : ''
+              isExitPlanApproval ? ` ${styles.floatingWorkflow}` : ''
             }`
           : styles.approval
       }
@@ -464,7 +534,7 @@ export function ToolApproval({
             {command}
           </pre>
         </div>
-      ) : contentText && contentText !== request.title ? (
+      ) : showsContent ? (
         <pre
           className={`${styles.content}${
             isExitPlanApproval ? ` ${styles.planContent}` : ''
@@ -479,6 +549,18 @@ export function ToolApproval({
       {showsPlanWorkflow && (
         <div className={styles.workflow}>
           <PlanExecutionView todos={planTodos} tools={[]} tasks={[]} />
+        </div>
+      )}
+
+      {isExec && command && generateContent && (
+        <div className={styles.explainRow}>
+          <ThinkingTranslateButton
+            key={request.id}
+            content={command}
+            generateContent={generateContent}
+            className={styles.explainButton}
+            mode="explain-shell"
+          />
         </div>
       )}
 
@@ -505,6 +587,7 @@ export function ToolApproval({
                 isSelected ? styles.optionActive : ''
               }`}
               data-web-shell-permission-option
+              disabled={disabled}
               data-option-id={option.id}
               tabIndex={isSelected ? 0 : -1}
               role="radio"

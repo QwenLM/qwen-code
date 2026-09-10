@@ -4,11 +4,11 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GoalSnapshotV2 } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
-import { GOAL_EVIDENCE_LIMIT_REASONS } from '../utils/goalGate';
 import { GoalStatusStrip, getGoalActiveTimeMs } from './GoalStatusStrip';
 
 function snapshot(
   status: NonNullable<GoalSnapshotV2['goal']>['status'],
+  overrides: Partial<NonNullable<GoalSnapshotV2['goal']>> = {},
 ): GoalSnapshotV2 {
   return {
     v: 2,
@@ -23,6 +23,7 @@ function snapshot(
       activeTimeMs: 4000,
       createdAt: 1000,
       updatedAt: 5000,
+      ...overrides,
     },
   };
 }
@@ -42,7 +43,10 @@ describe('GoalStatusStrip', () => {
     container.remove();
   });
 
-  function render(status: NonNullable<GoalSnapshotV2['goal']>['status']) {
+  function render(
+    status: NonNullable<GoalSnapshotV2['goal']>['status'],
+    overrides: Partial<NonNullable<GoalSnapshotV2['goal']>> = {},
+  ) {
     const handlers = {
       onEdit: vi.fn(),
       onPause: vi.fn(),
@@ -52,7 +56,10 @@ describe('GoalStatusStrip', () => {
     act(() => {
       root.render(
         <I18nProvider language="en">
-          <GoalStatusStrip snapshot={snapshot(status)} {...handlers} />
+          <GoalStatusStrip
+            snapshot={snapshot(status, overrides)}
+            {...handlers}
+          />
         </I18nProvider>,
       );
     });
@@ -107,9 +114,7 @@ describe('GoalStatusStrip', () => {
     ).toBeNull();
   });
 
-  it('hides resume for an evidence-limited Goal', () => {
-    // The reducer refuses to resume a Goal stopped at an evidence bound, so
-    // offering the control only earns the user an invalid-transition 409.
+  it('offers resume for an evidence-limited Goal', () => {
     const limited = snapshot('usage_limited');
     act(() => {
       root.render(
@@ -128,34 +133,38 @@ describe('GoalStatusStrip', () => {
       );
     });
 
-    expect(container.querySelector('[aria-label="Resume goal"]')).toBeNull();
+    expect(
+      container.querySelector('[aria-label="Resume goal"]'),
+    ).not.toBeNull();
     expect(
       container.querySelector('[data-testid="goal-status-strip"]'),
     ).not.toBeNull();
   });
 
-  it('hides resume for a Goal evidence-limited before `limitKind` existed', () => {
+  it('offers resume for a Goal evidence-limited before `limitKind` existed', () => {
     // The sentinel prose shipped before the `limitKind` field did, so a Goal
     // persisted in that window restores as `usage_limited` with no `limitKind`
-    // at all. The reducer still refuses it; a gate keyed off `limitKind` alone
-    // offered a Resume button that could only ever earn a 409.
+    // at all. The strip does not parse the prose -- resumability is decided by
+    // status alone -- so one representative sentinel is enough here.
     const limited = snapshot('usage_limited');
-    for (const lastReason of GOAL_EVIDENCE_LIMIT_REASONS) {
-      act(() => {
-        root.render(
-          <I18nProvider language="en">
-            <GoalStatusStrip
-              snapshot={{ ...limited, goal: { ...limited.goal!, lastReason } }}
-              onEdit={vi.fn()}
-              onPause={vi.fn()}
-              onResume={vi.fn()}
-              onClear={vi.fn()}
-            />
-          </I18nProvider>,
-        );
-      });
-      expect(container.querySelector('[aria-label="Resume goal"]')).toBeNull();
-    }
+    const lastReason =
+      'The current Goal revision exceeded the bounded evidence catalog. Automatic retries cannot recover. Edit or replace the Goal before resuming it.';
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GoalStatusStrip
+            snapshot={{ ...limited, goal: { ...limited.goal!, lastReason } }}
+            onEdit={vi.fn()}
+            onPause={vi.fn()}
+            onResume={vi.fn()}
+            onClear={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    expect(
+      container.querySelector('[aria-label="Resume goal"]'),
+    ).not.toBeNull();
   });
 
   it('still offers resume for an ordinary usage-limited stop', () => {
@@ -190,5 +199,49 @@ describe('GoalStatusStrip', () => {
   it('adds current active time only while active', () => {
     expect(getGoalActiveTimeMs(snapshot('active'), 8000)).toBe(7000);
     expect(getGoalActiveTimeMs(snapshot('paused'), 8000)).toBe(4000);
+  });
+
+  it('shows spend against the budget once a turn has billed', () => {
+    render('active', { tokensUsed: 1_234, tokenBudget: 30_000_000 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-tokens"]')
+        ?.textContent,
+    ).toBe('1.2k / 30.0M tokens');
+  });
+
+  it('shows spend alone when the Goal has no budget', () => {
+    render('active', { tokensUsed: 1_234 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-tokens"]')
+        ?.textContent,
+    ).toBe('1.2k tokens');
+  });
+
+  it('shows nothing for a Goal that has not billed a turn', () => {
+    render('active', { tokensUsed: 0, tokenBudget: 30_000_000 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-tokens"]'),
+    ).toBeNull();
+  });
+
+  it('shows nothing for a daemon that does not report spend', () => {
+    // An older daemon's snapshot carries neither field.
+    render('active');
+
+    expect(
+      container.querySelector('[data-testid="goal-active-tokens"]'),
+    ).toBeNull();
+  });
+
+  it('keeps showing what a stopped Goal spent', () => {
+    render('paused', { tokensUsed: 2_500_000, tokenBudget: 30_000_000 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-tokens"]')
+        ?.textContent,
+    ).toBe('2.5M / 30.0M tokens');
   });
 });

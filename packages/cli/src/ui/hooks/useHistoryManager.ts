@@ -7,6 +7,10 @@
 import { useState, useRef, useCallback, useMemo } from 'react';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
+import {
+  coalesceFindingsHistoryItems,
+  isFindingsListDisplay,
+} from '../utils/findings-coalescing.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('HISTORY_MANAGER');
@@ -52,6 +56,23 @@ export function useHistory(): UseHistoryManagerReturn {
 
   const loadHistory = useCallback((newHistory: HistoryItem[]) => {
     setHistory(newHistory);
+    // Restored transcripts stamp items with IDs relative to their own load
+    // timestamp (base + 1..N, see buildResumedHistoryItems). Advance the ID
+    // counter past the highest loaded ID so a subsequent addItem — which
+    // computes Date.now() + ++counter — cannot land inside the restored
+    // range and duplicate a React key in the <Static> transcript. The next
+    // getNextMessageId call increments again, so equality here still yields
+    // maxLoadedId + 1 at the earliest.
+    let maxLoadedId = 0;
+    for (const item of newHistory) {
+      if (item.id > maxLoadedId) {
+        maxLoadedId = item.id;
+      }
+    }
+    messageIdCounterRef.current = Math.max(
+      messageIdCounterRef.current,
+      maxLoadedId - Date.now(),
+    );
   }, []);
 
   // Adds a new item to the history state with a unique ID.
@@ -81,6 +102,18 @@ export function useHistory(): UseHistoryManagerReturn {
               `textSize=${textSize}, ` +
               `historyLength=${newHistory.length}`,
           );
+        }
+        // A delivered report_findings list REPLACES the session's earlier
+        // one; collapse the superseded displays the moment the new group
+        // commits so live history, the Ctrl+O transcript, and every
+        // re-render surface show only the latest list.
+        if (
+          newItem.type === 'tool_group' &&
+          newItem.tools.some((tool) =>
+            isFindingsListDisplay(tool.resultDisplay),
+          )
+        ) {
+          return coalesceFindingsHistoryItems(newHistory);
         }
         return newHistory;
       });
@@ -264,6 +297,7 @@ export function useHistory(): UseHistoryManagerReturn {
                   ...t,
                   resultDisplay: UI_COMPACT_CLEARED_MESSAGE,
                   detailedDisplay: undefined,
+                  supersededFindingsDisplay: undefined,
                   images: undefined,
                   omittedImageCount: undefined,
                 };

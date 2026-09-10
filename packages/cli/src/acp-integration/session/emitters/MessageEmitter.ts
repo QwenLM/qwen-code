@@ -12,11 +12,11 @@ import {
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import {
   apiActivityTracker,
-  getActiveGoal,
   projectGoalStateToLegacy,
   type GoalRecord,
   type GoalSnapshotV2,
   type GoalStateCause,
+  type VisionBridgeResult,
 } from '@qwen-code/qwen-code-core';
 import { BaseEmitter } from './base-emitter.js';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
@@ -95,7 +95,6 @@ export class MessageEmitter extends BaseEmitter {
     reasons: string[],
     stopHookCount: number,
   ): Promise<void> {
-    const activeGoal = getActiveGoal(this.sessionId);
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: '' },
@@ -104,16 +103,6 @@ export class MessageEmitter extends BaseEmitter {
           iterationCount,
           reasons,
           stopHookCount,
-          ...(activeGoal
-            ? {
-                goal: {
-                  condition: activeGoal.condition,
-                  iterations: activeGoal.iterations,
-                  setAt: activeGoal.setAt,
-                  lastReason: activeGoal.lastReason,
-                },
-              }
-            : {}),
         },
       },
     });
@@ -198,6 +187,34 @@ export class MessageEmitter extends BaseEmitter {
         text,
         timestamp,
         ...(subagentMeta ? { extra: { ...subagentMeta } } : {}),
+      }),
+    );
+  }
+
+  async emitVisionBridgeNotice(
+    text: string,
+    result: VisionBridgeResult,
+  ): Promise<void> {
+    await this.sendUpdate(
+      createTranscriptMessageUpdate({
+        role: 'assistant',
+        text,
+        extra: {
+          source: 'vision_bridge_notice',
+          qwenDiscreteMessage: true,
+          visionBridgeNotice: {
+            status: result.status,
+            convertedCount: result.convertedCount,
+            omittedCount: result.omittedCount,
+            ...(result.modelId
+              ? { modelName: result.modelId.replace(/^[^:]+:/, '') }
+              : {}),
+            ...(result.modelEndpoint
+              ? { modelEndpoint: result.modelEndpoint }
+              : {}),
+            egressOccurred: result.egressOccurred === true,
+          },
+        },
       }),
     );
   }

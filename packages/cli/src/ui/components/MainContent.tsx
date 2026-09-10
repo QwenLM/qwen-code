@@ -39,11 +39,16 @@ import {
   SCROLL_TO_ITEM_END,
   type ScrollableListRef,
 } from './shared/ScrollableList.js';
-import { TextSelectionController } from '../selection/use-text-selection.js';
+import {
+  TextSelectionController,
+  type SelectionQuery,
+} from '../selection/use-text-selection.js';
+import { ContentMouseController } from '../context-menu/ContentMouseController.js';
+import { useContextMenu } from '../context-menu/ContextMenuContext.js';
 import { measureElementPosition } from '../utils/measure-element-position.js';
 
-// Limit Gemini messages to a very high number of lines to mitigate performance
-// issues in the worst case if we somehow get an enormous response from Gemini.
+// Limit LLM messages to a very high number of lines to mitigate performance
+// issues in the worst case if we somehow get an enormous model response.
 // This threshold is arbitrary but should be high enough to never impact normal
 // usage.
 const MAX_GEMINI_MESSAGE_LINES = 65536;
@@ -156,6 +161,8 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
   // useMemo keeps it cheap when nothing changes.
   const useVirtualScroll = uiState.useTerminalBuffer;
   const scrollRef = useRef<ScrollableListRef<VpItem>>(null);
+  const selectionQueryRef = useRef<SelectionQuery | null>(null);
+  const { menu: contextMenuOpen } = useContextMenu();
 
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {
@@ -463,7 +470,7 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
           availableTerminalHeight={
             uiState.constrainHeight ? staticAreaMaxItemHeight : undefined
           }
-          availableTerminalHeightGemini={
+          availableTerminalHeightLlm={
             uiState.constrainHeight ? MAX_GEMINI_MESSAGE_LINES : undefined
           }
           item={item}
@@ -493,12 +500,19 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
       0,
       uiState.availableTerminalHeight ?? 0,
     );
+    // While the context menu is open it owns the pointer and keyboard: the
+    // scroll list goes quiet so clicks/keys don't leak into the content under
+    // the menu. The selection controller only PAUSES (it must keep the current
+    // selection — the menu's Copy Selection offers it — and clearing it the
+    // instant the menu opens would hide what is about to be copied).
+    const viewportInteractive =
+      !uiState.dialogsVisible && contextMenuOpen === null;
 
     return (
       <OverflowProvider>
         <ScrollableList
           ref={scrollRef}
-          hasFocus={!uiState.dialogsVisible}
+          hasFocus={viewportInteractive}
           data={allVirtualItems}
           renderItem={renderVirtualItem}
           estimatedItemHeight={virtualEstimatedItemHeight}
@@ -513,6 +527,7 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
         />
         <TextSelectionController
           isActive={!uiState.dialogsVisible}
+          eventsPaused={contextMenuOpen !== null}
           getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
           getAdditionalSelectableRects={() =>
             footerRef?.current
@@ -529,6 +544,15 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
           hitTestScrollbar={(location) =>
             scrollRef.current?.hitTestScrollbar(location) ?? false
           }
+          selectionQueryRef={selectionQueryRef}
+        />
+        <ContentMouseController
+          isActive={!uiState.dialogsVisible}
+          getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+          hitTestScrollbar={(location) =>
+            scrollRef.current?.hitTestScrollbar(location) ?? false
+          }
+          selectionQueryRef={selectionQueryRef}
         />
         <ShowMoreLines constrainHeight={uiState.constrainHeight} />
       </OverflowProvider>
@@ -554,7 +578,7 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
                 terminalWidth={terminalWidth}
                 mainAreaWidth={mainAreaWidth}
                 availableTerminalHeight={staticAreaMaxItemHeight}
-                availableTerminalHeightGemini={MAX_GEMINI_MESSAGE_LINES}
+                availableTerminalHeightLlm={MAX_GEMINI_MESSAGE_LINES}
                 key={h.id}
                 item={h}
                 isPending={false}

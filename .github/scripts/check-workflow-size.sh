@@ -31,7 +31,42 @@ GROWTH_ALLOWANCE="${WORKFLOW_SIZE_GROWTH_ALLOWANCE:-4096}"
 # the slack for the next unreviewed 25 KB.
 SLACK_BYTES=20000
 
+# The ratchet compares the worktree against a checked-in baseline, so a
+# workflow that grew on main without the same-PR baseline bump leaves every
+# OTHER open PR failing a gate on a file it never touched (red-walled the
+# queue twice in two weeks: #9747, #9822). When the caller passes the PR's
+# base commit in WORKFLOW_SIZE_BASE_SHA, the missing-entry and growth
+# branches below hard-fail only if the PR actually changed the file; a
+# byte-identical copy means the staleness is main-side drift and earns a
+# warning instead. An unresolvable base (local run, fetch failure) falls
+# back to the strict failure — the ratchet fails closed, never open. One
+# residual window stays by design: if main edits the same workflow again
+# after the PR branched, the comparison against the new base sees the PR's
+# older copy as different and fails closed until that PR rebases —
+# self-healing, and still fail-closed, so it is left alone rather than
+# wiring the PR's changed-files list into a gate that today needs no API
+# call.
+BASE_SHA="${WORKFLOW_SIZE_BASE_SHA:-}"
+# Returns 0 when the worktree copy of $1 is byte-identical to the base
+# commit, 1 when it differs (or no base was given), and 2 when the base
+# cannot be resolved — the callers add a diagnostic on 2, because a
+# transient fetch failure and genuine PR growth need opposite remedies.
+file_matches_base() {
+  local file="$1"
+  [[ -n "${BASE_SHA}" ]] || return 1
+  if ! git rev-parse --verify --quiet "${BASE_SHA}^{commit}" >/dev/null &&
+    ! git fetch --depth=1 --quiet origin "${BASE_SHA}"; then
+    return 2
+  fi
+  git show "${BASE_SHA}:${file}" 2>/dev/null | cmp -s - "${file}"
+}
+
+unresolvable_base_note() {
+  echo "::warning::base ${BASE_SHA} could not be resolved (git fetch failed?) — failing strict; if this PR did not touch ${1}, re-run the job."
+}
+
 status=0
+warned_stale=0
 declare -A baseline=()
 if [[ -r "${BASELINE_FILE}" ]]; then
   # The || clause keeps an unterminated final line, which read reports as a
@@ -72,17 +107,41 @@ for file in .github/workflows/*.yml .github/workflows/*.yaml; do
 
   base="${baseline[${file##*/}]:-}"
   if [[ -z "${base}" ]]; then
-    echo "::error file=${file}::${file} has no entry in ${BASELINE_FILE}. Add '${size} ${file##*/}' so its growth is tracked."
-    status=1
+    file_matches_base "${file}"
+    match=$?
+    if ((match == 0)); then
+      echo "::warning file=${file}::${file} has no entry in ${BASELINE_FILE}, but the file is unchanged from this PR's base — add '${size} ${file##*/}' on main so its growth is tracked; unrelated PRs are not blocked."
+      warned_stale=1
+    else
+      echo "::error file=${file}::${file} has no entry in ${BASELINE_FILE}. Add '${size} ${file##*/}' so its growth is tracked."
+      status=1
+      if ((match == 2)); then
+        unresolvable_base_note "${file}"
+      fi
+    fi
   elif ((size > base + GROWTH_ALLOWANCE)); then
-    echo "::error file=${file}::${file} grew to ${size} bytes, $((size - base)) over its recorded ${base} (allowance ${GROWTH_ALLOWANCE}). Move prose into a sibling .md and long steps into .github/scripts/ — or, if the growth is real, update ${BASELINE_FILE} in this PR and say why."
-    status=1
+    file_matches_base "${file}"
+    match=$?
+    if ((match == 0)); then
+      echo "::warning file=${file}::${file} is ${size} bytes, $((size - base)) over its recorded ${base}, but the file is unchanged from this PR's base — the baseline went stale on main, not in this PR. Bump ${BASELINE_FILE} on main (a one-line PR saying why); unrelated PRs are not blocked."
+      warned_stale=1
+    else
+      echo "::error file=${file}::${file} grew to ${size} bytes, $((size - base)) over its recorded ${base} (allowance ${GROWTH_ALLOWANCE}). Move prose into a sibling .md and long steps into .github/scripts/ — or, if the growth is real, update ${BASELINE_FILE} in this PR and say why."
+      status=1
+      if ((match == 2)); then
+        unresolvable_base_note "${file}"
+      fi
+    fi
   elif ((size + SLACK_BYTES < base)); then
     echo "::warning file=${file}::${file} is ${size} bytes, $((base - size)) under its recorded ${base} — lower the entry in ${BASELINE_FILE} so the slack is not banked."
   fi
 done
 
 if ((status == 0)); then
-  echo "✅ every workflow file is under the ${GATE_BYTES}-byte gate and within ${GROWTH_ALLOWANCE} bytes of its recorded baseline"
+  if ((warned_stale)); then
+    echo "✅ every workflow file is under the ${GATE_BYTES}-byte gate (stale-baseline warnings above — update ${BASELINE_FILE} on main)"
+  else
+    echo "✅ every workflow file is under the ${GATE_BYTES}-byte gate and within ${GROWTH_ALLOWANCE} bytes of its recorded baseline"
+  fi
 fi
 exit "${status}"

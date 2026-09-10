@@ -28,6 +28,7 @@ import { sanitizeProviderBaseUrl } from './acpModelUtils.js';
  */
 const AUTH_ENV_MODEL_VARS: Record<AuthType, string[]> = {
   [AuthType.USE_OPENAI]: ['OPENAI_MODEL', 'QWEN_MODEL'],
+  [AuthType.USE_OPENAI_RESPONSES]: ['OPENAI_MODEL'],
   [AuthType.USE_GEMINI]: ['GEMINI_MODEL'],
   [AuthType.USE_VERTEX_AI]: ['GOOGLE_MODEL'],
   [AuthType.USE_ANTHROPIC]: ['ANTHROPIC_MODEL'],
@@ -219,6 +220,10 @@ export function getAuthTypeFromEnv(
   }
 
   if (env['GOOGLE_API_KEY'] && env['GOOGLE_MODEL']) {
+    return AuthType.USE_VERTEX_AI;
+  }
+
+  if (env['GOOGLE_CLOUD_PROJECT'] && env['GOOGLE_MODEL']) {
     return AuthType.USE_VERTEX_AI;
   }
 
@@ -427,15 +432,20 @@ export function resolveCliGenerationConfig(
   // explicitly disabled (reasoning === false) so effort never silently
   // re-enables it; provider adapters clamp the tier to the active model.
   const rawReasoningEffort = settings.model?.reasoningEffort;
-  const reasoningEffort = normalizeReasoningEffort(rawReasoningEffort);
+  const reasoningDisabled = rawReasoningEffort === 'none';
+  const reasoningEffort = reasoningDisabled
+    ? undefined
+    : normalizeReasoningEffort(rawReasoningEffort);
   // A configured-but-unrecognized value (e.g. a "hihg" typo in settings.json)
   // normalizes to undefined and is silently skipped below. Surface it as a
   // warning so the user isn't left wondering why /effort had no effect.
   const invalidReasoningEffortWarning =
-    rawReasoningEffort && !reasoningEffort
-      ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: ${REASONING_EFFORT_TIERS.join(', ')}.`
+    rawReasoningEffort && !reasoningDisabled && !reasoningEffort
+      ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: none, ${REASONING_EFFORT_TIERS.join(', ')}.`
       : undefined;
-  if (reasoningEffort && generationConfig.reasoning !== false) {
+  if (reasoningDisabled && generationConfig.thinkingMandatory !== true) {
+    generationConfig.reasoning = false;
+  } else if (reasoningEffort && generationConfig.reasoning !== false) {
     generationConfig.reasoning = {
       ...(generationConfig.reasoning ?? {}),
       effort: reasoningEffort,

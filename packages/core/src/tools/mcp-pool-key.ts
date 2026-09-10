@@ -111,7 +111,8 @@ function sortedEntries(
  *
  * Hashed fields (transport-defining):
  *   transport, command, args, cwd, env, url, httpUrl, tcp, headers,
- *   timeout, oauth, authProviderType, targetAudience, targetServiceAccount
+ *   timeout, versionNegotiation, oauth, authProviderType, targetAudience,
+ *   targetServiceAccount
  *
  * Excluded fields (per-session filter / metadata; do NOT change the
  * underlying transport):
@@ -137,6 +138,7 @@ export function fingerprint(cfg: MCPServerConfig): PoolKey {
     tcp: cfg.tcp ?? null,
     headers: sortedEntries(cfg.headers),
     timeout: cfg.timeout ?? null,
+    automaticVersionNegotiation: cfg.versionNegotiation === 'auto',
     oauth: canonicalOAuth(cfg.oauth),
     authProviderType: cfg.authProviderType ?? null,
     targetAudience: cfg.targetAudience ?? null,

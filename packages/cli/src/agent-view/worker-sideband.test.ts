@@ -125,6 +125,7 @@ describe('worker sideband env', () => {
         type: 'ready',
         cwd: '/repo',
         capabilities: ['ready'],
+        at: expect.any(String),
         sessionId: 'session-1',
         token: 'token-1',
       },
@@ -146,6 +147,7 @@ describe('worker sideband env', () => {
       'workerEvent',
       {
         type: 'detach',
+        at: expect.any(String),
         sessionId: 'session-1',
         token: 'token-1',
       },
@@ -163,6 +165,7 @@ describe('worker sideband env', () => {
         {
           type: 'prompt',
           sequence: 2,
+          promptId: 'prompt-1',
           text: 'next step',
           at: '2026-07-17T00:00:01.000Z',
         },
@@ -197,6 +200,7 @@ describe('worker sideband env', () => {
       {
         type: 'prompt',
         sequence: 2,
+        promptId: 'prompt-1',
         text: 'next step',
         at: '2026-07-17T00:00:01.000Z',
       },
@@ -219,6 +223,28 @@ describe('worker sideband env', () => {
       },
       { timeoutMs: 1000 },
     );
+
+    mockCallAgentViewSupervisor.mockResolvedValueOnce({
+      events: [
+        {
+          type: 'prompt',
+          sequence: 3,
+          promptId: 'prompt-1',
+          text: 'next step',
+          at: '2026-07-17T00:00:01.000Z',
+        },
+      ],
+    });
+    await expect(readAgentViewWorkerControlEvents(env)).resolves.toEqual([]);
+    expect(mockCallAgentViewSupervisor).toHaveBeenLastCalledWith(
+      '/tmp/qwen-agent-view.sock',
+      'workerControl',
+      {
+        sessionId: 'session-1',
+        token: 'token-1',
+      },
+      { timeoutMs: 1000 },
+    );
   });
 
   it('ignores malformed worker control responses', async () => {
@@ -232,6 +258,136 @@ describe('worker sideband env', () => {
     for (const response of [null, {}, { events: 'invalid' }]) {
       mockCallAgentViewSupervisor.mockResolvedValueOnce(response);
       await expect(readAgentViewWorkerControlEvents(env)).resolves.toEqual([]);
+    }
+  });
+
+  it('correlates state reports with the accepted prompt', async () => {
+    const env = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+
+    mockCallAgentViewSupervisor.mockResolvedValueOnce({
+      events: [
+        {
+          type: 'prompt',
+          sequence: 1,
+          promptId: 'prompt-1',
+          text: 'next step',
+          at: '2026-07-17T00:00:01.000Z',
+        },
+      ],
+    });
+    await readAgentViewWorkerControlEvents(env);
+    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
+    await reportAgentViewWorkerState({ sessionState: 'idle' }, env);
+    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
+    await reportAgentViewWorkerState({ sessionState: 'completed' }, env);
+
+    expect(mockCallAgentViewSupervisor).toHaveBeenNthCalledWith(
+      2,
+      '/tmp/qwen-agent-view.sock',
+      'workerEvent',
+      expect.not.objectContaining({ promptId: expect.any(String) }),
+    );
+    expect(mockCallAgentViewSupervisor).toHaveBeenNthCalledWith(
+      4,
+      '/tmp/qwen-agent-view.sock',
+      'workerEvent',
+      expect.objectContaining({
+        sessionState: 'working',
+        promptId: 'prompt-1',
+      }),
+    );
+    expect(mockCallAgentViewSupervisor).toHaveBeenNthCalledWith(
+      5,
+      '/tmp/qwen-agent-view.sock',
+      'workerEvent',
+      expect.objectContaining({
+        sessionState: 'completed',
+        promptId: 'prompt-1',
+      }),
+    );
+  });
+
+  it('correlates working even when the pre-submit idle report is deduplicated', async () => {
+    const env = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+
+    await reportAgentViewWorkerState({ sessionState: 'idle' }, env);
+    mockCallAgentViewSupervisor.mockResolvedValueOnce({
+      events: [
+        {
+          type: 'prompt',
+          sequence: 1,
+          promptId: 'prompt-1',
+          text: 'next step',
+          at: '2026-07-17T00:00:01.000Z',
+        },
+      ],
+    });
+    await readAgentViewWorkerControlEvents(env);
+    await reportAgentViewWorkerState({ sessionState: 'idle' }, env);
+    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
+
+    expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(3);
+    expect(mockCallAgentViewSupervisor).toHaveBeenLastCalledWith(
+      '/tmp/qwen-agent-view.sock',
+      'workerEvent',
+      expect.objectContaining({
+        sessionState: 'working',
+        promptId: 'prompt-1',
+      }),
+    );
+  });
+
+  it('retries a lost correlated state response on the next control poll', async () => {
+    const env = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+    mockCallAgentViewSupervisor.mockResolvedValueOnce({
+      events: [
+        {
+          type: 'prompt',
+          sequence: 1,
+          promptId: 'prompt-1',
+          text: 'next step',
+          at: '2026-07-17T00:00:01.000Z',
+        },
+      ],
+    });
+    await readAgentViewWorkerControlEvents(env);
+    await reportAgentViewWorkerState({ sessionState: 'idle' }, env);
+    mockCallAgentViewSupervisor.mockRejectedValueOnce(
+      new Error('response lost'),
+    );
+    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
+    mockCallAgentViewSupervisor.mockRejectedValueOnce(
+      new Error('supervisor unavailable'),
+    );
+    await reportAgentViewWorkerState({ sessionState: 'completed' }, env);
+    mockCallAgentViewSupervisor.mockResolvedValueOnce({ events: [] });
+    await readAgentViewWorkerControlEvents(env);
+
+    for (const call of [4, 5]) {
+      expect(mockCallAgentViewSupervisor).toHaveBeenNthCalledWith(
+        call,
+        '/tmp/qwen-agent-view.sock',
+        'workerEvent',
+        expect.objectContaining({
+          sessionState: 'completed',
+          promptId: 'prompt-1',
+        }),
+      );
     }
   });
 
@@ -262,6 +418,7 @@ describe('worker sideband env', () => {
         cwd: '/repo',
         summary: 'Waiting for Bash',
         waitingFor: 'Bash',
+        at: expect.any(String),
         sessionId: 'session-1',
         token: 'token-1',
       },
@@ -498,6 +655,7 @@ describe('worker sideband env', () => {
         'workerEvent',
         {
           type: 'heartbeat',
+          at: expect.any(String),
           sessionId: 'session-1',
           token: 'token-1',
         },

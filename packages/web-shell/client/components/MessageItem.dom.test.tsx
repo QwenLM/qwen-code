@@ -8,9 +8,10 @@ import {
   type WebShellAssistantTurnFooterRenderInfo,
   type WebShellCustomization,
 } from '../customization';
-import type { Message } from '../adapters/types';
+import type { ACPToolCall, Message } from '../adapters/types';
+import { summaryRunId } from './summaryRunId';
 
-vi.mock('../App', async () => {
+vi.mock('../WebShellContexts', async () => {
   const { createContext } = await import('react');
   return { CompactModeContext: createContext(false) };
 });
@@ -90,7 +91,25 @@ vi.mock('./messages/AssistantMessage', async () => {
   };
 });
 vi.mock('./messages/SystemMessage', () => ({ SystemMessage: () => null }));
-vi.mock('./messages/ToolGroup', () => ({ ToolGroup: () => null }));
+vi.mock('./messages/ToolGroup', async () => {
+  const React = await import('react');
+  return {
+    ToolGroup: ({
+      compactSummary,
+      tools,
+    }: {
+      compactSummary?: boolean;
+      tools: ACPToolCall[];
+    }) =>
+      React.createElement('div', {
+        'data-testid': 'tool-group',
+        'data-compact-summary': String(compactSummary === true),
+        'data-agent-ready': String(
+          (tools[0]?.subTools?.[0] ?? tools[0])?.subagentSessionReady,
+        ),
+      }),
+  };
+});
 vi.mock('./messages/PlanMessage', () => ({ PlanMessage: () => null }));
 vi.mock('./messages/BtwMessage', () => ({ BtwMessage: () => null }));
 vi.mock('./messages/UserShellMessage', () => ({
@@ -100,7 +119,7 @@ vi.mock('./InsightProgress', () => ({ InsightProgress: () => null }));
 vi.mock('./InsightReady', () => ({ InsightReady: () => null }));
 
 const { MessageItem } = await import('./MessageItem');
-const { CompactModeContext } = await import('../App');
+const { CompactModeContext } = await import('../WebShellContexts');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -150,6 +169,53 @@ const toolMsg = (id: string): Message => ({
 function item(message: Message) {
   return <MessageItem message={message} />;
 }
+
+it.each([false, true])(
+  'propagates readiness-only changes with nested=%s',
+  (nested) => {
+    const agent: ACPToolCall = {
+      callId: 'agent-1',
+      toolName: 'agent',
+      status: 'in_progress',
+      subagentSessionReady: false,
+    };
+    const tools = nested
+      ? [{ ...agent, callId: 'parent', subTools: [agent] }]
+      : [agent];
+    const message: Message = {
+      id: 'agent-message',
+      role: 'tool_group',
+      tools,
+      timestamp: 0,
+    };
+    const { root, container } = renderWithRoot(
+      <I18nProvider language="en">{item(message)}</I18nProvider>,
+    );
+    expect(
+      container
+        .querySelector('[data-testid="tool-group"]')
+        ?.getAttribute('data-agent-ready'),
+    ).toBe('false');
+    const readyAgent = { ...agent, subagentSessionReady: true };
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          {item({
+            ...message,
+            tools: nested
+              ? [{ ...tools[0], subTools: [readyAgent] }]
+              : [readyAgent],
+          })}
+        </I18nProvider>,
+      ),
+    );
+    expect(
+      container
+        .querySelector('[data-testid="tool-group"]')
+        ?.getAttribute('data-agent-ready'),
+    ).toBe('true');
+  },
+);
 
 describe('MessageItem error isolation', () => {
   it('renders a healthy message normally (no fallback)', () => {
@@ -230,6 +296,34 @@ describe('MessageItem selectable wrapper', () => {
 });
 
 describe('MessageItem tool group spacing', () => {
+  it('marks only synthetic groups as compact summaries', () => {
+    const synthetic = render(
+      <I18nProvider language="en">
+        <CompactModeContext.Provider value={true}>
+          {item(toolMsg(summaryRunId('agent-1')))}
+        </CompactModeContext.Provider>
+      </I18nProvider>,
+    );
+    const regular = render(
+      <I18nProvider language="en">
+        <CompactModeContext.Provider value={true}>
+          {item(toolMsg('agent-1'))}
+        </CompactModeContext.Provider>
+      </I18nProvider>,
+    );
+
+    expect(
+      synthetic
+        .querySelector('[data-testid="tool-group"]')
+        ?.getAttribute('data-compact-summary'),
+    ).toBe('true');
+    expect(
+      regular
+        .querySelector('[data-testid="tool-group"]')
+        ?.getAttribute('data-compact-summary'),
+    ).toBe('false');
+  });
+
   it('uses larger row spacing only in compact mode', () => {
     const compact = render(
       <I18nProvider language="en">

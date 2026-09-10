@@ -27,7 +27,7 @@ const server = net.createServer(socket => {
     const request = JSON.parse(buffer.split("\\n", 1)[0]);
     const result = request.method === "metadata" ? {
       driver_version: ${JSON.stringify(packageVersion)},
-      contract_version: hostBundleId.endsWith(".failure") ? "incompatible" : "0.6.0",
+      contract_version: hostBundleId.endsWith(".failure") ? "incompatible" : "0.7.0",
       tools_list_schema_version: "1",
       capability_version: "1",
       mcp_protocol_version: "2025-06-18",
@@ -65,13 +65,13 @@ const waitForExit = async (pid) => {
 
 try {
   const { EmbeddedCuaDriverHost, EmbeddedDriverHostState } = await import(
-    "@trycua/cua-driver/embedded"
+    "@qwen-code/cua-sdk/embedded"
   )
   const host = new EmbeddedCuaDriverHost(binaryPath, "com.example.electron-host")
   const connection = await host.start()
   const socketPath = connection.socketPath
   const pid = connection.pid
-  const { CuaDriver } = await import("@trycua/cua-driver")
+  const { CuaDriver } = await import("@qwen-code/cua-sdk")
   const driver = CuaDriver.connect(socketPath)
   const tools = JSON.parse(await driver.listToolsJson())
   driver.uniffiDestroy()
@@ -84,7 +84,8 @@ try {
     connection: {
       driverVersion: connection.driverVersion,
       socketPathIsPrivate:
-        socketPath.startsWith(os.tmpdir()) && path.basename(socketPath).startsWith("cua-"),
+        socketPath.startsWith(os.tmpdir()) &&
+        path.basename(socketPath).startsWith("qwen-cua-"),
       pidMatchesChild: Number(readFileSync(path.join(directory, "com.example.electron-host.pid"), "utf8")) === pid,
       stateIsReady: host.state() === EmbeddedDriverHostState.Ready,
       mcpCommand: connection.mcp.command,

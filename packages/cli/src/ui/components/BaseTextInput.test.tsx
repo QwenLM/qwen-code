@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render } from 'ink-testing-library';
 import type { DOMElement } from 'ink';
+import stringWidth from 'string-width';
 import {
   BaseTextInput,
   defaultRenderLine,
@@ -183,6 +184,49 @@ describe('BaseTextInput', () => {
       }),
     ).toEqual({ x: 29, y: 20 });
   });
+
+  it.each([
+    { columns: 11, label: 'session', expectedLabel: 'sessi…' },
+    { columns: 12, label: '会话标题', expectedLabel: '会话标…' },
+    { columns: 20, label: 'session', expectedLabel: 'session' },
+    { columns: 4, label: 'session', expectedLabel: '' },
+  ])(
+    'keeps the top border within $columns columns for "$label"',
+    ({ columns, label, expectedLabel }) => {
+      const originalDescriptor = Object.getOwnPropertyDescriptor(
+        process.stdout,
+        'columns',
+      );
+      Object.defineProperty(process.stdout, 'columns', {
+        configurable: true,
+        value: columns,
+      });
+
+      try {
+        const { lastFrame } = render(
+          <BaseTextInput
+            buffer={createBuffer()}
+            onSubmit={vi.fn()}
+            topRightLabel={label}
+          />,
+        );
+        const topBorderLine = lastFrame()?.split('\n')[0] ?? '';
+
+        expect(stringWidth(topBorderLine)).toBe(columns);
+        if (expectedLabel) {
+          expect(topBorderLine).toContain(` ${expectedLabel} `);
+        } else {
+          expect(topBorderLine).toBe('─'.repeat(columns));
+        }
+      } finally {
+        if (originalDescriptor) {
+          Object.defineProperty(process.stdout, 'columns', originalDescriptor);
+        } else {
+          Reflect.deleteProperty(process.stdout, 'columns');
+        }
+      }
+    },
+  );
 });
 
 describe('getAbsolutePosition', () => {

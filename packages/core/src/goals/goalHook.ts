@@ -21,8 +21,8 @@ import {
   recordGoalIteration,
   resetGoalDeferrals,
   setActiveGoal,
-  type ActiveGoal,
 } from './activeGoalStore.js';
+import type { ActiveGoal } from './goal-legacy-projection.js';
 import { judgeGoal } from './goalJudge.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -36,7 +36,7 @@ const debugLogger = createDebugLogger('GOAL_HOOK');
  */
 export const MAX_GOAL_ITERATIONS = 50;
 
-/** Default budget (seconds) for a single goal-judge LLM call. */
+/** Default budget (milliseconds) for a single goal-judge LLM call. */
 export const GOAL_JUDGE_TIMEOUT_MS = 25_000;
 export const GOAL_HOOK_TIMEOUT_SECONDS = 30;
 export const GOAL_HOOK_TIMEOUT_MS = GOAL_HOOK_TIMEOUT_SECONDS * 1000;

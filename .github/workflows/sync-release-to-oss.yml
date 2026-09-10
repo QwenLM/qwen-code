@@ -30,7 +30,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ env.RELEASE_TAG }}'
 
@@ -73,9 +73,29 @@ jobs:
           mkdir -p dist/standalone
           gh release download "${RELEASE_TAG}" --dir dist/standalone --pattern '*.tar.gz' --pattern '*.zip' --pattern 'SHA256SUMS'
 
-      - name: 'Verify Downloaded Release Assets'
+      - name: 'Detect OpenTUI Preview Assets'
+        id: 'flavor'
         run: |-
-          npm run verify:installation-release -- --dir dist/standalone
+          set -euo pipefail
+
+          # These steps come from the default branch while the checkout and the
+          # downloaded assets come from the tag being synced, which on a
+          # re-dispatch can predate the preview flavor entirely. A repository
+          # variable describes the default branch, not that tag, so derive the
+          # flavor from the archives this release actually shipped.
+          shopt -s nullglob
+          preview_archives=(dist/standalone/*-opentui-preview.*)
+          preview_args=''
+          if [[ ${#preview_archives[@]} -gt 0 ]]; then
+            preview_args='--include-opentui-preview'
+          fi
+          echo "preview_args=${preview_args}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Verify Downloaded Release Assets'
+        env:
+          PREVIEW_ARGS: '${{ steps.flavor.outputs.preview_args }}'
+        run: |-
+          npm run verify:installation-release -- --dir dist/standalone ${PREVIEW_ARGS}
 
       - name: 'Package Hosted Installation Assets'
         if: |-
@@ -135,10 +155,11 @@ jobs:
         env:
           ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
           RELEASE_TAG: '${{ env.RELEASE_TAG }}'
+          PREVIEW_ARGS: '${{ steps.flavor.outputs.preview_args }}'
         run: |-
           set -euo pipefail
 
-          mapfile -t release_assets < <(node scripts/verify-installation-release.js --dir dist/standalone --list-release-asset-paths)
+          mapfile -t release_assets < <(node scripts/verify-installation-release.js --dir dist/standalone --list-release-asset-paths ${PREVIEW_ARGS})
           node scripts/upload-aliyun-oss-assets.js \
             --bucket "${ALIYUN_OSS_BUCKET}" \
             --config "${RUNNER_TEMP}/.ossutilconfig" \
@@ -149,10 +170,11 @@ jobs:
         env:
           ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
           RELEASE_TAG: '${{ env.RELEASE_TAG }}'
+          PREVIEW_ARGS: '${{ steps.flavor.outputs.preview_args }}'
         run: |-
           set -euo pipefail
 
-          npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"
+          npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}" ${PREVIEW_ARGS}
 
       - name: 'Sync Hosted Installation Assets to Aliyun OSS'
         if: |-

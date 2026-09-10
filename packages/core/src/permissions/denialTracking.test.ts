@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   AUTO_MODE_DENIAL_LIMITS,
+  consumePendingManualRetry,
   createDenialState,
   formatDenialStateLog,
   isApproveOutcome,
@@ -52,6 +53,7 @@ describe('formatDenialStateLog', () => {
 describe('isDenialFallbackReason', () => {
   it('accepts denial-tracking fallback reasons', () => {
     expect(isDenialFallbackReason('consecutive_block')).toBe(true);
+    expect(isDenialFallbackReason('classifier_blocked_retry')).toBe(true);
     expect(isDenialFallbackReason('consecutive_unavailable')).toBe(true);
     expect(isDenialFallbackReason('total_denial')).toBe(true);
   });
@@ -78,6 +80,12 @@ describe('recordBlock', () => {
     expect(s.consecutiveUnavailable).toBe(0);
     // Total counters are independent.
     expect(s.totalUnavailable).toBe(1);
+  });
+
+  it('records only a digest for the exact action eligible for manual retry', () => {
+    expect(recordBlock(FRESH, 'action-digest')).toMatchObject({
+      pendingManualRetryFingerprint: 'action-digest',
+    });
   });
 });
 
@@ -132,6 +140,60 @@ describe('shouldFallback', () => {
     expect(shouldFallback(s)).toEqual({
       fallback: true,
       reason: 'consecutive_block',
+    });
+  });
+
+  it('routes only an exact retry of the last blocked action to manual approval', () => {
+    const blocked = recordBlock(FRESH, 'blocked-action');
+
+    expect(shouldFallback(blocked, 'blocked-action')).toEqual({
+      fallback: true,
+      reason: 'classifier_blocked_retry',
+    });
+    expect(shouldFallback(blocked, 'changed-action')).toEqual({
+      fallback: false,
+    });
+  });
+
+  it('consumes the exact-action retry before manual confirmation', () => {
+    const blocked = recordBlock(FRESH, 'blocked-action');
+    const consumed = consumePendingManualRetry(blocked);
+
+    expect(consumed.pendingManualRetryFingerprint).toBeUndefined();
+    expect(shouldFallback(consumed, 'blocked-action')).toEqual({
+      fallback: false,
+    });
+  });
+
+  it('preserves an exact-action retry across unrelated allowed work', () => {
+    const blocked = recordBlock(FRESH, 'blocked-action');
+    const allowed = recordAllow(blocked, 'allowed-action');
+
+    expect(shouldFallback(allowed, 'blocked-action')).toEqual({
+      fallback: true,
+      reason: 'classifier_blocked_retry',
+    });
+  });
+
+  it('clears the retry when that exact action is allowed', () => {
+    const blocked = recordBlock(FRESH, 'blocked-action');
+    const allowed = recordAllow(blocked, 'blocked-action');
+
+    expect(shouldFallback(allowed, 'blocked-action')).toEqual({
+      fallback: false,
+    });
+  });
+
+  it.each([
+    ['a fingerprint-less block', recordBlock],
+    ['classifier unavailability', recordUnavailable],
+    ['an unrelated fallback approval', recordFallbackApprove],
+  ])('preserves an exact-action retry across %s', (_name, transition) => {
+    const blocked = recordBlock(FRESH, 'blocked-action');
+
+    expect(shouldFallback(transition(blocked), 'blocked-action')).toEqual({
+      fallback: true,
+      reason: 'classifier_blocked_retry',
     });
   });
 
@@ -235,6 +297,21 @@ describe('recordFallbackApprove', () => {
     expect(shouldFallback(s)).toEqual({ fallback: false });
   });
 
+  it('preserves an unrelated retry when resetting the total denial cap', () => {
+    const state = {
+      ...FRESH,
+      totalBlock: AUTO_MODE_DENIAL_LIMITS.maxTotalDenials,
+      pendingManualRetryFingerprint: 'blocked-action',
+    };
+
+    expect(
+      shouldFallback(recordFallbackApprove(state), 'blocked-action'),
+    ).toEqual({
+      fallback: true,
+      reason: 'classifier_blocked_retry',
+    });
+  });
+
   it('resets all counters when total and consecutive caps overlap', () => {
     const s: AutoModeDenialState = {
       consecutiveBlock: AUTO_MODE_DENIAL_LIMITS.maxConsecutiveBlock,
@@ -257,7 +334,7 @@ describe('resetDenialState', () => {
     let s: AutoModeDenialState = FRESH;
     s = recordBlock(s);
     s = recordUnavailable(s);
-    s = recordBlock(s);
+    s = recordBlock(s, 'blocked-action');
     s = resetDenialState();
     expect(s).toEqual(FRESH);
   });

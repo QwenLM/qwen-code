@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { DaemonDrainingError } from '../server/session-archive.js';
+
 export class ConversationRuntimeActivityGate {
   private sealed = false;
   private active = 0;
@@ -11,10 +13,7 @@ export class ConversationRuntimeActivityGate {
 
   async run<T>(task: () => Promise<T>): Promise<T> {
     if (this.sealed) {
-      throw Object.assign(
-        new Error('The daemon is draining and no longer accepts work.'),
-        { code: 'daemon_draining' },
-      );
+      throw new DaemonDrainingError();
     }
     this.active++;
     try {

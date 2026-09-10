@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Internal stream retry allow-list. Keep this outside geminiChat.ts because
+import type { RetryErrorClassification } from '../utils/retryErrorClassification.js';
+
+// Internal stream retry allow-list. Keep this outside llm-chat.ts because
 // that file is re-exported from the package barrel, and this retry policy is
 // not part of the public API.
 export const RETRYABLE_STREAM_TRANSPORT_CODES: ReadonlySet<string> = new Set([
@@ -15,3 +17,13 @@ export const RETRYABLE_STREAM_TRANSPORT_CODES: ReadonlySet<string> = new Set([
   'UND_ERR_HEADERS_TIMEOUT',
   'UND_ERR_SOCKET',
 ]);
+
+export function isRetryableStreamTransportError(
+  classification: RetryErrorClassification,
+): boolean {
+  return (
+    classification.kind === 'transport' &&
+    classification.transportCode !== undefined &&
+    RETRYABLE_STREAM_TRANSPORT_CODES.has(classification.transportCode)
+  );
+}

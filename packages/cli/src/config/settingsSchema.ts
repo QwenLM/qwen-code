@@ -17,6 +17,7 @@ import type {
 import {
   ApprovalMode,
   DEFAULT_MAX_SUBAGENT_DEPTH,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
@@ -25,10 +26,13 @@ import {
   DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  OutputFormat,
+  REASONING_EFFORT_TIERS,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
+import { MergeStrategy } from '../utils/deepMerge.js';
 
 export const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
 
@@ -62,17 +66,6 @@ export const TOGGLE_TYPES: ReadonlySet<SettingsType | undefined> = new Set([
 export interface SettingEnumOption {
   value: string | number;
   label: string;
-}
-
-export enum MergeStrategy {
-  // Replace the old value with the new value. This is the default.
-  REPLACE = 'replace',
-  // Concatenate arrays.
-  CONCAT = 'concat',
-  // Merge arrays, ensuring unique values.
-  UNION = 'union',
-  // Shallow merge objects.
-  SHALLOW_MERGE = 'shallow_merge',
 }
 
 export interface SettingDefinition {
@@ -202,7 +195,7 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
             type: 'string',
             description:
               'The type of hook. Note: "function" type is only available via SDK registration, not settings.json.',
-            enum: ['command', 'http'],
+            enum: ['command', 'http', 'prompt'],
             required: true,
           },
           command: {
@@ -214,6 +207,15 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
             type: 'string',
             description:
               'The URL to send the POST request to. Required for "http" type.',
+          },
+          prompt: {
+            type: 'string',
+            description:
+              'The prompt to send to the model. Required for "prompt" type.',
+          },
+          model: {
+            type: 'string',
+            description: 'The optional model to use for a "prompt" hook.',
           },
           headers: {
             type: 'object',
@@ -433,6 +435,20 @@ const SETTINGS_SCHEMA = {
         description: 'The preferred editor to open files in.',
         showInDialog: true,
       },
+      outputStyle: {
+        type: 'string',
+        label: 'Output Style',
+        category: 'General',
+        // Generic settings edits do not rebuild the running system instruction;
+        // `/output-style` owns the separate live-update path.
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Name of the output style that shapes how responses are written: a built-in such as "Concise" or "Explanatory", or a custom style\'s name — its frontmatter `name`, defaulting to the file name without ".md" — from ~/.qwen/output-styles or .qwen/output-styles. Leave unset for the default style. Change it with /output-style. Only the built-ins are available in --bare and --safe-mode.',
+        // The style list includes user/project-defined entries; the dedicated
+        // /output-style picker owns selection rather than a static enum here.
+        showInDialog: false,
+      },
       vimMode: {
         type: 'boolean',
         label: 'Vim Mode',
@@ -631,17 +647,6 @@ const SETTINGS_SCHEMA = {
           'or set a specific language.',
         showInDialog: true,
       },
-      dynamicCommandTranslation: {
-        type: 'boolean',
-        label: 'Language: Dynamic Command Translation',
-        category: 'General',
-        requiresRestart: false,
-        default: false,
-        description:
-          'Enable AI translation for dynamic slash command descriptions. ' +
-          'When disabled, dynamic commands use their original descriptions and do not trigger translation model calls.',
-        showInDialog: true,
-      },
       terminalBell: {
         type: 'boolean',
         label: 'Terminal Bell Notification',
@@ -727,6 +732,21 @@ const SETTINGS_SCHEMA = {
           'Append the attribution footer naming the model and CLI version (e.g. "_— qwen3-coder via Qwen Code /review (v0.21.2)_") to review bodies and inline comments posted to GitHub. Disable to post reviews without VISIBLE AI attribution: no footer, and no "**[Critical]**"/"**[Suggestion]**" severity markers on posted comments and body lists. Unattributed posts stay identifiable in the raw source: each posted comment carries an invisible severity marker ("<!-- qwen-review critical -->") and the review body carries a ledger marker ("<!-- qwen-review-ledger ... -->") — anything reading comment bodies (GitHub API automation, the workflows this setting couples to) still recognizes a /review artifact, and presubmit duplicate detection recognizes the reviewing account\'s earlier posts by the severity marker, though unattributed posts from other accounts escape it. Another consequence: qwen-autofix\'s Critical-only mode (engaged after round 5, or earlier when a counting window\'s diff-growth budget trips) no longer recognizes the posted findings as Critical and defers them. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
         showInDialog: true,
       },
+      sandbox: {
+        type: 'enum',
+        label: 'Sandbox the reviewed code: review',
+        category: 'General',
+        requiresRestart: false,
+        default: 'off',
+        description:
+          'Run the REVIEWED repository\'s own commands — `npm ci` with its install scripts, the build, the test suite, and every mutation probe — inside a container instead of directly as you. A review executes the code it is reviewing, and today those commands inherit the review process\'s whole environment (on CI that includes the model and GitHub credentials). "auto" uses a container when docker or podman answers and runs directly when neither does; "required" refuses to run them unsandboxed, which makes the evidence that depends on execution (build/test findings, mutation verdicts, `Source: [probe]`) unavailable for that run rather than ending the review; "off" is today\'s behaviour and stays the default, because containerising a build by surprise changes what native modules compile against. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot switch off the containment that exists to contain it.',
+        showInDialog: true,
+        options: [
+          { value: 'off', label: 'Off (run the reviewed code directly)' },
+          { value: 'auto', label: 'Auto (container when one is available)' },
+          { value: 'required', label: 'Required (never run it unsandboxed)' },
+        ],
+      },
       effort: {
         type: 'enum',
         label: 'Default effort: review',
@@ -734,7 +754,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: 'auto',
         description:
-          'Default effort for /review when --effort is not given. "auto" keeps the built-in rule (high for PRs, medium for local changes). An explicit --effort still wins; an effective --comment still forces high and --fix still floors at medium. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
+          'Default effort for /review when neither --effort nor a project-remembered explicitly typed level applies. "auto" keeps the built-in rule (high for PRs, medium for local changes). An explicit or remembered level wins; an effective --comment still forces high and --fix still floors at medium. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
         showInDialog: true,
         options: [
           { value: 'auto', label: 'Auto (high for PRs, medium for local)' },
@@ -778,6 +798,16 @@ const SETTINGS_SCHEMA = {
           'Lower the reverse-audit loop\'s round cap for every high-effort review. The cap is normally chosen from the diff topology (10 small / 5 chunked; a huge diff is 3 when the run has a review deadline and 5 when it does not, because that reduction answers a CI ceiling and applies only where one exists) because a round costs one agent on a small diff and ~90 minutes on a huge one; this setting can only LOWER whichever tier applies, never raise it — a value that is not a whole number above zero, or that is out of range (below 3, or above the plan\'s own tier), is ignored and leaves the tier alone — JSON Schema has no integer type here, so a fraction validates in an editor and is then discarded at runtime. Understand what it buys before enabling: the loop ends on two consecutive dry rounds, so cutting the cap does not make reviews converge sooner, it makes them stop before converging more often — and every such stop is disclosed as unreviewed scope and caps the verdict at Comment, so a cheaper review is also one that can no longer Approve. To spend LESS on reviews generally, prefer "effort". Nothing here makes a loop run LONGER: a review deadline bounds a run rather than extending it, and on a huge diff setting one lowers the cap from 5 to 3 rather than raising it. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
         showInDialog: true,
       },
+      approachRounds: {
+        type: 'number',
+        label: 'Approach-signal round threshold: review',
+        category: 'General',
+        requiresRestart: false,
+        default: 0,
+        description:
+          'How many rounds a pull request must reach before the review may add one advisory paragraph saying the shape of the change, rather than the current patch, looks like the open question. It appears only when the diff has also grown several times over since the review first measured it, and never on an Approve. It is disclosure only: it adds no finding, changes no verdict, and blocks nothing — it exists because every finding is anchored to a line in the current diff, so the review can report where an approach leaks but never that a different approach would retire all of the leaks at once. Leave at 0 to keep the built-in threshold of 5 rounds; raise it to make the paragraph appear later, and set it very high to silence it. A value that is not a whole number above zero is ignored. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
+        showInDialog: true,
+      },
     },
   },
   output: {
@@ -795,11 +825,22 @@ const SETTINGS_SCHEMA = {
         category: 'General',
         requiresRestart: false,
         default: 'text',
-        description: 'The format of the CLI output.',
+        description:
+          'The format of the CLI output. With `stream-json`, runs started ' +
+          'with a prompt behave as non-interactive (headless), matching ' +
+          '`--output-format stream-json`. Flags validated at argv parse ' +
+          'time (`--include-partial-messages`, `--input-format ' +
+          'stream-json`) still require the explicit `--output-format ' +
+          'stream-json` flag.',
         showInDialog: false,
+        // The values are the runtime's `OutputFormat` enum members, and the
+        // settingsSchema test pins these options against
+        // `Object.values(OutputFormat)`, so a format added in core fails
+        // that test until this list and the regenerated JSON follow.
         options: [
-          { value: 'text', label: 'Text' },
-          { value: 'json', label: 'JSON' },
+          { value: OutputFormat.TEXT, label: 'Text' },
+          { value: OutputFormat.JSON, label: 'JSON' },
+          { value: OutputFormat.STREAM_JSON, label: 'Stream JSON' },
         ],
       },
       showTimestamps: {
@@ -871,6 +912,38 @@ const SETTINGS_SCHEMA = {
         description: 'The color theme for the UI.',
         showInDialog: true,
       },
+      brand: {
+        type: 'object',
+        label: 'Web Shell Brand',
+        category: 'UI',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Product name and logo the Web Shell presents. Read from operator scopes only (System Defaults, User, System) — a workspace settings file cannot rebrand the shell, because it commonly comes from a repository the person opening the shell did not write. Not editable from the in-browser Settings page; edit settings.json directly.',
+        showInDialog: false,
+        properties: {
+          name: {
+            type: 'string',
+            label: 'Web Shell Brand Name',
+            category: 'UI',
+            requiresRestart: false,
+            default: '' as string,
+            description:
+              "Product name shown in the Web Shell sidebar, welcome header, About panel and browser tab title. Sanitized to a single line; capped at 80 characters. A placeholder value that substitution would change ($VAR/${VAR} with the variable set) is refused with a warning on the daemon's stderr, because the substitution source is process-wide and a workspace could supply it; an unresolvable placeholder is kept verbatim. Leave empty to use the built-in name. The terminal banner has its own separate setting, `ui.customBannerTitle`.",
+            showInDialog: false,
+          },
+          logoPath: {
+            type: 'string',
+            label: 'Web Shell Brand Logo Path',
+            category: 'UI',
+            requiresRestart: false,
+            default: '' as string,
+            description:
+              'Path to an SVG file used as the Web Shell sidebar logo and browser favicon. A leading "~" is expanded, and a relative path resolves against the directory of the settings file that declares it. The file must be a regular file — not a symlink, and not reachable through more than one hard link — at most 32 KiB both on disk and once UTF-8-decoded, and its root element must be a namespaced <svg> — a default xmlns, or an xmlns:svg binding on a prefix-bound root, is what makes it renderable as an image. Environment variable placeholders that would resolve are refused, as with the brand name. Leave empty to use the built-in logo.',
+            showInDialog: false,
+          },
+        },
+      },
       autoModeAcknowledged: {
         type: 'boolean',
         label: 'Auto Mode Acknowledged',
@@ -904,7 +977,7 @@ const SETTINGS_SCHEMA = {
             )
           | undefined,
         description:
-          'Status line display configuration. Use `type: "preset"` with built-in item ids, or `type: "command"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh. Set `respectUserColors: true` to preserve ANSI color codes in command output instead of applying dim/theme styling. Set `hideContextIndicator: true` to hide the built-in context usage indicator in the footer right section, or `false` to always show it. When `hideContextIndicator` is unset, the footer indicator is hidden automatically for preset status lines that already include `context-used` or `context-remaining`, and shown otherwise (including for `command` status lines). When unset (default), the built-in default preset (model, git branch, context usage, current dir) is shown automatically; set to `null` to explicitly disable the status line.',
+          'Status line display configuration. Use `type: "preset"` with built-in item ids, or `type: "command"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh. Set `respectUserColors: true` to preserve ANSI color codes in command output instead of applying dim/theme styling. Set `hideContextIndicator: true` to hide the built-in context usage indicator in the footer right section, or `false` to always show it. When `hideContextIndicator` is unset, the footer indicator is hidden automatically for preset status lines that already include `context-used` or `context-remaining`, and shown otherwise (including for `command` status lines). When unset (default), the built-in default preset (project name, git branch, model, context usage) is shown automatically; set to `null` to explicitly disable the status line.',
         showInDialog: false,
       },
       customThemes: {
@@ -1119,7 +1192,7 @@ const SETTINGS_SCHEMA = {
             label: 'Screen Reader Mode',
             category: 'UI',
             requiresRestart: true,
-            default: undefined as boolean | undefined,
+            default: false,
             description:
               'Render output in plain-text to be more screen reader accessible',
             showInDialog: false,
@@ -1141,12 +1214,13 @@ const SETTINGS_SCHEMA = {
         category: 'UI',
         requiresRestart: false,
         default: false,
-        // Retired from the TUI (compact tool output is now always-on there, and
-        // Ctrl+O opens the transcript instead of toggling this). Kept as a
-        // hidden, schema-only setting so the web shell's independent compact
-        // toggle can still persist via the daemon settings routes (mirrors
-        // `voiceModel`). Not shown in the TUI settings dialog.
-        description: 'Compact view (web shell only; not used by the TUI).',
+        // Retired everywhere: compact tool output is always on in the TUI
+        // (Ctrl+O opens the transcript there), and the web shell now fixes
+        // its compact view on too. Kept schema-registered (mirrors
+        // `voiceModel`) so settings files that still carry the key load
+        // without warnings; nothing reads the value anymore.
+        description:
+          'Retired: compact view is always on in both the TUI and the web shell. The key is kept so existing settings files do not warn.',
         showInDialog: false,
       },
       useTerminalBuffer: {
@@ -1156,7 +1230,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: true,
         description:
-          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Enabled by default in compatible interactive terminals to avoid flicker, scroll-storm, and interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Screen reader mode and non-interactive output such as piped stdout or CI use append-only terminal output instead. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging. These mouse interactions are controlled by ui.mouseTracking; disable that setting to restore native right-click and OSC 8 hyperlink clicks.',
+          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Enabled by default in compatible interactive terminals to avoid flicker, scroll-storm, and interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Screen reader mode and non-interactive output such as piped stdout or CI use append-only terminal output instead. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging. A single click opens an http(s) hyperlink under the pointer (other link schemes are copied to the clipboard), and right-click over a link or a text selection opens an in-app context menu. These mouse interactions are controlled by ui.mouseTracking; disable that setting to hand the mouse fully back to the terminal.',
         showInDialog: true,
       },
       showScrollbar: {
@@ -1176,7 +1250,17 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: true,
         description:
-          'Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, it cannot show native right-click context menus or open OSC 8 hyperlink clicks. Disable to restore native right-click and clickable URL links; this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript — use Shift+↑/↓, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).',
+          'Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, Qwen Code supplies its own equivalents for what the terminal can no longer do natively: a single click opens an http(s) hyperlink under the pointer (other link schemes are copied to the clipboard), and right-click over a link or a text selection opens an in-app context menu with Open Link / Copy Link Address / Copy Selection. Disable to hand the mouse fully back to the terminal (native right-click menu and link clicks); this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript — use Shift+↑/↓, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).',
+        showInDialog: true,
+      },
+      showToolCallArgs: {
+        type: 'boolean',
+        label: 'Show Tool Call Arguments',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Render tool calls on their own line with their raw arguments inline, instead of the type-based compact summary that folds read/search/list batches into "Read 3 files". Useful when debugging MCP integrations or tool schemas. Applies wherever the arguments are available: live, resumed, agent-view and speculated turns. The row is capped at 2 wrapped lines (and never more than 1000 characters) and truncated with a `+N chars` marker; press Ctrl+O for the complete payload. Groups of running parallel subagents keep their compact roster, and daemon-attached sessions carry no arguments, so both keep the compact view — press Ctrl+O there. Does not change result-output truncation.',
         showInDialog: true,
       },
       shellOutputMaxLines: {
@@ -1407,6 +1491,12 @@ const SETTINGS_SCHEMA = {
           type: 'boolean',
           default: false,
         },
+        allowDynamicHeaderValues: {
+          description:
+            'SECURITY-RELEVANT. Allow `modelProviders[].generationConfig.customHeaders` values to contain runtime placeholders — currently `${session_id}` — expanded per request instead of frozen at client construction. Default false: a value containing a placeholder is dropped rather than sent. Enable when a gateway requires a stable per-conversation identifier (e.g. OpenCode Go requires `x-opencode-session`). Which hosts receive the value and what the header is called are decided by the provider entry you attach the header to; this switch only decides whether `${session_id}` may be expanded from live session state and does not identify which settings source supplied the header.',
+          type: 'boolean',
+          default: false,
+        },
       },
       additionalProperties: false,
     },
@@ -1548,6 +1638,11 @@ const SETTINGS_SCHEMA = {
           { value: 'xhigh', label: 'Extra High' },
           { value: 'max', label: 'Max' },
         ],
+        // WebShell persists none; the TUI keeps its existing tier-only control.
+        jsonSchemaOverride: {
+          type: 'string',
+          enum: ['none', ...REASONING_EFFORT_TIERS],
+        },
       },
       maxSessionTurns: {
         type: 'integer',
@@ -1567,6 +1662,28 @@ const SETTINGS_SCHEMA = {
         default: -1,
         description:
           'Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited; otherwise must be in [1, ~2,147,483] (sub-second values and values above ~24 days are rejected as typos). Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1.5h).',
+        showInDialog: false,
+      },
+      goalTokenBudget: {
+        type: 'integer',
+        label: 'Goal Token Budget',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as number | undefined,
+        description:
+          'Autonomous spend window armed on each new Goal, in tokens as counted by the Goal meter (totalTokenCount summed over every model call the Goal makes in its own turns; side queries and checkpoint verification are not metered). When a Goal spends its window it gets one wind-down turn to hand off, then stops until you resume it, which arms another window. Unset uses the built-in default of 30,000,000; -1 means unlimited. Zero, values above 300,000,000 (10x the default, a typo guard), other negative, fractional, or non-number values are rejected at startup.',
+        showInDialog: false,
+      },
+      goalCheckpointTimeoutSeconds: {
+        type: 'integer',
+        label: 'Goal Checkpoint Timeout (seconds)',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as number | undefined,
+        minimum: 1,
+        maximum: GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+        description:
+          'Ceiling on one Goal evidence-checkpoint check, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call. A check whose claims overrun the aggregate byte budget, or include a claim over the per-claim character limit, makes one corrective retry, and both calls share this ceiling. A check that does not finish in time is abandoned as inconclusive; it counts toward the checkpoint stall limit only when the evidence window has overflowed, while a non-overflowing check preserves the streak and retries on a later turn. Unset uses the built-in default of 180. Must be an integer between 1 and 900; other values are rejected at startup. The calls are streamed, so the per-request transport timeout (model.generationConfig.timeout, default 120 s) bounds only connect and first response, and values above 900 are rejected because past the default stream lifetime guard that guard, not this setting, ends the check. The 900 ceiling is fixed: raising QWEN_STREAM_MAX_LIFETIME_MS does not lift it.',
         showInDialog: false,
       },
       maxToolCalls: {
@@ -1704,6 +1821,19 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: undefined as number | undefined,
             description: 'Request timeout in milliseconds.',
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
+          streamIdleTimeoutMs: {
+            type: 'integer',
+            label: 'Stream Idle Timeout',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description:
+              'Maximum inactivity between streamed chunks for OpenAI-compatible and Anthropic models, in milliseconds. Set to 0 to disable the idle guard. For provider-backed models, configure this field in the selected modelProviders entry.',
+            minimum: 0,
+            maximum: 2_147_483_647,
             parentKey: 'generationConfig',
             showInDialog: false,
           },
@@ -2484,6 +2614,31 @@ const SETTINGS_SCHEMA = {
               'environments.',
             showInDialog: false,
           },
+          mcp: {
+            type: 'object',
+            label: 'Auto Mode MCP Tools',
+            category: 'Tools',
+            requiresRestart: true,
+            default: {},
+            description: 'AUTO classifier controls for third-party MCP tools.',
+            showInDialog: false,
+            properties: {
+              forwardArguments: {
+                type: 'boolean',
+                label: 'Forward MCP Arguments To Classifier',
+                category: 'Tools',
+                requiresRestart: true,
+                default: true,
+                description:
+                  'Forward MCP tool arguments (bounded and truncated) to the ' +
+                  'AUTO classifier so it can judge what the agent is about ' +
+                  'to send to the server. When false the classifier sees ' +
+                  'only the tool name, which usually results in a ' +
+                  'conservative block.',
+                showInDialog: false,
+              },
+            },
+          },
         },
       },
     },
@@ -2528,7 +2683,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: {},
         description:
-          'Settings for the built-in WebSearch tool (DashScope Responses API backend). Opt-in: requires enabled=true and a search model. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.',
+          'Settings for the built-in WebSearch tool (DashScope Responses API backend). On by default at startup for Alibaba ModelStudio Standard API Key / Token Plan and OpenAI-compatible entries on recognized DashScope Responses hosts with a direct key; set enabled=false to turn it off. Which providers can activate the tool is decided at startup; once active, the search backend follows the currently selected model on the next search. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.',
         showInDialog: false,
         properties: {
           enabled: {
@@ -2536,9 +2691,9 @@ const SETTINGS_SCHEMA = {
             label: 'Enable WebSearch',
             category: 'Tools',
             requiresRestart: true,
-            default: false,
+            default: undefined as boolean | undefined,
             description:
-              'Enable the built-in web_search tool. Also requires tools.webSearch.model. Env override: ENABLE_WEB_SEARCH.',
+              'Set false to disable the built-in web_search tool. Automatic startup activation requires leaving enabled, model, and the env-only backend unset. Setting true permits automatic derivation only when the env-only backend is also unset; otherwise a model is required. Env override: ENABLE_WEB_SEARCH.',
             showInDialog: true,
           },
           model: {
@@ -2548,7 +2703,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: undefined as string | undefined,
             description:
-              'Model selector for the search side request, resolved against modelProviders like fastModel ("modelId" or "authType:modelId"). Must resolve to a DashScope-compatible entry with an envKey. Recommended: qwen3.6-plus. Env override: WEB_SEARCH_MODEL.',
+              'Model selector for the explicit search path ("modelId" or "authType:modelId"). With WEB_SEARCH_BASE_URL it is the plain model id for that endpoint; otherwise it must match a DashScope-compatible modelProviders entry with an envKey. The automatic path uses qwen3.6-plus. Env override: WEB_SEARCH_MODEL.',
             showInDialog: true,
           },
           webExtractor: {
@@ -2589,7 +2744,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: 10,
             description:
-              'Context-window percentage used as the session-start budget for preloading deferred tools (bundled built-ins and MCP alike). When every deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Set 0 to always load deferred tools on demand.',
+              'Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). When every eligible deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Tools demoted by tools.eager are excluded from this preload and stay on demand. Set 0 to always load deferred tools on demand.',
             showInDialog: true,
             // A percentage of the context window: values above 100 would set a
             // budget larger than the window and unconditionally preload every
@@ -2622,6 +2777,28 @@ const SETTINGS_SCHEMA = {
             default: false,
             description:
               'Enable the built-in list_directory tool. Disabled by default; it is also re-enabled automatically when explicitly listed in the coreTools allowlist (--core-tools / tools.core).',
+            showInDialog: true,
+          },
+        },
+      },
+      todoWrite: {
+        type: 'object',
+        label: 'Todo Write',
+        category: 'Tools',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Settings for the built-in todo_write tool. Opt-in: the tool is disabled by default.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Enable Todo Write',
+            category: 'Tools',
+            requiresRestart: true,
+            default: false,
+            description:
+              'Enable the built-in todo_write tool and its system-prompt guidance.',
             showInDialog: true,
           },
         },
@@ -2691,14 +2868,14 @@ const SETTINGS_SCHEMA = {
         },
       },
       // Legacy tool permission fields – kept for backward compatibility.
-      // Use permissions.{allow,ask,deny} instead.
       core: {
         type: 'array',
         label: 'Core Tools (deprecated)',
         category: 'Tools',
         requiresRestart: true,
         default: undefined as string[] | undefined,
-        description: 'Deprecated. Use permissions.allow instead.',
+        description:
+          'Deprecated. permissions.allow cannot reproduce this registration restriction because it only auto-approves calls. Use tools.eager to defer unlisted eager-by-default tools or permissions.deny to remove tools. An empty list is treated as unset and disables nothing.',
         showInDialog: false,
       },
       allowed: {
@@ -2741,6 +2918,16 @@ const SETTINGS_SCHEMA = {
           'Deferred tool names made visible at startup without requiring tool_search. Listed tools appear alongside core tools in the initial session.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
+      },
+      eager: {
+        type: 'array',
+        label: 'Eager Tool Schemas',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, callable, and discoverable via tool_search. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with tool_search: when ToolSearch is not registered (tools.toolSearch.enabled false, a tool_search deny rule, or the automatic opt-out for DeepSeek models) the schemas are still withheld but nothing can load them back, so the demoted tools are out of reach for that session and a warning is logged. Two carve-outs: demoted tools referenced in resumed session history get their schemas re-sent without a warning, and demoted tools listed in tools.visible are declared up front. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
+        showInDialog: false,
       },
       approvalMode: {
         type: 'enum',
@@ -2851,50 +3038,6 @@ const SETTINGS_SCHEMA = {
           'Per-message character budget for the combined text output of one batch of tool calls. Oversized batches are reduced deterministically and recoverable output is persisted when possible. Set to -1 to disable.',
         showInDialog: false,
       },
-      computerUse: {
-        type: 'object',
-        label: 'Computer Use',
-        category: 'Tools',
-        requiresRestart: true,
-        default: {},
-        description:
-          "Cross-platform desktop automation via the cua-driver native driver (trycua/cua). On first invocation a pinned, signed + notarized binary (~20MB) is downloaded into ~/.qwen/computer-use/ and the user is walked through macOS Accessibility / Screen Recording permissions if needed. Exposes cua-driver's full tool surface (click, type_text, scroll, drag, press_key, get_window_state, page, launch_app, and more).",
-        showInDialog: false,
-        properties: {
-          enabled: {
-            type: 'boolean',
-            label: 'Enable Computer Use',
-            category: 'Tools',
-            requiresRestart: true,
-            default: true,
-            description:
-              'When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins. Set to false to prevent the driver from being downloaded or spawned.',
-            showInDialog: true,
-          },
-          idleTimeoutMs: {
-            type: 'number',
-            label: 'Idle Timeout',
-            category: 'Tools',
-            requiresRestart: true,
-            default: 300000,
-            minimum: 0,
-            maximum: 2147483647,
-            description:
-              'Milliseconds to keep the cua-driver process alive after the last computer_use__* call. The default is 300000 (5 minutes). Set to 0 to keep it running until qwen-code exits.',
-            showInDialog: false,
-          },
-          maxImageDimension: {
-            type: 'number',
-            label: 'Max Screenshot Dimension',
-            category: 'Tools',
-            requiresRestart: true,
-            default: -1,
-            description:
-              "Longest-edge pixel cap applied to cua-driver screenshots (via set_config's max_image_dimension). -1 (default) keeps cua-driver's built-in default (1568); 0 disables resizing (full resolution); a positive value caps the longest edge. Lower caps cut vision-token cost at the expense of fine detail. Overridable via the QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION env var.",
-            showInDialog: false,
-          },
-        },
-      },
     },
   },
 
@@ -2928,7 +3071,8 @@ const SETTINGS_SCHEMA = {
           '`consensus` = N-of-M voters must agree. Default N=floor(M/2)+1, ' +
           'which means UNANIMITY for M=2 (quorum=2, both must agree) and ' +
           'supermajority for larger even M (M=4 → quorum=3; M=6 → quorum=4). ' +
-          'For M=2 specifically, split votes resolve only via permissionTimeoutMs. ' +
+          'For M=2 specifically, split votes resolve only via the configured ' +
+          'permission timeout, voter cancellation, or session cancellation. ' +
           '`local-only` = only loopback clients can RESOLVE; remote clients ' +
           'can still ABORT a pending permission via the cancel sentinel ' +
           '({outcome:"cancelled"}) — cancel stays cross-policy for ' +
@@ -3095,7 +3239,7 @@ const SETTINGS_SCHEMA = {
             label: 'Use External Auth',
             category: 'Security',
             requiresRestart: true,
-            default: undefined as boolean | undefined,
+            default: false,
             description: 'Whether to use an external authentication flow.',
             showInDialog: false,
           },
@@ -3126,7 +3270,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: [] as string[],
         description:
-          'Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection).',
+          'Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection). A value in Workspace settings is honored only when no User, System, or SystemDefaults scope sets one, so a cloned repository can narrow but never replace your whitelist.',
         showInDialog: false,
         items: {
           type: 'string',
@@ -3225,6 +3369,31 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  goals: {
+    type: 'object',
+    label: 'Goals',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description: 'Settings for session Goals (/goal).',
+    showInDialog: false,
+    properties: {
+      modelProposed: {
+        type: 'enum',
+        label: 'Model-Proposed Goals',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: 'alwaysAsk',
+        description:
+          'Controls the propose_goal tool, which lets the model propose a session Goal for you to approve. "alwaysAsk" (default) shows every proposal in an approval dialog and nothing is set until you accept it; "disabled" removes the tool. A typed /goal is unaffected. Consent-affecting, so this setting is only honored from User, System, or SystemDefaults scope; workspace values are ignored.',
+        showInDialog: true,
+        options: [
+          { value: 'alwaysAsk', label: 'Always ask' },
+          { value: 'disabled', label: 'Disabled' },
+        ],
+      },
+    },
+  },
   agents: {
     type: 'object',
     label: 'Agents',
@@ -3255,6 +3424,47 @@ const SETTINGS_SCHEMA = {
             showInDialog: false,
           },
         },
+      },
+      crossSessionMessaging: {
+        type: 'boolean',
+        label: 'Cross-Session Messaging',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Off by default; turning it on opens this session to peer messages, makes it discoverable to others, and lets its model address them from send_message.',
+        showInDialog: false,
+      },
+      crossSessionInbound: {
+        type: 'enum',
+        label: 'Inbound Cross-Session Messages',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'What happens to inbound cross-session messages. "accept" delivers them; "hold" parks them for your review without letting the model act; "refuse" opts this session out. Unset means user-minted controllers and this session\'s own child processes auto-deliver, while other sessions use review-class parity: both must review every action, or both must declare a mode that can apply actions without per-action review. Other messages are held for you to review.',
+        showInDialog: false,
+        options: [
+          { value: 'accept', label: 'Accept' },
+          { value: 'hold', label: 'Hold for review' },
+          { value: 'refuse', label: 'Refuse' },
+        ],
+      },
+      crossSessionHeldExpiry: {
+        type: 'enum',
+        label: 'Held Message Expiry',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: '5m' as string,
+        description:
+          'How long a message held for your review waits before it expires and the sending session is told nobody answered. "never" keeps held messages until the session ends. Only affects messages that are held; accepted and refused ones are settled on arrival.',
+        showInDialog: false,
+        options: [
+          { value: '1m', label: '1 minute' },
+          { value: '5m', label: '5 minutes' },
+          { value: '10m', label: '10 minutes' },
+          { value: 'never', label: 'Never' },
+        ],
       },
       modelGrades: {
         type: 'object',
@@ -3730,7 +3940,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default and does not change ordinary Todo or execution behavior.',
+          'Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default; Workflow markers, approval gates, and visualization stay off until enabled. Todo updates preserve omitted active dependencies in every mode.',
         showInDialog: true,
       },
       cron: {
@@ -3750,7 +3960,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.',
+          'Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Requires tools.todoWrite.enabled. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.',
         showInDialog: false,
       },
       sessionWriterLease: {
@@ -4009,9 +4219,13 @@ type InferSettings<T extends SettingsSchema> = {
   -readonly [K in keyof T]?: T[K] extends { properties: SettingsSchema }
     ? InferSettings<T[K]['properties']>
     : T[K]['type'] extends 'enum'
-      ? T[K]['options'] extends readonly SettingEnumOption[]
-        ? T[K]['options'][number]['value']
-        : T[K]['default']
+      ? T[K] extends {
+          jsonSchemaOverride: { enum: ReadonlyArray<string | number> };
+        }
+        ? T[K]['jsonSchemaOverride']['enum'][number]
+        : T[K]['options'] extends readonly SettingEnumOption[]
+          ? T[K]['options'][number]['value']
+          : T[K]['default']
       : T[K]['default'] extends boolean
         ? boolean
         : T[K]['default'];

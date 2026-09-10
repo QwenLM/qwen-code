@@ -38,6 +38,7 @@ import {
   formatHistoryGapNotice,
   indexGapsByChild,
 } from './history-gap-notice.js';
+import { coalesceFindingsHistoryItems } from './findings-coalescing.js';
 import { shouldDisplayGoalStateCause } from './goal-runtime.js';
 import {
   collectInlineImages,
@@ -201,6 +202,7 @@ function convertToHistoryItems(
     callId: string;
     name: string;
     description: string;
+    args?: Record<string, unknown>;
     resultDisplay: ToolResultDisplay | undefined;
     visionBridgeNotice?: string;
     detailedDisplay?: string;
@@ -529,6 +531,9 @@ function convertToHistoryItems(
             callId: fc.id,
             name: tool?.displayName || fc.name,
             description: tool ? formatToolDescription(tool, fc.args) : '',
+            // Rendered inline only when `ui.showToolCallArgs` is on, so a
+            // resumed session shows the same args row as a live one.
+            args: fc.args,
             resultDisplay: undefined,
             status: ToolCallStatus.Success, // Will be updated by tool_result
             confirmationDetails: undefined,
@@ -631,7 +636,10 @@ function convertToHistoryItems(
     });
   }
 
-  return items;
+  // A report_findings re-report REPLACES the earlier list — restored
+  // transcripts collapse the superseded displays so the initial report and
+  // its outcome re-report do not render two checklists at once.
+  return coalesceFindingsHistoryItems(items);
 }
 
 /**

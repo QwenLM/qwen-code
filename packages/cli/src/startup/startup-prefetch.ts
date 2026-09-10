@@ -166,7 +166,7 @@ export function startPostRenderPrefetches(
         { t },
       ] = await Promise.all([
         import('../ui/utils/updateCheck.js'),
-        import('../utils/handleAutoUpdate.js'),
+        import('../ui/handleAutoUpdate.js'),
         import('../utils/installationInfo.js'),
         import('../utils/updateEventEmitter.js'),
         import('../i18n/index.js'),
@@ -273,7 +273,7 @@ export function startPostRenderPrefetches(
   if (config.isInteractive()) {
     runDeferredTask('background_housekeeping', async () => {
       const { startBackgroundHousekeeping } = await import(
-        '../utils/housekeeping/scheduler.js'
+        '../services/housekeeping/scheduler.js'
       );
       startBackgroundHousekeeping(config, settings);
     });

@@ -10,18 +10,26 @@ import {
   useConnection,
   useTranscriptBlocks,
   useWorkspace,
-} from '@qwen-code/webui/daemon-react-sdk';
-import { transcriptBlocksToDaemonMessages } from '../adapters/transcriptToMessages';
+} from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  transcriptBlocksToLocalizedMessages,
+  type Translator,
+} from '../adapters/localizedMessages';
 import type { Message } from '../adapters/types';
 import {
   isActiveToolStatus,
   isBackgroundSubAgentToolCall,
+  isTerminalBackgroundAgentStatus,
+  projectTerminalBackgroundAgentTool,
 } from '../adapters/toolClassification';
 
-type Translator = (
-  key: string,
-  vars?: Record<string, string | number>,
-) => string;
+// Re-exported for existing callers. The projection itself lives in a leaf module
+// so the read-only transcript entry does not pull this file's daemon imports —
+// see adapters/localizedMessages.ts.
+export {
+  transcriptBlocksToLocalizedMessages,
+  type Translator,
+} from '../adapters/localizedMessages';
 
 const BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS = 3_000;
 const BACKGROUND_AGENT_RECONCILIATION_RETRY_MAX_MS = 60_000;
@@ -36,7 +44,7 @@ const BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS = 8;
 // registration. Require repeated misses before treating the agent as gone.
 const MISSING_BACKGROUND_AGENT_GRACE_MISSES = 2;
 // Insight JSON can split one growing text block into multiple projected
-// messages, so prefix identity reuse is unsafe once its marker appears.
+// messages, so the tail needs a full projection once its marker appears.
 const INSIGHT_CONTENT_MARKER = '"insight_';
 
 interface MessageProjection {
@@ -62,20 +70,6 @@ interface ReconciliationRound {
   errors: ReadonlyArray<{ callId: string; error: unknown }>;
   notFounds: ReadonlyArray<string>;
   succeeded: ReadonlyArray<string>;
-}
-
-export function transcriptBlocksToLocalizedMessages(
-  blocks: readonly DaemonTranscriptBlock[],
-  t: Translator,
-): Message[] {
-  return transcriptBlocksToDaemonMessages(blocks, {
-    labels: {
-      promptCancelled: t('request.cancelled'),
-      branchSuccess: (name) => t('branch.success', { name }),
-      modelStreamInterrupted: t('error.modelStreamInterrupted'),
-      loopDetected: t('error.loopDetected'),
-    },
-  });
 }
 
 function reuseUnchangedProjectedPrefix(
@@ -201,8 +195,32 @@ export function projectStreamingTailMessages(
     typeof before.text !== 'string' ||
     typeof after.text !== 'string' ||
     after.text.length < before.text.length ||
-    (!summaryProvesTailAppend && !after.text.startsWith(before.text)) ||
-    after.text.includes(INSIGHT_CONTENT_MARKER) ||
+    (!summaryProvesTailAppend && !after.text.startsWith(before.text))
+  ) {
+    return undefined;
+  }
+
+  if (after.text.includes(INSIGHT_CONTENT_MARKER)) {
+    const tailPrefix = `${before.id}-`;
+    const firstTailMessageIndex = previous.messages.findIndex(
+      (message) =>
+        message.id === before.id || message.id.startsWith(tailPrefix),
+    );
+    if (firstTailMessageIndex < 0) return undefined;
+    const messages = transcriptBlocksToLocalizedMessages(blocks, t);
+    for (let i = 0; i < firstTailMessageIndex; i += 1) {
+      if (
+        messages[i]?.id !== previous.messages[i]?.id ||
+        messages[i]?.role !== previous.messages[i]?.role
+      ) {
+        break;
+      }
+      messages[i] = previous.messages[i];
+    }
+    return messages;
+  }
+
+  if (
     (previousTail.role !== 'assistant' && previousTail.role !== 'thinking') ||
     previousTail.isStreaming !== true ||
     (after.kind === 'assistant') !== (previousTail.role === 'assistant')
@@ -221,15 +239,6 @@ export function projectStreamingTailMessages(
       : {}),
   };
   return messages;
-}
-
-function isTerminalBackgroundAgentStatus(status: string): boolean {
-  return (
-    status === 'completed' ||
-    status === 'failed' ||
-    status === 'cancelled' ||
-    status === 'canceled'
-  );
 }
 
 function getRecord(value: unknown): Record<string, unknown> | undefined {
@@ -337,30 +346,18 @@ export function reconcileBackgroundAgentResolutions(
       ) {
         return tool;
       }
+      const endTime =
+        tool.startTime !== undefined
+          ? tool.startTime + (resolution.durationMs ?? 0)
+          : undefined;
+      const reconciledTool = projectTerminalBackgroundAgentTool(
+        tool,
+        resolution.status,
+        endTime,
+      );
+      if (reconciledTool === tool) return tool;
       toolsChanged = true;
-      const cancelled =
-        resolution.status === 'cancelled' || resolution.status === 'canceled';
-      const status: typeof tool.status =
-        resolution.status === 'failed' ? 'failed' : 'completed';
-      return {
-        ...tool,
-        status,
-        ...(tool.startTime !== undefined
-          ? { endTime: tool.startTime + (resolution.durationMs ?? 0) }
-          : {}),
-        ...(cancelled
-          ? {
-              rawOutput: {
-                ...(typeof tool.rawOutput === 'object' &&
-                tool.rawOutput !== null &&
-                !Array.isArray(tool.rawOutput)
-                  ? tool.rawOutput
-                  : {}),
-                status: 'cancelled',
-              },
-            }
-          : {}),
-      };
+      return reconciledTool;
     });
     if (!toolsChanged) return message;
     changed = true;

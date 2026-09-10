@@ -32,16 +32,22 @@ import { theme } from '../../semantic-colors.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import {
   buildBackgroundEntryLabel,
+  MAX_RECENT_ACTIVITIES,
+} from '@qwen-code/qwen-code-core/agents/background-tasks.js';
+import type {
+  AgentTask,
+  BackgroundApproval,
+} from '@qwen-code/qwen-code-core/agents/background-tasks.js';
+import {
   isActiveWorkflowStatus,
   isTerminalWorkflowStatus,
-  MAX_RECENT_ACTIVITIES,
-  type AgentTask,
-  type BackgroundApproval,
-  type MonitorTask,
-  type ToolCallConfirmationDetails,
-  type WorkflowApproval,
-  type WorkflowTask,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
+import type {
+  WorkflowApproval,
+  WorkflowTask,
+} from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
+import type { MonitorTask } from '@qwen-code/qwen-code-core/services/monitorRegistry.js';
+import type { ToolCallConfirmationDetails } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { ToolConfirmationMessage } from '../messages/ToolConfirmationMessage.js';
 import { WorkflowSaveOverlay } from './workflow-save-overlay.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
@@ -1542,6 +1548,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
                   selectedApproval.approval.callId,
                   outcome,
                   payload,
+                  selectedApproval.approval.subagentId,
                 );
               return;
             }
@@ -1947,6 +1954,17 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
                 ? `[workflow] ${t('needs approval')}`
                 : t('Background agent needs approval')}
             </Text>
+            {/* subagentId is set only on approvals bridged from a NESTED
+                agent onto this entry (see AgentTool's nested approval
+                bridge). Name the actual waiter so the user knows which of
+                the descendants is blocked. */}
+            {selectedApproval?.kind === 'agent' &&
+              selectedApproval.approval.subagentId !== undefined && (
+                <Text color={theme.text.secondary}>
+                  {t('from nested agent')}:{' '}
+                  {selectedApproval.approval.subagentId}
+                </Text>
+              )}
             <ToolConfirmationMessage
               confirmationDetails={approvalConfirmationDetails}
               config={config}

@@ -14,7 +14,12 @@ export default defineConfig({
     // or WASM-load-bound tests (e.g. the web-tree-sitter lazy runtime, tar
     // extraction) blow 5s purely under contention, not from any logic fault.
     // Assertions still fail instantly; only the timeout ceiling grows.
-    testTimeout: 15000,
+    testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : 15_000,
+    hookTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : undefined,
     // ECS hosts run several jobs at once; leave capacity for neighboring jobs.
     maxWorkers: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
       ? '25%'
@@ -35,8 +40,16 @@ export default defineConfig({
     outputFile: {
       junit: 'junit.xml',
     },
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     coverage: {
-      enabled: true,
+      // CI collects coverage only where something keeps it: the post-merge
+      // run on main, which ci.yml marks with QWEN_CI_COVERAGE=1 and whose
+      // reports it uploads. Pull-request runs skip it — nothing read those
+      // reports, and v8 instrumentation plus the per-file merge on the main
+      // thread cost about a fifth of the suite's wall time. Local runs keep
+      // coverage.
+      enabled: !process.env.CI || process.env['QWEN_CI_COVERAGE'] === '1',
       provider: 'v8',
       reportsDirectory: './coverage',
       include: ['src/**/*'],

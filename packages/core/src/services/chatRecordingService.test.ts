@@ -23,6 +23,7 @@ import {
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import { computeInitialTurnFromHistory } from './session-turn-state.js';
 import type { Part } from '@google/genai';
 import type { FileDiff } from '../tools/tools.js';
 import {
@@ -40,7 +41,7 @@ import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
-import type { ToolResultBoundaryObservation } from '../utils/tool-result-boundary-diagnostics.js';
+import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
 
 function branchTestRecord(
   uuid: string,
@@ -84,10 +85,10 @@ const boundaryObserveMock = vi.hoisted(() =>
   vi.fn((_observation: ToolResultBoundaryObservation) => false),
 );
 vi.mock(
-  '../utils/tool-result-boundary-diagnostics.js',
+  '../tools/tool-result-boundary-diagnostics.js',
   async (importOriginal) => ({
     ...(await importOriginal<
-      typeof import('../utils/tool-result-boundary-diagnostics.js')
+      typeof import('../tools/tool-result-boundary-diagnostics.js')
     >()),
     observeToolResultBoundary: boundaryObserveMock,
   }),
@@ -205,7 +206,47 @@ describe('ChatRecordingService', () => {
       expect(record.version).toBe('1.0.0');
       expect(record.gitBranch).toBe('main');
       expect(record.provenance).toBe('real_user');
+      expect(record.daemonPromptId).toBeUndefined();
     });
+
+    it('persists the daemon prompt identity before any turn result', async () => {
+      chatRecordingService.recordUserMessage(
+        [{ text: 'same prompt' }],
+        undefined,
+        undefined,
+        'daemon-prompt-1',
+      );
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(jsonl.writeLine).mock.calls[0][1]).toMatchObject({
+        type: 'user',
+        daemonPromptId: 'daemon-prompt-1',
+        message: { role: 'user', parts: [{ text: 'same prompt' }] },
+      });
+    });
+
+    it.each(['42', '9007199254740992'])(
+      'keeps daemon IDs ending in ########%s out of CLI turn recovery',
+      async (turn) => {
+        const daemonPromptId = `test-session-id########${turn}`;
+        chatRecordingService.recordUserMessage(
+          [{ text: 'same prompt' }],
+          undefined,
+          undefined,
+          daemonPromptId,
+        );
+        await chatRecordingService.flush();
+
+        const record = vi.mocked(jsonl.writeLine).mock
+          .calls[0][1] as ChatRecord;
+        expect(record.daemonPromptId).toBe(daemonPromptId);
+        expect(record).not.toHaveProperty('promptId');
+        expect(computeInitialTurnFromHistory([record], 'test-session-id')).toBe(
+          1,
+        );
+      },
+    );
 
     it('preserves model-bound parts and records clean display text', async () => {
       const modelParts: Part[] = [
@@ -2873,6 +2914,47 @@ describe('ChatRecordingService', () => {
   });
 
   describe('legacy recorder', () => {
+    it('reanchors session source after more than the tail window is appended', async () => {
+      await expect(
+        chatRecordingService.recordSessionSource('channel', 'channel-main'),
+      ).resolves.toBe(true);
+
+      chatRecordingService.recordUserMessage([{ text: 'x'.repeat(65 * 1024) }]);
+      await chatRecordingService.flush();
+
+      const sourceRecords = vi
+        .mocked(mockLease.appendJsonLine)
+        .mock.calls.map((call) => call[0] as ChatRecord)
+        .filter((record) => record.subtype === 'session_source');
+      expect(sourceRecords).toHaveLength(2);
+      expect(sourceRecords.at(-1)?.systemPayload).toEqual({
+        sourceType: 'channel',
+        sourceId: 'channel-main',
+      });
+    });
+
+    it('reanchors a restored session source on the next append', async () => {
+      const service = new ChatRecordingService(mockConfig);
+      service.activate(mockLease, undefined, undefined, {
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null],
+        sourceType: 'channel',
+        sourceId: 'channel-main',
+      });
+
+      service.recordUserMessage([{ text: 'next' }]);
+      await service.flush();
+
+      const sourceRecord = vi
+        .mocked(mockLease.appendJsonLine)
+        .mock.calls.map((call) => call[0] as ChatRecord)
+        .find((record) => record.subtype === 'session_source');
+      expect(sourceRecord?.systemPayload).toEqual({
+        sourceType: 'channel',
+        sourceId: 'channel-main',
+      });
+    });
+
     it('restores reduced recorder state without the full conversation', async () => {
       const service = new ChatRecordingService(mockConfig, undefined, false, {
         lastCompletedUuid: 'projected-leaf',
@@ -3363,6 +3445,38 @@ describe('ChatRecordingService', () => {
       await expect(chatRecordingService.close()).rejects.toBe(cleanupFailure);
       expect(chatRecordingService.hasWriteOwnership()).toBe(false);
     });
+
+    it('retries release durability without reporting stale write ownership', async () => {
+      const cleanupFailure = new SessionWriterUnavailableError();
+      let released = false;
+      let durabilityPending = false;
+      Object.defineProperties(mockLease, {
+        isReleased: {
+          configurable: true,
+          get: () => released,
+        },
+        isReleaseDurabilityPending: {
+          configurable: true,
+          get: () => durabilityPending,
+        },
+      });
+      vi.mocked(mockLease.release)
+        .mockImplementationOnce(async () => {
+          released = true;
+          durabilityPending = true;
+          throw cleanupFailure;
+        })
+        .mockImplementationOnce(async () => {
+          durabilityPending = false;
+        });
+
+      await expect(chatRecordingService.close()).rejects.toBe(cleanupFailure);
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
+
+      await expect(chatRecordingService.close()).resolves.toBeUndefined();
+      expect(mockLease.release).toHaveBeenCalledTimes(2);
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
+    });
   });
 
   // Note: Session management tests (listSessions, loadSession, deleteSession, etc.)
@@ -3472,5 +3586,74 @@ describe('Goal turn token ledger', () => {
     accumulate('turn-1', { totalTokenCount: -5 });
 
     expect(service.takeGoalTurnTokens('turn-1')).toBe(0);
+  });
+});
+
+describe('Goal turn tool result ledger', () => {
+  const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+
+  const toolResultMessage = () => [
+    { functionResponse: { id: 'call-1', name: 'run_shell', response: {} } },
+  ];
+
+  function recorderForToolResults() {
+    const service = Object.create(
+      ChatRecordingService.prototype,
+    ) as ChatRecordingService;
+    const appended: unknown[] = [];
+    Object.assign(service, {
+      createBaseRecord: () => ({ type: 'tool_result' }),
+      appendRecord: (record: unknown) => appended.push(record),
+      getSessionId: () => 'session-1',
+    });
+    return { service, appended };
+  }
+
+  it('counts the evidence-bearing tool results a Goal turn recorded', () => {
+    // The wiring that matters: recordToolResult must feed the ledger, or the
+    // no-progress bound reads every turn as idle.
+    const { service, appended } = recorderForToolResults();
+
+    service.recordToolResult(toolResultMessage(), undefined, {
+      goalContext: permit,
+    });
+    service.recordToolResult(toolResultMessage(), undefined, {
+      goalContext: permit,
+    });
+    // A result outside a Goal turn belongs to no turn.
+    service.recordToolResult(toolResultMessage());
+
+    expect(appended).toHaveLength(3);
+    expect(service.takeGoalTurnToolResults('turn-1')).toBe(2);
+    // Consumed: a turn is counted once.
+    expect(service.takeGoalTurnToolResults('turn-1')).toBe(0);
+  });
+
+  it('does not count the Goal runtime talking to itself', () => {
+    // `get_goal` and `update_goal` results are recorded under the permit but
+    // are not evidence: a turn that only reads its own state is exactly the
+    // idling the count exists to notice.
+    const { service } = recorderForToolResults();
+
+    service.recordToolResult(toolResultMessage(), undefined, {
+      goalContext: permit,
+      provenance: 'goal_runtime',
+    });
+
+    expect(service.takeGoalTurnToolResults('turn-1')).toBe(0);
+  });
+
+  it("does not credit one turn with another turn's results", () => {
+    const { service } = recorderForToolResults();
+
+    service.recordToolResult(toolResultMessage(), undefined, {
+      goalContext: permit,
+    });
+    service.recordToolResult(toolResultMessage(), undefined, {
+      goalContext: { ...permit, turnId: 'turn-2' },
+    });
+
+    expect(service.takeGoalTurnToolResults('turn-1')).toBe(0);
+    expect(service.takeGoalTurnToolResults('turn-2')).toBe(1);
   });
 });

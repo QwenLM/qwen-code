@@ -18,6 +18,7 @@ import {
   resolveContainedCwd,
   resolveContainedCwdOrFail,
   resolveRegisteredWorkspaceRuntimeByPathSelector,
+  resolveTrustedRuntime,
   resolveWorkspaceRuntimeFromParam,
   resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
 } from './workspace-route-runtime.js';
@@ -54,6 +55,14 @@ describe('resolveContainedCwd', () => {
 
   it('returns the resolved path for a valid subdirectory', () => {
     const sub = path.join(workspace, 'sub');
+    fs.mkdirSync(sub);
+    expect(resolveContainedCwd(fakeReq(sub), workspace)).toBe(
+      fs.realpathSync(sub),
+    );
+  });
+
+  it('returns the resolved path for a contained directory starting with dotdot', () => {
+    const sub = path.join(workspace, '..build');
     fs.mkdirSync(sub);
     expect(resolveContainedCwd(fakeReq(sub), workspace)).toBe(
       fs.realpathSync(sub),
@@ -116,6 +125,14 @@ describe('resolveContainedCwdOrFail', () => {
 
   it('returns the resolved path for a valid contained cwd', () => {
     const sub = path.join(workspace, 'sub');
+    fs.mkdirSync(sub);
+    expect(resolveContainedCwdOrFail(fakeReq(sub), workspace)).toBe(
+      fs.realpathSync(sub),
+    );
+  });
+
+  it('returns the resolved path for a contained cwd starting with dotdot', () => {
+    const sub = path.join(workspace, '..build');
     fs.mkdirSync(sub);
     expect(resolveContainedCwdOrFail(fakeReq(sub), workspace)).toBe(
       fs.realpathSync(sub),
@@ -240,6 +257,44 @@ describe('resolveWorkspaceRuntimeFromParam', () => {
     expect(response.json).toHaveBeenCalledWith({
       error: '`:workspace` must decode to a workspace id or absolute path',
       code: 'workspace_mismatch',
+    });
+  });
+});
+
+describe('resolveTrustedRuntime', () => {
+  it('returns an active trusted runtime', () => {
+    const runtime = makeRuntime();
+    const registry = createSingleWorkspaceRegistry(runtime);
+
+    expect(
+      resolveTrustedRuntime(
+        registry,
+        {
+          params: { workspace: runtime.workspaceId },
+        } as unknown as Request,
+        makeResponse(),
+      ),
+    ).toBe(runtime);
+  });
+
+  it('rejects an active untrusted runtime', () => {
+    const runtime = { ...makeRuntime(), trusted: false };
+    const registry = createSingleWorkspaceRegistry(runtime);
+    const response = makeResponse();
+
+    expect(
+      resolveTrustedRuntime(
+        registry,
+        {
+          params: { workspace: runtime.workspaceId },
+        } as unknown as Request,
+        response,
+      ),
+    ).toBeNull();
+    expect(response.status).toHaveBeenCalledWith(403);
+    expect(response.json).toHaveBeenCalledWith({
+      error: 'Workspace is not trusted.',
+      code: 'untrusted_workspace',
     });
   });
 });

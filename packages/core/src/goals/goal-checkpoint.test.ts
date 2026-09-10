@@ -6,10 +6,14 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  isGoalCheckpointStalled,
   materializeGoalEvidenceCheckpoint,
   type GoalCheckpointVerificationResult,
 } from './goal-checkpoint.js';
-import { GOAL_CHECKPOINT_CLAIM_MAX_BYTES } from './goal-protocol.js';
+import {
+  GOAL_CHECKPOINT_CLAIM_LIMIT,
+  GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
+} from './goal-protocol.js';
 
 const evidence = [
   {
@@ -127,5 +131,42 @@ describe('materializeGoalEvidenceCheckpoint', () => {
     expect(
       Buffer.byteLength(JSON.stringify(checkpoint.claims), 'utf8'),
     ).toBeGreaterThan(GOAL_CHECKPOINT_CLAIM_MAX_BYTES);
+  });
+});
+
+describe('isGoalCheckpointStalled', () => {
+  const claims = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({
+      id: `claim-${index}`,
+      proofKind: 'delivered_output' as const,
+      claim: `Claim ${index}`,
+      sourceRefs: ['assistant-1'],
+    }));
+
+  it('needs both a truncated window and a full claim list', () => {
+    expect(
+      isGoalCheckpointStalled(
+        { truncated: true },
+        { claims: claims(GOAL_CHECKPOINT_CLAIM_LIMIT) },
+      ),
+    ).toBe(true);
+  });
+
+  it('is not a busy turn: truncation with claim room left', () => {
+    expect(
+      isGoalCheckpointStalled(
+        { truncated: true },
+        { claims: claims(GOAL_CHECKPOINT_CLAIM_LIMIT - 1) },
+      ),
+    ).toBe(false);
+  });
+
+  it('is not a quiet full Goal: full claims without truncation', () => {
+    expect(
+      isGoalCheckpointStalled(
+        { truncated: false },
+        { claims: claims(GOAL_CHECKPOINT_CLAIM_LIMIT) },
+      ),
+    ).toBe(false);
   });
 });

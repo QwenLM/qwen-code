@@ -155,6 +155,13 @@ section; the benefit is that neither document lies about its flow.
 
 **Decisions** (rationale in the prose below):
 
+> **Implementation note (2026-08-23):** #9146 moved the existing review
+> findings schema to `packages/cli/src/commands/review/findings.ts` and made
+> `packages/cli/src/utils/` a mechanically enforced leaf layer. The proposed
+> shared-home placement below is retained as design history, not as an
+> instruction to restore `utils/findings.ts`. A future `/audit` implementation
+> must revisit the neutral contract ownership explicitly.
+
 - `/audit` is a new skill with its own SKILL.md; `/review`'s SKILL.md and
   certifying path stay untouched — no in-place target-kind branches in
   the files `/review`'s coverage gate recomputes.

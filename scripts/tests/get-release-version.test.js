@@ -6,11 +6,17 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
-  assertVersionUnreleased,
   getVersion,
   PUBLISHED_PACKAGES,
   runCli,
 } from '../get-release-version.js';
+// The guard is imported from its own module: `get-release-version.js` no
+// longer re-exports it, because the release workflow must reach the guard
+// only through the workflow-pinned checkout.
+import {
+  assertVersionUnreleased,
+  runAssertVersionCli,
+} from '../assert-release-version.mjs';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
@@ -51,6 +57,7 @@ describe('getVersion', () => {
     if (command.includes('deprecated')) return '';
 
     // Git Tag Mocks
+    if (command.includes("git tag -l 'v*'")) return 'v0.6.0\nv0.6.1';
     if (command.includes("git tag -l 'v[0-9].[0-9].[0-9]'")) return 'v0.6.1';
     if (command.includes("git tag -l 'v*-preview*'")) return 'v0.7.0-preview.1';
     if (command.includes("git tag -l 'v*-nightly*'"))
@@ -225,6 +232,8 @@ describe('getVersion', () => {
       vi.mocked(execSync).mockImplementation((command) => {
         if (command.includes('npm view') && command.includes('--tag=latest'))
           return '0.8.0';
+        if (command.includes("git tag -l 'v*'"))
+          return 'v0.6.0\nv0.6.1\nv0.8.0';
         return mockExecSync(command);
       });
 
@@ -238,6 +247,8 @@ describe('getVersion', () => {
       vi.mocked(execSync).mockImplementation((command) => {
         if (command.includes('npm view') && command.includes('--tag=latest'))
           return '0.9.0';
+        if (command.includes("git tag -l 'v*'"))
+          return 'v0.6.0\nv0.6.1\nv0.9.0';
         return mockExecSync(command);
       });
 
@@ -251,6 +262,8 @@ describe('getVersion', () => {
       vi.mocked(execSync).mockImplementation((command) => {
         if (command.includes('npm view') && command.includes('--tag=latest'))
           return '0.7.9';
+        if (command.includes("git tag -l 'v*'"))
+          return 'v0.6.0\nv0.6.1\nv0.7.9';
         return mockExecSync(command);
       });
 
@@ -258,6 +271,68 @@ describe('getVersion', () => {
       expect(result.releaseVersion).toBe('0.8.0-preview.0');
       expect(result.npmTag).toBe('preview');
       expect(result.previousReleaseTag).toBe('v0.7.9');
+    });
+
+    it('should fall back to the latest existing git tag when the npm baseline has no tag (half-shipped release)', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          // Published to npm, but its release run failed before the git
+          // tag was created, so the base mock's tag list lacks v0.6.2.
+          return '0.6.2';
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('should skip unparseable tags (e.g. leading zeros) when resolving the previous release tag', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          return '0.6.2';
+        if (command.includes("git tag -l 'v*'"))
+          return 'v01.2.3\nv0.6.0\nv0.6.1';
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('should sort tags by semver order, not lexicographic order', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes("git tag -l 'v*'")) return 'v0.9.0\nv0.10.0';
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      // semver descending: v0.10.0 > v0.9.0 (lexicographic would pick v0.9.0)
+      expect(result.previousReleaseTag).toBe('v0.10.0');
+    });
+
+    it('should keep the npm-derived previous tag when git tag listing fails', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes("git tag -l 'v*'")) {
+          throw new Error('git not available');
+        }
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('should return an empty previous tag when no stable git tags exist', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes("git tag -l 'v*'")) {
+          // Only prerelease tags exist; the stable filter drops them all.
+          return 'v0.7.0-preview.1\nv0.8.0-nightly.20250916.abcdef';
+        }
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.previousReleaseTag).toBe('');
     });
 
     it('should fall back to package.json when no nightly dist-tag exists (preview)', () => {
@@ -663,15 +738,19 @@ describe('assertVersionUnreleased', () => {
     `Version 1.2.3 has already shipped; refusing to force-push the release branch over it. Found on: ${foundOn}. If a previous attempt published only part of the release, complete the remaining artifacts manually — re-running this job will keep failing here while the version stays published.`;
 
   it('pins the full published-package set', () => {
-    // The push-time guard derives from this list; the workflow's publish
-    // steps hardcode the same set separately, so adding or removing a
-    // package must update both this pin and the publish steps in
-    // release.yml so every consumer is reviewed together.
+    // The push-time guard derives from this list; the publish allowlist in
+    // `.github/scripts/run-release-step.sh` enumerates the same channels
+    // separately, so adding or removing a package must update both. The two
+    // are pinned against each other by "keeps the publish allowlist and the
+    // guard package set in step" in release-workflow.test.js — release.yml
+    // itself no longer contains any publish step.
     expect(PUBLISHED_PACKAGES).toEqual([
       '@qwen-code/qwen-code',
+      '@qwen-code/external-context-mem0',
       '@qwen-code/audio-capture',
       '@qwen-code/channel-base',
       '@qwen-code/channel-dingtalk',
+      '@qwen-code/channel-dws',
       '@qwen-code/channel-feishu',
       '@qwen-code/channel-github',
       '@qwen-code/channel-qqbot',
@@ -683,7 +762,16 @@ describe('assertVersionUnreleased', () => {
 
   it('passes when no package, tag, or release has shipped the version', () => {
     vi.mocked(execSync).mockImplementation(notFoundAnywhere);
-    expect(() => assertVersionUnreleased('1.2.3')).not.toThrow();
+    // The two scheduled releases never produce a plain X.Y.Z: the 21:00 UTC
+    // nightly and the preview lane are the formats the gate actually sees at
+    // runtime, so tightening the pattern must fail here rather than at 21:00.
+    for (const version of [
+      '1.2.3',
+      '1.2.3-preview.4',
+      '0.7.0-nightly.20260907.a1b2c3d',
+    ]) {
+      expect(() => assertVersionUnreleased(version), version).not.toThrow();
+    }
   });
 
   it('checks origin for tags, not the stale local checkout', () => {
@@ -774,7 +862,7 @@ describe('assertVersionUnreleased', () => {
   });
 
   it('rejects a missing or non-string version instead of failing open', () => {
-    for (const bad of [undefined, '', true]) {
+    for (const bad of [undefined, '', true, '1.2.3; echo injected']) {
       expect(() => assertVersionUnreleased(bad)).toThrow(/requires a version/);
     }
   });
@@ -810,7 +898,7 @@ describe('assertVersionUnreleased', () => {
     // The runner parses workflow commands from stdout only; ::error:: on
     // stderr would never surface as an annotation in the Actions UI.
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(3);
+    expect(runAssertVersionCli('1.2.3')).toBe(3);
     expect(logSpy).toHaveBeenCalledWith(
       `::error::${refusalMessage(PUBLISHED_PACKAGES[0])}`,
     );
@@ -842,7 +930,7 @@ describe('assertVersionUnreleased', () => {
     );
   });
 
-  it('CLI dispatch: exits 3 (benign refusal) when the version has shipped', () => {
+  it('guard CLI: exits 3 (benign refusal) when the version has shipped', () => {
     // Exit 3 is the marker the release workflow uses to keep this
     // decisive, benign refusal out of the release-failed notification.
     vi.mocked(execSync).mockImplementation((command) => {
@@ -851,13 +939,13 @@ describe('assertVersionUnreleased', () => {
     });
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(3);
+    expect(runAssertVersionCli('1.2.3')).toBe(3);
     expect(logSpy).toHaveBeenCalledWith(
       `::error::${refusalMessage(PUBLISHED_PACKAGES.join(', '))}`,
     );
   });
 
-  it('CLI dispatch: exits 2 (not the refusal marker) when a probe fails', () => {
+  it('guard CLI: exits 2 (not the refusal marker) when a probe fails', () => {
     vi.mocked(execSync).mockImplementation((command) => {
       if (command.includes('npm view')) {
         throw new Error('npm error code ETIMEDOUT');
@@ -865,24 +953,26 @@ describe('assertVersionUnreleased', () => {
       return notFoundAnywhere(command);
     });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(2);
+    expect(runAssertVersionCli('1.2.3')).toBe(2);
     expect(logSpy).toHaveBeenCalledWith(
       expect.stringContaining('::error::Failed to verify'),
     );
   });
 
-  it('CLI dispatch: exits 2 (not the refusal marker) on a missing version', () => {
+  it('guard CLI: exits 4 (permanent, not retried) on a malformed version', () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    expect(runCli({ 'assert-unreleased': '' })).toBe(2);
+    // 4, not 2: run-release-step.sh retries exit 2 three times as a
+    // transient probe failure, and a malformed version never becomes valid.
+    expect(runAssertVersionCli('')).toBe(4);
     expect(logSpy).toHaveBeenCalledWith(
-      '::error::assert-unreleased requires a version, e.g. --assert-unreleased=1.2.3',
+      '::error::assert-unreleased requires a version in release format, e.g. --assert-unreleased=1.2.3',
     );
   });
 
-  it('CLI dispatch: exits 0 when the version has not shipped', () => {
+  it('guard CLI: exits 0 when the version has not shipped', () => {
     vi.mocked(execSync).mockImplementation(notFoundAnywhere);
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(0);
+    expect(runAssertVersionCli('1.2.3')).toBe(0);
     expect(logSpy).not.toHaveBeenCalled();
   });
 });

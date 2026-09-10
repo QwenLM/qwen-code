@@ -3,6 +3,7 @@ import type { ACPToolCall } from '../../adapters/types';
 import {
   formatToolDisplayName,
   getAgentCurrentToolHint,
+  getSubagentDetailsUnavailableReason,
   getToolDescription,
   getToolResultSummary,
   getToolSummaryDescription,
@@ -380,12 +381,11 @@ describe('toolFormatting', () => {
       expect(localizeToolDisplayName('todo_write', t)).toBe('任务清单');
       expect(localizeToolDisplayName('run_shell_command', t)).toBe('运行命令');
       expect(localizeToolDisplayName('read_file', t)).toBe('读取文件');
+      expect(localizeToolDisplayName('agent', t)).toBe('智能体');
     });
 
-    it('keeps proper tool names / acronyms in English', () => {
+    it('keeps acronyms in English', () => {
       const t = getTranslator('zh-CN');
-      expect(localizeToolDisplayName('agent', t)).toBe('Agent');
-      expect(localizeToolDisplayName('glob', t)).toBe('Glob');
       expect(localizeToolDisplayName('lsp', t)).toBe('LSP');
     });
 
@@ -394,6 +394,7 @@ describe('toolFormatting', () => {
       expect(localizeToolDisplayName('grep', t)).toBe('搜索内容');
       expect(localizeToolDisplayName('grep_search', t)).toBe('搜索内容');
       expect(localizeToolDisplayName('search', t)).toBe('搜索内容');
+      expect(localizeToolDisplayName('glob', t)).toBe('查找文件');
     });
 
     it('falls back to the English display name when the locale has no entry', () => {
@@ -410,11 +411,8 @@ describe('toolFormatting', () => {
 
     it('has a zh translation for every tool in the display-name map', () => {
       const tZh = getTranslator('zh-CN');
-      // Tools intentionally shown in English (proper names / acronyms).
-      const keepEnglish = new Set(['agent', 'glob']);
       const untranslated = Object.keys(TOOL_DISPLAY_NAMES).filter(
         (wire) =>
-          !keepEnglish.has(wire) &&
           localizeToolDisplayName(wire, tZh) === formatToolDisplayName(wire),
       );
       expect(untranslated).toEqual([]);
@@ -436,4 +434,79 @@ describe('toolFormatting', () => {
       );
     });
   });
+});
+
+describe('subagent detail availability', () => {
+  it.each([
+    [false, 'pending', false, 'subagent.creating'],
+    [false, 'in_progress', false, 'subagent.creating'],
+    [false, 'failed', false, 'subagent.failed'],
+    [false, 'failed', true, 'subagent.cancelled'],
+    [false, 'completed', true, 'subagent.cancelled'],
+    [false, 'completed', false, undefined],
+    [true, 'failed', false, undefined],
+    [true, 'in_progress', false, undefined],
+    [undefined, 'in_progress', false, undefined],
+  ] as const)(
+    'readiness=%s status=%s cancelled=%s gives %s',
+    (subagentSessionReady, status, wasCancelled, expected) => {
+      expect(
+        getSubagentDetailsUnavailableReason(
+          tool({
+            toolName: 'agent',
+            status,
+            subagentSessionReady,
+            wasCancelled,
+          }),
+        ),
+      ).toBe(expected);
+    },
+  );
+
+  it.each([
+    [
+      'failed',
+      { reason: 'Cancel handler registration failed' },
+      'subagent.failed',
+    ],
+    [
+      'pending',
+      {
+        type: 'task_execution',
+        status: 'failed',
+        terminateReason: 'Cancelled during registration',
+      },
+      'subagent.failed',
+    ],
+    ['failed', { status: 'cancelled' }, 'subagent.cancelled'],
+    ['failed', { status: 'CANCELED' }, 'subagent.cancelled'],
+    ['completed', { reason: 'Cancelled by user' }, 'subagent.cancelled'],
+  ] as const)(
+    'resolves %s with output %j as %s',
+    (status, rawOutput, expected) => {
+      expect(
+        getSubagentDetailsUnavailableReason(
+          tool({
+            toolName: 'agent',
+            status,
+            subagentSessionReady: false,
+            rawOutput,
+          }),
+        ),
+      ).toBe(expected);
+    },
+  );
+});
+
+it('reports launch failure before the tool status catches up', () => {
+  expect(
+    getSubagentDetailsUnavailableReason(
+      tool({
+        toolName: 'agent',
+        status: 'pending',
+        subagentSessionReady: false,
+        rawOutput: { type: 'task_execution', status: 'failed' },
+      }),
+    ),
+  ).toBe('subagent.failed');
 });

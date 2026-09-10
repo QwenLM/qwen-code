@@ -10,14 +10,15 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   SessionMetrics,
-  ServerGeminiStreamEvent,
+  ServerLlmStreamEvent,
   AgentResultDisplay,
   McpToolProgressData,
   ShellProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
   formatVisionBridgeNoticeDisplay,
-  GeminiEventType,
+  createNotStartedToolErrorResponse,
+  LlmEventType,
   isVisionBridgeNoticeDisplay,
   ToolErrorType,
   parseAndFormatApiError,
@@ -42,9 +43,9 @@ import type {
   ToolUseBlock,
   Usage,
 } from '../types.js';
-import { functionResponsePartsToString } from '../../utils/nonInteractiveHelpers.js';
+import { functionResponsePartsToString } from '../nonInteractiveHelpers.js';
 import { projectHeadlessToolResultContent } from './headless-tool-result-text-projection.js';
-import { observeHeadlessToolResultProjection } from '../../utils/tool-result-boundary-diagnostics.js';
+import { observeHeadlessToolResultProjection } from '../tool-result-boundary-diagnostics.js';
 
 /**
  * Internal state for managing a single message context (main agent or subagent).
@@ -118,7 +119,11 @@ export interface MessageEmitter {
  */
 export interface JsonOutputAdapterInterface extends MessageEmitter {
   startAssistantMessage(): void;
-  processEvent(event: ServerGeminiStreamEvent): void;
+  restartAttempt(
+    preserveText: boolean,
+    discardedToolCalls: ToolCallRequestInfo[],
+  ): void;
+  processEvent(event: ServerLlmStreamEvent): void;
   finalizeAssistantMessage(): CLIAssistantMessage;
   emitResult(options: ResultOptions): void;
 
@@ -201,7 +206,7 @@ export abstract class BaseJsonOutputAdapter {
   /**
    * Creates a Usage object from metadata.
    *
-   * @param metadata - Optional usage metadata from Gemini API
+   * @param metadata - Optional LLM usage metadata
    * @returns Usage object
    */
   protected createUsage(
@@ -605,27 +610,78 @@ export abstract class BaseJsonOutputAdapter {
   }
 
   /**
-   * Processes a stream event from the Gemini API.
+   * Starts a replacement provider attempt. Continuation retries keep the
+   * already-delivered text; fresh retries and fallbacks discard the pending
+   * assistant state. Streaming adapters override this to pair any tool_use
+   * frames that are already on the wire before resetting.
+   */
+  restartAttempt(
+    preserveText: boolean,
+    discardedToolCalls: ToolCallRequestInfo[],
+  ): void {
+    if (preserveText) {
+      const discardedIds = new Set(
+        discardedToolCalls.map((request) => request.callId),
+      );
+      if (discardedIds.size > 0) {
+        const state = this.mainAgentMessageState;
+        const retainedBlocks: ContentBlock[] = [];
+        const retainedOpenBlocks = new Set<number>();
+        for (const [index, block] of state.blocks.entries()) {
+          if (block.type === 'tool_use' && discardedIds.has(block.id)) {
+            continue;
+          }
+          const retainedIndex = retainedBlocks.length;
+          retainedBlocks.push(block);
+          if (state.openBlocks.has(index)) {
+            retainedOpenBlocks.add(retainedIndex);
+          }
+        }
+        state.blocks = retainedBlocks;
+        state.openBlocks = retainedOpenBlocks;
+        state.currentBlockType = retainedBlocks.at(-1)?.type ?? null;
+        state.messageStarted = retainedBlocks.length > 0;
+      }
+      return;
+    }
+    this.startAssistantMessageInternal(this.mainAgentMessageState);
+  }
+
+  protected emitDiscardedAttemptToolResults(
+    discardedToolCalls: ToolCallRequestInfo[],
+  ): void {
+    const message =
+      'Skipped because the provider attempt was retried before execution.';
+    for (const request of discardedToolCalls) {
+      this.emitToolResult(
+        request,
+        createNotStartedToolErrorResponse(request, message),
+      );
+    }
+  }
+
+  /**
+   * Processes an LLM stream event.
    * This is a shared implementation used by both streaming and non-streaming adapters.
    *
-   * @param event - Stream event from Gemini API
+   * @param event - LLM stream event
    */
-  processEvent(event: ServerGeminiStreamEvent): void {
+  processEvent(event: ServerLlmStreamEvent): void {
     const state = this.mainAgentMessageState;
     if (state.finalized) {
       return;
     }
 
     switch (event.type) {
-      case GeminiEventType.Content:
+      case LlmEventType.Content:
         this.appendText(state, event.value, null);
         break;
-      case GeminiEventType.Citation:
+      case LlmEventType.Citation:
         if (typeof event.value === 'string') {
           this.appendText(state, `\n${event.value}`, null);
         }
         break;
-      case GeminiEventType.Thought:
+      case LlmEventType.Thought:
         this.appendThinking(
           state,
           event.value.subject,
@@ -633,16 +689,16 @@ export abstract class BaseJsonOutputAdapter {
           null,
         );
         break;
-      case GeminiEventType.ToolCallRequest:
+      case LlmEventType.ToolCallRequest:
         this.appendToolUse(state, event.value, null);
         break;
-      case GeminiEventType.Finished:
+      case LlmEventType.Finished:
         if (event.value?.usageMetadata) {
           state.usage = this.createUsage(event.value.usageMetadata);
         }
         this.finalizePendingBlocks(state, null);
         break;
-      case GeminiEventType.Error: {
+      case LlmEventType.Error: {
         // Format the error message using parseAndFormatApiError for consistency
         // with interactive mode error display
         const errorText = parseAndFormatApiError(
@@ -652,7 +708,7 @@ export abstract class BaseJsonOutputAdapter {
         this.appendText(state, errorText, null);
         break;
       }
-      case GeminiEventType.ModelFallback:
+      case LlmEventType.ModelFallback:
         // Surface model fallback transitions so non-interactive consumers
         // (CI pipelines, SDK clients) can observe capacity-driven model
         // switches without parsing assistant content.
@@ -1420,6 +1476,21 @@ function checkResponsePartsForError(
  * @param response - Tool call response
  * @returns String content or undefined
  */
+function mcpAppFallbackText(display: unknown): string | undefined {
+  if (
+    !display ||
+    typeof display !== 'object' ||
+    !('type' in display) ||
+    display.type !== 'mcp_app' ||
+    !('fallbackText' in display) ||
+    typeof display.fallbackText !== 'string'
+  ) {
+    return undefined;
+  }
+  const text = display.fallbackText.trim();
+  return text.length > 0 ? display.fallbackText : undefined;
+}
+
 export function toolResultContent(
   response: ToolCallResponseInfo,
 ): string | undefined {
@@ -1455,6 +1526,10 @@ export function toolResultContent(
   }
   if (response.error) {
     return response.error.message;
+  }
+  const mcpAppFallback = mcpAppFallbackText(response.resultDisplay);
+  if (mcpAppFallback) {
+    return mcpAppFallback;
   }
   if (
     typeof response.resultDisplay === 'string' &&

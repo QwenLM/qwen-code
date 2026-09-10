@@ -83,7 +83,12 @@ is kept.
 
 Forget, Indexer, Status, and Extraction keep the capped scanner. That preserves
 their current behavior but means an older document can become recallable before
-it becomes manageable by those non-recall flows.
+it becomes manageable by those non-recall flows. Superseded for Forget: issue
+#9378 moved Forget to the uncapped scanner, with its own per-scope bound on the
+model-selection prompt: each scope keeps a 200-candidate quota, unused quota is
+redistributed, and literal query matches rank first within a scope. Entries past
+that bound are not offered to the model. Indexer, Status, and Extraction remain
+capped.
 
 ## Failure and compatibility boundaries
 

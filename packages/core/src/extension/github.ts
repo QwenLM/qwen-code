@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SimpleGit } from 'simple-git';
 import { getErrorMessage } from '../utils/errors.js';
+import * as crypto from 'node:crypto';
 import * as os from 'node:os';
 import * as https from 'node:https';
 import * as fs from 'node:fs';
@@ -30,7 +30,12 @@ import {
   AGENT_PLUGIN_MANIFEST,
   getAgentPluginSchemaStatus,
 } from './agent-plugins-v1/manifest.js';
-import { assertTarArchiveHasNoLinks } from './archive-safety.js';
+import {
+  MAX_ARCHIVE_EXPANDED_BYTES,
+  assertDirectorySymlinksAreSafe,
+  assertTarArchiveLinksAreSafe,
+  type TarArchiveSafetyOptions,
+} from './archive-safety.js';
 import { resolveNetworkTarget } from './network-policy.js';
 import { extractZipArchive } from './zip-extraction.js';
 import { loadSimpleGit } from '../utils/load-simple-git.js';
@@ -39,6 +44,7 @@ import {
   resolveStoredGitCredential,
   type GitCredential,
 } from './extension-git-credentials.js';
+import { createExtensionGitClient } from './extension-git-client.js';
 
 const debugLogger = createDebugLogger('EXT_GITHUB');
 const SUPPORTED_ARCHIVE_EXTENSIONS = ['.tar.gz', '.zip'] as const;
@@ -51,6 +57,20 @@ interface GithubReleaseData {
   tag_name: string;
   tarball_url?: string;
   zipball_url?: string;
+}
+
+interface GitHubCommitData {
+  sha: string;
+}
+
+interface GitHubTreeEntry {
+  path?: string;
+  type?: string;
+}
+
+interface GitHubTreeData {
+  tree?: GitHubTreeEntry[];
+  truncated?: boolean;
 }
 
 interface Asset {
@@ -136,19 +156,52 @@ function getGitHubCredential(source: string): GitCredential | undefined {
   return undefined;
 }
 
-async function assertPinnedGitSupported(): Promise<void> {
-  const { simpleGit } = await loadSimpleGit();
-  const version = await simpleGit().version();
-  if (
-    version.major < MINIMUM_PINNED_GIT_VERSION.major ||
+type LocalGitVersion = {
+  major: number;
+  minor: number;
+  patch?: number | string;
+};
+
+// The local Git version cannot change within a process lifetime, so probe it
+// once instead of spawning a `git version` subprocess from both the fallback
+// gate and the pinned-Git assert for every extension.
+let localGitVersionPromise: Promise<LocalGitVersion> | undefined;
+
+function getLocalGitVersion(): Promise<LocalGitVersion> {
+  localGitVersionPromise ??= (async () => {
+    const { simpleGit } = await loadSimpleGit();
+    return await simpleGit().version();
+  })();
+  return localGitVersionPromise;
+}
+
+export function resetLocalGitVersionCacheForTesting(): void {
+  localGitVersionPromise = undefined;
+}
+
+function isPinnedGitVersionSupported(version: {
+  major: number;
+  minor: number;
+}): boolean {
+  return (
+    version.major > MINIMUM_PINNED_GIT_VERSION.major ||
     (version.major === MINIMUM_PINNED_GIT_VERSION.major &&
-      version.minor < MINIMUM_PINNED_GIT_VERSION.minor)
-  ) {
+      version.minor >= MINIMUM_PINNED_GIT_VERSION.minor)
+  );
+}
+
+async function isPinnedGitSupported(): Promise<boolean> {
+  return isPinnedGitVersionSupported(await getLocalGitVersion());
+}
+
+async function assertPinnedGitSupported(): Promise<void> {
+  const version = await getLocalGitVersion();
+  if (!isPinnedGitVersionSupported(version)) {
     const detectedVersion = [version.major, version.minor, version.patch]
       .filter((component) => component !== undefined)
       .join('.');
     throw new Error(
-      `Public extension Git installs require Git 2.37 or newer for secure DNS pinning; found Git ${detectedVersion}. Upgrade Git, or install the extension from a local path or archive instead.`,
+      `Public extension Git installs require Git 2.37 or newer unless the source is an anonymous public GitHub root repository; found Git ${detectedVersion}. Upgrade Git for credentialed, non-GitHub, nested, submodule, or Git LFS installs.`,
     );
   }
 }
@@ -163,40 +216,12 @@ function createPinnedGitConfig(curlResolve: string): string[] {
   ];
 }
 
-function restrictGitEnvironment(
-  git: SimpleGit,
-  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
-  authentication?: { source: string; credential: GitCredential },
-): SimpleGit {
-  if (networkPolicy !== 'public' && !authentication) return git;
-  const environment: Record<string, string> = {
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: os.devNull,
-  };
-  for (const key of [
-    'PATH',
-    'Path',
-    'SystemRoot',
-    'SYSTEMROOT',
-    'WINDIR',
-    'TEMP',
-    'TMP',
-    'TMPDIR',
-  ]) {
-    const value = process.env[key];
-    if (value !== undefined) environment[key] = value;
+function resolveGitRef(ref: string | undefined): string {
+  const resolvedRef = ref || 'HEAD';
+  if (resolvedRef.startsWith('-')) {
+    throw new Error('Git refs must not start with "-".');
   }
-  if (authentication) {
-    const value = Buffer.from(
-      `${authentication.credential.username}:${authentication.credential.password}`,
-      'utf8',
-    ).toString('base64');
-    environment['GIT_CONFIG_COUNT'] = '1';
-    environment['GIT_CONFIG_KEY_0'] =
-      `http.${authentication.source}.extraHeader`;
-    environment['GIT_CONFIG_VALUE_0'] = `Authorization: Basic ${value}`;
-  }
-  return git.env(environment);
+  return resolvedRef;
 }
 
 /**
@@ -215,6 +240,7 @@ export async function cloneFromGit(
     ? 'credentialed HTTPS Git source'
     : redactUrlCredentials(installMetadata.source);
   try {
+    const refToFetch = resolveGitRef(installMetadata.ref);
     const { simpleGit } = await loadSimpleGit();
     let networkConfig: string[] = [];
     if (installMetadata.networkPolicy === 'public') {
@@ -233,24 +259,15 @@ export async function cloneFromGit(
     }
     const effectiveCredential =
       credential ?? getGitHubCredential(installMetadata.source);
-    const git = restrictGitEnvironment(
-      simpleGit(destination, {
-        ...(signal ? { abort: signal } : {}),
-        ...(networkConfig.length > 0
-          ? {
-              config: networkConfig,
-              unsafe: {
-                allowUnsafeConfigPaths: true,
-                allowUnsafeProtocolOverride: true,
-              },
-            }
-          : {}),
-      }),
-      installMetadata.networkPolicy,
-      effectiveCredential
+    const git = createExtensionGitClient(simpleGit, {
+      baseDir: destination,
+      signal,
+      networkPolicy: installMetadata.networkPolicy,
+      networkConfig,
+      authentication: effectiveCredential
         ? { source: installMetadata.source, credential: effectiveCredential }
         : undefined,
-    );
+    });
     signal?.throwIfAborted();
     // On Windows, symlinks require elevated privileges by default, so we
     // disable them to avoid "Permission denied" errors during checkout.
@@ -267,8 +284,6 @@ export async function cloneFromGit(
     if (remotes.length === 0) {
       throw new Error(`Unable to find any remotes for repo ${redactedSource}`);
     }
-
-    const refToFetch = installMetadata.ref || 'HEAD';
 
     const remoteUrl = remotes[0].refs.fetch;
     if (!remoteUrl) {
@@ -325,6 +340,200 @@ export function parseGitHubRepoForReleases(source: string): {
   }
 
   return { owner, repo };
+}
+
+function parseAnonymousPublicGitHubRepo(source: string): {
+  owner: string;
+  repo: string;
+} {
+  let url: URL;
+  try {
+    url = new URL(source);
+  } catch {
+    throw new Error('Older-Git fallback requires a valid GitHub HTTPS URL.');
+  }
+  if (
+    url.protocol !== 'https:' ||
+    url.hostname !== 'github.com' ||
+    url.port ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error(
+      'Older-Git fallback only supports anonymous https://github.com/{owner}/{repo}[.git] sources.',
+    );
+  }
+  const match = /^\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(url.pathname);
+  if (!match || !match[1] || !match[2]) {
+    throw new Error(
+      'Older-Git fallback only supports a GitHub repository root URL.',
+    );
+  }
+  return { owner: match[1], repo: match[2] };
+}
+
+export async function shouldUsePublicGitHubArchiveFallback(
+  installMetadata: ExtensionInstallMetadata,
+): Promise<boolean> {
+  if (
+    installMetadata.type !== 'git' ||
+    installMetadata.networkPolicy !== 'public' ||
+    installMetadata.credentialPersistence ||
+    installMetadata.marketplaceConfig ||
+    installMetadata.pluginName ||
+    installMetadata.externalContent
+  ) {
+    return false;
+  }
+  try {
+    parseAnonymousPublicGitHubRepo(installMetadata.source);
+  } catch {
+    return false;
+  }
+  return !(await isPinnedGitSupported());
+}
+
+// A Git LFS pointer is a small text file (~130 bytes). Only files small
+// enough to plausibly be pointers are read, keeping the scan cheap.
+const GIT_LFS_POINTER_PREFIX = 'version https://git-lfs.github.com/spec/v1';
+const MAX_LFS_POINTER_SCAN_BYTES = 512;
+
+async function assertArchivePreservesGitSemantics(destination: string) {
+  const pending = [destination];
+  while (pending.length > 0) {
+    const directory = pending.pop()!;
+    const isArchiveRoot = directory === destination;
+    for (const entry of await fs.promises.readdir(directory, {
+      withFileTypes: true,
+    })) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(entryPath);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      // Git gives submodule semantics only to a root-level `.gitmodules`;
+      // a nested copy is an inert regular file.
+      if (isArchiveRoot && entry.name === '.gitmodules') {
+        throw new Error(
+          'Older-Git fallback does not support repositories with submodules.',
+        );
+      }
+      // Detect Git LFS by pointer-file content rather than `.gitattributes`
+      // grammar: codeload archives honor `.gitattributes` `export-ignore`,
+      // so the attributes file itself can be hidden from the extracted tree,
+      // and attribute macros or case-variant names also bypass a
+      // grammar-only check. Any LFS-tracked file arrives as a raw pointer
+      // file, so scanning for pointer content catches every variant.
+      const stats = await fs.promises.stat(entryPath);
+      if (stats.size > MAX_LFS_POINTER_SCAN_BYTES) {
+        continue;
+      }
+      const content = await fs.promises.readFile(entryPath, 'utf8');
+      if (content.startsWith(GIT_LFS_POINTER_PREFIX)) {
+        throw new Error(
+          'Older-Git fallback does not support repositories using Git LFS.',
+        );
+      }
+    }
+  }
+}
+
+// codeload archives honor `.gitattributes` `export-ignore`, so a repository
+// can strip its root `.gitmodules` from the archive and slip past the
+// extracted-tree presence check above. The commit's tree object still lists
+// every path regardless of export-ignore, so verify it directly: a root
+// `.gitmodules` blob or any gitlink (type `commit`) entry means the archive
+// would silently drop submodule content.
+async function assertGitHubTreeHasNoSubmodules(
+  owner: string,
+  repo: string,
+  commitSha: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const treeData = await fetchJson<GitHubTreeData>(
+    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(commitSha)}?recursive=1`,
+    signal,
+    'public',
+    false,
+  );
+  if (treeData.truncated) {
+    throw new Error(
+      'Older-Git fallback cannot verify that the repository is free of submodules because GitHub truncated the tree listing.',
+    );
+  }
+  const entries = Array.isArray(treeData.tree) ? treeData.tree : [];
+  const hasSubmoduleSemantics = entries.some(
+    (entry) => entry?.path === '.gitmodules' || entry?.type === 'commit',
+  );
+  if (hasSubmoduleSemantics) {
+    throw new Error(
+      'Older-Git fallback does not support repositories with submodules.',
+    );
+  }
+}
+
+async function resolvePublicGitHubCommitSha(
+  owner: string,
+  repo: string,
+  ref: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const commitData = await fetchJson<GitHubCommitData>(
+    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(ref)}`,
+    signal,
+    'public',
+    false,
+  );
+  if (!/^[a-f0-9]{40}$/i.test(commitData.sha)) {
+    throw new Error('GitHub returned an invalid commit SHA.');
+  }
+  return commitData.sha.toLowerCase();
+}
+
+export async function downloadPublicGitHubArchiveFallback(
+  installMetadata: ExtensionInstallMetadata,
+  destination: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const { owner, repo } = parseAnonymousPublicGitHubRepo(
+    installMetadata.source,
+  );
+  const commitSha = await resolvePublicGitHubCommitSha(
+    owner,
+    repo,
+    installMetadata.ref || 'HEAD',
+    signal,
+  );
+  await assertGitHubTreeHasNoSubmodules(owner, repo, commitSha, signal);
+  // A random staging name avoids clobbering (or being filtered out as) a
+  // repository file that happens to share the archive name.
+  const archivePath = path.join(
+    destination,
+    `github-source-${crypto.randomUUID()}.tar.gz`,
+  );
+  await downloadFile(
+    `https://codeload.github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tar.gz/${commitSha}`,
+    archivePath,
+    { includeGitHubToken: false, networkPolicy: 'public' },
+    0,
+    signal,
+  );
+  await extractArchiveFile(archivePath, destination, signal, {
+    enforceResourceLimits: true,
+    // Public repositories legitimately carry in-repo symlinks (the reported
+    // case is a root `AGENTS.md -> CLAUDE.md`), and this fallback is the only
+    // way to install them without Git 2.37+. Targets that escape the archive
+    // root or do not point directly to an archived file are still refused.
+    allowContainedSymlinks: true,
+  });
+  await fs.promises.unlink(archivePath);
+  await assertArchivePreservesGitSemantics(destination);
+  return commitSha;
 }
 
 async function fetchReleaseFromGithub(
@@ -473,10 +682,28 @@ export async function checkForExtensionUpdate(
   }
   try {
     if (installMetadata.type === 'git') {
+      const refToCheck = resolveGitRef(installMetadata.ref);
       const storedCredential =
         installMetadata.credentialPersistence === 'stored'
           ? (await resolveStoredGitCredential(extension.path)).credential
           : undefined;
+      if (await shouldUsePublicGitHubArchiveFallback(installMetadata)) {
+        if (!installMetadata.gitCommit) {
+          return ExtensionUpdateState.NOT_UPDATABLE;
+        }
+        const { owner, repo } = parseAnonymousPublicGitHubRepo(
+          installMetadata.source,
+        );
+        const remoteSha = await resolvePublicGitHubCommitSha(
+          owner,
+          repo,
+          refToCheck,
+          signal,
+        );
+        return remoteSha === installMetadata.gitCommit
+          ? ExtensionUpdateState.UP_TO_DATE
+          : ExtensionUpdateState.UPDATE_AVAILABLE;
+      }
       const { simpleGit } = await loadSimpleGit();
       if (installMetadata.networkPolicy === 'public') {
         await assertPinnedGitSupported();
@@ -530,25 +757,15 @@ export async function checkForExtensionUpdate(
       signal?.throwIfAborted();
       const effectiveCredential =
         storedCredential ?? getGitHubCredential(remoteUrl);
-      const git = restrictGitEnvironment(
-        simpleGit(extension.path, {
-          ...(signal ? { abort: signal } : {}),
-          ...(networkConfig.length > 0
-            ? {
-                config: networkConfig,
-                unsafe: {
-                  allowUnsafeConfigPaths: true,
-                  allowUnsafeProtocolOverride: true,
-                },
-              }
-            : {}),
-        }),
-        installMetadata.networkPolicy,
-        effectiveCredential
+      const git = createExtensionGitClient(simpleGit, {
+        baseDir: extension.path,
+        signal,
+        networkPolicy: installMetadata.networkPolicy,
+        networkConfig,
+        authentication: effectiveCredential
           ? { source: remoteUrl, credential: effectiveCredential }
           : undefined,
-      );
-      const refToCheck = installMetadata.ref || 'HEAD';
+      });
       const refPatterns = installMetadata.ref
         ? [refToCheck, `${refToCheck}^{}`]
         : [refToCheck];
@@ -731,6 +948,7 @@ export async function extractArchiveFile(
   archivePath: string,
   destination: string,
   signal?: AbortSignal,
+  options: TarArchiveSafetyOptions = {},
 ): Promise<void> {
   signal?.throwIfAborted();
   if (!isSupportedArchivePath(archivePath)) {
@@ -739,7 +957,19 @@ export async function extractArchiveFile(
     );
   }
   try {
-    await extractFile(archivePath, destination, signal);
+    await extractFile(archivePath, destination, signal, options);
+    signal?.throwIfAborted();
+    await flattenSingleExtensionDirectory(destination, archivePath);
+    signal?.throwIfAborted();
+    if (options.allowContainedSymlinks === true) {
+      await assertDirectorySymlinksAreSafe(destination, signal, {
+        maxExpandedBytes:
+          options.enforceResourceLimits === true
+            ? MAX_ARCHIVE_EXPANDED_BYTES
+            : undefined,
+        excludePath: archivePath,
+      });
+    }
   } catch (error) {
     signal?.throwIfAborted();
     throw new Error(
@@ -747,8 +977,6 @@ export async function extractArchiveFile(
         `.zip or .tar.gz file. ${getErrorMessage(error)}`,
     );
   }
-  signal?.throwIfAborted();
-  await flattenSingleExtensionDirectory(destination, archivePath);
   signal?.throwIfAborted();
   assertExtractedArchiveContainsExtensionSource(destination);
 }
@@ -790,10 +1018,14 @@ export function findReleaseAsset(assets: Asset[]): Asset | undefined {
   return undefined;
 }
 
+const MAX_API_REDIRECTS = 5;
+
 async function fetchJson<T>(
   url: string,
   signal?: AbortSignal,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+  includeGitHubToken = true,
+  redirectCount = 0,
 ): Promise<T> {
   const timeoutError = new Error('Timed out fetching GitHub API response');
   const timeoutController = new AbortController();
@@ -809,7 +1041,7 @@ async function fetchJson<T>(
     'User-Agent': 'gemini-cli',
   };
   const token = getGitHubToken();
-  if (token) {
+  if (includeGitHubToken && token) {
     headers.Authorization = `token ${token}`;
   }
   let target;
@@ -856,6 +1088,52 @@ async function fetchJson<T>(
         },
         (res) => {
           res.on('error', fail);
+          if (
+            res.statusCode === 301 ||
+            res.statusCode === 302 ||
+            res.statusCode === 307 ||
+            res.statusCode === 308
+          ) {
+            res.resume();
+            if (redirectCount >= MAX_API_REDIRECTS) {
+              return fail(
+                new Error('Too many redirects while fetching GitHub API data'),
+              );
+            }
+            if (!res.headers.location) {
+              return fail(
+                new Error('Redirect response missing location header'),
+              );
+            }
+            let redirectUrl: URL;
+            try {
+              redirectUrl = new URL(res.headers.location, url);
+            } catch (error) {
+              return fail(
+                new Error(`Invalid redirect URL: ${getErrorMessage(error)}`),
+              );
+            }
+            if (redirectUrl.protocol !== 'https:') {
+              return fail(
+                new Error(
+                  `Unsupported redirect URL protocol: ${redirectUrl.protocol}`,
+                ),
+              );
+            }
+            cleanup();
+            // Every hop is re-resolved against the network policy above, and
+            // the token never follows a redirect to a different host.
+            fetchJson<T>(
+              redirectUrl.toString(),
+              signal,
+              networkPolicy,
+              redirectUrl.host === target.url.host ? includeGitHubToken : false,
+              redirectCount + 1,
+            )
+              .then(finish)
+              .catch(fail);
+            return;
+          }
           if (res.statusCode !== 200) {
             res.resume();
             return fail(
@@ -1055,15 +1333,23 @@ export async function extractFile(
   file: string,
   dest: string,
   signal?: AbortSignal,
+  options: TarArchiveSafetyOptions = {},
 ): Promise<void> {
   signal?.throwIfAborted();
   if (file.endsWith('.tar.gz')) {
-    await assertTarArchiveHasNoLinks(file, signal);
+    await assertTarArchiveLinksAreSafe(file, signal, options);
     signal?.throwIfAborted();
     try {
-      await pipeline(fs.createReadStream(file), tar.x({ cwd: dest }), {
-        signal,
-      });
+      await pipeline(
+        fs.createReadStream(file),
+        tar.x({
+          cwd: dest,
+          // The opt-in fallback intentionally treats every tar warning as a
+          // failure; see docs/design/safe-archive-symlinks.md.
+          strict: options.allowContainedSymlinks === true,
+        }),
+        { signal },
+      );
     } catch (error) {
       signal?.throwIfAborted();
       throw error;

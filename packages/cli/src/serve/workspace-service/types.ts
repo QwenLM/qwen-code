@@ -39,6 +39,7 @@ import type { WorkspaceVoiceStatus } from '../../services/voice-service.js';
 import type { VoiceMode } from '../../services/voice-settings.js';
 import type { WorkspaceProvidersStatusProvider } from '../workspace-providers-status.js';
 import type { WorkspaceSkillsStatusProvider } from '../workspace-skills-status.js';
+import type { ServeModelProviderRuntimeSyncResult } from '../types.js';
 import type {
   WorkspaceSkillInstallRequest,
   WorkspaceSkillMutationResult,
@@ -125,6 +126,16 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
   ): Promise<ServeWorkspaceSkillsStatus>;
 
+  /** Live runtime Skills catalog without daemon-local fallback. */
+  getWorkspaceSkillsRuntimeStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<ServeWorkspaceSkillsStatus>;
+
+  /** Daemon-local Skills inventory without starting or querying ACP. */
+  getWorkspaceSkillsConfigStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<ServeWorkspaceSkillsStatus>;
+
   /** Model-provider status for the bound workspace. */
   getWorkspaceProvidersStatus(
     ctx: WorkspaceRequestContext,
@@ -208,6 +219,7 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
     skillName: string,
     enabled: boolean,
+    opts?: { refreshRuntime?: boolean },
   ): Promise<WorkspaceSkillToggleResult>;
 
   /** Toggle multiple skills with one settings write and one session refresh. */
@@ -221,6 +233,7 @@ export interface DaemonWorkspaceService {
   installWorkspaceSkill(
     ctx: WorkspaceRequestContext,
     request: WorkspaceSkillInstallRequest,
+    opts?: { refreshRuntime?: boolean },
   ): Promise<WorkspaceSkillMutationResult>;
 
   /** Delete a managed project- or user-level Skill. */
@@ -228,6 +241,7 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
     skillName: string,
     scope: WorkspaceSkillScope,
+    opts?: { refreshRuntime?: boolean },
   ): Promise<WorkspaceSkillMutationResult>;
 
   /** Scaffold (init) a QWEN.md file in the workspace. */
@@ -245,6 +259,11 @@ export interface DaemonWorkspaceService {
 
   /** Reload all settings (env + model + permissions + tools + memory). */
   reload(ctx: WorkspaceRequestContext): Promise<ReloadResponse>;
+
+  /** Reload only the runtime model-provider registry and spawn environment. */
+  reloadModelProviders(
+    ctx: WorkspaceRequestContext,
+  ): Promise<ServeModelProviderRuntimeSyncResult>;
 
   /** Drop cached skill status so extension skill changes are re-enumerated. */
   invalidateWorkspaceSkillsStatus(): void;
@@ -267,6 +286,7 @@ export interface ReloadResponse {
   sessionsSkipped?: string[];
   childReloaded: boolean;
   childError?: string;
+  runtimeEnvironmentApplied?: boolean;
 }
 
 export interface WorkspaceAcpPreheatResult {
@@ -338,7 +358,11 @@ export interface WorkspaceVoiceSettingsUpdate {
   voiceModel?: string;
 }
 
-export type WorkspaceSkillToggleActivation = 'applied' | 'deferred' | 'partial';
+export type WorkspaceSkillToggleActivation =
+  | 'applied'
+  | 'deferred'
+  | 'reconciling'
+  | 'partial';
 
 export interface WorkspaceSkillToggleResult {
   skillName: string;
@@ -349,17 +373,12 @@ export interface WorkspaceSkillToggleResult {
   sessionsFailed: number;
 }
 
-export type WorkspaceSkillToggleErrorCode =
-  | 'skill_not_found'
-  | 'skill_not_toggleable'
-  | 'skill_inactive_extension';
+export type WorkspaceSkillToggleErrorCode = 'skill_not_found';
 
 export interface WorkspaceSkillToggleError {
   skillName: string;
   code: WorkspaceSkillToggleErrorCode;
   error: string;
-  reason?: WorkspaceSkillNotToggleableReason;
-  lockedScope?: 'system' | 'user' | 'systemDefaults';
 }
 
 export interface WorkspaceSkillBatchToggleItem {
@@ -386,9 +405,10 @@ export interface PersistDisabledSkillResult {
   }>;
 }
 
-export type PersistDisabledSkillsBatchOutcome =
-  | { skillName: string; changed: boolean }
-  | { skillName: string; error: WorkspaceSkillNotToggleableError };
+export interface PersistDisabledSkillsBatchOutcome {
+  skillName: string;
+  changed: boolean;
+}
 
 export interface PersistDisabledSkillsBatchResult {
   outcomes: PersistDisabledSkillsBatchOutcome[];
@@ -398,30 +418,10 @@ export interface PersistDisabledSkillsBatchResult {
   }>;
 }
 
-export type WorkspaceSkillNotToggleableReason =
-  | 'not_user_invocable'
-  | 'inactive_extension'
-  | 'locked';
-
 export class WorkspaceSkillNotFoundError extends Error {
   constructor(readonly skillName: string) {
     super(`Skill not found: ${skillName}`);
     this.name = 'WorkspaceSkillNotFoundError';
-  }
-}
-
-export class WorkspaceSkillNotToggleableError extends Error {
-  constructor(
-    readonly skillName: string,
-    readonly reason: WorkspaceSkillNotToggleableReason,
-    readonly lockedScope?: 'system' | 'user' | 'systemDefaults',
-  ) {
-    super(
-      lockedScope
-        ? `Skill ${skillName} is locked by ${lockedScope} settings`
-        : `Skill ${skillName} is not toggleable: ${reason}`,
-    );
-    this.name = 'WorkspaceSkillNotToggleableError';
   }
 }
 
@@ -433,18 +433,6 @@ export function mapWorkspaceSkillToggleError(
       skillName: error.skillName,
       code: 'skill_not_found',
       error: error.message,
-    };
-  }
-  if (error instanceof WorkspaceSkillNotToggleableError) {
-    return {
-      skillName: error.skillName,
-      code:
-        error.reason === 'inactive_extension'
-          ? 'skill_inactive_extension'
-          : 'skill_not_toggleable',
-      error: error.message,
-      reason: error.reason,
-      ...(error.lockedScope ? { lockedScope: error.lockedScope } : {}),
     };
   }
   return undefined;
@@ -578,7 +566,21 @@ export interface DaemonWorkspaceServiceDeps {
   reloadDaemonEnv?: (
     workspace: string,
     assertGenerationOpen?: () => void,
-  ) => Promise<EnvReloadResult>;
+  ) => Promise<
+    EnvReloadResult & {
+      runtimeEnvironmentApplied?: boolean;
+    }
+  >;
+
+  /** Refresh the runtime-local spawn environment for provider mutations. */
+  reloadModelProvidersDaemonEnv?: (
+    workspace: string,
+    assertGenerationOpen?: () => void,
+  ) => Promise<
+    EnvReloadResult & {
+      runtimeEnvironmentApplied?: boolean;
+    }
+  >;
 
   /** Eagerly start the ACP child/channel without creating a session. */
   preheatAcpChild?: () => Promise<void>;

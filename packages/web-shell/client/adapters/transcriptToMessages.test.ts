@@ -7,6 +7,8 @@ import type {
   DaemonTranscriptBlock,
   DaemonUserShellTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
+import { extractTodosFromToolCall } from '../utils/todos.js';
+import { groupParallelAgents } from './parallelAgentGrouping.js';
 import { transcriptBlocksToDaemonMessages } from './transcriptToMessages.js';
 
 function textBlock(
@@ -174,6 +176,8 @@ function toolBlock(
     toolName: overrides.toolName ?? 'Read',
     toolKind: overrides.toolKind,
     preview: overrides.preview ?? { kind: 'generic' },
+    resultPreview: overrides.resultPreview,
+    background: overrides.background,
     rawInput: overrides.rawInput,
     rawOutput: overrides.rawOutput,
     content: overrides.content,
@@ -181,6 +185,8 @@ function toolBlock(
     details: overrides.details,
     parentToolCallId: overrides.parentToolCallId,
     subagentType: overrides.subagentType,
+    subagentSessionReady: overrides.subagentSessionReady,
+    serverTimestamp: overrides.serverTimestamp,
     clientReceivedAt: createdAt,
     createdAt,
     updatedAt: overrides.updatedAt ?? createdAt,
@@ -188,6 +194,78 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
+  it('does not treat a historical background launch as agent completion', () => {
+    const block = toolBlock('agent-history', 'agent-1', 'completed', 1000, {
+      toolName: 'agent',
+      rawInput: { prompt: 'inspect history' },
+      rawOutput: {
+        type: 'task_execution',
+        status: 'background',
+        result: 'kept detail',
+      },
+      updatedAt: 1005,
+    });
+    const messages = transcriptBlocksToDaemonMessages([block]);
+    const tool = messages.find((message) => message.role === 'tool_group')
+      ?.tools[0];
+
+    expect(tool).toMatchObject({
+      status: 'pending',
+      startTime: 1000,
+      endTime: undefined,
+      args: { prompt: 'inspect history' },
+      rawOutput: { result: 'kept detail' },
+    });
+    expect(tool?.endTime).toBeUndefined();
+  });
+
+  it.each(['completed', 'failed'] as const)(
+    'uses an in-range background notification for historical %s status',
+    (status) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('agent-history', 'agent-1', 'completed', 1000, {
+          toolName: 'agent',
+          rawInput: { prompt: 'inspect history' },
+          rawOutput: {
+            type: 'task_execution',
+            status: 'background',
+            result: 'kept detail',
+          },
+          updatedAt: 1005,
+        }),
+        textBlock(
+          'agent-result',
+          'assistant',
+          `agent ${status}`,
+          60000,
+          false,
+          {
+            meta: {
+              source: 'background_notification',
+              qwenDiscreteMessage: true,
+              backgroundTask: {
+                kind: 'agent',
+                taskId: 'task-1',
+                toolUseId: 'agent-1',
+                status,
+              },
+            },
+          },
+        ),
+      ]);
+      const tool = messages.find((message) => message.role === 'tool_group')
+        ?.tools[0];
+
+      expect(tool).toMatchObject({
+        status,
+        startTime: 1000,
+        endTime: 60000,
+        args: { prompt: 'inspect history' },
+        rawOutput: { result: 'kept detail' },
+      });
+    },
+  );
+
   it('preserves user source metadata', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('user-1', 'user', 'scheduled prompt', 1, false, {
@@ -350,6 +428,61 @@ describe('transcriptBlocksToDaemonMessages', () => {
         id: 'assistant-1',
         role: 'assistant',
         content: '正常回复',
+        isStreaming: false,
+        timestamp: 2,
+      },
+    ]);
+  });
+
+  it('keeps vision bridge notices separate from assistant output', () => {
+    const notice = {
+      status: 'skipped',
+      convertedCount: 0,
+      omittedCount: 0,
+      modelName: 'qwen3.6-plus',
+      modelEndpoint: 'idealab.alibaba-inc.com',
+      egressOccurred: true,
+    };
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-0', 'assistant', 'Earlier reply', 0),
+      textBlock(
+        'vision-notice',
+        'assistant',
+        'Vision bridge cancelled.',
+        1,
+        false,
+        {
+          meta: {
+            source: 'vision_bridge_notice',
+            qwenDiscreteMessage: true,
+            visionBridgeNotice: notice,
+          },
+        },
+      ),
+      textBlock('assistant-1', 'assistant', 'Normal reply', 2),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'assistant-0',
+        role: 'assistant',
+        content: 'Earlier reply',
+        isStreaming: false,
+        timestamp: 0,
+      },
+      {
+        id: 'vision-notice',
+        role: 'system',
+        content: 'Vision bridge cancelled.',
+        variant: 'info',
+        source: 'vision_bridge_notice',
+        data: notice,
+        timestamp: 1,
+      },
+      {
+        id: 'assistant-1',
+        role: 'assistant',
+        content: 'Normal reply',
         isStreaming: false,
         timestamp: 2,
       },
@@ -523,11 +656,15 @@ describe('transcriptBlocksToDaemonMessages', () => {
           content: '检查项目结构',
           priority: 'medium',
           status: 'pending',
+          _meta: { qwenTodo: { id: 'inspect' } },
         },
         {
           content: '运行类型检查',
           priority: 'high',
           status: 'in_progress',
+          _meta: {
+            qwenTodo: { id: 'typecheck', blockedBy: ['inspect'] },
+          },
         },
       ],
     };
@@ -543,16 +680,17 @@ describe('transcriptBlocksToDaemonMessages', () => {
         timestamp: 1,
         todos: [
           {
-            id: 'plan-0',
+            id: 'inspect',
             content: '检查项目结构',
             priority: 'medium',
             status: 'pending',
           },
           {
-            id: 'plan-1',
+            id: 'typecheck',
             content: '运行类型检查',
             priority: 'high',
             status: 'in_progress',
+            blockedBy: ['inspect'],
           },
         ],
       },
@@ -829,7 +967,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('keeps each TodoWrite call as a distinct tool entry with its own todos', () => {
+  it('merges adjacent TodoWrite calls into one tool group like any tool', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('todo-1', 'todo-call-1', 'completed', 1, {
         title: 'Update Todos',
@@ -859,9 +997,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       }),
     ]);
 
-    // Each TodoWrite update stands alone in its own group (it renders as a
-    // self-contained collapsible checklist), rather than merging with adjacent
-    // tool calls.
+    // TodoWrite is an ordinary tool: adjacent calls share one group box.
     expect(messages).toEqual([
       {
         id: 'tg-todo-1',
@@ -872,13 +1008,6 @@ describe('transcriptBlocksToDaemonMessages', () => {
             callId: 'todo-call-1',
             toolName: 'TodoWrite',
           }),
-        ],
-      },
-      {
-        id: 'tg-todo-2',
-        role: 'tool_group',
-        timestamp: 2,
-        tools: [
           expect.objectContaining({
             callId: 'todo-call-2',
             toolName: 'TodoWrite',
@@ -1028,7 +1157,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('never merges todo_write updates into or after a regular tool_group', () => {
+  it('merges todo_write updates with adjacent tool calls like any tool', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('t1', 'tc1', 'completed', 1, { toolName: 'Read' }),
       toolBlock('todo-1', 'todo-call-1', 'completed', 2, {
@@ -1040,9 +1169,14 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
 
     expect(messages).toMatchObject([
-      { role: 'tool_group', tools: [{ callId: 'tc1' }] },
-      { role: 'tool_group', tools: [{ callId: 'todo-call-1' }] },
-      { role: 'tool_group', tools: [{ callId: 'tc2' }] },
+      {
+        role: 'tool_group',
+        tools: [
+          { callId: 'tc1' },
+          { callId: 'todo-call-1' },
+          { callId: 'tc2' },
+        ],
+      },
     ]);
   });
 
@@ -1148,6 +1282,26 @@ describe('transcriptBlocksToDaemonMessages', () => {
         timestamp: 1,
       },
     ]);
+  });
+
+  it('uses source-local insight text IDs for identity probes', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        textBlock(
+          'insight-1',
+          'assistant',
+          'before {"insight_ready":{"path":"/tmp/report.md"}} middle {"insight_error":{"error":"boom"}} after',
+          1,
+        ),
+      ],
+      { includeSourceIdentity: true },
+    );
+
+    expect(
+      messages
+        .filter((message) => message.role === 'assistant')
+        .map((message) => message.id),
+    ).toEqual(['insight-1-t-0', 'insight-1-t-1', 'insight-1-t-2']);
   });
 
   it('keeps malformed insight JSON as assistant text', () => {
@@ -1476,6 +1630,128 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('preserves safe background identity without raw output', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('agent-background-safe', 'agent-safe', 'completed', 20, {
+          toolName: 'agent',
+          background: true,
+          rawInput: undefined,
+          rawOutput: undefined,
+          preview: {
+            kind: 'subagent_delegation',
+            agentName: 'reviewer',
+            task: 'Review safely',
+          },
+          resultPreview: {
+            kind: 'text',
+            text: 'Background agent started',
+          },
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+    const tool = messages.find((message) => message.role === 'tool_group')
+      ?.tools[0];
+
+    expect(tool).toMatchObject({
+      callId: 'agent-safe',
+      status: 'completed',
+    });
+    expect(tool?.endTime).toBe(20);
+  });
+
+  it.each(['failed', 'cancelled', 'canceled'] as const)(
+    'keeps terminal background agent status %s in safe projection',
+    (status) => {
+      const messages = transcriptBlocksToDaemonMessages(
+        [
+          toolBlock('agent-background-terminal', 'agent-terminal', status, 20, {
+            toolName: 'agent',
+            background: true,
+            preview: {
+              kind: 'subagent_delegation',
+              agentName: 'reviewer',
+              task: 'Review safely',
+            },
+            resultPreview: { kind: 'text', text: 'Terminal result' },
+          }),
+        ],
+        { safeToolProjection: true },
+      );
+      const tool = messages.find((message) => message.role === 'tool_group')
+        ?.tools[0];
+
+      expect(tool).toMatchObject({ status: 'failed', endTime: 20 });
+    },
+  );
+
+  it('preserves a cancelled background agent result in safe projection', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('agent-background-result', 'agent-result', 'completed', 20, {
+          toolName: 'agent',
+          background: true,
+          preview: {
+            kind: 'subagent_delegation',
+            agentName: 'reviewer',
+            task: 'Review safely',
+          },
+          resultPreview: { kind: 'text', text: 'Terminal result' },
+        }),
+        textBlock(
+          'agent-cancelled',
+          'assistant',
+          'background agent cancelled',
+          21,
+          false,
+          {
+            meta: {
+              source: 'background_notification',
+              qwenDiscreteMessage: true,
+              backgroundTask: {
+                kind: 'agent',
+                status: 'cancelled',
+                taskId: 'agent-task',
+                toolUseId: 'agent-result',
+              },
+            },
+          },
+        ),
+      ],
+      { safeToolProjection: true },
+    );
+    const tool = messages.find((message) => message.role === 'tool_group')
+      ?.tools[0];
+
+    expect(tool).toMatchObject({
+      status: 'failed',
+      wasCancelled: true,
+      rawOutput: { text: 'Terminal result', status: 'cancelled' },
+    });
+  });
+
+  it('does not classify non-agent background tools as subagents', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('shell-background-safe', 'shell-safe', 'completed', 20, {
+          toolName: 'shell',
+          background: true,
+          rawInput: undefined,
+          rawOutput: undefined,
+          preview: { kind: 'command', command: 'npm test &' },
+          resultPreview: { kind: 'text', text: 'Started in background' },
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+    const tool = messages.find((message) => message.role === 'tool_group')
+      ?.tools[0];
+
+    expect(tool).toMatchObject({ callId: 'shell-safe', status: 'completed' });
+    expect(tool?.endTime).toBe(20);
+  });
+
   it('keeps merged background subagent blocks from capturing main-thread text', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-background', 'agent-1', 'completed', 20, {
@@ -1524,6 +1800,52 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('keeps foreground subagent launches separate from intervening thinking in safe projection', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('agent-fg-1', 'agent-fg-call-1', 'completed', 1, {
+          toolName: 'agent',
+          rawInput: undefined,
+          rawOutput: undefined,
+          preview: {
+            kind: 'subagent_delegation',
+            agentName: 'reviewer',
+            task: 'Review A',
+          },
+        }),
+        textBlock('thought-between', 'thought', 'thinking between agents', 2),
+        toolBlock('agent-fg-2', 'agent-fg-call-2', 'completed', 3, {
+          toolName: 'agent',
+          rawInput: undefined,
+          rawOutput: undefined,
+          preview: {
+            kind: 'subagent_delegation',
+            agentName: 'reviewer',
+            task: 'Review B',
+          },
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+
+    const items = groupParallelAgents(messages);
+
+    expect(items).toHaveLength(3);
+    expect(items[0]).toMatchObject({
+      type: 'message',
+      message: { role: 'tool_group' },
+    });
+    expect(items[1]).toMatchObject({
+      type: 'message',
+      message: { role: 'thinking', content: 'thinking between agents' },
+    });
+    expect(items[2]).toMatchObject({
+      type: 'message',
+      message: { role: 'tool_group' },
+    });
+    expect(items.some((item) => item.type === 'parallel_agents')).toBe(false);
+  });
+
   it('keeps unparented assistant text in the main transcript', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-1', 'agent-call-1', 'in_progress', 10, {
@@ -1569,6 +1891,22 @@ describe('transcriptBlocksToDaemonMessages', () => {
         isStreaming: false,
         timestamp: 1,
       },
+    ]);
+  });
+
+  it('keeps identity-tagged assistant segments as separate messages', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'first', 1, false, {
+        segmentId: 'record-1:0',
+      }),
+      textBlock('a2', 'assistant', 'second', 2, false, {
+        segmentId: 'record-2:0',
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      { id: 'a1', role: 'assistant', content: 'first' },
+      { id: 'a2', role: 'assistant', content: 'second' },
     ]);
   });
 
@@ -1914,21 +2252,26 @@ describe('transcriptBlocksToDaemonMessages', () => {
   });
 
   it('appends shell output to preceding tool_group', () => {
-    const messages = transcriptBlocksToDaemonMessages([
-      toolBlock('t1', 'tc1', 'completed', 1, {
-        toolName: 'bash',
-        toolKind: 'execute',
-      }),
-      shellBlock('sh1', 'output text', 2),
-    ]);
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('t1', 'tc1', 'completed', 1, {
+          toolName: 'bash',
+          toolKind: 'execute',
+        }),
+        shellBlock('sh1', 'output text', 2),
+      ],
+      { includeSourceIdentity: true },
+    );
 
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({
       role: 'tool_group',
+      sourceBlockIds: ['t1', 'sh1'],
       tools: [
         {
           callId: 'tc1',
           rawOutput: 'output text',
+          sourceBlockIds: ['t1', 'sh1'],
         },
       ],
     });
@@ -2180,6 +2523,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         {
           callId: 'agent-1',
           status: 'completed',
+          wasCancelled: true,
           endTime: 30,
           rawOutput: {
             status: 'cancelled',
@@ -2231,6 +2575,492 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('renders typed todo results after raw fields are removed', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('todo-typed', 'todo-call', 'completed', 1, {
+          toolName: 'todo_write',
+          preview: {
+            kind: 'todo_list',
+            entries: [
+              {
+                id: 'implement',
+                content: 'Implement contract',
+                status: 'completed',
+                blockedBy: ['audit'],
+              },
+            ],
+            planId: 'plan-1',
+            revision: 2,
+          },
+          resultPreview: {
+            kind: 'todo_list',
+            entries: [
+              {
+                id: 'implement',
+                content: 'Implement contract',
+                status: 'completed',
+                blockedBy: ['audit'],
+              },
+            ],
+            planId: 'plan-1',
+            revision: 2,
+          },
+          rawInput: undefined,
+          rawOutput: undefined,
+          content: undefined,
+        }),
+      ],
+      { includeSourceIdentity: true, safeToolProjection: true },
+    );
+
+    expect(messages).toMatchObject([
+      {
+        role: 'tool_group',
+        sourceBlockIds: ['todo-typed'],
+        tools: [
+          {
+            callId: 'todo-call',
+            sourceBlockIds: ['todo-typed'],
+            rawOutput: {
+              entries: [
+                {
+                  content: 'Implement contract',
+                  status: 'completed',
+                },
+              ],
+              plan: { id: 'plan-1', revision: 2 },
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('keeps safe todo preview entries extractable with a text result', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('todo-safe', 'todo-call', 'failed', 1, {
+          toolName: 'todo_write',
+          preview: {
+            kind: 'todo_list',
+            entries: [
+              {
+                id: 'implement',
+                content: 'Implement contract',
+                status: 'pending',
+              },
+            ],
+            planId: 'plan-1',
+            revision: 2,
+          },
+          resultPreview: {
+            kind: 'text',
+            text: 'Todo completion blocked',
+          },
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+
+    expect(tool?.args).toMatchObject({
+      entries: [{ content: 'Implement contract', status: 'pending' }],
+    });
+    expect(tool && extractTodosFromToolCall(tool)).toEqual([
+      {
+        id: 'implement',
+        content: 'Implement contract',
+        status: 'pending',
+      },
+    ]);
+  });
+
+  it('preserves typed file diff previews after raw fields are removed', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('diff-typed', 'diff-call', 'completed', 1, {
+          toolName: 'edit',
+          preview: {
+            kind: 'file_diff',
+            path: 'document.ts',
+            oldText: 'old content',
+            newText: 'DOCUMENT_DIFF_DETAIL',
+          },
+          resultPreview: { kind: 'text', text: 'Diff completed' },
+          rawInput: undefined,
+          rawOutput: undefined,
+          content: undefined,
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool).toMatchObject({
+      args: {
+        path: 'document.ts',
+        oldText: 'old content',
+        newText: 'DOCUMENT_DIFF_DETAIL',
+      },
+      rawOutput: 'Diff completed',
+    });
+  });
+
+  it.each(['cancelled', 'canceled'])(
+    'keeps %s edits unapplied in safe projection',
+    (status) => {
+      const messages = transcriptBlocksToDaemonMessages(
+        [
+          toolBlock('diff-cancelled', 'diff-call', status, 1, {
+            toolName: 'edit',
+            preview: {
+              kind: 'file_diff',
+              path: 'document.ts',
+              oldText: 'old content',
+              newText: 'attempted content',
+            },
+            resultPreview: { kind: 'text', text: 'Edit cancelled' },
+          }),
+        ],
+        { safeToolProjection: true },
+      );
+
+      const tool =
+        messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+      expect(tool).toMatchObject({ status: 'failed' });
+    },
+  );
+
+  it('keeps raw tool data authoritative in the default projection', () => {
+    const rawInput = {
+      file_path: 'src/generated.ts',
+      content: 'RAW_INPUT_CONTENT\nSECOND_LINE\n',
+    };
+    const rawOutput = {
+      returnDisplay: 'RAW_RESULT',
+      audit: 'KEEP_ME',
+    };
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('write-raw', 'write-call', 'completed', 1, {
+        toolName: 'write_file',
+        rawInput,
+        rawOutput,
+        preview: {
+          kind: 'file_diff',
+          path: 'src/generated.ts',
+          newText: 'PREVIEW_NEW_TEXT\n',
+        },
+        resultPreview: { kind: 'text', text: 'SAFE_RESULT' },
+      }),
+    ]);
+
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.args).toEqual(rawInput);
+    expect(tool?.rawOutput).toEqual(rawOutput);
+  });
+
+  it('does not inspect typed projections in the default projection', () => {
+    const malformedTypedBlock = {
+      ...toolBlock('write-malformed', 'write-call', 'completed', 1, {
+        toolName: 'write_file',
+        rawInput: { content: 'RAW_INPUT' },
+        rawOutput: 'RAW_OUTPUT',
+      }),
+      preview: { kind: 'todo_list' },
+      resultPreview: { kind: 'todo_list' },
+    } as unknown as DaemonToolTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([malformedTypedBlock]);
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.args).toEqual({ content: 'RAW_INPUT' });
+    expect(tool?.rawOutput).toBe('RAW_OUTPUT');
+  });
+
+  it('does not consume typed tool projections in the default projection', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('write-preview-only', 'write-call', 'completed', 1, {
+        toolName: 'write_file',
+        preview: {
+          kind: 'file_diff',
+          path: 'src/generated.ts',
+          newText: 'SAFE_CONTENT\n',
+        },
+        resultPreview: { kind: 'text', text: 'SAFE_RESULT' },
+      }),
+    ]);
+
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(messages).toHaveLength(1);
+    expect(tool).toBeDefined();
+    expect(tool?.args).toBeUndefined();
+    expect(tool?.rawOutput).toBeUndefined();
+  });
+
+  it('does not replace raw tool data with completion previews', () => {
+    const rawInput = {
+      file_path: 'src/generated.ts',
+      content: 'RAW_START_CONTENT\n',
+    };
+    const rawOutput = { audit: 'RAW_START_RESULT' };
+    const blocks = [
+      toolBlock('write-start', 'write-call', 'in_progress', 1, {
+        toolName: 'write_file',
+        rawInput,
+        rawOutput,
+      }),
+      toolBlock('write-complete', 'write-call', 'completed', 2, {
+        toolName: 'write_file',
+        preview: {
+          kind: 'file_diff',
+          path: 'src/generated.ts',
+          newText: 'SAFE_COMPLETION_CONTENT\n',
+        },
+        resultPreview: { kind: 'text', text: 'SAFE_COMPLETION_RESULT' },
+      }),
+    ];
+
+    const messages = transcriptBlocksToDaemonMessages(blocks);
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.args).toEqual(rawInput);
+    expect(tool?.rawOutput).toEqual(rawOutput);
+  });
+
+  it('uses completion previews when multi-block safe projection is explicit', () => {
+    const blocks = [
+      toolBlock('write-start', 'write-call', 'in_progress', 1, {
+        toolName: 'write_file',
+        rawInput: {
+          file_path: 'src/generated.ts',
+          content: 'RAW_START_CONTENT\n',
+        },
+        rawOutput: { audit: 'RAW_START_RESULT' },
+      }),
+      toolBlock('write-complete', 'write-call', 'completed', 2, {
+        toolName: 'write_file',
+        preview: {
+          kind: 'file_diff',
+          path: 'src/generated.ts',
+          newText: 'SAFE_COMPLETION_CONTENT\n',
+        },
+        resultPreview: { kind: 'text', text: 'SAFE_COMPLETION_RESULT' },
+      }),
+    ];
+
+    const messages = transcriptBlocksToDaemonMessages(blocks, {
+      safeToolProjection: true,
+    });
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.args).toEqual({
+      path: 'src/generated.ts',
+      newText: 'SAFE_COMPLETION_CONTENT\n',
+    });
+    expect(tool?.rawOutput).toBe('SAFE_COMPLETION_RESULT');
+  });
+
+  it('uses typed tool projections when safe projection is explicit', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('write-safe', 'write-call', 'completed', 1, {
+          toolName: 'write_file',
+          rawInput: {
+            file_path: 'src/generated.ts',
+            content: 'RAW_INPUT_CONTENT\n',
+          },
+          rawOutput: { audit: 'DO_NOT_EXPORT' },
+          preview: {
+            kind: 'file_diff',
+            path: 'src/generated.ts',
+            newText: 'SAFE_CONTENT\n',
+          },
+          resultPreview: { kind: 'text', text: 'SAFE_RESULT' },
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.args).toEqual({
+      path: 'src/generated.ts',
+      newText: 'SAFE_CONTENT\n',
+    });
+    expect(tool?.rawOutput).toBe('SAFE_RESULT');
+  });
+
+  it('never falls back to raw tool data in safe projection', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('raw-only', 'raw-only-call', 'completed', 1, {
+          toolName: 'custom_tool',
+          rawInput: { secret: 'RAW_INPUT' },
+          rawOutput: { secret: 'RAW_OUTPUT' },
+          content: [
+            {
+              type: 'content',
+              content: { type: 'text', text: 'RAW_CONTENT' },
+            },
+          ],
+          preview: { kind: 'generic' },
+          resultPreview: undefined,
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(messages).toHaveLength(1);
+    expect(tool).toMatchObject({ callId: 'raw-only-call' });
+    expect(tool?.args).toBeUndefined();
+    expect(tool?.rawOutput).toBeUndefined();
+    expect(tool?.content).toBeUndefined();
+  });
+
+  it('renders resolved permission history from safe identity fields', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        {
+          id: 'permission-safe',
+          kind: 'permission',
+          requestId: 'request-safe',
+          title: 'Allow file read?',
+          options: [{ optionId: 'reject', label: 'Reject', raw: null }],
+          preview: { kind: 'file_read', path: 'src/index.ts' },
+          toolCallId: 'read-safe',
+          toolName: 'read',
+          toolKind: 'read',
+          resolved: 'rejected',
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ],
+      { includeSourceIdentity: true, safeToolProjection: true },
+    );
+
+    expect(messages).toMatchObject([
+      {
+        role: 'tool_group',
+        sourceBlockIds: ['permission-safe'],
+        tools: [
+          {
+            callId: 'read-safe',
+            toolName: 'read',
+            status: 'failed',
+            args: { path: 'src/index.ts' },
+          },
+        ],
+      },
+    ]);
+
+    const neutral = transcriptBlocksToDaemonMessages(
+      [
+        {
+          id: 'permission-neutral',
+          kind: 'permission',
+          requestId: 'request-neutral',
+          title: 'Permission resolved',
+          options: [],
+          preview: { kind: 'file_read', path: 'src/index.ts' },
+          toolCallId: 'read-neutral',
+          toolName: 'read',
+          resolved: 'resolved',
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ],
+      { safeToolProjection: true },
+    );
+    expect(neutral).toMatchObject([
+      {
+        role: 'tool_group',
+        tools: [{ callId: 'read-neutral', status: 'completed' }],
+      },
+    ]);
+
+    const runtimeNeutral = transcriptBlocksToDaemonMessages([
+      {
+        id: 'permission-neutral-runtime',
+        kind: 'permission',
+        requestId: 'request-neutral-runtime',
+        title: 'Permission resolved',
+        options: [],
+        preview: { kind: 'file_read', path: 'src/index.ts' },
+        toolCallId: 'read-neutral-runtime',
+        toolName: 'read',
+        resolved: 'resolved',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    ]);
+    expect(runtimeNeutral).toEqual([]);
+  });
+
+  it('retains every source block when assistant blocks merge', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        textBlock('assistant-a', 'assistant', 'A', 1),
+        textBlock('assistant-b', 'assistant', 'B', 2),
+      ],
+      { includeSourceIdentity: true },
+    );
+
+    expect(messages).toMatchObject([
+      {
+        role: 'assistant',
+        content: 'AB',
+        sourceBlockIds: ['assistant-a', 'assistant-b'],
+      },
+    ]);
+  });
+
+  it('retains nested subagent sources on the top-level rendered item', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('agent-block', 'agent-call', 'completed', 1, {
+          toolName: 'agent',
+        }),
+        textBlock('agent-text', 'assistant', 'Subagent result', 2, false, {
+          parentToolCallId: 'agent-call',
+        }),
+        toolBlock('agent-child-tool', 'child-call', 'completed', 3, {
+          toolName: 'read',
+          parentToolCallId: 'agent-call',
+        }),
+      ],
+      { includeSourceIdentity: true },
+    );
+
+    expect(messages).toMatchObject([
+      {
+        role: 'tool_group',
+        sourceBlockIds: ['agent-block', 'agent-text', 'agent-child-tool'],
+        tools: [
+          {
+            callId: 'agent-call',
+            sourceBlockIds: ['agent-block', 'agent-text', 'agent-child-tool'],
+            subTools: [
+              {
+                callId: 'child-call',
+                sourceBlockIds: ['agent-child-tool'],
+              },
+            ],
+          },
+        ],
+      },
+    ]);
+  });
+
   it('does not synthesize a generic tool card for AskUserQuestion permissions', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('a1', 'assistant', 'I will ask for student info.', 1),
@@ -2270,51 +3100,23 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
-  it('uses AskUserQuestion permission title for the completed tool block', () => {
-    const messages = transcriptBlocksToDaemonMessages([
-      {
-        id: 'perm-ask-1',
-        kind: 'permission',
-        requestId: 'req-ask-1',
-        sessionId: 'sess-1',
-        title: 'Ask user 4 questions',
-        options: [{ optionId: 'proceed_once', label: 'Submit', raw: {} }],
-        toolCall: {
-          toolCallId: 'ask-call-1',
-          kind: 'think',
-          status: 'pending',
+  it.each([false, true])(
+    'uses AskUserQuestion permission details regardless of block order (tool first=%s)',
+    (toolFirst) => {
+      const blocks: DaemonTranscriptBlock[] = [
+        {
+          id: 'perm-ask-1',
+          kind: 'permission',
+          requestId: 'req-ask-1',
+          sessionId: 'sess-1',
           title: 'Ask user 4 questions',
-          rawInput: {
-            questions: [
-              {
-                header: '姓名',
-                question: '请输入学生的姓名：',
-                options: [{ label: '张三', description: '示例姓名' }],
-              },
-            ],
-          },
-        },
-        preview: { kind: 'generic' as const },
-        clientReceivedAt: 1,
-        createdAt: 1,
-        updatedAt: 2,
-        resolved: 'selected:proceed_once',
-      },
-      toolBlock('ask-tool-1', 'ask-call-1', 'completed', 3, {
-        toolName: 'ask_user_question',
-        title: 'ask_user_question',
-        rawOutput: 'User has provided the following answers:\n\n**姓名**: 张三',
-      }),
-    ]);
-
-    expect(messages).toMatchObject([
-      {
-        role: 'tool_group',
-        tools: [
-          {
-            callId: 'ask-call-1',
+          options: [{ optionId: 'proceed_once', label: 'Submit', raw: {} }],
+          toolCall: {
+            toolCallId: 'ask-call-1',
+            kind: 'think',
+            status: 'pending',
             title: 'Ask user 4 questions',
-            args: {
+            rawInput: {
               questions: [
                 {
                   header: '姓名',
@@ -2323,13 +3125,49 @@ describe('transcriptBlocksToDaemonMessages', () => {
                 },
               ],
             },
-            rawOutput:
-              'User has provided the following answers:\n\n**姓名**: 张三',
           },
-        ],
-      },
-    ]);
-  });
+          preview: { kind: 'generic' as const },
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 2,
+          resolved: 'selected:proceed_once',
+        },
+        toolBlock('ask-tool-1', 'ask-call-1', 'completed', 3, {
+          toolName: 'ask_user_question',
+          title: 'ask_user_question',
+          rawInput: {},
+          rawOutput:
+            'User has provided the following answers:\n\n**姓名**: 张三',
+        }),
+      ];
+      const messages = transcriptBlocksToDaemonMessages(
+        toolFirst ? blocks.reverse() : blocks,
+      );
+
+      expect(messages).toMatchObject([
+        {
+          role: 'tool_group',
+          tools: [
+            {
+              callId: 'ask-call-1',
+              title: 'Ask user 4 questions',
+              args: {
+                questions: [
+                  {
+                    header: '姓名',
+                    question: '请输入学生的姓名：',
+                    options: [{ label: '张三', description: '示例姓名' }],
+                  },
+                ],
+              },
+              rawOutput:
+                'User has provided the following answers:\n\n**姓名**: 张三',
+            },
+          ],
+        },
+      ]);
+    },
+  );
 
   it('uses text content as raw output when a tool has no raw output', () => {
     const messages = transcriptBlocksToDaemonMessages([
@@ -3585,6 +4423,29 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it.each([false, undefined])(
+    'keeps merged readiness true when a later block supplies %s',
+    (subagentSessionReady) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('ready', 'agent-1', 'in_progress', 10, {
+          toolName: 'agent',
+          subagentSessionReady: true,
+        }),
+        toolBlock('later', 'agent-1', 'in_progress', 20, {
+          toolName: 'agent',
+          subagentSessionReady,
+        }),
+      ]);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ callId: 'agent-1', subagentSessionReady: true }],
+      });
+      if (messages[0].role === 'tool_group')
+        expect(messages[0].tools).toHaveLength(1);
+    },
+  );
+
   it('mergeToolCall updates fields from completion block', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
@@ -3595,7 +4456,11 @@ describe('transcriptBlocksToDaemonMessages', () => {
       toolBlock('agent-end', 'agent-1', 'completed', 20, {
         title: 'Agent: work done',
         toolName: 'agent',
-        rawOutput: { type: 'task_execution', totalTokens: 500 },
+        rawOutput: {
+          type: 'task_execution',
+          executionMode: 'background',
+          totalTokens: 500,
+        },
         updatedAt: 25,
       }),
     ]);
@@ -3606,10 +4471,56 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(tool?.title).toBe('Agent: work done');
     expect(tool?.status).toBe('completed');
     expect(tool?.endTime).toBe(25);
+    expect(tool?.executionMode).toBe('background');
     expect(tool?.rawOutput).toEqual({
       type: 'task_execution',
+      executionMode: 'background',
       totalTokens: 500,
     });
+  });
+
+  it('rejects an unknown executionMode literal from task_execution rawOutput', () => {
+    // Only the two known literals may flow through as authoritative; any
+    // other value (corrupted recording, future runtime mode) must fall back
+    // to the compatibility heuristic instead of forcing a classification.
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: work',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+        rawOutput: { type: 'task_execution', executionMode: 'detached' },
+      }),
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.executionMode).toBeUndefined();
+    expect(tool?.rawOutput).toEqual({
+      type: 'task_execution',
+      executionMode: 'detached',
+    });
+  });
+
+  it('accepts the foreground executionMode literal over the frozen heuristic', () => {
+    // Shaped as a downgraded nested agent's block in the child session's
+    // transcript: top-level-shaped (no parentToolCallId) with an empty arg
+    // object. Without the authoritative literal, the frozen compatibility
+    // heuristic's defaultsToBackground branch would classify exactly this
+    // block background and hide the inline result — the literal must win so
+    // the downgrade direction stays pinned end-to-end.
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: work',
+        toolName: 'agent',
+        rawInput: {},
+        rawOutput: { type: 'task_execution', executionMode: 'foreground' },
+      }),
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.executionMode).toBe('foreground');
+    expect(tool?.status).toBe('in_progress');
   });
 
   it('does not merge assistant across error block', () => {
@@ -4055,3 +4966,105 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(agentB!.subContent).toBeUndefined();
   });
 });
+
+describe('running subagent replay start time', () => {
+  function firstTool(blocks: DaemonTranscriptBlock[]) {
+    return transcriptBlocksToDaemonMessages(blocks).find(
+      (message) => message.role === 'tool_group',
+    )?.tools[0];
+  }
+
+  it.each([10_000, 20_000])(
+    'keeps the server start when reopened at %s',
+    (receivedAt) => {
+      const tool = firstTool([
+        toolBlock('agent', 'agent-1', 'in_progress', receivedAt, {
+          toolName: 'Agent',
+          serverTimestamp: 1_000,
+        }),
+      ]);
+      expect(tool?.startTime).toBe(1_000);
+    },
+  );
+
+  it.each([
+    ['Agent', 'completed', 1_000],
+    ['Agent', 'failed', 1_000],
+    ['Read', 'in_progress', 1_000],
+    ['Agent', 'in_progress', undefined],
+  ])(
+    'preserves existing timing for %s/%s/%s',
+    (toolName, status, serverTimestamp) => {
+      const tool = firstTool([
+        toolBlock('tool', 'tool-1', status, 10_000, {
+          toolName,
+          serverTimestamp,
+        }),
+      ]);
+      expect(tool?.startTime).toBe(10_000);
+    },
+  );
+});
+
+it.each(['selected:allow', 'selected:cancel'])(
+  'keeps permission merging compatible with the running clock (%s)',
+  (resolved) => {
+    const permission: DaemonTranscriptBlock = {
+      id: 'permission',
+      kind: 'permission',
+      requestId: 'req',
+      sessionId: 'session',
+      title: 'Agent',
+      options: [],
+      preview: { kind: 'generic' },
+      resolved,
+      toolCall: {
+        toolCallId: 'agent-1',
+        rawInput: { subagent_type: 'general-purpose' },
+      },
+      serverTimestamp: 1_000,
+      clientReceivedAt: 10_000,
+      createdAt: 10_000,
+      updatedAt: 11_000,
+    };
+    const real = toolBlock('real', 'agent-1', 'in_progress', 12_000, {
+      toolName: 'Agent',
+      serverTimestamp: 2_000,
+    });
+    for (const blocks of [
+      [permission],
+      [permission, real],
+      [real, permission],
+    ]) {
+      const tool = transcriptBlocksToDaemonMessages(blocks).find(
+        (message) => message.role === 'tool_group',
+      )?.tools[0];
+      if (tool?.endTime !== undefined) {
+        expect(tool.endTime).toBe(11_000);
+        expect(tool.startTime).toBe(blocks[0].createdAt);
+      } else {
+        expect(tool?.startTime).toBe(blocks.includes(real) ? 2_000 : 1_000);
+      }
+    }
+  },
+);
+
+it.each([true, false])(
+  'preserves subagent readiness with safeToolProjection=%s',
+  (safeToolProjection) => {
+    for (const subagentSessionReady of [false, true, undefined]) {
+      const messages = transcriptBlocksToDaemonMessages(
+        [
+          toolBlock('agent', 'agent-1', 'running', 1, {
+            toolName: 'agent',
+            subagentSessionReady,
+          }),
+        ],
+        { safeToolProjection },
+      );
+      expect(messages).toMatchObject([
+        { role: 'tool_group', tools: [{ subagentSessionReady }] },
+      ]);
+    }
+  },
+);

@@ -18,6 +18,10 @@ import { LoggingContentGenerator } from './index.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
 import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
 import {
+  convertResponsesEventToGemini,
+  ResponsesStreamState,
+} from '../openaiResponsesContentGenerator/responses-converter.js';
+import {
   logApiRequest,
   logApiResponse,
   logApiError,
@@ -293,16 +297,16 @@ function createOwnedLlmSpan(
   };
 }
 
-const realConvertGeminiRequestToOpenAI =
-  OpenAIContentConverter.convertGeminiRequestToOpenAI;
-const convertGeminiRequestToOpenAISpy = vi
-  .spyOn(OpenAIContentConverter, 'convertGeminiRequestToOpenAI')
+const realConvertLlmRequestToOpenAI =
+  OpenAIContentConverter.convertLlmRequestToOpenAI;
+const convertLlmRequestToOpenAISpy = vi
+  .spyOn(OpenAIContentConverter, 'convertLlmRequestToOpenAI')
   .mockReturnValue([{ role: 'user', content: 'converted' }]);
-const convertGeminiToolsToOpenAISpy = vi
-  .spyOn(OpenAIContentConverter, 'convertGeminiToolsToOpenAI')
+const convertLlmToolsToOpenAISpy = vi
+  .spyOn(OpenAIContentConverter, 'convertLlmToolsToOpenAI')
   .mockResolvedValue([{ type: 'function', function: { name: 'tool' } }]);
-const convertGeminiResponseToOpenAISpy = vi
-  .spyOn(OpenAIContentConverter, 'convertGeminiResponseToOpenAI')
+const convertLlmResponseToOpenAISpy = vi
+  .spyOn(OpenAIContentConverter, 'convertLlmResponseToOpenAI')
   .mockReturnValue({
     id: 'openai-response',
     object: 'chat.completion',
@@ -329,6 +333,14 @@ const createConfig = (overrides: Record<string, unknown> = {}): Config => {
     getSessionId: () =>
       (configContent['sessionId'] as string | undefined) ?? 'test-session',
     getTelemetryUserId: () => configContent['userId'] as string | undefined,
+    getUserMemory: () => (configContent['userMemory'] as string) ?? '',
+    getAutoMemoryPrompt: () =>
+      (configContent['autoMemoryPrompt'] as string) ?? '',
+    getAutoCompactThreshold: () =>
+      configContent['autoCompactThreshold'] as number | undefined,
+    getToolRegistry: () =>
+      configContent['toolRegistry'] ?? { getTool: () => undefined },
+    getSkillManager: () => configContent['skillManager'] ?? null,
   } as Config;
 };
 
@@ -339,9 +351,7 @@ const createWrappedGenerator = (
   ({
     generateContent,
     generateContentStream,
-    countTokens: vi.fn(),
     embedContent: vi.fn(),
-    useSummarizedThinking: vi.fn().mockReturnValue(false),
   }) as ContentGenerator;
 
 const createResponse = (
@@ -420,9 +430,9 @@ describe('LoggingContentGenerator', () => {
 
   afterEach(() => {
     vi.useRealTimers();
-    convertGeminiRequestToOpenAISpy.mockClear();
-    convertGeminiToolsToOpenAISpy.mockClear();
-    convertGeminiResponseToOpenAISpy.mockClear();
+    convertLlmRequestToOpenAISpy.mockClear();
+    convertLlmToolsToOpenAISpy.mockClear();
+    convertLlmResponseToOpenAISpy.mockClear();
   });
 
   it('passes the owning config identity to a standalone LLM span', async () => {
@@ -459,6 +469,143 @@ describe('LoggingContentGenerator', () => {
         userId: 'owner-user',
       }),
     );
+  });
+
+  it('snapshots context usage before a non-stream request starts', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-context', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      contextWindowSize: 100_000,
+    });
+
+    await generator.generateContent(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+        config: { systemInstruction: 'system' },
+      },
+      'context-prompt',
+    );
+
+    expect(
+      vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]
+        ?.contextUsage,
+    ).toMatchObject({
+      version: 1,
+      window_size_tokens: 100_000,
+      breakdown: {
+        system_prompt_tokens: 2,
+        messages_tokens: 2,
+      },
+      estimated: true,
+    });
+  });
+
+  it('reads the live context window after a hot model switch', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-context', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generatorConfig = {
+      model: 'test-model',
+      authType: AuthType.QWEN_OAUTH,
+      contextWindowSize: 1_000_000,
+    };
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig(),
+      generatorConfig,
+    );
+    const request: GenerateContentParameters = {
+      model: 'test-model',
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+    };
+
+    await generator.generateContent(request, 'before-model-switch');
+    generatorConfig.contextWindowSize = 262_144;
+    await generator.generateContent(request, 'after-model-switch');
+
+    expect(
+      vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]?.contextUsage
+        ?.window_size_tokens,
+    ).toBe(1_000_000);
+    expect(
+      vi.mocked(startLLMRequestSpanWithContext).mock.calls[1]?.[2]?.contextUsage
+        ?.window_size_tokens,
+    ).toBe(262_144);
+  });
+
+  it('snapshots context usage before a stream is iterated', async () => {
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield createResponse('resp-context', 'test-model', [{ text: 'ok' }]);
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      contextWindowSize: 100_000,
+    });
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+      'context-stream-prompt',
+    );
+
+    expect(
+      vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]?.contextUsage
+        ?.window_size_tokens,
+    ).toBe(100_000);
+    for await (const _chunk of stream) {
+      // Drain the stream so span finalization runs.
+    }
+  });
+
+  it('skips context snapshot work when telemetry is disabled', async () => {
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-context', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+    });
+
+    await generator.generateContent(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+      'context-disabled-prompt',
+    );
+
+    expect(
+      vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]
+        ?.contextUsage,
+    ).toBeUndefined();
   });
 
   it('uses the final logical-parent session for API logs', async () => {
@@ -512,6 +659,7 @@ describe('LoggingContentGenerator', () => {
       expect.anything(),
       expect.anything(),
       'parent-session',
+      undefined,
     );
   });
 
@@ -569,6 +717,7 @@ describe('LoggingContentGenerator', () => {
       expect.anything(),
       expect.anything(),
       'stream-session-B',
+      undefined,
     );
     expect(activeOtelContext.current).toBe('root');
   });
@@ -664,9 +813,9 @@ describe('LoggingContentGenerator', () => {
     expect(responseEvent.input_token_count).toBe(3);
     expect(responseEvent.response_text).toBe('ok');
 
-    expect(convertGeminiRequestToOpenAISpy).toHaveBeenCalledTimes(1);
-    expect(convertGeminiToolsToOpenAISpy).toHaveBeenCalledTimes(1);
-    expect(convertGeminiResponseToOpenAISpy).toHaveBeenCalledTimes(1);
+    expect(convertLlmRequestToOpenAISpy).toHaveBeenCalledTimes(1);
+    expect(convertLlmToolsToOpenAISpy).toHaveBeenCalledTimes(1);
+    expect(convertLlmResponseToOpenAISpy).toHaveBeenCalledTimes(1);
 
     const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
       ?.value as { logInteraction: ReturnType<typeof vi.fn> };
@@ -1897,9 +2046,8 @@ describe('LoggingContentGenerator', () => {
     expect(responseEvent.input_token_count).toBe(2);
     expect(responseEvent.response_text).toBe('Hello world');
 
-    expect(convertGeminiResponseToOpenAISpy).toHaveBeenCalledTimes(1);
-    const [consolidatedResponse] =
-      convertGeminiResponseToOpenAISpy.mock.calls[0];
+    expect(convertLlmResponseToOpenAISpy).toHaveBeenCalledTimes(1);
+    const [consolidatedResponse] = convertLlmResponseToOpenAISpy.mock.calls[0];
     const consolidatedParts =
       consolidatedResponse.candidates?.[0]?.content?.parts || [];
     expect(consolidatedParts).toEqual([
@@ -1949,11 +2097,11 @@ describe('LoggingContentGenerator', () => {
     });
     const consolidateSpy = vi.spyOn(
       generator as unknown as {
-        consolidateGeminiResponsesForLogging: (
+        consolidateLlmResponsesForLogging: (
           responses: GenerateContentResponse[],
         ) => GenerateContentResponse | undefined;
       },
-      'consolidateGeminiResponsesForLogging',
+      'consolidateLlmResponsesForLogging',
     );
 
     const stream = await generator.generateContentStream(
@@ -2199,6 +2347,73 @@ describe('LoggingContentGenerator', () => {
       outputTokens: 3,
     });
     expect(spanRecord.ended).toBe(true);
+  });
+
+  it('reports nested Responses stream errors with provider details', async () => {
+    const message =
+      'Your requests to gpt-6-astra in eastus have exceeded rate limit.';
+    const expectedMessage = `Responses API error: rate_limit_exceeded: ${message}`;
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          const chunk = convertResponsesEventToGemini(
+            {
+              event: 'error',
+              data: {
+                type: 'error',
+                error: {
+                  message,
+                  type: 'too_many_requests',
+                  code: 'rate_limit_exceeded',
+                },
+              },
+            },
+            'gpt-6-astra',
+            new ResponsesStreamState(),
+          );
+          if (chunk) yield chunk;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'gpt-6-astra',
+      authType: AuthType.USE_OPENAI_RESPONSES,
+      enableOpenAILogging: true,
+    });
+    const stream = await generator.generateContentStream(
+      { model: 'gpt-6-astra', contents: 'Hello' },
+      'prompt-responses-error',
+    );
+    await expect(async () => {
+      for await (const _item of stream) {
+        // Consume the stream to reach the provider error.
+      }
+    }).rejects.toThrow(expectedMessage);
+
+    expect(logApiResponse).not.toHaveBeenCalled();
+    expect(logApiError).toHaveBeenCalledTimes(1);
+    const [, errorEvent] = vi.mocked(logApiError).mock.calls[0];
+    expect(errorEvent).toMatchObject({
+      error_message: expectedMessage,
+      error_type: 'too_many_requests',
+      status_code: 429,
+      auth_type: AuthType.USE_OPENAI_RESPONSES,
+    });
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    const [, , loggedError] = openaiLoggerInstance.logInteraction.mock.calls[0];
+    expect(loggedError).toMatchObject({
+      message: expectedMessage,
+      code: 'rate_limit_exceeded',
+      type: 'too_many_requests',
+      status: 429,
+    });
+    expect(getStreamSpanRecord().endMetadata).toMatchObject({
+      success: false,
+      errorType: 'too_many_requests',
+      errorStatusCode: 429,
+    });
   });
 
   it('keeps a real partial-stream failure as an error when it races an abort', async () => {
@@ -2836,9 +3051,9 @@ describe('LoggingContentGenerator', () => {
   });
 
   it('uses generator modalities when converting logged OpenAI requests', async () => {
-    convertGeminiRequestToOpenAISpy.mockImplementationOnce(
+    convertLlmRequestToOpenAISpy.mockImplementationOnce(
       (request, requestContext, options) =>
-        realConvertGeminiRequestToOpenAI(request, requestContext, options),
+        realConvertLlmRequestToOpenAI(request, requestContext, options),
     );
 
     const wrapped = createWrappedGenerator(
@@ -2883,7 +3098,7 @@ describe('LoggingContentGenerator', () => {
 
     await generator.generateContent(request, 'prompt-5');
 
-    expect(convertGeminiRequestToOpenAISpy).toHaveBeenCalledWith(
+    expect(convertLlmRequestToOpenAISpy).toHaveBeenCalledWith(
       request,
       expect.objectContaining({
         model: 'test-model',
@@ -2914,9 +3129,9 @@ describe('LoggingContentGenerator', () => {
   });
 
   it('uses string tool result content in reconstructed OpenAI logs when configured', async () => {
-    convertGeminiRequestToOpenAISpy.mockImplementationOnce(
+    convertLlmRequestToOpenAISpy.mockImplementationOnce(
       (request, requestContext, options) =>
-        realConvertGeminiRequestToOpenAI(request, requestContext, options),
+        realConvertLlmRequestToOpenAI(request, requestContext, options),
     );
 
     const wrapped = createWrappedGenerator(
@@ -3130,7 +3345,7 @@ describe('LoggingContentGenerator', () => {
 
     // No capture fires, so resolve() falls through to the synthetic builder.
     // Force the synthetic build to throw, then verify the API result still surfaces.
-    convertGeminiRequestToOpenAISpy.mockImplementationOnce(() => {
+    convertLlmRequestToOpenAISpy.mockImplementationOnce(() => {
       throw new Error('synth-fail-success');
     });
 
@@ -3154,7 +3369,7 @@ describe('LoggingContentGenerator', () => {
       enableOpenAILogging: true,
       openAILoggingDir: 'logs',
     });
-    convertGeminiRequestToOpenAISpy.mockImplementationOnce(() => {
+    convertLlmRequestToOpenAISpy.mockImplementationOnce(() => {
       throw new Error('synth-fail-error');
     });
 
@@ -3287,6 +3502,10 @@ describe('LoggingContentGenerator', () => {
 
       // logApiRequest should NOT be called for internal prompts
       expect(logApiRequest).not.toHaveBeenCalled();
+      expect(
+        vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]
+          ?.contextUsage,
+      ).toBeUndefined();
       // logApiResponse SHOULD be called (for /stats token tracking)
       expect(logApiResponse).toHaveBeenCalled();
       const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
@@ -3356,6 +3575,10 @@ describe('LoggingContentGenerator', () => {
       }
 
       expect(logApiRequest).not.toHaveBeenCalled();
+      expect(
+        vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]
+          ?.contextUsage,
+      ).toBeUndefined();
       expect(logApiResponse).toHaveBeenCalled();
       const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
       expect(responseEvent.response_text).toBeUndefined();

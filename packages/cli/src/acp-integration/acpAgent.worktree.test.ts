@@ -28,11 +28,13 @@ import {
 // Hoisted mocks
 // ---------------------------------------------------------------------------
 
-const { mockRunExitCleanup } = vi.hoisted(() => ({
+const { mockRunExitCleanup, mockRegisterCleanup } = vi.hoisted(() => ({
   mockRunExitCleanup: vi.fn().mockResolvedValue(undefined),
+  mockRegisterCleanup: vi.fn(),
 }));
 vi.mock('../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
+  registerCleanup: mockRegisterCleanup,
 }));
 
 const { mockConnectionState } = vi.hoisted(() => {
@@ -105,7 +107,14 @@ const { mockRestoreWorktreeContext, mockWithDaemonSpan } = vi.hoisted(() => {
   };
 });
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
+// The agent imports the peer-messaging transport statically; its own core
+// imports would reach past this suite's exhaustive core mock, and nothing
+// here turns messaging on.
+vi.mock('../peerMessaging/peer-messaging.js', () => ({
+  PeerMessaging: { start: vi.fn() },
+}));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  registerSession: vi.fn(),
   createDebugLogger: () => ({
     debug: vi.fn(),
     error: vi.fn(),
@@ -137,6 +146,23 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     return config.getReasoningEffort() === effort;
   },
   REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
+  clampReasoningEffort: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).clampReasoningEffort,
+  getGptReasoningCapabilities: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).getGptReasoningCapabilities,
+  isReasoningEffortPlaceholder: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isReasoningEffortPlaceholder,
+  isOpenRouterHostname: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isOpenRouterHostname,
+  // The real parser: `model-configuration` gates every reasoning control on it,
+  // and a stand-in would decide capability validity differently from the wire.
+  parseModelReasoningCapabilities: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).parseModelReasoningCapabilities,
   DEFAULT_STOP_HOOK_BLOCK_CAP: 8,
   DEFAULT_MAX_SUBAGENT_DEPTH: 5,
   DEFAULT_MAX_TOOL_CALLS_PER_TURN: 100,
@@ -145,12 +171,18 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD: 500_000,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES: 1000,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD: 25_000,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP: 900,
   PRIVATE_ACP_CAPABILITY_ENV: 'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
   ApprovalMode: {
     DEFAULT: 'default',
     AUTO_EDIT: 'auto-edit',
     YOLO: 'yolo',
     PLAN: 'plan',
+  },
+  OutputFormat: {
+    TEXT: 'text',
+    JSON: 'json',
+    STREAM_JSON: 'stream-json',
   },
   Kind: {
     Read: 'read',
@@ -210,6 +242,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     snapshot: vi.fn(() => ({})),
   })),
   restoreWorktreeContext: mockRestoreWorktreeContext,
+  listWorkflowSnapshots: vi.fn().mockResolvedValue([]),
   HookEventName: {
     PreToolUse: 'PreToolUse',
     PostToolUse: 'PostToolUse',
@@ -231,6 +264,11 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     TodoCreated: 'TodoCreated',
     TodoCompleted: 'TodoCompleted',
   },
+  // Real pass-through: newSessionConfig binds the session's debug-log context
+  // via sessionIdContext.run, so the mock must expose the actual store.
+  sessionIdContext: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).sessionIdContext,
 }));
 
 vi.mock('./runtimeOutputDirContext.js', () => ({
@@ -263,6 +301,7 @@ vi.mock('./service/filesystem.js', () => ({
 vi.mock('../config/settings.js', () => ({
   SettingScope: {},
   loadSettings: vi.fn(),
+  reloadEnvironment: vi.fn(() => ({ updatedKeys: [], removedKeys: [] })),
 }));
 // Passthrough: the real cache would serve the first mockReturnValue to every
 // later same-cwd call, breaking tests that re-point loadSettings per call.
@@ -275,8 +314,15 @@ vi.mock('../config/settings-cache.js', async () => {
 vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+  buildEnabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+  // newSessionConfig's catch narrows on this class; without the export an
+  // unrelated error in the try block surfaces as a confusing mock error.
+  SessionIdConflictError: class SessionIdConflictError extends Error {},
 }));
-vi.mock('./session/Session.js', () => ({ Session: vi.fn() }));
+vi.mock('./session/Session.js', () => ({
+  Session: vi.fn(),
+  registerCreateSubSessionTool: vi.fn().mockResolvedValue(undefined),
+}));
 // ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
@@ -347,9 +393,10 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getSessionId: vi.fn().mockReturnValue(SESSION_ID),
+      getTargetDir: vi.fn().mockReturnValue('/fake/project'),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -454,7 +501,6 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
-        installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         pendingWorktreeNotice: null as string | null,

@@ -196,7 +196,7 @@ export function resolveTestScope(input: {
   const unmapped = affected.filter(
     (d) => d !== '.' && !scriptsOf.has(d) && !skipped.includes(d),
   );
-  // Files a negation excludes (!packages/desktop — a separate toolchain with
+  // Files a negation excludes (!packages/desktop-shell — a separate toolchain with
   // its own lockfile) cannot affect any included workspace's tests, so they
   // earn no incomplete-scope caveat — but their own suites were not run
   // either, and "nothing is silent" covers that too: disclose it as the

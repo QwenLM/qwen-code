@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { t } from '../../i18n/index.js';
+
 // Re-exported from core so the CLI UI, the shell/diagnostics paths in core
 // and the serve daemon all render a byte count identically.
 export { formatMemoryUsage } from '@qwen-code/qwen-code-core';
@@ -57,6 +59,18 @@ export const formatTokenCount = (count: number): string => {
   }
   return `${Math.floor(count / 1000)}k`;
 };
+
+/** Context-window usage from the used fraction: `4.5`, or `>100` past the limit. */
+export const formatPercentageUsed = (percentage: number): string => {
+  if (percentage > 1) {
+    return '>100';
+  }
+  return (percentage * 100).toFixed(1);
+};
+
+/** Narrow terminals drop "context" so the indicator still fits. */
+export const contextUsageLabel = (terminalWidth: number): string =>
+  terminalWidth < 100 ? t('% used') : t('% context used');
 
 export interface FormatDurationOptions {
   /**

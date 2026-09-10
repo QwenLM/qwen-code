@@ -6,7 +6,7 @@
 //! `CacheKey` and `CachedSnapshot` (no Drop needed — `Vec<u64>` frees
 //! itself).
 
-use super::AtspiNode;
+use super::{AtspiIdentity, AtspiNode};
 use cua_driver_core::element_cache::ElementCacheCore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -16,8 +16,14 @@ pub struct CacheKey {
 }
 
 pub struct CachedSnapshot {
-    /// element_index → element_key (opaque AT-SPI path hash).
-    pub elements: Vec<u64>,
+    pub elements: Vec<CachedElement>,
+}
+
+#[derive(Clone)]
+pub struct CachedElement {
+    pub element_key: u64,
+    pub identity: Option<AtspiIdentity>,
+    pub actions: Vec<String>,
 }
 
 pub struct ElementCache {
@@ -32,10 +38,14 @@ impl ElementCache {
     }
 
     pub fn update(&self, pid: u32, xid: u64, nodes: &[AtspiNode]) {
-        let elements: Vec<u64> = nodes
+        let elements = nodes
             .iter()
             .filter(|n| n.element_index.is_some())
-            .map(|n| n.element_key)
+            .map(|node| CachedElement {
+                element_key: node.element_key,
+                identity: node.identity.clone(),
+                actions: node.actions.clone(),
+            })
             .collect();
         self.core
             .insert(CacheKey { pid, xid }, CachedSnapshot { elements });
@@ -43,7 +53,31 @@ impl ElementCache {
 
     pub fn get_element_key(&self, pid: u32, xid: u64, idx: usize) -> Option<u64> {
         self.core
-            .with_snapshot(&CacheKey { pid, xid }, |s| s.elements.get(idx).copied())
+            .with_snapshot(&CacheKey { pid, xid }, |s| {
+                s.elements.get(idx).map(|element| element.element_key)
+            })
+            .flatten()
+    }
+
+    pub fn get_element_identity(&self, pid: u32, xid: u64, idx: usize) -> Option<AtspiIdentity> {
+        self.core
+            .with_snapshot(&CacheKey { pid, xid }, |snapshot| {
+                snapshot
+                    .elements
+                    .get(idx)
+                    .and_then(|element| element.identity.clone())
+            })
+            .flatten()
+    }
+
+    pub fn get_element_actions(&self, pid: u32, xid: u64, idx: usize) -> Option<Vec<String>> {
+        self.core
+            .with_snapshot(&CacheKey { pid, xid }, |snapshot| {
+                snapshot
+                    .elements
+                    .get(idx)
+                    .map(|element| element.actions.clone())
+            })
             .flatten()
     }
 
@@ -51,6 +85,10 @@ impl ElementCache {
         self.core
             .with_snapshot(&CacheKey { pid, xid }, |s| s.elements.len())
             .unwrap_or(0)
+    }
+
+    pub fn clear_target(&self, pid: u32, xid: u64) {
+        self.core.remove(&CacheKey { pid, xid });
     }
 }
 

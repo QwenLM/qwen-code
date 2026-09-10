@@ -7,7 +7,7 @@
 import type { CommandContext, SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import type { HistoryItemDoctor } from '../types.js';
-import { runDoctorChecks } from '../../utils/doctorChecks.js';
+import { runDoctorChecks } from './doctorChecks.js';
 import {
   collectMemoryPressureSamples,
   formatMemoryDiagnostics,
@@ -21,7 +21,7 @@ import {
   startCpuProfile,
   stopCpuProfile,
 } from '../../utils/cpuProfiler.js';
-import { rollbackStandaloneUpdate } from '../../utils/standalone-update.js';
+import { rollbackStandaloneUpdate } from '../standalone-update.js';
 import { getInstallationInfo } from '../../utils/installationInfo.js';
 import { t } from '../../i18n/index.js';
 import {
@@ -475,7 +475,7 @@ function collectToolResultRetention(
 ): ToolResultRetentionReport | null {
   try {
     const config = context.services.config;
-    const history = config?.getGeminiClient()?.getHistoryShallow();
+    const history = config?.getLlmClient()?.getHistoryShallow();
     if (!history) {
       return null;
     }

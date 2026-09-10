@@ -46,8 +46,8 @@ import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarning
  * Pause the current async function indefinitely. Used after the daemon
  * listener is up so yargs `parse()` never resolves — if it did, the
  * top-level CLI would fall through to the interactive (TUI) entry point
- * in `gemini.tsx`. SIGINT / SIGTERM in `runQwenServe` is the sole exit
- * route.
+ * in `llm.tsx`. SIGINT / SIGTERM / SIGHUP in `runQwenServe` is the sole
+ * exit route.
  */
 function blockForever(): Promise<never> {
   return new Promise<never>(() => {});
@@ -120,8 +120,10 @@ async function startLocalControl(
 /**
  * Open the Web Shell in a browser once the daemon is listening. Extracted from
  * the `serve` handler so it is unit-testable. Best-effort:
- *  - gated on `--open`, the UI actually being mounted (`webShellMounted`), and
- *    `shouldLaunchBrowser()` (false in CI / SSH / headless);
+ *  - gated on `--open` and the UI actually being mounted
+ *    (`webShellMounted`); bare `--open` remains a no-op when
+ *    `shouldLaunchBrowser()` is false, while `--open-with-auth` prints a
+ *    manual URL instead;
  *  - wildcard bind hosts (`0.0.0.0` / `[::]`) are rewritten to loopback so the
  *    URL is client-addressable;
  *  - the token rides in the URL fragment (`#token=`), which is never sent to
@@ -140,8 +142,11 @@ export async function maybeOpenWebShellBrowser(
     runtimeReady?: Promise<void>;
   },
   open: boolean,
+  manualFallbackWhenIneligible = false,
 ): Promise<void> {
-  if (!open || !handle.webShellMounted || !shouldLaunchBrowser()) return;
+  if (!open || !handle.webShellMounted) return;
+  const shouldLaunch = shouldLaunchBrowser();
+  if (!shouldLaunch && !manualFallbackWhenIneligible) return;
   try {
     await handle.runtimeReady;
   } catch (runtimeErr) {
@@ -152,14 +157,24 @@ export async function maybeOpenWebShellBrowser(
     );
     return;
   }
+  let target: URL | undefined;
   try {
-    const target = new URL(handle.url);
+    target = new URL(handle.url);
     // Node's URL returns the IPv6 wildcard as `[::]` (bracketed), never `::`.
     if (target.hostname === '0.0.0.0' || target.hostname === '[::]') {
       target.hostname = '127.0.0.1';
     }
     if (handle.resolvedToken) {
       target.hash = `token=${encodeURIComponent(handle.resolvedToken)}`;
+    }
+    if (!shouldLaunch) {
+      writeStderrLine(
+        'Browser launch is not available in this environment. ' +
+          `Please open this URL manually: ${target.toString()}`,
+      );
+      return;
+    }
+    if (handle.resolvedToken) {
       writeStderrLine(
         'qwen serve: --open passes the token in the browser launch command ' +
           '(visible via `ps` / /proc); on a multi-user host open the URL manually instead.',
@@ -167,8 +182,12 @@ export async function maybeOpenWebShellBrowser(
     }
     await openBrowserSecurely(target.toString());
   } catch (browserErr) {
+    const manualUrl =
+      manualFallbackWhenIneligible && target
+        ? `. Please open this URL manually: ${target.toString()}`
+        : '';
     writeStderrLine(
-      `qwen serve: failed to open browser: ${browserErr instanceof Error ? browserErr.message : String(browserErr)}`,
+      `qwen serve: failed to open browser: ${browserErr instanceof Error ? browserErr.message : String(browserErr)}${manualUrl}`,
     );
   }
 }
@@ -193,6 +212,7 @@ interface ServeArgs {
   'tls-key'?: string;
   web: boolean;
   open: boolean;
+  'open-with-auth': boolean;
   'local-control': boolean;
   'local-control-address'?: string;
   // Read from the kebab-case key only — the camelCase mirror that yargs
@@ -213,6 +233,7 @@ interface ServeArgs {
   'session-restore-timeout-ms'?: number;
   'session-reap-interval-ms'?: number;
   'session-idle-timeout-ms'?: number;
+  'session-prompt-settled-close-grace-ms'?: number;
   'permission-response-timeout-ms'?: number;
   'external-tool-guard-mode': 'off' | 'required';
   'external-tool-guard-endpoint'?: string;
@@ -249,12 +270,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         default: DEFAULT_SERVE_HOSTNAME,
         description:
-          'Interface to bind. Loopback (127.0.0.1, localhost, ::1, [::1]) is auth-free; anything else requires a token.',
+          'Interface to bind. Loopback (127.0.0.0/8, localhost, ::1, [::1]) is auth-free; anything else requires a token (one is generated and printed when neither --token nor QWEN_SERVER_TOKEN supplies one). A localhost bind that resolves off-loopback never generates, and still refuses when no token source resolved; an empty value is rejected as operator error.',
       })
       .option('token', {
         type: 'string',
         description:
-          'Bearer token required on every request. Falls back to the QWEN_SERVER_TOKEN env var.',
+          'Bearer token required on every request. Falls back to the QWEN_SERVER_TOKEN env var; a non-loopback bind with neither generates an ephemeral token at startup, while loopback keeps the trusted tokenless mode unless --require-auth is set.',
       })
       .option('max-sessions', {
         type: 'number',
@@ -309,7 +330,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Refuse to start without a bearer token, even on loopback. ' +
           'Hardens the loopback developer default for shared dev hosts / CI ' +
           'runners / multi-tenant workstations where any local user can hit ' +
-          '127.0.0.1. Requires --token or QWEN_SERVER_TOKEN. /health also ' +
+          '127.0.0.1. Requires --token, QWEN_SERVER_TOKEN, or --open-with-auth ' +
+          '(which installs its own generated loopback token); on non-loopback ' +
+          'binds the generated ephemeral token also satisfies it, so the ' +
+          'no-configured-secret fail-fast is loopback-only. /health also ' +
           'requires Authorization when enabled (no loopback exemption — ' +
           'k8s/Compose probes must pass the bearer too).',
       })
@@ -317,7 +341,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: false,
         description:
-          'Enable direct POST /session/:id/shell execution. Requires a bearer token and a session-bound client id on each call.',
+          'Enable direct POST /session/:id/shell execution. Available with bearer auth or trusted loopback; each call still requires a session-bound client id.',
       })
       .option('tls-cert', {
         type: 'string',
@@ -361,6 +385,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: false,
         description:
           'Open the Web Shell in a browser once the daemon is listening. With a token configured, the launch URL (token included) is handed to the browser launcher and is visible in the process list, so prefer opening the URL manually on multi-user hosts. No-op with --no-web, when the UI assets are absent, or in headless/CI/SSH environments.',
+      })
+      .option('open-with-auth', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Open the Web Shell with bearer authentication on loopback. Reuse --token or QWEN_SERVER_TOKEN, or generate a temporary 256-bit token and deliver it in the URL fragment. In headless environments, print the fragment URL for manual opening.',
       })
       .option('local-control', {
         type: 'boolean',
@@ -457,8 +487,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: true,
         description:
-          'HTTP bridge mode: attempt to preheat one primary `qwen --acp` child; trusted ' +
-          'secondaries start one on demand. Stage 2 native in-process mode is ' +
+          'HTTP bridge mode: attempt to preheat the primary `qwen --acp` child; ' +
+          'trusted secondaries start one on demand. Stage 2 native in-process mode is ' +
           'not yet implemented; this flag will become opt-in then.',
       })
       .option('memory-budget-mb', {
@@ -532,7 +562,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('allow-origin', {
         type: 'string',
         array: true,
-        description: 'Cross-origin allowlist for browser webui clients.',
+        description: 'Cross-origin allowlist for browser clients.',
       })
       .option('allow-private-auth-base-url', {
         type: 'boolean',
@@ -556,8 +586,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('channel-idle-timeout-ms', {
         type: 'number',
         description:
-          'Milliseconds to keep ACP child alive after last session closes. ' +
-          '0 or unset = immediate kill (default).',
+          'Compatibility auto-reap delay for an idle workspace ACP child. ' +
+          '0 or unset = reap after work drains; keepalive windows may extend it (default).',
       })
       .option('initialize-timeout-ms', {
         type: 'number',
@@ -582,12 +612,20 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Idle timeout before a disconnected session is reaped (ms). ' +
           '0 = disabled. Default: 1800000 (30 min).',
       })
+      .option('session-prompt-settled-close-grace-ms', {
+        type: 'number',
+        description:
+          'Grace period after a prompt settles before an otherwise-idle ' +
+          'session may be auto-closed (ms). Poll-based SSE clients use this ' +
+          'window to reconnect without triggering a session rebuild. ' +
+          '0 = disabled (immediate close). Default: 0.',
+      })
       .option('permission-response-timeout-ms', {
         type: 'number',
         description:
-          'Wall-clock timeout for a single human permission / ' +
-          'ask_user_question response in daemon (ACP) mode (ms). ' +
-          '0 = disabled (wait forever). Default: 300000 (5 min).',
+          'Wall-clock timeout for a human permission / ask_user_question ' +
+          'response in daemon (ACP) mode (ms). ' +
+          '0 or unset = disabled (wait indefinitely). Default: 0.',
       })
       .option('external-tool-guard-mode', {
         choices: ['off', 'required'] as const,
@@ -811,12 +849,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     const externalToolGuardToken =
       process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV] ?? '';
     delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
+    const openWithAuth = argv['open-with-auth'];
+    const open = argv.open || openWithAuth;
 
     // Lazy-load the slim serve runner so the yargs fallback path does not pull
     // the public serve barrel, which also exports REST/ACP runtime modules.
     const { runQwenServe } = await import('../serve/run-qwen-serve.js');
     try {
-      const handle = await runQwenServe({
+      const serveOptions = {
         port: argv.port,
         hostname: argv.hostname,
         token: argv.token,
@@ -880,6 +920,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(argv['session-idle-timeout-ms'] !== undefined
           ? { sessionIdleTimeoutMs: argv['session-idle-timeout-ms'] }
           : {}),
+        ...(argv['session-prompt-settled-close-grace-ms'] !== undefined
+          ? {
+              sessionPromptSettledCloseGraceMs:
+                argv['session-prompt-settled-close-grace-ms'],
+            }
+          : {}),
         ...(argv['permission-response-timeout-ms'] !== undefined
           ? {
               permissionResponseTimeoutMs:
@@ -910,7 +956,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           ? { restoreAskUserQuestion: true }
           : {}),
         ...(channelSelection !== undefined ? { channelSelection } : {}),
-      });
+      } satisfies Parameters<typeof runQwenServe>[0];
+      if (openWithAuth) {
+        const { applyOpenWithAuth } = await import(
+          '../serve/open-with-auth.js'
+        );
+        applyOpenWithAuth(serveOptions);
+      }
+      const handle = await runQwenServe(serveOptions);
       // Open the Web Shell in a browser once the listener is up (best-effort;
       // never throws — see maybeOpenWebShellBrowser).
       if (argv['local-control']) {
@@ -924,7 +977,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           throw err;
         }
       }
-      await maybeOpenWebShellBrowser(handle, argv.open);
+      await maybeOpenWebShellBrowser(handle, open, openWithAuth);
     } catch (err) {
       writeStderrLine(
         `qwen serve: ${err instanceof Error ? err.message : String(err)}`,

@@ -3,7 +3,7 @@ import type {
   DaemonContextSkillDetail,
   DaemonContextToolDetail,
   DaemonSessionContextUsageStatus,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { getContextUsageLevel } from '../../utils/contextUsage';
 import { formatContextTokens as formatTokens } from '../../utils/formatTokenCount';
@@ -55,18 +55,53 @@ function sortByTokens<T extends { tokens: number }>(items: readonly T[]): T[] {
 function ProgressBar({
   usedPercentage,
   bufferPercentage,
+  compact = false,
 }: {
   usedPercentage: number;
   bufferPercentage: number;
+  compact?: boolean;
 }) {
-  const width = 56;
-  const usedCount = Math.round((Math.min(usedPercentage, 100) / 100) * width);
-  const bufferCount = Math.round(
-    (Math.min(bufferPercentage, Math.max(0, 100 - usedPercentage)) / 100) *
-      width,
-  );
-  const freeCount = Math.max(0, width - usedCount - bufferCount);
   const usedLevel = getContextUsageLevel(usedPercentage);
+  const usedCount = Math.min(usedPercentage, 100);
+  const bufferCount = Math.min(
+    bufferPercentage,
+    Math.max(0, 100 - usedPercentage),
+  );
+  const freeCount = Math.max(0, 100 - usedCount - bufferCount);
+
+  if (compact) {
+    // Proportional blocks: the glyph track cannot scale to the pane width.
+    const usedColor =
+      usedLevel === 'error'
+        ? 'var(--error-color)'
+        : usedLevel === 'warning'
+          ? 'var(--warning-color)'
+          : 'var(--agent-blue-500)';
+    return (
+      <div className={styles.progress} aria-hidden="true">
+        <span style={{ width: `${usedCount}%`, background: usedColor }} />
+        <span
+          style={{
+            width: `${freeCount}%`,
+            background: 'var(--muted-foreground)',
+            opacity: 0.25,
+          }}
+        />
+        <span
+          style={{
+            width: `${bufferCount}%`,
+            background: 'var(--warning-color)',
+            opacity: 0.45,
+          }}
+        />
+      </div>
+    );
+  }
+
+  const width = 56;
+  const usedGlyphs = Math.round((usedCount / 100) * width);
+  const bufferGlyphs = Math.round((bufferCount / 100) * width);
+  const freeGlyphs = Math.max(0, width - usedGlyphs - bufferGlyphs);
   const usedClass =
     usedLevel === 'error'
       ? styles.error
@@ -76,12 +111,14 @@ function ProgressBar({
 
   return (
     <div className={styles.progress} aria-hidden="true">
-      <span className={usedClass}>{FILLED.repeat(Math.max(0, usedCount))}</span>
+      <span className={usedClass}>
+        {FILLED.repeat(Math.max(0, usedGlyphs))}
+      </span>
       <span className={styles.secondary}>
-        {EMPTY.repeat(Math.max(0, freeCount))}
+        {EMPTY.repeat(Math.max(0, freeGlyphs))}
       </span>
       <span className={styles.warning}>
-        {BUFFER.repeat(Math.max(0, bufferCount))}
+        {BUFFER.repeat(Math.max(0, bufferGlyphs))}
       </span>
     </div>
   );
@@ -149,16 +186,18 @@ function DetailRow({
   name,
   tokens,
   tokenLabel,
+  detailNameMaxLen,
 }: {
   name: string;
   tokens: number;
   tokenLabel: string;
+  detailNameMaxLen: number;
 }) {
   return (
     <div className={styles.detailRow}>
       <span className={styles.secondary}>{'\u2514'} </span>
       <span className={styles.detailName} title={name}>
-        {truncateName(name, DETAIL_NAME_MAX_LEN)}
+        {truncateName(name, detailNameMaxLen)}
       </span>
       <span className={styles.value}>
         {formatTokens(tokens)} {tokenLabel}
@@ -172,6 +211,7 @@ function DetailSection({
   items,
   getName,
   tokenLabel,
+  detailNameMaxLen,
 }: {
   title: string;
   items: readonly (DaemonContextToolDetail | DaemonContextMemoryDetail)[];
@@ -179,6 +219,7 @@ function DetailSection({
     item: DaemonContextToolDetail | DaemonContextMemoryDetail,
   ) => string;
   tokenLabel: string;
+  detailNameMaxLen: number;
 }) {
   const sorted = sortByTokens(items);
   if (sorted.length === 0) return null;
@@ -191,6 +232,7 @@ function DetailSection({
           name={getName(item)}
           tokens={item.tokens}
           tokenLabel={tokenLabel}
+          detailNameMaxLen={detailNameMaxLen}
         />
       ))}
     </section>
@@ -200,6 +242,7 @@ function DetailSection({
 function SkillsSection({
   skills,
   labels,
+  detailNameMaxLen,
 }: {
   skills: readonly DaemonContextSkillDetail[];
   labels: {
@@ -208,6 +251,7 @@ function SkillsSection({
     skills: string;
     tokens: string;
   };
+  detailNameMaxLen: number;
 }) {
   const sorted = [...skills].sort((a, b) => {
     if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
@@ -223,7 +267,7 @@ function SkillsSection({
           <div className={styles.detailRow}>
             <span className={styles.secondary}>{'\u2514'} </span>
             <span className={styles.detailName} title={skill.name}>
-              {truncateName(skill.name, DETAIL_NAME_MAX_LEN)}
+              {truncateName(skill.name, detailNameMaxLen)}
               {skill.loaded && (
                 <span className={styles.success}> {labels.active}</span>
               )}
@@ -250,10 +294,16 @@ function SkillsSection({
 export function ContextUsageMessage({
   status,
   onShowDetail,
+  compact = false,
+  detailNameMaxLen = DETAIL_NAME_MAX_LEN,
 }: {
   status: DaemonSessionContextUsageStatus;
   /** Run /context detail, exactly like typing it. */
   onShowDetail?: () => void;
+  compact?: boolean;
+  /** Compact's wrapping column fits full names; the transcript's fixed
+   * name column keeps the default cap. */
+  detailNameMaxLen?: number;
 }) {
   const { t } = useI18n();
   const { usage } = status;
@@ -268,8 +318,10 @@ export function ContextUsageMessage({
       : 0;
 
   return (
-    <div className={styles.panel}>
-      <div className={styles.title}>{t('contextUsage.title')}</div>
+    <div className={`${styles.panel}${compact ? ` ${styles.compact}` : ''}`}>
+      {!compact && (
+        <div className={styles.title}>{t('contextUsage.title')}</div>
+      )}
 
       {!hasTokenCount ? (
         <>
@@ -312,6 +364,7 @@ export function ContextUsageMessage({
           <ProgressBar
             usedPercentage={Math.min(percentage, 100)}
             bufferPercentage={bufferPercentage}
+            compact={compact}
           />
           <div className={styles.spacer} />
           <CategoryRow
@@ -405,18 +458,21 @@ export function ContextUsageMessage({
             items={usage.builtinTools}
             getName={(item) => ('name' in item ? item.name : item.path)}
             tokenLabel={t('contextUsage.tokens')}
+            detailNameMaxLen={detailNameMaxLen}
           />
           <DetailSection
             title={t('contextUsage.mcpTools')}
             items={usage.mcpTools}
             getName={(item) => ('name' in item ? item.name : item.path)}
             tokenLabel={t('contextUsage.tokens')}
+            detailNameMaxLen={detailNameMaxLen}
           />
           <DetailSection
             title={t('contextUsage.memoryFiles')}
             items={usage.memoryFiles}
             getName={(item) => ('path' in item ? item.path : item.name)}
             tokenLabel={t('contextUsage.tokens')}
+            detailNameMaxLen={detailNameMaxLen}
           />
           <SkillsSection
             skills={usage.skills}
@@ -426,6 +482,7 @@ export function ContextUsageMessage({
               skills: t('contextUsage.skills'),
               tokens: t('contextUsage.tokens'),
             }}
+            detailNameMaxLen={detailNameMaxLen}
           />
         </>
       ) : (

@@ -11,6 +11,7 @@ export const CHANNEL_PROMPT_AUTHORIZATION_META_KEY =
 // strips it from untrusted callers and honors it only when an authenticated
 // channel worker (or a private-parent channel bridge) set it.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
+export const CHANNEL_BTW_METHOD = 'qwen/control/session/btw';
 // Private-parent capability handshake with the spawned `qwen --acp` child
 // (packages/core/src/utils/invocation-context.ts owns the same constants).
 // channel-base keeps a minimal dependency footprint, so the wire contract is
@@ -80,10 +81,71 @@ export interface PermissionResolvedEvent {
   outcome?: RequestPermissionResponse['outcome'];
 }
 
+export interface BackgroundResponseContext {
+  taskId: string;
+  status: string;
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+  toolUseId?: string;
+  label?: string;
+  turnId?: string;
+  turnComplete?: boolean;
+  partial?: boolean;
+}
+
+export function parseBackgroundResponseContext(
+  value: unknown,
+): BackgroundResponseContext | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const taskId = record['taskId'];
+  const status = record['status'];
+  const kind = record['kind'];
+  if (
+    typeof taskId !== 'string' ||
+    !taskId ||
+    typeof status !== 'string' ||
+    !status ||
+    (kind !== 'agent' &&
+      kind !== 'monitor' &&
+      kind !== 'shell' &&
+      kind !== 'workflow')
+  ) {
+    return undefined;
+  }
+
+  const context: BackgroundResponseContext = { taskId, status, kind };
+  for (const field of ['toolUseId', 'label', 'turnId'] as const) {
+    const fieldValue = record[field];
+    if (typeof fieldValue === 'string' && fieldValue) {
+      context[field] = fieldValue;
+    }
+  }
+  if (typeof record['turnComplete'] === 'boolean') {
+    context.turnComplete = record['turnComplete'];
+  }
+  if (typeof record['partial'] === 'boolean') {
+    context.partial = record['partial'];
+  }
+  return context;
+}
+
 interface ChannelAgentBridgeEventMap {
   sessionDied: [SessionDiedEvent];
+  /**
+   * Standalone ACP bridge process exit. Daemon bridges never emit this; they
+   * report per-session death through sessionDied instead. Listeners must
+   * clear only turn-scoped transient state: crash recovery restores the
+   * sessions on a fresh bridge, so routing state must stay.
+   */
+  disconnected: [code: number | null, signal: NodeJS.Signals | null];
   textChunk: [sessionId: string, chunk: string];
-  backgroundResponse: [sessionId: string, text: string];
+  backgroundResponse: [
+    sessionId: string,
+    text: string,
+    context?: BackgroundResponseContext,
+  ];
   responseBoundary: [sessionId: string];
   toolCall: [ToolCallEvent];
   permissionRequest: [PermissionRequestEvent];
@@ -94,25 +156,79 @@ export interface BridgeSessionInfo {
   sessionId: string;
   workspaceCwd: string;
   hasActivePrompt: boolean;
+  worktree?: { slug: string; path: string; branch: string };
+  worktreeState?: 'persisted-v1';
 }
 
 export interface ChannelAgentBridgeSessionOptions {
   approvalMode?: string;
+  /** Whether daemon-managed Channel loop tools may be attached to the session. */
+  enableChannelLoops?: boolean;
   /**
    * Channel instance name (e.g. `feishu-main`) stamped as the daemon `sourceId`
-   * on **new** sessions — creation-time attribution paired with
-   * `sourceType: 'channel'`. Ignored by `loadSession`: loading an existing
-   * session never re-stamps its creation attribution.
+   * for new sessions and restore-time attribution for legacy sessions resumed
+   * through a channel.
    */
   sourceId?: string;
+  /** Request daemon-managed git worktree isolation for a fresh session. */
+  worktree?: Record<string, never>;
+}
+
+export interface ChannelPromptImage {
+  data: string;
+  mimeType: string;
 }
 
 export interface ChannelAgentBridgePromptOptions {
+  images?: ChannelPromptImage[];
   imageBase64?: string;
   imageMimeType?: string;
   /** User-authored text shown in transcripts when `text` includes hidden context.
    * `''` means no user-visible text and must not be treated as unset. */
   displayText?: string;
+}
+
+export interface ChannelBtwResult {
+  sessionId: string;
+  answer: string | null;
+}
+
+/**
+ * Resolves the ordered `images` contract, falling back to the legacy
+ * single-image pair, and normalizes MIME types in one place: channel
+ * adapters forward CDN `content-type` headers verbatim, so values arrive
+ * with parameters and mixed case (e.g. `image/png; charset=binary`), and
+ * the non-standard `image/jpg` alias rides them too. Entries missing
+ * `data` or `mimeType` are dropped so one malformed attachment degrades
+ * to a prompt without that image, like the legacy field guards did.
+ */
+export function resolvePromptImages(
+  options?: ChannelAgentBridgePromptOptions,
+): ChannelPromptImage[] {
+  const images =
+    options?.images && options.images.length > 0
+      ? options.images
+      : options?.imageBase64 && options.imageMimeType
+        ? [{ data: options.imageBase64, mimeType: options.imageMimeType }]
+        : [];
+  return images
+    .filter(
+      (image) =>
+        !!image &&
+        typeof image.data === 'string' &&
+        image.data.length > 0 &&
+        typeof image.mimeType === 'string' &&
+        image.mimeType.length > 0,
+    )
+    .map((image) => {
+      const cleaned =
+        image.mimeType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+      return {
+        data: image.data,
+        // Normalize the alias like the daemon attachment store's own naming.
+        mimeType: cleaned === 'image/jpg' ? 'image/jpeg' : cleaned,
+      };
+    });
 }
 
 export interface ChannelAgentBridge {
@@ -137,11 +253,27 @@ export interface ChannelAgentBridge {
     options?: ChannelAgentBridgeSessionOptions,
     bindingToken?: object,
   ): Promise<string>;
+  /**
+   * Transfer a worktree session's checkout ownership to a fresh replacement
+   * session and return the replacement's id. Bridges without daemon-side
+   * worktree reset support omit it; callers fail closed.
+   */
+  resetWorktreeSession?(
+    sessionId: string,
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string>;
   prompt(
     sessionId: string,
     text: string,
     options?: ChannelAgentBridgePromptOptions,
   ): Promise<string>;
+  btw?(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<ChannelBtwResult>;
   cancelSession(sessionId: string): Promise<void>;
   /** Release a bridge-owned session that will not be routed to a caller. */
   discardSession?(
@@ -162,6 +294,16 @@ export interface ChannelAgentBridge {
     command: string,
     signal?: AbortSignal,
   ): Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
+  /**
+   * Answer a side question without interrupting the session's active turn.
+   * The result must echo the request's sessionId. Bridges whose agent
+   * connection cannot answer side questions omit it and channels fail closed.
+   */
+  btw?(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<{ sessionId: string; answer: string | null }>;
   listSessions?(): BridgeSessionInfo[];
   registerChannelLoopToolHandler?(handler: ChannelLoopToolHandler): void;
 }

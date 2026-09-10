@@ -402,6 +402,12 @@ export class SystemController extends BaseController {
       authProvider,
       config.targetAudience,
       config.targetServiceAccount,
+      undefined, // type
+      undefined, // discoveryTimeoutMs
+      undefined, // scope
+      undefined, // alwaysLoadTools
+      undefined, // agentPluginV1
+      config.versionNegotiation,
     );
   }
 

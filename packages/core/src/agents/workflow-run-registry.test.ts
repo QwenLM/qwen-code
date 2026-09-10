@@ -13,6 +13,8 @@ import {
   type AgentApprovalRequestEvent,
 } from './runtime/agent-events.js';
 import type { WorkflowRunHandle } from './runtime/workflow-runner.js';
+import { MAX_FAILURE_LINES } from './workflow-failure-lines.js';
+import { RESUME_ARGS_TOO_LARGE_NOTE } from './workflow-resume-call.js';
 import {
   WorkflowRunRegistry,
   MAX_PENDING_WORKFLOW_APPROVALS,
@@ -20,10 +22,23 @@ import {
   MAX_RETAINED_TERMINAL_WORKFLOWS,
   isActiveWorkflowStatus,
   isTerminalWorkflowStatus,
+  tryWithWorkflowTaskMutation,
   type WorkflowApprovalRequestCallback,
+  type WorkflowTaskMutationAttempt,
   type WorkflowTaskRegistration,
   type WorkflowStatus,
 } from './workflow-run-registry.js';
+
+const debugWarn = vi.hoisted(() => vi.fn());
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    isEnabled: () => true,
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: debugWarn,
+    error: vi.fn(),
+  }),
+}));
 
 function reg(
   runId: string,
@@ -64,6 +79,47 @@ function approvalEvent(
 }
 
 describe('WorkflowRunRegistry', () => {
+  it('does not inherit a stale workflow task mutation claim', async () => {
+    const mutationKey = 'scope\0run\0wf_stale';
+    let releaseStale: () => void = () => {};
+    let releaseCompeting: () => void = () => {};
+    let signalCompeting: () => void = () => {};
+    const staleGate = new Promise<void>((resolve) => {
+      releaseStale = resolve;
+    });
+    const competingStarted = new Promise<void>((resolve) => {
+      signalCompeting = resolve;
+    });
+    let staleAttempt: Promise<WorkflowTaskMutationAttempt<string>> | undefined;
+
+    const original = await tryWithWorkflowTaskMutation(
+      mutationKey,
+      async () => {
+        staleAttempt = staleGate.then(() =>
+          tryWithWorkflowTaskMutation(mutationKey, async () => 'stale'),
+        );
+        return 'original';
+      },
+    );
+    const competing = tryWithWorkflowTaskMutation(mutationKey, async () => {
+      signalCompeting();
+      await new Promise<void>((resolve) => {
+        releaseCompeting = resolve;
+      });
+      return 'competing';
+    });
+
+    await competingStarted;
+    releaseStale();
+    const staleResult = await staleAttempt;
+    releaseCompeting();
+    const competingResult = await competing;
+
+    expect(original).toEqual({ acquired: true, value: 'original' });
+    expect(staleResult).toEqual({ acquired: false });
+    expect(competingResult).toEqual({ acquired: true, value: 'competing' });
+  });
+
   it('records rerun lineage and notifies status observers', () => {
     const r = new WorkflowRunRegistry();
     const onStatusChange = vi.fn();
@@ -427,26 +483,228 @@ describe('WorkflowRunRegistry', () => {
     expect(event.respond).not.toHaveBeenCalled();
   });
 
-  it('does not re-park a duplicate event after it was resolved', async () => {
+  it('allows the same source to retry after an approval is rejected', async () => {
     const r = new WorkflowRunRegistry();
-    r.register(reg('wf_late_duplicate'));
+    r.register(reg('wf_rejected_retry'));
+    const emitter = new AgentEventEmitter();
+    const rejectedRespond = vi.fn(async () => {});
+    r.bridgeApprovalEvents('wf_rejected_retry', emitter);
+
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ respond: rejectedRespond }),
+    );
+    await vi.waitFor(() => {
+      expect(rejectedRespond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+      );
+    });
+
+    r.setApprovalChangeCallback(() => {});
+    const retryRespond = vi.fn(async () => {});
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({
+        respond: retryRespond,
+        timestamp: 1_700_000_000_200,
+      }),
+    );
+
+    expect(r.get('wf_rejected_retry')?.pendingApprovals).toMatchObject([
+      {
+        subagentId: 'workflow-agent-a',
+        callId: 'call-1',
+        at: 1_700_000_000_200,
+      },
+    ]);
+    expect(retryRespond).not.toHaveBeenCalled();
+  });
+
+  it('allows the same source to retry after TOOL_RESULT clears it', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_tool_result_retry'));
     r.setApprovalChangeCallback(() => {});
     const emitter = new AgentEventEmitter();
-    const event = approvalEvent();
-    r.bridgeApprovalEvents('wf_late_duplicate', emitter);
-    emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
-    const approvalId =
-      r.get('wf_late_duplicate')!.pendingApprovals[0].approvalId;
+    const firstRespond = vi.fn(async () => {});
+    r.bridgeApprovalEvents('wf_tool_result_retry', emitter);
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ respond: firstRespond }),
+    );
+    emitter.emit(AgentEventType.TOOL_RESULT, {
+      subagentId: 'workflow-agent-a',
+      round: 1,
+      callId: 'call-1',
+      name: 'Shell',
+      success: true,
+      timestamp: 1_700_000_000_200,
+    });
+
+    const retryRespond = vi.fn(async () => {});
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({
+        respond: retryRespond,
+        timestamp: 1_700_000_000_300,
+      }),
+    );
+
+    expect(r.get('wf_tool_result_retry')?.pendingApprovals).toMatchObject([
+      {
+        subagentId: 'workflow-agent-a',
+        callId: 'call-1',
+        at: 1_700_000_000_300,
+      },
+    ]);
+    expect(firstRespond).not.toHaveBeenCalled();
+    expect(retryRespond).not.toHaveBeenCalled();
+  });
+
+  it('does not let an active duplicate block a later retry', async () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_duplicate_retry'));
+    r.setApprovalChangeCallback(() => {});
+    const firstEmitter = new AgentEventEmitter();
+    const duplicateEmitter = new AgentEventEmitter();
+    const firstRespond = vi.fn(async () => {});
+    const duplicateRespond = vi.fn(async () => {});
+    r.bridgeApprovalEvents('wf_duplicate_retry', firstEmitter);
+    r.bridgeApprovalEvents('wf_duplicate_retry', duplicateEmitter);
+
+    firstEmitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ respond: firstRespond }),
+    );
+    duplicateEmitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ respond: duplicateRespond }),
+    );
+    r.cancel('wf_duplicate_retry', 2_000);
+    await vi.waitFor(() => {
+      expect(firstRespond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+    });
+    r.register(reg('wf_duplicate_retry'));
+
+    const retryRespond = vi.fn(async () => {});
+    duplicateEmitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({
+        respond: retryRespond,
+        timestamp: 1_700_000_000_200,
+      }),
+    );
+
+    expect(r.get('wf_duplicate_retry')?.pendingApprovals).toMatchObject([
+      {
+        subagentId: 'workflow-agent-a',
+        callId: 'call-1',
+        at: 1_700_000_000_200,
+      },
+    ]);
+    expect(firstRespond).toHaveBeenCalledOnce();
+    expect(duplicateRespond).not.toHaveBeenCalled();
+    expect(retryRespond).not.toHaveBeenCalled();
+  });
+
+  it('releases the source latch when cancellation rejects an approval', async () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_cancelled_retry'));
+    r.setApprovalChangeCallback(() => {});
+    const emitter = new AgentEventEmitter();
+    const firstRespond = vi.fn(async () => {});
+    r.bridgeApprovalEvents('wf_cancelled_retry', emitter);
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ respond: firstRespond }),
+    );
+
+    r.cancel('wf_cancelled_retry', 2_000);
+    await vi.waitFor(() => {
+      expect(firstRespond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+    });
+    r.register(reg('wf_cancelled_retry'));
+
+    const retryRespond = vi.fn(async () => {});
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({
+        respond: retryRespond,
+        timestamp: 1_700_000_000_200,
+      }),
+    );
+
+    expect(r.get('wf_cancelled_retry')?.pendingApprovals).toMatchObject([
+      {
+        subagentId: 'workflow-agent-a',
+        callId: 'call-1',
+        at: 1_700_000_000_200,
+      },
+    ]);
+    expect(firstRespond).toHaveBeenCalledOnce();
+    expect(retryRespond).not.toHaveBeenCalled();
+  });
+
+  it('warns when an active source duplicate is dropped', () => {
+    debugWarn.mockClear();
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_duplicate_warning'));
+    r.setApprovalChangeCallback(() => {});
+    const emitter = new AgentEventEmitter();
+    r.bridgeApprovalEvents('wf_duplicate_warning', emitter);
+    emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, approvalEvent());
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ timestamp: 1_700_000_000_200 }),
+    );
+
+    expect(debugWarn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Workflow approval re-emission dropped (source still latched)',
+      ),
+    );
+  });
+
+  it('re-parks a hook-bounced approval after the prior emission resolves', async () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_hook_bounce'));
+    r.setApprovalChangeCallback(() => {});
+    const emitter = new AgentEventEmitter();
+    const secondRespond = vi.fn(async () => {});
+    const firstRespond = vi.fn(async () => {
+      emitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        approvalEvent({
+          respond: secondRespond,
+          timestamp: 1_700_000_000_200,
+        }),
+      );
+    });
+    r.bridgeApprovalEvents('wf_hook_bounce', emitter);
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ respond: firstRespond }),
+    );
+    const firstApprovalId =
+      r.get('wf_hook_bounce')!.pendingApprovals[0].approvalId;
     await r.resolvePendingApproval(
-      'wf_late_duplicate',
-      approvalId,
+      'wf_hook_bounce',
+      firstApprovalId,
       ToolConfirmationOutcome.ProceedOnce,
     );
 
-    emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
-
-    expect(r.get('wf_late_duplicate')?.pendingApprovals).toEqual([]);
-    expect(event.respond).toHaveBeenCalledOnce();
+    const secondApproval = r.get('wf_hook_bounce')!.pendingApprovals[0];
+    expect(secondApproval).toMatchObject({
+      subagentId: 'workflow-agent-a',
+      callId: 'call-1',
+      at: 1_700_000_000_200,
+    });
+    await r.resolvePendingApproval(
+      'wf_hook_bounce',
+      secondApproval.approvalId,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    expect(firstRespond).toHaveBeenCalledOnce();
+    expect(secondRespond).toHaveBeenCalledOnce();
   });
 
   it('normalizes persistent approval outcomes to cancel', async () => {
@@ -817,6 +1075,32 @@ describe('WorkflowRunRegistry', () => {
     expect(entry.notified).toBe(false);
   });
 
+  it('removes only terminal entries without live handles', () => {
+    const r = new WorkflowRunRegistry();
+    const running = r.register(reg('wf_running'));
+    const terminal = r.register(reg('wf_terminal'));
+    const held = r.register(reg('wf_held'));
+    const handle = {
+      runId: held.runId,
+      abort: vi.fn(),
+    } as unknown as WorkflowRunHandle;
+    r.attachHandle(handle);
+    r.fail(terminal.runId, 'failed', 2_000);
+    r.fail(held.runId, 'failed', 2_000);
+    const callback = vi.fn();
+    r.setStatusChangeCallback(callback);
+
+    expect(r.removeTerminal(running.runId)).toBe(false);
+    expect(r.removeTerminal(held.runId)).toBe(false);
+    expect(r.removeTerminal(terminal.runId)).toBe(true);
+
+    expect(r.get(running.runId)).toBe(running);
+    expect(r.get(held.runId)).toBe(held);
+    expect(r.get(terminal.runId)).toBeUndefined();
+    expect(callback).toHaveBeenCalledOnce();
+    expect(callback).toHaveBeenCalledWith(undefined);
+  });
+
   it('rejects a duplicate run id until its owner handle is released', () => {
     const r = new WorkflowRunRegistry();
     const runId = 'wf_collision';
@@ -834,6 +1118,59 @@ describe('WorkflowRunRegistry', () => {
 
     r.releaseHandle(runId, handle);
     expect(r.register(reg(runId)).status).toBe('running');
+  });
+
+  it('reserves a run id while a workflow is starting', () => {
+    const r = new WorkflowRunRegistry();
+    const runId = 'wf_starting';
+    const owner = new AbortController();
+    const competing = new AbortController();
+
+    r.reserveStart(runId, () => owner);
+
+    expect(r.isStarting(runId)).toBe(true);
+    expect(r.hasRunningEntries()).toBe(true);
+    expect(() => r.reserveStart(runId, () => competing)).toThrow(
+      /already active/,
+    );
+    expect(() => r.register(reg(runId))).toThrow(/already active/);
+
+    const entry = r.register(reg(runId), owner);
+    expect(entry.runId).toBe(runId);
+    expect(r.isStarting(runId)).toBe(false);
+  });
+
+  it('aborts a workflow that has not registered yet', () => {
+    const r = new WorkflowRunRegistry();
+    const controller = new AbortController();
+
+    r.reserveStart('wf_starting', () => controller);
+    r.abortAll();
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(r.isStarting('wf_starting')).toBe(true);
+    r.releaseStart('wf_starting', controller);
+    expect(r.hasRunningEntries()).toBe(false);
+  });
+
+  it('cancelStarting aborts a reserved start and leaves the release to the runner', () => {
+    const r = new WorkflowRunRegistry();
+    const controller = new AbortController();
+
+    expect(r.cancelStarting('wf_absent')).toBe(false);
+
+    r.reserveStart('wf_starting', () => controller);
+    expect(r.cancelStarting('wf_starting')).toBe(true);
+    expect(controller.signal.aborted).toBe(true);
+    // Same contract as abortAll: the reservation stays until the runner's
+    // start-failure path releases it, so a competing start cannot slip in
+    // between the abort and that release.
+    expect(r.isStarting('wf_starting')).toBe(true);
+    expect(() =>
+      r.reserveStart('wf_starting', () => new AbortController()),
+    ).toThrow(/already active/);
+    r.releaseStart('wf_starting', controller);
+    expect(r.hasRunningEntries()).toBe(false);
   });
 
   it('register synthesizes description from meta.name when omitted', () => {
@@ -1464,6 +1801,74 @@ describe('WorkflowRunRegistry', () => {
     expect(ids).not.toContain('wf_0');
   });
 
+  it('does not evict a terminal entry until its handle is released', () => {
+    const r = new WorkflowRunRegistry();
+    const held = r.register(reg('wf_held'));
+    const handle = {
+      runId: held.runId,
+      abort: vi.fn(),
+    } as unknown as WorkflowRunHandle;
+    r.attachHandle(handle);
+    r.complete(held.runId, null, 1_000);
+
+    for (let i = 0; i < MAX_RETAINED_TERMINAL_WORKFLOWS; i++) {
+      r.register(reg(`wf_new_${i}`));
+      r.complete(`wf_new_${i}`, null, 2_000 + i);
+    }
+
+    expect(r.get(held.runId)).toBe(held);
+    expect(r.list()).toHaveLength(MAX_RETAINED_TERMINAL_WORKFLOWS + 1);
+
+    const statusChange = vi.fn();
+    r.setStatusChangeCallback(statusChange);
+    r.releaseHandle(held.runId, handle);
+
+    expect(r.get(held.runId)).toBeUndefined();
+    expect(r.list()).toHaveLength(MAX_RETAINED_TERMINAL_WORKFLOWS);
+    expect(statusChange.mock.calls).toEqual([[undefined]]);
+  });
+
+  it('does not emit on a handle release that evicts nothing', () => {
+    const r = new WorkflowRunRegistry();
+    const held = r.register(reg('wf_held'));
+    const handle = {
+      runId: held.runId,
+      abort: vi.fn(),
+    } as unknown as WorkflowRunHandle;
+    r.attachHandle(handle);
+    r.complete(held.runId, null, 1_000);
+
+    const statusChange = vi.fn();
+    r.setStatusChangeCallback(statusChange);
+    r.releaseHandle(held.runId, handle);
+
+    // Under the retention cap nothing is swept, so the release is not a
+    // row-removing mutation and must stay silent.
+    expect(statusChange).not.toHaveBeenCalled();
+    expect(r.get(held.runId)).toBe(held);
+  });
+
+  it('emits after the sweep, so a consumer reads the post-eviction list', () => {
+    const r = new WorkflowRunRegistry();
+    for (let i = 0; i < MAX_RETAINED_TERMINAL_WORKFLOWS; i++) {
+      r.register(reg(`wf_${i}`));
+      r.complete(`wf_${i}`, null, 1_000 + i);
+    }
+
+    const seen: number[] = [];
+    r.setStatusChangeCallback(() => {
+      seen.push(r.list().length);
+    });
+    // complete() emits BEFORE it sweeps, so without the trailing
+    // eviction emission a consumer only ever observes the over-cap list
+    // and keeps rendering the row that was just dropped.
+    r.register(reg('wf_overflow'));
+    r.complete('wf_overflow', null, 9_000);
+
+    expect(r.list()).toHaveLength(MAX_RETAINED_TERMINAL_WORKFLOWS);
+    expect(seen.at(-1)).toBe(MAX_RETAINED_TERMINAL_WORKFLOWS);
+  });
+
   it('active entries are never evicted', () => {
     const r = new WorkflowRunRegistry();
     r.register(reg('runner'));
@@ -1591,6 +1996,294 @@ describe('WorkflowRunRegistry', () => {
 
     r.setCompletionCallback(undefined);
     expect(r.hasCompletionCallback()).toBe(false);
+  });
+
+  // The notification is the whole surface a backgrounded run has: it lands in
+  // a later turn, when the handle and the tool result are long gone. What the
+  // run cost, and how to get back into it, have to be in the message itself.
+  // A count says a fan-out came back thinner than it left; it does not say
+  // which agents are missing or why. That is the difference between the
+  // reader re-running the whole thing and re-running one prompt.
+  it('names the agents that failed, with their errors', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(reg('wf_failures', { isBackgrounded: true }));
+    for (const [id, label] of [
+      ['d1', 'scout'],
+      ['d2', 'audit <core>'],
+    ] as const) {
+      r.onDispatchQueued(entry.runId, {
+        id,
+        label,
+        prompt: 'p',
+        dependsOn: [],
+        queuedAt: 1,
+      });
+    }
+    r.onDispatchSettled(entry.runId, 'd1', 'terminate mode: MAX_TURNS', 2);
+    r.onDispatchSettled(entry.runId, 'd2', 'model <errored> & died', 2);
+    r.complete(entry.runId, [], 3_000);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    expect(modelText).toContain('<failures>');
+    expect(modelText).toContain('[scout] terminate mode: MAX_TURNS');
+    // Element text is escaped: a label or error carrying markup must not be
+    // able to close the tag it sits in.
+    expect(modelText).toContain(
+      '[audit &lt;core&gt;] model &lt;errored&gt; &amp; died',
+    );
+    expect(modelText).not.toContain('<core>');
+  });
+
+  it('caps the failures list and names the remainder', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(reg('wf_many', { isBackgrounded: true }));
+    for (let i = 0; i < MAX_FAILURE_LINES + 2; i++) {
+      r.onDispatchQueued(entry.runId, {
+        id: `d${i}`,
+        label: `agent-${i}`,
+        prompt: 'p',
+        dependsOn: [],
+        queuedAt: 1,
+      });
+      r.onDispatchSettled(entry.runId, `d${i}`, `boom ${i}`, 2);
+    }
+    r.complete(entry.runId, [], 3_000);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    const failuresBlock = modelText.slice(
+      modelText.indexOf('<failures>'),
+      modelText.indexOf('</failures>'),
+    );
+    expect(failuresBlock).toContain('[agent-0] boom 0');
+    expect(failuresBlock).not.toContain('[agent-10]');
+    expect(failuresBlock).toContain('… and 2 more failures omitted');
+    expect(modelText).toContain(`agents_failed=${MAX_FAILURE_LINES + 2}`);
+  });
+
+  it('omits the failures block when nothing failed', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(reg('wf_clean', { isBackgrounded: true }));
+    r.onDispatchQueued(entry.runId, {
+      id: 'd1',
+      prompt: 'p',
+      dependsOn: [],
+      queuedAt: 1,
+    });
+    r.onDispatchSettled(entry.runId, 'd1', undefined, 2);
+    r.complete(entry.runId, [], 3_000);
+
+    expect(completion.mock.calls[0][1] as string).not.toContain('<failures>');
+  });
+
+  // "Why is it running that agent again?" is the first question a resume
+  // raises, and the two answers call for different reactions.
+  it.each([
+    [true, '[resume] re-running "scout": it failed in the previous run'],
+    [
+      false,
+      '[resume] respawning "scout": interrupted in a previous run (2 prior attempts)',
+    ],
+  ])('logs a respawn (wasFailed=%s) and counts it', (wasFailed, expected) => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(reg('wf_respawn', { isBackgrounded: true }));
+
+    r.onResumeRespawn(entry.runId, expected);
+    expect(r.get(entry.runId)?.recentLogs.at(-1)).toContain(expected);
+    expect(
+      r
+        .get(entry.runId)
+        ?.events.filter(
+          (event) => event.type === 'log' && event.message === expected,
+        ),
+    ).toHaveLength(1);
+    // Settlement replaces the live mirror from the sandbox buffer. The
+    // respawn line must therefore be present in that buffer too.
+    r.setRecentLogs(entry.runId, [expected]);
+
+    expect(r.get(entry.runId)?.agentsRespawned).toBe(1);
+    expect(r.get(entry.runId)?.recentLogs.at(-1)).toContain(expected);
+
+    r.complete(entry.runId, [], 3_000);
+    expect(completion.mock.calls[0][1] as string).toContain(
+      'agents_respawned=1',
+    );
+  });
+
+  it('rejects the respawn counter and log together after terminal settlement', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_terminal_respawn'));
+    r.complete(entry.runId, [], 3_000);
+
+    const line = '[resume] respawning an agent: interrupted in a previous run';
+    r.onResumeRespawn(entry.runId, line);
+
+    expect(r.get(entry.runId)?.agentsRespawned).toBe(0);
+    expect(r.get(entry.runId)?.recentLogs).not.toContain(line);
+  });
+
+  it('reports usage and the recovery route on a background failure', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(
+      reg('wf_recover', {
+        isBackgrounded: true,
+        scriptPath: '/runtime/workflows/generated/inline/wf_recover.js',
+        journalPath: '/runtime/workflows/wf_recover/journal.jsonl',
+        args: { plan: 'a' },
+        resumeInBackground: true,
+        startTime: 1_000,
+      }),
+    );
+    r.onAgentDispatched(entry.runId);
+    r.onAgentDispatched(entry.runId);
+    r.onDispatchQueued(entry.runId, {
+      id: 'd1',
+      prompt: 'ok',
+      dependsOn: [],
+      queuedAt: 1,
+    });
+    r.onDispatchQueued(entry.runId, {
+      id: 'd2',
+      prompt: 'bad',
+      dependsOn: [],
+      queuedAt: 1,
+    });
+    r.onDispatchSettled(entry.runId, 'd1', undefined, 2);
+    r.onDispatchSettled(entry.runId, 'd2', 'boom', 2);
+    r.onAgentCompleted(entry.runId);
+    r.onAgentCompleted(entry.runId);
+    r.onBudgetUpdated(entry.runId, 4_242, null);
+    r.fail(entry.runId, 'boom', 3_500);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    expect(modelText).toContain(
+      '<usage>agents_dispatched=2 agents_succeeded=1 agents_cached=0 ' +
+        'agents_failed=1 agents_cancelled=0 agents_respawned=0 ' +
+        'tokens_spent=4242 duration_ms=2500</usage>',
+    );
+    expect(modelText).toContain('<recovery>');
+    expect(modelText).toContain(
+      'Workflow({ scriptPath: "/runtime/workflows/generated/inline/wf_recover.js", ' +
+        'resumeFromRunId: "wf_recover", args: {"plan":"a"}, run_in_background: true })',
+    );
+    expect(modelText).toContain(
+      'Journal: /runtime/workflows/wf_recover/journal.jsonl',
+    );
+    expect(modelText).not.toContain('<diagnostics>');
+  });
+
+  it('points a completed background run at the per-agent journal', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(
+      reg('wf_diag', {
+        isBackgrounded: true,
+        scriptPath: '/runtime/workflows/generated/inline/wf_diag.js',
+        journalPath: '/runtime/workflows/wf_diag/journal.jsonl',
+      }),
+    );
+    r.onDispatchQueued(entry.runId, {
+      id: 'd1',
+      prompt: 'replayed',
+      dependsOn: [],
+      queuedAt: 1,
+      cached: true,
+    });
+    r.complete(entry.runId, [], 1_700_000_001_000);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    expect(modelText).toContain('agents_cached=1');
+    expect(modelText).toContain('<diagnostics>');
+    expect(modelText).toContain(
+      'Per-agent results: /runtime/workflows/wf_diag/journal.jsonl',
+    );
+    expect(modelText).toContain('read this file BEFORE diagnosing');
+    expect(modelText).not.toContain('<recovery>');
+  });
+
+  // An unpersisted inline script (no storage, symlinked root) leaves nothing
+  // to resume from, and a run with no journal has nothing to read: the
+  // notification must then say neither rather than name a path that is not
+  // there.
+  it('omits the recovery block when the run has no script or journal on disk', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(reg('wf_bare', { isBackgrounded: true }));
+    r.fail('wf_bare', 'boom', 2_000);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    expect(modelText).toContain('<usage>');
+    expect(modelText).not.toContain('<recovery>');
+    expect(modelText).not.toContain('Workflow({');
+  });
+
+  // Args that cannot be pasted back are NAMED, never truncated: half a JSON
+  // literal in a resume call is a call that fails to parse.
+  it('names oversized args instead of truncating the resume call', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(
+      reg('wf_bigargs', {
+        isBackgrounded: true,
+        scriptPath: '/runtime/workflows/generated/inline/wf_bigargs.js',
+        args: { blob: 'x'.repeat(400) },
+      }),
+    );
+    r.fail('wf_bigargs', 'boom', 2_000);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    expect(modelText).toContain('resumeFromRunId: "wf_bigargs" })');
+    expect(modelText).not.toContain('args:');
+    expect(modelText).toContain('too large to inline here');
+  });
+
+  it('names oversized args on completed background diagnostics', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(
+      reg('wf_bigargs_done', {
+        isBackgrounded: true,
+        scriptPath: '/runtime/workflows/generated/inline/wf_bigargs_done.js',
+        args: { blob: 'x'.repeat(400) },
+      }),
+    );
+    r.complete('wf_bigargs_done', [], 2_000);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    expect(modelText).toContain('<diagnostics>');
+    expect(modelText).toContain(RESUME_ARGS_TOO_LARGE_NOTE);
+  });
+
+  it('reports cancelled live dispatches as a disjoint usage bucket', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(reg('wf_cancel_usage', { isBackgrounded: true }));
+    r.onAgentDispatched(entry.runId);
+    r.onDispatchQueued(entry.runId, {
+      id: 'd1',
+      prompt: 'pending',
+      dependsOn: [],
+      queuedAt: 1,
+    });
+    r.fail(entry.runId, 'boom', 2_000);
+
+    expect(completion.mock.calls[0][1]).toContain(
+      'agents_dispatched=1 agents_succeeded=0 agents_cached=0 agents_failed=0 agents_cancelled=1',
+    );
   });
 
   it('emits one safe background failure completion and isolates callback errors', () => {

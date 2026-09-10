@@ -16,12 +16,19 @@
  * Precedence: when the same `<name>.js` exists in both scopes, the
  * project-level file wins (matches `FileCommandLoader`'s project-over-user
  * precedence for custom commands).
+ *
+ * A third root, `<projectDir>/workflows/generated`
+ * (`Storage.getGeneratedWorkflowsDir`), is trusted for `{scriptPath}` loads
+ * only. Scripts a tool generates for a single run go there: they are neither
+ * listed as slash commands nor resolvable by name, so emitting one never
+ * hands the user a command for a run that is already over.
  */
 
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import type { Config } from '../../config/config.js';
 import { Storage } from '../../config/storage.js';
+import { atomicWriteFile } from '../../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_SAVED');
@@ -51,6 +58,7 @@ export interface ResolvedSavedWorkflow {
   name: string;
   scriptPath: string;
   script: string;
+  savedWorkflowName?: string;
 }
 
 /** Result of a {@link saveWorkflowScript} attempt. */
@@ -88,7 +96,20 @@ export function getSavedWorkflowDirs(config: Config): Array<{
 }
 
 /**
- * True when a saved-workflow root dir is itself a symlink. `readWorkflowFileSecurely`
+ * Every directory a `{scriptPath}` may resolve into: both saved scopes plus
+ * the generated-scripts root. Name resolution and discovery deliberately use
+ * {@link getSavedWorkflowDirs} instead — a generated script is loadable by
+ * path, never addressable by name.
+ */
+export function getWorkflowScriptRoots(config: Config): string[] {
+  return [
+    ...getSavedWorkflowDirs(config).map(({ dir }) => dir),
+    config.storage.getGeneratedWorkflowsDir(),
+  ];
+}
+
+/**
+ * True when a workflow script root dir is itself a symlink. `readWorkflowFileSecurely`
  * realpaths the root so it can tolerate symlinked *ancestors* (e.g. a project under
  * macOS `/tmp -> /private/tmp`); but that same laundering turns a checked-in
  * `.qwen/workflows -> /outside` link into the allowed boundary — letting discovery
@@ -98,7 +119,7 @@ export function getSavedWorkflowDirs(config: Config): Array<{
  * all three operations. A missing dir (the common case) is not a symlink, so this
  * is transparent until someone actually links the dir.
  */
-async function isSymlinkedRoot(dir: string): Promise<boolean> {
+export async function isSymlinkedRoot(dir: string): Promise<boolean> {
   return fs
     .lstat(dir)
     .then((st) => st.isSymbolicLink())
@@ -139,38 +160,70 @@ async function listJsFiles(dir: string): Promise<string[]> {
 
 /**
  * Read a candidate workflow file, but only after proving its canonical real
- * path stays inside one of the saved-workflow directories. `fs.realpath`
- * resolves both `..` and symlinks, so this single check defeats path
- * traversal (a `name`/`scriptPath` containing `..`) AND symlink escape (a
- * file inside the dir that links out). Throws otherwise.
+ * path stays inside one of the workflow script roots (the saved-workflow
+ * directories or the generated-scripts root). `fs.realpath` resolves both
+ * `..` and symlinks, so this single check defeats path traversal (a
+ * `name`/`scriptPath` containing `..`) AND symlink escape (a file inside the
+ * dir that links out). Throws otherwise.
  */
 async function readWorkflowFileSecurely(
   filePath: string,
   config: Config,
 ): Promise<string> {
   const real = await fs.realpath(filePath); // throws ENOENT if absent
-  const dirs = (
-    await Promise.all(
-      getSavedWorkflowDirs(config).map(async ({ dir }) => {
-        // Exclude a symlinked root: realpath(dir) would launder a
-        // `.qwen/workflows -> /outside` link into the allowed boundary, so a
-        // file resolving under the link's target would pass the check below.
-        if (await isSymlinkedRoot(dir)) return null;
-        try {
-          return await fs.realpath(dir);
-        } catch {
-          return path.resolve(dir);
-        }
-      }),
-    )
-  ).filter((d): d is string => d !== null);
+  const roots = await Promise.all(
+    getWorkflowScriptRoots(config).map(async (dir) => {
+      // Exclude a symlinked root: realpath(dir) would launder a
+      // `.qwen/workflows -> /outside` link into the allowed boundary, so a
+      // file resolving under the link's target would pass the check below.
+      if (await isSymlinkedRoot(dir)) return { dir, real: null };
+      try {
+        return { dir, real: await fs.realpath(dir) };
+      } catch {
+        return { dir, real: path.resolve(dir) };
+      }
+    }),
+  );
+  const dirs = roots.flatMap((r) => (r.real === null ? [] : [r.real]));
   const inside = dirs.some((d) => real === d || real.startsWith(d + path.sep));
   if (!inside) {
+    // Keep refused-but-considered roots visible: dropping a symlinked root
+    // from the list reads as if the loader never considered it at all.
+    const refused = roots.flatMap((r) => (r.real === null ? [r.dir] : []));
+    const refusedNote =
+      refused.length > 0
+        ? `; refused symlinked ${refused.length === 1 ? 'root' : 'roots'}: ${refused.join(', ')}`
+        : '';
     throw new Error(
-      `refusing to load a workflow file outside the saved-workflow directories: '${filePath}'.`,
+      `refusing to load a workflow file outside the workflow script roots (checked: ${dirs.join(', ')}${refusedNote}): '${filePath}'.`,
     );
   }
   return fs.readFile(real, 'utf8');
+}
+
+async function resolveSavedWorkflowNameForPath(
+  scriptPath: string,
+  config: Config,
+): Promise<string | undefined> {
+  const realScriptPath = await fs.realpath(scriptPath);
+  for (const { dir } of getSavedWorkflowDirs(config)) {
+    if (await isSymlinkedRoot(dir)) continue;
+    let realDir: string;
+    try {
+      realDir = await fs.realpath(dir);
+    } catch {
+      continue;
+    }
+    if (
+      realScriptPath !== realDir &&
+      !realScriptPath.startsWith(realDir + path.sep)
+    ) {
+      continue;
+    }
+    const name = path.basename(realScriptPath).replace(/\.js$/, '');
+    return WORKFLOW_NAME_PATTERN.test(name) ? name : undefined;
+  }
+  return undefined;
 }
 
 /**
@@ -200,7 +253,8 @@ export async function listSavedWorkflows(
 /**
  * Resolve `workflow('<name>')` or `workflow({scriptPath})` to a loaded
  * script. The string form looks up `<name>.js` in project then user scope;
- * the `{scriptPath}` form reads the file at the given path directly.
+ * the `{scriptPath}` form reads the file at the given path directly, which
+ * may sit in either saved scope or under the generated-scripts root.
  *
  * Throws with an actionable, available-names message on a miss — the
  * message text mirrors upstream so scripts written against either runtime
@@ -227,7 +281,16 @@ export async function resolveSavedWorkflowScript(
       );
     }
     const name = path.basename(scriptPath).replace(/\.js$/, '');
-    return { name, scriptPath, script };
+    const savedWorkflowName = await resolveSavedWorkflowNameForPath(
+      scriptPath,
+      config,
+    );
+    return {
+      name,
+      scriptPath,
+      script,
+      ...(savedWorkflowName ? { savedWorkflowName } : {}),
+    };
   }
 
   if (typeof nameOrRef !== 'string') {
@@ -249,7 +312,7 @@ export async function resolveSavedWorkflowScript(
     const scriptPath = path.join(dir, `${name}.js`);
     try {
       const script = await readWorkflowFileSecurely(scriptPath, config);
-      return { name, scriptPath, script };
+      return { name, scriptPath, script, savedWorkflowName: name };
     } catch {
       // Not in this scope (absent or rejected) — try the next.
     }
@@ -315,4 +378,90 @@ export async function saveWorkflowScript(
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(filePath, script, 'utf8');
   return { status: 'saved', name, scope, path: filePath };
+}
+
+/**
+ * Run-id shape accepted for a persisted inline script. Mirrors the tool's
+ * `resumeFromRunId` guard (`workflow.ts`) and the snapshot pruner: the id is
+ * a path segment here, so anything but the generated `wf_<hex>` shape is
+ * refused rather than joined into a path.
+ */
+const INLINE_RUN_ID_PATTERN = /^wf_[0-9a-f]+$/;
+
+/**
+ * Persist the source of an inline `Workflow({script})` run to
+ * `<generated>/inline/<runId>.js` and return that path.
+ *
+ * The run is what matters, not the copy: this never throws and never blocks
+ * a launch. A missing `storage`, a symlinked root, a full disk — each degrades
+ * to `null`, which the caller reports by simply omitting the script path from
+ * the result. Writing it is what lets a model resume a run (and edit the
+ * script first) without re-sending the whole source, and lets a user read
+ * what actually ran.
+ *
+ * `atomicWriteFile` does the write: temp-and-rename with `renameWithRetry`
+ * (a transient Windows EPERM must not silently cost the result its script
+ * path), `forceMode` so a resume heals a copy some earlier state left more
+ * permissive than 0600, and `noFollow` so a symlink planted at the target is
+ * replaced rather than written through.
+ */
+export async function persistInlineWorkflowScript(
+  config: Config,
+  runId: string,
+  script: string,
+): Promise<string | null> {
+  if (!INLINE_RUN_ID_PATTERN.test(runId)) {
+    debugLogger.warn(`refusing to persist a script for run id: ${runId}`);
+    return null;
+  }
+  const storage = config.storage;
+  if (!storage) return null;
+  try {
+    const filePath = storage.getInlineWorkflowScriptPath(runId);
+    const dir = path.dirname(filePath);
+    // Same refusal the loader makes: a symlinked generated root (or a
+    // symlinked `inline/` inside it) would carry the write outside the
+    // trusted root, and the loader would refuse to read back what we wrote.
+    if (
+      (await isSymlinkedRoot(storage.getGeneratedWorkflowsDir())) ||
+      (await isSymlinkedRoot(dir))
+    ) {
+      debugLogger.warn(
+        `refusing to persist an inline workflow script into a symlinked root: '${dir}'.`,
+      );
+      return null;
+    }
+    await fs.mkdir(dir, { recursive: true });
+    await atomicWriteFile(filePath, script, {
+      encoding: 'utf8',
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+    });
+    return filePath;
+  } catch (error) {
+    debugLogger.warn(
+      `failed to persist inline workflow script for ${runId}: ${error}`,
+    );
+    return null;
+  }
+}
+
+/** Best-effort cleanup for a persisted inline workflow script. */
+export async function deleteInlineWorkflowScript(
+  config: Config,
+  runId: string,
+): Promise<boolean> {
+  if (!INLINE_RUN_ID_PATTERN.test(runId)) return false;
+  const storage = config.storage;
+  if (!storage) return false;
+  try {
+    await fs.rm(storage.getInlineWorkflowScriptPath(runId), { force: true });
+    return true;
+  } catch (error) {
+    debugLogger.warn(
+      `failed to delete inline workflow script for ${runId}: ${error}`,
+    );
+    return false;
+  }
 }

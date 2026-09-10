@@ -30,13 +30,17 @@ import { getPlatformReader } from './lib/platform/registry.js';
 import type { PlatformKind } from './lib/platform/types.js';
 import {
   LEDGER_MAX_FINDINGS,
+  axesOf,
   parseLedger,
   streakOf,
   stripLedgerMarker,
   type Ledger,
 } from './lib/ledger.js';
 import { isPositivePrNumber } from './lib/roster.js';
-import { commentMarkerSeverity } from './lib/review-footer.js';
+import {
+  commentMarkerSeverity,
+  FIXED_RULING_SHAPE_RE,
+} from './lib/review-footer.js';
 
 /**
  * Marker embedded in the "suggestion summary" issue comment that /review used
@@ -415,13 +419,107 @@ const NEGATION = new RegExp(
   `(?:${NEG_WORD})(?:(?!${ADVERSATIVE})[^.!?。！？;:；：\\n]){0,40}$`,
 );
 
+/**
+ * Remove every region of a comment body that GitHub renders as QUOTED text
+ * rather than the comment's own claim, so a blocker scan sees only what the
+ * author asserts. The posting contract mandates a fenced witness (a test log,
+ * a probe transcript) under every finding, and program output routinely
+ * prints literal `[Critical]` / "still fails" lines — scanning inside would
+ * self-promote a non-blocking Suggestion into the blocker section every round,
+ * the identical harm `isIssueBlocker` documents for the issue channel.
+ *
+ * Structural rather than a regex per construct, because the surface is every
+ * quoting form GitHub-flavoured Markdown has: fenced blocks (``` or ~~~, three
+ * or more, opened only at line start with up to three spaces of indent, closed
+ * by a same-character run at least as long — so a 4-backtick fence containing
+ * ``` stays one fence, and a mid-line ``` run is text, not a delimiter),
+ * indented code blocks (four spaces or a tab after a blank line), inline code
+ * spans (a backtick run closed by the same run on the line), and HTML
+ * comments (rendered as nothing; may span lines). Constructs nest the way the
+ * renderer nests them: whichever opens first owns the text until it closes —
+ * a `<!--` inside a fence is fence content, a fence opener inside an open
+ * comment is comment text — and an unclosed fence or comment swallows the
+ * rest of the body, as GitHub renders it.
+ */
+export function stripQuotedRegions(text: string): string {
+  const out: string[] = [];
+  let fence: { ch: string; len: number } | null = null;
+  let inComment = false;
+  let inIndented = false;
+  let prevBlank = true;
+  for (const line of text.split('\n')) {
+    if (fence !== null) {
+      const close = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(line);
+      if (close && close[1][0] === fence.ch && close[1].length >= fence.len) {
+        fence = null;
+      }
+      prevBlank = false;
+      continue;
+    }
+    if (!inComment) {
+      const open = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+      if (open) {
+        fence = { ch: open[1][0], len: open[1].length };
+        prevBlank = false;
+        continue;
+      }
+      // Indented code: begins after a blank line, runs while lines stay
+      // indented (or are blank).
+      if (inIndented) {
+        if (/^(?: {4}|\t)/.test(line) || line.trim() === '') continue;
+        inIndented = false;
+      } else if (prevBlank && /^(?: {4}|\t)/.test(line)) {
+        inIndented = true;
+        continue;
+      }
+    }
+    // Within a plain line: HTML comments (possibly continuing from a previous
+    // line) and inline code spans.
+    let acc = '';
+    let i = 0;
+    while (i < line.length) {
+      if (inComment) {
+        const end = line.indexOf('-->', i);
+        if (end < 0) {
+          i = line.length;
+          break;
+        }
+        inComment = false;
+        i = end + 3;
+        continue;
+      }
+      if (line.startsWith('<!--', i)) {
+        inComment = true;
+        i += 4;
+        continue;
+      }
+      if (line[i] === '`') {
+        const run = /^`+/.exec(line.slice(i))![0];
+        const close = line.indexOf(run, i + run.length);
+        if (close >= 0) {
+          i = close + run.length; // the span is quoted text — drop it
+          continue;
+        }
+        acc += run;
+        i += run.length;
+        continue;
+      }
+      acc += line[i];
+      i++;
+    }
+    out.push(acc);
+    prevBlank = line.trim() === '';
+  }
+  return out.join('\n');
+}
+
 export function carriesBlockerSignal(body: string | undefined): boolean {
   // Only RENDERED text can promote through this ungated channel: GitHub
   // renders an HTML comment as nothing, so a planted `<!-- [critical] -->`
   // would otherwise become an invisible, irrefutable blocker — the exact
   // harm `isBlockerBody`'s identity gate exists to prevent, reached around
   // it. An unclosed comment swallows the rest of the body, as on GitHub.
-  const b = (body ?? '').replace(/<!--[\s\S]*?(?:-->|$)/g, '').toLowerCase();
+  const b = stripQuotedRegions(body ?? '').toLowerCase();
   return BLOCKER_PATTERNS.some((re) => {
     // Preserve the pattern's own flags (a future `i`/`u` must not be silently
     // dropped) and add `g` for the scan; dedupe so `g` is never doubled.
@@ -517,6 +615,14 @@ export interface InlineThreads {
   repliedBlockerRoots: RawComment[];
   repliedRoots: RawComment[];
   repliesByRoot: Map<number, RawComment[]>;
+  /**
+   * Per promoted root id whose standing claim is a REPLY: this account's
+   * newest blocker-shaped re-post in that thread, which since the thread
+   * lifecycle (#9906) is where a still-standing finding re-asserts
+   * itself. Absent when the root itself is the latest own assertion —
+   * the section always renders the root, and this beside it.
+   */
+  blockerLeads: Map<number, RawComment>;
 }
 
 /**
@@ -546,26 +652,30 @@ export function isBlockerBody(
 /**
  * Whether any posted ROOT comment carries the invisible CRITICAL marker —
  * exactly the signal authorship unlocks (`isBlockerBody`'s marker disjunct
- * reads root bodies only, and only `critical` promotes). When identity
+ * reads a thread's root AND this account's replies in it — since the
+ * thread lifecycle (#9906) a still-standing Critical re-asserts itself as
+ * a REPLY, so a root-only read left the routine carrier uncovered (#9940
+ * review, round 30 reverse audit) — and only `critical` promotes). When
+ * identity
  * lookup fails while one is present, the context must fail closed instead
  * of proceeding with an empty `me`: an unresolved attribution-off Critical
  * would classify as ordinary discussion and disappear from the blocker set
  * later rounds use, and "could not tell" must not read the same as "was
- * not". Firing on anything WIDER — a reply's marker, a suggestion marker —
- * would fail closed on a signal the identity decides nothing about, and the
- * marker string is public: a planted reply would then convert every
- * transient identity blip into a repeating hard refusal.
+ * not". Firing on anything WIDER — a suggestion marker — would fail
+ * closed on a signal the identity decides nothing about. The marker
+ * string is public, so a planted comment converts a transient identity
+ * blip into a hard refusal either way: that was already true of a planted
+ * ROOT, and the reply leg inherits exactly that trade — the alternative
+ * is losing the carrier the lifecycle actually uses.
  */
-export function anyRootCarriesCriticalMarker(
+export function anyCommentCarriesCriticalMarker(
   comments: ReadonlyArray<{
     body?: string | undefined;
     in_reply_to_id?: number | null;
   }>,
 ): boolean {
   return comments.some(
-    (c) =>
-      (c.in_reply_to_id === undefined || c.in_reply_to_id === null) &&
-      commentMarkerSeverity(c.body ?? '') === 'critical',
+    (c) => commentMarkerSeverity(c.body ?? '') === 'critical',
   );
 }
 
@@ -619,8 +729,63 @@ export function classifyInlineThreads(
   // including from round N+2, where the ledger no longer resurfaces a
   // "cannot tell" ruling. The marker disjunct is gated on the reviewing
   // account: the string is public and plantable.)
-  const isBlockerRoot = (c: RawComment): boolean =>
-    isBlockerBody(c.body, c.user?.login, me);
+  //
+  // The claim is read from the whole THREAD, not the root alone: since the
+  // thread lifecycle (#9906) a still-standing finding re-posts as a REPLY
+  // inside its original thread instead of opening a new root, and a round
+  // may raise its severity (SKILL.md's dedup keeps the HIGHEST). A Critical
+  // carried into a thread whose root was a Suggestion then promoted
+  // nothing — the blocker left the mandatory section entirely and settled
+  // into "Already discussed — do NOT re-report" as a 240-char snippet,
+  // which is exactly the #5738/#6486 failure this section exists to close
+  // (#9940 review, round 30). The lead is the NEWEST blocker-shaped
+  // comment in the thread: the standing claim is the latest one, and its
+  // body is what the re-check must rule on.
+  //
+  // Two decisions, deliberately not the same test. PROMOTION reads the
+  // whole thread from ANY author — widening it can only ADD a thread, the
+  // same fail-safe the root read already had. The LEAD — the re-post
+  // whose body the section renders BESIDE the root's — is restricted to
+  // this account: the standing claim is the reviewer's own re-assertion,
+  // and a third party's reply that merely matches a blocker phrase (the
+  // "Quote reply" button quotes the root's `**[Critical]**` marker
+  // verbatim) is a rebuttal, not the claim to rule on (#9940 review,
+  // round 30 reverse audit).
+  //
+  // A `fixed` ruling note is never either: the lifecycle posts
+  // `R1-2 fixed by <what> <marker>` into the thread it then resolves, and
+  // a `by` clause naming what changed routinely carries blocker prose
+  // ("removing the blocking wait", "the must-fix guard") — read as a
+  // claim, it promoted retired threads and, worse, presented the ruling
+  // as the text to rule on while the real re-post sank into a snippet
+  // (#9940 review, round 30 reverse audit).
+  const isRuling = (c: RawComment): boolean =>
+    FIXED_RULING_SHAPE_RE.test(c.body ?? '');
+  const blockerLeads = new Map<number, RawComment>();
+  const promoted = new Set<number>();
+  for (const root of roots) {
+    const chain = [root, ...(repliesByRoot.get(root.id) ?? [])];
+    if (
+      chain.some(
+        (c) => !isRuling(c) && isBlockerBody(c.body, c.user?.login, me),
+      )
+    ) {
+      promoted.add(root.id);
+    }
+    for (let i = chain.length - 1; i > 0; i--) {
+      const c = chain[i]!;
+      if (
+        me !== '' &&
+        (c.user?.login ?? '').toLowerCase() === me.toLowerCase() &&
+        !isRuling(c) &&
+        isBlockerBody(c.body, c.user?.login, me)
+      ) {
+        blockerLeads.set(root.id, c);
+        break;
+      }
+    }
+  }
+  const isBlockerRoot = (c: RawComment): boolean => promoted.has(c.id);
   const repliedBlockerRoots = roots.filter(
     (c) => repliesByRoot.has(c.id) && isBlockerRoot(c),
   );
@@ -640,6 +805,7 @@ export function classifyInlineThreads(
     repliedBlockerRoots,
     repliedRoots,
     repliesByRoot,
+    blockerLeads,
   };
 }
 
@@ -655,11 +821,22 @@ export function classifyInlineThreads(
  */
 const BLOCKER_SECTION_BUDGET = 16000;
 
+/**
+ * Characters a thread's own re-post may spend on a full body before it
+ * degrades to a snippet that names its fetch. The ROOT is what the
+ * re-check rules on and carries no cap of its own beyond the section
+ * budget; the re-post is the newer restatement of the same claim, so its
+ * share is bounded to keep one long thread from starving later blockers.
+ */
+const LEAD_BODY_CAP = 2000;
+
 function blockerSection(
   roots: RawComment[],
   issueBlockers: RawComment[],
   repliesByRoot: Map<number, RawComment[]>,
   ctx: RefContext,
+  /** See `InlineThreads.blockerLeads` — the comment each claim lives in. */
+  blockerLeads: Map<number, RawComment> = new Map(),
 ): string[] {
   if (roots.length === 0 && issueBlockers.length === 0) return [];
   const out: string[] = [
@@ -702,6 +879,13 @@ function blockerSection(
   });
 
   for (const root of sortedRoots) {
+    // The claim to rule on is the thread's LEAD — the newest blocker-shaped
+    // comment in it, which the thread lifecycle routinely makes a reply
+    // (#9940 review, round 30). Its body is what gets rendered in full and
+    // what the Referenced-code list is extracted from: a re-post names the
+    // location the finding sits at NOW, while the root's anchor is where
+    // the thread was opened, rounds ago.
+    const lead = blockerLeads.get(root.id);
     out.push(
       ...charge([
         `**\`${root.path ?? '?'}\`:${root.line ?? '?'}** — initiated by @${root.user?.login ?? '?'} (comment ${root.id})`,
@@ -710,21 +894,50 @@ function blockerSection(
     );
     // Gate on what is actually emitted. `quoteBlock` adds `> ` to every line, so
     // gating on the raw body undercounts each one by 2 × its line count.
-    const quoted = quoteBlock(fullCommentBody(root.body, root.id, ctx));
-    if (spent + quoted.length <= BLOCKER_SECTION_BUDGET) {
-      out.push(...charge([quoted, '']));
-    } else {
+    const quoteOne = (c: RawComment, cap: number): void => {
+      const quoted = quoteBlock(fullCommentBody(c.body, c.id, ctx));
+      if (
+        quoted.length <= cap &&
+        spent + quoted.length <= BLOCKER_SECTION_BUDGET
+      ) {
+        out.push(...charge([quoted, '']));
+      } else {
+        out.push(
+          ...charge([
+            `> ${snippetWithRef(c.body, 400, pullCommentRef(c.id, ctx))}`,
+            '',
+            '_(section budget spent — this body is a snippet; fetch it in full before ruling)_',
+            '',
+          ]),
+        );
+      }
+      out.push(...charge(refsLine(c.body)));
+    };
+    // The root keeps the section's whole allowance — `fullCommentBody`
+    // already truncates it at FULL_BODY_CAP.
+    quoteOne(root, Number.POSITIVE_INFINITY);
+    // The thread's own latest re-assertion, IN ADDITION to the root: a
+    // re-post names where the finding sits now, while the root's anchor
+    // and text are rounds old. Never instead of the root — the root is
+    // the reviewed claim, and this section is the only place it appears
+    // (#9940 review, round 30).
+    if (lead !== undefined) {
       out.push(
         ...charge([
-          `> ${snippetWithRef(root.body, 400, pullCommentRef(root.id, ctx))}`,
-          '',
-          '_(section budget spent — this body is a snippet; fetch it in full before ruling)_',
+          `Re-asserted by @${lead.user?.login ?? '?'} (comment ${lead.id}) — the standing claim; rule on this text:`,
           '',
         ]),
       );
+      // Bounded harder than the root's: the root is the reviewed claim and
+      // gets the section's full allowance, while a long re-post used to
+      // spend up to 8 KB of one shared budget and push two later roots'
+      // bodies down to snippets (#9940 review, round 30 reverse audit).
+      quoteOne(lead, LEAD_BODY_CAP);
     }
-    out.push(...charge(refsLine(root.body)));
-    const replies = repliesByRoot.get(root.id) ?? [];
+    // A lead quoted in full above is not listed again as a snippet.
+    const replies = (repliesByRoot.get(root.id) ?? []).filter(
+      (r) => r.id !== lead?.id,
+    );
     if (replies.length > 0) {
       out.push(
         ...charge([
@@ -821,6 +1034,16 @@ export interface RecoveredLedger {
    * never early.
    */
   ownMarkerRead?: boolean;
+  /**
+   * The round the ledger's anchor was CERTIFIED at, when it is not the
+   * winning round's own. Set only when `recoverLedger` grafted the anchor
+   * forward from an earlier own marker because the winning round closed
+   * without one (fail-closed) or was a foreign marker stripped at the seam.
+   * The renderer reads it so "Round N, reviewed at sha" is never claimed of
+   * a round that reviewed no such range — the anchor is round M's verdict,
+   * carried, and the section says so.
+   */
+  anchorFromRound?: number;
 }
 
 /**
@@ -921,6 +1144,38 @@ export function recoverLedger(
   let sawOwnReview = false;
   /** The own marker whose findings a foreign winner is merged OVER. */
   let bestOwn: { ledger: Ledger; at: string; id: number } | null = null;
+  /**
+   * The highest-round OWN marker carrying an anchor — the graft candidate
+   * when the winning marker has none. A fail-closed round withholds its
+   * anchor on purpose, but the withhold is about THAT round's range: the
+   * anchor an earlier clean round certified stays true ("clean up to sha"
+   * is a claim about the sha, revoked by nothing a later round can post),
+   * and scoping the next round `sha..HEAD` re-covers exactly the gap the
+   * fail-closed round could not certify. Without the graft one non-clean
+   * round dropped the incremental state permanently — every later round
+   * re-read the whole diff, and a full-range re-read of a large PR is
+   * itself the round most likely to close non-clean (issue #9902).
+   */
+  let bestOwnAnchor: {
+    sha: string;
+    model: string | undefined;
+    round: number;
+    at: string;
+    id: number;
+  } | null = null;
+  // The "later own marker" rule is used TWICE on this walk — `bestOwn`
+  // selects the union's findings, `bestOwnAnchor` the graft source — and
+  // both pair data taken from the same markers, so the precedence lives
+  // here once rather than as two hand-maintained copies a future tiebreak
+  // edit could diverge.
+  const laterOwn = (
+    round: number,
+    at: string,
+    id: number,
+    cur: { round: number; at: string; id: number },
+  ) =>
+    round > cur.round ||
+    (round === cur.round && (at > cur.at || (at === cur.at && id > cur.id)));
   if (me) {
     for (const r of reviews) {
       if (r.user?.login?.toLowerCase() !== me) continue;
@@ -933,11 +1188,19 @@ export function recoverLedger(
       const id = typeof r.id === 'number' ? r.id : 0;
       if (
         !bestOwn ||
-        l.round > bestOwn.ledger.round ||
-        (l.round === bestOwn.ledger.round &&
-          (at > bestOwn.at || (at === bestOwn.at && id > bestOwn.id)))
+        laterOwn(l.round, at, id, {
+          round: bestOwn.ledger.round,
+          at: bestOwn.at,
+          id: bestOwn.id,
+        })
       ) {
         bestOwn = { ledger: l, at, id };
+      }
+      if (
+        l.sha !== undefined &&
+        (!bestOwnAnchor || laterOwn(l.round, at, id, bestOwnAnchor))
+      ) {
+        bestOwnAnchor = { sha: l.sha, model: l.model, round: l.round, at, id };
       }
     }
   }
@@ -996,7 +1259,11 @@ export function recoverLedger(
   if (!best) return { recovered: null, sawOwnReview };
   // The anchor never crosses accounts. Dropped here, at the recovery seam, so
   // no consumer downstream has to remember the rule. The churn state is the
-  // same class of claim and crosses with it — see `stripChurnState`.
+  // same class of claim and crosses with it — see `stripChurnState` — and so
+  // are the closures: a closure records what LEFT a work list the account
+  // that minted it certified, so a stranger's `closed` is their ruling-shaped
+  // history, not this loop's — adopted, it feeds the divergence sentinel a
+  // lineage this loop never produced. See `withoutClosures`.
   // The anchor is stripped whenever the winner is foreign, INCLUDING the
   // anonymous case: without a `me` every marker walks as foreign, and a
   // drive-by anchor must not decide which lines this pipeline stops looking
@@ -1006,7 +1273,12 @@ export function recoverLedger(
   // `gh api user` break this account's own trend chain for two rounds — and
   // record its own marker as a stranger's.
   let ledger = best.foreign
-    ? stripChurnState(stripAnchor(best.ledger))
+    ? (withoutClosures(
+        stripChurnState(stripAnchor(best.ledger)) as unknown as Record<
+          string,
+          unknown
+        >,
+      ) as unknown as Ledger)
     : best.ledger;
   if (me && best.foreign) ledger = stripForeignVolume(ledger);
   // A FOREIGN winner never DISPLACES this account's own findings — it is
@@ -1061,7 +1333,20 @@ export function recoverLedger(
       ...ledger,
       ...pickChurnState(bestOwn.ledger),
       ...(bestOwn.ledger.round === ledger.round
-        ? pickVolume(bestOwn.ledger as unknown as Record<string, unknown>)
+        ? {
+            ...pickVolume(bestOwn.ledger as unknown as Record<string, unknown>),
+            // The closures come back under the SAME gate as the volume, for
+            // the same reason: each entry is stamped `r` = the round that
+            // minted it, and the compose this recovery feeds reads exactly
+            // `r === winner's round` off it — own closures from the winner's
+            // own round are the generation the sentinel needs, own closures
+            // from any OTHER round are dead bytes, and the foreign winner's
+            // were stripped above, so nothing foreign enters through the
+            // restore. A round gap reads as "not recorded", like volume.
+            ...(bestOwn.ledger.closed === undefined
+              ? {}
+              : { closed: bestOwn.ledger.closed }),
+          }
         : {}),
     };
   }
@@ -1083,6 +1368,65 @@ export function recoverLedger(
       ...(dropped > 0 ? { dropped } : {}),
     };
   }
+  // The anchor graft. The winner — own fail-closed round, or a foreign
+  // marker stripped at the seam — carries no anchor, but this account's own
+  // earlier marker may still carry the one IT certified. Grafting it is not
+  // the crossing the strip exists to prevent: the sha comes from THIS
+  // account's own posted round, walked in pass 1, never from the foreign
+  // winner. And it is not an advance: the grafted anchor is never newer
+  // than the round that certified it, so the next round's `sha..HEAD`
+  // re-reads every line the unanchored rounds in between could not certify.
+  // Three more guards, all fail-safe toward the full range. The source must
+  // be a STRICTLY earlier round: two same-round own markers (a concurrent
+  // lane) leave one certified and one not, and the renderer cannot say of
+  // one round both "certified it" and "closed without an anchor". The
+  // winner's work list must be COMPLETE: a partial list's dropped entries
+  // reference code the grafted scope may never re-see — a fail-closed round
+  // that ran FULL range sheds findings spanning the whole diff, some before
+  // the candidate sha, and scoping past them retires them silently — the
+  // exact shape the serializer's truncation withhold exists to prevent. For
+  // a FOREIGN winner the own side's count reaches `ledger.dropped` only
+  // through the merge, which an own latest marker parsing to zero findings
+  // never enters — entries the admission test rejects under version drift,
+  // or a hand-edited list — yet still counts them, so that marker's own
+  // `dropped` is read directly. And
+  // the winner must not have RUN at the candidate sha: its `commit_id` is
+  // the head it reviewed at, and when the two are equal the next round's
+  // `--since <sha>` resolves to the head — `upToDate` — whose same-sha stop
+  // ends the round before any ruling on the winner's work list, abandoning
+  // it, and freezing every later round at the same head into the same stop.
+  // That is the exact range the graft's contract claims to re-cover, and at
+  // `sha == HEAD` nothing is re-read at all, so the refuse keeps the round
+  // full-range (Step 1's fence on the stop itself covers the shapes this
+  // equality cannot see — a missing commit_id, a rewound head). Own markers
+  // only, and a KNOWN `me` only — on an anonymous walk no marker is
+  // attributable, which is exactly the drive-by shape the anonymous strip
+  // refuses.
+  let anchorFromRound: number | undefined;
+  if (
+    me &&
+    ledger.sha === undefined &&
+    (ledger.dropped ?? 0) === 0 &&
+    !(
+      best.foreign &&
+      bestOwn &&
+      bestOwn.ledger.findings.length === 0 &&
+      (bestOwn.ledger.dropped ?? 0) > 0
+    ) &&
+    bestOwnAnchor &&
+    bestOwnAnchor.round < ledger.round &&
+    (best.commitId === null ||
+      best.commitId.toLowerCase() !== bestOwnAnchor.sha.toLowerCase())
+  ) {
+    ledger = {
+      ...ledger,
+      sha: bestOwnAnchor.sha,
+      ...(bestOwnAnchor.model !== undefined
+        ? { model: bestOwnAnchor.model }
+        : {}),
+    };
+    anchorFromRound = bestOwnAnchor.round;
+  }
   return {
     recovered: {
       ledger,
@@ -1092,6 +1436,7 @@ export function recoverLedger(
       author: best.author,
       merged: mergedOverOwn,
       ownMarkerRead: bestOwn !== null,
+      ...(anchorFromRound !== undefined ? { anchorFromRound } : {}),
     },
     sawOwnReview,
   };
@@ -1184,7 +1529,10 @@ export function persistedAnchorSha(sideFilePath: string): string | null {
  *   the next review (the healthy foreign-winner path strips it at the
  *   recovery seam for the same reason). A same-round anonymous winner
  *   changes nothing. With no readable file there is nothing to protect,
- *   and the anonymous recovery is written whole, exactly as before.
+ *   and the anonymous recovery is written whole, exactly as before —
+ *   stamped `anonymousAdoption: true`, the machine-readable record the
+ *   closure mint's honesty leg reads, because `foreign: false` there is
+ *   right for the disclosure caveat but cannot vouch the findings.
  *
  * Every write is write-temp-then-rename: a failure mid-write must leave the
  * previous file intact, never a truncated one that parses as no round and
@@ -1299,16 +1647,21 @@ export function persistRecoveredLedger(
           sha: _droppedSha,
           // The PAIR, as everywhere else: a `model` left behind says a round
           // was certified by someone while the range it certified is gone.
-          // This was the one seam where they did not fall together.
+          // This was the one seam where they did not fall together. The
+          // graft provenance goes with the pair it qualifies — a carried
+          // `anchorFromRound` beside a dropped sha would name a source
+          // whose anchor no longer rides the file.
           model: _droppedModel,
+          anchorFromRound: _droppedAnchorFromRound,
           commitId: _droppedCommitId,
           ...rest
         } = existing;
-        // Both groups through their shared projections, not a second
+        // All three groups through their shared projections, not a second
         // hand-kept list: the volume group grew twice and this branch was
         // updated neither time, and the churn group carries a streak that
-        // DECIDES a blocker.
-        const kept = withoutChurn(withoutVolume(rest));
+        // DECIDES a blocker. The closures go with them: each is a fact
+        // about the round this advance leaves behind, exactly like volume.
+        const kept = withoutClosures(withoutChurn(withoutVolume(rest)));
         mkdirSync(dirname(sideFilePath), { recursive: true });
         writeAtomic(
           JSON.stringify(
@@ -1376,10 +1729,11 @@ export function persistRecoveredLedger(
       // carried either: the marker omits a zero streak, so writing one back
       // records a shape the serializer never emits.
       //
-      // Reads the ONE decision-bearing member by name rather than the whole
-      // group. `CHURN_FIELDS` is a single field today and a test pins that,
-      // so a second member cannot be added without this site being revisited
-      // — the drift the volume group's own `floor` history warns about.
+      // Each decision-bearing member is read by name through the group's own
+      // projection rather than spreading the group: the carry has to clamp
+      // each streak independently, and a spread would carry a third member
+      // added later without this site deciding it should — the drift the
+      // volume group's own `floor` history warns about.
       //
       // No "and the recovery brought none of its own" term, because it is an
       // INVARIANT of the strip above, not a separate condition: churn
@@ -1388,7 +1742,9 @@ export function persistRecoveredLedger(
       // An explicit term for it was unreachable code no mutation could
       // redden. If the strip is ever loosened so a foreign streak can
       // survive recovery, this site needs that term back.
-      const carriedStreak = streakOf(pickChurn(existing ?? {})['churnRounds']);
+      const carriedChurn = pickChurn(existing ?? {});
+      const carriedStreak = streakOf(carriedChurn['churnRounds']);
+      const carriedFlat = streakOf(carriedChurn['flatRounds']);
       // `identityKnown` is DEFENCE IN DEPTH here, and deliberately kept
       // although no mutation can redden its removal: an anonymous recovery
       // over an existing file returns above (equal-or-lower round) or takes
@@ -1403,26 +1759,41 @@ export function persistRecoveredLedger(
       // round — so it stays as a statement of intent for whoever next moves
       // one of those early returns.
       const carryFileChurn =
-        identityKnown &&
-        recovered.ownMarkerRead === false &&
-        carriedStreak !== undefined &&
-        carriedStreak > 0
-          ? { churnRounds: Math.min(carriedStreak, recovered.ledger.round) }
+        identityKnown && recovered.ownMarkerRead === false
+          ? {
+              ...(carriedStreak !== undefined && carriedStreak > 0
+                ? {
+                    churnRounds: Math.min(
+                      carriedStreak,
+                      recovered.ledger.round,
+                    ),
+                  }
+                : {}),
+              ...(carriedFlat !== undefined && carriedFlat > 0
+                ? {
+                    flatRounds: Math.min(carriedFlat, recovered.ledger.round),
+                  }
+                : {}),
+            }
           : {};
-      // The anonymous whole-write sheds BOTH groups. The volume can genuinely
-      // arrive here — recovery keeps it on an anonymous walk on purpose, since
-      // "foreign" then means only "this run could not ask who" — and the churn
-      // cannot, because recovery strips it from every marker when there is no
-      // `me`. Shedding it anyway costs nothing and makes the seam defend
-      // itself instead of depending on that upstream invariant holding
-      // forever: this is the one path where a whole foreign ledger is written
-      // to the file, so a loosened strip would land a stranger's streak here
-      // intact and arm the blocker off someone else's count.
+      // The anonymous whole-write sheds ALL THREE groups. The volume can
+      // genuinely arrive here — recovery keeps it on an anonymous walk on
+      // purpose, since "foreign" then means only "this run could not ask
+      // who" — and the churn and the closures cannot, because recovery
+      // strips them from every marker when there is no `me`. Shedding them
+      // anyway costs nothing and makes the seam defend itself instead of
+      // depending on that upstream invariant holding forever: this is the
+      // one path where a whole foreign ledger is written to the file, so a
+      // loosened strip would land a stranger's streak here intact and arm
+      // the blocker off someone else's count — and a stranger's closure
+      // lineage here intact, stamped `foreign: false`.
       const recoveredOut = identityKnown
         ? recovered.ledger
-        : (withoutChurn(
-            withoutVolume(
-              recovered.ledger as unknown as Record<string, unknown>,
+        : (withoutClosures(
+            withoutChurn(
+              withoutVolume(
+                recovered.ledger as unknown as Record<string, unknown>,
+              ),
             ),
           ) as unknown as Ledger);
       writeAtomic(
@@ -1431,6 +1802,14 @@ export function persistRecoveredLedger(
             ...recoveredOut,
             ...carryFileChurn,
             ...(recovered.commitId ? { commitId: recovered.commitId } : {}),
+            // The grafted anchor's provenance — the round that CERTIFIED it.
+            // Persisted beside the pair so compose-review's `prevLedgerFacts`
+            // can tell an anchor the previous round certified from one it
+            // merely carried, and rule the chain self-check on the carried
+            // one only when the certifier matches the running identity.
+            ...(recovered.anchorFromRound !== undefined
+              ? { anchorFromRound: recovered.anchorFromRound }
+              : {}),
             reviewId: recovered.reviewId,
             // Provenance travels WITH the list it describes. Written even
             // when false, so the field's absence means only "a version
@@ -1487,6 +1866,16 @@ export function persistRecoveredLedger(
               (!recovered.foreign &&
                 existing?.['merged'] === true &&
                 recovered.ledger.findings.length > 0),
+            // The unverifiable adoption, recorded machine-readably for the
+            // one consumer the `foreign` rationale above never addressed:
+            // compose-review's closure mint, which reads that stamp to
+            // decide whether absence can mean "ruled fixed". An anonymously
+            // adopted stranger's list carries `foreign: false` — right for
+            // the caveat — and would walk through the mint as own without
+            // this flag. Rides ONLY on this branch: it is the one write
+            // where the adoption happened, and an identity-KNOWN whole
+            // write replaces the file with a list the union vouched.
+            ...(!identityKnown ? { anonymousAdoption: true } : {}),
           },
           null,
           2,
@@ -1584,6 +1973,15 @@ function pickChurnState(ledger: Ledger): Partial<Ledger> {
 /**
  * The convergence state group, named ONCE.
  *
+ * Both members are streaks another account's marker must never set for this
+ * one: `churnRounds` arms the non-convergence blocker, `flatRounds` engages
+ * the severity floor early (#9903). Their carry contracts differ at COMPOSE
+ * time (churn carries across an unmeasured round, flat resets) but are
+ * identical at THIS seam: a round this account never ran — an interleaved
+ * foreign winner — is not a measurement in either direction, so the restore
+ * carries both and neither arms off the carry alone (a carry never adds;
+ * engaging or filing still takes this account's own measured rounds).
+ *
  * Two production seams shed or restore this group — the recovery strip
  * above and the union's restore beside it — and the adjacent volume group
  * already paid for the alternative: `withoutVolume`'s own note records how a
@@ -1593,7 +1991,7 @@ function pickChurnState(ledger: Ledger): Partial<Ledger> {
  * own data on the merged recoveries the union exists to protect. Same
  * hazard, same remedy.
  */
-export const CHURN_FIELDS = ['churnRounds'] as const;
+export const CHURN_FIELDS = ['churnRounds', 'flatRounds'] as const;
 
 /** Drop the whole churn group from a record, whatever shape it is in. */
 export function withoutChurn<T extends Record<string, unknown>>(record: T): T {
@@ -1677,6 +2075,30 @@ function stripForeignVolume(ledger: Ledger): Ledger {
 }
 
 /**
+ * The same record with its closure list removed — ONE statement of the
+ * scoping decision three seams make for `closed`, on the same discipline the
+ * churn and volume groups get from `CHURN_FIELDS`/`VOLUME_FIELDS`.
+ *
+ * A closure is a ruling-shaped fact about the account whose round minted it:
+ * what LEFT a work list that account certified, when. Recovery crosses
+ * accounts, and the field crosses with it — left scoped, a foreign winner's
+ * closures ride into the side file as this loop's own history, feed the
+ * divergence sentinel a lineage this loop never produced, and the anonymous
+ * whole-write stamps them `foreign: false`, laundering the provenance past
+ * every guard that could still see it. The union restores this account's OWN
+ * closures beside the volume (same-round gate, same reason), and the two
+ * anonymous writes in `persistRecoveredLedger` shed the field beside the
+ * volume and the churn — each entry is a fact about a round those writes no
+ * longer describe. Absence degrades to silence: the sentinel reads no
+ * closures exactly as a pre-field marker does.
+ */
+function withoutClosures<T extends Record<string, unknown>>(record: T): T {
+  const out = { ...record };
+  delete out['closed'];
+  return out;
+}
+
+/**
  * Whether the recovered anchor may scope this round, and the routing that
  * follows from it — computed here, for the reason `renderLedgerSection`
  * records.
@@ -1729,7 +2151,7 @@ function anchorRuling(
   }
   if (certifierMatchesRound(ledger.model, running)) {
     return (
-      `The reviewed-at sha is the incremental anchor Step 1's ` +
+      `The anchor above is the incremental anchor Step 1's ` +
       `recovered-anchor check reads from the side file, and the \`model\` ` +
       `beside it IS the identity running this review ` +
       `(\`${code(running)}\`) — the same-model contract HOLDS, ruled here ` +
@@ -1746,11 +2168,11 @@ function anchorRuling(
   }
   const certifier = ledger.model?.trim()
     ? `\`${code(ledger.model.trim())}\``
-    : 'nothing — the marker predates the field, which counts as a mismatch';
+    : 'nothing — the marker carries no model (attribution off, or it predates the field), which counts as a mismatch';
   const runner =
     running !== '' ? `\`${code(running)}\`` : 'an unpublished identity';
   return (
-    `**Do NOT pass the reviewed-at sha as \`--since\`, and do not run git ` +
+    `**Do NOT pass the anchor above as \`--since\`, and do not run git ` +
     `against it yourself.** It was certified by ${certifier}, and this ` +
     `review runs as ${runner}: "clean up to that sha" is the recorded ` +
     `identity's verdict, so scoping to it would carry this round past code ` +
@@ -1801,6 +2223,15 @@ export function renderLedgerSection(
    * or could not be read, which leaves the ruling to this ledger alone.
    */
   persistedSha: string | null = null,
+  /**
+   * The round the anchor was certified at when it is NOT this ledger's own —
+   * `recoverLedger` grafted it forward from an earlier own marker because
+   * this round closed without one. The heading then says "anchoring at",
+   * never "reviewed at": a fail-closed round reviewed no certifiable range,
+   * and dressing its marker in the earlier round's verdict would tell Step 1
+   * a lie about which round read what.
+   */
+  anchorFromRound?: number,
 ): string {
   // Cell contents come from a marker in a PR body — untrusted text. A `|` or a
   // newline would break the table structure (and could forge rows), so both are
@@ -1817,14 +2248,44 @@ export function renderLedgerSection(
       .replace(/\|/g, '\\|')
       .replace(/[\r\n]+/g, ' ');
   const code = (v: string) => cell(v).replace(/`/g, "'");
-  const rows = ledger.findings.map(
-    (f) =>
-      `| ${cell(f.id)} | ${f.sev === 'C' ? 'Critical' : 'Suggestion'} | \`${code(f.file)}${f.line ? `:${f.line}` : ''}\` | ${cell(f.title)} |`,
-  );
+  // A grafted anchor is an EARLIER round's verdict this round carries, not a
+  // range this round certified — "reviewed at" would attribute round M's
+  // reading to round N. Why round N carries none differs: an OWN winner
+  // closed fail-closed, a FOREIGN one had its anchor stripped at the seam (or
+  // never carried one) — and the foreign clause must hold in BOTH sub-cases,
+  // because the renderer cannot tell a stripped anchor from an absent one,
+  // and each one-sided claim would be a lie in the other sub-case. The
+  // "certified it" clause is likewise conditional on a certifier riding the
+  // graft: an attribution-off source round posts a model-less sha, and
+  // asserting its certification beside the ruling's "certified by nothing"
+  // would contradict it within one section. The foreign provenance clauses
+  // make the same distinction at their tail: with a graft in hand the round
+  // is NOT full-range-by-default, so the "unless a local cache supplies one"
+  // fallback wording would undersell what the section already holds.
+  const shaClause = ledger.sha
+    ? anchorFromRound !== undefined
+      ? `, anchoring at \`${code(ledger.sha)}\`${ledger.model ? ` certified by \`${code(ledger.model)}\`` : ''} — carried forward from this account's round-${anchorFromRound} marker${ledger.model ? ', the round that certified it' : ''}; ${
+          author
+            ? `round ${ledger.round}'s marker carried no anchor this account could use`
+            : `round ${ledger.round} itself closed without an anchor`
+        }`
+      : `, reviewed at \`${code(ledger.sha)}\`${ledger.model ? ` by \`${code(ledger.model)}\`` : ''}`
+    : '';
+  const noCrossing = `the sha never crosses accounts${
+    anchorFromRound !== undefined
+      ? " — and has not: the anchor above came from this account's own earlier marker, not the foreign one"
+      : '; this round is full-range unless a local cache supplies one'
+  }`;
+  const rows = ledger.findings.map((f) => {
+    // A classified Critical (#10291) shows its axes beside the severity —
+    // the next round's Step 6 routes a still-standing entry by them.
+    const axes = axesOf(f);
+    return `| ${cell(f.id)} | ${f.sev === 'C' ? 'Critical' : 'Suggestion'}${axes ? ` (${axes})` : ''} | \`${code(f.file)}${f.line ? `:${f.line}` : ''}\` | ${cell(f.title)} |`;
+  });
   return [
     '## Previous /review round (machine ledger)',
     '',
-    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`${ledger.model ? ` by \`${code(ledger.model)}\`` : ''}` : ''}, recovered from ${author ? (merged ? `**@${cell(author)}**'s round-${ledger.round} marker MERGED over this account's own latest findings — entries this account certified are its own claims, the rest are @${cell(author)}'s, and no incremental anchor travelled with the foreign marker (the sha never crosses accounts; this round is full-range unless a local cache supplies one)` : `the marker **@${cell(author)}**'s last posted review carried — another account, so these are THEIR claims and no incremental anchor travelled with them (the sha never crosses accounts; this round is full-range unless a local cache supplies one)`) : `the marker this account's last posted review carried`}. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / fix-induced / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` ${anchorRuling(ledger, running, code, persistedSha)}` : ''}`,
+    `Round ${ledger.round}${shaClause}, recovered from ${author ? (merged ? `**@${cell(author)}**'s round-${ledger.round} marker MERGED over this account's own latest findings — entries this account certified are its own claims, the rest are @${cell(author)}'s, and no incremental anchor travelled with the foreign marker (${noCrossing})` : `the marker **@${cell(author)}**'s last posted review carried — another account, so these are THEIR claims and no incremental anchor travelled with them (${noCrossing})`) : `the marker this account's last posted review carried`}. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / fix-induced / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` ${anchorRuling(ledger, running, code, persistedSha)}` : ''}`,
     // A truncated ledger must not read like a complete one. `dropped` exists
     // to draw that line, and this is the only place a reader sees the list.
     ...(ledger.dropped
@@ -1863,6 +2324,9 @@ export function buildMarkdown(
   /** The platform the target lives on — the refetch commands' addressing
    *  scheme depends on it (Aone addresses every comment body per-MR). */
   platform: PlatformKind = 'github',
+  /** See `renderLedgerSection` — set when the anchor was grafted forward
+   *  from an earlier own marker rather than certified by the winning round. */
+  prevLedgerAnchorFromRound?: number,
 ): string {
   const {
     openRoots,
@@ -1870,6 +2334,7 @@ export function buildMarkdown(
     repliedBlockerRoots,
     repliedRoots,
     repliesByRoot,
+    blockerLeads,
   } = classifyInlineThreads(inline, me);
   // Both replied and un-replied blocker roots go to the re-check section,
   // rendered first and in full. Un-replied ones simply have no reply chain.
@@ -1919,7 +2384,13 @@ export function buildMarkdown(
   // section existed and nobody could see it, which is the PR #5738 failure this
   // file already carries a comment about, reintroduced one section further down.
   parts.push(
-    ...blockerSection(allBlockerRoots, blockerIssue, repliesByRoot, ctx),
+    ...blockerSection(
+      allBlockerRoots,
+      blockerIssue,
+      repliesByRoot,
+      ctx,
+      blockerLeads,
+    ),
   );
 
   parts.push('## Description');
@@ -1946,6 +2417,7 @@ export function buildMarkdown(
         prevLedgerAuthor,
         prevLedgerMerged,
         persistedSha,
+        prevLedgerAnchorFromRound,
       ),
     );
   }
@@ -2102,6 +2574,22 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
       `pr_number must be a positive integer, got ${JSON.stringify(prNumber)}`,
     );
   }
+  // The same-repo context-unavailable flow (SKILL.md) launches Agent 0 and
+  // 6d against "a context file that is not on disk" — a premise a stale
+  // file from an interrupted earlier round breaks: nothing else removes
+  // this path between rounds (fetch-pr's stale-clean sweeps the worktree
+  // and branch only), and this command writes it only at the end of a
+  // successful run. Remove it up front so a run that fails after the
+  // invocation validates leaves the documented missing-file shape as the
+  // only one the launched agents can meet — a usage error still rejects
+  // before any side effect by design (the handler-level test pins it), and
+  // SKILL.md's paragraph names the exception. A re-run that behaved as if
+  // it had read the context it just lost is the exact invariant the
+  // paragraph closes on. The
+  // `-prev-ledger.json` side file is deliberately NOT removed:
+  // compose-review reads it for the round counter, and
+  // persistRecoveredLedger owns its deletion licensing.
+  rmSync(out, { force: true });
   const platform = getPlatformReader({ host: args.host });
   platform.ensureAuthenticated();
   const ctx = platform.getReviewContext(prNum, ownerRepo);
@@ -2196,7 +2684,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     // disjunct of `isBlockerBody` never fires — an unresolved
     // attribution-off Critical would classify as ordinary discussion and
     // disappear from the blocker set later rounds use.
-    if (!identityKnown && anyRootCarriesCriticalMarker(inline)) {
+    if (!identityKnown && anyCommentCarriesCriticalMarker(inline)) {
       throw new Error(
         `cannot determine the reviewing account (${
           lookupError === null
@@ -2204,7 +2692,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
             : lookupError instanceof Error
               ? lookupError.message
               : String(lookupError)
-        }) while a posted root comment carries a Qwen critical marker — ` +
+        }) while a posted comment carries a Qwen critical marker — ` +
           'the blocker re-check depends on it; re-run',
       );
     }
@@ -2306,10 +2794,29 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     bakeHost,
     persistedSha,
     platform.kind,
+    prevRecovered?.anchorFromRound,
   );
 
   mkdirSync(dirname(out), { recursive: true });
-  writeFileSync(out, md, 'utf8');
+  // Write-temp-then-rename, the way the `-prev-ledger.json` side file is
+  // written: the up-front removal of a STALE file already ran, so a failure
+  // MID-WRITE of this one (ENOSPC creates the file then throws) would leave
+  // a truncated-but-readable context at `out` — the exact shape the
+  // missing-context branches the launch flow keys on cannot see. The temp
+  // write sits inside the same try, so a failure THERE removes its own
+  // debris too, rather than leaving a `.tmp` beside a missing context.
+  const tmp = `${out}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, md, 'utf8');
+    renameSync(tmp, out);
+  } catch (err) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      /* debris removal is best-effort */
+    }
+    throw err;
+  }
   const meaningfulReviewCount = reviews.filter((r) =>
     isReviewWorthShowing(stripLedgerMarker(r.body ?? '')),
   ).length;

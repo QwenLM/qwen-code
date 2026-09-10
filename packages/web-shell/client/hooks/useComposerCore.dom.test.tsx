@@ -32,10 +32,13 @@ function Harness({
   followupState,
   sessionId,
   atWorkspaceCwd,
+  composerScopeKey,
+  disableLegacyHistoryFallback,
   commands,
   onImageIngestionNotice,
   workspaceUploadBusy,
   fileDragEnabled,
+  attachmentsEnabled,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
@@ -50,10 +53,13 @@ function Harness({
   };
   sessionId?: string;
   atWorkspaceCwd?: string;
+  composerScopeKey?: string;
+  disableLegacyHistoryFallback?: boolean;
   commands?: UseComposerCoreOptions['commands'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
   workspaceUploadBusy?: boolean;
   fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
+  attachmentsEnabled?: UseComposerCoreOptions['attachmentsEnabled'];
 }) {
   const composer = useComposerCore({
     onSubmit,
@@ -66,11 +72,14 @@ function Harness({
     followupState,
     sessionId,
     atWorkspaceCwd,
+    composerScopeKey,
+    disableLegacyHistoryFallback,
     composerInput,
     composerInputVersion: composerInput ? 1 : undefined,
     onImageIngestionNotice,
     workspaceUploadBusy,
     fileDragEnabled,
+    attachmentsEnabled,
   });
   latest = composer;
 
@@ -91,10 +100,13 @@ async function mount({
   followupState,
   sessionId,
   atWorkspaceCwd,
+  composerScopeKey,
+  disableLegacyHistoryFallback,
   commands,
   onImageIngestionNotice,
   workspaceUploadBusy,
   fileDragEnabled,
+  attachmentsEnabled,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
@@ -109,10 +121,13 @@ async function mount({
   };
   sessionId?: string;
   atWorkspaceCwd?: string;
+  composerScopeKey?: string;
+  disableLegacyHistoryFallback?: boolean;
   commands?: UseComposerCoreOptions['commands'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
   workspaceUploadBusy?: boolean;
   fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
+  attachmentsEnabled?: UseComposerCoreOptions['attachmentsEnabled'];
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -121,6 +136,7 @@ async function mount({
   let currentPortalRoot: HTMLElement | null = null;
   let currentSessionId = sessionId;
   let currentWorkspaceCwd = atWorkspaceCwd;
+  let currentAttachmentsEnabled = attachmentsEnabled;
   const render = () => {
     root!.render(
       <WebShellPortalRootContext.Provider value={currentPortalRoot}>
@@ -135,10 +151,13 @@ async function mount({
             followupState={followupState}
             sessionId={currentSessionId}
             atWorkspaceCwd={currentWorkspaceCwd}
+            composerScopeKey={composerScopeKey}
+            disableLegacyHistoryFallback={disableLegacyHistoryFallback}
             commands={commands}
             onImageIngestionNotice={onImageIngestionNotice}
             workspaceUploadBusy={workspaceUploadBusy}
             fileDragEnabled={fileDragEnabled}
+            attachmentsEnabled={currentAttachmentsEnabled}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -163,6 +182,10 @@ async function mount({
       act(() => render());
     },
     rerender() {
+      act(() => render());
+    },
+    setAttachmentsEnabled(enabled: boolean) {
+      currentAttachmentsEnabled = enabled;
       act(() => render());
     },
   };
@@ -247,6 +270,27 @@ describe('useComposerCore tooltip portal', () => {
 });
 
 describe('useComposerCore history and drafts', () => {
+  it('places the caret after a draft restored on initial mount', async () => {
+    localStorage.setItem(
+      getSessionDraftKey('restored-session'),
+      'restored draft',
+    );
+
+    const mounted = await mount({
+      sessionId: 'restored-session',
+      atWorkspaceCwd: '/workspace/shared',
+    });
+
+    const view = latest!.viewRef.current!;
+    expect(view.state.doc.toString()).toBe('restored draft');
+    expect(view.state.selection.main.head).toBe(view.state.doc.length);
+    expect(document.activeElement).toBe(view.contentDOM);
+
+    act(() => view.dispatch({ selection: { anchor: 3 } }));
+    mounted.rerender();
+    expect(view.state.selection.main.head).toBe(3);
+  });
+
   it('does not serialize the whole document again for a slash menu refresh', async () => {
     await mount();
     const doc = latest!.viewRef.current!.state.doc;
@@ -399,6 +443,49 @@ describe('useComposerCore history and drafts', () => {
           '[]',
       ),
     ).toEqual(['prompt from b']);
+  });
+
+  it('isolates standalone history without falling back to legacy workspace prompts', async () => {
+    const scope = 'standalone';
+    localStorage.setItem(
+      getPromptHistoryStorageKey(),
+      JSON.stringify(['legacy workspace prompt']),
+    );
+    await mount({
+      sessionId: 'session-a',
+      composerScopeKey: scope,
+      disableLegacyHistoryFallback: true,
+    });
+
+    act(() => pressHistoryKey('ArrowUp'));
+    expect(latest!.getText()).toBe('');
+
+    act(() => {
+      latest!.setText('standalone prompt');
+      latest!.submitText();
+      pressHistoryKey('ArrowUp');
+    });
+    expect(latest!.getText()).toBe('standalone prompt');
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey(scope)) ?? '[]',
+      ),
+    ).toEqual(['standalone prompt']);
+  });
+
+  it('keeps legacy prompt history available in the Live scope', async () => {
+    localStorage.setItem(
+      getPromptHistoryStorageKey(),
+      JSON.stringify(['legacy Live prompt']),
+    );
+    await mount({
+      sessionId: 'session-a',
+      composerScopeKey: 'live',
+      disableLegacyHistoryFallback: false,
+    });
+
+    act(() => pressHistoryKey('ArrowUp'));
+    expect(latest!.getText()).toBe('legacy Live prompt');
   });
 
   it('resets history navigation when the session changes', async () => {
@@ -818,6 +905,41 @@ describe('useComposerCore history and drafts', () => {
 });
 
 describe('useComposerCore paste', () => {
+  it('pastes editable text when PPT clipboard also includes an image', async () => {
+    const { onSubmit } = await mount();
+    const text = '第一季度收入增长 20%\n请改写这段文字。';
+    const image = new File(['png'], 'ppt-text.png', { type: 'image/png' });
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [image],
+        items: [
+          { kind: 'file', type: 'image/png', getAsFile: () => image },
+          { kind: 'string', type: 'text/plain', getAsFile: () => null },
+        ],
+        types: ['Files', 'text/plain'],
+        getData: (type: string) => (type === 'text/plain' ? text : ''),
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+    await waitForImageIngestion();
+
+    expect.soft(latest!.getText()).toBe(text);
+    expect.soft(latest!.pastedImages).toEqual([]);
+
+    act(() => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalledWith(
+      text,
+      undefined,
+      undefined,
+      expect.any(Function),
+      undefined,
+    );
+  });
+
   it('lets long plain text paste directly into the editor', async () => {
     await mount();
     const event = new Event('paste', { bubbles: true, cancelable: true });
@@ -854,6 +976,45 @@ describe('useComposerCore paste', () => {
     expect(latest!.pastedFiles).toMatchObject([
       { name: 'notes.txt', data: files[1] },
     ]);
+  });
+
+  it('drops held attachments with a notice when attachments become unavailable', async () => {
+    const onImageIngestionNotice = vi.fn();
+    const mounted = await mount({ onImageIngestionNotice });
+    const file = new File(['hello'], 'notes.txt', { type: 'text/plain' });
+
+    await act(async () => {
+      expect(latest!.ingestFiles([file])).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(latest!.pastedFiles).toHaveLength(1);
+
+    mounted.setAttachmentsEnabled(false);
+
+    expect(latest!.pastedImages).toEqual([]);
+    expect(latest!.pastedFiles).toEqual([]);
+    expect(onImageIngestionNotice).toHaveBeenCalledWith(
+      'warning',
+      expect.any(String),
+    );
+  });
+
+  it('rejects new attachment ingestion while attachments are unavailable', async () => {
+    const onImageIngestionNotice = vi.fn();
+    await mount({ attachmentsEnabled: false, onImageIngestionNotice });
+    const file = new File(['hello'], 'notes.txt', { type: 'text/plain' });
+
+    await act(async () => {
+      expect(latest!.ingestFiles([file])).toBe(true);
+      await Promise.resolve();
+    });
+
+    expect(latest!.pastedImages).toEqual([]);
+    expect(latest!.pastedFiles).toEqual([]);
+    expect(onImageIngestionNotice).toHaveBeenCalledWith(
+      'warning',
+      expect.any(String),
+    );
   });
 
   it('claims image drops, blocks submit while reading, and submits image-only', async () => {
@@ -1204,6 +1365,39 @@ describe('useComposerCore tags', () => {
     );
   });
 
+  it('uses file format icons while preserving explicit icons and directories', async () => {
+    await mount({
+      composerInput: {
+        tags: [
+          { id: 'html', kind: 'file', value: 'docs/page.html' },
+          {
+            id: 'custom',
+            kind: 'file',
+            value: 'other.html',
+            icon: '/custom.svg',
+          },
+          {
+            id: 'folder',
+            kind: 'file',
+            value: 'docs',
+            metadata: { fileKind: 'directory' },
+          },
+        ],
+        tagPlacement: 'inline',
+      },
+    });
+
+    expect(
+      document.body.querySelectorAll('[data-file-type-icon="html"]'),
+    ).toHaveLength(1);
+    expect(
+      document.body.querySelectorAll('[style*="--composer-tag-icon-url"]'),
+    ).toHaveLength(2);
+    expect(latest!.viewRef.current!.state.doc.toString()).toContain(
+      'docs/page.html',
+    );
+  });
+
   it('resubmits restored input annotations with the draft', async () => {
     const { onSubmit } = await mount();
     const inputAnnotations = [
@@ -1408,23 +1602,26 @@ describe('useComposerCore tags', () => {
     warn.mockRestore();
   });
 
-  it('uses a custom inline tooltip without a native title', async () => {
-    await mount({
-      composerInput: {
-        tags: [{ id: 'orders', label: 'Table', value: 'orders' }],
-        tagPlacement: 'inline',
-      },
-      renderComposerTagTooltip: () => 'Details',
-    });
+  it.each([undefined, 'file'] as const)(
+    'uses a custom inline tooltip without a native title for kind %s',
+    async (kind) => {
+      await mount({
+        composerInput: {
+          tags: [{ id: 'orders', kind, label: 'Table', value: 'orders' }],
+          tagPlacement: 'inline',
+        },
+        renderComposerTagTooltip: () => 'Details',
+      });
 
-    const tooltip = document.body.querySelector('[role="tooltip"]');
-    expect(tooltip?.textContent).toBe('Details');
-    expect(tooltip?.parentElement?.getAttribute('title')).toBeNull();
-    expect(tooltip?.id).toBeTruthy();
-    expect(tooltip?.parentElement?.getAttribute('aria-describedby')).toBe(
-      tooltip?.id,
-    );
-  });
+      const tooltip = document.body.querySelector('[role="tooltip"]');
+      expect(tooltip?.textContent).toBe('Details');
+      expect(tooltip?.parentElement?.getAttribute('title')).toBeNull();
+      expect(tooltip?.id).toBeTruthy();
+      expect(tooltip?.parentElement?.getAttribute('aria-describedby')).toBe(
+        tooltip?.id,
+      );
+    },
+  );
 
   it('falls back to a native title when attaching an inline tooltip fails', async () => {
     const error = new Error('append failed');
@@ -1511,7 +1708,10 @@ describe('useComposerCore tags', () => {
 
     expect(
       document.body.querySelectorAll('[style*="--composer-tag-icon-url"]'),
-    ).toHaveLength(kinds.length);
+    ).toHaveLength(kinds.length - 1);
+    expect(
+      document.body.querySelector('[data-file-type-icon="file"]'),
+    ).not.toBeNull();
   });
 
   it('reports inline composer tags as attachments', async () => {

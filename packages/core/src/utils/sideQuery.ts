@@ -12,7 +12,7 @@ import type {
   Part,
 } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { DEFAULT_QWEN_MODEL } from './default-qwen-model.js';
 import { SchemaValidator } from './schemaValidator.js';
 
 export interface SideQueryJsonOptions<TResponse> {

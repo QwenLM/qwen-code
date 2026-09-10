@@ -8,12 +8,14 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
+import { isScalar, parseDocument, visit } from 'yaml';
 import {
   parse as parseYaml,
   stringify as stringifyYaml,
 } from '../utils/yaml-parser.js';
 import type {
   SubagentConfig,
+  SubagentModelRoute,
   SubagentRuntimeConfig,
   SubagentLevel,
   ListSubagentsOptions,
@@ -32,12 +34,13 @@ import {
 } from './types.js';
 import { SubagentValidator } from './validation.js';
 import { AgentHeadless } from '../agents/runtime/agent-headless.js';
+import type { SubagentExecutor } from '../agents/runtime/subagent-executor.js';
 import type {
   AgentEventEmitter,
   AgentHooks,
 } from '../agents/runtime/agent-events.js';
 import type { Config, MCPServerConfig } from '../config/config.js';
-import { APPROVAL_MODES } from '../config/config.js';
+import { APPROVAL_MODES, deriveConfig } from '../config/config.js';
 import type { HookDefinition, HookEventName } from '../hooks/types.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
@@ -57,6 +60,7 @@ import {
   COLOR_VALUES,
   isColor,
   isPermissionMode,
+  parseAgentExecutor,
   parseAgentHooks,
   parseAgentMcpServers,
   parseMaxTurns,
@@ -102,6 +106,14 @@ function subagentApprovalModesLabel(): string {
 export class SubagentManager {
   private readonly validator: SubagentValidator;
   private subagentsCache: Map<SubagentLevel, SubagentConfig[]> | null = null;
+  // R10-2: executor-block refusals recorded during a level scan, keyed by level
+  // then lowercased declared name. loadSubagent consults this so a by-name
+  // dispatch REFUSES instead of falling through to a lower-precedence in-process
+  // definition of the same name (the silent substitution this feature prevents).
+  private readonly executorRefusals = new Map<
+    SubagentLevel,
+    Map<string, SubagentError>
+  >();
   private readonly changeListeners: Set<() => void> = new Set();
 
   constructor(private readonly config: Config) {
@@ -304,6 +316,10 @@ export class SubagentManager {
         );
       }
 
+      // The explicit-level path does not fall through to a lower-precedence
+      // definition or a builtin, so it cannot silently substitute an in-process
+      // agent — return the level's match (or null) without the R10-2 refusal.
+      // Only the by-name fall-through path below (used by dispatch) refuses.
       return this.findSubagentByNameAtLevel(name, level);
     }
 
@@ -321,12 +337,14 @@ export class SubagentManager {
     if (projectConfig) {
       return projectConfig;
     }
+    this.throwRecordedExecutorRefusal('project', lowerName);
 
     // Try user level
     const userConfig = await this.findSubagentByNameAtLevel(name, 'user');
     if (userConfig) {
       return userConfig;
     }
+    this.throwRecordedExecutorRefusal('user', lowerName);
 
     // Try extension level
     const extensionConfig = await this.findSubagentByNameAtLevel(
@@ -336,9 +354,25 @@ export class SubagentManager {
     if (extensionConfig) {
       return extensionConfig;
     }
+    this.throwRecordedExecutorRefusal('extension', lowerName);
 
     // Try built-in agents as fallback
     return this.getBuiltinAgent(name);
+  }
+
+  // R10-2: refuse a by-name dispatch when this level skipped a file that
+  // declared `name` but had an invalid executor block, instead of falling
+  // through to a lower-precedence in-process definition (or a builtin) of the
+  // same name — which would silently substitute a Qwen-model agent for the
+  // external one the file asked for, with only a discovery-time console.warn.
+  // Scoped to executor refusals recorded during the level scan, so an arbitrary
+  // malformed file cannot disable an unrelated builtin.
+  private throwRecordedExecutorRefusal(
+    level: SubagentLevel,
+    lowerName: string,
+  ): void {
+    const refusal = this.executorRefusals.get(level)?.get(lowerName);
+    if (refusal) throw refusal;
   }
 
   /**
@@ -785,6 +819,18 @@ export class SubagentManager {
       frontmatter['hooks'] = config.hooks;
     }
 
+    if (config.executor !== undefined) {
+      const executor = parseAgentExecutor(config.executor);
+      if (!executor) {
+        throw new SubagentError(
+          `Subagent "${config.name}" executor block failed validation. Refusing to save it without its executor.`,
+          SubagentErrorCode.INVALID_CONFIG,
+          config.name,
+        );
+      }
+      frontmatter['executor'] = executor;
+    }
+
     // Serialize to YAML
     const yamlContent = stringifyYaml(frontmatter, {
       lineWidth: 0, // Disable line wrapping
@@ -831,8 +877,12 @@ export class SubagentManager {
       runtimeAuthOverrides?: AuthOverrides;
       runConfigOverrides?: Partial<RunConfig>;
       toolConfigOverride?: ToolConfig;
+      /** Business/task name used for local per-invocation usage labels. */
+      taskName?: string;
+      /** Stable id used to keep one invocation grouped across resume. */
+      subagentId?: string;
     },
-  ): Promise<{ subagent: AgentHeadless; dispose: () => Promise<void> }> {
+  ): Promise<{ subagent: SubagentExecutor; dispose: () => Promise<void> }> {
     // Track per-spawn cleanup callbacks declared outside the inner
     // `try/catch` so the catch can fire them on a constructor failure
     // before the caller ever receives the return value. The successful
@@ -865,6 +915,124 @@ export class SubagentManager {
     };
 
     try {
+      if (config.executor !== undefined) {
+        // Safe mode promises that only built-in subagents are available and
+        // that no repo-supplied execution surface runs. Discovery filtering is
+        // not enough: `loadSubagent` resolves a `subagent_type` from disk
+        // (project/user/extension) regardless of safe mode, and a cloned repo
+        // can ship `.qwen/agents/<builtin-name>.md` carrying an `executor` that
+        // resolves before the built-in of the same name. Refuse at the dispatch
+        // gate so safe mode never spawns a definition-supplied binary.
+        if (runtimeContext.isSafeMode()) {
+          throw new SubagentError(
+            `Subagent "${config.name}" declares an external executor, which safe mode forbids: safe mode restricts subagents to the built-in set and never spawns a definition-supplied binary.`,
+            SubagentErrorCode.INVALID_CONFIG,
+            config.name,
+          );
+        }
+        const spec = parseAgentExecutor(config.executor);
+        if (!spec) {
+          throw new SubagentError(
+            `Subagent "${config.name}" executor block failed validation. Refusing to run it in-process.`,
+            SubagentErrorCode.INVALID_CONFIG,
+            config.name,
+          );
+        }
+        if (config.level === 'project' && !runtimeContext.isTrustedFolder()) {
+          throw new SubagentError(
+            `Cannot start external agent "${config.name}" from an untrusted project.`,
+            SubagentErrorCode.INVALID_CONFIG,
+            config.name,
+          );
+        }
+        const unsupported = [
+          ['tools', config.tools],
+          ['disallowedTools', config.disallowedTools],
+          ['mcpServers', config.mcpServers],
+          ['hooks', config.hooks],
+          ['maxTurns', config.maxTurns],
+          ['runConfig.max_turns', config.runConfig?.max_turns],
+          [
+            'runConfigOverrides.max_turns',
+            options?.runConfigOverrides?.max_turns,
+          ],
+          [
+            'model',
+            config.model && config.model !== 'inherit'
+              ? config.model
+              : undefined,
+          ],
+          [
+            'modelConfigOverrides',
+            Object.keys(options?.modelConfigOverrides ?? {}).length > 0
+              ? options?.modelConfigOverrides
+              : undefined,
+          ],
+          ['runtimeAuthOverrides', options?.runtimeAuthOverrides],
+          ['toolConfigOverride', options?.toolConfigOverride],
+          [
+            'promptConfigOverrides.renderedSystemPrompt',
+            options?.promptConfigOverrides?.renderedSystemPrompt,
+          ],
+          [
+            'promptConfigOverrides.initialMessages',
+            options?.promptConfigOverrides?.initialMessages,
+          ],
+          ['hooks callbacks', options?.hooks],
+        ].filter(([, value]) => value !== undefined);
+        if (unsupported.length > 0) {
+          throw new SubagentError(
+            `External agent "${config.name}" does not support ${unsupported.map(([key]) => key).join(', ')}.`,
+            SubagentErrorCode.INVALID_CONFIG,
+            config.name,
+          );
+        }
+        const externalExecutor = runtimeContext.getExternalAgentExecutor();
+        if (!externalExecutor) {
+          throw new SubagentError(
+            `Subagent "${config.name}" declares an executor but this host registered no external agent executor. Refusing to run it in-process.`,
+            SubagentErrorCode.INVALID_CONFIG,
+            config.name,
+          );
+        }
+        const subagent = await externalExecutor.create({
+          spec,
+          name: config.name,
+          // The peer permission mode must be the host's effective, already
+          // clamped approval policy — not the definition's raw request. The
+          // Agent tool resolves the definition's approvalMode against the
+          // parent session's mode and folder trust (resolveSubagentApprovalMode)
+          // and stamps the result onto this runtimeContext, so reading it back
+          // here is what stops a definition from escalating the external agent
+          // past the parent session's limit. config.permissionMode is already
+          // bridged into that resolved value at parse time.
+          approvalMode: runtimeContext.getApprovalMode(),
+          permissionMode: config.permissionMode,
+          promptConfig: {
+            systemPrompt: config.systemPrompt,
+            ...options?.promptConfigOverrides,
+          },
+          modelConfig: {},
+          runConfig: {
+            ...config.runConfig,
+            ...options?.runConfigOverrides,
+          },
+          toolConfig: {
+            tools: ['*'],
+            disallowedTools: [ToolNames.ASK_USER_QUESTION],
+          },
+          eventEmitter: options?.eventEmitter,
+          taskName: options?.taskName,
+          subagentId: options?.subagentId,
+          runtimeContext: deriveConfig(runtimeContext),
+        });
+        return {
+          subagent,
+          dispose: async () => {
+            await subagent.dispose?.();
+          },
+        };
+      }
       const runtimeConfig = await this.convertToRuntimeConfig(
         config,
         runtimeContext,
@@ -924,7 +1092,15 @@ export class SubagentManager {
       const hookSystem = runtimeContext.getHookSystem();
       const hookRegistry = hookSystem?.getRegistry();
       if (config.hooks && Object.keys(config.hooks).length > 0) {
-        if (hookRegistry) {
+        if (config.level === 'project' && !runtimeContext.isTrustedFolder()) {
+          // Project agents load from <repo>/.qwen/agents/ regardless of
+          // trust (read-only use is fine), but their hooks are repo-supplied
+          // code execution — the same gate Config.getProjectHooks() applies
+          // to settings-file hooks.
+          debugLogger.warn(
+            `Subagent "${config.name}" is a project agent in an untrusted folder; ignoring its hooks.`,
+          );
+        } else if (hookRegistry) {
           const agentScope = `agent:${config.name}:${randomUUID()}`;
           unregisterAgentHooks = hookRegistry.addAgentHooks(
             config.hooks as { [K in HookEventName]?: HookDefinition[] },
@@ -952,6 +1128,8 @@ export class SubagentManager {
           options?.eventEmitter,
           options?.hooks,
           runtimeView,
+          options?.taskName,
+          options?.subagentId,
         );
         return { subagent, dispose: runCleanup };
       } catch (innerError) {
@@ -963,6 +1141,12 @@ export class SubagentManager {
         throw innerError;
       }
     } catch (error) {
+      // Already-classified errors carry an accurate message; re-wrapping them
+      // under "Failed to create AgentHeadless" would misreport the executor
+      // path, which never constructs an AgentHeadless at all.
+      if (error instanceof SubagentError || config.executor !== undefined) {
+        throw error;
+      }
       if (error instanceof Error) {
         throw new SubagentError(
           `Failed to create AgentHeadless: ${error.message}`,
@@ -976,8 +1160,8 @@ export class SubagentManager {
 
   /**
    * Build the per-subagent Config override used as the AgentHeadless
-   * runtime context. The override is a thin prototype-delegation wrapper
-   * (`Object.create(runtimeContext)`): no method changes, but a distinct
+   * runtime context. The override is a thin factory-derived wrapper: no
+   * method changes, but a distinct
    * instance triggers the lazy own-property init in
    * `Config.getFileReadCache()` so the subagent gets its own cache
    * rather than inheriting the parent's recorded reads — which would
@@ -990,10 +1174,11 @@ export class SubagentManager {
    * a wrapper above `runtimeContext` already rebuilt one (typically
    * `agent.ts:createApprovalModeOverride`, which marks itself via a
    * Symbol-keyed flag — Symbol lookup walks the prototype chain, so
-   * this also catches wrapper-on-wrapper layering like
-   * `bgConfig = Object.create(agentConfig)` from the background path).
-   * Rebuilding twice would waste work, leak listeners on shared
-   * managers, and split caches across registry layers.
+   * this also catches wrapper-on-wrapper layering like the background
+   * launch passing its stamped `createApprovalModeOverride` override directly
+   * as `runtimeContext`). Rebuilding twice would waste work,
+   * leak listeners on shared managers, and split caches across registry
+   * layers.
    */
   private async buildSubagentContextOverride(
     runtimeContext: Config,
@@ -1013,8 +1198,28 @@ export class SubagentManager {
      */
     cleanup?: () => Promise<void>;
   }> {
+    const subagentContext = deriveConfig(runtimeContext);
+
+    // Session Workflow plan-revision state is session-global on the base
+    // Config. The prototype set/clear assign
+    // `this.sessionWorkflowPlanRevision`, which would land as an OWN property
+    // on this wrapper and shadow the base value — a subagent's divergent
+    // todo_write would clear the approved revision only for itself while the
+    // parent keeps rejecting Agent launches against a plan that no longer
+    // exists. Forward mutations through to the wrapped Config
+    // (runtimeContext may itself be a write-through wrapper — the forwarding
+    // chain bottoms out at the base Config); keep in sync with
+    // `createApprovalModeOverride` in tools/agent/agent.ts.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const subagentContext = Object.create(runtimeContext) as any as Config;
+    (subagentContext as any).setSessionWorkflowPlanRevision = (
+      revision: Parameters<Config['setSessionWorkflowPlanRevision']>[0],
+    ): void => {
+      runtimeContext.setSessionWorkflowPlanRevision(revision);
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (subagentContext as any).clearSessionWorkflowPlanRevision = (): void => {
+      runtimeContext.clearSessionWorkflowPlanRevision();
+    };
 
     // Per-agent MCP server overrides. Frontmatter `mcpServers` entries shadow
     // session-level servers on key collision (more-specific-wins, matching
@@ -1108,17 +1313,21 @@ export class SubagentManager {
     fallbackModelId?: string,
     runtimeAuthOverrides?: AuthOverrides,
   ): Promise<RuntimeContentGeneratorView | undefined> {
-    const resolvedModel = this.resolveModelOverride(config.model, base);
-    const modelId = resolvedModel?.modelId ?? fallbackModelId;
+    const route = this.resolveModelRoute(
+      config,
+      base,
+      runtimeAuthOverrides?.authType,
+    );
+    const modelId = route?.modelId ?? fallbackModelId;
     if (!modelId) {
       return undefined;
     }
 
     const authType =
-      resolvedModel?.authType ??
+      route?.authType ??
       runtimeAuthOverrides?.authType ??
       base.getContentGeneratorConfig().authType;
-    const authOverrides: AuthOverrides = resolvedModel
+    const authOverrides: AuthOverrides = route
       ? { authType: authType as string }
       : {
           ...runtimeAuthOverrides,
@@ -1151,6 +1360,66 @@ export class SubagentManager {
   }
 
   /**
+   * Shared route-resolution core for a subagent definition's `model:`
+   * selector: resolve it against `runtimeContext` (with `currentModel`
+   * stripped, so `inherit` yields nothing) and return the concrete model
+   * ID plus the auth type a dedicated ContentGenerator must be created
+   * with. Returns `undefined` when the selector does not resolve to a
+   * concrete model — `inherit`, an unset `fast` selector, or no selector.
+   *
+   * Every spawn path must resolve routes through this single helper so the
+   * same `.qwen/agents/<name>.md` definition always maps to the same
+   * provider route, whether it runs as an ordinary subagent
+   * ({@link buildRuntimeContentGeneratorView}) or as a named teammate
+   * ({@link resolveSubagentModelRoute}).
+   *
+   * @param fallbackAuthType - Middle step of the ordinary-spawn auth
+   * fallback chain: runtime auth overrides carried by the caller. Spawn
+   * paths without such overrides (teammates) pass nothing.
+   */
+  private resolveModelRoute(
+    config: SubagentConfig,
+    runtimeContext: Config,
+    fallbackAuthType?: string,
+  ): SubagentModelRoute | undefined {
+    const resolvedModel = this.resolveModelOverride(
+      config.model,
+      runtimeContext,
+    );
+    if (!resolvedModel?.modelId) {
+      return undefined;
+    }
+    const authType =
+      resolvedModel.authType ??
+      fallbackAuthType ??
+      runtimeContext.getContentGeneratorConfig().authType;
+    return {
+      modelId: resolvedModel.modelId,
+      authType: authType as string,
+    };
+  }
+
+  /**
+   * Resolve a subagent definition's model selector the way the ordinary
+   * subagent spawn path does ({@link buildRuntimeContentGeneratorView}),
+   * returning the concrete model ID plus the auth type a dedicated
+   * ContentGenerator must be created with. Returns `undefined` when the
+   * selector does not resolve to a concrete model — `inherit`, an unset
+   * `fast` selector, or no selector — in which case the caller should
+   * inherit the parent's ContentGenerator unchanged.
+   *
+   * Used by spawn paths outside `createAgentHeadless` that still need the
+   * definition's provider route — the Agent Team teammate path (#10071)
+   * passes it as `inProcess.authOverrides` so InProcessBackend builds the
+   * same per-agent ContentGenerator an ordinary subagent would get.
+   */
+  resolveSubagentModelRoute(
+    config: SubagentConfig,
+  ): SubagentModelRoute | undefined {
+    return this.resolveModelRoute(config, this.config);
+  }
+
+  /**
    * Converts a file-based SubagentConfig to runtime configuration
    * compatible with AgentHeadless.create().
    *
@@ -1161,6 +1430,13 @@ export class SubagentManager {
     config: SubagentConfig,
     runtimeContext?: Config,
   ): Promise<SubagentRuntimeConfig> {
+    if (config.executor !== undefined) {
+      throw new SubagentError(
+        `Subagent "${config.name}" declares an external executor and cannot be converted to an in-process agent.`,
+        SubagentErrorCode.INVALID_CONFIG,
+        config.name,
+      );
+    }
     const promptConfig: PromptConfig = {
       systemPrompt: config.systemPrompt,
     };
@@ -1331,6 +1607,18 @@ export class SubagentManager {
 
     if (level === 'extension') {
       const extensions = this.config.getActiveExtensions();
+      // R10-2: extension agents load via loadSubagentFromDir, which skips and
+      // warns on a refusal — so the directory-scan branch below never runs for
+      // them and nothing would be recorded. Merge each active extension's
+      // recorded executor-block refusals so the by-name fall-through refuses
+      // them too instead of resolving a builtin of the same name.
+      const merged = new Map<string, SubagentError>();
+      for (const extension of extensions) {
+        for (const [name, error] of extension.agentExecutorRefusals ?? []) {
+          merged.set(name, error);
+        }
+      }
+      this.executorRefusals.set('extension', merged);
       return extensions.flatMap((extension) => extension.agents || []);
     }
 
@@ -1341,6 +1629,10 @@ export class SubagentManager {
     // If project level is requested but project root is same as home directory,
     // return empty array to avoid conflicts between project and global agents
     if (level === 'project' && isHomeDirectory) {
+      // No fresh scan happens on this path, so clear any refusal a prior scan
+      // recorded for the level — otherwise loadSubagent keeps throwing a stale
+      // refusal for a file this path no longer reads. (R12-4)
+      this.executorRefusals.set(level, new Map());
       return [];
     }
 
@@ -1353,6 +1645,7 @@ export class SubagentManager {
       const files = await fs.readdir(baseDir);
       const subagents: SubagentConfig[] = [];
 
+      const refusals = new Map<string, SubagentError>();
       for (const file of files) {
         if (!file.endsWith('.md')) continue;
 
@@ -1367,13 +1660,29 @@ export class SubagentManager {
           // mistyped frontmatter or used a reserved name had no way to see
           // why their agent wasn't loading.
           warnInvalidSubagentFile(filePath, error);
+          // R10-2: record an executor-block refusal by declared name so a
+          // by-name dispatch can REFUSE instead of falling through to a
+          // lower-precedence in-process definition of the same name. Scoped to
+          // executor refusals (not parse failures generally) so an arbitrary
+          // malformed repo file cannot disable an unrelated builtin at dispatch.
+          if (
+            error instanceof SubagentError &&
+            error.subagentName !== undefined &&
+            error.message.includes('invalid executor block')
+          ) {
+            refusals.set(error.subagentName.toLowerCase(), error);
+          }
           continue;
         }
       }
 
+      this.executorRefusals.set(level, refusals);
       return subagents;
     } catch (_error) {
-      // Directory doesn't exist or can't be read
+      // Directory doesn't exist or can't be read. Clear any refusal a prior
+      // scan recorded for this level so a stale entry cannot keep refusing a
+      // by-name dispatch for a file that no longer exists or is unreadable. (R12-4)
+      this.executorRefusals.set(level, new Map());
       return [];
     }
   }
@@ -1410,7 +1719,21 @@ export class SubagentManager {
    * @returns True if name is available
    */
   async isNameAvailable(name: string, level?: SubagentLevel): Promise<boolean> {
-    const existing = await this.loadSubagent(name, level);
+    let existing: SubagentConfig | null;
+    try {
+      existing = await this.loadSubagent(name, level);
+    } catch (error) {
+      // R10-2: loadSubagent now refuses a name claimed by an invalid-executor
+      // file. For availability that name IS taken (the file exists), so report
+      // it unavailable rather than propagating the dispatch-time refusal.
+      if (
+        error instanceof SubagentError &&
+        error.message.includes('invalid executor block')
+      ) {
+        return false;
+      }
+      throw error;
+    }
 
     if (!existing) {
       return true; // Name is available
@@ -1426,6 +1749,11 @@ export class SubagentManager {
 
 export async function loadSubagentFromDir(
   baseDir: string,
+  // R10-2: when provided, executor-block refusals (an agent file that declares
+  // an executor but failed to load) are recorded keyed by lowercased declared
+  // name, so a by-name dispatch can refuse instead of falling through to a
+  // builtin of the same name.
+  refusals?: Map<string, SubagentError>,
 ): Promise<SubagentConfig[]> {
   try {
     const files = await fs.readdir(baseDir);
@@ -1447,6 +1775,14 @@ export async function loadSubagentFromDir(
         subagents.push(config);
       } catch (error) {
         warnInvalidSubagentFile(filePath, error);
+        if (
+          refusals &&
+          error instanceof SubagentError &&
+          error.subagentName !== undefined &&
+          error.message.includes('invalid executor block')
+        ) {
+          refusals.set(error.subagentName.toLowerCase(), error);
+        }
         continue;
       }
     }
@@ -1458,12 +1794,58 @@ export async function loadSubagentFromDir(
   }
 }
 
+/**
+ * R12-5: returns true when a raw-text `executor:` probe match at `matchIndex`
+ * lies inside a block scalar (`description: |` or `>`), i.e. the match is prose
+ * documenting the executor syntax, not a real claim. The R10-1 probe is
+ * indentation-tolerant, so without this a `description: |` line reading
+ * `executor: acp` would hoist into a claim and hard-refuse an in-process
+ * definition that merely carries an unrelated tolerated YAML quirk. Fail-closed:
+ * if the AST walk itself throws, return false so the match stays a claim.
+ */
+function probeMatchInsideBlockScalar(
+  document: ReturnType<typeof parseDocument>,
+  matchIndex: number,
+): boolean {
+  try {
+    let inside = false;
+    visit(document, (_key, node) => {
+      if (
+        isScalar(node) &&
+        (node.type === 'BLOCK_LITERAL' || node.type === 'BLOCK_FOLDED') &&
+        node.range &&
+        node.range[0] <= matchIndex &&
+        matchIndex < node.range[1]
+      ) {
+        inside = true;
+      }
+    });
+    return inside;
+  } catch {
+    // A failed walk must not drop a real claim; leave the match as a claim.
+    return false;
+  }
+}
+
 function parseSubagentContent(
   content: string,
   filePath: string,
   level: SubagentLevel,
   validator: SubagentValidator,
 ): SubagentConfig {
+  // R11-1/R11-4: the executor claim and the trusted declared name are computed
+  // at FUNCTION scope so the catch can convert ANY load failure of an
+  // executor-claiming file into a named executor refusal (recorded by
+  // listSubagentsAtLevel, refused by loadSubagent's fall-through) — otherwise a
+  // file that fails an EARLIER validation (missing description, bad approvalMode)
+  // is skipped with nothing recorded, and a by-name dispatch silently falls
+  // through to a lower-precedence in-process definition or the builtin. The name
+  // comes from the real AST (parseDocument strips quotes), NOT the lenient value
+  // — the lenient parser strips only double quotes, so a single-quoted
+  // `name: 'Explore'` would otherwise be keyed "'explore'" and miss the
+  // 'explore' dispatch lookup.
+  let claimsExecutor = false;
+  let declaredName: string | undefined;
   try {
     const normalizedContent = normalizeContent(content);
 
@@ -1479,6 +1861,38 @@ function parseSubagentContent(
 
     // Parse YAML frontmatter
     const frontmatter = parseYaml(frontmatterYaml) as Record<string, unknown>;
+
+    // Real-AST executor claim + trusted declared name, computed BEFORE any
+    // validation can throw so the catch can route an executor-claiming file's
+    // failure to a named refusal. The executor block below reuses `document`,
+    // `hasExecutor` and `executorClaimMatch`.
+    const document = parseDocument(frontmatterYaml);
+    const hasExecutor = document.has('executor');
+    const executorClaimMatch = /^[ \t]*["']?executor["']?[ \t]*:/m.exec(
+      frontmatterYaml,
+    );
+    // R12-5: a probe match lying inside a block scalar is prose (a
+    // `description: |`/`>` documenting the executor syntax), not a claim —
+    // exclude it so the refusal guards below do not fire on an in-process
+    // definition that only mentions `executor:` in prose. A genuine top-level
+    // (even TAB-misindented) executor key is not inside a block scalar, so it
+    // stays a claim and the R10-1/R9-2 refusals still hold.
+    const probeIsClaim =
+      executorClaimMatch !== null &&
+      !probeMatchInsideBlockScalar(document, executorClaimMatch.index);
+    claimsExecutor = hasExecutor || probeIsClaim;
+    try {
+      const nodeName = document.has('name') ? document.get('name') : undefined;
+      if (typeof nodeName === 'string' && nodeName !== '')
+        declaredName = nodeName;
+    } catch {
+      // toJS/node reads can throw on an unresolved alias; keep the lenient name.
+    }
+    if (declaredName === undefined) {
+      const lenientName = frontmatter['name'];
+      if (typeof lenientName === 'string' && lenientName !== '')
+        declaredName = lenientName;
+    }
 
     // Extract required fields and convert to strings
     const nameRaw = frontmatter['name'];
@@ -1634,6 +2048,136 @@ function parseSubagentContent(
       );
     }
 
+    // executor: qwen-code extension (not part of the mirrored CC schema).
+    // Strictly validated because it names an external process to run; see
+    // `parseAgentExecutor`. Availability of the named command is NOT checked
+    // here — that is the injected executor's job at spawn time.
+    //
+    // A malformed block is a hard error, NOT a lenient drop. Dropping it would
+    // leave `config.executor` undefined, so the definition would run
+    // in-process: the task completes under Qwen's model, billed to the Qwen
+    // provider, with nothing on stdout or stderr — precisely the silent
+    // substitution this feature exists to prevent, and the consumption-point
+    // re-validation can never catch it because the field is already gone. The
+    // warn-only path was invisible in practice too, since `debugLogger.warn`
+    // is a no-op unless QWEN_DEBUG_LOG_FILE is set. This deliberately diverges
+    // from the lenient posture used for `mcpServers` / `hooks`: losing those
+    // degrades a capability, whereas losing this one substitutes a different
+    // agent for the one the definition asked for.
+    // The shared parser strips nulls, including null arguments. Validate the
+    // original YAML node so sanitization cannot change the executable request.
+    // (`document`, `hasExecutor`, `executorClaimMatch` and `claimsExecutor` are
+    // computed earlier, right after the frontmatter is parsed, so the catch can
+    // route an executor-claiming file's failure to a named refusal.)
+    // parseDocument repairs a syntactically invalid document instead of
+    // throwing, and `document.errors` is the only signal that it did so. For an
+    // executor-bearing definition that is unsafe: the repaired node can dispatch
+    // a different command/args than the file declares, or drop the key and run
+    // in-process. Refuse it and surface the real YAML error (with line/column).
+    //
+    // Scope this to executor-bearing files only. Every OTHER definition must
+    // keep loading through the shared parser's lenient `parseSimple` fallback —
+    // a description containing a colon, a tab-indented field, or a key
+    // duplicated by a bad merge loads at the merge base, and refusing it here
+    // would silently delete an agent from `/agents` (and break
+    // `subagent_type:`) with nothing on stdout or stderr. Detect the claim from
+    // the raw text too, so a YAML error that corrupts the `executor` key out of
+    // the AST still cannot slip through to a silent in-process run. The probe is
+    // indentation-TOLERANT (`^[ \t]*`, optional quotes) on purpose: a TAB before
+    // a top-level `executor:` is invalid YAML indentation, so parseDocument
+    // errors and drops the key, and a column-0-anchored probe would miss it — the
+    // definition would then load executor-less and run in-process under a Qwen
+    // model with nothing on any channel, the exact silent substitution this
+    // feature exists to prevent. The accepted cost is that an `executor:` token
+    // nested under another key (e.g. `metadata:`) in an otherwise-malformed file
+    // is also treated as a claim and refused; a visible, user-fixable
+    // over-refusal beats an invisible substitution or an invented dispatch. The
+    // claim is NOT read from the lenient `parseSimple` value: that line-based
+    // heuristic hoists an `executor:` line inside a `description: |` block scalar
+    // into a top-level key, which would dispatch a command existing only as prose.
+    // Refuse only when an error can actually corrupt the executor node, not on
+    // every tolerated YAML error in the file. Two distinct dangers: (1) the real
+    // YAML parser (parseDocument) lost the executor node (!hasExecutor) although
+    // the file claims one; do NOT fall back to the lenient parseSimple value, a
+    // line-based heuristic that mangles block scalars and sequences (command: |
+    // plus an indented npx becomes command '|', spawning an executable the file
+    // never declared), and YAML errors are not line-local, so an earlier
+    // compact-mapping error can drop the whole remainder including executor;
+    // (2) the AST
+    // has the executor but an error sits at or after its line, so parseDocument
+    // may have repaired the node into a different command/args than the file
+    // declares. An error strictly BEFORE the executor line — a duplicate `name:`
+    // from a bad merge, say — cannot have reached the executor subtree that
+    // parseDocument kept (hasExecutor still true), which stays byte-faithful, so
+    // refusing there would delete a valid external-agent
+    // definition over an unrelated quirk (it still loads at the merge base via
+    // the lenient `parseSimple` fallback). When the claim cannot be localized to
+    // a line, fail closed and treat every error as reaching it.
+    const executorLine =
+      executorClaimMatch === null
+        ? undefined
+        : frontmatterYaml.slice(0, executorClaimMatch.index).split('\n').length;
+    if (claimsExecutor && document.errors.length > 0) {
+      const astLostExecutor = !hasExecutor;
+      const reachingError = document.errors.find(
+        (error) =>
+          executorLine === undefined ||
+          error.linePos === undefined ||
+          error.linePos[0].line >= executorLine,
+      );
+      if (astLostExecutor || reachingError !== undefined) {
+        throw new SubagentError(
+          `Agent file ${filePath} has an invalid executor block: its frontmatter ` +
+            `YAML does not parse (${(reachingError ?? document.errors[0]).message}). ` +
+            `Refusing to load the definition rather than dispatch a silently ` +
+            `repaired executor.`,
+          SubagentErrorCode.INVALID_CONFIG,
+          declaredName ?? name,
+        );
+      }
+    }
+    // parseDocument tolerates an unresolved YAML alias (e.g. `command: *undef`)
+    // without recording a `document.errors` entry, but `toJS()` throws when it
+    // resolves the node — so the errors-based guard above cannot catch it. Refuse
+    // gracefully rather than let a raw YAML error escape parseSubagentContent.
+    let executorRaw: unknown;
+    if (hasExecutor) {
+      let documentJs: unknown;
+      try {
+        documentJs = document.toJS();
+      } catch (error) {
+        throw new SubagentError(
+          `Agent file ${filePath} has an invalid executor block: its frontmatter ` +
+            `YAML does not resolve (${error instanceof Error ? error.message : String(error)}). ` +
+            `Refusing to load the definition rather than dispatch an executor ` +
+            `parsed from YAML that will not resolve to a document.`,
+          SubagentErrorCode.INVALID_CONFIG,
+          declaredName ?? name,
+        );
+      }
+      executorRaw = (documentJs as Record<string, unknown>)['executor'];
+    } else {
+      // Do NOT fall back to the lenient parseSimple value: when parseDocument
+      // (the real YAML parser) has no top-level executor node, any `executor:`
+      // token the text probe matched is nested or block-scalar prose, and
+      // parseSimple's reconstruction is untrustworthy (it invents `command: '|'`,
+      // hoists prose into a key). A claim the AST lost under a YAML error is
+      // already refused above; with no error there is genuinely no top-level
+      // executor, so load without one rather than dispatch an unconfirmed value.
+      executorRaw = undefined;
+    }
+    const executor = parseAgentExecutor(executorRaw);
+    if ((hasExecutor || executorRaw !== undefined) && executor === undefined) {
+      throw new SubagentError(
+        `Agent file ${filePath} has an invalid executor block (expected ` +
+          `{ kind: 'acp', command: string, args?: string[] }). Refusing to load ` +
+          `the definition: dropping the block would silently run it in-process ` +
+          `instead of in the external agent it asked for.`,
+        SubagentErrorCode.INVALID_CONFIG,
+        declaredName ?? name,
+      );
+    }
+
     const config: SubagentConfig = {
       name,
       description,
@@ -1651,6 +2195,7 @@ function parseSubagentContent(
       ...(maxTurns !== undefined ? { maxTurns } : {}),
       ...(mcpServers !== undefined ? { mcpServers } : {}),
       ...(hooks !== undefined ? { hooks } : {}),
+      ...(executor !== undefined ? { executor } : {}),
     };
 
     // Validate the parsed configuration
@@ -1661,6 +2206,26 @@ function parseSubagentContent(
 
     return config;
   } catch (error) {
+    // Preserve a SubagentError as-is: an executor-block refusal already carries
+    // the declared agent name (subagentName), which loadSubagent needs to refuse
+    // a by-name dispatch instead of falling through (R10-2). Re-wrapping would
+    // strip the name and code.
+    if (error instanceof SubagentError) throw error;
+    // R11-1: a file that CLAIMS an executor but failed to load for ANY reason —
+    // a missing description, an invalid approvalMode, any validation before or
+    // after the executor block — must surface as a named executor refusal, so the
+    // dispatch refuses rather than falling through to an in-process substitute.
+    // (A file whose own name is unparseable stays undefined-keyed and falls
+    // through to the generic wrap; it cannot be matched by name anyway.)
+    if (claimsExecutor && declaredName) {
+      throw new SubagentError(
+        `Agent file ${filePath} has an invalid executor block: it declares an ` +
+          `executor but failed to load (${error instanceof Error ? error.message : 'Unknown error'}). ` +
+          `Refusing to fall through to a lower-precedence in-process substitute.`,
+        SubagentErrorCode.INVALID_CONFIG,
+        declaredName,
+      );
+    }
     throw new SubagentError(
       `Failed to parse subagent file: ${error instanceof Error ? error.message : 'Unknown error'}`,
       SubagentErrorCode.INVALID_CONFIG,
@@ -1676,5 +2241,13 @@ function parseSubagentContent(
  */
 function warnInvalidSubagentFile(filePath: string, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
+  if (
+    error instanceof SubagentError &&
+    message.includes('invalid executor block')
+  ) {
+    // eslint-disable-next-line no-console -- executor rejection must be visible without debug logging
+    console.warn(`Skipped invalid file ${filePath}: ${message}`);
+    return;
+  }
   debugLogger.debug(`Skipped invalid file ${filePath}: ${message}`);
 }

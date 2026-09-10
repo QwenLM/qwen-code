@@ -576,15 +576,33 @@ fn send_click_synthesized_mods_impl(
         // Capture whether the target was ALREADY always-on-top so we don't strip
         // that state on restore — only demote below if WE promoted it.
         let was_topmost = (GetWindowLongPtrW(target, GWL_EXSTYLE) as u32) & WS_EX_TOPMOST.0 != 0;
-        let foreground_attach_failed = activate && !crate::input::force_foreground_attached(target);
+        if activate && !crate::input::force_foreground_assisted(target).0 {
+            let actual = GetForegroundWindow();
+            bail!(
+                "foreground_unavailable: Windows did not activate exact target HWND {:?} \
+                 (actual foreground HWND {:?}); no mouse input was sent",
+                target.0,
+                actual.0
+            );
+        }
+        if activate && crate::win32::capture_foreground_target(target.0 as usize as u64).is_none() {
+            bail!(
+                "foreground_unavailable: exact target HWND {:?} disappeared before mouse \
+                 input could be sent",
+                target.0
+            );
+        }
         let noactivate = (!activate).then(|| crate::input::NoActivateGuard::arm(target));
-        if !activate || foreground_attach_failed {
-            let flags = if activate {
-                SWP_NOMOVE | SWP_NOSIZE
-            } else {
-                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE
-            };
-            let _ = SetWindowPos(target, HWND_TOPMOST, 0, 0, 0, 0, flags);
+        if !activate {
+            let _ = SetWindowPos(
+                target,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+            );
         }
 
         // Move the cursor so the OS hover state matches before the click; the
@@ -639,7 +657,7 @@ fn send_click_synthesized_mods_impl(
         // lose the click if the real cursor is warped away while those queued
         // messages are still being dispatched.
         sleep(Duration::from_millis(if activate { 120 } else { 40 }));
-        if !was_topmost && (!activate || foreground_attach_failed) {
+        if !was_topmost && !activate {
             let _ = SetWindowPos(
                 target,
                 HWND_NOTOPMOST,
@@ -671,13 +689,11 @@ fn send_click_synthesized_mods_impl(
                  foreground click."
             );
         }
-        if activate {
-            let foreground_root = GetAncestor(GetForegroundWindow(), GA_ROOT);
-            let target_root = GetAncestor(target, GA_ROOT);
-            if foreground_root != target_root {
-                bail!("The foreground click did not activate its target window.");
-            }
-        }
+        // The exact target was proven foreground before SendInput, and all
+        // requested mouse records were accepted above. From this point the
+        // action is committed. A click may synchronously open a modal, popup,
+        // or another application window, so post-action foreground state must
+        // not retroactively turn the committed input into a refusal.
     }
 
     Ok(())

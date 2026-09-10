@@ -146,12 +146,17 @@ export const Composer = ({ footerRef }: ComposerProps) => {
           promptSuggestion={uiState.promptSuggestion}
           onPromptSuggestionDismiss={uiState.abortPromptSuggestion}
           clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+          voiceMicWarnedStatusRef={uiState.voiceMicWarnedStatusRef}
         />
       )}
 
       {/* Exclusive area: only one component visible at a time */}
       {/* Hide footer when a confirmation dialog (e.g. ask_user_question) is active */}
-      {uiState.isInputActive &&
+      {/* The footer is the only production consumer of useConfigInitMessage,
+          which returns a message exactly while initialization is pending — so
+          it has to mount on that window too, or startup shows no progress at
+          all. InputPrompt stays gated on isInputActive alone. */}
+      {(uiState.isInputActive || !uiState.isConfigInitialized) &&
         !showSuggestions &&
         (showShortcuts ? (
           <KeyboardShortcuts />

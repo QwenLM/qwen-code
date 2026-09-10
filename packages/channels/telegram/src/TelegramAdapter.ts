@@ -29,15 +29,7 @@ const TELEGRAM_BOT_COMMANDS = [
   { command: 'cancel', description: 'Cancel the running request' },
   { command: 'status', description: 'Show session info' },
 ] as const;
-
-const TELEGRAM_START_MESSAGE = [
-  'Qwen Code Telegram bot',
-  '',
-  'Send any message to chat with Qwen Code.',
-  'Use /new to start a fresh conversation.',
-  'Use /cancel to stop a running request.',
-  'Use /help to see available commands.',
-].join('\n');
+const TELEGRAM_MESSAGE_LIMIT = 4096;
 
 export class TelegramChannel extends ChannelBase {
   private bot: Bot;
@@ -58,7 +50,7 @@ export class TelegramChannel extends ChannelBase {
     super(name, config, bridge, options);
     this.bot = this.createBot();
     this.registerCommand('start', async (envelope) => {
-      await this.sendMessage(envelope.chatId, TELEGRAM_START_MESSAGE);
+      await this.sendMessage(envelope.chatId, this.startMessage());
       return true;
     });
     this.registerCancelCommand();
@@ -87,6 +79,26 @@ export class TelegramChannel extends ChannelBase {
     return `https://api.telegram.org/file/bot${this.bot.token}/${filePath}`;
   }
 
+  private reportInboundError(
+    envelope: Envelope,
+    error: unknown,
+    reply: () => Promise<unknown>,
+  ): void {
+    process.stderr.write(
+      `[Telegram:${this.name}] Error handling message: ${error}\n`,
+    );
+    const sourceLabel = this.getInboundErrorSourceLabel(envelope);
+    const delivery = sourceLabel
+      ? this.sendThreadMessage(
+          envelope.chatId,
+          envelope.threadId,
+          'Sorry, something went wrong processing your message.',
+          sourceLabel,
+        )
+      : reply();
+    delivery.catch(() => {});
+  }
+
   async connect(): Promise<void> {
     if (this.hasConnectedOnce) {
       this.bot = this.createBot();
@@ -106,12 +118,9 @@ export class TelegramChannel extends ChannelBase {
 
       // Don't await — long prompts would block the update loop
       this.handleInbound(envelope).catch((err) => {
-        process.stderr.write(
-          `[Telegram:${this.name}] Error handling message: ${err}\n`,
+        this.reportInboundError(envelope, err, () =>
+          ctx.reply('Sorry, something went wrong processing your message.'),
         );
-        ctx
-          .reply('Sorry, something went wrong processing your message.')
-          .catch(() => {});
       });
     });
 
@@ -122,33 +131,33 @@ export class TelegramChannel extends ChannelBase {
         msg,
         msg.caption || '(image)',
         msg.caption_entities,
+        !msg.caption,
       );
 
       // Pick the largest photo size (last in array)
       const photo = msg.photo[msg.photo.length - 1];
       if (!photo) return;
 
-      try {
-        const file = await ctx.api.getFile(photo.file_id);
-        const fileUrl = this.getFileUrl(file.file_path!);
-        const resp = await fetch(fileUrl);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const buf = Buffer.from(await resp.arrayBuffer());
-        envelope.imageBase64 = buf.toString('base64');
-        envelope.imageMimeType = 'image/jpeg'; // Telegram always converts photos to JPEG
-      } catch (err) {
-        process.stderr.write(
-          `[Telegram:${this.name}] Failed to download photo: ${err instanceof Error ? err.message : err}\n`,
+      this.prepareThenHandleInbound(envelope, async () => {
+        try {
+          const file = await ctx.api.getFile(photo.file_id);
+          const fileUrl = this.getFileUrl(file.file_path!);
+          const resp = await fetch(fileUrl);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const buf = Buffer.from(await resp.arrayBuffer());
+          envelope.imageBase64 = buf.toString('base64');
+          envelope.imageMimeType = 'image/jpeg'; // Telegram always converts photos to JPEG
+        } catch (err) {
+          process.stderr.write(
+            `[Telegram:${this.name}] Failed to download photo: ${err instanceof Error ? err.message : err}\n`,
+          );
+          const promptText = msg.caption ? envelope.text : '';
+          envelope.text = `${promptText}\n\n(User sent an image but download failed)`;
+        }
+      }).catch((err) => {
+        this.reportInboundError(envelope, err, () =>
+          ctx.reply('Sorry, something went wrong processing your message.'),
         );
-      }
-
-      this.handleInbound(envelope).catch((err) => {
-        process.stderr.write(
-          `[Telegram:${this.name}] Error handling message: ${err}\n`,
-        );
-        ctx
-          .reply('Sorry, something went wrong processing your message.')
-          .catch(() => {});
       });
     });
 
@@ -162,46 +171,48 @@ export class TelegramChannel extends ChannelBase {
         msg,
         msg.caption || `(file: ${fileName})`,
         msg.caption_entities,
+        !msg.caption,
       );
 
-      try {
-        const file = await ctx.api.getFile(doc.file_id);
-        const fileUrl = this.getFileUrl(file.file_path!);
-        const resp = await fetch(fileUrl);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const buf = Buffer.from(await resp.arrayBuffer());
+      this.prepareThenHandleInbound(envelope, async () => {
+        try {
+          const file = await ctx.api.getFile(doc.file_id);
+          const fileUrl = this.getFileUrl(file.file_path!);
+          const resp = await fetch(fileUrl);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const buf = Buffer.from(await resp.arrayBuffer());
 
-        // Save to temp dir so the agent can read it via read-file tool
-        const dir = join(tmpdir(), 'channel-files', randomUUID());
-        mkdirSync(dir, { recursive: true });
-        const filePath = join(dir, basename(fileName) || `file_${Date.now()}`);
-        writeFileSync(filePath, buf);
+          // Save to temp dir so the agent can read it via read-file tool
+          const dir = join(tmpdir(), 'channel-files', randomUUID());
+          mkdirSync(dir, { recursive: true });
+          const filePath = join(
+            dir,
+            basename(fileName) || `file_${Date.now()}`,
+          );
+          writeFileSync(filePath, buf);
 
-        envelope.text = msg.caption || '';
-        envelope.attachments = [
-          {
-            type: 'file',
-            filePath,
-            mimeType: doc.mime_type || 'application/octet-stream',
-            fileName,
-          },
-        ];
-      } catch (err) {
-        process.stderr.write(
-          `[Telegram:${this.name}] Failed to download document: ${err instanceof Error ? err.message : err}\n`,
+          envelope.text = msg.caption || '';
+          envelope.attachments = [
+            {
+              type: 'file',
+              filePath,
+              mimeType: doc.mime_type || 'application/octet-stream',
+              fileName,
+            },
+          ];
+        } catch (err) {
+          process.stderr.write(
+            `[Telegram:${this.name}] Failed to download document: ${err instanceof Error ? err.message : err}\n`,
+          );
+          // Mirrors the success branch: the placeholder is adapter text, so
+          // only a real caption may survive into the prompt.
+          const promptText = msg.caption || '';
+          envelope.text = `${promptText}\n\n(User sent a file "${fileName}" but download failed)`;
+        }
+      }).catch((err) => {
+        this.reportInboundError(envelope, err, () =>
+          ctx.reply('Sorry, something went wrong processing your message.'),
         );
-        envelope.text =
-          (msg.caption || '') +
-          `\n\n(User sent a file "${fileName}" but download failed)`;
-      }
-
-      this.handleInbound(envelope).catch((err) => {
-        process.stderr.write(
-          `[Telegram:${this.name}] Error handling message: ${err}\n`,
-        );
-        ctx
-          .reply('Sorry, something went wrong processing your message.')
-          .catch(() => {});
       });
     });
 
@@ -215,46 +226,47 @@ export class TelegramChannel extends ChannelBase {
         msg,
         msg.caption || '(voice message)',
         msg.caption_entities,
+        // Standard Telegram clients cannot caption a voice message, so
+        // this is effectively always synthetic.
+        !msg.caption,
       );
 
-      try {
-        const file = await ctx.api.getFile(voice.file_id);
-        const fileUrl = this.getFileUrl(file.file_path!);
-        const resp = await fetch(fileUrl);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const buf = Buffer.from(await resp.arrayBuffer());
+      this.prepareThenHandleInbound(envelope, async () => {
+        try {
+          const file = await ctx.api.getFile(voice.file_id);
+          const fileUrl = this.getFileUrl(file.file_path!);
+          const resp = await fetch(fileUrl);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const buf = Buffer.from(await resp.arrayBuffer());
 
-        // Save to temp dir so the agent can read it via read-file tool
-        const dir = join(tmpdir(), 'channel-files', randomUUID());
-        mkdirSync(dir, { recursive: true });
-        const filePath = join(dir, fileName);
-        writeFileSync(filePath, buf);
+          // Save to temp dir so the agent can read it via read-file tool
+          const dir = join(tmpdir(), 'channel-files', randomUUID());
+          mkdirSync(dir, { recursive: true });
+          const filePath = join(dir, fileName);
+          writeFileSync(filePath, buf);
 
-        envelope.text = msg.caption || '';
-        envelope.attachments = [
-          {
-            type: 'audio',
-            filePath,
-            mimeType: voice.mime_type || 'audio/ogg',
-            fileName,
-          },
-        ];
-      } catch (err) {
-        process.stderr.write(
-          `[Telegram:${this.name}] Failed to download voice message: ${err instanceof Error ? err.message : err}\n`,
+          envelope.text = msg.caption || '';
+          envelope.attachments = [
+            {
+              type: 'audio',
+              filePath,
+              mimeType: voice.mime_type || 'audio/ogg',
+              fileName,
+            },
+          ];
+        } catch (err) {
+          process.stderr.write(
+            `[Telegram:${this.name}] Failed to download voice message: ${err instanceof Error ? err.message : err}\n`,
+          );
+          // Mirrors the success branch: the placeholder is adapter text, so
+          // only a real caption may survive into the prompt.
+          const promptText = msg.caption || '';
+          envelope.text = `${promptText}\n\n(User sent a voice message but download failed)`;
+        }
+      }).catch((err) => {
+        this.reportInboundError(envelope, err, () =>
+          ctx.reply('Sorry, something went wrong processing your message.'),
         );
-        envelope.text =
-          (msg.caption || '') +
-          `\n\n(User sent a voice message but download failed)`;
-      }
-
-      this.handleInbound(envelope).catch((err) => {
-        process.stderr.write(
-          `[Telegram:${this.name}] Error handling message: ${err}\n`,
-        );
-        ctx
-          .reply('Sorry, something went wrong processing your message.')
-          .catch(() => {});
       });
     });
 
@@ -279,6 +291,17 @@ export class TelegramChannel extends ChannelBase {
         `[Telegram:${this.name}] Failed to register bot commands: ${err instanceof Error ? err.message : err}\n`,
       );
     }
+  }
+
+  private startMessage(): string {
+    return [
+      'Qwen Code Telegram bot',
+      '',
+      'Send any message to chat with Qwen Code.',
+      'Use /new to start a fresh conversation.',
+      'Use /cancel to stop a running request.',
+      'Use /help to see available commands.',
+    ].join('\n');
   }
 
   /** Per-chat typing interval — repeats every 4s since Telegram expires it after 5s. */
@@ -351,6 +374,17 @@ export class TelegramChannel extends ChannelBase {
     await this.inboundRoute.run(route, () => super.handleInbound(envelope));
   }
 
+  protected override async prepareThenHandleInbound(
+    envelope: Envelope,
+    prepare: () => Promise<boolean | void>,
+  ): Promise<void> {
+    const route =
+      envelope.threadId === undefined ? {} : { threadId: envelope.threadId };
+    await this.inboundRoute.run(route, () =>
+      super.prepareThenHandleInbound(envelope, prepare),
+    );
+  }
+
   async sendMessage(chatId: string, text: string): Promise<void> {
     await this.sendTelegramMessage(
       chatId,
@@ -359,10 +393,20 @@ export class TelegramChannel extends ChannelBase {
     );
   }
 
+  protected override async sendThreadMessage(
+    chatId: string,
+    threadId: string | undefined,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    await this.sendTelegramMessage(chatId, text, threadId, sourceLabel);
+  }
+
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     const inboundRoute = this.inboundRoute.getStore();
     const target = this.router.getTarget(sessionId);
@@ -372,35 +416,66 @@ export class TelegramChannel extends ChannelBase {
         : target?.channelName === this.name && target.chatId === chatId
           ? target.threadId
           : undefined;
-    await this.sendTelegramMessage(chatId, text, threadId);
+    await this.sendTelegramMessage(
+      chatId,
+      text,
+      threadId,
+      sourceLabel ?? this.getResponseSourceLabel(sessionId),
+    );
   }
 
   protected override async pushProactive(
     target: SessionTarget,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
-    await this.sendTelegramMessage(target.chatId, text, target.threadId);
+    await this.sendTelegramMessage(
+      target.chatId,
+      text,
+      target.threadId,
+      sourceLabel,
+    );
   }
 
   private async sendTelegramMessage(
     chatId: string,
     text: string,
     threadId?: string,
+    sourceLabel?: string,
   ): Promise<void> {
     const html = telegramFormat(text);
-    const chunks = splitHtmlForTelegram(html);
-    const options =
-      threadId === undefined
-        ? { parse_mode: 'HTML' as const }
-        : { parse_mode: 'HTML' as const, message_thread_id: Number(threadId) };
+    const prefix =
+      sourceLabel && text.trim().length > 0
+        ? `${escapeTelegramHtml(sourceLabel)} `
+        : undefined;
+    const chunks = splitAttributedTelegramHtml(html, prefix, sourceLabel);
     for (const chunk of chunks) {
+      const options = chunk.isHtml
+        ? threadId === undefined
+          ? { parse_mode: 'HTML' as const }
+          : {
+              parse_mode: 'HTML' as const,
+              message_thread_id: Number(threadId),
+            }
+        : threadId === undefined
+          ? undefined
+          : { message_thread_id: Number(threadId) };
+      if (!chunk.isHtml) {
+        await this.bot.api.sendMessage(chatId, chunk.text, options);
+        continue;
+      }
       try {
-        await this.bot.api.sendMessage(chatId, chunk, options);
+        await this.bot.api.sendMessage(chatId, chunk.text, options);
       } catch {
         // Fallback to plain text for the failed chunk only
+        const withoutTags = chunk.text.replace(/<[^>]*>/g, '');
+        const plainText =
+          prefix && sourceLabel && withoutTags.startsWith(prefix)
+            ? `${sourceLabel} ${withoutTags.slice(prefix.length)}`
+            : withoutTags;
         await this.bot.api.sendMessage(
           chatId,
-          chunk.replace(/<[^>]*>/g, ''),
+          plainText,
           threadId === undefined
             ? undefined
             : { message_thread_id: Number(threadId) },
@@ -427,6 +502,8 @@ export class TelegramChannel extends ChannelBase {
     },
     text: string,
     entities?: Array<{ type: string; offset: number; length: number }>,
+    /** Whether the text is an adapter-generated media placeholder. */
+    syntheticText = false,
   ): Envelope {
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
 
@@ -472,10 +549,142 @@ export class TelegramChannel extends ChannelBase {
           ? String(msg.message_thread_id)
           : undefined,
       text: cleanText,
+      ...(syntheticText ? { syntheticText: true as const } : {}),
       isGroup,
       isMentioned,
       isReplyToBot,
       referencedText,
     };
   }
+}
+
+function splitAttributedTelegramHtml(
+  html: string,
+  prefix: string | undefined,
+  sourceLabel: string | undefined,
+): Array<{ text: string; isHtml: boolean }> {
+  const chunks = splitHtmlForTelegram(html);
+  const contentLimit = TELEGRAM_MESSAGE_LIMIT - (prefix?.length ?? 0);
+  if (contentLimit <= 0) {
+    throw new Error('Telegram source label exceeds the message limit.');
+  }
+
+  const attributed: Array<{ text: string; isHtml: boolean }> = [];
+  for (const chunk of chunks) {
+    const split = splitTelegramHtmlAtLimit(chunk, contentLimit);
+    if (split) {
+      attributed.push(
+        ...split.map((part) => ({
+          text: `${prefix ?? ''}${part}`,
+          isHtml: true,
+        })),
+      );
+      continue;
+    }
+    attributed.push(
+      ...splitAttributedTelegramText(
+        chunk.replace(/<[^>]*>/g, ''),
+        sourceLabel,
+      ).map((text) => ({ text, isHtml: false })),
+    );
+  }
+  return attributed;
+}
+
+function splitTelegramHtmlAtLimit(
+  html: string,
+  limit: number,
+): string[] | undefined {
+  const tokens = html.match(
+    /<[^>]+>|&(?:#\d+|#x[\da-f]+|[a-z][\da-z]+);|[\s\S]/giu,
+  );
+  if (!tokens) return [];
+
+  const chunks: string[] = [];
+  const openTags: Array<{ name: string; html: string }> = [];
+  let current = '';
+  let hasContent = false;
+  const closingTags = () =>
+    [...openTags]
+      .reverse()
+      .map(({ name }) => `</${name}>`)
+      .join('');
+  const reopenedTags = () => openTags.map(({ html }) => html).join('');
+  const flush = () => {
+    if (!hasContent) return false;
+    chunks.push(`${current}${closingTags()}`);
+    current = reopenedTags();
+    hasContent = false;
+    return true;
+  };
+
+  for (const token of tokens) {
+    const closingMatch = token.match(/^<\/([a-z\d]+)/iu);
+    if (closingMatch) {
+      current += token;
+      const index = openTags.findLastIndex(
+        ({ name }) => name === closingMatch[1]?.toLowerCase(),
+      );
+      if (index !== -1) openTags.splice(index, 1);
+      continue;
+    }
+
+    const openingMatch = token.match(/^<([a-z\d]+)/iu);
+    const isSelfClosing = /^<br\b|\/>$/iu.test(token);
+    if (openingMatch && !isSelfClosing) {
+      const tag = { name: openingMatch[1].toLowerCase(), html: token };
+      const required = `${current}${token}</${tag.name}>${closingTags()}`;
+      if (required.length > limit && !flush()) return undefined;
+      if (`${current}${token}</${tag.name}>${closingTags()}`.length > limit) {
+        return undefined;
+      }
+      current += token;
+      openTags.push(tag);
+      continue;
+    }
+
+    if (`${current}${token}${closingTags()}`.length > limit && !flush()) {
+      return undefined;
+    }
+    if (`${current}${token}${closingTags()}`.length > limit) return undefined;
+    current += token;
+    hasContent = true;
+  }
+
+  if (hasContent) chunks.push(`${current}${closingTags()}`);
+  return chunks;
+}
+
+function splitAttributedTelegramText(
+  text: string,
+  sourceLabel: string | undefined,
+): string[] {
+  if (text.length === 0) return [];
+  const prefix = sourceLabel ? `${sourceLabel} ` : '';
+  const contentLimit = TELEGRAM_MESSAGE_LIMIT - prefix.length;
+  if (contentLimit <= 0) {
+    throw new Error('Telegram source label exceeds the message limit.');
+  }
+
+  const chunks: string[] = [];
+  for (let offset = 0; offset < text.length; ) {
+    let end = Math.min(offset + contentLimit, text.length);
+    if (
+      end < text.length &&
+      /[\uD800-\uDBFF]/u.test(text[end - 1] ?? '') &&
+      /[\uDC00-\uDFFF]/u.test(text[end] ?? '')
+    ) {
+      end--;
+    }
+    chunks.push(`${prefix}${text.slice(offset, end)}`);
+    offset = end;
+  }
+  return chunks;
+}
+
+function escapeTelegramHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
 }

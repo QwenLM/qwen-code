@@ -200,6 +200,7 @@ mod tests {
             automation_id: None,
             help_text: None,
             actions: actions.iter().map(|value| (*value).to_owned()).collect(),
+            runtime_id: None,
             enabled: None,
             selected: None,
             element_ptr: 7,

@@ -24,7 +24,8 @@ import {
   registerWorkspaceQualifiedGitDiffRoutes,
 } from './workspace-git-diff.js';
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
   fetchGitDiff: vi.fn(),
   fetchGitDiffHunksForFile: vi.fn(),
 }));

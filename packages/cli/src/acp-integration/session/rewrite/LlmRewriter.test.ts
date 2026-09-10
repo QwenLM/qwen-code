@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { TurnContent, MessageRewriteConfig } from './types.js';
 
@@ -42,7 +45,7 @@ const { LlmRewriter } = await import('./LlmRewriter.js');
 function makeConfig(): Config {
   return {
     getModel: () => 'test-model',
-    getGeminiClient: () => ({}),
+    getLlmClient: () => ({}),
   } as unknown as Config;
 }
 
@@ -276,6 +279,67 @@ describe('LlmRewriter', () => {
       const input =
         mockGenerateContent.mock.calls[1][0].contents[0].parts[0].text;
       expect(input).not.toContain('上一轮改写结果');
+    });
+  });
+
+  describe('promptFile', () => {
+    let tempDir: string;
+
+    beforeEach(() => {
+      tempDir = mkdtempSync(join(tmpdir(), 'llm-rewriter-promptfile-'));
+    });
+
+    afterEach(() => {
+      rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    function promptOf(rewriter: unknown): string {
+      return (rewriter as { prompt: string }).prompt;
+    }
+
+    it('loads a custom prompt from a readable file', () => {
+      const filePath = join(tempDir, 'prompt.md');
+      writeFileSync(filePath, '  custom rewrite prompt  ');
+
+      const rewriter = new LlmRewriter(makeConfig(), {
+        enabled: true,
+        target: 'all',
+        promptFile: filePath,
+      } as MessageRewriteConfig);
+
+      expect(promptOf(rewriter)).toBe('custom rewrite prompt');
+    });
+
+    it('falls back to the default prompt when the file is missing', () => {
+      const rewriter = new LlmRewriter(makeConfig(), {
+        enabled: true,
+        target: 'all',
+        promptFile: join(tempDir, 'does-not-exist.md'),
+      } as MessageRewriteConfig);
+
+      expect(promptOf(rewriter)).toContain('rewrites raw coding-agent output');
+    });
+
+    // Regression for #9752: promptFile pointing at a path that exists but
+    // cannot be read as a file (a directory) used to throw EISDIR from the
+    // constructor, crashing ACP session startup.
+    it('falls back to the default prompt when promptFile is a directory', () => {
+      expect(
+        () =>
+          new LlmRewriter(makeConfig(), {
+            enabled: true,
+            target: 'all',
+            promptFile: tempDir,
+          } as MessageRewriteConfig),
+      ).not.toThrow();
+
+      const rewriter = new LlmRewriter(makeConfig(), {
+        enabled: true,
+        target: 'all',
+        promptFile: tempDir,
+      } as MessageRewriteConfig);
+
+      expect(promptOf(rewriter)).toContain('rewrites raw coding-agent output');
     });
   });
 });

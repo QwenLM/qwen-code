@@ -415,18 +415,24 @@ export class SessionOrganizationService {
     });
   }
 
-  async removeSession(sessionId: string): Promise<void> {
+  async removeSession(
+    sessionId: string,
+    options: { assertCanCommit?: () => void } = {},
+  ): Promise<void> {
     await this.withStoreLock(async () => {
       const store = await this.readStore();
       if (!Object.prototype.hasOwnProperty.call(store.sessions, sessionId)) {
         return;
       }
       delete store.sessions[sessionId];
-      await this.writeStore(store);
+      await this.writeStore(store, options);
     });
   }
 
-  async removeSessions(sessionIds: string[]): Promise<void> {
+  async removeSessions(
+    sessionIds: string[],
+    options: { assertCanCommit?: () => void } = {},
+  ): Promise<void> {
     const uniqueSessionIds = [...new Set(sessionIds)];
     if (uniqueSessionIds.length === 0) return;
 
@@ -440,7 +446,7 @@ export class SessionOrganizationService {
         }
       }
       if (changed) {
-        await this.writeStore(store);
+        await this.writeStore(store, options);
       }
     });
   }
@@ -538,7 +544,10 @@ export class SessionOrganizationService {
     return emptyStore();
   }
 
-  private async writeStore(store: SessionOrganizationStoreV1): Promise<void> {
+  private async writeStore(
+    store: SessionOrganizationStoreV1,
+    options: { assertCanCommit?: () => void } = {},
+  ): Promise<void> {
     await fs.mkdir(path.dirname(this.getStorePath()), { recursive: true });
     if (this.readFailed) {
       throw new SessionOrganizationError(
@@ -546,11 +555,15 @@ export class SessionOrganizationService {
         'session_organization_store_unreadable',
       );
     }
-    await atomicWriteJSON(this.getStorePath(), {
-      schemaVersion: SCHEMA_VERSION,
-      groups: this.sortGroups(store.groups),
-      sessions: store.sessions,
-    });
+    await atomicWriteJSON(
+      this.getStorePath(),
+      {
+        schemaVersion: SCHEMA_VERSION,
+        groups: this.sortGroups(store.groups),
+        sessions: store.sessions,
+      },
+      { assertCanCommit: options.assertCanCommit },
+    );
     this.readFailed = false;
   }
 

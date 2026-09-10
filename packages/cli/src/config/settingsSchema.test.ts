@@ -4,19 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, expectTypeOf } from 'vitest';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+  HELD_EXPIRY_OPTIONS,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  OutputFormat,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import {
   getSettingsSchema,
-  MergeStrategy,
   type SettingDefinition,
   type Settings,
   type SettingsSchema,
 } from './settingsSchema.js';
+import { MergeStrategy } from '../utils/deepMerge.js';
 import {
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
   MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
@@ -25,6 +28,21 @@ import {
 
 describe('SettingsSchema', () => {
   describe('getSettingsSchema', () => {
+    it('should describe prompt hooks supported by the runtime', () => {
+      const hookProperties =
+        getSettingsSchema().hooks.properties.PreToolUse.items.properties?.[
+          'hooks'
+        ]?.items?.properties;
+
+      expect(hookProperties?.['type']?.enum).toEqual([
+        'command',
+        'http',
+        'prompt',
+      ]);
+      expect(hookProperties?.['prompt']).toMatchObject({ type: 'string' });
+      expect(hookProperties?.['model']).toMatchObject({ type: 'string' });
+    });
+
     it('should contain all expected top-level settings', () => {
       const expectedSettings: Array<keyof Settings> = [
         'mcpServers',
@@ -47,6 +65,31 @@ describe('SettingsSchema', () => {
       expectedSettings.forEach((setting) => {
         expect(getSettingsSchema()[setting as keyof Settings]).toBeDefined();
       });
+    });
+
+    it('accepts none in configuration without adding a TUI off control', () => {
+      const { options, jsonSchemaOverride } =
+        getSettingsSchema().model.properties.reasoningEffort;
+
+      expect(options?.map((option) => option.value)).toEqual([
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+      ]);
+      expect(jsonSchemaOverride).toEqual({
+        type: 'string',
+        enum: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      });
+      expectTypeOf<
+        NonNullable<Settings['model']>['reasoningEffort']
+      >().toEqualTypeOf<
+        'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined
+      >();
+      expect(options).not.toContainEqual(
+        expect.objectContaining({ value: 'default' }),
+      );
     });
 
     it('should have correct structure for each setting', () => {
@@ -85,6 +128,12 @@ describe('SettingsSchema', () => {
         expect(definition.properties).toBeDefined();
         expect(typeof definition.properties).toBe('object');
       });
+    });
+
+    it('should not expose the removed dynamic command translation setting', () => {
+      expect(getSettingsSchema().general.properties).not.toHaveProperty(
+        'dynamicCommandTranslation',
+      );
     });
 
     it('should have accessibility nested properties', () => {
@@ -193,6 +242,16 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().proxy.showInDialog).toBe(false);
     });
 
+    it('should have general.outputStyle setting in schema', () => {
+      const outputStyle = getSettingsSchema().general.properties!.outputStyle;
+
+      expect(outputStyle).toBeDefined();
+      expect(outputStyle.type).toBe('string');
+      expect(outputStyle.category).toBe('General');
+      expect(outputStyle.default).toBe(undefined);
+      expect(outputStyle.requiresRestart).toBe(true);
+    });
+
     it('should have plansDirectory setting in schema', () => {
       expect(getSettingsSchema().plansDirectory).toBeDefined();
       expect(getSettingsSchema().plansDirectory.type).toBe('string');
@@ -245,6 +304,56 @@ describe('SettingsSchema', () => {
       expect(exploreModel.showInDialog).toBe(false);
     });
 
+    it('should keep cross-session messaging off by default', () => {
+      // The default is the entire security posture of the feature: shipping
+      // it flipped on would open every session on the box to peer messages.
+      const crossSessionMessaging =
+        getSettingsSchema().agents.properties.crossSessionMessaging;
+
+      expect(crossSessionMessaging.type).toBe('boolean');
+      expect(crossSessionMessaging.default).toBe(false);
+      expect(crossSessionMessaging.requiresRestart).toBe(true);
+      expect(crossSessionMessaging.showInDialog).toBe(false);
+    });
+
+    it('should define the inbound cross-session policy as accept/hold/refuse', () => {
+      const crossSessionInbound =
+        getSettingsSchema().agents.properties.crossSessionInbound;
+
+      expect(crossSessionInbound.type).toBe('enum');
+      // Unset is not a fourth policy: it means approval-mode parity, which
+      // the gate derives. A concrete default here would silence that.
+      expect(crossSessionInbound.default).toBeUndefined();
+      expect(crossSessionInbound.options).toEqual([
+        { value: 'accept', label: 'Accept' },
+        { value: 'hold', label: 'Hold for review' },
+        { value: 'refuse', label: 'Refuse' },
+      ]);
+      expect(crossSessionInbound.description).toContain(
+        'user-minted controllers',
+      );
+      expect(crossSessionInbound.description).toContain('child processes');
+    });
+
+    it('should offer exactly the hold lifetimes core knows how to parse', () => {
+      // Three copies of this vocabulary exist: core's table, these
+      // options, and the generated JSON schema. Adding an option here
+      // without a core entry fails nowhere -- `parseHeldExpiry` takes its
+      // unrecognized branch, logs at debug level (off by default), and
+      // returns the five-minute default. A user who hand-edits
+      // settings.json to the new value gets a silently shorter review
+      // window, with the whole suite green.
+      const crossSessionHeldExpiry =
+        getSettingsSchema().agents.properties.crossSessionHeldExpiry;
+
+      expect(crossSessionHeldExpiry.options?.map((o) => o.value)).toEqual(
+        HELD_EXPIRY_OPTIONS,
+      );
+      // And the declared default must be one core resolves to a real
+      // lifetime, not one that happens to fall back to it.
+      expect(HELD_EXPIRY_OPTIONS).toContain(crossSessionHeldExpiry.default);
+    });
+
     it('should define model grade settings', () => {
       const agents = getSettingsSchema().agents.properties;
 
@@ -271,11 +380,40 @@ describe('SettingsSchema', () => {
       expect(timeout.showInDialog).toBe(false);
     });
 
+    it('should define goalCheckpointTimeoutSeconds as a bounded integer', () => {
+      const timeout =
+        getSettingsSchema().model.properties.goalCheckpointTimeoutSeconds;
+
+      expect(timeout).toBeDefined();
+      expect(timeout.type).toBe('integer');
+      expect(timeout.category).toBe('Model');
+      expect(timeout.default).toBeUndefined();
+      expect(timeout.minimum).toBe(1);
+      expect(timeout.maximum).toBe(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP);
+      expect(timeout.requiresRestart).toBe(false);
+      expect(timeout.showInDialog).toBe(false);
+    });
+
     it('should define count-based model limits as integers', () => {
       const model = getSettingsSchema().model.properties;
 
       expect(model.maxSessionTurns.type).toBe('integer');
       expect(model.maxToolCallsPerTurn.type).toBe('integer');
+    });
+
+    it('should define streamIdleTimeoutMs as a bounded generation setting', () => {
+      const streamIdleTimeout =
+        getSettingsSchema().model.properties.generationConfig.properties
+          ?.streamIdleTimeoutMs;
+
+      expect(streamIdleTimeout).toMatchObject({
+        type: 'integer',
+        default: undefined,
+        minimum: 0,
+        maximum: 2_147_483_647,
+        requiresRestart: false,
+        showInDialog: false,
+      });
     });
 
     it('should define stopHookBlockingCap schema override as a positive integer', () => {
@@ -483,6 +621,24 @@ describe('SettingsSchema', () => {
       ).toBe(false);
     });
 
+    it('should define the web shell brand as deployment-only configuration', () => {
+      const brand = getSettingsSchema().ui.properties.brand;
+
+      expect(brand.type).toBe('object');
+      // Edited in settings.json, not from the in-browser Settings page: brand
+      // is deployment identity, not a preference one viewer of a workspace
+      // should be able to change for everyone else.
+      expect(brand.showInDialog).toBe(false);
+
+      const { name, logoPath } = brand.properties;
+      expect(name.type).toBe('string');
+      expect(name.default).toBe('');
+      expect(name.showInDialog).toBe(false);
+      expect(logoPath.type).toBe('string');
+      expect(logoPath.default).toBe('');
+      expect(logoPath.showInDialog).toBe(false);
+    });
+
     it('should define Markdown render mode as a user-facing UI enum', () => {
       const renderMode = getSettingsSchema().ui.properties.renderMode;
 
@@ -513,6 +669,18 @@ describe('SettingsSchema', () => {
       expect(mouseTracking.default).toBe(true);
       expect(mouseTracking.showInDialog).toBe(true);
       expect(mouseTracking.requiresRestart).toBe(true);
+    });
+
+    it('should have showToolCallArgs in ui settings', () => {
+      const showToolCallArgs =
+        getSettingsSchema().ui.properties.showToolCallArgs;
+      expect(showToolCallArgs).toBeDefined();
+      expect(showToolCallArgs.type).toBe('boolean');
+      // Default must stay false — the compact tool view is the baseline.
+      expect(showToolCallArgs.default).toBe(false);
+      expect(showToolCallArgs.showInDialog).toBe(true);
+      // Read at render time, so no restart is needed.
+      expect(showToolCallArgs.requiresRestart).toBe(false);
     });
 
     it('should expose response tokens/sec as an opt-in UI setting', () => {
@@ -595,6 +763,22 @@ describe('SettingsSchema', () => {
         { value: 'tree', label: 'Tree' },
         { value: 'flat', label: 'Flat' },
       ]);
+    });
+
+    it('should allow stream-json as an output.format the runtime honors', () => {
+      // The runtime reads `output.format` from settings.json via
+      // `normalizeOutputFormat`, which returns `OutputFormat.STREAM_JSON` for
+      // `"stream-json"` — a documented, first-class CLI output format. The
+      // settings schema drives VS Code validation of `.qwen/settings.json`, so
+      // it must not reject a value the runtime accepts and runs.
+      const format = getSettingsSchema().output?.properties.format;
+
+      expect(format.type).toBe('enum');
+      const values = format.options?.map((o: { value: string }) => o.value);
+      // Pin the options to the full runtime enum, array-derived (order
+      // included) so a removed, added, or reordered core format fails this
+      // test until the schema follows.
+      expect(values).toEqual(Object.values(OutputFormat));
     });
 
     it('should have loadFromIncludeDirectories setting in schema', () => {

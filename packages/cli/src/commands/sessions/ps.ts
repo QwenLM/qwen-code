@@ -5,20 +5,22 @@
  */
 
 /**
- * `qwen sessions ps` — list the interactive Qwen Code sessions running
- * right now.
+ * `qwen sessions ps` — list the Qwen Code sessions running right now.
  *
  * The sibling `qwen sessions list` walks saved transcripts; this walks the
  * live-process registry, so the two answer different questions: "what have
  * I worked on" versus "what is running on this machine at this moment".
  *
- * "Interactive" is a registration fact, not a filter: only the
- * interactive UI registers sessions, so headless runs (`qwen -p`) never
- * appear here.
+ * KIND says what registered each one — an interactive terminal, a
+ * daemon-managed session, a program that is not Qwen Code at all. It is a
+ * self-report, like NAME and DIRECTORY: everything here was written by
+ * the process it describes. What does not appear at all is a one-shot
+ * `qwen -p` run, which never registers.
  */
 
 import type { CommandModule, Argv } from 'yargs';
 import {
+  describeSessionKind,
   listLiveSessions,
   type SessionRegistryRecord,
 } from '@qwen-code/qwen-code-core';
@@ -31,6 +33,8 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 /** Fixed column widths for the human-readable table (exported for tests). */
 export const NAME_COL = 22;
+/** Wide enough for the longest kind this build writes (`headless`). */
+export const KIND_COL = 10;
 export const PID_COL = 9;
 export const AGE_COL = 10;
 
@@ -78,6 +82,7 @@ export function formatAge(ms: number): string {
 function outputHuman(records: SessionRegistryRecord[], now: number): void {
   writeStdoutLine(
     padDisplay('NAME', NAME_COL) +
+      padDisplay('KIND', KIND_COL) +
       padDisplay('PID', PID_COL) +
       padDisplay('AGE', AGE_COL) +
       'DIRECTORY',
@@ -88,6 +93,15 @@ function outputHuman(records: SessionRegistryRecord[], now: number): void {
         truncateToWidth(sanitize(record.name), NAME_COL - 2),
         NAME_COL,
       ) +
+        // Truncated for the same reason NAME is: a newer build may write
+        // a longer kind than any this one knows, and one over-wide cell
+        // would misalign every column after it. Not sanitized — unlike
+        // NAME and DIRECTORY, the read guard already bounds `kind` to
+        // lowercase ASCII, digits and dashes.
+        padDisplay(
+          truncateToWidth(describeSessionKind(record.kind), KIND_COL - 2),
+          KIND_COL,
+        ) +
         padDisplay(String(record.pid), PID_COL) +
         padDisplay(formatAge(now - record.startedAt), AGE_COL) +
         sanitize(record.cwd),
@@ -107,14 +121,17 @@ async function handlePs(argv: PsArgs): Promise<void> {
       // with none of the table path's terminal sanitization. That keeps
       // the output honest data for tooling (and matches the sibling
       // `sessions list --json`); consumers that RENDER these values in a
-      // terminal own the sanitization.
-      writeStdoutLine(JSON.stringify(record));
+      // terminal own the sanitization. The inbox token is the one
+      // exception — a credential, not data: tooling that really needs it
+      // can read the record file, but it must not spill into logs and
+      // pipelines by default.
+      writeStdoutLine(JSON.stringify({ ...record, ipcToken: undefined }));
     }
     return;
   }
 
   if (records.length === 0) {
-    writeStdoutLine('No other interactive Qwen Code sessions are running.');
+    writeStdoutLine('No Qwen Code sessions are registered right now.');
     return;
   }
 
@@ -123,7 +140,7 @@ async function handlePs(argv: PsArgs): Promise<void> {
 
 export const psCommand: CommandModule<unknown, PsArgs> = {
   command: 'ps',
-  describe: 'List interactive Qwen Code sessions running right now',
+  describe: 'List Qwen Code sessions running right now',
   builder: (yargs: Argv) =>
     yargs.option('json', {
       type: 'boolean',

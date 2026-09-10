@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { stripSeverityPrefix } from './inline-counts.js';
+import MarkdownIt from 'markdown-it';
+
+import { indentColumns, stripSeverityPrefix } from './inline-counts.js';
 
 // The attribution footer every posted review carries, stated once.
 //
@@ -40,6 +42,82 @@ export function commentMarker(severity: 'critical' | 'suggestion'): string {
 
 /** The trailing shape `submit` posts on attribution-off comments. */
 const POSTED_MARKER_RE = /<!-- qwen-review (?:critical|suggestion) -->$/;
+
+/**
+ * The canonical attribution footer as it trails a one-line note — the
+ * exact tail `normalizeInlineComments` appends, not "any italic line":
+ * `_— <model> via Qwen Code /review (vX)_`. A permissive `_—[^\n]*_`
+ * read a comment whose own second paragraph is italic prose as a ruling
+ * note (#9940 review, round 31 reverse audit).
+ */
+const CANONICAL_FOOTER_TAIL =
+  '\\r?\\n[ \\t\\r\\n]*_— (?:(?! via Qwen Code /review)[^\\r\\n\\u2028\\u2029])* via Qwen Code /review(?: \\(v[A-Za-z0-9._+-]{0,200}…?\\)?)?_';
+
+/**
+ * The trailing marker the thread lifecycle's `R<id> fixed by <what>` reply
+ * carries — a NOTE the review bot posts inside a thread, not a finding.
+ * Machine-recognisable so the autofix census can skip it (a round that
+ * rules findings fixed and approves must not select the PR for a round
+ * with nothing to address), and deliberately NOT the posted comment-marker
+ * shape: `carriesCommentMarker` stays false on it, so presubmit reads no
+ * carried id off the ruling (#9940 review, round 28).
+ */
+export const FIXED_RULING_MARKER = '<!-- qwen-review-fixed-ruling -->';
+
+/**
+ * The ruling note's posted SHAPE, anchored over the WHOLE body: the one
+ * `submit` assembles as `${fixedRulingLine(id, by)} ${FIXED_RULING_MARKER}`
+ * (the by-less `R<id> fixed` form included), plus the attribution footer
+ * `normalizeInlineComments` appends under attribution on and nothing
+ * else.
+ *
+ * Readers must match THIS, never the marker as a substring: the marker
+ * string is public, a review of the file that defines it quotes it
+ * verbatim, and a substring test demoted such a Critical out of the
+ * blocker re-check (#9940 review, round 30). The autofix census applies
+ * the same anchored shape from its own workflow-level env.
+ *
+ * Every whitespace class here is spelled out for the same reason the `by`
+ * class is: `\s` is NOT the same set in the two engines — Oniguruma's
+ * matches U+0085 and JS's does not, JS's matches U+FEFF and Oniguruma's
+ * does not — and a note the census reads as a note while this side reads
+ * it as a finding is dropped from the census with the finding inside it
+ * (#9940 review, round 31 reverse audit).
+ *
+ * The `by` clause is spelled as an explicit not-a-line-break class rather
+ * than `.`: jq's `[^\n]` admits `\r`, U+2028 and U+2029 while JS's `.`
+ * does not, and the census must not DROP a comment this side counts — the
+ * two dialects agree only when both name the same line breaks (#9940
+ * review, round 31 reverse audit). On THIS side that class is a NO-OP —
+ * without `s`, JS's `.` is already exactly it — so nothing here reddens
+ * if it is loosened; what it buys is a spelling the census can copy, and
+ * the cross-dialect cell over `RULING_CORPUS` is what holds the copy
+ * honest. The footer tail names the same set for the same reason, and
+ * THERE it is not a no-op: `[^\n]` inside a character class admits all
+ * three, and a "footer" carrying a live finding after a `\r` read as a
+ * note in both engines.
+ *
+ * The two whitespace runs after the marker must not OVERLAP. Spelled
+ * `[ \t]*(?:tail)?[ \t\r\n]*$`, a run of spaces has no unique split and
+ * the match is quadratic: the census dialect ABORTS (`retry-limit-in-match`)
+ * and the scan step, running under `set -e`, fails whole. The trailing run
+ * therefore starts at a line break (#9940 review, round 31 reverse audit).
+ *
+ * Anchored over the WHOLE body, not one line. `^` alone is only worth
+ * anything while the severity marker leads the body: under
+ * `review.attribution: false` the post strips it, and a Critical whose
+ * claim line opens by quoting a ruling then matched and demoted itself.
+ * Anchoring that LINE at both ends closed the opening quotation but not a
+ * comment that quotes the whole note and then states its own finding
+ * underneath — the natural way to say "this was ruled fixed last round
+ * and is not" — which the census dropped wholesale, the live Critical
+ * with it. A real note is the note and, under attribution on, its footer;
+ * anything carrying further prose fails closed toward COUNTING (#9940
+ * review, round 31).
+ */
+export const FIXED_RULING_SHAPE_RE = new RegExp(
+  `^R\\d+-\\d+ fixed(?: by [^\\r\\n\\u2028\\u2029]*?)? ${FIXED_RULING_MARKER}[ \\t]*(?:${CANONICAL_FOOTER_TAIL}[ \\t]*)?(?:[\\r\\n][ \\t\\r\\n]*)?$`,
+);
 
 /** Whether the body ends with the posted marker shape. */
 export function carriesCommentMarker(body: string): boolean {
@@ -157,8 +235,22 @@ interface Projection {
  * no code span in CommonMark and stays literal. The strips used to match
  * the raw bytes and disagreed with their own `rendersAsNothing` gate, which
  * projects first — one projection for all of them ends the disagreement.
+ *
+ * An UNCLOSED comment opener has two readings, and the caller picks. In a
+ * multi-line body it runs to the end of the input (`'swallow'`): a
+ * line-leading opener opens a comment block GitHub renders as nothing to
+ * the end, and the attribution-off line strips rely on that reading to
+ * remove a forged footer trailed by junk. On a folded SINGLE line
+ * (`'literal'`) there is no later line for a closer to sit on, so
+ * CommonMark's inline HTML rule never fires: GitHub escapes the opener to
+ * literal text and everything after it renders as prose — swallowing there
+ * hid a forged footer the render shows, on the one-line channels whose fold
+ * puts a witness block's quoted `<!--` on the footer's own line.
  */
-function projectInvisibles(input: string): Projection {
+function projectInvisibles(
+  input: string,
+  unclosedOpener: 'swallow' | 'literal' = 'swallow',
+): Projection {
   let text = '';
   const starts: number[] = [];
   const ends: number[] = [];
@@ -205,6 +297,11 @@ function projectInvisibles(input: string): Projection {
     }
     if (ch === '<' && input.startsWith('<!--', i)) {
       const close = input.indexOf('-->', i + 4);
+      if (close === -1 && unclosedOpener === 'literal') {
+        push('<!--', i, i + 4);
+        i += 4;
+        continue;
+      }
       i = close === -1 ? n : close + 3;
       continue;
     }
@@ -275,9 +372,22 @@ export function stripFooterSpans(text: string): string {
   // short of the word itself — and an entity reference can stand in for
   // any character of it, so an `&` must open the gate too.
   if (!text.includes('/review') && !text.includes('&')) return text;
-  if (!text.includes('\n')) {
+  // One line by the file's own line-ending model (`LINE_ENDING_RE`): a
+  // bare-CR body is multi-line here as everywhere else, or its first
+  // line's indentation judged every line (#9940 review, round 28).
+  if (!/[\r\n]/.test(text)) {
+    // A single line indented four columns is an indented code block — the
+    // span in it is quotation, as the multi-line path's line map already
+    // treats it (a marker-stripped body whose kept code block is one line
+    // arrives here) (#9940 review, audit 5).
+    if (indentColumns(text) >= 4) return text;
     const stripped = stripFooterSpanInLine(text);
-    return stripped === text ? text : stripped.trim();
+    if (stripped === text) return text;
+    // The line's own indentation stays (four columns is a code block, and
+    // the span inside it was quotation); only the space a removed span
+    // left behind goes (#9940 review, audit 5).
+    const indent = /^[ \t]*/.exec(text)?.[0] ?? '';
+    return indent + stripped.slice(indent.length).trim();
   }
   const rejoined = stripSplitFooterSpans(text);
   return mapLinesAware(rejoined, (line) => stripFooterSpanInLine(line));
@@ -362,11 +472,22 @@ export function reviewFooter(modelId: string, cliVersion: string): string {
     modelId.length <= MODEL_ID_MAX_CHARS
       ? modelId
       : `${modelId.slice(0, MODEL_ID_MAX_CHARS - 1)}…`;
-  const version =
-    cliVersion.length <= MODEL_ID_MAX_CHARS
+  // The version slot carries only the charset the readers accept. The
+  // startup stamp goes through `footerVersion`, but the fallback
+  // (`CLI_VERSION`, else the package version) reached this unchecked, and
+  // a version like `0.1.0 (nightly)` built a CANONICAL note that neither
+  // the ruling-shape matcher nor the census filter recognises — the
+  // "ruling note re-posted forever" this module names (#9940 review, round
+  // 31 reverse audit). Checked BEFORE the cap, whose ellipsis both readers
+  // accept but the charset does not.
+  const version = FOOTER_VERSION_RE.test(cliVersion)
+    ? cliVersion.length <= MODEL_ID_MAX_CHARS
       ? cliVersion
-      : `${cliVersion.slice(0, MODEL_ID_MAX_CHARS - 1)}…`;
-  return `_— ${name} ${FOOTER_MARKER} (v${version})_`;
+      : `${cliVersion.slice(0, MODEL_ID_MAX_CHARS - 1)}…`
+    : undefined;
+  return version === undefined
+    ? `_— ${name} ${FOOTER_MARKER}_`
+    : `_— ${name} ${FOOTER_MARKER} (v${version})_`;
 }
 
 /**
@@ -426,57 +547,163 @@ const STRIP_TAIL_LIMIT = 8192;
  * line and stays inside that bound. Shared by both strip sites —
  * `compose-review`'s drafted entries and `submit`'s inline comments —
  * because one guard is one guard, and a second copy is how one site
- * eventually forgets it.
+ * eventually forgets it. The tail bound is the REGEX's: the blanking ahead
+ * of it reads the whole body — a fence's state is only knowable from where
+ * it opened — in one linear, block-only parse, a few milliseconds at
+ * GitHub's 65,536-character comment cap.
  *
  * The match runs on the displayed projection — a comment or entity inside
  * the marker phrase cannot hide a trailing forged footer (or forge one:
  * the cut maps back to the original bytes) — and the projection of a
  * marker-less tail returns the body byte-identical without the regex.
+ * Quoted code is blanked out of the projection first, for the reason
+ * `blankQuotedCode` states; a body that cannot project the marker at all
+ * returns before paying for that structural scan.
  */
 export function stripReviewFooter(body: string): string {
-  const tail = body.slice(-STRIP_TAIL_LIMIT);
-  const proj = projectInvisibles(tail);
+  if (!canProjectFooterMarker(body)) return body;
+  return stripTrailingFooter(body, blankQuotedCode(body));
+}
+
+/**
+ * The trailing strip for ONE folded line — the shape the one-line channels
+ * post: `compose-review`'s collapsed deferral titles, reroute records and
+ * ingested entries, and `submit`'s relocated claim. A folded line carries
+ * no block structure — the collapse flattened it — so a footer on it is
+ * never the quotation `stripReviewFooter`'s blanking keeps: a fence
+ * delimiter leading the line is posted text, not a code edge, and must
+ * not blind the strip. Nor may an unterminated `<!--` the fold carried
+ * onto the line: it is literal text on a single line (the projection's
+ * `'literal'` reading), and the footer after it renders as prose.
+ */
+export function stripReviewFooterLine(line: string): string {
+  return stripTrailingFooter(line, line, 'literal');
+}
+
+/**
+ * Whether the string can project the footer marker at all: the projection
+ * assembles it only out of literal characters, entity decodes (which need
+ * a literal `&`), or a dropped comment joining the halves a literal `<`
+ * sits between. `/review`, not FOOTER_MARKER: re-wrapping can split the
+ * phrase across a soft break, and only `/review` survives every split
+ * point short of the word itself.
+ */
+function canProjectFooterMarker(s: string): boolean {
+  return s.includes('/review') || s.includes('&') || s.includes('<');
+}
+
+/**
+ * The strip proper. `scanned` is `body` with its quoted code blanked — or
+ * `body` itself — and the SAME length, so an index into the projection of
+ * its tail is an index into the original bytes the cut slices.
+ */
+function stripTrailingFooter(
+  body: string,
+  scanned: string,
+  unclosedOpener: 'swallow' | 'literal' = 'swallow',
+): string {
+  const tail = scanned.slice(-STRIP_TAIL_LIMIT);
+  const proj = projectInvisibles(tail, unclosedOpener);
   if (!proj.text.includes(FOOTER_MARKER)) return body;
   const m = REVIEW_FOOTER_RE.exec(proj.text);
   if (m === null) return body;
   const keep = proj.starts[m.index];
-  return body.slice(0, body.length - tail.length) + tail.slice(0, keep);
+  return body.slice(0, body.length - tail.length + keep);
+}
+
+/**
+ * The body's code lines blanked to same-length NULs — fenced and indented
+ * code, fence delimiters included — in the one shape a trailing-anchored
+ * strip can use: blanking is length-preserving, so the projection's index
+ * map still points into the original bytes.
+ *
+ * Code content is a quotation. GitHub renders it literally, so it can
+ * neither BE attribution nor hide any: unblanked, a `<!--` with no `-->`
+ * quoted in a witness block (a review of an HTML marker quotes exactly
+ * that) projects as a comment running to the END of the input and takes
+ * the real trailing footer out of the projection with it — the strip then
+ * sees no footer, leaves the model's own, and the canonical one lands
+ * beside it as a second attribution line. The delimiters blank with the
+ * content: GitHub renders neither them nor an opener's info string, and a
+ * `<!--` lodged in the info string would blind the strip the same way.
+ *
+ * Scanned from the body's START, not from the tail the strip matches on: a
+ * fence's state is only knowable from where it opened, and a tail cut
+ * inside one reads its code as ordinary text. The scan is one linear pass,
+ * so the tail bound the regex needs is untouched.
+ */
+function blankQuotedCode(body: string): string {
+  const scanned = scanLines(body);
+  if (!scanned.some(({ kind }) => kind === 'fence' || kind === 'code')) {
+    return body;
+  }
+  const endings = body.match(LINE_ENDING_RE) ?? [];
+  return scanned
+    .map(
+      ({ line, kind }, i) =>
+        (kind === 'fence' || kind === 'code'
+          ? '\u0000'.repeat(line.length)
+          : line) + (endings[i] ?? ''),
+    )
+    .join('');
+}
+
+/**
+ * Every CommonMark line ending — `\n`, `\r\n`, and a bare `\r`. The one
+ * spelling for the scan and the blanking: both index lines the parser
+ * counted under the same definition (it normalizes all three to one line
+ * break), so a second spelling would misalign the two. Carries the `g`
+ * flag; `.split()` clones the regex and `.match()` resets `lastIndex`, so
+ * both are safe call sites.
+ */
+const LINE_ENDING_RE = /\r\n?|\n/g;
+
+/**
+ * The CommonMark classifier every line-aware strip reads. `html: true` is
+ * load-bearing: with raw-HTML blocks parsed as paragraphs instead, a fence
+ * delimiter inside `<div>…</div>` would open code state GitHub does not
+ * render. Same construction as `audit-layers.ts`. Only `token.type` and
+ * `token.map` are read, and the `block` core rule produces both — the
+ * inline pass is pure cost, two orders of magnitude on hostile one-line
+ * bodies (a 256 KiB run of `[` measured ~1 ms block-only, ~400 ms with the
+ * inline pass; linear either way), so it is off. A test bounds the cost.
+ */
+const BLOCK_PARSER = new MarkdownIt({ html: true });
+BLOCK_PARSER.core.ruler.disable(['inline']);
+
+/**
+ * The top-level block kinds the CommonMark parser reads off a body, in
+ * order, each with the source lines it spans — the skeleton the id stamp
+ * compares before and after its insertion, on both projections (#9940
+ * review, round 28). Block-only, like every other read of the parser here;
+ * container contents are the container's own.
+ */
+export function blockSkeleton(
+  body: string,
+): Array<{ kind: string; text: string }> {
+  const lines = body.split(LINE_ENDING_RE);
+  return BLOCK_PARSER.parse(body, {})
+    .filter(
+      (t) =>
+        t.level === 0 &&
+        t.nesting !== -1 &&
+        t.type !== 'inline' &&
+        t.map !== null,
+    )
+    .map((t) => ({
+      kind: t.type,
+      text: lines.slice(t.map![0], t.map![1]).join('\n'),
+    }));
 }
 
 /** The blockquote prefix a line can carry, at any nesting depth. */
-const QUOTE_PREFIX_RE = /^[ \t]{0,3}(?:>[ \t]*)+/;
+export const QUOTE_PREFIX_RE = /^[ \t]{0,3}(?:>[ \t]*)+/;
 
-/** Fence delimiter runs (``` or ~~~), openers and closers alike. */
-const FENCE_RUN_RE = /^[ \t]{0,3}(`{3,}|~{3,})/;
-
-/** A fence CLOSER: same shape, nothing but trailing whitespace after it. */
-const FENCE_CLOSE_RE = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*\r?$/;
-
-// The CommonMark type-6 block-level tag names, opening or closing.
-const HTML_BLOCK_TAG_NAMES =
-  '(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)';
-
-/**
- * The simple HTML-block opener the line-map tracks (see `scanLines`): an
- * opening tag, or a CLOSING block-level tag — `</div>` alone on a line
- * starts a blank-line-terminated HTML block exactly as `<div>` does.
- */
-const HTML_BLOCK_OPEN_RE = new RegExp(
-  `^(?:<[A-Za-z][^>]*>?|</${HTML_BLOCK_TAG_NAMES}[ \\t]*>)[ \\t]*\\r?$`,
-  'i',
-);
-
-/** The type-1 openers: their blocks end at the closing tag, not a blank line. */
-const HTML_TYPE1_OPEN_RE = /^<(pre|script|style|textarea)\b/i;
-
-/** Structural classes a line falls into, in scan order. */
+/** Structural classes a line falls into. */
 type LineKind =
   | 'text' // ordinary line — a strip's map applies
-  | 'htmlOpen' // opens a simple HTML block — kept verbatim
-  | 'html' // HTML-block content — mapped: renders VISIBLY on GitHub
-  | 'htmlEnd' // the blank line closing an HTML block — kept
-  | 'fenceEdge' // a fence opener or closer — kept
-  | 'fence' // fenced-code content — kept (a quotation)
+  | 'html' // tag-based HTML-block content — mapped: renders VISIBLY on GitHub
+  | 'fence' // fenced-code line, delimiters included — kept (a quotation)
   | 'code'; // indented-code content — kept (a quotation)
 
 interface ScannedLine {
@@ -490,114 +717,73 @@ interface ScannedLine {
 }
 
 /**
- * One structural pass over the body, shared by every line-aware strip:
- * markdown constructs under which a footer/marker-shaped line is a
- * QUOTATION, not attribution, classified identically everywhere.
+ * One structural pass over the body, shared by every line-aware strip and
+ * the blanking: which lines GitHub renders as code (the quotations the
+ * maps keep and the blanking hides), which as visible HTML-block content,
+ * and which as ordinary text the maps apply to — classified identically
+ * everywhere.
  *
- * Blockquote-wrapped lines classify on their CONTENT, after the `>` prefix
- * — `quoteBlock` in pr-context quotes every earlier comment containing code
- * as `> ``` …`, and a scanner that never sees past the `>` reaches inside
- * quoted code and corrupts it. Fences track their quote depth for the same
- * reason: a shallower depth ends the quoted block carrying the fence. A
- * DEEPER depth inside an open fence does not — a `>`-prefixed line inside a
- * fenced code block is literal code content on GitHub, and the fence stays
- * open past it; the closer must carry the opener's own depth for the same
- * reason.
+ * The classification is the CommonMark parser's token map, not a hand
+ * model of the block grammar. The scan this replaced tracked fences and
+ * HTML blocks itself and disagreed with the renderers on lazy continuation
+ * (an indented line right after a paragraph line is prose, not code), on
+ * list content indents and tab stops, and on fence delimiters inside a
+ * raw-HTML block — each disagreement kept a forged footer the render
+ * showed, or hid one it rendered as code. A fence token's map covers its
+ * delimiters too, so they classify with their content. Blockquotes and
+ * list items are the parser's containers: a `> ```` quotation of an earlier
+ * round's comment (`quoteBlock` in pr-context) is code at its depth.
  *
- * The fence state is the opener's delimiter character and run length:
- * CommonMark closes a fence only on the same character, at least the
- * opener's length, with no info string — a bare boolean inverts parity on
- * nested/mixed quotes, exactly the 'quoting an earlier round' shape these
- * strips exist for. It also never OPENS a backtick fence whose info string
- * carries a backtick — CommonMark forbids that spelling, so the line is
- * ordinary paragraph text (tilde fences may carry one). Lines inside a
- * simple HTML block (`<div>`, `</div>`, … until the next blank line;
- * `<pre>`/`<script>`/`<style>`/`<textarea>` until their closing tag) render
- * VISIBLY on GitHub, so the state only stops a fence-shaped line inside one
- * from toggling fence state — and a `>`-only line is not the blank line
- * that ends such a block.
+ * Tag-based HTML blocks (`<div>`, `<details>`, `<pre>` …) render their
+ * content visibly, so it maps like text — the one droppable quotation kind
+ * — and is what the marker-exposure gate counts. The raw kinds (a comment,
+ * PI, declaration or CDATA block) render nothing; they were never modeled
+ * and classify as text, where the projection's own comment handling
+ * applies.
+ *
+ * Blockquote-wrapped lines keep their prefix on `line`, their content on
+ * `content`, and their prefix depth on `depth`: the maps match quoted
+ * shapes at any depth, and a paragraph run ends where the depth changes.
  *
  * Splits on every CommonMark line ending — `\n`, `\r\n`, and a bare
- * `\r`: GitHub renders all three as a line break, and a `\n`-only scan
- * read the CR twins of these bodies as one line, leaving a forged footer
- * or a hollow fence the LF twin strips or refuses.
+ * `\r`: the parser normalizes all three to one line break, so its map and
+ * this split stay aligned, and the CR twins of these bodies classify like
+ * the LF ones.
  */
 function scanLines(body: string): ScannedLine[] {
-  let fence: { char: string; len: number; depth: number } | null = null;
-  let html: { endRe: RegExp | null } | null = null;
-  const out: ScannedLine[] = [];
-  for (const line of body.split(/\r\n?|\n/)) {
+  const lines = body.split(LINE_ENDING_RE);
+  const kinds: LineKind[] = new Array<LineKind>(lines.length).fill('text');
+  for (const token of BLOCK_PARSER.parse(body, {})) {
+    if (token.map === null) continue;
+    let kind: LineKind;
+    if (token.type === 'fence') kind = 'fence';
+    else if (token.type === 'code_block') kind = 'code';
+    else if (token.type === 'html_block') {
+      // A block opens at its first `<`, past any container prefix. Only a
+      // tag opens the visible kind; `<!--`, `<?`, `<!X` and `<![CDATA[`
+      // open the render-nothing kinds, which stay text.
+      const opener = lines[token.map[0]];
+      if (!/^<[A-Za-z/]/.test(opener.slice(Math.max(opener.indexOf('<'), 0)))) {
+        continue;
+      }
+      kind = 'html';
+    } else continue;
+    for (let l = token.map[0]; l < token.map[1]; l += 1) kinds[l] = kind;
+  }
+  return lines.map((line, i) => {
     const quote = QUOTE_PREFIX_RE.exec(line);
     const depth = quote === null ? 0 : quote[0].split('>').length - 1;
     const content = quote === null ? line : line.slice(quote[0].length);
-    const trimmed = content.trimStart();
-    if (html !== null) {
-      const closes =
-        html.endRe === null ? line.trim() === '' : html.endRe.test(line);
-      if (closes && html.endRe === null) {
-        html = null;
-        out.push({ line, kind: 'htmlEnd', depth, content });
-      } else {
-        out.push({ line, kind: 'html', depth, content });
-        if (closes) html = null;
-      }
-      continue;
-    }
-    if (fence !== null && depth < fence.depth) {
-      // The quoted block carrying the fence ended; reclassify outside it.
-      fence = null;
-    }
-    if (fence !== null) {
-      const close = FENCE_CLOSE_RE.exec(content);
-      if (
-        close !== null &&
-        depth === fence.depth &&
-        close[1]![0] === fence.char &&
-        close[1]!.length >= fence.len
-      ) {
-        fence = null;
-        out.push({ line, kind: 'fenceEdge', depth, content });
-      } else {
-        out.push({ line, kind: 'fence', depth, content });
-      }
-      continue;
-    }
-    if (HTML_BLOCK_OPEN_RE.test(trimmed)) {
-      const t1 = HTML_TYPE1_OPEN_RE.exec(trimmed);
-      html =
-        t1 === null
-          ? { endRe: null }
-          : { endRe: new RegExp(`</${t1[1]}\\s*>`, 'i') };
-      out.push({ line, kind: 'htmlOpen', depth, content });
-      continue;
-    }
-    const open = FENCE_RUN_RE.exec(content);
-    if (open !== null) {
-      // A backtick in a BACKTICK fence's info string is no fence at all —
-      // the line is ordinary text; tilde fences may carry one.
-      if (
-        !(open[1]![0] === '`' && content.slice(open[0].length).includes('`'))
-      ) {
-        fence = { char: open[1]![0]!, len: open[1]!.length, depth };
-        out.push({ line, kind: 'fenceEdge', depth, content });
-        continue;
-      }
-    }
-    if (/^[ \t]{4}/.test(content)) {
-      out.push({ line, kind: 'code', depth, content });
-      continue;
-    }
-    out.push({ line, kind: 'text', depth, content });
-  }
-  return out;
+    return { line, kind: kinds[i], depth, content };
+  });
 }
 
 /**
  * Line-map shared by the anywhere-strips: `map` returns the replacement
- * line, or null to drop it. Fenced code, indented code, fence edges, and
- * HTML-block openers/closers are quotations — kept verbatim; HTML-block
- * CONTENT renders visibly, so it maps like text. A body where nothing
- * changed is returned byte-identical.
+ * line, or null to drop it. Fenced code (delimiters included) and indented
+ * code are quotations — kept verbatim; HTML-block CONTENT renders visibly,
+ * so it maps like text. A body where nothing changed is returned
+ * byte-identical.
  */
 function mapLinesAware(
   body: string,
@@ -716,19 +902,213 @@ function linkRefDefLines(lines: string[], i: number): number {
  * toward the verdict, and re-promotes as an unanswerable blocker. This is a
  * judgment projection, not a sanitizer, so it is deliberately fence-blind: a
  * quotation of scaffolding is still not a finding.
+ *
+ * Two further blind spots are DECISIONS, not gaps, and both were measured
+ * against cmark-gfm and an HTML parser before being left alone (#9940
+ * review, round 12 reverse audit):
+ *
+ * FOLDS. A body whose prose sits inside a `<details>` renders as a
+ * collapsed triangle — one click from readable, not invisible — and an arm
+ * that deleted the fold's content would delete a quoted `` `<details>` ``
+ * too, which is the shape a review OF THIS FILE writes. That trade loses a
+ * real finding to catch a readable one, so a fold that hides an inline
+ * comment's whole text posts, and counts.
+ *
+ * BLOCK CONTEXT. The `<!` and `<?` arms hide the same span wherever the
+ * opener stands, though the renderer does not: mid-line a `<?` without its
+ * `?>` forms nothing and its characters are VISIBLE, while at a line's
+ * content start it is an HTML block. Splitting the two BY HAND was tried
+ * and REVERTED. Measured on a prose-weighted corpus of 30 000 bodies: the
+ * split alone traded 121 → 116 bodies wrongly called empty for 1426 → 1730
+ * wrongly called visible, and teaching it the container prefixes (so
+ * `><?…` reads as a block) then needs the container's EXTENT as well —
+ * without that, bodies wrongly called EMPTY went 121 → 3594. (A one-off
+ * corpus, not kept: the numbers are the shape of the trade, not a
+ * benchmark to re-run.)
+ *
+ * The parse is not what stops it, and neither is the parser. `BLOCK_PARSER`
+ * ABOVE hands every BLOCK token its line span, and this path already pays
+ * for a run of it: `stripReviewFooter` opens `canProjectFooterMarker` on a
+ * `<`, which every body these arms judge carries by construction, and
+ * reaches `scanLines`. So the parse is already in the bill — on the body
+ * shapes these arms fire on, adding one costs about what this leg already
+ * spends in `stripReviewFooter`, and the two move together across shapes
+ * (a directional measurement, not a benchmark: the absolute figures swing
+ * more than twentyfold with the body's structure).
+ *
+ * What stops it is the PROJECTION. `scanLines` flattens `token.map` into a
+ * per-line kind and returns `{line, kind, depth, content}` — the extent is
+ * discarded, and `depth` counts block-quote markers only, so a list item
+ * reads 0. Extent is the exact fact the numbers above say the split needs:
+ * a container prefix tells you an opener is at a line's content start, and
+ * only the container's END tells you how far the block it opens reaches.
+ * So the arms stay position-blind until something here surfaces that, and
+ * the price is the `&nbsp;<?x>` miscall pinned in the tests.
  */
+/**
+ * The `<!` family and `<?`, taken as ONE left-to-right decision.
+ *
+ * Written as a scan rather than a regex alternation: with no end-of-input
+ * alternative the alternation retries at every later `<`, and an entry of
+ * repeated unterminated `<![CDATA[` took nineteen seconds at 720 kB — this
+ * projection runs TWICE per entry and once per inline comment body, on text
+ * a model writes with no length bound (#9940 review, round 31 reverse
+ * audit). A terminator absent from one position is absent from every later
+ * one, so one failed search per kind is all the scan ever does.
+ */
+function stripBangSpans(text: string): string {
+  let out = '';
+  let at = 0;
+  let i = text.indexOf('<');
+  let noCommentEnd = false;
+  let noGt = false;
+  while (i !== -1) {
+    let end = -1;
+    if (text.startsWith('<!-->', i)) end = i + 5;
+    else if (text.startsWith('<!--->', i)) end = i + 6;
+    else if (text.startsWith('<!--', i)) {
+      if (!noCommentEnd) {
+        const plain = text.indexOf('-->', i + 4);
+        const bang = text.indexOf('--!>', i + 4);
+        if (plain === -1 && bang === -1) noCommentEnd = true;
+        else if (bang !== -1 && (plain === -1 || bang < plain)) end = bang + 4;
+        else end = plain + 3;
+      }
+    } else if (
+      text.startsWith('<?', i) ||
+      text.startsWith('<![CDATA[', i) ||
+      /^<![A-Z]+[ \t\n\v\f\r]/.test(text.slice(i))
+    ) {
+      if (!noGt) {
+        const gt = text.indexOf('>', i + 2);
+        if (gt === -1) noGt = true;
+        else end = gt + 1;
+      }
+    }
+    if (end === -1) {
+      i = text.indexOf('<', i + 1);
+      continue;
+    }
+    out += text.slice(at, i);
+    at = end;
+    i = text.indexOf('<', end);
+  }
+  return out + text.slice(at);
+}
+
+/**
+ * Characters a reader cannot see: whitespace of every width (`\s` already
+ * covers `\p{Zs}`), the format characters, and the C0/C1 controls — a
+ * control is never a glyph, and `&#28;`…`&#31;` and `&#133;` were being
+ * called visible (#9940 review, round 31 reverse audit).
+ */
+const INVISIBLE_ONLY_RE = /^[\s\p{Cf}\p{Cc}]*$/u;
+
+/**
+ * The HTML5 named references whose value is invisible — derived from the
+ * entity table, not curated, so the set cannot drift from what a renderer
+ * decodes. Case is significant: `&nbsp;` is a space and `&NBSP;` is the
+ * five characters a reader sees.
+ */
+const INVISIBLE_ENTITY_NAMES = new Set([
+  'ApplyFunction',
+  'InvisibleComma',
+  'InvisibleTimes',
+  'MediumSpace',
+  'NegativeMediumSpace',
+  'NegativeThickSpace',
+  'NegativeThinSpace',
+  'NegativeVeryThinSpace',
+  'NewLine',
+  'NoBreak',
+  'NonBreakingSpace',
+  'Tab',
+  'ThickSpace',
+  'ThinSpace',
+  'VeryThinSpace',
+  'ZeroWidthSpace',
+  'af',
+  'emsp',
+  'emsp13',
+  'emsp14',
+  'ensp',
+  'hairsp',
+  'ic',
+  'it',
+  'lrm',
+  'nbsp',
+  'numsp',
+  'puncsp',
+  'rlm',
+  'shy',
+  'thinsp',
+  'zwj',
+  'zwnj',
+]);
+
+/** Whether an entity reference's body decodes to nothing a reader sees. */
+function invisibleEntity(ref: string): boolean {
+  if (ref[0] !== '#') return INVISIBLE_ENTITY_NAMES.has(ref);
+  const code =
+    ref[1] === 'x' || ref[1] === 'X'
+      ? Number.parseInt(ref.slice(2), 16)
+      : Number.parseInt(ref.slice(1), 10);
+  // Out of range, NUL and the lone surrogates all decode to U+FFFD, which
+  // a reader sees.
+  if (!Number.isSafeInteger(code) || code < 1 || code > 0x10ffff) return false;
+  if (code >= 0xd800 && code <= 0xdfff) return false;
+  return INVISIBLE_ONLY_RE.test(String.fromCodePoint(code));
+}
+
 export function rendersAsNothing(text: string): boolean {
   let stripped = text
-    .replace(/<!--[\s\S]*?(?:-->|$)/g, '')
-    .replace(/<script\b[\s\S]*?(?:<\/script\s*>|$)/gi, '')
-    .replace(/<style\b[\s\S]*?(?:<\/style\s*>|$)/gi, '')
-    .replace(/<\?[\s\S]*?(?:\?>|$)/g, '')
-    .replace(/<![A-Za-z][\s\S]*?(?:>|$)/g, '')
-    .replace(/\p{Cf}/gu, '')
-    // No-break, space, and invisible named/numeric entity families.
+    // The `<!` family and `<?` are ONE decision, taken left to right,
+    // because that is how the HTML tokenizer takes it: at a `<!` it looks
+    // for `--` (comment), `[CDATA[` and a DOCTYPE-shaped name, and
+    // otherwise opens a BOGUS COMMENT that ends at the first `>`. Four
+    // independent global passes take the decision four times and in the
+    // wrong order — the comment pass ate the `>` that terminates a
+    // declaration standing in FRONT of it, and the entry then read as
+    // empty and `rendersAsNothingAtExit` threw the whole compose away.
+    //
+    // `<!-->` and `<!--->` close on their own dashes (HTML5 "abrupt
+    // closing of empty comment") and a comment ALSO closes at `--!>`
+    // (HTML5 "comment end bang state"), so what follows any of the three
+    // is VISIBLE. A declaration is `<!` + UPPERCASE letters + WHITESPACE —
+    // derived exhaustively against cmark-gfm, which is what GitHub runs —
+    // so `<!a x>`, `<!A1 x>` and `<!Ax>` are not declarations and the text
+    // behind them is visible. A processing instruction and a CDATA section
+    // hide only to the first `>`, not to their own `?>` / `]]>`, because
+    // the markdown block hands the raw text to an HTML parser and the
+    // bogus comment closes there (#9940 review, rounds 10 and 11 reverse
+    // audits).
+    .replace(/^[\s\S]*$/, stripBangSpans)
+    // An opener left with no terminator runs to the END of the document —
+    // but only from the START of a line, where it is an HTML BLOCK (types
+    // 2, 3, 4 and 5). MID-LINE the same opener is an inline construct the
+    // renderer refuses, so the text after it is visible and deleting it
+    // threw the compose away (#9940 review, round 11 reverse audit).
     .replace(
-      /&nbsp;|&ensp;|&emsp;|&thinsp;|&shy;|&zwj;|&zwnj;|&lrm;|&rlm;|&zerowidthspace;|&#0*(?:160|173|819[2-9]|820[0-7]|8288|65279);|&#x0*(?:a0|ad|200[0-9a-f]|206[0-4]|feff);/gi,
+      /(?:^|\n) {0,3}<(?:!--|\?|!\[CDATA\[|![A-Z]+[ \t\n\v\f\r])[\s\S]*$/,
       '',
+    )
+    .replace(/\p{Cf}/gu, '')
+    // Invisible entity references, DECIDED rather than listed. The hand
+    // table named ten of the thirty-three HTML5 names and twelve of the
+    // thirty-three numeric spellings that render nothing, so `&Tab;`,
+    // `&NewLine;`, `&#x2028;` and twenty more posted a Critical with no
+    // visible content at all — counted toward the verdict and re-promoted
+    // as an unanswerable blocker, which is the whole point of this
+    // projection (#9940 review, round 31 reverse audit). It also matched
+    // case-INSENSITIVELY, and named references are case-sensitive:
+    // `&NBSP;` is literal text a reader sees, and deleting it read a
+    // visible body as empty.
+    .replace(
+      // Wider than CommonMark's 7 digits / 6 hex digits: cmark-gfm decodes
+      // `&#00000160;` past that bound, and the range check below is what
+      // rejects an out-of-range code point.
+      /&(#\d{1,10}|#[xX][0-9a-fA-F]{1,9}|[A-Za-z][A-Za-z0-9]{1,31});/g,
+      (whole, ref: string) => (invisibleEntity(ref) ? '' : whole),
     )
     // Empty inline links render no pixels; an empty-alt image still
     // renders its <img> — only the link spelling is scaffolding.
@@ -747,7 +1127,7 @@ export function rendersAsNothing(text: string): boolean {
     stripped = next;
   }
   const kept: string[] = [];
-  const lines = stripped.split(/\r\n?|\n/);
+  const lines = stripped.split(LINE_ENDING_RE);
   for (let i = 0; i < lines.length; i += 1) {
     const l = lines[i]!;
     if (/^[ \t]{0,3}(`{3,}|~{3,})[ \t]*\r?$/.test(l)) continue;
@@ -832,6 +1212,16 @@ export function stripParagraphMarkers(body: string): string {
  * nothing changes posts none of them. Every attribution-off leg — submit's
  * post transform and gate, compose's body lists, the ledger titles — goes
  * through here so the sites cannot drift.
+ *
+ * Comment grammar is deliberately NOT neutralized in this chain, even
+ * though a forged footer wrapped in an HTML comment slips past every strip
+ * above (they match the displayed projection, which drops the comment
+ * whole). The chain is shared with submit's inline-comment transform,
+ * whose contract keeps a quoted marker MENTION verbatim, and with the
+ * ledger's id read, which steps over a leading comment as render-nothing
+ * residue — a strip here turned both into visible words. The verbatim
+ * body exits neutralize the grammar BEFORE calling in (`quotedProse` in
+ * compose-review), where the wrapped footer then strips like any other.
  */
 export function stripForUnattributedPost(body: string): string {
   let current = body;
@@ -856,7 +1246,16 @@ export function stripForUnattributedPost(body: string): string {
  * normalizing to one.
  */
 export function isFooterSafeModelId(modelId: string): boolean {
-  return !/[\n\r]/.test(modelId) && !modelId.includes(FOOTER_MARKER);
+  // U+2028 and U+2029 too: the readers' footer tail names them (they are
+  // display line breaks, and the `by` clause and the census filter both
+  // name them), so a modelId carrying one built a CANONICAL ruling note
+  // that neither this module's matcher nor the autofix census accepts —
+  // the note is re-posted every round and the loop never converges. The
+  // writer's gate and the readers' class have to be the same set (#9940
+  // review, round 31 reverse audit).
+  return (
+    !/[\n\r\u2028\u2029]/.test(modelId) && !modelId.includes(FOOTER_MARKER)
+  );
 }
 
 /** The shape of a version the footer can carry. */

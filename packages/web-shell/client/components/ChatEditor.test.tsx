@@ -2,6 +2,11 @@
 
 import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type {
+  DaemonWorkspaceGitStatus,
+  ReasoningSelection,
+} from '@qwen-code/sdk/daemon';
+import type { DaemonReasoningControls } from '@qwen-code/web-shell/daemon-react-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   WebShellCustomizationProvider,
@@ -10,11 +15,12 @@ import {
   type WebShellComposerTag,
   type WebShellCustomization,
 } from '../customization';
-import { I18nProvider } from '../i18n';
+import { I18nProvider, type WebShellLanguage } from '../i18n';
 import type {
   MobileComposerBackend,
   SlashMenuState,
 } from '../hooks/useComposerCore';
+import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { WebShellPortalRootContext } from '../portalRoot';
 
@@ -34,10 +40,36 @@ const mockComposerCoreState = vi.hoisted(() => ({
   removeTopTag: vi.fn(),
 }));
 
+// Stand in for the branch picker so the tests can assert what the composer
+// hands it (the git status behind its action hints) without driving Radix.
+vi.mock('./BranchPickerPopover', async () => {
+  const { createElement } = await import('react');
+  return {
+    BranchPickerPopover: ({
+      children,
+      status,
+    }: {
+      children?: unknown;
+      status?: { operation?: string; unstaged?: number };
+    }) =>
+      createElement(
+        'div',
+        {
+          'data-testid': 'branch-picker',
+          'data-status-operation': status?.operation ?? undefined,
+          'data-status-unstaged': status?.unstaged ?? undefined,
+        },
+        children,
+      ),
+  };
+});
+
 // Mock useWorkspace so BranchPickerPopover can render without a real provider.
-vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
+    await importOriginal<
+      typeof import('@qwen-code/web-shell/daemon-react-sdk')
+    >();
   return {
     ...actual,
     useWorkspace: () => ({
@@ -102,6 +134,13 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
 });
 
 const composerCoreState = vi.hoisted(() => ({
+  viewRef: { current: null } as { current: unknown },
+  workspaceActionsRef: { current: undefined } as {
+    current: AtMentionWorkspaceActions | undefined;
+  },
+  getText: vi.fn(() => ''),
+  setText: vi.fn(),
+  insertText: vi.fn(),
   slashMenu: null as SlashMenuState | null,
   focus: vi.fn(),
   closeSlashMenu: vi.fn(),
@@ -112,6 +151,10 @@ const composerCoreState = vi.hoisted(() => ({
   clearImageDragState: vi.fn(),
   addTags: vi.fn(),
   imageDragActive: false,
+  navigatePrevHistory: vi.fn(),
+  navigateNextHistory: vi.fn(),
+  shellMode: false,
+  setShellMode: vi.fn(),
   onFileUploadRequest: undefined as
     | ((targetDir: string, restoreQuery?: () => void) => void)
     | undefined,
@@ -180,12 +223,13 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         options?.workspaceUploadBusy ?? false;
       return {
         containerRef: React.createRef<HTMLDivElement>(),
-        viewRef: { current: null },
+        viewRef: composerCoreState.viewRef,
+        workspaceActionsRef: composerCoreState.workspaceActionsRef,
         mobileComposer: composerCoreState.mobileComposer,
         focus: composerCoreState.focus,
         submitText: vi.fn(),
         clearText: vi.fn(),
-        getText: vi.fn(() => ''),
+        getText: composerCoreState.getText,
         hasInput: vi.fn(() => false),
         hasAttachments:
           mockComposerCoreState.pastedImages.length > 0 ||
@@ -222,14 +266,14 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         removeTopTag: mockComposerCoreState.removeTopTag,
         addTags: composerCoreState.addTags,
         removeInlineTags: vi.fn(),
-        insertText: vi.fn(),
-        setText: vi.fn(),
+        insertText: composerCoreState.insertText,
+        setText: composerCoreState.setText,
         submit: vi.fn(),
         clear: vi.fn(),
         retryLast: vi.fn(),
         replaceEditorText: vi.fn(),
-        shellMode: false,
-        setShellMode: vi.fn(),
+        shellMode: composerCoreState.shellMode,
+        setShellMode: composerCoreState.setShellMode,
         toggleShellMode: vi.fn(),
         currentMode: 'default',
         sessionName: undefined,
@@ -247,8 +291,8 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           handleSearchInput: vi.fn(),
           handleSearchCompositionEnd: vi.fn(),
         },
-        navigatePrevHistory: vi.fn(),
-        navigateNextHistory: vi.fn(),
+        navigatePrevHistory: composerCoreState.navigatePrevHistory,
+        navigateNextHistory: composerCoreState.navigateNextHistory,
         showShortcutHints: false,
         followupState: { isVisible: false, suggestion: '' },
         disabled: false,
@@ -294,6 +338,10 @@ const mounted: Array<{
 
 afterEach(() => {
   composerCoreState.slashMenu = null;
+  composerCoreState.viewRef.current = null;
+  composerCoreState.getText.mockReset().mockReturnValue('');
+  composerCoreState.setText.mockReset();
+  composerCoreState.insertText.mockReset();
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
   composerCoreState.mobileComposer = null;
@@ -302,6 +350,11 @@ afterEach(() => {
   composerCoreState.ingestFiles.mockReset();
   composerCoreState.clearImageDragState.mockReset();
   composerCoreState.addTags.mockReset();
+  composerCoreState.navigatePrevHistory.mockReset();
+  composerCoreState.navigateNextHistory.mockReset();
+  composerCoreState.setShellMode.mockReset();
+  composerCoreState.shellMode = false;
+  composerCoreState.workspaceActionsRef.current = undefined;
   composerCoreState.imageDragActive = false;
   composerCoreState.onFileUploadRequest = undefined;
   voiceButtonState.onActiveChange = undefined;
@@ -327,12 +380,18 @@ interface ChatEditorRenderProps {
     size?: number;
   }>;
   gitBranch?: string;
+  gitStatus?: DaemonWorkspaceGitStatus;
   workspaceName?: string;
   workspaceTitle?: string;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
   currentMode?: string;
+  planMode?: boolean;
+  modeControlsDisabled?: boolean;
+  onTogglePlan?: () => void;
+  isRunning?: boolean;
+  onCancel?: () => void;
   currentModel?: string;
   availableModels?: Array<{ id: string; label?: string }>;
   sessionWorkflowEnabled?: boolean;
@@ -350,10 +409,17 @@ interface ChatEditorRenderProps {
   onShowContextUsage?: () => void;
   disabled?: boolean;
   atWorkspaceCwd?: string;
+  composerScopeKey?: string;
+  workspaceFeaturesEnabled?: boolean;
+  attachmentsEnabled?: boolean;
   sessionId?: string;
   customization?: WebShellCustomization;
+  language?: WebShellLanguage;
   builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
   atProviders?: WebShellCustomization['atProviders'];
+  skills?: Array<{ name: string; description: string }>;
+  reasoning?: DaemonReasoningControls;
+  onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
 }
 
 function renderChatEditorInto(
@@ -366,6 +432,7 @@ function renderChatEditorInto(
     pastedImages,
     pastedFiles,
     customization,
+    language = 'en',
     renderComposerTagTooltip,
     onComposerTagClick,
     ...chatEditorProps
@@ -390,7 +457,7 @@ function renderChatEditorInto(
             onComposerTagClick,
           }}
         >
-          <I18nProvider language="en">
+          <I18nProvider language={language}>
             <ChatEditor
               onSubmit={() => undefined}
               commands={[]}
@@ -449,6 +516,393 @@ describe('ChatEditor voice toolbar integration', () => {
     expect(
       hidden.querySelector('[data-testid="live-voice-button"]'),
     ).toBeNull();
+  });
+});
+
+describe('ChatEditor add menu (+)', () => {
+  const trigger = (container: HTMLElement) =>
+    container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-add-menu-trigger"]',
+    );
+
+  it('renders at the front of the toolbar when addMenu is opted in', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu', 'approvalMode', 'voice'],
+    });
+    const button = trigger(container);
+    expect(button).not.toBeNull();
+    const leading = container.querySelector(
+      '[data-web-shell-toolbar-leading]',
+    )!;
+    expect(leading.contains(button)).toBe(true);
+    const modeButton = container.querySelector('[data-web-shell-mode-button]')!;
+    expect(
+      button!.compareDocumentPosition(modeButton) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('does not render when addMenu is not in the toolbar list', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode', 'voice'],
+    });
+    expect(trigger(container)).toBeNull();
+  });
+
+  it('keeps session attachments available without workspace actions', async () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      workspaceFeaturesEnabled: false,
+      attachmentsEnabled: true,
+    });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-file',
+    );
+
+    expect(
+      portalRoot.querySelector('[data-testid="composer-add-menu-file-attach"]'),
+    ).not.toBeNull();
+    expect(
+      portalRoot.querySelector(
+        '[data-testid="composer-add-menu-file-upload"]:not([data-disabled])',
+      ),
+    ).toBeNull();
+  });
+
+  it('stays off by default when the host passes no toolbar list', () => {
+    const container = renderChatEditor({});
+    expect(trigger(container)).toBeNull();
+  });
+
+  it('discards a pending file picker when the composer owner changes', async () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      sessionId: 'session-a',
+    });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-file',
+    );
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-file-attach"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    const staleInput = container.querySelector<HTMLInputElement>(
+      'input[type="file"]:not([data-web-shell-upload-input])',
+    )!;
+
+    rerenderChatEditor(container, {
+      visibleToolbarActions: ['addMenu'],
+      sessionId: 'session-b',
+    });
+    expect(staleInput.isConnected).toBe(false);
+
+    Object.defineProperty(staleInput, 'files', {
+      value: [new File(['hello'], 'note.txt', { type: 'text/plain' })],
+      configurable: true,
+    });
+    await act(async () => {
+      staleInput.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+  });
+
+  it('discards a pending file picker when file ingestion is disabled', async () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      customization: { fileUploadEnabled: true },
+    });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-file',
+    );
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-file-attach"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    const staleInput = container.querySelector<HTMLInputElement>(
+      'input[type="file"]:not([data-web-shell-upload-input])',
+    )!;
+
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, {
+      visibleToolbarActions: ['addMenu'],
+      customization: { fileUploadEnabled: false },
+    });
+    expect(staleInput.isConnected).toBe(false);
+    expect(composerCoreState.focus).toHaveBeenCalled();
+
+    Object.defineProperty(staleInput, 'files', {
+      value: [new File(['hello'], 'note.txt', { type: 'text/plain' })],
+      configurable: true,
+    });
+    await act(async () => {
+      staleInput.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+  });
+
+  it('closes an open add menu when the composer becomes disabled', async () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+    });
+    await openAddSubmenu(container, 'composer-add-menu-file');
+
+    rerenderChatEditor(container, {
+      visibleToolbarActions: ['addMenu'],
+      disabled: true,
+    });
+
+    const portalRoot = mounted.find(
+      (entry) => entry.container === container,
+    )!.portalRoot;
+    expect(
+      portalRoot.querySelector('[data-testid="composer-add-menu-file"]'),
+    ).toBeNull();
+  });
+
+  it('closes an open add menu when a workspace capability disappears', async () => {
+    composerCoreState.workspaceActionsRef.current = {
+      loadExtensionsStatus: vi.fn().mockResolvedValue({
+        extensions: [
+          {
+            name: 'reviewer',
+            description: 'Reviews code',
+            isActive: true,
+          },
+        ],
+      }),
+    };
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+    });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-extensions',
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(
+      portalRoot.querySelector(
+        '[data-testid="composer-add-menu-extensions-item"]',
+      ),
+    ).not.toBeNull();
+
+    composerCoreState.workspaceActionsRef.current = undefined;
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { visibleToolbarActions: ['addMenu'] });
+
+    expect(
+      portalRoot.querySelector(
+        '[data-testid="composer-add-menu-extensions-item"]',
+      ),
+    ).toBeNull();
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  async function openAddSubmenu(container: HTMLDivElement, testId: string) {
+    const portalRoot = mounted.find(
+      (entry) => entry.container === container,
+    )!.portalRoot;
+    await act(async () => {
+      trigger(container)!.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(`[data-testid="${testId}"]`)!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    return portalRoot;
+  }
+
+  it('routes add-menu attachments through the composer file lane', async () => {
+    const container = renderChatEditor({ visibleToolbarActions: ['addMenu'] });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-file',
+    );
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-file-attach"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    const file = new File(['hello'], 'note.txt', { type: 'text/plain' });
+    const input =
+      container.querySelector<HTMLInputElement>('input[type=file]')!;
+    Object.defineProperty(input, 'files', {
+      value: [file],
+      configurable: true,
+    });
+    await act(async () => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    expect(composerCoreState.ingestFiles).toHaveBeenCalledWith([file]);
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it('refocuses the composer when the add-menu file picker is canceled', async () => {
+    const container = renderChatEditor({ visibleToolbarActions: ['addMenu'] });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-file',
+    );
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-file-attach"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    const input =
+      container.querySelector<HTMLInputElement>('input[type=file]')!;
+    composerCoreState.focus.mockClear();
+    await act(async () => {
+      input.dispatchEvent(new Event('cancel'));
+    });
+
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it('routes add-menu references through the inline tag lane', async () => {
+    let docLength = 0;
+    const dispatch = vi.fn();
+    composerCoreState.viewRef.current = {
+      state: {
+        doc: {
+          get length() {
+            return docLength;
+          },
+        },
+      },
+      dispatch,
+    };
+    composerCoreState.addTags.mockImplementation(() => {
+      docLength = 14;
+    });
+    composerCoreState.workspaceActionsRef.current = {
+      globWorkspace: vi.fn().mockResolvedValue({ matches: ['src/index.ts'] }),
+    };
+    const container = renderChatEditor({ visibleToolbarActions: ['addMenu'] });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-reference-file',
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-reference-file-item"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    expect(composerCoreState.addTags).toHaveBeenCalledWith(
+      [expect.objectContaining({ kind: 'file', serialized: '@src/index.ts' })],
+      { placement: 'inline', position: 'end' },
+    );
+    expect(dispatch).toHaveBeenCalledWith({
+      selection: { anchor: 14 },
+      scrollIntoView: true,
+    });
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  async function selectReviewSkill(container: HTMLDivElement) {
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-skills',
+    );
+    const skill = portalRoot.querySelector<HTMLElement>(
+      '[data-testid="composer-add-menu-skills-item"]',
+    )!;
+    await act(async () => {
+      skill.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, button: 0 }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+  }
+
+  it('prepends a skill without replacing the desktop draft', async () => {
+    const dispatch = vi.fn();
+    const focus = vi.fn();
+    composerCoreState.viewRef.current = {
+      state: { doc: { toString: () => 'existing draft' } },
+      dispatch,
+      focus,
+    };
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      skills: [{ name: 'review', description: '' }],
+    });
+
+    await selectReviewSkill(container);
+
+    expect(dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 0, insert: '/review ' },
+      selection: { anchor: 8 },
+      scrollIntoView: true,
+    });
+    expect(focus).toHaveBeenCalled();
+  });
+
+  it('refocuses the desktop editor when the skill is already prepended', async () => {
+    const dispatch = vi.fn();
+    const focus = vi.fn();
+    composerCoreState.viewRef.current = {
+      state: { doc: { toString: () => '/review existing draft' } },
+      dispatch,
+      focus,
+    };
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      skills: [{ name: 'review', description: '' }],
+    });
+
+    await selectReviewSkill(container);
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it('prepends a skill through the textarea backend on touch', async () => {
+    composerCoreState.mobileComposer = {
+      textareaRef: createRef<HTMLTextAreaElement>(),
+      value: 'existing draft',
+      onChange: vi.fn(),
+      onBlur: vi.fn(),
+      placeholder: '',
+    } satisfies MobileComposerBackend;
+    composerCoreState.getText.mockReturnValue('existing draft');
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      skills: [{ name: 'review', description: '' }],
+    });
+
+    await selectReviewSkill(container);
+
+    expect(composerCoreState.insertText).toHaveBeenCalledWith('/review ');
+    expect(composerCoreState.setText).not.toHaveBeenCalled();
+    expect(
+      container.querySelector<HTMLTextAreaElement>('textarea')!.selectionStart,
+    ).toBe(0);
   });
 });
 
@@ -577,6 +1031,33 @@ describe('ChatEditor context usage ring', () => {
 });
 
 describe('ChatEditor attachment reporting', () => {
+  it('renders attachments with a file icon, title, and type', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'report.html',
+          media_type: 'text/html',
+          text: '<h1>Report</h1>',
+        },
+      ],
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    expect(
+      attachments?.querySelector('[data-file-type-icon="html"]'),
+    ).not.toBeNull();
+    expect(
+      attachments?.querySelector('[title="report.html"]')?.textContent,
+    ).toBe('report.html');
+    expect(attachments?.querySelector('[title="HTML"]')?.textContent).toBe(
+      'HTML',
+    );
+    expect(
+      attachments?.querySelector('button[aria-label="Remove report.html"]'),
+    ).not.toBeNull();
+  });
+
   it('reports whether the composer has tags or pasted images', () => {
     const onEmptyAttachmentsChange = vi.fn();
     renderChatEditor({
@@ -684,7 +1165,10 @@ describe('ChatEditor composer tag icons', () => {
 
     expect(
       container.querySelectorAll('[style*="--composer-tag-icon-url"]'),
-    ).toHaveLength(kinds.length);
+    ).toHaveLength(kinds.length - 1);
+    expect(
+      container.querySelector('[data-file-type-icon="file"]'),
+    ).not.toBeNull();
   });
 
   it('rejects unsafe custom icon URLs for top composer tags', () => {
@@ -720,6 +1204,25 @@ describe('ChatEditor git branch toolbar integration', () => {
     ).not.toBeNull();
   });
 
+  it('hands the workspace git status to the branch picker for its action hints', () => {
+    const container = renderChatEditor({
+      gitBranch: 'feature/web-shell',
+      gitStatus: {
+        v: 2,
+        workspaceCwd: '/repo',
+        branch: 'feature/web-shell',
+        operation: 'rebase',
+        unstaged: 4,
+        computedAt: 1,
+      },
+      visibleToolbarActions: ['gitBranch'],
+    });
+
+    const picker = container.querySelector('[data-testid="branch-picker"]');
+    expect(picker?.getAttribute('data-status-operation')).toBe('rebase');
+    expect(picker?.getAttribute('data-status-unstaged')).toBe('4');
+  });
+
   it('hides the git branch indicator without a branch or visible action', () => {
     expect(
       renderChatEditor({
@@ -736,6 +1239,59 @@ describe('ChatEditor git branch toolbar integration', () => {
 });
 
 describe('ChatEditor workspace toolbar integration', () => {
+  it('controls the workspace selector with the workspace action', () => {
+    const props = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/main',
+          label: 'main',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'api',
+          cwd: '/work/api',
+          label: 'api',
+          primary: false,
+          trusted: true,
+        },
+      ],
+      onSelectWorkspace: vi.fn(),
+    };
+
+    expect(
+      renderChatEditor({
+        ...props,
+        visibleToolbarActions: ['workspace'],
+      }).querySelector('button[aria-label="Workspace"]'),
+    ).not.toBeNull();
+    expect(
+      renderChatEditor({
+        ...props,
+        visibleToolbarActions: [],
+      }).querySelector('button[aria-label="Workspace"]'),
+    ).toBeNull();
+  });
+
+  it('keeps legacy history fallback for Live but isolates standalone drafts', () => {
+    renderChatEditor({
+      composerScopeKey: 'live',
+      workspaceFeaturesEnabled: false,
+    });
+    expect(
+      latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
+    ).toBe(false);
+
+    renderChatEditor({
+      composerScopeKey: 'standalone',
+      workspaceFeaturesEnabled: false,
+    });
+    expect(
+      latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
+    ).toBe(true);
+  });
+
   it('shows the workspace indicator when the workspace action is visible', () => {
     const container = renderChatEditor({
       workspaceName: 'api',
@@ -986,51 +1542,269 @@ describe('ChatEditor top composer tag tooltip', () => {
   });
 });
 
-describe('ChatEditor Session Workflow mode rename', () => {
-  it('renames only the plan entry in the mode dropdown while enabled', () => {
-    const container = renderChatEditor({
-      visibleToolbarActions: ['approvalMode'],
-      sessionWorkflowEnabled: true,
-    });
+describe('ChatEditor Plan toggle', () => {
+  it('associates the Plan switch with its changing accessible description', () => {
+    const props = {
+      visibleToolbarActions: ['plan'] as const,
+      onTogglePlan: vi.fn(),
+    };
+    const container = renderChatEditor(props);
+    for (const state of [
+      {
+        planMode: false,
+        currentMode: 'yolo',
+        description: 'Plan before executing',
+      },
+      {
+        planMode: true,
+        currentMode: 'yolo',
+        description:
+          'Planning; execute with Full Access after approval. Click to exit planning.',
+      },
+      {
+        planMode: true,
+        currentMode: 'auto-edit',
+        description:
+          'Planning; execute with Auto Edit after approval. Click to exit planning.',
+      },
+      {
+        planMode: false,
+        currentMode: 'auto-edit',
+        description: 'Plan before executing',
+      },
+    ]) {
+      rerenderChatEditor(container, { ...props, ...state });
+      const button = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-plan-button]',
+      )!;
+      act(() => button.focus());
+      expect(button.getAttribute('aria-label')).toBe('Plan');
+      const descriptionIds = button.getAttribute('aria-describedby');
+      expect(descriptionIds).toBeTruthy();
+      const description = descriptionIds!
+        .split(/\s+/)
+        .map((id) => document.getElementById(id)?.textContent ?? '')
+        .join(' ');
+      expect(description).toBe(state.description);
+    }
+  });
 
-    act(() => {
+  it('closes an open permission dropdown when mode controls become disabled', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode', 'plan'] as const,
+      onSelectMode: vi.fn(),
+      onTogglePlan: vi.fn(),
+    };
+    const container = renderChatEditor(props);
+    act(() =>
       container
         .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
-        ?.click();
-    });
-
-    const popover = document.querySelector('[data-web-shell-toolbar-popover]');
-    expect(popover).not.toBeNull();
-    const labels = Array.from(popover?.querySelectorAll('button') ?? []).map(
-      (button) => button.textContent ?? '',
-    );
-    expect(labels.some((label) => label.includes('Plan & Review (plan)'))).toBe(
-      true,
+        ?.click(),
     );
     expect(
-      labels.some((label) => label.includes('Ask Approval (default)')),
-    ).toBe(true);
-    expect(labels.some((label) => label.includes('Plan (plan)'))).toBe(false);
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).not.toBeNull();
+    rerenderChatEditor(container, { ...props, modeControlsDisabled: true });
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).toBeNull();
   });
 
-  it('renames the active plan mode chip while enabled', () => {
-    const withWorkflow = renderChatEditor({
-      currentMode: 'plan',
-      sessionWorkflowEnabled: true,
+  it('omits Plan from permissions and retains every execution policy', () => {
+    const onSelectMode = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode', 'plan'],
+      planMode: true,
+      currentMode: 'yolo',
+      onTogglePlan: vi.fn(),
+      onSelectMode,
     });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.click(),
+    );
+    const buttons = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    );
+    const labels = buttons.map((button) => button.textContent ?? '');
+    expect(labels.some((label) => label.includes('(plan)'))).toBe(false);
+    for (const mode of ['default', 'auto-edit', 'auto', 'yolo']) {
+      expect(labels.some((label) => label.includes(`(${mode})`))).toBe(true);
+    }
+    act(() =>
+      buttons
+        .find((button) => button.textContent?.includes('(auto-edit)'))
+        ?.click(),
+    );
+    expect(onSelectMode).toHaveBeenCalledWith('auto-edit');
     expect(
-      withWorkflow
-        .querySelector('[data-toolbar-measure="mode:expanded"]')
-        ?.textContent?.includes('Plan & Review'),
-    ).toBe(true);
-
-    const withoutWorkflow = renderChatEditor({ currentMode: 'plan' });
-    expect(
-      withoutWorkflow
-        .querySelector('[data-toolbar-measure="mode:expanded"]')
-        ?.textContent?.includes('Plan & Review'),
-    ).toBe(false);
+      container
+        .querySelector('[data-web-shell-plan-button]')
+        ?.getAttribute('aria-checked'),
+    ).toBe('true');
   });
+
+  it('keeps permission and Plan controls operable while approval disables input', () => {
+    const onSelectMode = vi.fn();
+    const onTogglePlan = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode', 'plan'],
+      disabled: true,
+      planMode: true,
+      currentMode: 'default',
+      onSelectMode,
+      onTogglePlan,
+    });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.click(),
+    );
+    const option = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    ).find((button) => button.textContent?.includes('(yolo)'));
+    expect(option).toBeDefined();
+    act(() => option!.click());
+    expect(onSelectMode).toHaveBeenCalledWith('yolo');
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-plan-button]')
+        ?.click(),
+    );
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+  });
+
+  it('disables both controls during a plan handoff and restores them afterward', () => {
+    const onSelectMode = vi.fn();
+    const onTogglePlan = vi.fn();
+    const props = {
+      visibleToolbarActions: ['approvalMode', 'plan'] as const,
+      planMode: true,
+      modeControlsDisabled: true,
+      onSelectMode,
+      onTogglePlan,
+    };
+    const container = renderChatEditor(props);
+    const mode = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    const plan = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-plan-button]',
+    )!;
+    expect(mode.disabled).toBe(true);
+    expect(plan.disabled).toBe(true);
+    const planControl = plan.closest('[data-web-shell-plan-control]')!;
+    expect(planControl.hasAttribute('data-disabled')).toBe(true);
+    act(() => {
+      mode.click();
+      plan.click();
+    });
+    expect(onTogglePlan).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).toBeNull();
+    rerenderChatEditor(container, { ...props, modeControlsDisabled: false });
+    expect(mode.disabled).toBe(false);
+    expect(plan.disabled).toBe(false);
+    expect(planControl.hasAttribute('data-disabled')).toBe(false);
+    act(() => plan.click());
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+  });
+
+  it('places the controlled toggle immediately after permission and allows use while running', () => {
+    const onTogglePlan = vi.fn();
+    const props = {
+      visibleToolbarActions: ['approvalMode', 'plan', 'model'] as const,
+      currentMode: 'yolo',
+      onTogglePlan,
+      isRunning: true,
+    };
+    const container = renderChatEditor(props);
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-plan-button]',
+    )!;
+    const controls = Array.from(
+      container.querySelectorAll('[data-web-shell-toolbar-leading] button'),
+    );
+    expect(controls.indexOf(button)).toBe(
+      controls.indexOf(
+        container.querySelector('[data-web-shell-mode-button]')!,
+      ) + 1,
+    );
+    expect(button.getAttribute('role')).toBe('switch');
+    expect(button.getAttribute('aria-label')).toBe('Plan');
+    expect(button.getAttribute('aria-checked')).toBe('false');
+    act(() => button.click());
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+    expect(button.getAttribute('aria-checked')).toBe('false');
+    rerenderChatEditor(container, { ...props, planMode: true });
+    expect(button.getAttribute('aria-checked')).toBe('true');
+    rerenderChatEditor(container, { ...props, planMode: false });
+    expect(button.getAttribute('aria-checked')).toBe('false');
+    expect(
+      container.querySelector('[data-toolbar-measure="mode:expanded"]')
+        ?.textContent,
+    ).toContain('Full Access');
+  });
+
+  it.each([
+    { width: 0, label: '' },
+    { width: 300, label: 'Plan' },
+  ])(
+    'fits the Plan label to available toolbar width $width',
+    ({ width, label }) => {
+      const bounds = vi
+        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+        .mockImplementation(function () {
+          if (this.matches('[data-toolbar-measure="plan:expanded"]'))
+            return { width: 72 } as DOMRect;
+          if (this.matches('[data-toolbar-measure="plan:collapsed"]'))
+            return { width: 54 } as DOMRect;
+          if (this.querySelector(':scope > [data-web-shell-toolbar-leading]'))
+            return { width } as DOMRect;
+          return { width: 0 } as DOMRect;
+        });
+      try {
+        const container = renderChatEditor({
+          visibleToolbarActions: ['approvalMode', 'plan'],
+          onTogglePlan: vi.fn(),
+        });
+        const button = container.querySelector('[data-web-shell-plan-button]')!;
+        const control = container.querySelector(
+          '[data-web-shell-plan-control]',
+        )!;
+        expect(control.textContent).toBe(label);
+        expect(control.querySelector('[aria-hidden="true"]') !== null).toBe(
+          label === '',
+        );
+        expect(
+          button.querySelector('[data-slot="switch-thumb"]'),
+        ).not.toBeNull();
+        expect(button.getAttribute('role')).toBe('switch');
+        expect(button.getAttribute('aria-label')).toBe('Plan');
+      } finally {
+        bounds.mockRestore();
+      }
+    },
+  );
+
+  it.each([undefined, [], ['approvalMode']] as const)(
+    'requires an explicit Plan toolbar action: %j',
+    (visibleToolbarActions) => {
+      const container = renderChatEditor({
+        visibleToolbarActions,
+        onTogglePlan: vi.fn(),
+      });
+      expect(
+        container.querySelector('[data-web-shell-plan-button]'),
+      ).toBeNull();
+    },
+  );
 });
 
 describe('ChatEditor toolbar popovers', () => {
@@ -1125,6 +1899,33 @@ describe('ChatEditor toolbar popovers', () => {
     }
   });
 
+  it('remeasures the toolbar when addMenu visibility changes', () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let observers = 0;
+    globalThis.ResizeObserver = class ResizeObserverMock {
+      constructor(_callback: ResizeObserverCallback) {
+        observers += 1;
+      }
+
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    };
+
+    try {
+      const container = renderChatEditor({
+        visibleToolbarActions: ['approvalMode'],
+      });
+      const before = observers;
+      rerenderChatEditor(container, {
+        visibleToolbarActions: ['addMenu', 'approvalMode'],
+      });
+      expect(observers).toBeGreaterThan(before);
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
   it('does not synchronously loop when toolbar measurements alternate', () => {
     let leadingWidthReads = 0;
     const bounds = vi
@@ -1210,6 +2011,161 @@ describe('ChatEditor toolbar popovers', () => {
     expect(onSelectModel).toHaveBeenCalledWith('qwen-max');
   });
 
+  it.each([
+    [
+      {
+        enabled: false,
+        effort: 'medium',
+        defaultEffort: 'medium',
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+      },
+      'medium',
+    ],
+    [{ enabled: false, effort: 'default', efforts: [] }, 'default'],
+    [
+      {
+        enabled: false,
+        effort: 'default',
+        efforts: ['low', 'high'],
+        canEnable: false,
+      },
+      undefined,
+    ],
+    [
+      { enabled: false, effort: 'default', efforts: [], canEnable: false },
+      undefined,
+    ],
+    [
+      {
+        enabled: true,
+        effort: 'high',
+        efforts: ['low', 'high'],
+        canEnable: false,
+      },
+      'none',
+    ],
+    [
+      {
+        enabled: false,
+        effort: 'medium',
+        defaultEffort: 'medium',
+        enableValue: 'default',
+        efforts: ['medium'],
+      },
+      'default',
+    ],
+    [
+      {
+        enabled: true,
+        effort: 'medium',
+        defaultEffort: 'medium',
+        efforts: ['medium'],
+      },
+      'none',
+    ],
+  ] as const)(
+    'toggles thinking only when the requested direction is available for %j',
+    async (reasoning, expected) => {
+      const onSelectReasoningEffort = vi.fn();
+      const container = renderChatEditor({
+        visibleToolbarActions: ['model'],
+        currentModel: 'gpt-5.4',
+        availableModels: [{ id: 'gpt-5.4', label: 'GPT-5.4' }],
+        reasoning: { ...reasoning, efforts: [...reasoning.efforts] },
+        onSelectReasoningEffort,
+      });
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+          ?.click(),
+      );
+      const toggle = document.querySelector<HTMLButtonElement>(
+        '[data-web-shell-thinking-toggle]',
+      );
+      expect(toggle).not.toBeNull();
+      await act(async () => toggle?.click());
+      expect(toggle?.disabled).toBe(expected === undefined);
+      if (expected === undefined) {
+        expect(onSelectReasoningEffort).not.toHaveBeenCalled();
+      } else {
+        expect(onSelectReasoningEffort).toHaveBeenCalledWith(
+          expected,
+          'toggle',
+        );
+      }
+    },
+  );
+
+  it('localizes every fixed effort tier after a runtime language change', () => {
+    const props: ChatEditorRenderProps = {
+      visibleToolbarActions: ['model'],
+      currentModel: 'reasoning-model',
+      availableModels: [{ id: 'reasoning-model', label: 'Reasoning Model' }],
+      reasoning: {
+        enabled: true,
+        effort: 'max',
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+    };
+    const container = renderChatEditor(props);
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+    let controls = document.querySelector('[data-web-shell-model-reasoning]');
+    expect(controls?.textContent).toContain('High');
+    expect(controls?.textContent).toContain('Max');
+    expect(controls?.textContent).not.toContain('reasoning.effort.');
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    rerenderChatEditor(container, { ...props, language: 'zh-CN' });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+    controls = document.querySelector('[data-web-shell-model-reasoning]');
+    expect(controls?.textContent).toContain('高');
+    expect(controls?.textContent).toContain('最高');
+    expect(controls?.textContent).not.toContain('High');
+    expect(controls?.textContent).not.toContain('reasoning.effort.');
+  });
+
+  it('renders an unknown provider default as Thinking without a Default effort', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'reasoning-model',
+      availableModels: [{ id: 'reasoning-model', label: 'Reasoning Model' }],
+      reasoning: {
+        enabled: true,
+        effort: 'default',
+        efforts: ['low', 'max'],
+      },
+    });
+
+    const modelButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+    expect(modelButton?.textContent).toContain('Thinking');
+    expect(modelButton?.textContent).not.toContain('Default');
+    expect(modelButton?.textContent).not.toContain('reasoning.effort.');
+
+    act(() => modelButton?.click());
+    const controls = document.querySelector('[data-web-shell-model-reasoning]');
+    expect(controls?.textContent).not.toContain('Default');
+    expect(
+      Array.from(
+        controls?.querySelectorAll('[data-web-shell-effort]') ?? [],
+      ).every((button) => button.getAttribute('aria-pressed') === 'false'),
+    ).toBe(true);
+  });
+
   it('displays the model label instead of an opaque route id', () => {
     const routeId = 'qwen-route:v1:abcdefghijklmnop';
     const container = renderChatEditor({
@@ -1286,6 +2242,28 @@ describe('ChatEditor toolbar popovers', () => {
         '[data-web-shell-toolbar-popover] input[type="search"]',
       ),
     ).toBeNull();
+  });
+
+  it('localizes the approval-mode button accessible name', () => {
+    const english = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      language: 'en',
+    });
+    const chinese = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      language: 'zh-CN',
+    });
+
+    expect(
+      english
+        .querySelector('[data-web-shell-mode-button]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Approval mode');
+    expect(
+      chinese
+        .querySelector('[data-web-shell-mode-button]')
+        ?.getAttribute('aria-label'),
+    ).toBe('审批模式');
   });
 });
 
@@ -1383,7 +2361,7 @@ describe('ChatEditor mobile composer quick actions', () => {
       textareaRef: createRef<HTMLTextAreaElement>(),
       value: '',
       onChange: vi.fn(),
-      onPaste: vi.fn(),
+      onBlur: vi.fn(),
       placeholder: '',
     };
   }
@@ -1412,7 +2390,7 @@ describe('ChatEditor mobile composer quick actions', () => {
     });
   });
 
-  it('hides the keyboard shortcut hints grid on the mobile composer', () => {
+  it('shows the keyboard shortcut hints grid on the mobile composer', () => {
     withTouchDevice(() => {
       composerCoreState.mobileComposer = mobileComposerStub();
       const mobileContainer = renderChatEditor({});
@@ -1421,7 +2399,7 @@ describe('ChatEditor mobile composer quick actions', () => {
         Array.from(mobileContainer.querySelectorAll('button')).some(
           (button) => button.textContent === 'Tab',
         ),
-      ).toBe(false);
+      ).toBe(true);
 
       composerCoreState.mobileComposer = null;
       const desktopContainer = renderChatEditor({});
@@ -1431,6 +2409,98 @@ describe('ChatEditor mobile composer quick actions', () => {
           (button) => button.textContent === 'Tab',
         ),
       ).toBe(true);
+    });
+  });
+
+  it('walks prompt history from the hint arrows on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      const container = renderChatEditor({});
+      openQuickActions(container);
+      const pressHint = (label: string) => {
+        const button = Array.from(container.querySelectorAll('button')).find(
+          (candidate) => candidate.textContent === label,
+        );
+        expect(button).not.toBeUndefined();
+        act(() => button!.click());
+      };
+
+      pressHint('↑');
+      expect(composerCoreState.navigatePrevHistory).toHaveBeenCalledTimes(1);
+      pressHint('↓');
+      expect(composerCoreState.navigateNextHistory).toHaveBeenCalledTimes(1);
+
+      // Tab has no completion target on the textarea backend.
+      pressHint('Tab');
+      expect(composerCoreState.navigatePrevHistory).toHaveBeenCalledTimes(1);
+      expect(composerCoreState.navigateNextHistory).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('cancels the running turn from the Esc hint on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      const onCancel = vi.fn();
+      const container = renderChatEditor({ isRunning: true, onCancel });
+      openQuickActions(container);
+      const escButton = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Esc',
+      );
+      expect(escButton).not.toBeUndefined();
+      act(() => escButton!.click());
+      expect(onCancel).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('moves the textarea caret from the cursor hints on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      const container = renderChatEditor({});
+      const textarea = container.querySelector<HTMLTextAreaElement>('textarea');
+      expect(textarea).not.toBeNull();
+      openQuickActions(container);
+      // Setting the value after the panel opens keeps React's controlled
+      // state from resetting it on the panel re-render.
+      textarea!.value = 'abcd';
+      textarea!.setSelectionRange(1, 3);
+      const pressHint = (label: string) => {
+        const button = Array.from(container.querySelectorAll('button')).find(
+          (candidate) => candidate.textContent === label,
+        );
+        expect(button).not.toBeUndefined();
+        act(() => button!.click());
+      };
+
+      // An existing selection collapses to its far edge first.
+      pressHint('→');
+      expect(textarea!.selectionStart).toBe(3);
+      pressHint('→');
+      expect(textarea!.selectionStart).toBe(4);
+      pressHint('←');
+      expect(textarea!.selectionStart).toBe(3);
+
+      // Movement skips whole code points so an emoji is never split.
+      textarea!.value = 'a😀b';
+      textarea!.setSelectionRange(1, 1);
+      pressHint('→');
+      expect(textarea!.selectionStart).toBe(3);
+      pressHint('←');
+      expect(textarea!.selectionStart).toBe(1);
+    });
+  });
+
+  it('exits shell mode from the Esc hint on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      composerCoreState.shellMode = true;
+      const container = renderChatEditor({ isRunning: true });
+      openQuickActions(container);
+      const escButton = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Esc',
+      );
+      expect(escButton).not.toBeUndefined();
+      act(() => escButton!.click());
+      expect(composerCoreState.setShellMode).toHaveBeenCalledWith(false);
     });
   });
 
@@ -1599,10 +2669,28 @@ describe('ChatEditor file upload gating', () => {
     expect(composerCoreState.onFileUploadRequest).toBeUndefined();
   });
 
-  it('fileUploadEnabled={false} disables file drag-and-drop in the composer core', () => {
+  it('fileUploadEnabled={false} keeps attachment drag-and-drop enabled', () => {
     uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
     renderChatEditor({ customization: { fileUploadEnabled: false } });
+    expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(true);
+  });
+
+  it('disables attachment drag feedback when attachments are disabled', () => {
+    renderChatEditor({ attachmentsEnabled: false });
     expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(false);
+  });
+
+  it('does not advertise upload for an attach-only drop preference', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    const container = renderChatEditor({
+      customization: { fileDropAction: 'attach' },
+    });
+    dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'dragenter',
+      ['Files'],
+    );
+    expect(container.querySelector('[data-upload-drag-active]')).toBeNull();
   });
 
   it('enables file drag-and-drop in the composer core by default', () => {
@@ -1611,7 +2699,7 @@ describe('ChatEditor file upload gating', () => {
     expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(true);
   });
 
-  it('fileUploadEnabled={false} ingests nothing on file drop', () => {
+  it('fileUploadEnabled={false} routes drops to attachments without asking', () => {
     const workspace = makeWorkspace(['workspace_file_upload']);
     uploadWorkspaceState.current = workspace;
     composerCoreState.imageDropCapture.mockImplementation((event: Event) => {
@@ -1628,13 +2716,131 @@ describe('ChatEditor file upload gating', () => {
       ['Files'],
       [new File(['abc'], 'notes.txt')],
     );
-    // Cancelled so the browser cannot navigate to the dropped file, but no
-    // lane — upload or inline image/text — reacts.
     expect(drop.defaultPrevented).toBe(true);
-    expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
+    expect(composerCoreState.imageDropCapture).toHaveBeenCalledTimes(1);
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
     expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
     expect(composerCoreState.addTags).not.toHaveBeenCalled();
     expect(container.querySelector('[data-web-shell-upload-strip]')).toBeNull();
+  });
+
+  it.each([
+    ['upload', true],
+    ['attach', true],
+    [undefined, false],
+    ['attach', false],
+  ] as const)(
+    'routes default %s with attachments %s without asking',
+    async (fileDropAction, attachmentsEnabled) => {
+      const workspace = makeWorkspace(['workspace_file_upload']);
+      workspace.client.uploadWorkspaceFile.mockResolvedValue({
+        kind: 'file_upload',
+        path: 'uploads/notes.txt',
+        sizeBytes: 3,
+        hash: `sha256:${'a'.repeat(64)}`,
+      });
+      uploadWorkspaceState.current = workspace;
+      const container = renderChatEditor({
+        attachmentsEnabled,
+        customization: { fileDropAction, fileUploadDirectory: 'uploads' },
+      });
+      const files = [new File(['abc'], 'notes.txt')];
+      const drop = dispatchDrag(
+        container.querySelector('[data-web-shell-composer-editor]')!,
+        'drop',
+        ['Files'],
+        files,
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(drop.defaultPrevented).toBe(true);
+      expect(
+        document.querySelector('[data-web-shell-drop-choice-dialog]'),
+      ).toBeNull();
+      expect(composerCoreState.focus).toHaveBeenCalled();
+      if (fileDropAction === 'attach' && attachmentsEnabled) {
+        expect(composerCoreState.ingestFiles).toHaveBeenCalledWith(files);
+        expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+      } else {
+        expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+        expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledWith(
+          expect.objectContaining({
+            path: 'uploads/notes.txt',
+            data: files[0],
+          }),
+        );
+        expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('falls back to attachments when the preferred upload is unavailable', () => {
+    uploadWorkspaceState.current = makeWorkspace([]);
+    const container = renderChatEditor({
+      customization: { fileDropAction: 'upload' },
+    });
+    dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'drop',
+      ['Files'],
+      [new File(['abc'], 'notes.txt')],
+    );
+    expect(composerCoreState.imageDropCapture).toHaveBeenCalledTimes(1);
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
+  });
+
+  it('cancels drops when neither destination is available', () => {
+    const workspace = makeWorkspace([]);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({
+      attachmentsEnabled: false,
+      customization: { fileDropAction: 'upload' },
+    });
+    const onDrop = vi.fn();
+    container.addEventListener('drop', onDrop);
+    const drop = dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'drop',
+      ['Files'],
+      [new File(['abc'], 'notes.txt')],
+    );
+    expect(onDrop).toHaveBeenCalledTimes(1);
+    expect(drop.defaultPrevented).toBe(true);
+    expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
+  });
+
+  it.each([
+    { attachmentsEnabled: false },
+    { customization: { fileDropAction: 'attach' as const } },
+  ])('closes a pending choice when routing changes: %j', (props) => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'drop',
+      ['Files'],
+      [new File(['abc'], 'notes.txt')],
+    );
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).not.toBeNull();
+    rerenderChatEditor(container, props);
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
   });
 
   it('asks whether dropped files should be referenced or uploaded', () => {
@@ -2279,6 +3485,9 @@ describe('ChatEditor file upload gating', () => {
       '[data-web-shell-upload-strip] [data-status="done"]',
     );
     expect(row?.textContent).toContain('Saved as report (1).txt');
+    expect(
+      row?.querySelector('[title="Saved as report (1).txt"]'),
+    ).not.toBeNull();
   });
 
   it('shows the plain Uploaded copy when the file kept its name', async () => {

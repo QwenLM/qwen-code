@@ -7,13 +7,12 @@
 import type {
   Config,
   ConfigInitializeOptions,
-} from '@qwen-code/qwen-code-core';
-import {
-  createDebugLogger,
-  buildSessionRecoveryPlanFromApiHistory,
-  SendMessageType,
-  TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/config/config.js';
+import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
+import { buildSessionRecoveryPlanFromApiHistory } from '@qwen-code/qwen-code-core/core/session-recovery.js';
+import { TURN_INTERRUPTION_HISTORY_TAIL_COUNT } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
+import { computeInitialTurnFromHistory } from '@qwen-code/qwen-code-core/services/session-turn-state.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ControlContext } from './control/ControlContext.js';
@@ -49,7 +48,7 @@ import {
 import {
   settleChatRecording,
   subscribeToHeadlessChatRecordingFailures,
-} from '../utils/chat-recording-failure.js';
+} from './chat-recording-failure.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 
@@ -79,7 +78,7 @@ class Session {
   private activeTurnAbortController: AbortController | null = null;
   private config: Config;
   private sessionId: string;
-  private promptIdCounter: number = 0;
+  private promptIdCounter: number | null = null;
   private inputReader: StreamJsonInputReader;
   private outputAdapter: StreamJsonOutputAdapter;
   private controlContext: ControlContext | null = null;
@@ -144,7 +143,36 @@ class Session {
     });
   }
 
+  /**
+   * Mints the next promptId for this process.
+   *
+   * The counter is seeded from the resumed transcript on first use. Without
+   * that seed a `--resume`/`--continue` chain restarts at 1 every process and
+   * re-mints promptIds the previous run already persisted, so one transcript
+   * carries several turns under a single id: the key the rewind mapping from
+   * #9466 anchors on (it fails closed to a positional walk when ids repeat),
+   * and the `prompt_id` on persisted `ui_telemetry` records, which is what
+   * the next resume reads back to seed from. File-history snapshots are not
+   * at stake on this path — checkpointing defaults off outside interactive
+   * sessions, so headless turns write none.
+   *
+   * ACP seeds through this same helper (`primeTurnFromHistory`). Interactive
+   * mode seeds too, but by its own inline count of resumed user turns
+   * (`seedPromptCount` in AppContainer), which ignores the turns the
+   * transcript actually claims.
+   *
+   * Seeding is lazy because resumed data only becomes authoritative after
+   * `config.initialize()` re-reads the session file, which this class defers
+   * until the first control request.
+   */
   private getNextPromptId(): string {
+    if (this.promptIdCounter === null) {
+      const records =
+        this.config.getResumedSessionData?.()?.conversation.messages;
+      this.promptIdCounter = records
+        ? computeInitialTurnFromHistory(records, this.sessionId)
+        : 0;
+    }
     this.promptIdCounter++;
     return `${this.sessionId}########${this.promptIdCounter}`;
   }
@@ -159,12 +187,12 @@ class Session {
     debugLogger.debug('[Session] Initializing config');
 
     try {
-      // gemini.tsx has already emitted warnings known before stream-json
+      // llm.tsx has already emitted warnings known before stream-json
       // initialization starts. Keep that snapshot so only warnings produced
       // by the deferred initialize() call are written here.
       const emittedWarnings = new Set(this.config.getWarnings());
       // Bracket `config.initialize()` with the same profiler checkpoints
-      // the non-stream-json branch in `gemini.tsx` uses so the
+      // the non-stream-json branch in `llm.tsx` uses so the
       // `config_initialize_dur` derived phase shows up in stream-json
       // startup profiles. `profileCheckpoint` is a no-op when
       // `QWEN_CODE_PROFILE_STARTUP` is unset, so this adds zero overhead
@@ -184,7 +212,7 @@ class Session {
       // MCP servers settle, so we must explicitly await discovery here —
       // otherwise the first prompt would see only built-in tools.
       await this.config.waitForMcpReady();
-      // Surface MCP failures on stderr — same rationale as gemini.tsx's
+      // Surface MCP failures on stderr — same rationale as llm.tsx's
       // non-interactive branch: per-server errors are caught inside
       // `discoverAllMcpToolsIncremental` and never reach a TTY otherwise,
       // so a script using stream-json with broken MCP config would
@@ -203,7 +231,7 @@ class Session {
       }
       // Finalize the startup profile here so `config_initialize_*` and the
       // MCP discovery events captured during init/discovery make it into
-      // the on-disk profile. gemini.tsx's stream-json branch deliberately
+      // the on-disk profile. llm.tsx's stream-json branch deliberately
       // skips finalize because the profiler's `finalized` guard would
       // otherwise suppress every event emitted during the
       // `Session.ensureConfigInitialized` flow above.
@@ -512,15 +540,15 @@ class Session {
       return { accepted: false, interruption: 'none' };
     }
 
-    const geminiClient = this.config.getGeminiClient();
-    if (!geminiClient || !geminiClient.isInitialized()) {
+    const llmClient = this.config.getLlmClient();
+    if (!llmClient || !llmClient.isInitialized()) {
       debugLogger.debug(
         '[Session] continue_last_turn rejected: gemini client is not ready',
       );
       return { accepted: false, interruption: 'none' };
     }
 
-    const chat = geminiClient.getChat();
+    const chat = llmClient.getChat();
     const historyTail =
       chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);

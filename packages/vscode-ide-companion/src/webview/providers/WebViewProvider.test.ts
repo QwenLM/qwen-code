@@ -29,6 +29,7 @@ const {
   slashCommandNotificationCallbackRef,
   endTurnCallbackRef,
   streamChunkCallbackRef,
+  transcriptUpdateCallbackRef,
   toolCallCallbackRef,
   permissionRequestCallbackRef,
   askUserQuestionCallbackRef,
@@ -104,6 +105,11 @@ const {
   streamChunkCallbackRef: {
     current: undefined as ((chunk: string) => void) | undefined,
   },
+  transcriptUpdateCallbackRef: {
+    current: undefined as
+      | ((notification: Record<string, unknown>) => void)
+      | undefined,
+  },
   toolCallCallbackRef: {
     current: undefined as
       | ((update: Record<string, unknown>) => void)
@@ -140,6 +146,64 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
     },
   };
 });
+
+const daemonMocks = vi.hoisted(() => {
+  // Contract-faithful stand-in for QwenDaemonProcess: workspace switches
+  // notify superseded listeners, exits notify exit listeners, and a disposed
+  // subscription stops receiving either.
+  class FakeQwenDaemonProcess {
+    boundCwd: string | null = null;
+    runtimeCount = 0;
+    exitListeners = new Set<() => void>();
+    supersededListeners = new Set<() => void>();
+
+    async start(_cliEntryPath: string, workspaceCwd: string) {
+      if (this.boundCwd !== null && this.boundCwd !== workspaceCwd) {
+        for (const listener of [...this.supersededListeners]) listener();
+      }
+      this.boundCwd = workspaceCwd;
+      this.runtimeCount += 1;
+      return {
+        baseUrl: `http://127.0.0.1:${4100 + this.runtimeCount}`,
+        token: `token-${this.runtimeCount}`,
+      };
+    }
+
+    addExitListener(listener: () => void) {
+      this.exitListeners.add(listener);
+      return {
+        dispose: () => {
+          this.exitListeners.delete(listener);
+        },
+      };
+    }
+
+    addSupersededListener(listener: () => void) {
+      this.supersededListeners.add(listener);
+      return {
+        dispose: () => {
+          this.supersededListeners.delete(listener);
+        },
+      };
+    }
+
+    dispose(): void {}
+  }
+
+  return {
+    FakeQwenDaemonProcess,
+    instances: [] as FakeQwenDaemonProcess[],
+  };
+});
+
+vi.mock('../../services/qwenDaemonProcess.js', () => ({
+  QwenDaemonProcess: class extends daemonMocks.FakeQwenDaemonProcess {
+    constructor() {
+      super();
+      daemonMocks.instances.push(this);
+    }
+  },
+}));
 
 vi.mock('vscode', () => ({
   ExtensionMode: {
@@ -252,6 +316,11 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
         askUserQuestionCallbackRef.current = callback;
       },
     );
+    onTranscriptUpdate = vi.fn(
+      (callback: (notification: Record<string, unknown>) => void) => {
+        transcriptUpdateCallbackRef.current = callback;
+      },
+    );
     onDisconnected = vi.fn();
     permissionRequestCallback?: (request: unknown) => Promise<string>;
     cancelCurrentPrompt = vi.fn();
@@ -260,6 +329,14 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
       mockQwenAgentManagerInstances.push(this);
     }
   },
+}));
+
+const conversationStoreMocks = vi.hoisted(() => ({
+  getAllConversations: vi.fn(
+    async (): Promise<
+      Array<{ id: string; title: string; messages: unknown[] }>
+    > => [],
+  ),
 }));
 
 vi.mock('../../services/conversationStore.js', () => ({
@@ -271,6 +348,7 @@ vi.mock('../../services/conversationStore.js', () => ({
     });
     addMessage = vi.fn().mockResolvedValue(undefined);
     getCurrentConversationId = vi.fn(() => null);
+    getAllConversations = conversationStoreMocks.getAllConversations;
   },
 }));
 
@@ -285,6 +363,7 @@ vi.mock('./PanelManager.js', async (importOriginal) => {
         return mockGetPanel();
       }
       setPanel = vi.fn();
+      dispose = vi.fn();
     },
   };
 });
@@ -360,13 +439,21 @@ vi.mock('../../utils/errorMessage.js', () => ({
   getErrorMessage: vi.fn((error: unknown) => String(error)),
 }));
 
+import * as vscode from 'vscode';
 import { WebViewProvider, resolveQwenCliEntryPath } from './WebViewProvider.js';
 import {
   truncatePanelTitle,
   MAX_PANEL_TITLE_LENGTH,
 } from '../utils/panelTitleUtils.js';
 import { logger } from '../../utils/logger.js';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
@@ -418,8 +505,10 @@ describe('resolveQwenCliEntryPath', () => {
  */
 async function setupAttachedProvider(options?: {
   captureMessageHandler?: boolean;
+  context?: unknown;
 }) {
   let messageHandler: WebViewMessageHandler | undefined;
+  const viewDisposeListeners: Array<() => void> = [];
 
   const postMessage = vi.fn();
   const webview = {
@@ -440,7 +529,7 @@ async function setupAttachedProvider(options?: {
   };
 
   const provider = new WebViewProvider(
-    { subscriptions: [] } as never,
+    (options?.context ?? { subscriptions: [] }) as never,
     { fsPath: '/extension-root' } as never,
   );
 
@@ -449,18 +538,28 @@ async function setupAttachedProvider(options?: {
       webview,
       visible: true,
       onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
-      onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+      onDidDispose: vi.fn((listener: () => void) => {
+        viewDisposeListeners.push(listener);
+        return { dispose: vi.fn() };
+      }),
     } as never,
     'qwen-code.chatView.sidebar',
   );
 
-  return { webview, postMessage, provider, messageHandler };
+  return {
+    webview,
+    postMessage,
+    provider,
+    messageHandler,
+    viewDisposeListeners,
+  };
 }
 
 beforeEach(() => {
   mockConfigChangeHandlers.length = 0;
   endTurnCallbackRef.current = undefined;
   streamChunkCallbackRef.current = undefined;
+  transcriptUpdateCallbackRef.current = undefined;
   toolCallCallbackRef.current = undefined;
   permissionRequestCallbackRef.current = undefined;
   askUserQuestionCallbackRef.current = undefined;
@@ -1121,6 +1220,39 @@ describe('WebViewProvider.attachToView', () => {
   });
 });
 
+describe('WebViewProvider transcript forwarding', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMessageHandlerInstances.length = 0;
+    mockQwenAgentManagerInstances.length = 0;
+    mockGetPanel.mockReturnValue(null);
+  });
+
+  it('forwards agent transcriptUpdate notifications to the webview', async () => {
+    const { postMessage } = await setupAttachedProvider();
+
+    // The subscription is registered in the provider constructor; without it
+    // the webview never receives timeline frames and renders an empty
+    // transcript while every other message flow keeps working.
+    expect(transcriptUpdateCallbackRef.current).toBeDefined();
+
+    const notification = {
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'hello transcript' },
+      },
+    };
+
+    transcriptUpdateCallbackRef.current?.(notification);
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'transcriptUpdate',
+      data: notification,
+    });
+  });
+});
+
 describe('WebViewProvider settings sync', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1458,6 +1590,74 @@ describe('WebViewProvider initial model inheritance', () => {
       { autoAuthenticate: true },
     );
     expect(agentManager.setModelFromUi).toHaveBeenCalledWith('glm-5');
+  });
+
+  it('does not apply a discontinued initial model to the new session', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    provider.setInitialModelId('qwen3-coder-plus(qwen-oauth)');
+
+    const agentManager = (
+      provider as unknown as {
+        agentManager: {
+          createNewSession: ReturnType<typeof vi.fn>;
+          setModelFromUi: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).agentManager;
+    agentManager.createNewSession.mockResolvedValue('session-1');
+    agentManager.setModelFromUi.mockResolvedValue({
+      modelId: 'qwen3-coder-plus(qwen-oauth)',
+      name: 'Qwen3 Coder Plus',
+    });
+
+    await (
+      provider as unknown as {
+        loadCurrentSessionMessages: (options?: {
+          autoAuthenticate?: boolean;
+        }) => Promise<boolean>;
+      }
+    ).loadCurrentSessionMessages();
+
+    expect(agentManager.setModelFromUi).not.toHaveBeenCalled();
+  });
+
+  it('still applies a runtime snapshot id that wraps a discontinued model', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    provider.setInitialModelId(
+      '$runtime|qwen-oauth|qwen3-coder-plus(qwen-oauth)',
+    );
+
+    const agentManager = (
+      provider as unknown as {
+        agentManager: {
+          createNewSession: ReturnType<typeof vi.fn>;
+          setModelFromUi: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).agentManager;
+    agentManager.createNewSession.mockResolvedValue('session-1');
+    agentManager.setModelFromUi.mockResolvedValue({
+      modelId: '$runtime|qwen-oauth|qwen3-coder-plus(qwen-oauth)',
+      name: 'Qwen3 Coder Plus',
+    });
+
+    await (
+      provider as unknown as {
+        loadCurrentSessionMessages: (options?: {
+          autoAuthenticate?: boolean;
+        }) => Promise<boolean>;
+      }
+    ).loadCurrentSessionMessages();
+
+    expect(agentManager.setModelFromUi).toHaveBeenCalledWith(
+      '$runtime|qwen-oauth|qwen3-coder-plus(qwen-oauth)',
+    );
   });
 });
 
@@ -2078,5 +2278,617 @@ describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
         }),
       }),
     );
+  });
+});
+
+describe('WebViewProvider web-shell daemon bootstrap', () => {
+  function setWorkspaceFolders(folders: string[]): void {
+    (
+      vscode.workspace as unknown as {
+        workspaceFolders: Array<{ uri: { fsPath: string } }>;
+      }
+    ).workspaceFolders = folders.map((fsPath) => ({ uri: { fsPath } }));
+  }
+
+  function createSharedContext(): unknown {
+    return {
+      subscriptions: [],
+      workspaceState: {
+        get: vi.fn(() => undefined),
+        update: vi.fn(() => Promise.resolve()),
+      },
+    };
+  }
+
+  /**
+   * A view-host context whose Memento only answers the keys it is seeded with,
+   * and writes through — so a migration that retires an entry is observable.
+   */
+  function createSessionStateContext(entries: Record<string, string>) {
+    return {
+      subscriptions: [],
+      workspaceState: {
+        get: vi.fn((key: string) => entries[key]),
+        update: vi.fn((key: string, value: string | undefined) => {
+          if (value === undefined) {
+            delete entries[key];
+          } else {
+            entries[key] = value;
+          }
+          return Promise.resolve();
+        }),
+      },
+    };
+  }
+
+  const WEB_SHELL_SESSION_KEY_PREFIX = 'qwenCode.webShellSessionId:';
+
+  /** Run `body` against a folder reachable only through a symlink. */
+  async function withSymlinkedWorkspace<T>(
+    body: (paths: { alias: string; canonical: string }) => Promise<T>,
+  ): Promise<T> {
+    const root = mkdtempSync(path.join(tmpdir(), 'qwen-vscode-workspace-'));
+    const target = path.join(root, 'workspace');
+    const alias = path.join(root, 'workspace-link');
+    mkdirSync(target);
+    symlinkSync(
+      target,
+      alias,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    try {
+      setWorkspaceFolders([alias]);
+      return await body({ alias, canonical: realpathSync.native(target) });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMessageHandlerInstances.length = 0;
+    mockQwenAgentManagerInstances.length = 0;
+    mockGetPanel.mockReturnValue(null);
+    conversationStoreMocks.getAllConversations.mockReset();
+    conversationStoreMocks.getAllConversations.mockResolvedValue([]);
+    mockConfigGet.mockImplementation(
+      (_key: string, defaultValue: unknown) => defaultValue,
+    );
+    daemonMocks.instances.length = 0;
+    setWorkspaceFolders(['/workspace-a']);
+    vi.spyOn(
+      WebViewProvider.prototype as unknown as {
+        initializeAgentConnection: () => Promise<void>;
+      },
+      'initializeAgentConnection',
+    ).mockResolvedValue(undefined);
+  });
+
+  it('canonicalizes a symlinked workspace before bootstrapping the daemon', async () => {
+    await withSymlinkedWorkspace(async ({ alias, canonical }) => {
+      // Seed a restorable id ONLY under the canonical key. The write side keys
+      // off the canonical payload, so a read still keyed off the raw alias
+      // would split the very identity this PR exists to unify.
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`]: 'session-restored-1',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      expect(daemonMocks.instances[0].boundCwd).toBe(canonical);
+      expect(context.workspaceState.get).toHaveBeenCalledWith(
+        `${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`,
+      );
+      expect(setup.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'webShellBootstrap',
+          data: expect.objectContaining({
+            workspaceCwd: canonical,
+            // Every `activeEditorChanged` sender posts VS Code's raw
+            // `uri.fsPath`, which keeps the alias spelling; the webview needs
+            // it to relativize the active file.
+            editorWorkspaceCwd: alias,
+            sessionId: 'session-restored-1',
+          }),
+        }),
+      );
+    });
+  });
+
+  it('ships restorable legacy conversation ids in the bootstrap payload', async () => {
+    // Pre-cutover conversations whose prompts reached the daemon were renamed
+    // to the ACP session id; entries that never left the panel keep their
+    // conv_*/temp* id and have no daemon transcript to restore.
+    conversationStoreMocks.getAllConversations.mockResolvedValue([
+      {
+        id: 'conv_1757000000000_abc123',
+        title: 'Empty draft',
+        messages: [],
+      },
+      {
+        id: '550e8400-e29b-41d4-a716-446655440201',
+        title: 'Pre-upgrade chat',
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+      {
+        id: 'temp-scratch',
+        title: 'Scratch',
+        messages: [],
+      },
+    ]);
+    const context = createSessionStateContext({});
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    expect(setup.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({
+          legacyConversationIds: ['550e8400-e29b-41d4-a716-446655440201'],
+        }),
+      }),
+    );
+    // The legacy store doubles as the downgrade/recovery path; the bootstrap
+    // must stay read-only against it.
+    expect(conversationStoreMocks.getAllConversations).toHaveBeenCalled();
+  });
+
+  it('omits the legacy allowlist when no restorable conversation exists', async () => {
+    conversationStoreMocks.getAllConversations.mockResolvedValue([
+      {
+        id: 'conv_1757000000000_abc123',
+        title: 'Empty draft',
+        messages: [],
+      },
+    ]);
+    const context = createSessionStateContext({});
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    const bootstrap = setup.postMessage.mock.calls
+      .map(
+        ([message]) =>
+          message as {
+            type?: string;
+            data?: { legacyConversationIds?: string[] };
+          },
+      )
+      .find((message) => message.type === 'webShellBootstrap');
+    expect(bootstrap).toBeDefined();
+    expect(bootstrap?.data?.legacyConversationIds).toBeUndefined();
+  });
+
+  it('restores a session id persisted under the pre-canonicalization key', async () => {
+    await withSymlinkedWorkspace(async ({ alias, canonical }) => {
+      // Someone who chatted in this folder before the state key was
+      // canonicalized has their id under the raw spelling. Without a legacy
+      // read the upgrade silently opens a fresh sidebar conversation.
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`]: 'pre-upgrade-session-id',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      expect(setup.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'webShellBootstrap',
+          data: expect.objectContaining({
+            workspaceCwd: canonical,
+            sessionId: 'pre-upgrade-session-id',
+          }),
+        }),
+      );
+
+      // Clearing the session posts `sessionId: undefined` against the
+      // canonical cwd, which deletes only the canonical key. Without the
+      // legacy entry being retired by the bootstrap above, the next bootstrap
+      // resurrects the id the user just cleared.
+      await setup.messageHandler?.({
+        type: 'webShellSessionChanged',
+        data: { sessionId: undefined, workspaceCwd: canonical },
+      });
+      setup.postMessage.mockClear();
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      const secondBootstrap = setup.postMessage.mock.calls
+        .map(
+          ([message]) =>
+            message as {
+              type?: string;
+              data?: { sessionId?: string };
+            },
+        )
+        .find((message) => message.type === 'webShellBootstrap');
+      expect(secondBootstrap).toBeDefined();
+      expect(secondBootstrap?.data?.sessionId).toBeUndefined();
+      expect(context.workspaceState.update).toHaveBeenCalledWith(
+        `${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`,
+        undefined,
+      );
+    });
+  });
+
+  it('keeps the binding when the bootstrap is interrupted before the echo', async () => {
+    await withSymlinkedWorkspace(async ({ alias, canonical }) => {
+      // The canonical key's only other writer (`webShellSessionChanged`) runs
+      // after the shell attaches. Retiring the alias without moving the id
+      // first would lose the folder->session binding for good if the window
+      // reloads inside that window.
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`]: 'pre-upgrade-session-id',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+
+      await setup.messageHandler?.({ type: 'webShellReady' });
+      setup.postMessage.mockClear();
+      // No `webShellSessionChanged` in between: this is the interrupted path.
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      const secondBootstrap = setup.postMessage.mock.calls
+        .map(
+          ([message]) =>
+            message as { type?: string; data?: { sessionId?: string } },
+        )
+        .find((message) => message.type === 'webShellBootstrap');
+      expect(secondBootstrap?.data?.sessionId).toBe('pre-upgrade-session-id');
+      expect(
+        context.workspaceState.get(
+          `${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`,
+        ),
+      ).toBe('pre-upgrade-session-id');
+    });
+  });
+
+  it('does not let the alias id overwrite an existing canonical one', async () => {
+    await withSymlinkedWorkspace(async ({ alias, canonical }) => {
+      // A user who opened the same folder under both spellings before
+      // upgrading has an entry under each. The canonical one is authoritative;
+      // the alias is retired without clobbering it.
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`]: 'canonical-session-id',
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`]: 'alias-session-id',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      const bootstrap = setup.postMessage.mock.calls
+        .map(
+          ([message]) =>
+            message as { type?: string; data?: { sessionId?: string } },
+        )
+        .find((message) => message.type === 'webShellBootstrap');
+      expect(bootstrap?.data?.sessionId).toBe('canonical-session-id');
+      expect(
+        context.workspaceState.get(
+          `${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`,
+        ),
+      ).toBe('canonical-session-id');
+      expect(
+        context.workspaceState.get(`${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`),
+      ).toBeUndefined();
+    });
+  });
+
+  it('leaves the stored id alone when the folder is not symlinked', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'qwen-vscode-workspace-'));
+    const workspace = realpathSync.native(root);
+    try {
+      // Here the legacy and canonical keys are the same string, so a
+      // retirement that is not gated on an alias actually existing would
+      // delete the entry it just read.
+      setWorkspaceFolders([workspace]);
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${workspace}`]: 'existing-session-id',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      expect(
+        context.workspaceState.get(
+          `${WEB_SHELL_SESSION_KEY_PREFIX}${workspace}`,
+        ),
+      ).toBe('existing-session-id');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('surfaces the failure to an attached webview when another host switches the shared daemon workspace', async () => {
+    const context = createSharedContext();
+    const first = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+    const second = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
+    setWorkspaceFolders(['/workspace-a']);
+    await first.messageHandler?.({ type: 'webShellReady' });
+    expect(first.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({ workspaceCwd: '/workspace-a' }),
+      }),
+    );
+
+    // A second host bootstrapping against another folder replaces the
+    // daemon the first webview is streaming against.
+    setWorkspaceFolders(['/workspace-b']);
+    await second.messageHandler?.({ type: 'webShellReady' });
+
+    expect(second.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({ workspaceCwd: '/workspace-b' }),
+      }),
+    );
+    // The first webview must hear about the replacement — its baseUrl and
+    // token are dead and nothing else tells it.
+    expect(first.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'webShellBootstrapError' }),
+    );
+    // The host that triggered the switch must not be told its own daemon died.
+    const secondErrors = second.postMessage.mock.calls.filter(
+      ([message]) =>
+        (message as { type?: string }).type === 'webShellBootstrapError',
+    );
+    expect(secondErrors).toHaveLength(0);
+  });
+
+  it('does not notify a host about a workspace switch it triggers itself', async () => {
+    const context = createSharedContext();
+    const host = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
+    setWorkspaceFolders(['/workspace-a']);
+    await host.messageHandler?.({ type: 'webShellReady' });
+    expect(host.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({ workspaceCwd: '/workspace-a' }),
+      }),
+    );
+
+    // The same host re-bootstrapping against another folder (a webview
+    // reload with a different active editor) replaces the daemon itself —
+    // it must not be told its own daemon died.
+    setWorkspaceFolders(['/workspace-b']);
+    await host.messageHandler?.({ type: 'webShellReady' });
+
+    expect(host.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'webShellBootstrap',
+        data: expect.objectContaining({ workspaceCwd: '/workspace-b' }),
+      }),
+    );
+    const errors = host.postMessage.mock.calls.filter(
+      ([message]) =>
+        (message as { type?: string }).type === 'webShellBootstrapError',
+    );
+    expect(errors).toHaveLength(0);
+  });
+
+  it('keeps notifying live hosts after another host disposes', async () => {
+    const context = createSharedContext();
+    const first = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+    const second = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+
+    await first.messageHandler?.({ type: 'webShellReady' });
+    await second.messageHandler?.({ type: 'webShellReady' });
+
+    // A disposed host's subscription must not swallow the crash notice for
+    // the hosts still alive.
+    first.provider.dispose();
+    const daemon = daemonMocks.instances[0];
+    for (const listener of [...daemon.exitListeners]) listener();
+
+    expect(second.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'webShellBootstrapError' }),
+    );
+    const firstErrors = first.postMessage.mock.calls.filter(
+      ([message]) =>
+        (message as { type?: string }).type === 'webShellBootstrapError',
+    );
+    expect(firstErrors).toHaveLength(0);
+  });
+});
+
+describe('WebViewProvider web-shell permission bridge', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMessageHandlerInstances.length = 0;
+    mockQwenAgentManagerInstances.length = 0;
+    mockGetPanel.mockReturnValue(null);
+    mockConfigGet.mockImplementation(
+      (_key: string, defaultValue: unknown) => defaultValue,
+    );
+    vi.spyOn(
+      WebViewProvider.prototype as unknown as {
+        initializeAgentConnection: () => Promise<void>;
+      },
+      'initializeAgentConnection',
+    ).mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function setupPendingWebShellPermission(requestId = 'req-1') {
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
+    await setup.messageHandler?.({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId },
+    });
+    return setup;
+  }
+
+  function decisionCalls(postMessage: ReturnType<typeof vi.fn>) {
+    return postMessage.mock.calls.filter(
+      ([message]) =>
+        (message as { type?: string }).type === 'webShellPermissionDecision',
+    );
+  }
+
+  it('routes accept to the request-owner webview', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+    const activePostMessage = vi.fn();
+    mockGetPanel.mockReturnValue({
+      webview: { postMessage: activePostMessage },
+    } as never);
+
+    provider.respondToPendingPermission('allow', {
+      fromDiffEditor: true,
+      permissionRequestId: 'req-1',
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'webShellPermissionDecision',
+      data: { decision: 'allow', requestId: 'req-1' },
+    });
+    expect(decisionCalls(activePostMessage)).toHaveLength(0);
+  });
+
+  it('routes cancel as a reject decision', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    provider.respondToPendingPermission('cancel', {
+      fromDiffEditor: true,
+      permissionRequestId: 'req-1',
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'webShellPermissionDecision',
+      data: { decision: 'reject', requestId: 'req-1' },
+    });
+  });
+
+  it('does not vote when a diff command has no exact request id', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    provider.respondToPendingPermission('allow', {
+      fromDiffEditor: true,
+    });
+
+    expect(decisionCalls(postMessage)).toHaveLength(0);
+  });
+
+  it('does not route an unknown request id to the active webview', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+    const activePostMessage = vi.fn();
+    mockGetPanel.mockReturnValue({
+      webview: { postMessage: activePostMessage },
+    } as never);
+
+    provider.respondToPendingPermission('allow', {
+      fromDiffEditor: true,
+      permissionRequestId: 'req-not-yet-mapped',
+    });
+
+    expect(decisionCalls(postMessage)).toHaveLength(0);
+    expect(decisionCalls(activePostMessage)).toHaveLength(0);
+  });
+
+  it('does not vote when the trigger is the original workspace file', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    // qwen.diff.isVisible is also true on the user's own file while a diff
+    // is open, so Ctrl+S there invokes qwen.diff.accept with a file: uri.
+    // That must not resolve an approval the user may never have looked at.
+    provider.respondToPendingPermission('allow', {
+      fromDiffEditor: false,
+      permissionRequestId: 'req-1',
+    });
+    provider.respondToPendingPermission('allow');
+
+    expect(decisionCalls(postMessage)).toHaveLength(0);
+  });
+
+  it('does not vote before permission ownership state arrives', async () => {
+    const setup = await setupAttachedProvider({ captureMessageHandler: true });
+
+    setup.provider.respondToPendingPermission('allow', {
+      fromDiffEditor: true,
+      permissionRequestId: 'req-1',
+    });
+
+    expect(decisionCalls(setup.postMessage)).toHaveLength(0);
+  });
+
+  it('reports hasPendingPermission from the webview-pushed state', async () => {
+    const setup = await setupAttachedProvider({ captureMessageHandler: true });
+
+    // The extension command gate consults hasPendingPermission() before
+    // asking the provider to vote; it must track the state the webview
+    // pushes, not only the legacy ACP resolver.
+    expect(setup.provider.hasPendingPermission()).toBe(false);
+
+    await setup.messageHandler?.({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId: 'req-1' },
+    });
+    expect(setup.provider.hasPendingPermission()).toBe(true);
+
+    await setup.messageHandler?.({
+      type: 'webShellPermissionState',
+      data: { pending: false },
+    });
+    expect(setup.provider.hasPendingPermission()).toBe(false);
+  });
+
+  it('clears the pending flag when the hosting view is disposed', async () => {
+    const setup = await setupAttachedProvider({ captureMessageHandler: true });
+
+    await setup.messageHandler?.({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId: 'req-1' },
+    });
+    expect(setup.provider.hasPendingPermission()).toBe(true);
+
+    for (const listener of setup.viewDisposeListeners) listener();
+
+    // Without a webview there is no route for the decision; leaving the
+    // ownership entry would let a diff-editor accept find hasPendingPermission()
+    // true, skip the vote, and close the diff while the daemon stays
+    // blocked. The panel dispose path already resets it; the view-hosted
+    // path must too.
+    expect(setup.provider.hasPendingPermission()).toBe(false);
   });
 });

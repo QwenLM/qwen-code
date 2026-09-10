@@ -8,7 +8,7 @@ import type { Config } from '../config/config.js';
 import {
   runForkedAgent,
   type ForkedAgentResult,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import {

@@ -43,6 +43,7 @@ import {
   isCompatibleLiveSessionSource,
   LIVE_SESSION_SOURCE_PREFIX,
 } from '../../runtime/live-session-source.js';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import type { LiveProviderReadiness, LiveSessionLocator } from './types.js';
 
 export { LIVE_SESSION_SOURCE_PREFIX } from '../../runtime/live-session-source.js';
@@ -519,7 +520,7 @@ export class LiveSessionCoordinator {
         try {
           context.runtime?.bridge.updateSessionMetadata(
             context.coordinator.sessionId,
-            { displayName: 'Voice chat' },
+            { displayName: 'Voice chat', titleSource: 'auto' },
           );
         } catch {
           /* the session remains usable when a title write fails */
@@ -1407,7 +1408,7 @@ export class LiveSessionCoordinator {
     if (candidate) {
       try {
         const resumed = await runtime.bridge.resumeSession({
-          sessionId: candidate.sessionId,
+          sessionId: normalizeSessionIdForLookup(candidate.sessionId),
           workspaceCwd: runtime.workspaceCwd,
           ...(candidate.parentSessionId
             ? { parentSessionId: candidate.parentSessionId }
@@ -1758,9 +1759,13 @@ export class LiveSessionCoordinator {
           if (update?.['sessionUpdate'] === 'agent_message_chunk') {
             const source = updateSource(update);
             if (source === 'background_notification') {
-              announcement = updateText(update);
+              const text = updateText(update);
+              announcement = announcement
+                ? appendBounded(announcement, `\n${text}`)
+                : text;
               response = '';
-              backgroundTaskId = updateBackgroundTaskId(update);
+              const taskId = updateBackgroundTaskId(update);
+              if (taskId !== undefined) backgroundTaskId = taskId;
             } else if (source === 'background_notification_response') {
               response = appendBounded(response, updateText(update));
             }

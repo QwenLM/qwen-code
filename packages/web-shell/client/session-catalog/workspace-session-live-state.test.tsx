@@ -21,6 +21,7 @@ import {
   SESSION_LIVE_STATE_ERROR_RETRY_MS,
   SESSION_LIVE_STATE_POLL_MS,
   SESSION_LIVE_STATE_RECONCILE_COOLDOWN_MS,
+  SESSION_LIVE_STATE_STALE_AFTER_FAILURES,
   useWorkspaceSessionLiveState,
 } from './workspace-session-live-state';
 
@@ -109,9 +110,11 @@ describe('useWorkspaceSessionLiveState', () => {
   function Probe({
     organizationEnabled = false,
     sourceType,
+    pollIntervalMs,
   }: {
     organizationEnabled?: boolean;
     sourceType?: string;
+    pollIntervalMs?: number;
   }) {
     const activeQuery = useMemo<SessionCatalogQuery>(
       () => ({
@@ -124,6 +127,7 @@ describe('useWorkspaceSessionLiveState', () => {
     controller = useSessionCatalogController(client);
     const groupCatalogs = useWorkspaceSessionLiveState(client, {
       enabled: true,
+      pollIntervalMs,
       workspaceCwds: ['/work'],
       groupWorkspaceCwds: organizationEnabled ? ['/work'] : [],
     });
@@ -140,12 +144,14 @@ describe('useWorkspaceSessionLiveState', () => {
   async function renderProbe(
     organizationEnabled = false,
     sourceType?: string,
+    pollIntervalMs?: number,
   ): Promise<void> {
     await act(async () => {
       root.render(
         <Probe
           organizationEnabled={organizationEnabled}
           sourceType={sourceType}
+          pollIntervalMs={pollIntervalMs}
         />,
       );
       await Promise.resolve();
@@ -154,6 +160,57 @@ describe('useWorkspaceSessionLiveState', () => {
       await Promise.resolve();
     });
   }
+
+  it('defaults to five seconds between periodic live-state requests', async () => {
+    await renderProbe();
+    expect(getLiveState).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTimeAsync(4_999));
+    expect(getLiveState).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(getLiveState).toHaveBeenCalledTimes(3);
+  });
+
+  it('changes the interval without releasing state, rescanning, or overlapping an in-flight request', async () => {
+    await renderProbe();
+    const catalogRequests = listSessions.mock.calls.length;
+    const store = getSessionCatalogStore(client);
+    let resolveLive!: (value: DaemonWorkspaceSessionLiveState) => void;
+    getLiveState.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveLive = resolve;
+      }),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    expect(getLiveState).toHaveBeenCalledTimes(3);
+
+    await renderProbe(false, undefined, 10_000);
+    expect(store.isWorkspaceLiveStateEnabled('/work')).toBe(true);
+    expect(getLiveState).toHaveBeenCalledTimes(3);
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests);
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(getLiveState).toHaveBeenCalledTimes(3);
+    await act(async () => resolveLive(liveState(1, true)));
+    expect(container.textContent).toBe('true:true:no-group');
+    await act(async () => vi.advanceTimersByTimeAsync(9_999));
+    expect(getLiveState).toHaveBeenCalledTimes(3);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(getLiveState).toHaveBeenCalledTimes(4);
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests);
+
+    act(() => root.render(null));
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(getLiveState).toHaveBeenCalledTimes(4);
+    expect(store.isWorkspaceLiveStateEnabled('/work')).toBe(false);
+  });
+
+  it('refreshes immediately on a local wake even with a thirty-second interval', async () => {
+    await renderProbe(false, undefined, 30_000);
+    const initialRequests = getLiveState.mock.calls.length;
+    await act(async () => {
+      getSessionCatalogStore(client).requestWorkspaceLiveStateRefresh('/work');
+    });
+    expect(getLiveState.mock.calls.length).toBeGreaterThan(initialRequests);
+  });
 
   it('polls only live-state after the initial version-fenced catalog load', async () => {
     let active = false;
@@ -175,12 +232,13 @@ describe('useWorkspaceSessionLiveState', () => {
   });
 
   it('does not rescan the catalog for prompt admission, and rate-limits unusable-watermark completions', async () => {
-    await renderProbe();
+    const pollIntervalMs = 2_000;
+    await renderProbe(false, undefined, pollIntervalMs);
     const catalogRequests = listSessions.mock.calls.length;
 
     act(() => controller.promptAdmitted('/work', 'session-a'));
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+      await vi.advanceTimersByTimeAsync(pollIntervalMs);
     });
     expect(listSessions).toHaveBeenCalledTimes(catalogRequests);
 
@@ -192,13 +250,13 @@ describe('useWorkspaceSessionLiveState', () => {
       controller.turnCompleted('/work', 'session-a');
     });
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+      await vi.advanceTimersByTimeAsync(pollIntervalMs);
     });
     expect(listSessions).toHaveBeenCalledTimes(catalogRequests + 1);
 
     act(() => controller.turnCompleted('/work', 'session-a'));
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+      await vi.advanceTimersByTimeAsync(pollIntervalMs);
     });
     expect(listSessions).toHaveBeenCalledTimes(catalogRequests + 1);
     // Falling back must still resolve the pending completion — a leaked
@@ -554,6 +612,134 @@ describe('useWorkspaceSessionLiveState', () => {
     expect(container.textContent).toBe('false:false:no-group');
   });
 
+  it('drops the retained snapshot once the channel stops answering', async () => {
+    // A blip keeps the last-known state — one failed request must not disturb a
+    // running turn. Sustained failure is different: retaining the snapshot lets
+    // a reader vouch for a turn nobody can confirm, so a pane can show a dead
+    // daemon's turn as running for the life of the tab (#9487).
+    await renderProbe();
+    const store = getSessionCatalogStore(client);
+    expect(store.hasLiveSessions('/work')).toBe(true);
+
+    getLiveState.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        SESSION_LIVE_STATE_ERROR_RETRY_MS + SESSION_LIVE_STATE_POLL_MS,
+      );
+    });
+    expect(store.hasLiveSessions('/work')).toBe(true);
+
+    getLiveState.mockRejectedValue(new Error('offline'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        SESSION_LIVE_STATE_STALE_AFTER_FAILURES *
+          (SESSION_LIVE_STATE_ERROR_RETRY_MS + SESSION_LIVE_STATE_POLL_MS),
+      );
+    });
+    expect(store.hasLiveSessions('/work')).toBe(false);
+
+    // A poll that answers again restores the authority.
+    getLiveState.mockResolvedValue(liveState(1));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        SESSION_LIVE_STATE_ERROR_RETRY_MS + SESSION_LIVE_STATE_POLL_MS,
+      );
+    });
+    expect(store.hasLiveSessions('/work')).toBe(true);
+
+    // Recovery must re-arm the full blip tolerance. If the streak were not
+    // reset, the next single failure would still be at the threshold and drop
+    // the snapshot again — authority would flap on every post-recovery blip.
+    // Stay inside the error-retry window so the recovering poll cannot mask it.
+    getLiveState.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS * 2);
+    });
+    expect(store.hasLiveSessions('/work')).toBe(true);
+  });
+
+  it('keeps a recovered snapshot when an older duplicate poller fails', async () => {
+    getLiveState.mockResolvedValue(liveState(1, true));
+    await act(async () => {
+      root.render(
+        <>
+          <Probe />
+          <Probe />
+        </>,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const store = getSessionCatalogStore(client);
+
+    getLiveState.mockRejectedValue(new Error('offline'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        SESSION_LIVE_STATE_STALE_AFTER_FAILURES *
+          (SESSION_LIVE_STATE_ERROR_RETRY_MS + SESSION_LIVE_STATE_POLL_MS),
+      );
+    });
+    expect(store.hasLiveSessions('/work')).toBe(false);
+
+    let resolveRecovery!: (state: DaemonWorkspaceSessionLiveState) => void;
+    let rejectOlderPoll!: (error: Error) => void;
+    getLiveState.mockReset();
+    getLiveState
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveRecovery = resolve;
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise((_resolve, reject) => {
+          rejectOlderPoll = reject;
+        }),
+      );
+    act(() => {
+      vi.advanceTimersByTime(
+        SESSION_LIVE_STATE_ERROR_RETRY_MS + SESSION_LIVE_STATE_POLL_MS,
+      );
+    });
+    await act(async () => {
+      resolveRecovery(liveState(1, true));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(store.hasLiveSessions('/work')).toBe(true);
+
+    await act(async () => {
+      rejectOlderPoll(new Error('stale poller'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(store.hasLiveSessions('/work')).toBe(true);
+  });
+
+  it('does not count interactive refreshes toward staleness', async () => {
+    // Interactive refreshes bypass the error backoff, so they can fail seconds
+    // apart. Counting them would drop the snapshot inside the very blip the
+    // threshold exists to ride out — a user archiving a couple of sessions
+    // during a 10s daemon restart would settle a running turn.
+    await renderProbe();
+    const store = getSessionCatalogStore(client);
+    expect(store.hasLiveSessions('/work')).toBe(true);
+
+    getLiveState.mockRejectedValue(new Error('offline'));
+    for (
+      let attempt = 0;
+      attempt <= SESSION_LIVE_STATE_STALE_AFTER_FAILURES;
+      attempt += 1
+    ) {
+      await act(async () => {
+        store.invalidateWorkspace('/work', { interactive: true });
+        await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+      });
+    }
+    expect(store.hasLiveSessions('/work')).toBe(true);
+  });
+
   it('lets an explicit refresh bypass live-state error backoff', async () => {
     await renderProbe();
     getLiveState.mockRejectedValueOnce(new Error('offline'));
@@ -755,13 +941,14 @@ describe('useWorkspaceSessionLiveState', () => {
   });
 
   it('rate-limits sustained lifecycle invalidations to one reconcile per window', async () => {
-    await renderProbe();
+    const pollIntervalMs = 2_000;
+    await renderProbe(false, undefined, pollIntervalMs);
     const initialCatalogRequests = listSessions.mock.calls.length;
 
     // A single local change still reconciles immediately.
     act(() => controller.sessionCreated('/work', 'session-b'));
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+      await vi.advanceTimersByTimeAsync(pollIntervalMs);
     });
     expect(listSessions).toHaveBeenCalledTimes(initialCatalogRequests + 1);
 
@@ -773,7 +960,7 @@ describe('useWorkspaceSessionLiveState', () => {
       controller.promptAdmissionUncertain('/work');
     });
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS * 3);
+      await vi.advanceTimersByTimeAsync(pollIntervalMs * 3);
     });
     expect(listSessions).toHaveBeenCalledTimes(initialCatalogRequests + 1);
 
@@ -837,7 +1024,8 @@ describe('useWorkspaceSessionLiveState', () => {
   });
 
   it('does not hot-loop when a staged commit is persistently refused', async () => {
-    await renderProbe();
+    const pollIntervalMs = 2_000;
+    await renderProbe(false, undefined, pollIntervalMs);
     const initialCatalogRequests = listSessions.mock.calls.length;
 
     // Every staged fetch bumps the revision mid-flight, so every commit
@@ -859,7 +1047,7 @@ describe('useWorkspaceSessionLiveState', () => {
     expect(callsAfterGiveUp).toBeGreaterThan(initialCatalogRequests);
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS * 4);
+      await vi.advanceTimersByTimeAsync(pollIntervalMs * 4);
     });
     // One invalidation-gated retry per cooldown window at most — without
     // the fix every 2s tick re-runs two catalog fetches.

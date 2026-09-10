@@ -5,7 +5,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { SendMessageType, type Config } from '@qwen-code/qwen-code-core';
+import {
+  SendMessageType,
+  type ChatRecord,
+  type Config,
+} from '@qwen-code/qwen-code-core';
 import type { Content } from '@google/genai';
 import { runNonInteractiveStreamJson } from './session.js';
 import type {
@@ -104,6 +108,33 @@ function createUserMessage(content: string): CLIUserMessage {
     },
     parent_tool_use_id: null,
   };
+}
+
+function createResumedUserRecord(text: string): ChatRecord {
+  return {
+    uuid: `uuid-${text}`,
+    parentUuid: null,
+    sessionId: 'test-session',
+    timestamp: new Date().toISOString(),
+    type: 'user',
+    cwd: '/tmp',
+    version: 'test',
+    message: { role: 'user', parts: [{ text }] },
+  } as ChatRecord;
+}
+
+function createResumedTelemetryRecord(promptId: string): ChatRecord {
+  return {
+    uuid: `uuid-${promptId}`,
+    parentUuid: null,
+    sessionId: 'test-session',
+    timestamp: new Date().toISOString(),
+    type: 'system',
+    subtype: 'ui_telemetry',
+    cwd: '/tmp',
+    version: 'test',
+    systemPayload: { uiEvent: { prompt_id: promptId } },
+  } as unknown as ChatRecord;
 }
 
 function createControlRequest(
@@ -317,16 +348,16 @@ describe('runNonInteractiveStreamJson', () => {
     return { continueResults, getControlContext: () => controlContext };
   }
 
-  function createInitializedGeminiClient(historyTail: Content[]) {
+  function createInitializedLlmClient(historyTail: Content[]) {
     const getHistoryTail = vi.fn().mockReturnValue(historyTail);
-    const geminiClient = {
+    const llmClient = {
       isInitialized: vi.fn().mockReturnValue(true),
       getChat: vi.fn().mockReturnValue({ getHistoryTail }),
     };
     config = createConfig({
-      getGeminiClient: vi.fn().mockReturnValue(geminiClient),
+      getLlmClient: vi.fn().mockReturnValue(llmClient),
     });
-    return { geminiClient, getHistoryTail };
+    return { llmClient, getHistoryTail };
   }
 
   it('initializes session and processes initialize control request', async () => {
@@ -386,6 +417,74 @@ describe('runNonInteractiveStreamJson', () => {
     );
   });
 
+  it('mints a fresh promptId chain when nothing was resumed', async () => {
+    mockInputReader.read = async function* () {
+      yield createUserMessage('Hello world');
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock.mock.calls[0][3]).toBe(
+      'test-session########1',
+    );
+  });
+
+  it('seeds the promptId counter past turns the resumed transcript claims', async () => {
+    // A resumed headless chain reuses the session id, so restarting the
+    // counter at 1 would re-mint ids the previous run already persisted —
+    // loadSession keeps only the last file-history snapshot per promptId,
+    // silently dropping the earlier run's /rewind target for that turn.
+    config = createConfig({
+      getResumedSessionData: () => ({
+        conversation: {
+          sessionId: 'test-session',
+          messages: [
+            createResumedUserRecord('first turn'),
+            createResumedUserRecord('second turn'),
+            createResumedTelemetryRecord('test-session########5'),
+          ],
+        },
+      }),
+    });
+
+    mockInputReader.read = async function* () {
+      yield createUserMessage('third turn');
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    // 5 is the highest turn the transcript claims (a ui_telemetry record from
+    // the previous run), not the 2 user turns it happens to contain.
+    expect(runNonInteractiveMock.mock.calls[0][3]).toBe(
+      'test-session########6',
+    );
+  });
+
+  it('falls back to the resumed user-turn count when no promptId is persisted', async () => {
+    config = createConfig({
+      getResumedSessionData: () => ({
+        conversation: {
+          sessionId: 'test-session',
+          messages: [
+            createResumedUserRecord('first turn'),
+            createResumedUserRecord('second turn'),
+            createResumedUserRecord('third turn'),
+          ],
+        },
+      }),
+    });
+
+    mockInputReader.read = async function* () {
+      yield createUserMessage('fourth turn');
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock.mock.calls[0][3]).toBe(
+      'test-session########4',
+    );
+  });
+
   it('processes multiple user messages sequentially', async () => {
     // Initialize first to enable multi-query mode
     const initRequest = createControlRequest('initialize');
@@ -406,7 +505,7 @@ describe('runNonInteractiveStreamJson', () => {
   it('rejects continue_last_turn when the Gemini client is not initialized', async () => {
     const { continueResults } = installContinueDispatch();
     config = createConfig({
-      getGeminiClient: vi.fn().mockReturnValue(undefined),
+      getLlmClient: vi.fn().mockReturnValue(undefined),
     });
     const initRequest = createControlRequest('initialize');
     const continueRequest = createContinueRequest();
@@ -426,7 +525,7 @@ describe('runNonInteractiveStreamJson', () => {
 
   it('rejects continue_last_turn when the last turn ended cleanly', async () => {
     const { continueResults } = installContinueDispatch();
-    const { getHistoryTail } = createInitializedGeminiClient([
+    const { getHistoryTail } = createInitializedLlmClient([
       { role: 'model', parts: [{ text: 'done' }] },
     ]);
     const initRequest = createControlRequest('initialize');
@@ -448,7 +547,7 @@ describe('runNonInteractiveStreamJson', () => {
 
   it('deduplicates continue_last_turn while a continuation is pending or running', async () => {
     const { continueResults } = installContinueDispatch();
-    createInitializedGeminiClient([
+    createInitializedLlmClient([
       { role: 'user', parts: [{ text: 'resume me' }] },
     ]);
     const initRequest = createControlRequest('initialize');
@@ -497,7 +596,7 @@ describe('runNonInteractiveStreamJson', () => {
 
   it('keeps continue_last_turn available after an interrupt with no active turn', async () => {
     const { continueResults, getControlContext } = installContinueDispatch();
-    createInitializedGeminiClient([
+    createInitializedLlmClient([
       { role: 'user', parts: [{ text: 'resume me' }] },
     ]);
     const initRequest = createControlRequest('initialize');
@@ -577,7 +676,7 @@ describe('runNonInteractiveStreamJson', () => {
 
   it('emits a terminal error result when an accepted continuation is abandoned by shutdown', async () => {
     const { continueResults, getControlContext } = installContinueDispatch();
-    createInitializedGeminiClient([
+    createInitializedLlmClient([
       { role: 'user', parts: [{ text: 'resume me' }] },
     ]);
     const initRequest = createControlRequest('initialize');
@@ -628,7 +727,7 @@ describe('runNonInteractiveStreamJson', () => {
 
   it('emits an error result when a scheduled continue turn fails', async () => {
     const { continueResults } = installContinueDispatch();
-    createInitializedGeminiClient([
+    createInitializedLlmClient([
       { role: 'user', parts: [{ text: 'resume me' }] },
     ]);
     const initRequest = createControlRequest('initialize');
@@ -658,7 +757,7 @@ describe('runNonInteractiveStreamJson', () => {
 
   it('flushes recording failures before a session-level error result', async () => {
     const { continueResults } = installContinueDispatch();
-    createInitializedGeminiClient([
+    createInitializedLlmClient([
       { role: 'user', parts: [{ text: 'resume me' }] },
     ]);
     const order: string[] = [];
@@ -667,7 +766,7 @@ describe('runNonInteractiveStreamJson', () => {
       | undefined;
     let flushCount = 0;
     config = createConfig({
-      getGeminiClient: vi.fn().mockReturnValue(config.getGeminiClient()),
+      getLlmClient: vi.fn().mockReturnValue(config.getLlmClient()),
       onChatRecordingFailure: (
         listener: (event: { sessionId: string; error: Error }) => void,
       ) => {
@@ -717,7 +816,7 @@ describe('runNonInteractiveStreamJson', () => {
 
   it('does not emit a second result when a failed continue turn already reported one', async () => {
     const { continueResults } = installContinueDispatch();
-    createInitializedGeminiClient([
+    createInitializedLlmClient([
       { role: 'user', parts: [{ text: 'resume me' }] },
     ]);
     const initRequest = createControlRequest('initialize');
@@ -762,7 +861,7 @@ describe('runNonInteractiveStreamJson', () => {
 
   it('emits a continue_turn_failed diagnostic when a continue turn fails after a result', async () => {
     const { continueResults } = installContinueDispatch();
-    createInitializedGeminiClient([
+    createInitializedLlmClient([
       { role: 'user', parts: [{ text: 'resume me' }] },
     ]);
     const initRequest = createControlRequest('initialize');

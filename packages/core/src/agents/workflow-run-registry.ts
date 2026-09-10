@@ -22,6 +22,8 @@
  * consumer replacing the other.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+import type { Config } from '../config/config.js';
 import type { TaskBase, TaskRegistration } from './tasks/types.js';
 import type { WorkflowMeta } from './runtime/workflow-sandbox.js';
 import type { WorkflowRunHandle } from './runtime/workflow-runner.js';
@@ -38,11 +40,105 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
-import { escapeXml } from '../utils/xml.js';
+import { buildFailureLines } from './workflow-failure-lines.js';
+import {
+  buildResumeCall,
+  hasUninlinableResumeArgs,
+  RESUME_ARGS_TOO_LARGE_NOTE,
+} from './workflow-resume-call.js';
+import { escapeXml, escapeXmlElementText } from '../utils/xml.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
 import type { WorkflowDispatchState } from './runtime/workflow-dispatch-scheduler.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_REGISTRY');
+
+const mutatingWorkflowTasks = new Map<string, symbol>();
+const activeWorkflowRunKeys = new Map<string, number>();
+const workflowTaskMutationContext = new AsyncLocalStorage<
+  ReadonlyMap<string, symbol>
+>();
+const inMemoryMutationScopeIds = new WeakMap<object, number>();
+let nextInMemoryMutationScopeId = 1;
+
+export function getWorkflowTaskMutationKey(
+  config: Config,
+  taskId: string,
+  namespace = 'run',
+): string {
+  const storage = config.storage as
+    | { getWorkflowRunsDir?: () => string }
+    | undefined;
+  const workflowRunsDir = storage?.getWorkflowRunsDir?.();
+  if (workflowRunsDir) {
+    return `${workflowRunsDir}\0${namespace}\0${taskId}`;
+  }
+
+  const owner = storage ?? config.getWorkflowRunRegistry?.() ?? config;
+  let scopeId = inMemoryMutationScopeIds.get(owner);
+  if (scopeId === undefined) {
+    scopeId = nextInMemoryMutationScopeId++;
+    inMemoryMutationScopeIds.set(owner, scopeId);
+  }
+  return `memory:${scopeId}\0${namespace}\0${taskId}`;
+}
+
+export type WorkflowTaskMutationAttempt<T> =
+  | { acquired: true; value: T }
+  | { acquired: false };
+
+export async function tryWithWorkflowTaskMutation<T>(
+  mutationKey: string,
+  operation: () => Promise<T>,
+): Promise<WorkflowTaskMutationAttempt<T>> {
+  const inherited = workflowTaskMutationContext.getStore();
+  const inheritedOwner = inherited?.get(mutationKey);
+  if (
+    inheritedOwner !== undefined &&
+    mutatingWorkflowTasks.get(mutationKey) === inheritedOwner
+  ) {
+    return { acquired: true, value: await operation() };
+  }
+  if (mutatingWorkflowTasks.has(mutationKey)) return { acquired: false };
+
+  const owner = Symbol(mutationKey);
+  mutatingWorkflowTasks.set(mutationKey, owner);
+  const context = new Map(inherited);
+  context.set(mutationKey, owner);
+  try {
+    return {
+      acquired: true,
+      value: await workflowTaskMutationContext.run(context, operation),
+    };
+  } finally {
+    if (mutatingWorkflowTasks.get(mutationKey) === owner) {
+      mutatingWorkflowTasks.delete(mutationKey);
+    }
+  }
+}
+
+export function markWorkflowRunPersistenceActive(
+  config: Config,
+  runId: string,
+): () => void {
+  const key = getWorkflowTaskMutationKey(config, runId);
+  activeWorkflowRunKeys.set(key, (activeWorkflowRunKeys.get(key) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const count = activeWorkflowRunKeys.get(key) ?? 0;
+    if (count <= 1) activeWorkflowRunKeys.delete(key);
+    else activeWorkflowRunKeys.set(key, count - 1);
+  };
+}
+
+export function isWorkflowRunPersistenceActive(
+  config: Config,
+  runId: string,
+): boolean {
+  const key = getWorkflowTaskMutationKey(config, runId);
+  return activeWorkflowRunKeys.has(key) || mutatingWorkflowTasks.has(key);
+}
 
 /**
  * Cap on terminal entries retained for dialog history. Picked smaller
@@ -194,6 +290,8 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   runId: string;
   /** Tool call in the parent session that launched this workflow. */
   toolUseId?: string;
+  /** Saved workflow definition name, when this run came from one. */
+  workflowName?: string;
   /** Run whose result or journal led to this attempt. */
   sourceRunId?: string;
   /** Whether this attempt reused the journal or started from scratch. */
@@ -207,6 +305,8 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   status: WorkflowStatus;
   /** Whether the tool returned before this run reached a terminal state. */
   isBackgrounded?: boolean;
+  /** Whether a model-visible resume may preserve background execution. */
+  resumeInBackground?: boolean;
   /** Title of the most recent `phase(...)` call, or `null` before the first phase. */
   currentPhase: string | null;
   /**
@@ -225,6 +325,17 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   agentsDispatched: number;
   /** Cumulative `agent()` dispatches that have resolved (success or thrown). */
   agentsCompleted: number;
+  /**
+   * Journaled `agent()` calls this resume ran live again — because the
+   * previous run failed them, or was interrupted with them in flight. `0` for
+   * a fresh run. Reported so a resume that looks like it re-did everything
+   * can be told apart from one that genuinely had nothing to replay.
+   *
+   * Optional on read: a snapshot written before this field existed has no
+   * value for it, and an old run's history is worth more than a uniform
+   * shape. Treat `undefined` as `0`.
+   */
+  agentsRespawned?: number;
   /** Most recent log lines from the sandbox's `getLogs()`. Capped at 100 for the UI. */
   recentLogs: string[];
   /** Ordered runtime facts used to replay this run after it settles. */
@@ -265,12 +376,17 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   /** Original structured arguments, retained so a failed run can resume the same journal prefix. */
   args?: unknown;
   /**
-   * P7b: the path the script was loaded from, when the run was launched
-   * from a saved workflow (`Workflow({scriptPath})` or a `/workflow-name`
-   * slash command). `undefined` for inline scripts. Recorded as run
-   * provenance (e.g. for the snapshot).
+   * The loaded saved-workflow path or the persisted copy of an inline script.
+   * `undefined` only when an inline script could not be persisted.
    */
   scriptPath?: string;
+  /**
+   * This run's resume journal (`<projectDir>/workflows/<runId>/journal.jsonl`),
+   * when the config had a `storage` to hold one. Recorded so the terminal
+   * notification can point the model at the per-agent results without
+   * reconstructing the path from a storage handle it does not have.
+   */
+  journalPath?: string;
   /** Process-local approval requests; omitted from persisted snapshots. */
   pendingApprovals: readonly WorkflowApproval[];
   /** Final script return value once the run completes (success path). */
@@ -297,6 +413,7 @@ export type WorkflowTaskRegistration = Omit<
   | 'dispatches'
   | 'agentsDispatched'
   | 'agentsCompleted'
+  | 'agentsRespawned'
   | 'recentLogs'
   | 'events'
   | 'tokensSpent'
@@ -363,14 +480,24 @@ export type WorkflowApprovalRequestCallback = (
   signal: AbortSignal,
 ) => void | Promise<void>;
 
+/**
+ * Fires when the runner has safely persisted a terminal run's snapshot to
+ * the shared store. The owning session uses this to retire its
+ * unpersisted history cache: once the run exists on disk, absence from
+ * the store means a deletion happened, not "not written yet".
+ */
+export type WorkflowSnapshotPersistedCallback = (runId: string) => void;
+
 interface WorkflowApprovalRuntime {
   respond: AgentApprovalRequestEvent['respond'];
   requestController?: AbortController;
+  releaseSource: () => void;
 }
 
 export class WorkflowRunRegistry {
   private readonly entries = new Map<string, WorkflowTask>();
   private readonly handles = new Map<string, WorkflowRunHandle>();
+  private readonly starting = new Map<string, AbortController>();
 
   private registerCallback: WorkflowRunRegisterCallback | undefined;
   private statusChangeCallback: WorkflowRunStatusChangeCallback | undefined;
@@ -378,6 +505,9 @@ export class WorkflowRunRegistry {
   private completionCallback: WorkflowRunCompletionCallback | undefined;
   private approvalChangeCallback: WorkflowApprovalChangeCallback | undefined;
   private approvalRequestCallback: WorkflowApprovalRequestCallback | undefined;
+  private snapshotPersistedCallback:
+    | WorkflowSnapshotPersistedCallback
+    | undefined;
   private readonly approvalRuntimes = new Map<
     string,
     WorkflowApprovalRuntime
@@ -447,6 +577,22 @@ export class WorkflowRunRegistry {
     this.approvalRequestCallback = cb;
   }
 
+  setSnapshotPersistedCallback(
+    cb: WorkflowSnapshotPersistedCallback | undefined,
+  ): void {
+    this.snapshotPersistedCallback = cb;
+  }
+
+  /** Called by the runner once a terminal run's snapshot is persisted. */
+  notifySnapshotPersisted(runId: string): void {
+    if (!this.snapshotPersistedCallback) return;
+    try {
+      this.snapshotPersistedCallback(runId);
+    } catch (error) {
+      debugLogger.error('Failed to notify snapshot persistence:', error);
+    }
+  }
+
   /** Fire the terminal-completion notification (best-effort). */
   private emitNotification(entry: WorkflowTask): void {
     if (!this.notificationCallback) return;
@@ -481,6 +627,36 @@ export class WorkflowRunRegistry {
         `<result>Error: ${escapeXml(entry.error ?? '')}</result>`,
       );
     }
+    // What the run cost, so the model can size the next fan-out against a
+    // number instead of a guess. `agents_cached` is the resume-relevant half:
+    // a resumed run whose agents all replayed spent nothing and proves it here.
+    modelParts.push(`<usage>${escapeXml(buildUsageLine(entry))}</usage>`);
+    // Which agents were lost, not just how many. A run can complete with a
+    // third of its fan-out missing — the script simply saw `null` for those
+    // slots — and the count alone gives the reader no way to judge whether
+    // the result is thin because the work was thin or because the agents
+    // failed. These are the errors the registry already recorded.
+    const failures = buildFailureLines(entry);
+    if (failures.length > 0) {
+      modelParts.push(
+        `<failures>${escapeXmlElementText(failures.join('\n'))}</failures>`,
+      );
+    }
+    // The two recovery routes a backgrounded run needs and cannot reconstruct:
+    // a failure needs the resume call (the script is on disk, editable before
+    // the retry); a success needs the journal, because an empty-looking result
+    // is far more often a script that dropped its values than a fan-out that
+    // produced none.
+    const recovery =
+      entry.status === 'failed'
+        ? buildRecoveryLines(entry)
+        : buildDiagnosticsLines(entry);
+    if (recovery.length > 0) {
+      const tag = entry.status === 'failed' ? 'recovery' : 'diagnostics';
+      modelParts.push(
+        `<${tag}>${escapeXmlElementText(recovery.join('\n'))}</${tag}>`,
+      );
+    }
     modelParts.push('</task-notification>');
 
     const meta: WorkflowRunCompletionMeta = {
@@ -498,18 +674,88 @@ export class WorkflowRunRegistry {
   }
 
   /**
+   * Hold a run id for a workflow whose start is still in flight — the
+   * runner reserves before it loads the script and replays the journal,
+   * and only `register`s once both succeeded. The reservation is what
+   * makes the id visible to liveness and cancel checks during that
+   * window; the returned controller is the run's own.
+   */
+  reserveStart(
+    runId: string,
+    createController: () => AbortController,
+  ): AbortController {
+    const existing = this.entries.get(runId);
+    if (
+      (existing && isActiveWorkflowStatus(existing.status)) ||
+      this.handles.has(runId) ||
+      this.starting.has(runId)
+    ) {
+      throw new Error(`Workflow run ${runId} is already active.`);
+    }
+    const controller = createController();
+    this.starting.set(runId, controller);
+    return controller;
+  }
+
+  releaseStart(runId: string, controller: AbortController): void {
+    if (this.starting.get(runId) === controller) this.starting.delete(runId);
+  }
+
+  isStarting(runId: string): boolean {
+    return this.starting.has(runId);
+  }
+
+  /**
+   * Run ids reserved by `reserveStart` and not yet registered. A session
+   * reports these as active-work holds: `list()` has no entry for the
+   * starting window, and a daemon that judged the session idle from
+   * `list()` alone would close it and abort the start under the client
+   * that just asked for it.
+   */
+  listStartingRunIds(): string[] {
+    return [...this.starting.keys()];
+  }
+
+  /**
+   * Cancel a run that has been reserved but not yet registered. Aborts
+   * the reserved controller only — the reservation itself is the
+   * runner's to release, in its start-failure path, exactly as after
+   * `abortAll`. Returns `false` when nothing is starting under `runId`,
+   * so a caller can fall through to the registered-entry route.
+   */
+  cancelStarting(runId: string): boolean {
+    const controller = this.starting.get(runId);
+    if (!controller) return false;
+    try {
+      controller.abort();
+    } catch (error) {
+      debugLogger.error('Failed to abort a starting workflow:', error);
+    }
+    return true;
+  }
+
+  /**
    * Register a new run. Mutates the registration in place to graduate
    * it to a `WorkflowTask` (sets `id`, `kind`, derived counters), so
    * callers can keep using their local reference post-register and
    * observers see updates without an extra `get()`.
    */
-  register(registration: WorkflowTaskRegistration): WorkflowTask {
+  register(
+    registration: WorkflowTaskRegistration,
+    startController?: AbortController,
+  ): WorkflowTask {
     const existing = this.entries.get(registration.runId);
+    const reservedController = this.starting.get(registration.runId);
     if (
       (existing && isActiveWorkflowStatus(existing.status)) ||
-      this.handles.has(registration.runId)
+      this.handles.has(registration.runId) ||
+      (reservedController !== undefined &&
+        reservedController !== startController)
     ) {
       throw new Error(`Workflow run ${registration.runId} is already active.`);
+    }
+    if (reservedController === startController) {
+      this.starting.delete(registration.runId);
     }
     const entry = registration as WorkflowTask;
     entry.id = registration.runId;
@@ -525,6 +771,7 @@ export class WorkflowRunRegistry {
     entry.dispatches = [];
     entry.agentsDispatched = 0;
     entry.agentsCompleted = 0;
+    entry.agentsRespawned = 0;
     entry.recentLogs = [];
     entry.events = [];
     entry.tokensSpent = 0;
@@ -595,7 +842,9 @@ export class WorkflowRunRegistry {
   }
 
   releaseHandle(runId: string, handle: WorkflowRunHandle): void {
-    if (this.handles.get(runId) === handle) this.handles.delete(runId);
+    if (this.handles.get(runId) !== handle) return;
+    this.handles.delete(runId);
+    this.evictTerminal();
   }
 
   bridgeApprovalEvents(
@@ -617,13 +866,22 @@ export class WorkflowRunRegistry {
         if (dispatch) dispatch.subagentId = event.subagentId;
       }
       const sourceKey = JSON.stringify([event.subagentId, event.callId]);
-      // Re-emission of an already-settled call: respond is idempotent via
-      // the runtime's responded set, so silently dropping it is safe.
-      if (seenSources.has(sourceKey)) return;
+      if (seenSources.has(sourceKey)) {
+        debugLogger.warn(
+          `Workflow approval re-emission dropped (source still latched): ${runId}/${sourceKey}`,
+        );
+        return;
+      }
       seenSources.add(sourceKey);
-      const parked = this.parkPendingApproval(runId, event, dispatchId);
-      if (parked === 'duplicate') return;
+      const parked = this.parkPendingApproval(runId, event, dispatchId, () =>
+        seenSources.delete(sourceKey),
+      );
+      if (parked === 'duplicate') {
+        seenSources.delete(sourceKey);
+        return;
+      }
       if (parked === 'rejected') {
+        seenSources.delete(sourceKey);
         this.rejectResponder(event.respond);
         return;
       }
@@ -662,13 +920,11 @@ export class WorkflowRunRegistry {
       (candidate) => candidate.approvalId === approvalId,
     );
     if (!approval) return false;
-    const runtime = this.approvalRuntimes.get(approvalId);
     this.appendApprovalEvent(entry, approval, 'approval-settled', Date.now());
     entry.pendingApprovals = entry.pendingApprovals.filter(
       (candidate) => candidate !== approval,
     );
-    this.approvalRuntimes.delete(approvalId);
-    runtime?.requestController?.abort();
+    const runtime = this.releaseApprovalRuntime(approvalId);
     this.emitApprovalChange(entry);
     if (!runtime) return false;
     const normalized = normalizeWorkflowApprovalOutcome(outcome);
@@ -716,9 +972,7 @@ export class WorkflowRunRegistry {
     entry.pendingApprovals = entry.pendingApprovals.filter(
       (candidate) => candidate !== approval,
     );
-    const runtime = this.approvalRuntimes.get(approval.approvalId);
-    this.approvalRuntimes.delete(approval.approvalId);
-    runtime?.requestController?.abort();
+    this.releaseApprovalRuntime(approval.approvalId);
     this.emitApprovalChange(entry);
     return true;
   }
@@ -726,7 +980,8 @@ export class WorkflowRunRegistry {
   private parkPendingApproval(
     runId: string,
     event: AgentApprovalRequestEvent,
-    dispatchId?: string,
+    dispatchId: string | undefined,
+    releaseSource: () => void,
   ): string | 'duplicate' | 'rejected' {
     const entry = this.entries.get(runId);
     if (
@@ -786,6 +1041,7 @@ export class WorkflowRunRegistry {
     this.approvalRuntimes.set(approvalId, {
       respond: event.respond,
       requestController,
+      releaseSource,
     });
     entry.pendingApprovals = [...entry.pendingApprovals, approval];
     this.appendEvent(entry, {
@@ -826,8 +1082,7 @@ export class WorkflowRunRegistry {
         entry.pendingApprovals = entry.pendingApprovals.filter(
           (candidate) => candidate.approvalId !== approvalId,
         );
-        this.approvalRuntimes.delete(approvalId);
-        requestController.abort();
+        this.releaseApprovalRuntime(approvalId);
         this.emitApprovalChange(entry);
         return 'rejected';
       }
@@ -1016,6 +1271,23 @@ export class WorkflowRunRegistry {
   }
 
   /**
+   * A resume re-ran a call the journal already knew about. Counted for the
+   * usage line and written to the log the user reads in `/workflows`, because
+   * "why is it running that agent again?" is the first question a resume
+   * raises and the journal alone cannot answer it out loud.
+   */
+  onResumeRespawn(runId: string, line: string): void {
+    const entry = this.entries.get(runId);
+    if (
+      !entry ||
+      (!isActiveWorkflowStatus(entry.status) && entry.status !== 'cancelled')
+    )
+      return;
+    entry.agentsRespawned = (entry.agentsRespawned ?? 0) + 1;
+    this.onLogAppended(runId, line);
+  }
+
+  /**
    * P5: mirror a `budgetUpdated` emitter event into the entry. Attributes
    * the cumulative delta (`spent - entry.tokensSpent`) to the entry's
    * `currentPhase`. Per-phase attribution is best-effort: agents in
@@ -1164,6 +1436,21 @@ export class WorkflowRunRegistry {
     return this.entries.get(runId);
   }
 
+  removeTerminal(runId: string): boolean {
+    const entry = this.entries.get(runId);
+    if (
+      !entry ||
+      !isTerminalWorkflowStatus(entry.status) ||
+      this.handles.has(runId)
+    ) {
+      return false;
+    }
+    this.rejectPendingApprovals(runId);
+    this.entries.delete(runId);
+    this.emitStatusChange();
+    return true;
+  }
+
   setLineage(
     runId: string,
     sourceRunId: string,
@@ -1201,6 +1488,7 @@ export class WorkflowRunRegistry {
    * `reset()` so they settle terminal instead of leaking.
    */
   hasRunningEntries(): boolean {
+    if (this.starting.size > 0) return true;
     for (const entry of this.entries.values()) {
       if (entry.status === 'running' || entry.status === 'pausing') {
         return true;
@@ -1229,11 +1517,10 @@ export class WorkflowRunRegistry {
     for (const entry of this.entries.values()) {
       this.rejectPendingApprovals(entry.runId);
     }
-    for (const runtime of this.approvalRuntimes.values()) {
-      runtime.requestController?.abort();
-      this.rejectResponder(runtime.respond);
+    for (const approvalId of Array.from(this.approvalRuntimes.keys())) {
+      const runtime = this.releaseApprovalRuntime(approvalId);
+      if (runtime) this.rejectResponder(runtime.respond);
     }
-    this.approvalRuntimes.clear();
     this.entries.clear();
     this.handles.clear();
     if (sample) this.emitStatusChange(sample);
@@ -1253,6 +1540,9 @@ export class WorkflowRunRegistry {
   abortAll(): void {
     const endTime = Date.now();
     let lastCancelled: WorkflowTask | undefined;
+    for (const controller of this.starting.values()) {
+      controller.abort();
+    }
     for (const entry of Array.from(this.entries.values())) {
       if (!isActiveWorkflowStatus(entry.status)) continue;
       this.rejectPendingApprovals(entry.runId, undefined, endTime);
@@ -1338,8 +1628,10 @@ export class WorkflowRunRegistry {
    * (by `endTime`) are evicted first.
    */
   private evictTerminal(): void {
-    const terminal = this.list().filter((e) =>
-      isTerminalWorkflowStatus(e.status),
+    const terminal = this.list().filter(
+      (entry) =>
+        isTerminalWorkflowStatus(entry.status) &&
+        !this.handles.has(entry.runId),
     );
     if (terminal.length <= MAX_RETAINED_TERMINAL_WORKFLOWS) return;
     terminal.sort((a, b) => (a.endTime ?? 0) - (b.endTime ?? 0));
@@ -1350,9 +1642,21 @@ export class WorkflowRunRegistry {
     for (const e of toEvict) {
       this.entries.delete(e.runId);
     }
+    // Eviction is a row-removing mutation like every other one, and the
+    // consumers that render these rows (tasks dialog, `/workflows`
+    // roster) re-read the registry only when a status change is
+    // emitted. Two paths reach here without a usable emission:
+    // `releaseHandle` emits nothing of its own, and complete / fail /
+    // cancel / abortAll emit BEFORE sweeping, so a synchronous consumer
+    // reads the pre-eviction list. Either way the roster kept showing
+    // an evicted row until some unrelated status change fired. Emit
+    // once here, after the sweep, so every eviction converges on its
+    // own — and so a future eviction site inherits the guarantee
+    // instead of having to remember it.
+    this.emitStatusChange();
   }
 
-  private emitStatusChange(entry: WorkflowTask): void {
+  private emitStatusChange(entry?: WorkflowTask): void {
     if (!this.statusChangeCallback) return;
     try {
       this.statusChangeCallback(entry);
@@ -1381,14 +1685,23 @@ export class WorkflowRunRegistry {
     );
     const runtimes: WorkflowApprovalRuntime[] = [];
     for (const approvalId of rejectedIds) {
-      const runtime = this.approvalRuntimes.get(approvalId);
-      this.approvalRuntimes.delete(approvalId);
+      const runtime = this.releaseApprovalRuntime(approvalId);
       if (!runtime) continue;
-      runtime.requestController?.abort();
       runtimes.push(runtime);
     }
     this.emitApprovalChange(entry);
     for (const runtime of runtimes) this.rejectResponder(runtime.respond);
+  }
+
+  private releaseApprovalRuntime(
+    approvalId: string,
+  ): WorkflowApprovalRuntime | undefined {
+    const runtime = this.approvalRuntimes.get(approvalId);
+    if (!runtime) return undefined;
+    this.approvalRuntimes.delete(approvalId);
+    runtime.releaseSource();
+    runtime.requestController?.abort();
+    return runtime;
   }
 
   private rejectResponder(respond: AgentApprovalRequestEvent['respond']): void {
@@ -1478,4 +1791,70 @@ function restrictWorkflowConfirmationDetails(
       return _exhaustive;
     }
   }
+}
+
+/** Flat `key=value` usage line for the terminal notification. */
+function buildUsageLine(entry: WorkflowTask): string {
+  const countByStatus = (status: WorkflowDispatchTraceStatus): number =>
+    entry.dispatches.reduce((n, d) => (d.status === status ? n + 1 : n), 0);
+  // A run that never settled its end time reads as zero elapsed rather than
+  // as a negative duration computed against `Date.now()`.
+  const durationMs = Math.max(
+    0,
+    (entry.endTime ?? entry.startTime) - entry.startTime,
+  );
+  return [
+    `agents_dispatched=${entry.dispatches.length}`,
+    `agents_succeeded=${countByStatus('completed')}`,
+    `agents_cached=${countByStatus('cached')}`,
+    `agents_failed=${countByStatus('failed')}`,
+    `agents_cancelled=${countByStatus('cancelled')}`,
+    `agents_respawned=${entry.agentsRespawned ?? 0}`,
+    `tokens_spent=${entry.tokensSpent}`,
+    `duration_ms=${durationMs}`,
+  ].join(' ');
+}
+
+/** `<recovery>` body for a failed run. */
+function buildRecoveryLines(entry: WorkflowTask): string[] {
+  const lines: string[] = [];
+  const resume = buildResumeCall(entry);
+  if (resume) {
+    const pathAdvice = entry.workflowName
+      ? `This reads the saved /${entry.workflowName} workflow; copy it before making a run-specific change.`
+      : 'Edit the generated script copy first if the script needs to change.';
+    const journalAdvice = entry.journalPath
+      ? 'The journal replays the longest unchanged prefix of agent() calls; the first changed call onward runs live.'
+      : 'No journal was written for this run, so every agent() call runs live.';
+    lines.push(`Resume: ${resume} — ${pathAdvice} ${journalAdvice}`);
+    if (hasUninlinableResumeArgs(entry)) {
+      lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
+    }
+  }
+  if (entry.journalPath) {
+    lines.push(`Journal: ${stripAnsiAndControl(entry.journalPath)}`);
+  }
+  return lines;
+}
+
+/** `<diagnostics>` body for a completed run. */
+function buildDiagnosticsLines(entry: WorkflowTask): string[] {
+  const lines: string[] = [];
+  if (entry.journalPath) {
+    lines.push(
+      `Per-agent results: ${stripAnsiAndControl(entry.journalPath)} — one {"type":"result",...} line per completed agent with its full return value. If the result above is empty or unexpected, read this file BEFORE diagnosing.`,
+    );
+  }
+  const resume = buildResumeCall(entry);
+  if (resume) {
+    lines.push(
+      entry.workflowName
+        ? `Re-run the saved /${entry.workflowName} workflow: ${resume}`
+        : `Re-run after editing the generated script: ${resume}`,
+    );
+    if (hasUninlinableResumeArgs(entry)) {
+      lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
+    }
+  }
+  return lines;
 }

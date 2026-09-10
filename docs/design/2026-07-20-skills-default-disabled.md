@@ -20,11 +20,13 @@ Effective disables are `disabled + (defaultDisabled - enabled)`. An explicit `en
 
 One CLI-local resolver computes the effective disabled names and whether each disabled skill is `hard` or `default`. Existing runtime consumers continue reading the effective set through `Config.getDisabledSkillNames()`; core skill discovery and execution APIs do not change.
 
-The `/skills` picker and daemon toggle apply the same rules:
+The `/skills` picker continues to operate on discovered Skills. Daemon toggle
+routes instead persist settings by requested name without consulting that
+catalog:
 
-- enabling removes a workspace hard disable and adds the canonical name to workspace `skills.enabled` only when needed;
-- disabling removes the workspace opt-in and adds the canonical name to workspace `skills.disabled`;
-- higher-scope `skills.disabled` entries remain locked;
+- enabling removes a workspace hard disable and adds the requested name to workspace `skills.enabled` only when needed;
+- disabling removes the workspace opt-in and adds the requested name to workspace `skills.disabled`;
+- higher-scope `skills.disabled` entries remain authoritative for effective availability but do not block workspace scope from recording or removing its own declaration;
 - unrelated and unavailable skill entries are preserved.
 
 Workspace skill status adds a disable reason and optional lock scope so clients can distinguish a hard lock from an overridable default. The daemon-local and ACP status paths both read the same CLI-local resolver.

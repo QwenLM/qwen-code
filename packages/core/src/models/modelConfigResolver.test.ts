@@ -328,6 +328,7 @@ describe('modelConfigResolver', () => {
             apiKey: 'key',
             generationConfig: {
               timeout: 60000,
+              streamIdleTimeoutMs: 300000,
               maxRetries: 5,
               samplingParams: {
                 temperature: 0.7,
@@ -338,12 +339,14 @@ describe('modelConfigResolver', () => {
         });
 
         expect(result.config.timeout).toBe(60000);
+        expect(result.config.streamIdleTimeoutMs).toBe(300000);
         expect(result.config.maxRetries).toBe(5);
         expect(result.config.retryInitialDelayMs).toBeUndefined();
         expect(result.config.retryMaxDelayMs).toBeUndefined();
         expect(result.config.samplingParams?.temperature).toBe(0.7);
 
         expect(result.sources['timeout'].kind).toBe('settings');
+        expect(result.sources['streamIdleTimeoutMs'].kind).toBe('settings');
         expect(result.sources['samplingParams'].kind).toBe('settings');
       });
 
@@ -354,6 +357,7 @@ describe('modelConfigResolver', () => {
           settings: {
             generationConfig: {
               timeout: 30000,
+              streamIdleTimeoutMs: 300000,
               retryInitialDelayMs: 60_000,
               retryMaxDelayMs: 300_000,
             },
@@ -368,6 +372,7 @@ describe('modelConfigResolver', () => {
             baseUrl: 'https://api.example.com',
             generationConfig: {
               timeout: 60000,
+              streamIdleTimeoutMs: 0,
               retryInitialDelayMs: 3_000,
               retryMaxDelayMs: 30_000,
             },
@@ -375,9 +380,13 @@ describe('modelConfigResolver', () => {
         });
 
         expect(result.config.timeout).toBe(60000);
+        expect(result.config.streamIdleTimeoutMs).toBe(0);
         expect(result.config.retryInitialDelayMs).toBe(3_000);
         expect(result.config.retryMaxDelayMs).toBe(30_000);
         expect(result.sources['timeout'].kind).toBe('modelProviders');
+        expect(result.sources['streamIdleTimeoutMs'].kind).toBe(
+          'modelProviders',
+        );
         expect(result.sources['retryInitialDelayMs'].kind).toBe(
           'modelProviders',
         );

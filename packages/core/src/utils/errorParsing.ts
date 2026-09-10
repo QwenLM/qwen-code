@@ -9,7 +9,7 @@ import {
   isStructuredError,
   QUOTA_EXHAUSTED_PREFIX,
 } from './quotaErrorDetection.js';
-import { AuthType } from '../core/contentGenerator.js';
+import { AuthType } from './auth-type.js';
 import { getErrorMessage } from './errors.js';
 
 const RATE_LIMIT_MESSAGE_BY_AUTH = {

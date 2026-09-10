@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { STANDALONE_SESSION_SOURCE_TYPE } from '@qwen-code/acp-bridge/sessionSource';
 import { normalizeSessionIdForLookup } from '../config/session-id.js';
 
 export const LIVE_SESSION_SOURCE_PREFIX = 'realtime_voice:';
-export const STANDALONE_SESSION_SOURCE_TYPE = 'standalone';
+export { STANDALONE_SESSION_SOURCE_TYPE };
 
 export interface LiveSessionCreationMetadata {
   parentSessionId?: string;

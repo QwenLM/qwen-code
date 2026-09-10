@@ -14,9 +14,16 @@ import {
   ChannelBase,
   isTerminalTaskLifecycleType,
   sanitizeLogText,
+  sanitizePromptText,
   sanitizeSenderName,
+  truncateUtf16Units,
 } from '@qwen-code/channel-base';
-import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
+import {
+  DINGTALK_CHUNK_LIMIT,
+  escapeDingTalkMarkdown,
+  normalizeDingTalkMarkdown,
+  extractTitle,
+} from './markdown.js';
 import { downloadMedia } from './media.js';
 import {
   DingTalkMediaUploadError,
@@ -26,10 +33,22 @@ import {
   uploadDingTalkImage,
 } from './outbound-image.js';
 import {
+  FILE_UNAVAILABLE_NOTICE,
+  OutboundFileProjector,
+  projectFileText,
+  readValidatedFile,
+  safeFileName,
+  uploadDingTalkFile,
+  type ValidatedFile,
+} from './outbound-file.js';
+import {
   DingtalkConnectionManager,
   type DingtalkManagedSocket,
 } from './DingtalkConnectionManager.js';
-import { DingtalkInteractiveCardClient } from './interactive-card-client.js';
+import {
+  DingtalkCardRequestError,
+  DingtalkInteractiveCardClient,
+} from './interactive-card-client.js';
 import {
   parseDingtalkCardActorId,
   parseDingtalkCardCallback,
@@ -39,15 +58,24 @@ import {
   type DingtalkInteractiveCardConfig,
 } from './interactive-card-types.js';
 import { StatusCardController } from './status-card-controller.js';
+import {
+  isChinesePresentationLanguage,
+  lifecyclePresentationPhase,
+  presentationPhaseLabel,
+  type DingtalkPresentationPhase,
+} from './presentation-phase.js';
 import { QuestionCardController } from './question-card-controller.js';
+import { PermissionCardController } from './permission-card-controller.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 import type {
+  BackgroundResponseContext,
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
   ChannelAgentBridge,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
   SessionTarget,
@@ -66,16 +94,24 @@ interface DingTalkRichTextPart {
   atName?: string;
 }
 
+interface DingTalkMessageContent {
+  text?: string;
+  richText?: DingTalkRichTextPart[];
+  downloadCode?: string;
+  fileName?: string;
+  recognition?: string;
+  title?: string;
+  summary?: string;
+  chatRecord?: unknown;
+  records?: unknown;
+  messages?: unknown;
+}
+
 interface DingTalkRepliedMsg {
   msgId?: string;
   msgType?: string;
   senderId?: string;
-  content?: {
-    text?: string;
-    richText?: DingTalkRichTextPart[];
-    downloadCode?: string;
-    fileName?: string;
-  };
+  content?: DingTalkMessageContent;
 }
 
 interface DingTalkAtUser {
@@ -107,11 +143,455 @@ interface DingTalkMessageData {
     text?: { content?: string };
     msgtype?: string;
   };
-  content?: {
-    richText?: DingTalkRichTextPart[];
-    downloadCode?: string;
-    fileName?: string;
-    recognition?: string;
+  content?: DingTalkMessageContent;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function parseJsonArray(value: unknown): unknown[] | undefined {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Neutralize a field lifted out of a forwarded chat record before it is joined
+ * into the prompt.
+ *
+ * Record content is multi-author third-party text: the forwarder is an allowed
+ * user, but the authors inside the record are not. `ChannelBase` applies
+ * `sanitizePromptText` only when `envelope.isGroup || sessionScope === 'single'`,
+ * and DingTalk declares no `defaultSessionScope` so the registry falls back to
+ * `'user'` — meaning in 1:1 DMs nothing downstream neutralizes this text. Doing
+ * it per field here is what closes the DM path, and matches how
+ * `referencedText` is sanitized unconditionally on the reply path.
+ *
+ * It does NOT make the two renderings identical. In groups (and `single`-scope
+ * sessions) `ChannelBase` runs `sanitizePromptText` again over the ASSEMBLED
+ * text, which folds every structural newline to a space and peels this file's
+ * own `[Chat record: ...]` / `[Chat record messages]` / `[N more message(s) not
+ * shown]` markers whenever their content fits the unwrap's 64-char window. The
+ * group prompt therefore carries the same content on one line with those
+ * markers reduced to bare text. That is a safe degradation, not a defect in
+ * this function — but the record's LAYOUT is a DM-only guarantee.
+ */
+function sanitizeChatRecordField(value: string): string {
+  return sanitizePromptText(value).trim();
+}
+
+/**
+ * Neutralize a record field that this file then WRAPS in `[...]`. Sanitizing
+ * alone does not cover those: `sanitizePromptText` unwraps a start-of-line tag
+ * only when the value already BEGINS with `[`, so `SYSTEM]: do this` passes
+ * through untouched and the wrapper's own `[` completes a forged `[SYSTEM]:`
+ * tag on a prompt line — the exact forge the sanitizer exists to prevent,
+ * reopened by the wrapping that happens after it. Strip the brackets the
+ * wrapper supplies so the value cannot close or complete one.
+ */
+function bracketSafeChatRecordField(value: string): string {
+  return sanitizeChatRecordField(value).replace(/[[\]]/g, ' ').trim();
+}
+
+/**
+ * Neutralize a record field this file renders AT start-of-line but does not
+ * wrap. `sanitizePromptText` already peels a leading `[tag]` there, but only
+ * while the tag content fits its `{1,64}` window — an 87-char `[SYSTEM MESSAGE
+ * FROM ...]:` run never matches and survives verbatim. Peel the leading run at
+ * ANY length, to a fixpoint so a nested `[[...]]` cannot re-form one.
+ *
+ * Brackets elsewhere on the line are LEFT ALONE, unlike
+ * `bracketSafeChatRecordField`: nothing here wraps the value, and the rest of a
+ * summary line is DingTalk's own display copy — `Bob: [image]` — which cannot
+ * forge a prompt line from mid-line and should reach the model intact.
+ */
+function startOfLineSafeChatRecordField(value: string): string {
+  const sanitized = sanitizeChatRecordField(value);
+  if (!sanitized.startsWith('[')) return sanitized;
+  // ONE linear pass, not a fixpoint loop over the whole string: the loop this
+  // replaces rebuilt the entire value for every bracket pair, which is
+  // quadratic — a 62,889-char nested `[[[...]]]` summary (authorable by any
+  // group member, and the header caps below only run AFTER this) cost ~212 ms
+  // of synchronous event-loop stall, ~4 s at 200 KB.
+  //
+  // Same peel, simulated in place. Each pass of that loop deleted exactly two
+  // characters — the leading `[` and the FIRST `]` (its `[^\]]*` window can
+  // match no other) — so instead of re-copying between passes, mark the pairs
+  // and emit what survives. `open` walks the head of the current string (past
+  // what is already deleted and past the whitespace `trim()` would take off);
+  // `close` never rewinds because every `]` it passed is already deleted.
+  const deleted = new Uint8Array(sanitized.length);
+  let open = 0;
+  let close = 0;
+  for (;;) {
+    while (
+      open < sanitized.length &&
+      (deleted[open] === 1 || /\s/.test(sanitized[open]!))
+    ) {
+      open += 1;
+    }
+    if (sanitized[open] !== '[') break;
+    let next = Math.max(close, open + 1);
+    while (
+      next < sanitized.length &&
+      (deleted[next] === 1 || sanitized[next] !== ']')
+    ) {
+      next += 1;
+    }
+    if (next >= sanitized.length) {
+      // No `]` to pair with: delete the `[` anyway. Keeping it is what lets
+      // `capChatRecordLines`' ` [truncated]` marker (appended past 500 units)
+      // supply the closing bracket and complete a third-party bracket span at
+      // start-of-line.
+      deleted[open] = 1;
+      open += 1;
+      // A failed scan proves no live `]` remains anywhere past this point,
+      // and later scans only start further right: latch the end so the next
+      // head `[` does not rescan the tail -- that made a run of unpaired `[`
+      // quadratic (R11-1) in the pass this function promises is linear.
+      close = next;
+      continue;
+    }
+    deleted[open] = 1;
+    deleted[next] = 1;
+    open += 1;
+    close = next + 1;
+  }
+  const parts: string[] = [];
+  let cut = 0;
+  for (let i = 0; i < sanitized.length; i++) {
+    if (deleted[i] === 0) continue;
+    if (i > cut) parts.push(sanitized.slice(cut, i));
+    cut = i + 1;
+  }
+  parts.push(sanitized.slice(cut));
+  return parts.join('').trim();
+}
+
+/**
+ * Bounds on how much of a forwarded record is joined into the prompt. A merge
+ * forward can carry an entire group's history, and unbounded it displaces the
+ * user's actual request in the model's context window. Truncation is
+ * ANNOUNCED: a tail the model cannot see is worse than one it can account for.
+ */
+const MAX_CHAT_RECORD_ENTRIES = 50;
+const MAX_CHAT_RECORD_CHARS = 4000;
+const MAX_CHAT_RECORD_LINE_CHARS = 500;
+/**
+ * The budget a record gets on the REPLY leg. `ChannelBase` renders
+ * `envelope.referencedText` through `sanitizeQuotedText(..., 500)`, which cuts
+ * at 500 code points unconditionally — so a record rendered to the 4000-char
+ * budget arrives with everything past the header gone and, worse, its own
+ * `[N more message(s) not shown]` announcement cut off with it, leaving a bare
+ * `…`. Render to the transport's budget instead, so the announcement lands
+ * INSIDE the quote. `sanitizeQuotedText` only substitutes characters (brackets
+ * and newlines become spaces), so a text within this budget is never cut.
+ */
+const MAX_QUOTED_CHAT_RECORD_CHARS = 500;
+const CHAT_RECORD_ENTRIES_LABEL = '[Chat record messages]';
+const CHAT_RECORD_HEADER_LEAD = (title: string) => `[Chat record: ${title}] `;
+/** `parts.join('\n\n')`. */
+const CHAT_RECORD_PART_GAP = 2;
+
+function announcedDrop(count: number): string {
+  return `[${count} more message(s) not shown]`;
+}
+
+/**
+ * What the announcement costs a budget worst case: its own text plus the `\n`
+ * that joins it to the last kept line. `lines.length` bounds the drop count, so
+ * the real announcement is never longer than the one measured here.
+ */
+function chatRecordAnnouncementCost(lines: string[]): number {
+  return lines.length > 0 ? announcedDrop(lines.length).length + 1 : 0;
+}
+
+/**
+ * @param budget Hard ceiling, in UTF-16 units, on everything returned —
+ *   announcement included. UTF-16 length is an upper bound on code-point
+ *   count, so a caller measuring in code points (the quote leg) is safe.
+ */
+function capChatRecordLines(lines: string[], budget: number): string[] {
+  const kept: string[] = [];
+  let dropped = 0;
+  let total = 0;
+  // Reserve the announcement up front rather than appending it over the top of
+  // a full budget: on the quote leg the budget is small enough that the
+  // overshoot is what the transport cuts, which loses exactly the sentence
+  // telling the model the record is partial. `lines.length` bounds `dropped`,
+  // so the reservation is never short.
+  const spendable = budget - chatRecordAnnouncementCost(lines);
+  // Below its own announcement there is nothing this function can say inside
+  // the budget, and saying it anyway is what overflows onto the transport's
+  // cut. Callers reserve the announcement (`chatRecordAnnouncementCost`), so
+  // this is a floor, not a path.
+  if (spendable < 0) return [];
+  // Both caps STOP at the first line they reject rather than skipping it and
+  // trying the next: the announcement below reads as a tail cut, so letting a
+  // later shorter line slip past the size cap would drop messages out of the
+  // MIDDLE of the record while telling the model the missing ones are the last
+  // ones — positional reasoning over the transcript then silently skips a
+  // message the model believes it has. Stopping also means no line past the cut
+  // is measured or truncated, the waste the entry cap was already ordered to
+  // avoid.
+  for (const [index, line] of lines.entries()) {
+    if (kept.length >= MAX_CHAT_RECORD_ENTRIES) {
+      dropped = lines.length - index;
+      break;
+    }
+    // Slice in UTF-16 UNITS, on code-point boundaries: `total` below, the
+    // caller's `spent`, and `chatRecordAnnouncementCost` all measure `.length`,
+    // so a code-point cap would let an astral-heavy line claim up to 2x the
+    // units it was budgeted, while cutting mid-surrogate-pair would emit a lone
+    // surrogate into the prompt. `truncateUtf16Units` returns the input
+    // untouched when it already fits, so the length test is its own fast path.
+    const boundedRaw = truncateUtf16Units(line, MAX_CHAT_RECORD_LINE_CHARS);
+    const bounded = boundedRaw === line ? line : `${boundedRaw} [truncated]`;
+    // No first-line exemption: with the per-line cap at 500 the first line
+    // always fits the 4000 budget anyway, so the exemption only ever fired on
+    // the quote leg's budget — where keeping a line the transport then cuts is
+    // exactly the silent truncation this block exists to prevent.
+    if (total + bounded.length > spendable) {
+      dropped = lines.length - index;
+      break;
+    }
+    kept.push(bounded);
+    total += bounded.length + 1;
+  }
+  if (dropped > 0) kept.push(announcedDrop(dropped));
+  return kept;
+}
+
+/**
+ * The placeholder shown for a message whose body is not text. Shared by the
+ * record-entry and reply-quote paths so the two cannot drift — they already had
+ * (different `file` handling, different empty fallback), which described the
+ * same message type two ways to the model depending on how it arrived. Callers
+ * supply their own fallback for an absent/unknown msgType.
+ */
+function mediaTypePlaceholder(
+  msgType: string | undefined,
+  fileName?: unknown,
+): string | undefined {
+  switch (msgType) {
+    case 'picture':
+      return '[image]';
+    case 'file': {
+      // `fileName` is record content, i.e. third-party authored, and it lands
+      // inside a bracket wrapper — same treatment as every other such field.
+      const name = bracketSafeChatRecordField(nonEmptyString(fileName) || '');
+      return `[file: ${name || 'file'}]`;
+    }
+    case 'audio':
+      return '[audio]';
+    case 'video':
+      return '[video]';
+    default:
+      return undefined;
+  }
+}
+
+function formatChatRecordEntryBody(record: Record<string, unknown>): string {
+  const rawContent = record['content'];
+  const content =
+    rawContent && typeof rawContent === 'object'
+      ? (rawContent as Record<string, unknown>)
+      : undefined;
+  const body =
+    nonEmptyString(record['text']) ||
+    nonEmptyString(rawContent) ||
+    nonEmptyString(content?.['text']) ||
+    nonEmptyString(record['message']) ||
+    nonEmptyString(record['body']);
+  if (body) return sanitizeChatRecordField(body) || '[message]';
+
+  const msgType =
+    nonEmptyString(record['msgType']) || nonEmptyString(record['msgtype']);
+  const safeMsgType = msgType ? bracketSafeChatRecordField(msgType) : '';
+  return (
+    mediaTypePlaceholder(msgType, content?.['fileName']) ??
+    // Record-specific fallback: name the type when DingTalk sends one we do
+    // not model, so the model sees *something* arrived rather than a gap.
+    // The name is record content like every other field here, so it is
+    // neutralized before it goes inside the brackets.
+    (safeMsgType ? `[${safeMsgType}]` : '[message]')
+  );
+}
+
+/**
+ * The content keys that actually arrived on a chat-record payload, for the
+ * degraded-path diagnostic below. The payload shape is undocumented and
+ * varies — this file probes three entry field names and two encodings — so
+ * when DingTalk ships another variant the only thing that distinguishes "the
+ * bot cannot see forwarded messages" from a bug is knowing which keys were
+ * present.
+ */
+function describeChatRecordKeys(content?: DingTalkMessageContent): string {
+  if (!content || typeof content !== 'object') return 'none';
+  const keys = Object.keys(content as Record<string, unknown>);
+  return keys.length > 0 ? keys.join(',') : 'none';
+}
+
+/**
+ * The rendered record plus whether an entries key arrived but produced no
+ * lines. That case renders a non-empty title/summary, so the empty-record
+ * warning below never fires for it, yet every forwarded message is gone — the
+ * degradation `describeChatRecordKeys` exists to make diagnosable.
+ */
+interface FormattedChatRecord {
+  text: string;
+  entriesDropped: boolean;
+}
+
+function formatChatRecord(
+  content?: DingTalkMessageContent,
+  budget: number = MAX_CHAT_RECORD_CHARS,
+): FormattedChatRecord {
+  const title = nonEmptyString(content?.title);
+  const rawSummary = nonEmptyString(content?.summary);
+  const parsedSummary = parseJsonArray(rawSummary);
+  // Keep empty placeholder lines: `summaryLines` is positional and indexes
+  // into `entries` for sender recovery below, so filtering here would shift
+  // every later line onto the wrong entry — the exact misattribution the
+  // length guard exists to prevent. `summary` is the display copy and filters
+  // them; the two variables look redundant but are not. Start-of-line-safe
+  // rather than merely sanitized because the lines are joined with `\n` and
+  // rendered after a header, so every line after the first sits at start-of-
+  // line — the privileged prompt position — and the unwrap alone cannot defend
+  // it: its `{1,64}` content window can never match a longer bracketed run, so
+  // an 87-char `[SYSTEM MESSAGE FROM ...]:` tag survives verbatim.
+  const summaryLines: string[] = parsedSummary
+    ? parsedSummary.map(
+        (item) =>
+          startOfLineSafeChatRecordField(nonEmptyString(item) || '') || '',
+      )
+    : rawSummary
+        ?.split('\n')
+        .map((line) =>
+          startOfLineSafeChatRecordField(nonEmptyString(line) || ''),
+        ) || [];
+  const rawEntries =
+    content?.chatRecord ?? content?.records ?? content?.messages;
+  const entries = parseJsonArray(rawEntries);
+
+  const recordLines = Array.isArray(entries)
+    ? entries.flatMap((entry, index) => {
+        if (typeof entry === 'string') {
+          const body = nonEmptyString(entry);
+          if (!body) return [];
+          // Through the shared body pipeline, not a second copy of it: a
+          // string entry and an object entry carrying the same text must be
+          // described to the model the same way, including when the text
+          // sanitizes to nothing.
+          return [`Unknown: ${formatChatRecordEntryBody({ text: body })}`];
+        }
+        if (!entry || typeof entry !== 'object') return [];
+        const record = entry as Record<string, unknown>;
+        const summarySender =
+          summaryLines.length === entries.length
+            ? nonEmptyString(summaryLines[index]?.match(/^([^:：]+)[:：]/)?.[1])
+            : undefined;
+        const rawSender =
+          nonEmptyString(record['senderName']) ||
+          nonEmptyString(record['senderNick']) ||
+          nonEmptyString(record['sender']) ||
+          summarySender ||
+          nonEmptyString(record['senderId']);
+        // A sender lands at start-of-line immediately before `: `, the exact
+        // privileged position the `[tag]:` unwrap defends — so strip the
+        // brackets outright rather than relying on the unwrap alone.
+        const sender =
+          (rawSender && bracketSafeChatRecordField(rawSender)) || 'Unknown';
+        return [`${sender}: ${formatChatRecordEntryBody(record)}`];
+      })
+    : [];
+
+  // The header is record content too, and it was inside NO cap — per-line,
+  // total or code-point — while `capChatRecordLines` bounded only the entry
+  // lines: a 62,889-char `summary` reached the prompt intact, ~15x the total
+  // this function documents, displacing the user's own request. Spend one
+  // budget across header then entries, in render order, reserving what the
+  // entries need to announce their own cut.
+  const entriesFloor =
+    recordLines.length > 0
+      ? CHAT_RECORD_ENTRIES_LABEL.length +
+        1 +
+        chatRecordAnnouncementCost(recordLines)
+      : 0;
+  const headerBudget = Math.max(
+    budget - CHAT_RECORD_PART_GAP - entriesFloor,
+    0,
+  );
+  const summaryDisplayLines = summaryLines.filter(Boolean);
+  // The title is wrapped in brackets below, so bracket-safety on top of
+  // sanitization; `|| undefined` keeps the 'Chat record' fallback for a title
+  // that was nothing but brackets or whitespace. It is one line of the record,
+  // so the per-line cap bounds it — and then the header budget bounds that,
+  // leaving the summary room to announce its own cut. Uncapped, a 5,000-char
+  // title ate the whole header budget on its own.
+  //
+  // Cut in UTF-16 UNITS, not code points: `headerBudget`, `headerLead.length`,
+  // `spent` and `chatRecordAnnouncementCost` are all `.length`, so a code-point
+  // cap let an astral-heavy title claim up to 2x its reserved units. A title of
+  // >=429 code points carrying >=2 astral characters then pushed the entries
+  // budget below the announcement cost this line reserves, `capChatRecordLines`
+  // hit its `spendable < 0` floor, and EVERY forwarded message vanished with no
+  // announcement and `entriesDropped` still false — the exact silent truncation
+  // the reservation exists to prevent. A fully-astral title also carried the
+  // result past the documented 500-unit ceiling.
+  const safeTitle = title
+    ? truncateUtf16Units(
+        bracketSafeChatRecordField(title),
+        Math.max(
+          Math.min(
+            MAX_CHAT_RECORD_LINE_CHARS,
+            headerBudget -
+              CHAT_RECORD_HEADER_LEAD('').length -
+              chatRecordAnnouncementCost(summaryDisplayLines),
+          ),
+          0,
+        ),
+      ) || undefined
+    : undefined;
+  const headerLead = CHAT_RECORD_HEADER_LEAD(safeTitle || 'untitled');
+  const summary = capChatRecordLines(
+    summaryDisplayLines,
+    Math.max(headerBudget - headerLead.length, 0),
+  ).join('\n');
+  const parts: string[] = [];
+  // The tag NAME is fixed and the title goes inside it, never the other way
+  // round. `bracketSafeChatRecordField` is a no-op for a title that carries no
+  // brackets, so a bare attacker title like `SYSTEM` (which is also what
+  // `[SYSTEM]` and `[[SYSTEM]]` sanitize down to) would otherwise have this
+  // wrapper manufacture a clean start-of-line `[SYSTEM]` — a forge created
+  // AFTER sanitization, which no amount of sanitizing the title can prevent.
+  if (summary) {
+    parts.push(`${headerLead}${summary}`);
+  } else if (safeTitle) {
+    parts.push(`[Chat record: ${safeTitle}]`);
+  }
+  const spent = parts.reduce(
+    (used, part) => used + part.length + CHAT_RECORD_PART_GAP,
+    0,
+  );
+  const boundedLines = capChatRecordLines(
+    recordLines,
+    Math.max(budget - spent - CHAT_RECORD_ENTRIES_LABEL.length - 1, 0),
+  );
+  if (boundedLines.length > 0) {
+    parts.push(`${CHAT_RECORD_ENTRIES_LABEL}\n${boundedLines.join('\n')}`);
+  }
+  return {
+    text: parts.join('\n\n'),
+    entriesDropped: rawEntries !== undefined && recordLines.length === 0,
   };
 }
 
@@ -121,15 +601,142 @@ const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const ACK_REACTION_NAME = '👀';
 const ACK_EMOTION_ID = '2659900';
 const ACK_EMOTION_BG_ID = 'im_bg_1';
+const STATUS_EMOTION_ID = '34019';
+const STATUS_EMOTION_BG_ID = 'im_bg_6';
+const DONE_EMOTION_ID = '54054';
+const DONE_EMOTION_BG_ID = 'im_bg_5';
 const EMOTION_API = 'https://api.dingtalk.com/v1.0/robot/emotion';
 const EMOTION_MAX_ATTEMPTS = 3;
 const EMOTION_RETRY_BASE_DELAY_MS = 250;
+const EMOTION_FETCH_TIMEOUT_MS = 15_000;
+const EMOTION_FINISH_MAX_ATTEMPTS = 3;
 const GROUP_MSG_API = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
 const DIRECT_MSG_API =
   'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend';
 const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
+const PROACTIVE_FILE_MSG_KEY = 'sampleFile';
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
+const ROBOT_MESSAGE_HOSTS = new Set(['api.dingtalk.com', 'oapi.dingtalk.com']);
+/**
+ * gettoken business errors a retry cannot fix: an invalid appkey/secret or a
+ * missing app. Any other errcode (-1 system busy, 88 throttled, ...) is
+ * treated as transient so card recovery keeps retrying through it.
+ */
+const PERMANENT_TOKEN_ERROR_CODES = new Set([
+  40001, 40013, 40089, 40096, 90002, 90003,
+]);
+const REPLY_FETCH_TIMEOUT_MS = 15_000;
+
+interface InboundErrorPresentation {
+  status: string;
+  nextStep: string;
+}
+
+function presentInboundError(error: unknown): InboundErrorPresentation {
+  const parts: string[] = [];
+  let status: number | undefined;
+
+  try {
+    if (error instanceof Error) {
+      if (typeof error.name === 'string') parts.push(error.name);
+      if (typeof error.message === 'string') parts.push(error.message);
+    } else if (typeof error === 'string') {
+      parts.push(error);
+    }
+
+    if (typeof error === 'object' && error !== null) {
+      const record = error as Record<string, unknown>;
+      if (typeof record['code'] === 'string') parts.push(record['code']);
+      if (typeof record['status'] === 'number') status = record['status'];
+      const body = record['body'];
+      if (typeof body === 'string') {
+        parts.push(body);
+      } else if (typeof body === 'object' && body !== null) {
+        const bodyRecord = body as Record<string, unknown>;
+        for (const key of ['code', 'errorKind', 'message']) {
+          if (typeof bodyRecord[key] === 'string') parts.push(bodyRecord[key]);
+        }
+      }
+    }
+  } catch {
+    return {
+      status: 'Processing failed',
+      nextStep:
+        'Try again. If it keeps failing, contact the bot administrator.',
+    };
+  }
+
+  const diagnostic = parts.join(' ').slice(0, 2000).toLowerCase();
+  if (
+    status === 401 ||
+    status === 403 ||
+    /unauthor|forbidden|authentication|credential|invalid.?token/.test(
+      diagnostic,
+    )
+  ) {
+    return {
+      status: 'Bot configuration error',
+      nextStep: 'Contact the bot administrator.',
+    };
+  }
+  if (
+    status === 408 ||
+    status === 504 ||
+    /timeout|timed?\s+out|deadline/.test(diagnostic)
+  ) {
+    return {
+      status: 'Request timed out',
+      nextStep: 'Try again. For a large request, split it into smaller parts.',
+    };
+  }
+  if (/cancel|abort/.test(diagnostic)) {
+    return {
+      status: 'Request was cancelled',
+      nextStep: 'Send the request again if you still need it.',
+    };
+  }
+  if (
+    status === 429 ||
+    /overload|rate.?limit|queue.?full|too many|busy|pending prompts full/.test(
+      diagnostic,
+    )
+  ) {
+    return {
+      status: 'Service is busy',
+      nextStep: 'Try again in a moment.',
+    };
+  }
+  if (
+    status === 502 ||
+    status === 503 ||
+    /unavailable|econn|enotfound|etimedout|network|socket|fetch failed|connection|session[_ ](?:not[ _]found|closing)|workspace[_ ]draining|transport closed/.test(
+      diagnostic,
+    )
+  ) {
+    return {
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    };
+  }
+  return {
+    status: 'Processing failed',
+    nextStep: 'Try again. If it keeps failing, contact the bot administrator.',
+  };
+}
+
+function formatInboundErrorMessage(error: unknown, reference: string): string {
+  const presentation = presentInboundError(error);
+  return [
+    '**Unable to process this message**',
+    '',
+    `**Status:** ${presentation.status}`,
+    `**Next step:** ${presentation.nextStep}`,
+    `**Reference:** \`${reference}\``,
+  ].join('\n');
+}
+
 // Extensions for generated media store names, keyed by the download's mime
 // type. The agent reads stored media via `read_file`, whose type detection is
 // extension-first: an extensionless name falls through to the binary content
@@ -153,6 +760,15 @@ const IMAGE_INSTRUCTIONS = [
   '',
   'Only use a real image file inside the workspace or system temporary directory.',
 ].join('\n');
+const FILE_INSTRUCTIONS = [
+  '',
+  'When the user explicitly asks for a completed local file, send it by writing this on its own line:',
+  '`[FILE: /absolute/path/to/file]` (without the backticks)',
+  '',
+  'Use at most five non-empty files inside the workspace or system temporary directory.',
+  'File paths containing ] are not supported.',
+  'Do not claim delivery succeeded; DingTalk shows successful files separately and reports failures in the final text.',
+].join('\n');
 
 type MentionTargetEnvelope = Envelope & {
   [mentionTarget]?: string;
@@ -163,6 +779,58 @@ interface CardRunCorrelation {
   target: { chatId: string; isGroup: boolean };
   sender?: { senderName: string };
 }
+
+interface DingtalkEmotionTag {
+  name: string;
+  emotionId: string;
+  backgroundId: string;
+}
+
+interface DingtalkReactionState {
+  key: string;
+  messageId: string;
+  chatId: string;
+  sessionId?: string;
+  desiredStatusTag?: DingtalkEmotionTag;
+  statusTag?: DingtalkEmotionTag;
+  terminalTag?: DingtalkEmotionTag;
+  finishing: boolean;
+  drainScheduled: boolean;
+  eyeAttached: boolean;
+  /** Set when a finish attempt could not clear both transient tags; the
+   * state stays registered so a later finish trigger retries the cleanup. */
+  finishBlocked?: boolean;
+  /** Blocked finish attempts so far; at EMOTION_FINISH_MAX_ATTEMPTS the
+   * state is dropped so a permanently failing emotion API does not hold the
+   * entry for the process lifetime. */
+  finishAttempts?: number;
+  /** The last failed drain transition. Identical repeat requests are skipped
+   * so a failing emotion API is not re-hit once per streamed chunk. */
+  failedTransition?: { from: string | undefined; to: string };
+  revision: number;
+  tail: Promise<void>;
+}
+
+function statusEmotionTag(name: string): DingtalkEmotionTag {
+  return {
+    name,
+    emotionId: STATUS_EMOTION_ID,
+    backgroundId: STATUS_EMOTION_BG_ID,
+  };
+}
+
+const EYE_TAG: DingtalkEmotionTag = {
+  name: ACK_REACTION_NAME,
+  emotionId: ACK_EMOTION_ID,
+  backgroundId: ACK_EMOTION_BG_ID,
+};
+const DONE_TAG: DingtalkEmotionTag = {
+  name: '✅ Done',
+  emotionId: DONE_EMOTION_ID,
+  backgroundId: DONE_EMOTION_BG_ID,
+};
+const FAILED_TAG = statusEmotionTag('❌ Failed');
+const STOPPED_TAG = statusEmotionTag('⏹️ Stopped');
 
 function collectNonBotMentionIds(data: DingTalkMessageData): string[] {
   if (!Array.isArray(data.atUsers) || typeof data.chatbotUserId !== 'string') {
@@ -195,6 +863,7 @@ interface DingTalkTokenResponse {
 interface DingTalkDirectMessageResponse {
   flowControlledStaffIdList?: string[];
   invalidStaffIdList?: string[];
+  processQueryKey?: string;
 }
 
 type DingTalkClientInternals = DWClient & {
@@ -205,14 +874,54 @@ type DingTalkClientInternals = DWClient & {
   onCallback(message: DWClientDownStream): void;
 };
 
+/* eslint-disable no-console -- swapping console.log out is the whole job here */
+let connectLogDepth = 0;
+let unsuppressedConsoleLog: typeof console.log | undefined;
+
+// Connects can overlap — a manager replacement starts while another is still
+// in flight, and either may settle first — so only the depth 1→0 transition
+// restores, to what the 0→1 transition saved. An inner scope restoring its own
+// capture would put the no-op back and leave logging off process-wide.
+async function withConnectLoggingSuppressed<T>(
+  connect: () => Promise<T>,
+): Promise<T> {
+  if (connectLogDepth++ === 0) {
+    unsuppressedConsoleLog = console.log;
+    console.log = () => {};
+  }
+  try {
+    return await connect();
+  } finally {
+    if (--connectLogDepth === 0 && unsuppressedConsoleLog) {
+      console.log = unsuppressedConsoleLog;
+      unsuppressedConsoleLog = undefined;
+    }
+  }
+}
+/* eslint-enable no-console */
+
 type DingtalkChannelConfig = ChannelConfig & {
   useConnectionManager?: unknown;
   interactiveCards?: unknown;
 };
 
+interface ProactiveTextDelivery {
+  title: string;
+  chunks: string[];
+  nextChunk: number;
+}
+
+interface ReplyTextDelivery {
+  title: string;
+  chunks: string[];
+  nextChunk: number;
+  atUserId?: string;
+}
+
 export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
   private readonly atSender: boolean;
+  private readonly displayLanguage: string | undefined;
   private connectionManager?: DingtalkConnectionManager<DWClient>;
   private seenMessages: Map<string, number> = new Map();
   private mentionTargets = new Map<string, string>();
@@ -223,11 +932,14 @@ export class DingtalkChannel extends ChannelBase {
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
   private activeReactionKeys = new Set<string>();
+  private reactionStates = new Map<string, DingtalkReactionState>();
   /** sessionId → reaction keys, so a dead session's reactions can be recalled. */
   private sessionReactionKeys = new Map<
     string,
     Map<string, { messageId: string; chatId: string }>
   >();
+  /** Settles when the reaction cleanup queued by disconnect() has run. */
+  private disconnectDrain: Promise<void> | undefined;
   /**
    * Real inbound message ids (insertion-ordered, size-capped). Unlike the
    * TTL-swept seenMessages dedup map, entries survive long queue waits, so a
@@ -243,10 +955,18 @@ export class DingtalkChannel extends ChannelBase {
   protected readonly interactiveCardClient?: DingtalkInteractiveCardClient;
   private statusCardController?: StatusCardController;
   private questionCardController?: QuestionCardController;
+  private permissionCardController?: PermissionCardController;
   private interactionPresenter?: DingtalkInteractionPresenter;
   private readonly inboundCardOwners = new Map<string, CardRunCorrelation>();
   private readonly cardRunBySession = new Map<string, string>();
   private readonly cardRuns = new Map<string, CardRunCorrelation>();
+  // Keyed by runId, not segmentId: a mid-turn segment reset (response
+  // boundary, input requested) mints a fresh segment UUID but the projection
+  // state must survive it, or a marker split across the reset leaks.
+  private readonly fileProjectors = new Map<
+    string,
+    { sessionId: string; projector: OutboundFileProjector }
+  >();
 
   constructor(
     name: string,
@@ -258,6 +978,7 @@ export class DingtalkChannel extends ChannelBase {
 
     this.atSender =
       (config as unknown as Record<string, unknown>)['atSender'] === true;
+    this.displayLanguage = options?.displayLanguage;
     if (!this.config.instructions) {
       this.config.instructions = [
         '## DingTalk Channel',
@@ -267,6 +988,9 @@ export class DingtalkChannel extends ChannelBase {
       ].join('\n');
     } else if (!this.config.instructions.includes('[IMAGE:')) {
       this.config.instructions += IMAGE_INSTRUCTIONS;
+    }
+    if (!this.config.instructions.includes('[FILE:')) {
+      this.config.instructions += FILE_INSTRUCTIONS;
     }
     this.interactiveCardConfig = parseDingtalkInteractiveCardConfig(
       (config as DingtalkChannelConfig).interactiveCards,
@@ -295,16 +1019,21 @@ export class DingtalkChannel extends ChannelBase {
       this.interactiveCardClient = new DingtalkInteractiveCardClient({
         robotCode: config.clientId,
         getAccessToken: () => this.getProactiveToken(),
+        invalidateAccessToken: (token) => {
+          if (this.proactiveToken?.token === token) {
+            this.proactiveToken = undefined;
+          }
+        },
       });
-      if (
-        this.interactiveCardConfig.statusCard.enabled &&
-        config.blockStreaming !== 'on'
-      ) {
+      if (this.interactiveCardConfig.statusCard.enabled) {
         this.statusCardController = new StatusCardController({
           client: this.interactiveCardClient,
           cancelRun: (sessionId, runId) =>
             this.requestPromptRunCancellation(sessionId, runId),
           ...(config.model ? { model: config.model } : {}),
+          ...(options?.displayLanguage
+            ? { language: options.displayLanguage }
+            : {}),
           onError: (operation, error) => {
             process.stderr.write(
               `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,
@@ -316,7 +1045,8 @@ export class DingtalkChannel extends ChannelBase {
         this.questionCardController = new QuestionCardController({
           client: this.interactiveCardClient,
           timeoutMs: this.interactiveCardConfig.questionCard.timeoutMs,
-          sendFallback: (chatId, text) => this.sendMessage(chatId, text),
+          sendFallback: (chatId, text, sourceLabel) =>
+            this.sendReply(chatId, text, undefined, sourceLabel),
           reserveRunProjection: (runId) =>
             this.interactionPresenter?.reserveProjection(runId),
           onError: (operation, error) => {
@@ -326,19 +1056,34 @@ export class DingtalkChannel extends ChannelBase {
           },
         });
       }
-      if (this.statusCardController || this.questionCardController) {
+      if (this.interactiveCardConfig.permissionCard.enabled) {
+        this.permissionCardController = new PermissionCardController({
+          client: this.interactiveCardClient,
+          timeoutMs: this.interactiveCardConfig.permissionCard.timeoutMs,
+          locale: this.locale,
+          reserveRunProjection: (runId) =>
+            this.interactionPresenter?.reserveProjection(runId),
+          onError: (operation, error) => {
+            process.stderr.write(
+              `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,
+            );
+          },
+        });
+      }
+      if (
+        this.statusCardController ||
+        this.questionCardController ||
+        this.permissionCardController
+      ) {
         this.interactionPresenter = new DingtalkInteractionPresenter({
           statusCards: this.statusCardController,
           questionCards: this.questionCardController,
-          ...(config.blockStreaming !== 'on'
-            ? {
-                sendFallback: (
-                  chatId: string,
-                  text: string,
-                  sessionId: string,
-                ) => this.sendFallbackReply(chatId, text, sessionId),
-              }
+          permissionCards: this.permissionCardController,
+          ...(options?.displayLanguage
+            ? { language: options.displayLanguage }
             : {}),
+          sendFallback: (chatId, text, sessionId, sourceLabel) =>
+            this.sendFallbackReply(chatId, text, sessionId, sourceLabel),
         });
       }
     }
@@ -380,6 +1125,11 @@ export class DingtalkChannel extends ChannelBase {
     client.onDownStream = (raw: unknown) => {
       this.onDownStream(raw, client);
     };
+    // The SDK's getEndpoint() console.log()s the resolved config (clientSecret)
+    // and the gateway response (stream ticket), ungated by its own `debug` flag.
+    // Silence rather than redact: a key allowlist stays open to future SDK logs.
+    const sdkConnect = client.connect.bind(client);
+    client.connect = () => withConnectLoggingSuppressed(sdkConnect);
   }
 
   private registerMessageHandler(client: DWClient): void {
@@ -444,8 +1194,13 @@ export class DingtalkChannel extends ChannelBase {
         ) ?? { kind: 'ignored', actorId: callback.actorId }
       );
     }
+    const permissionResult = this.permissionCardController?.claim(callback);
+    if (permissionResult && permissionResult.kind !== 'ignored') {
+      return permissionResult;
+    }
     return (
-      this.questionCardController?.claim(callback) ?? {
+      this.questionCardController?.claim(callback) ??
+      permissionResult ?? {
         kind: 'ignored',
         actorId: callback.actorId,
       }
@@ -591,6 +1346,172 @@ export class DingtalkChannel extends ChannelBase {
     return isGroup && !conversationId;
   }
 
+  private resolveSessionWebhook(chatId: string): string | undefined {
+    const value = this.webhooks.get(chatId);
+    if (!value) return undefined;
+    try {
+      const url = new URL(value);
+      return url.protocol === 'https:' &&
+        url.port === '' &&
+        ROBOT_MESSAGE_HOSTS.has(url.hostname)
+        ? url.toString()
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async uploadOutboundFile(
+    filePath: string,
+  ): Promise<{ file: ValidatedFile; mediaId: string }> {
+    const file = readValidatedFile(filePath, this.config.cwd);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const token = await this.getProactiveToken();
+      try {
+        return { file, mediaId: await uploadDingTalkFile(file, token) };
+      } catch (error) {
+        if (
+          error instanceof DingTalkMediaUploadError &&
+          error.authFailure &&
+          attempt === 0
+        ) {
+          this.proactiveToken = undefined;
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error('DingTalk file upload returned no MediaID');
+  }
+
+  private async deliverFiles(
+    paths: readonly string[],
+    send: (file: ValidatedFile, mediaId: string) => Promise<void>,
+    preflight?: () => void,
+  ): Promise<string[]> {
+    const notices: string[] = [];
+    for (const filePath of paths) {
+      const displayName = safeFileName(filePath);
+      try {
+        preflight?.();
+        const { file, mediaId } = await this.uploadOutboundFile(filePath);
+        await send(file, mediaId);
+      } catch (error) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] outbound file delivery failed (${sanitizeLogText(displayName, 200)}): ${sanitizeLogText(
+            error instanceof Error ? error.message : String(error),
+            300,
+          )}\n`,
+        );
+        notices.push(`[File delivery failed: ${displayName}]`);
+      }
+    }
+    return notices;
+  }
+
+  private async sendSessionFile(
+    chatId: string,
+    file: ValidatedFile,
+    mediaId: string,
+  ): Promise<void> {
+    const webhook = this.resolveSessionWebhook(chatId);
+    if (!webhook) throw new Error('DingTalk session webhook unavailable');
+
+    let response: Response;
+    try {
+      response = await fetch(webhook, {
+        method: 'POST',
+        redirect: 'error',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          msgtype: 'file',
+          file: {
+            mediaId,
+            fileName: file.fileName,
+            fileType: file.fileType,
+          },
+        }),
+        signal: AbortSignal.timeout(REPLY_FETCH_TIMEOUT_MS),
+      });
+    } catch {
+      throw new Error('DingTalk file delivery failed: network request failed');
+    }
+    const body = await response.text().catch(() => '');
+    if (!response.ok) {
+      throw new Error(`DingTalk file delivery failed: HTTP ${response.status}`);
+    }
+    if (!body.trim()) return;
+
+    let data: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(body) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+        return;
+      data = parsed as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    const code = data['errcode'] ?? data['code'];
+    if (code !== undefined && String(code) !== '0') {
+      throw new Error(`DingTalk file delivery failed: API code ${code}`);
+    }
+  }
+
+  private appendFileNotices(text: string, notices: readonly string[]): string {
+    if (notices.length === 0) return text;
+    const prefix = text.trimEnd();
+    return `${prefix}${prefix ? '\n' : ''}${notices.join('\n')}`;
+  }
+
+  private async prepareReplyOutput(
+    chatId: string,
+    text: string,
+    streamed?: OutboundFileProjector,
+  ): Promise<string> {
+    return this.prepareFileOutput(
+      text,
+      (file, mediaId) => this.sendSessionFile(chatId, file, mediaId),
+      streamed,
+      () => {
+        if (!this.resolveSessionWebhook(chatId)) {
+          throw new Error('DingTalk session webhook unavailable');
+        }
+      },
+    );
+  }
+
+  private async prepareFileOutput(
+    text: string,
+    send: (file: ValidatedFile, mediaId: string) => Promise<void>,
+    streamed?: OutboundFileProjector,
+    preflight?: () => void,
+  ): Promise<string> {
+    const projection = projectFileText(text);
+    const streamedMarkers = streamed ? streamed.result('').markerCount : 0;
+    if (projection.markerCount > 0 || streamedMarkers > 0) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] file markers projected (final=${projection.markerCount}, streamed=${streamedMarkers})\n`,
+      );
+    }
+
+    const notices: string[] = [];
+    if (projection.invalidMarkers > 0) {
+      notices.push('[File delivery failed: invalid marker]');
+    }
+    if (projection.excessMarkers > 0) {
+      notices.push('[File delivery failed: response file limit exceeded]');
+    }
+    if (streamedMarkers > projection.markerCount) {
+      notices.push(FILE_UNAVAILABLE_NOTICE);
+    }
+    notices.push(
+      ...(await this.deliverFiles(projection.paths, send, preflight)),
+    );
+    return this.prepareOutgoingText(
+      this.appendFileNotices(projection.text, notices),
+    );
+  }
+
   private async prepareOutgoingText(text: string): Promise<string> {
     const markers = findImageMarkers(text);
     if (markers.length === 0) return text;
@@ -648,8 +1569,10 @@ export class DingtalkChannel extends ChannelBase {
     chatId: string,
     text: string,
     atUserId?: string,
+    sourceLabel?: string,
+    prepared = false,
   ): Promise<void> {
-    // chatId is a conversationId — resolve to the latest sessionWebhook
+    // chatId is a conversationId — resolve to the latest sessionWebhook.
     const webhook = this.webhooks.get(chatId);
     if (!webhook) {
       process.stderr.write(
@@ -658,28 +1581,83 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
 
-    const outgoingText = await this.prepareOutgoingText(text);
-    const mentionPrefix = atUserId ? `@${atUserId}\n\n` : '';
-    const chunks = normalizeDingTalkMarkdown(mentionPrefix + outgoingText);
-    const title = extractTitle(outgoingText);
+    const outgoingText = prepared
+      ? text
+      : await this.prepareReplyOutput(chatId, text);
+    if (!outgoingText.trim()) return;
+    const plan = this.createReplyTextDelivery(
+      outgoingText,
+      atUserId,
+      sourceLabel,
+    );
+    await this.deliverReplyText(chatId, plan);
+  }
 
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i]!;
-      const isMention = i === 0 && atUserId !== undefined;
+  private createReplyTextDelivery(
+    outgoingText: string,
+    atUserId?: string,
+    sourceLabel?: string,
+  ): ReplyTextDelivery {
+    const mentionPrefix = atUserId ? `@${atUserId}\n\n` : '';
+    const sourcePrefix =
+      sourceLabel && outgoingText.trim().length > 0
+        ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
+        : '';
+    const contentLimit =
+      DINGTALK_CHUNK_LIMIT - mentionPrefix.length - sourcePrefix.length;
+    if (contentLimit <= 0) {
+      throw new Error('DingTalk source label exceeds the message limit.');
+    }
+    const chunks = normalizeDingTalkMarkdown(outgoingText, contentLimit).map(
+      (chunk, index) =>
+        `${index === 0 ? mentionPrefix : ''}${sourcePrefix}${chunk}`,
+    );
+    return {
+      title: extractTitle(outgoingText),
+      chunks,
+      nextChunk: 0,
+      ...(atUserId ? { atUserId } : {}),
+    };
+  }
+
+  private async deliverReplyText(
+    chatId: string,
+    plan: ReplyTextDelivery,
+  ): Promise<void> {
+    const webhook = this.webhooks.get(chatId);
+    if (!webhook) {
+      return;
+    }
+    while (plan.nextChunk < plan.chunks.length) {
+      const index = plan.nextChunk;
+      const chunk = plan.chunks[index]!;
+      const isMention = index === 0 && plan.atUserId !== undefined;
       const body = {
         msgtype: 'markdown',
         markdown: {
-          title: i === 0 ? title : `${title} (cont.)`,
+          title: index === 0 ? plan.title : `${plan.title} (cont.)`,
           text: chunk,
         },
-        ...(isMention ? { at: { atUserIds: [atUserId] } } : {}),
+        ...(isMention ? { at: { atUserIds: [plan.atUserId!] } } : {}),
       };
 
-      const resp = await fetch(webhook, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+      let resp: Response;
+      try {
+        resp = await fetch(webhook, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(REPLY_FETCH_TIMEOUT_MS),
+        });
+      } catch (err) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] sendMessage failed: ${sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            300,
+          )}\n`,
+        );
+        throw err;
+      }
 
       if (isMention && process.env['QWEN_CHANNEL_DEBUG_MENTIONS'] === '1') {
         const payload = (await resp
@@ -706,11 +1684,21 @@ export class DingtalkChannel extends ChannelBase {
           `[DingTalk:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
         );
       }
+      plan.nextChunk++;
     }
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
     await this.sendReply(chatId, text);
+  }
+
+  protected override async sendThreadMessage(
+    chatId: string,
+    _threadId: string | undefined,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    await this.sendReply(chatId, text, undefined, sourceLabel);
   }
 
   override supportsProactiveSend(): boolean {
@@ -754,20 +1742,54 @@ export class DingtalkChannel extends ChannelBase {
   protected override async pushProactive(
     target: SessionTarget,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
     if (!text.trim()) return;
 
-    const outgoingText = await this.prepareOutgoingText(text);
-    const chunks = normalizeDingTalkMarkdown(outgoingText);
-    const title = extractTitle(outgoingText);
+    const plan = await this.createProactiveTextDelivery(
+      target,
+      text,
+      sourceLabel,
+    );
+    if (!plan) return;
+    await this.deliverProactiveText(target, plan);
+  }
 
-    for (let i = 0; i < chunks.length; i++) {
+  private async createProactiveTextDelivery(
+    target: SessionTarget,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<ProactiveTextDelivery | undefined> {
+    const outgoingText = await this.prepareFileOutput(text, (file, mediaId) =>
+      this.sendProactiveFile(target, file, mediaId),
+    );
+    if (!outgoingText.trim()) return undefined;
+    const sourcePrefix = sourceLabel
+      ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
+      : '';
+    const contentLimit = DINGTALK_CHUNK_LIMIT - sourcePrefix.length;
+    if (contentLimit <= 0) {
+      throw new Error('DingTalk source label exceeds the message limit.');
+    }
+    const chunks = normalizeDingTalkMarkdown(outgoingText, contentLimit).map(
+      (chunk) => `${sourcePrefix}${chunk}`,
+    );
+    return { title: extractTitle(outgoingText), chunks, nextChunk: 0 };
+  }
+
+  private async deliverProactiveText(
+    target: SessionTarget,
+    plan: ProactiveTextDelivery,
+  ): Promise<void> {
+    while (plan.nextChunk < plan.chunks.length) {
+      const index = plan.nextChunk;
       await this.sendProactiveChunk(
         target,
-        i === 0 ? title : `${title} (cont.)`,
-        chunks[i]!,
-        `chunk ${i + 1}/${chunks.length}`,
+        index === 0 ? plan.title : `${plan.title} (cont.)`,
+        plan.chunks[index]!,
+        `chunk ${index + 1}/${plan.chunks.length}`,
       );
+      plan.nextChunk++;
     }
   }
 
@@ -795,8 +1817,9 @@ export class DingtalkChannel extends ChannelBase {
       process.stderr.write(
         `[DingTalk:${this.name}] access token request failed: gettoken errcode=${data.errcode} ${errmsg}\n`,
       );
-      throw new Error(
+      throw new DingtalkCardRequestError(
         `DingTalk access token request failed: gettoken errcode=${data.errcode}${errmsg ? ` ${errmsg}` : ''}`,
+        !PERMANENT_TOKEN_ERROR_CODES.has(Number(data.errcode)),
       );
     }
     this.proactiveToken = {
@@ -812,6 +1835,20 @@ export class DingtalkChannel extends ChannelBase {
     actorId: string,
     target?: { chatId: string; isGroup: boolean },
   ): Promise<void> {
+    const copy =
+      this.locale === 'zh'
+        ? {
+            title: '卡片操作',
+            group: '仅任务发起人可以操作这张卡片，本次操作未生效。',
+            direct: '你无权操作这张卡片，仅任务发起人可以提交或停止。',
+          }
+        : {
+            title: 'Card interaction',
+            group:
+              'Only the task initiator can operate this card. This action had no effect.',
+            direct:
+              'You cannot operate this card. Only the task initiator can submit or stop it.',
+          };
     if (target?.isGroup) {
       return this.sendProactiveChunk(
         {
@@ -820,8 +1857,8 @@ export class DingtalkChannel extends ChannelBase {
           chatId: target.chatId,
           isGroup: true,
         },
-        '卡片操作',
-        '仅任务发起人可以操作这张卡片，本次操作未生效。',
+        copy.title,
+        copy.group,
         'card interaction feedback',
       );
     }
@@ -832,8 +1869,8 @@ export class DingtalkChannel extends ChannelBase {
         chatId: actorId,
         isGroup: false,
       },
-      '卡片操作',
-      '你无权操作这张卡片，仅任务发起人可以提交或停止。',
+      copy.title,
+      copy.direct,
       'card interaction feedback',
     );
   }
@@ -842,6 +1879,33 @@ export class DingtalkChannel extends ChannelBase {
     target: SessionTarget,
     title: string,
     text: string,
+    chunkLabel: string,
+  ): Promise<void> {
+    return this.sendProactivePayload(
+      target,
+      PROACTIVE_MSG_KEY,
+      { title, text },
+      chunkLabel,
+    );
+  }
+
+  private async sendProactiveFile(
+    target: SessionTarget,
+    file: ValidatedFile,
+    mediaId: string,
+  ): Promise<void> {
+    return this.sendProactivePayload(
+      target,
+      PROACTIVE_FILE_MSG_KEY,
+      { mediaId, fileName: file.fileName, fileType: file.fileType },
+      `file ${file.fileName}`,
+    );
+  }
+
+  private async sendProactivePayload(
+    target: SessionTarget,
+    msgKey: string,
+    msgParam: Record<string, string>,
     chunkLabel: string,
   ): Promise<void> {
     const targetKind = target.isGroup === true ? 'group' : 'dm';
@@ -864,8 +1928,8 @@ export class DingtalkChannel extends ChannelBase {
             body: JSON.stringify({
               robotCode: this.config.clientId!,
               ...targetBody,
-              msgKey: PROACTIVE_MSG_KEY,
-              msgParam: JSON.stringify({ title, text }),
+              msgKey,
+              msgParam: JSON.stringify(msgParam),
             }),
             signal: AbortSignal.timeout(PROACTIVE_FETCH_TIMEOUT_MS),
           },
@@ -893,6 +1957,37 @@ export class DingtalkChannel extends ChannelBase {
         throw new Error(
           `DingTalk proactive send failed: HTTP ${resp.status}${detail ? ` ${detail}` : ''}`,
         );
+      }
+      if (target.isGroup === true) {
+        if (msgKey !== PROACTIVE_FILE_MSG_KEY) {
+          await resp.body?.cancel();
+          return;
+        }
+        let data: Record<string, unknown>;
+        try {
+          const parsed = (await resp.json()) as unknown;
+          data =
+            parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+              ? (parsed as Record<string, unknown>)
+              : {};
+        } catch {
+          throw new Error(
+            'DingTalk file delivery failed: invalid JSON response',
+          );
+        }
+        const code = data['errcode'] ?? data['code'];
+        if (code !== undefined && String(code) !== '0') {
+          throw new Error(`DingTalk file delivery failed: API code ${code}`);
+        }
+        if (
+          typeof data['processQueryKey'] !== 'string' ||
+          !data['processQueryKey'].trim()
+        ) {
+          throw new Error(
+            'DingTalk file delivery failed: missing processQueryKey',
+          );
+        }
+        return;
       }
       if (target.isGroup === false) {
         let data: DingTalkDirectMessageResponse;
@@ -922,6 +2017,14 @@ export class DingtalkChannel extends ChannelBase {
             'DingTalk proactive send failed: direct recipient rate limited',
           );
         }
+        if (
+          msgKey === PROACTIVE_FILE_MSG_KEY &&
+          !data.processQueryKey?.trim()
+        ) {
+          throw new Error(
+            'DingTalk file delivery failed: missing processQueryKey',
+          );
+        }
         return;
       }
       await resp.body?.cancel();
@@ -937,14 +2040,15 @@ export class DingtalkChannel extends ChannelBase {
     endpoint: 'reply' | 'recall',
     msgId: string,
     conversationId: string,
-  ): Promise<void> {
+    tag: DingtalkEmotionTag,
+  ): Promise<boolean> {
     const robotCode = this.config.clientId;
-    if (!robotCode || !msgId || !conversationId) return;
+    if (!robotCode || !msgId || !conversationId) return false;
     try {
       const token = this.config.clientSecret
         ? await this.getProactiveToken()
         : this.getAccessToken();
-      if (!token) return;
+      if (!token) return false;
       for (let attempt = 0; attempt < EMOTION_MAX_ATTEMPTS; attempt++) {
         const resp = await fetch(`${EMOTION_API}/${endpoint}`, {
           method: 'POST',
@@ -957,16 +2061,17 @@ export class DingtalkChannel extends ChannelBase {
             openMsgId: msgId,
             openConversationId: conversationId,
             emotionType: 2,
-            emotionName: ACK_REACTION_NAME,
+            emotionName: tag.name,
             textEmotion: {
-              emotionId: ACK_EMOTION_ID,
-              emotionName: ACK_REACTION_NAME,
-              text: ACK_REACTION_NAME,
-              backgroundId: ACK_EMOTION_BG_ID,
+              emotionId: tag.emotionId,
+              emotionName: tag.name,
+              text: tag.name,
+              backgroundId: tag.backgroundId,
             },
           }),
+          signal: AbortSignal.timeout(EMOTION_FETCH_TIMEOUT_MS),
         });
-        if (resp.ok) return;
+        if (resp.ok) return true;
 
         const isTransient = resp.status === 429 || resp.status >= 500;
         if (isTransient && attempt < EMOTION_MAX_ATTEMPTS - 1) {
@@ -981,39 +2086,55 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] emotion/${endpoint} failed after ${attempt + 1}/${EMOTION_MAX_ATTEMPTS} attempts: ${resp.status} ${detail}\n`,
         );
-        return;
+        return false;
       }
     } catch {
       // best-effort, don't break message flow
     }
+    return false;
   }
 
   private async attachReaction(
     msgId: string,
     conversationId: string,
-  ): Promise<void> {
-    await this.emotionApi('reply', msgId, conversationId);
+    tag: DingtalkEmotionTag = EYE_TAG,
+  ): Promise<boolean> {
+    return this.emotionApi('reply', msgId, conversationId, tag);
   }
 
   private async recallReaction(
     msgId: string,
     conversationId: string,
-  ): Promise<void> {
-    await this.emotionApi('recall', msgId, conversationId);
+    tag: DingtalkEmotionTag = EYE_TAG,
+  ): Promise<boolean> {
+    return this.emotionApi('recall', msgId, conversationId, tag);
   }
 
   disconnect(): void {
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
     }
+    const reactionStates = [...this.reactionStates.values()];
+    for (const state of reactionStates) {
+      this.finishReaction(state.chatId, state.messageId, state.sessionId);
+    }
+    this.statusCardController?.dispose();
     this.activeReactionKeys.clear();
     this.sessionReactionKeys.clear();
+    this.reactionStates.clear();
     if (this.connectionManager) {
       this.connectionManager.stop();
     } else {
       this.client.disconnect();
     }
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
+    this.disconnectDrain = Promise.allSettled(
+      reactionStates.map((state) => state.tail),
+    ).then(() => undefined);
+  }
+
+  override waitForDisconnect(): Promise<void> {
+    return this.disconnectDrain ?? Promise.resolve();
   }
 
   /** Stable API targets are conversation or user IDs, never webhook URLs. */
@@ -1023,6 +2144,164 @@ export class DingtalkChannel extends ChannelBase {
 
   private reactionKey(messageId: string, conversationId: string): string {
     return `${conversationId}:${messageId}`;
+  }
+
+  private forgetReactionState(state: DingtalkReactionState): void {
+    this.activeReactionKeys.delete(state.key);
+    if (this.reactionStates.get(state.key) === state) {
+      this.reactionStates.delete(state.key);
+    }
+    if (!state.sessionId) return;
+    const keys = this.sessionReactionKeys.get(state.sessionId);
+    keys?.delete(state.key);
+    if (keys?.size === 0) this.sessionReactionKeys.delete(state.sessionId);
+  }
+
+  private enqueueReaction(
+    state: DingtalkReactionState,
+    operation: () => Promise<void>,
+  ): void {
+    state.tail = state.tail.then(operation).catch((err) => {
+      this.logReactionFailure('lifecycle tag update', err);
+    });
+  }
+
+  private scheduleReactionDrain(state: DingtalkReactionState): void {
+    if (state.drainScheduled) return;
+    state.drainScheduled = true;
+    this.enqueueReaction(state, async () => {
+      try {
+        await this.drainReactionState(state);
+      } finally {
+        state.drainScheduled = false;
+        if (
+          this.reactionStates.get(state.key) === state &&
+          (state.finishing
+            ? !state.finishBlocked
+            : this.activeReactionKeys.has(state.key) &&
+              state.desiredStatusTag &&
+              state.desiredStatusTag.name !== state.statusTag?.name)
+        ) {
+          this.scheduleReactionDrain(state);
+        }
+      }
+    });
+  }
+
+  private async drainReactionState(
+    state: DingtalkReactionState,
+  ): Promise<void> {
+    while (true) {
+      if (state.finishing) {
+        await this.finishReactionState(state);
+        return;
+      }
+      if (
+        this.reactionStates.get(state.key) !== state ||
+        !this.activeReactionKeys.has(state.key)
+      ) {
+        return;
+      }
+
+      const desired = state.desiredStatusTag;
+      if (!desired || desired.name === state.statusTag?.name) return;
+      const latched = state.failedTransition;
+      if (state.statusTag) {
+        const from = state.statusTag.name;
+        if (latched && latched.from === from && latched.to === desired.name) {
+          // This exact replacement already failed; re-issuing it once per
+          // lifecycle event hammers a failing emotion API on every streamed
+          // chunk. A different desired tag retries the recall.
+          state.desiredStatusTag = state.statusTag;
+          return;
+        }
+        const revision = state.revision;
+        if (
+          (await this.recallReaction(
+            state.messageId,
+            state.chatId,
+            state.statusTag,
+          )) === false
+        ) {
+          state.failedTransition = { from, to: desired.name };
+          if (state.revision !== revision) continue;
+          state.desiredStatusTag = state.statusTag;
+          return;
+        }
+        state.failedTransition = undefined;
+        state.statusTag = undefined;
+        continue;
+      }
+
+      if (
+        latched &&
+        latched.from === undefined &&
+        latched.to === desired.name
+      ) {
+        state.desiredStatusTag = undefined;
+        return;
+      }
+      const revision = state.revision;
+      if (
+        (await this.attachReaction(state.messageId, state.chatId, desired)) ===
+        false
+      ) {
+        state.failedTransition = { from: undefined, to: desired.name };
+        if (state.revision !== revision) continue;
+        state.desiredStatusTag = undefined;
+        return;
+      }
+      state.failedTransition = undefined;
+      state.statusTag = desired;
+    }
+  }
+
+  private async finishReactionState(
+    state: DingtalkReactionState,
+  ): Promise<void> {
+    let statusCleared = true;
+    if (state.statusTag) {
+      statusCleared =
+        (await this.recallReaction(
+          state.messageId,
+          state.chatId,
+          state.statusTag,
+        )) !== false;
+      if (statusCleared) state.statusTag = undefined;
+    }
+    const eyeCleared =
+      !state.eyeAttached ||
+      (await this.recallReaction(state.messageId, state.chatId, EYE_TAG)) !==
+        false;
+    if (eyeCleared) state.eyeAttached = false;
+    let terminalAttached = true;
+    if (state.terminalTag && statusCleared && eyeCleared) {
+      terminalAttached =
+        (await this.attachReaction(
+          state.messageId,
+          state.chatId,
+          state.terminalTag,
+        )) !== false;
+    }
+    if (!statusCleared || !eyeCleared || !terminalAttached) {
+      // Keep the state registered: forgetting it here would leave a stale
+      // phase tag nothing can ever recall. finishReaction re-arms the drain
+      // (disconnect, session death) so the cleanup gets a second chance.
+      state.finishAttempts = (state.finishAttempts ?? 0) + 1;
+      if (state.finishAttempts >= EMOTION_FINISH_MAX_ATTEMPTS) {
+        // A permanently failing emotion API (robot removed, expired token)
+        // would otherwise hold the entry for the process lifetime.
+        this.logReactionFailure(
+          'reaction cleanup',
+          `abandoned after ${state.finishAttempts} attempts`,
+        );
+        this.forgetReactionState(state);
+        return;
+      }
+      state.finishBlocked = true;
+      return;
+    }
+    this.forgetReactionState(state);
   }
 
   private rememberInboundMessageId(msgId: string): void {
@@ -1053,6 +2332,19 @@ export class DingtalkChannel extends ChannelBase {
     const key = this.reactionKey(messageId, chatId);
     if (this.activeReactionKeys.has(key)) return;
     this.activeReactionKeys.add(key);
+    const state: DingtalkReactionState = {
+      key,
+      messageId,
+      chatId,
+      ...(sessionId ? { sessionId } : {}),
+      desiredStatusTag: this.phaseReactionTag('thinking'),
+      finishing: false,
+      drainScheduled: false,
+      eyeAttached: false,
+      revision: 0,
+      tail: Promise.resolve(),
+    };
+    this.reactionStates.set(key, state);
     if (sessionId) {
       let keys = this.sessionReactionKeys.get(sessionId);
       if (!keys) {
@@ -1061,18 +2353,83 @@ export class DingtalkChannel extends ChannelBase {
       }
       keys.set(key, { messageId, chatId });
     }
-    this.attachReaction(messageId, chatId)
-      .then(() => {
-        if (!this.activeReactionKeys.has(key)) {
-          void this.recallReaction(messageId, chatId).catch((err) => {
-            this.logReactionFailure('late reaction recall', err);
-          });
+    this.enqueueReaction(state, async () => {
+      try {
+        if ((await this.attachReaction(messageId, chatId, EYE_TAG)) === false) {
+          this.forgetReactionState(state);
+          return;
         }
-      })
-      .catch((err) => {
-        this.activeReactionKeys.delete(key);
+        state.eyeAttached = true;
+        this.scheduleReactionDrain(state);
+      } catch (err) {
+        this.forgetReactionState(state);
         this.logReactionFailure('reaction attach', err);
-      });
+      }
+    });
+  }
+
+  private replaceStatusReaction(
+    chatId: string,
+    messageId: string | undefined,
+    tag: DingtalkEmotionTag,
+  ): void {
+    if (!messageId) return;
+    const state = this.reactionStates.get(this.reactionKey(messageId, chatId));
+    if (!state || !this.activeReactionKeys.has(state.key)) return;
+    state.desiredStatusTag = tag;
+    state.revision++;
+    this.scheduleReactionDrain(state);
+  }
+
+  private phaseReactionTag(
+    phase: DingtalkPresentationPhase,
+  ): DingtalkEmotionTag {
+    return statusEmotionTag(
+      presentationPhaseLabel(phase, this.displayLanguage),
+    );
+  }
+
+  private terminalReactionTag(
+    type: 'completed' | 'failed' | 'cancelled',
+  ): DingtalkEmotionTag {
+    if (!isChinesePresentationLanguage(this.displayLanguage)) {
+      return type === 'completed'
+        ? DONE_TAG
+        : type === 'failed'
+          ? FAILED_TAG
+          : STOPPED_TAG;
+    }
+    if (type === 'completed') {
+      return { ...DONE_TAG, name: '✅ 已完成' };
+    }
+    return statusEmotionTag(type === 'failed' ? '❌ 失败' : '⏹️ 已停止');
+  }
+
+  private finishReaction(
+    chatId: string,
+    messageId: string | undefined,
+    sessionId: string | undefined,
+    terminalTag?: DingtalkEmotionTag,
+  ): void {
+    if (!messageId || !this.isStableTargetId(chatId)) return;
+    const key = this.reactionKey(messageId, chatId);
+    const state = this.reactionStates.get(key);
+    if (!state) return;
+    if (state.finishing) {
+      // A finish is either draining or blocked on a failed recall; only the
+      // blocked case needs this trigger to retry the cleanup.
+      if (!state.finishBlocked) return;
+      state.finishBlocked = false;
+      if (terminalTag) state.terminalTag = terminalTag;
+      this.scheduleReactionDrain(state);
+      return;
+    }
+    if (!this.activeReactionKeys.delete(key)) return;
+    state.finishing = true;
+    state.desiredStatusTag = undefined;
+    state.terminalTag = terminalTag;
+    state.revision++;
+    this.scheduleReactionDrain(state);
   }
 
   private stopReaction(
@@ -1080,23 +2437,14 @@ export class DingtalkChannel extends ChannelBase {
     messageId?: string,
     sessionId?: string,
   ): void {
-    if (!messageId || !this.isStableTargetId(chatId)) return;
-    const key = this.reactionKey(messageId, chatId);
-    if (sessionId) {
-      const keys = this.sessionReactionKeys.get(sessionId);
-      if (keys) {
-        keys.delete(key);
-        if (keys.size === 0) this.sessionReactionKeys.delete(sessionId);
-      }
-    }
-    if (!this.activeReactionKeys.delete(key)) return;
-    this.recallReaction(messageId, chatId).catch((err) => {
-      this.logReactionFailure('reaction recall', err);
-    });
+    this.finishReaction(chatId, messageId, sessionId);
   }
 
   /** Recall reactions left behind when a session dies without terminal lifecycle events. */
   override onSessionDied(sessionId: string): void {
+    for (const [runId, state] of this.fileProjectors) {
+      if (state.sessionId === sessionId) this.fileProjectors.delete(runId);
+    }
     const bufferedTargets = this.bufferedMentionTargetsBySession.get(sessionId);
     if (bufferedTargets) {
       this.bufferedMentionTargetsBySession.delete(sessionId);
@@ -1115,15 +2463,32 @@ export class DingtalkChannel extends ChannelBase {
     const keys = this.sessionReactionKeys.get(sessionId);
     if (keys) {
       this.sessionReactionKeys.delete(sessionId);
-      for (const [key, { messageId, chatId }] of keys) {
-        if (this.activeReactionKeys.delete(key)) {
-          void this.recallReaction(messageId, chatId).catch((err) => {
-            this.logReactionFailure('session-death reaction recall', err);
-          });
-        }
+      for (const { messageId, chatId } of keys.values()) {
+        this.finishReaction(chatId, messageId, sessionId);
       }
     }
     super.onSessionDied(sessionId);
+  }
+
+  /**
+   * A crashed standalone bridge never settles its in-flight turns, so their
+   * transient tags and ticking status cards would otherwise assert a live
+   * turn forever. Finish the tags without a terminal result and terminalize
+   * the cards as interrupted. Session state stays: crash recovery restores
+   * the sessions on a fresh bridge.
+   */
+  override onBridgeDisconnected(): void {
+    for (const [sessionId, keys] of this.sessionReactionKeys) {
+      this.sessionReactionKeys.delete(sessionId);
+      for (const { messageId, chatId } of keys.values()) {
+        this.finishReaction(chatId, messageId, sessionId);
+      }
+    }
+    for (const [sessionId, runId] of this.cardRunBySession) {
+      this.cardRunBySession.delete(sessionId);
+      this.interactionPresenter?.terminalizeRun(runId, 'cancelled');
+      this.cardRuns.delete(runId);
+    }
   }
 
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
@@ -1140,21 +2505,44 @@ export class DingtalkChannel extends ChannelBase {
       ) {
         this.cardRuns.set(event.runId, inboundOwner);
         this.cardRunBySession.set(event.sessionId, event.runId);
+        const sourceLabel = this.getResponseSourceLabel(event.sessionId);
         this.interactionPresenter?.registerRun(
           event.runId,
           event.owner.id,
           inboundOwner.target,
           event.sessionId,
           inboundOwner.sender,
+          ...(sourceLabel ? [sourceLabel] : []),
         );
         this.interactionPresenter?.startStatusCard(event.runId);
       }
       return;
     }
+    const presentationPhase = lifecyclePresentationPhase(event);
+    if (event.runId && presentationPhase) {
+      this.interactionPresenter?.updateStatusCardPhase(
+        event.runId,
+        presentationPhase,
+      );
+    }
+    if (presentationPhase) {
+      this.replaceStatusReaction(
+        event.chatId,
+        event.messageId,
+        this.phaseReactionTag(presentationPhase),
+      );
+      return;
+    }
     if (isTerminalTaskLifecycleType(event.type)) {
       if (event.messageId) this.mentionTargets.delete(event.messageId);
-      this.stopReaction(event.chatId, event.messageId, event.sessionId);
+      this.finishReaction(
+        event.chatId,
+        event.messageId,
+        event.sessionId,
+        this.terminalReactionTag(event.type),
+      );
       if (event.runId) {
+        this.deleteFileProjectorsForRun(event.runId);
         if (event.type === 'failed') {
           this.interactionPresenter?.terminalizeRun(
             event.runId,
@@ -1240,34 +2628,36 @@ export class DingtalkChannel extends ChannelBase {
   override async handleInbound(envelope: Envelope): Promise<void> {
     if (!(await this.preflightInbound(envelope))) return;
 
-    const messageId = envelope.messageId;
-    if (messageId && envelope.senderId) {
-      this.inboundCardOwners.delete(messageId);
-      this.inboundCardOwners.set(messageId, {
-        ownerId: envelope.senderId,
-        target: {
-          chatId: envelope.chatId,
-          isGroup: envelope.isGroup,
-        },
-        ...(this.atSender && envelope.isGroup
-          ? {
-              sender: {
-                senderName: envelope.senderName,
-              },
-            }
-          : {}),
-      });
-      if (this.inboundCardOwners.size > 1000) {
-        const oldest = this.inboundCardOwners.keys().next().value;
-        if (oldest !== undefined) this.inboundCardOwners.delete(oldest);
+    await this.processPreflightedInbound(envelope, async () => {
+      const messageId = envelope.messageId;
+      if (messageId && envelope.senderId) {
+        this.inboundCardOwners.delete(messageId);
+        this.inboundCardOwners.set(messageId, {
+          ownerId: envelope.senderId,
+          target: {
+            chatId: envelope.chatId,
+            isGroup: envelope.isGroup,
+          },
+          ...(this.atSender && envelope.isGroup
+            ? {
+                sender: {
+                  senderName: envelope.senderName,
+                },
+              }
+            : {}),
+        });
+        if (this.inboundCardOwners.size > 1000) {
+          const oldest = this.inboundCardOwners.keys().next().value;
+          if (oldest !== undefined) this.inboundCardOwners.delete(oldest);
+        }
       }
-    }
-    const atUserId = (envelope as MentionTargetEnvelope)[mentionTarget];
-    if (this.atSender && messageId && atUserId) {
-      this.mentionTargets.set(messageId, atUserId);
-    }
+      const atUserId = (envelope as MentionTargetEnvelope)[mentionTarget];
+      if (this.atSender && messageId && atUserId) {
+        this.mentionTargets.set(messageId, atUserId);
+      }
 
-    await this.processInbound(envelope);
+      await this.processInbound(envelope);
+    });
   }
 
   protected override async processInbound(envelope: Envelope): Promise<void> {
@@ -1301,29 +2691,71 @@ export class DingtalkChannel extends ChannelBase {
     this.stopReaction(chatId, messageId, sessionId);
   }
 
+  override async dispatchBackgroundResponse(
+    sessionId: string,
+    text: string,
+    context?: BackgroundResponseContext,
+  ): Promise<void> {
+    const target = this.router.getTarget(sessionId);
+    if (
+      !target ||
+      target.channelName !== this.name ||
+      (context !== undefined && context.kind !== 'agent') ||
+      !text.trim()
+    ) {
+      return super.dispatchBackgroundResponse(sessionId, text, context);
+    }
+    return super.dispatchBackgroundResponse(
+      sessionId,
+      this.formatBackgroundAgentResponse(text, context?.label),
+      context,
+    );
+  }
+
+  private formatBackgroundAgentResponse(text: string, label?: string): string {
+    return `## 🤖 Agent · ${this.formatBackgroundAgentLabel(label)}\n\n${text}`;
+  }
+
+  private formatBackgroundAgentLabel(label?: string): string {
+    const normalized = label
+      ?.replace(/\p{Cc}+/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return escapeDingTalkMarkdown(normalized || '后台任务');
+  }
+
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
+    prepared = false,
   ): Promise<void> {
     const atUserId = this.atSender
       ? this.sessionMentionTargets.get(sessionId)
       : undefined;
     if (atUserId) this.sessionMentionTargets.delete(sessionId);
-    await this.sendReply(chatId, text, atUserId);
+    await this.sendReply(
+      chatId,
+      text,
+      atUserId,
+      sourceLabel ?? this.getResponseSourceLabel(sessionId),
+      prepared,
+    );
   }
 
   private async sendFallbackReply(
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     // Mid-run fallbacks must not consume the prompt's mention target: the
     // final answer of the same run still needs it.
     const atUserId = this.atSender
       ? this.sessionMentionTargets.get(sessionId)
       : undefined;
-    await this.sendReply(chatId, text, atUserId);
+    await this.sendReply(chatId, text, atUserId, sourceLabel);
   }
 
   protected override async onResponseComplete(
@@ -1332,8 +2764,12 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
+    const streamed = segment
+      ? this.fileProjectors.get(segment.runId)?.projector
+      : undefined;
+    if (segment) this.fileProjectors.delete(segment.runId);
+    const outgoingText = await this.prepareReplyOutput(chatId, text, streamed);
     if (segment && this.interactionPresenter) {
-      const outgoingText = await this.prepareOutgoingText(text);
       if (
         await this.interactionPresenter.closeOutput(
           segment.segmentId,
@@ -1345,7 +2781,13 @@ export class DingtalkChannel extends ChannelBase {
         return;
       }
     }
-    await this.sendResponseMessage(chatId, text, sessionId);
+    await this.sendResponseMessage(
+      chatId,
+      outgoingText,
+      sessionId,
+      segment?.sourceLabel,
+      true,
+    );
   }
 
   protected override onOutputSegmentEnd(
@@ -1354,6 +2796,13 @@ export class DingtalkChannel extends ChannelBase {
     segment: ChannelOutputSegmentContext,
     reason: ChannelOutputSegmentEndReason,
   ): void | Promise<void> {
+    if (
+      reason === 'completed' ||
+      reason === 'failed' ||
+      reason === 'cancelled'
+    ) {
+      this.fileProjectors.delete(segment.runId);
+    }
     if (!this.interactionPresenter) return;
     return this.interactionPresenter
       .closeOutput(segment.segmentId, '', reason, segment)
@@ -1366,7 +2815,21 @@ export class DingtalkChannel extends ChannelBase {
     _sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): void {
-    if (segment) this.interactionPresenter?.appendOutput(segment, chunk);
+    if (!segment) return;
+    let state = this.fileProjectors.get(segment.runId);
+    if (!state) {
+      state = {
+        sessionId: segment.sessionId,
+        projector: new OutboundFileProjector(),
+      };
+      this.fileProjectors.set(segment.runId, state);
+    }
+    const safe = state.projector.append(chunk);
+    if (safe) this.interactionPresenter?.appendOutput(segment, safe);
+  }
+
+  private deleteFileProjectorsForRun(runId: string): void {
+    this.fileProjectors.delete(runId);
   }
 
   protected override async presentUserInputRequest(
@@ -1380,6 +2843,19 @@ export class DingtalkChannel extends ChannelBase {
       return { kind: 'unsupported' };
     }
     return this.interactionPresenter.presentInput(context);
+  }
+
+  protected override async presentPermissionRequest(
+    context: ChannelPermissionRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    const run = this.cardRuns.get(context.runId);
+    if (!run || run.ownerId !== context.owner.id) {
+      return { kind: 'unsupported' };
+    }
+    if (!this.permissionCardController || !this.interactionPresenter) {
+      return { kind: 'unsupported' };
+    }
+    return this.interactionPresenter.presentPermission(context);
   }
 
   /**
@@ -1434,8 +2910,40 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   /**
-   * Build a text summary from a repliedMsg, handling text, richText, and
-   * media message types with placeholders.
+   * Warn once when a chat-record payload yields nothing to show the model.
+   * Both chat-record paths degrade silently otherwise — `parseJsonArray`
+   * swallows JSON errors, the top-level path falls back to `(chat record)`
+   * and the replied path to an empty quote — matching this file's convention
+   * of logging degraded paths (`onDownStream`, `onMessage`).
+   */
+  private warnEmptyChatRecord(content?: DingTalkMessageContent): void {
+    process.stderr.write(
+      `[DingTalk:${this.name}] chat record had no readable content ` +
+        `(content keys: ${sanitizeLogText(describeChatRecordKeys(content), 200)})\n`,
+    );
+  }
+
+  /**
+   * The partial degradation the empty-record warning cannot see: a title or
+   * summary rendered, so the result is non-empty, but the entries key that
+   * arrived produced no lines at all (an object encoding such as
+   * `{"list":[...]}`, a non-array, or a present-but-unusable first alias).
+   * Every forwarded message is dropped and the user reports only that "the bot
+   * cannot see forwarded messages"; without this line nothing in the log
+   * distinguishes that from model behaviour.
+   */
+  private warnUnreadableChatRecordEntries(
+    content?: DingTalkMessageContent,
+  ): void {
+    process.stderr.write(
+      `[DingTalk:${this.name}] chat record summary rendered but no readable entries ` +
+        `(content keys: ${sanitizeLogText(describeChatRecordKeys(content), 200)})\n`,
+    );
+  }
+
+  /**
+   * Build a text summary from a repliedMsg, handling text, richText, chat
+   * records, and media message types with placeholders.
    */
   private summarizeRepliedContent(replied: DingTalkRepliedMsg): string {
     const msgType = replied.msgType;
@@ -1463,21 +2971,24 @@ export class DingtalkChannel extends ChannelBase {
       if (summary) return summary;
     }
 
-    // Media type placeholders
-    switch (msgType) {
-      case 'picture':
-        return '[image]';
-      case 'file':
-        return `[file: ${content?.fileName || 'file'}]`;
-      case 'audio':
-        return '[audio]';
-      case 'video':
-        return '[video]';
-      default:
-        break;
+    if (msgType === 'chatRecord') {
+      // The quote budget, not the record budget: this text becomes
+      // `envelope.referencedText`, which `ChannelBase` renders through
+      // `sanitizeQuotedText(..., 500)`. Rendered to 4000 the quote arrives cut
+      // at 500 with a bare `…` — announcement and all — so the model is told
+      // nothing about what it is missing.
+      const { text, entriesDropped } = formatChatRecord(
+        content,
+        MAX_QUOTED_CHAT_RECORD_CHARS,
+      );
+      if (!text) this.warnEmptyChatRecord(content);
+      else if (entriesDropped) this.warnUnreadableChatRecordEntries(content);
+      return text;
     }
 
-    return '';
+    // Media type placeholders. Shared with the chat-record entry formatter so
+    // the same message type is never described two ways to the model.
+    return mediaTypePlaceholder(msgType, content?.fileName) ?? '';
   }
 
   /**
@@ -1497,7 +3008,8 @@ export class DingtalkChannel extends ChannelBase {
 
   /**
    * Extract text and media download codes from an incoming DingTalk message.
-   * Handles text, richText, picture, file, audio, and video message types.
+   * Handles text, richText, chat records, picture, file, audio, and video
+   * message types.
    */
   private extractContent(data: DingTalkMessageData): {
     text: string;
@@ -1505,13 +3017,14 @@ export class DingtalkChannel extends ChannelBase {
     mediaType?: 'image' | 'file' | 'audio' | 'video';
     fileName?: string;
     placeholder?: string;
+    syntheticText: boolean;
   } {
     const msgtype = data.msgtype || 'text';
 
     if (msgtype === 'richText') {
       const richText = data.content?.richText;
       if (!Array.isArray(richText)) {
-        return { text: '', downloadCodes: [] };
+        return { text: '', downloadCodes: [], syntheticText: false };
       }
       let text = '';
       const codes: string[] = [];
@@ -1527,6 +3040,7 @@ export class DingtalkChannel extends ChannelBase {
         text: text.trim() || (codes.length > 0 ? '(image)' : ''),
         downloadCodes: codes,
         mediaType: codes.length > 0 ? 'image' : undefined,
+        syntheticText: text.trim().length === 0 && codes.length > 0,
       };
     }
 
@@ -1536,6 +3050,7 @@ export class DingtalkChannel extends ChannelBase {
         text: '(image)',
         downloadCodes: code ? [code] : [],
         mediaType: this.mediaTypeFromMsgType(msgtype),
+        syntheticText: Boolean(code),
       };
     }
 
@@ -1549,17 +3064,23 @@ export class DingtalkChannel extends ChannelBase {
         mediaType: this.mediaTypeFromMsgType(msgtype),
         fileName,
         placeholder,
+        syntheticText: Boolean(code),
       };
     }
 
     if (msgtype === 'audio') {
       const code = data.content?.downloadCode;
       const recognition = data.content?.recognition;
+      // A transcript is the user's own words, so it stays gated on the
+      // configured prefix -- the same call WeCom makes for its voice
+      // branch. An untranscribed note carries only the `(audio)`
+      // placeholder and runs as synthetic media instead.
       return {
         text: recognition || '(audio)',
         downloadCodes: code ? [code] : [],
         mediaType: this.mediaTypeFromMsgType(msgtype),
         placeholder: recognition ? undefined : '(audio)',
+        syntheticText: !recognition && Boolean(code),
       };
     }
 
@@ -1570,11 +3091,28 @@ export class DingtalkChannel extends ChannelBase {
         downloadCodes: code ? [code] : [],
         mediaType: this.mediaTypeFromMsgType(msgtype),
         placeholder: '(video)',
+        syntheticText: Boolean(code),
+      };
+    }
+
+    if (msgtype === 'chatRecord') {
+      const { text, entriesDropped } = formatChatRecord(data.content);
+      if (!text) this.warnEmptyChatRecord(data.content);
+      else if (entriesDropped)
+        this.warnUnreadableChatRecordEntries(data.content);
+      return {
+        text: text || '(chat record)',
+        downloadCodes: [],
+        syntheticText: !text,
       };
     }
 
     // Default: text message
-    return { text: data.text?.content?.trim() || '', downloadCodes: [] };
+    return {
+      text: data.text?.content?.trim() || '',
+      downloadCodes: [],
+      syntheticText: false,
+    };
   }
 
   /**
@@ -1615,16 +3153,7 @@ export class DingtalkChannel extends ChannelBase {
     const media = await downloadMedia(downloadCode, robotCode, token);
     if (!media) return;
 
-    // ChannelBase fills a single imageBase64 slot from the FIRST data-only
-    // image attachment and silently drops every later one, so an image
-    // arriving after the slot is taken (e.g. a quoted picture alongside the
-    // message's own picture) falls through to the file-backed path — the
-    // `saved to:` prompt line is what keeps it reachable for the agent.
-    const inlineImageSlotFree = !(envelope.attachments || []).some(
-      (attachment) => attachment.type === 'image' && attachment.data,
-    );
-
-    if (mediaType === 'image' && inlineImageSlotFree) {
+    if (mediaType === 'image') {
       const mimeType = media.mimeType.startsWith('image/')
         ? media.mimeType
         : 'image/jpeg';
@@ -1824,6 +3353,7 @@ export class DingtalkChannel extends ChannelBase {
           ? { chatName: conversationTitle }
           : {}),
         text: messageText,
+        ...(content.syntheticText ? { syntheticText: true as const } : {}),
         ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
         isGroup,
         isMentioned,
@@ -1839,37 +3369,58 @@ export class DingtalkChannel extends ChannelBase {
         (envelope as MentionTargetEnvelope)[mentionTarget] = senderStaffId;
       }
 
-      const processMessage = async () => {
-        // Download media if present (first downloadCode only for images)
-        if (content.downloadCodes.length > 0 && content.mediaType) {
-          await this.attachMedia(
-            envelope,
-            content.downloadCodes[0]!,
-            content.mediaType,
-            content.fileName,
-            content.placeholder,
-          );
+      const processMessage =
+        content.downloadCodes.length > 0 || quoted.media
+          ? this.prepareThenHandleInbound(envelope, async () => {
+              // Download media in callback order.
+              if (content.downloadCodes.length > 0 && content.mediaType) {
+                for (const downloadCode of content.downloadCodes) {
+                  await this.attachMedia(
+                    envelope,
+                    downloadCode,
+                    content.mediaType,
+                    content.fileName,
+                    content.placeholder,
+                  );
+                }
+              }
+              if (quoted.media) {
+                await this.attachMedia(
+                  envelope,
+                  quoted.media.downloadCode,
+                  quoted.media.mediaType,
+                  quoted.media.fileName,
+                );
+              }
+            })
+          : this.handleInbound(envelope);
+      processMessage.catch((err) => {
+        // Don't await — stream callback should return quickly
+        const reference = randomUUID().slice(0, 8);
+        let errorSummary = 'Unknown error';
+        try {
+          errorSummary =
+            err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+        } catch {
+          // The user-facing fallback below must survive arbitrary rejections.
         }
-        if (quoted.media) {
-          await this.attachMedia(
-            envelope,
-            quoted.media.downloadCode,
-            quoted.media.mediaType,
-            quoted.media.fileName,
-          );
-        }
-        await this.handleInbound(envelope);
-      };
-
-      // Don't await — stream callback should return quickly
-      processMessage().catch((err) => {
         process.stderr.write(
-          `[DingTalk:${this.name}] Error handling message: ${err}\n`,
+          `[DingTalk:${this.name}] Error handling message ref=${reference}: ${sanitizeLogText(
+            errorSummary,
+            300,
+          )}\n`,
         );
-        this.sendMessage(
-          chatId,
-          'Sorry, something went wrong processing your message.',
-        ).catch(() => {});
+        const fallbackMessage = formatInboundErrorMessage(err, reference);
+        const sourceLabel = this.getInboundErrorSourceLabel(envelope);
+        const delivery = sourceLabel
+          ? this.sendThreadMessage(
+              chatId,
+              envelope.threadId,
+              fallbackMessage,
+              sourceLabel,
+            )
+          : this.sendMessage(chatId, fallbackMessage);
+        delivery.catch(() => {});
       });
     } catch (err) {
       process.stderr.write(

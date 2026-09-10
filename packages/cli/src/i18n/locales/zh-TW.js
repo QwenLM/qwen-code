@@ -179,10 +179,13 @@ export default {
   'toolDisplayName.TodoList': '任務清單',
   'toolDisplayName.Goal': '目標',
   'toolDisplayName.UpdateGoal': '更新目標',
+  'toolDisplayName.ProposeGoal': '提議目標',
   'toolDisplayName.SaveMemory': '儲存記憶',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '製品',
   'toolDisplayName.RecordArtifact': '記錄製品',
+  'toolDisplayName.RecordSource': '記錄來源',
+  'toolDisplayName.ReportFindings': '上報評審發現',
   'toolDisplayName.DisplayImage': '顯示圖片',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '進入計畫模式',
@@ -206,6 +209,7 @@ export default {
   'toolDisplayName.TeamDelete': '刪除團隊',
   'toolDisplayName.TeamPlanApproval': '團隊計畫審批',
   'toolDisplayName.SendMessage': '傳送訊息',
+  'toolDisplayName.RequestShutdown': '請求下線',
   'toolDisplayName.StructuredOutput': '結構化輸出',
   'toolDisplayName.Monitor': '監控',
   'toolDisplayName.NotebookEdit': '編輯 Notebook',
@@ -692,6 +696,7 @@ export default {
   'Hide Window Title': '隱藏窗口標題',
   'Show Status in Title': '在標題中顯示狀態',
   'Hide Tips': '隱藏提示',
+  'Show Tool Call Arguments': '顯示工具呼叫參數',
   'Show Line Numbers in Code': '在代碼中顯示行號',
   'Show Citations': '顯示引用',
   'Custom Witty Phrases': '自定義詼諧短語',
@@ -1059,8 +1064,8 @@ export default {
     '命令輸入為包含 tool_name、tool_input、tool_use_id、error、error_type、is_interrupt 和 is_timeout 的 JSON。',
   'Input to command is JSON with notification message and type.':
     '命令輸入為包含通知消息和類型的 JSON。',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    '命令輸入為 JSON，其中包含 "prompt"（目前模型側提示）以及選用的 "submitted_prompt"（受支援互動式 TUI 的提交文字投影）。',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    '命令輸入為 JSON，其中包含 "prompt"（目前模型側提示）以及選用的 "submitted_prompt"（在受支援的提交邊界擷取的文字投影）。',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     '命令輸入為包含 command_name、command_args 和展開後提示文本的 JSON。',
   'Input to command is JSON with session start source.':
@@ -1422,6 +1427,12 @@ export default {
     '聊天歷史壓縮未能減小大小。這可能表明壓縮提示存在問題。',
   'Could not compress chat history due to a token counting error.':
     '由於 token 計數錯誤，無法壓縮聊天歷史。',
+  'Could not compress chat history because the compression summary was empty.':
+    '由於壓縮摘要為空，無法壓縮聊天歷史。',
+  'Could not compress chat history because the compression summary was truncated.':
+    '由於壓縮摘要被截斷，無法壓縮聊天歷史。',
+  'Could not compress chat history due to an API error.':
+    '由於 API 錯誤，無法壓縮聊天歷史。',
   'Configuration is not available.': '配置不可用。',
   'Please provide at least one path to add.': '請提供至少一個要添加的路徑。',
   'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.':
@@ -2018,6 +2029,10 @@ export default {
   'Switch to plan mode or exit plan mode': '切換到計劃模式或退出計劃模式',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
     '設定具備推理能力的模型思考的強度（{{tiers}}）；依各供應商進行映射與鉗制。',
+  'Choose the output style that shapes how responses are written ({{styles}}, or a custom style name).':
+    '選擇用於塑造回答表達方式的輸出風格（{{styles}}，或自訂風格名稱）。',
+  'It is saved but does not apply while this workspace is untrusted.':
+    '已儲存，但此工作區不受信任時不會生效。',
   'Set a goal — keep working until the condition is met':
     '設定目標 — 持續工作直到條件滿足',
   'Set or control a session goal': '設定或控制工作階段目標',
@@ -2128,6 +2143,7 @@ export default {
   'rejected — edit config to re-approve': '已拒絕 — 編輯設定以重新審批',
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',
+  'from nested agent': '來自嵌套 agent',
   Running: '執行中',
   Pausing: '暫停中',
   Paused: '已暫停',
@@ -2419,4 +2435,6 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '只有受信任的工作區可以變更自動技能管理器。請透過 `/trust` 信任此資料夾後再試一次。',
   'Kept model as {{model}}': '模型保持為 {{model}}',
+  'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
+    '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny），並管理受信任控制器（controllers | revoke）',
 };

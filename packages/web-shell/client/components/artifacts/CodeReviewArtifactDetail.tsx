@@ -10,10 +10,10 @@ import styles from './CodeReviewArtifactDetail.module.css';
 import type { ArtifactWorkspaceActions } from './useArtifactWorkspaceTarget';
 
 // Hand-duplicated from the CLI's canonical lists in
-// packages/cli/src/utils/findings.ts. The parser below fails closed
+// packages/cli/src/commands/review/findings.ts. The parser below fails closed
 // on any value missing here, so when the CLI adds one, update this copy and
 // the contract fixture (__fixtures__/code-review-artifact-v1.json) with it.
-// The CLI-side vocabulary snapshot (packages/cli/src/utils/findings.test.ts)
+// The CLI-side vocabulary snapshot (packages/cli/src/commands/review/findings.test.ts)
 // turns red on that change and names this file.
 const SEVERITIES = ['Critical', 'Suggestion', 'Nice to have'] as const;
 const CONFIDENCES = ['high', 'low'] as const;

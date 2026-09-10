@@ -23,6 +23,7 @@ import { ChannelDeliveryError } from '../runtime/channel-delivery-ipc.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
+import { assertChannelControlWorkspaceCapacity } from './channel-control-capacity.js';
 
 /** A channel worker snapshot annotated with its owning workspace. */
 export interface ChannelWorkerGroupSnapshot extends ChannelWorkerSnapshot {
@@ -88,7 +89,10 @@ export interface ChannelWorkerGroup {
   beginWorkspaceDrain(workspaceCwd: string): void;
   cancelWorkspaceDrain(workspaceCwd: string): void;
   workspaceActivity(workspaceCwd: string): number;
-  removeWorkspace(workspaceCwd: string): Promise<void>;
+  removeWorkspace(
+    workspaceCwd: string,
+    options?: { permanent?: boolean },
+  ): Promise<void>;
   restoreWorkspace(workspaceCwd: string): Promise<void>;
   deliverChannelMessage(
     request: Parameters<
@@ -103,6 +107,7 @@ export interface ChannelWorkerGroupSharedOptions {
   cliEntryPath: string;
   daemonUrl: string;
   daemonToken?: string;
+  workerTlsCaCertPath?: string;
   restartPolicy?: ChannelWorkerRestartPolicy;
   startupTimeoutMs?: number;
   heartbeatTimeoutMs?: number;
@@ -169,6 +174,9 @@ function startupFailureDetails(error: unknown): {
 export function createChannelWorkerGroup(
   opts: CreateChannelWorkerGroupOptions,
 ): ChannelWorkerGroup {
+  assertChannelControlWorkspaceCapacity(
+    opts.groups.map((group) => group.workspaceCwd),
+  );
   let generation = 0;
   let entries = new Map<string, ChannelWorkerGroupEntry>();
   const groupsByWorkspace = new Map(
@@ -230,6 +238,9 @@ export function createChannelWorkerGroup(
       daemonUrl: opts.shared.daemonUrl,
       ...(opts.shared.daemonToken
         ? { daemonToken: opts.shared.daemonToken }
+        : {}),
+      ...(opts.shared.workerTlsCaCertPath
+        ? { tlsCaCertPath: opts.shared.workerTlsCaCertPath }
         : {}),
       workspace: runtime.workspaceCwd,
       selection: group.selection,
@@ -574,6 +585,13 @@ export function createChannelWorkerGroup(
             }
           }
         }
+        // Failed rollback can retain both the previous and candidate owners.
+        assertChannelControlWorkspaceCapacity([
+          ...entries.keys(),
+          ...groupsByWorkspace.keys(),
+          ...Array.from(pendingEntries, (entry) => entry.workspaceCwd),
+          ...targets.keys(),
+        ]);
         const unchanged = new Map<string, ChannelWorkerGroupEntry>();
         const oldAffected: ChannelWorkerGroupEntry[] = [];
         const newEntries: ChannelWorkerGroupEntry[] = [];
@@ -748,9 +766,13 @@ export function createChannelWorkerGroup(
         ? 1
         : 0;
     },
-    removeWorkspace(workspaceCwd) {
+    removeWorkspace(workspaceCwd, options) {
       const existing = removalPromises.get(workspaceCwd);
-      if (existing) return existing;
+      if (existing) {
+        return options?.permanent
+          ? existing.finally(() => groupsByWorkspace.delete(workspaceCwd))
+          : existing;
+      }
       drainingWorkspaces.add(workspaceCwd);
       const removal = (async () => {
         try {
@@ -772,6 +794,7 @@ export function createChannelWorkerGroup(
           if (killError) throw killError;
         } finally {
           drainingWorkspaces.delete(workspaceCwd);
+          if (options?.permanent) groupsByWorkspace.delete(workspaceCwd);
         }
       })();
       removalPromises.set(workspaceCwd, removal);
@@ -793,6 +816,12 @@ export function createChannelWorkerGroup(
       if (entries.has(workspaceCwd)) return;
       const target = groupsByWorkspace.get(workspaceCwd);
       if (!target) return;
+      assertChannelControlWorkspaceCapacity([
+        ...entries.keys(),
+        ...groupsByWorkspace.keys(),
+        ...Array.from(pendingEntries, (entry) => entry.workspaceCwd),
+        target.workspaceCwd,
+      ]);
       const entry = createEntry(target);
       entries.set(workspaceCwd, entry);
       if (!groupStarted || stopping) {

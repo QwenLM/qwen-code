@@ -91,6 +91,7 @@ export class HistoryReplayer {
       initialGoalCause?: GoalStateCause;
       goalBootstrap?: HistoryReplayGoalBootstrap;
       skipFinalizeCallIds?: ReadonlySet<string>;
+      finalizeDangling?: boolean;
     } = {},
   ): Promise<void> {
     try {
@@ -108,7 +109,7 @@ export class HistoryReplayer {
         await this.sendUpdate(update);
       }
       await this.replayPage(records, {
-        finalizeDangling: true,
+        finalizeDangling: options.finalizeDangling ?? true,
         gaps,
         ...(options.skipFinalizeCallIds
           ? { skipFinalizeCallIds: options.skipFinalizeCallIds }

@@ -228,3 +228,57 @@ describe('QwenAgentManager.getSessionMessages', () => {
     }
   });
 });
+
+describe('QwenAgentManager session-update transcript forwarding', () => {
+  function fireSessionUpdate(
+    manager: QwenAgentManager,
+    notification: Record<string, unknown>,
+  ): void {
+    const connection = (
+      manager as unknown as {
+        connection: { onSessionUpdate?: (data: never) => void };
+      }
+    ).connection;
+    connection.onSessionUpdate?.(notification as never);
+  }
+
+  it('forwards live session updates verbatim to onTranscriptUpdate', () => {
+    const manager = new QwenAgentManager();
+    const onTranscriptUpdate = vi.fn();
+    manager.onTranscriptUpdate(onTranscriptUpdate);
+
+    const notification = {
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'live chunk' },
+      },
+    };
+    fireSessionUpdate(manager, notification);
+
+    expect(onTranscriptUpdate).toHaveBeenCalledWith(notification);
+  });
+
+  it('forwards rehydrating session updates verbatim to onTranscriptUpdate', () => {
+    const manager = new QwenAgentManager();
+    const onTranscriptUpdate = vi.fn();
+    manager.onTranscriptUpdate(onTranscriptUpdate);
+    (
+      manager as unknown as { rehydratingSessionId: string | null }
+    ).rehydratingSessionId = 'session-1';
+
+    const notification = {
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'rehydrated chunk' },
+      },
+    };
+    fireSessionUpdate(manager, notification);
+
+    // Rehydration additionally maps chunks onto discrete onMessage calls,
+    // but the raw notification must still reach the transcript feed
+    // unchanged so the WebShell timeline sees history replay frames.
+    expect(onTranscriptUpdate).toHaveBeenCalledWith(notification);
+  });
+});

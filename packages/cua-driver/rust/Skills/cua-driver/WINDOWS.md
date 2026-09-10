@@ -412,15 +412,18 @@ When a qwen-cua-driver call surprises you, diagnose qwen-cua-driver first:
   `capture_mode` param is **deprecated and ignored** — it's still accepted
   so old callers don't error, but both the tree and the image come back
   regardless of what you pass.
-- **`get_desktop_state` returns `desktop_scope_disabled`?** That's
-  intended: full-display capture is a **desktop-scope** operation, gated
-  by the caller-declared session policy. To verify a specific window use
-  `get_window_state(pid, window_id)` (works backgrounded). Use
-  `get_desktop_state` only in a strict desktop session or after explicitly
-  escalating an `auto` session once the window ladder is exhausted. Desktop
-  actions pass `scope:"desktop"` with no pid/window_id. Don't reach for
-  `get_desktop_state` as a casual screenshot — it's the capture surface for
-  desktop-scope coordinate loops, not window inspection.
+- **`list_windows` returns Win32 windows but misses UWP / WebView2
+  windows?** UIA desktop enumeration may be degraded because a provider
+  is unresponsive. `list_windows` falls back to Win32-only output instead
+  of hanging; run `cua-driver doctor` and retry after the provider
+  recovers.
+- **Need full-display capture?** Use `get_desktop_state` only for a desktop
+  coordinate loop. To verify a specific window, use
+  `get_window_state(pid, window_id)` instead; it works while backgrounded.
+  Desktop actions use
+  `target:{"kind":"desktop","display_id":"primary"}`. Don't reach for
+  `get_desktop_state` as a casual screenshot—it is the desktop capture
+  surface, not window inspection.
 - **`Calc display stuck at 0 after my clicks`?** Almost always
   means UWP and you're on the PostMessage path. UWP processes
   pointer input via `Windows.UI.Input`, NOT through HWND message
@@ -482,8 +485,9 @@ your prior tool calls earned.
    schtasks /Run /TN qwen-cua-driver-serve
    ```
 3. **Run `qwen-cua-driver doctor`** — reports session ID, COM apartment
-   status, UIA reachability, install paths, version. If anything reads
-   `false` / `error`, fix that before tool-calling.
+   status, UIA desktop-enumeration reachability, install paths,
+   version. If anything reads `false` / `error`, fix that before
+   tool-calling.
 4. **Permissions** — Windows has no TCC equivalent. cua-driver-rs
    needs:
    - No admin elevation for normal use (UIA, PostMessage, UWP
@@ -781,21 +785,26 @@ typed browser tools yet.
   - **`hotkey` / `press_key`** (keystroke + key-combo): `delivery_mode:"background"`
     surfaces a `background_unavailable` error for VCL.
   - **`type_text`** does a **UIA read-back** and returns the shared
-    `ActionResult`: `effect:"confirmed"` with `evidence:[{"kind":
-    "value_readback"}]` when the value reflects the text, and
-    `effect:"unverifiable"` when the value is unchanged or unreadable. Use the
-    optional `escalation` to choose the next rung. **Pass an
-    `element_index`** for reliable verification: the read-back then reads
-    _that specific element_ by handle (ValuePattern → TextPattern), which is
-    **focus-independent** — it can confirm or disprove a change whether or not
-    the target is foreground. (Verified live against the WPF harness: typed
-    via element_index, read back confirmed, value independently present in
-    the next snapshot — app never fronted.) **Without** an element_index it
-    falls back to system-wide `GetFocusedElement`, which on Windows only
-    resolves when the target is the **foreground** app (no per-app
-    `AXFocusedUIElement` like macOS); a backgrounded target then reads
-    an unverifiable result even when the text actually landed — so it is NOT a
-    failure signal; call `verify_state` or inspect a fresh screenshot.
+    `ActionResult`. With an `element_index`, the ValuePattern path returns
+    `effect:"confirmed"` with `evidence:[{"kind":"value_readback"}]` only
+    when the complete expected value is synchronously visible and differs from
+    the prior value. If SetValue succeeded but the provider still exposes the
+    old or no value, the result is `effect:"unverifiable"` with no escalation.
+    This is common for deferred providers such as AccessKit: take a fresh
+    snapshot before retrying because the value may publish only after
+    `type_text` returns and an immediate retry can duplicate text. A pixel
+    escalation is reserved for an Electron/web accessibility echo that does
+    not prove the renderer observed the write. The PostMessage fallback keeps
+    its separate delivery/read-back behavior. Even when the value changes and
+    contains the requested text, the result stays `effect:"unverifiable"` because
+    WM_CHAR does not expose the insertion point. Take a fresh snapshot before
+    retrying. It may recommend foreground when a background insert appears
+    dropped. Passing an `element_index` makes the
+    read-back target that exact element by handle (ValuePattern → TextPattern),
+    independent of foreground focus. Without one, PostMessage verification
+    falls back to system-wide `GetFocusedElement`, which normally resolves only
+    for the foreground app; an unreadable result is therefore not proof of
+    failure.
     Escalate to `delivery_mode:"foreground"` for both (SendInput Unicode /
     accelerator). **But** foreground needs the swap to actually land — if the
     daemon lacks UIAccess and `bring_to_front` returns `landed_on_target:false`
@@ -828,7 +837,7 @@ typed browser tools yet.
 - Daemon version and install paths
 - Current session ID (must be ≥1)
 - COM apartment status (STA / MTA / uninitialized)
-- UIA reachability (can we connect to `CUIAutomation`?)
+- UIA reachability (can we create `CUIAutomation` and enumerate desktop children?)
 - AppX broker reachability (for packaged-app activation)
 - PATH state (is `qwen-cua-driver` actually on PATH?)
 - Autostart Scheduled Task status

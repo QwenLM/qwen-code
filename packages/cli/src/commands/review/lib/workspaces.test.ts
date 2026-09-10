@@ -35,7 +35,7 @@ const GLOBS = [
   'packages/channels/base',
   'packages/channels/telegram',
   'packages/channels/qqbot',
-  '!packages/desktop',
+  '!packages/desktop-shell',
 ];
 
 describe('workspaceDirFor', () => {
@@ -54,37 +54,48 @@ describe('workspaceDirFor', () => {
     );
   });
 
-  it('honours a negation, so a separate bun workspace is not a member', () => {
-    // packages/desktop has its own lockfile and is not part of this npm workspace.
+  it('honours a negation, so a separate toolchain is not a member', () => {
+    // packages/desktop-shell has its own lockfile and is not part of this npm workspace.
     // Building it from the root fails.
     expect(
-      workspaceDirFor('packages/desktop/apps/electron/src/main.ts', GLOBS),
+      workspaceDirFor(
+        'packages/desktop-shell/apps/electron/src/main.ts',
+        GLOBS,
+      ),
     ).toBeNull();
-    expect(isWorkspaceMember('packages/desktop/src/a.test.ts', GLOBS)).toBe(
-      false,
-    );
+    expect(
+      isWorkspaceMember('packages/desktop-shell/src/a.test.ts', GLOBS),
+    ).toBe(false);
   });
 
   it('re-includes what a negation excluded when a later glob matches again', () => {
     // npm's own rule: last match wins, whichever direction it points.
-    const globs = ['packages/*', '!packages/desktop', 'packages/desktop'];
-    expect(workspaceDirFor('packages/desktop/src/a.ts', globs)).toBe(
-      'packages/desktop',
+    const globs = [
+      'packages/*',
+      '!packages/desktop-shell',
+      'packages/desktop-shell',
+    ];
+    expect(workspaceDirFor('packages/desktop-shell/src/a.ts', globs)).toBe(
+      'packages/desktop-shell',
     );
   });
 
   it('falls back to the surviving OUTER member when a negation excludes a nested one', () => {
-    // npm keeps packages/desktop in the graph — only src is excluded — and
+    // npm keeps packages/desktop-shell in the graph — only src is excluded — and
     // desktop's test runner collects src/**, so the file is felt by the outer
     // member's suite. Declaring it felt by NOTHING would certify "a complete
     // answer" over a suite that can fail.
-    const globs = ['packages/*', 'packages/desktop/*', '!packages/desktop/src'];
-    expect(workspaceDirFor('packages/desktop/src/x.test.ts', globs)).toBe(
-      'packages/desktop',
+    const globs = [
+      'packages/*',
+      'packages/desktop-shell/*',
+      '!packages/desktop-shell/src',
+    ];
+    expect(workspaceDirFor('packages/desktop-shell/src/x.test.ts', globs)).toBe(
+      'packages/desktop-shell',
     );
-    expect(isNegationExcluded('packages/desktop/src/x.test.ts', globs)).toBe(
-      false,
-    );
+    expect(
+      isNegationExcluded('packages/desktop-shell/src/x.test.ts', globs),
+    ).toBe(false);
   });
 
   it('treats a ./-prefixed glob like its bare form', () => {
@@ -201,9 +212,9 @@ describe('readRootPackage', () => {
 
 describe('isNegationExcluded', () => {
   it('is true when a positive glob claims the file but a negation excludes it', () => {
-    expect(isNegationExcluded('packages/desktop/src/main.rs', GLOBS)).toBe(
-      true,
-    );
+    expect(
+      isNegationExcluded('packages/desktop-shell/src/main.rs', GLOBS),
+    ).toBe(true);
   });
 
   it('is false for a file inside an included workspace', () => {
@@ -216,21 +227,27 @@ describe('isNegationExcluded', () => {
   });
 
   it('is false when a later glob re-includes what the negation excluded', () => {
-    const globs = ['packages/*', '!packages/desktop', 'packages/desktop'];
-    expect(isNegationExcluded('packages/desktop/src/a.ts', globs)).toBe(false);
-  });
-
-  it('keeps a member owned under a partial negation (`!packages/desktop/*`)', () => {
-    // npm keeps packages/desktop itself a member — a glob with a subpath
-    // cannot match the dir itself — so a file under it is still owned and its
-    // suite can feel a change there; it is NOT negation-excluded.
-    const globs = ['packages/*', '!packages/desktop/*'];
-    expect(workspaceDirFor('packages/desktop/src/main.ts', globs)).toBe(
-      'packages/desktop',
-    );
-    expect(isNegationExcluded('packages/desktop/src/main.ts', globs)).toBe(
+    const globs = [
+      'packages/*',
+      '!packages/desktop-shell',
+      'packages/desktop-shell',
+    ];
+    expect(isNegationExcluded('packages/desktop-shell/src/a.ts', globs)).toBe(
       false,
     );
+  });
+
+  it('keeps a member owned under a partial negation (`!packages/desktop-shell/*`)', () => {
+    // npm keeps packages/desktop-shell itself a member — a glob with a subpath
+    // cannot match the dir itself — so a file under it is still owned and its
+    // suite can feel a change there; it is NOT negation-excluded.
+    const globs = ['packages/*', '!packages/desktop-shell/*'];
+    expect(workspaceDirFor('packages/desktop-shell/src/main.ts', globs)).toBe(
+      'packages/desktop-shell',
+    );
+    expect(
+      isNegationExcluded('packages/desktop-shell/src/main.ts', globs),
+    ).toBe(false);
   });
 });
 
@@ -334,9 +351,9 @@ describe('readWorkspacePackages', () => {
   });
 
   it('ignores a broken manifest in a NEGATED dir — not a workspace, not our graph', () => {
-    setup(['packages/*', '!packages/desktop']);
+    setup(['packages/*', '!packages/desktop-shell']);
     write('packages/good', { name: '@x/good' });
-    write('packages/desktop', '{ not json');
+    write('packages/desktop-shell', '{ not json');
     const { packages, skipped } = readWorkspacePackages(root);
     expect(packages.map((p) => p.dir)).toEqual(['packages/good']);
     expect(skipped).toEqual([]);
@@ -442,7 +459,7 @@ describe('hasUnmodeledWorkspaceGlob', () => {
   it('is false for the shapes the walker models — literals and a trailing /*', () => {
     expect(hasUnmodeledWorkspaceGlob(GLOBS)).toBe(false);
     expect(hasUnmodeledWorkspaceGlob(['packages/*', 'apps/web'])).toBe(false);
-    expect(hasUnmodeledWorkspaceGlob(['!packages/desktop'])).toBe(false);
+    expect(hasUnmodeledWorkspaceGlob(['!packages/desktop-shell'])).toBe(false);
   });
 
   it('is true for `**`, an inner `*`, or a `foo-*` prefix the walker cannot model', () => {

@@ -17,7 +17,7 @@ import type {
   DaemonUserMessage,
   DaemonUserShellMessage,
 } from './messageTypes.js';
-import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
 
 export type Message = DaemonMessage;
 export type ACPToolCall = DaemonMessageToolCall;
@@ -108,12 +108,15 @@ export interface PermissionRequest {
   toolKind?: string;
   /** Canonical tool name (from the ACP frame's `_meta.toolName`). */
   toolName?: string;
+  /** Whether this permission includes a diff the host can preview. */
+  hasDiffPreview?: boolean;
   todoPlan?: {
     planId: string;
     sourceCallId: string;
   };
   content: ContentBlock[];
   options: PermissionOption[];
+  contentIsInput?: boolean;
   rawInput?: Record<string, unknown>;
   kind?: string;
 }
@@ -121,10 +124,14 @@ export interface PermissionRequest {
 export interface CommandInfo {
   name: string;
   description: string;
+  completionLabel?: string;
+  completionSection?: string;
+  completionPriority?: number;
   argumentHint?: string;
   subcommands?: string[];
   source?: string;
   displayCategory?: 'custom' | 'skill' | 'system';
+  autoSubmit?: boolean;
 }
 
 export interface ModelInfo {

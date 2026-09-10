@@ -102,6 +102,23 @@ describe('WorkspaceChannelSettingsStore', () => {
         throw new Error('not used');
       },
     });
+    registerPlugin({
+      channelType: 'non-user-default-management-test',
+      displayName: 'Non-user default management test',
+      defaultSessionScope: 'chat_thread',
+      management: { fields: [] },
+      createChannel() {
+        throw new Error('not used');
+      },
+    });
+    registerPlugin({
+      channelType: 'user-default-management-test',
+      displayName: 'User default management test',
+      management: { fields: [] },
+      createChannel() {
+        throw new Error('not used');
+      },
+    });
   });
 
   beforeEach(() => {
@@ -137,6 +154,28 @@ describe('WorkspaceChannelSettingsStore', () => {
     resetHomeEnvBootstrapForTesting();
     fs.rmSync(testRoot, { recursive: true, force: true });
   });
+
+  it.each([false, true])(
+    'preserves distinct padded identities when removing a startup entry (other enabled: %s)',
+    async (otherEnabled) => {
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: { ' bot': { type: 'telegram' }, bot: { type: 'telegram' } },
+          serve: { channels: otherEnabled ? [' bot', 'bot'] : [' bot'] },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const after = await store.remove(' bot', {
+        expectedRevision: store.snapshot().revision,
+      });
+      expect(after.channels).toHaveProperty('bot');
+      expect(after.channels).not.toHaveProperty(' bot');
+      expect(after.startupNames).toEqual(otherEnabled ? ['bot'] : []);
+      expect(readWorkspaceSettings()['serve']).toEqual({
+        channels: otherEnabled ? ['bot'] : [],
+      });
+    },
+  );
 
   it('preserves an existing secret unless replace or clear is explicit', async () => {
     const store = new WorkspaceChannelSettingsStore(workspace);
@@ -209,6 +248,126 @@ describe('WorkspaceChannelSettingsStore', () => {
         >
       )['bot']?.['sessionScope'],
     ).toBe('chat_thread');
+  });
+
+  it('preserves a stored legacy messagePrefix when saving other settings', async () => {
+    const settings = readWorkspaceSettings();
+    const channels = settings['channels'] as Record<
+      string,
+      Record<string, unknown>
+    >;
+    channels['bot']!['messagePrefix'] = '/review';
+    writeWorkspaceSettings(JSON.stringify(settings));
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const config = {
+      type: 'management-validation-test',
+      clientId: 'client-id',
+      messagePrefix: '/review',
+      instructions: 'Use concise replies.',
+    };
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config,
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      messagePrefix: '/review',
+      instructions: 'Use concise replies.',
+    });
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: next.revision,
+        config: { ...config, messagePrefix: '/changed' },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: 'Channel field "messagePrefix" is not manageable.',
+    });
+  });
+
+  it('rejects adding the removed messagePrefix setting', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'client-id',
+          messagePrefix: '/review',
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: 'Channel field "messagePrefix" is not manageable.',
+    });
+  });
+
+  it.each([
+    {
+      label: 'an explicit non-user session scope',
+      type: 'user-default-management-test',
+      extra: { sessionScope: 'chat_thread' },
+      message: 'requires sessionScope "user"',
+    },
+    {
+      label: 'a plugin non-user default session scope',
+      type: 'non-user-default-management-test',
+      extra: {},
+      message: 'requires sessionScope "user"',
+    },
+    {
+      label: 'channel group history',
+      type: 'user-default-management-test',
+      extra: { groupHistoryLimit: 1 },
+      message: 'cannot use groupHistoryLimit',
+    },
+    {
+      label: 'per-group history',
+      type: 'user-default-management-test',
+      extra: {
+        groups: { group1: { groupHistoryLimit: 1 } },
+      },
+      message: 'group "group1" cannot use groupHistoryLimit',
+    },
+  ])('rejects multiSession with $label', async ({ type, extra, message }) => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await expect(
+      store.upsert('named-bot', {
+        expectedRevision: store.snapshot().revision,
+        config: { type, multiSession: true, ...extra },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: expect.stringContaining(message),
+    });
+  });
+
+  it('rejects enabling multiSession while preserving webhook config', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "named-bot": {
+    "type": "user-default-management-test",
+    "webhooks": { "sources": {} }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await expect(
+      store.upsert('named-bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'user-default-management-test',
+          multiSession: true,
+          webhooks: { sources: {} },
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: expect.stringContaining('cannot use webhooks'),
+    });
   });
 
   it('replaces and clears secrets only through explicit operations', async () => {
@@ -510,7 +669,6 @@ describe('WorkspaceChannelSettingsStore', () => {
           'group-1': { dispatchMode: 'collect', groupHistoryLimit: 25 },
         },
         groupHistoryLimit: 25,
-        blockStreaming: 'on',
         identity: { id: 'ops', displayName: 'Ops' },
       },
       secrets: {
@@ -537,10 +695,64 @@ describe('WorkspaceChannelSettingsStore', () => {
         'group-1': { dispatchMode: 'collect', groupHistoryLimit: 25 },
       },
       groupHistoryLimit: 25,
-      blockStreaming: 'on',
       identity: { id: 'ops', displayName: 'Ops' },
     });
   });
+
+  it.each([
+    ['blockStreaming', 'on', 'off'],
+    ['blockStreamingChunk', { minChars: 400 }, { minChars: 100 }],
+    ['blockStreamingCoalesce', { idleMs: 1500 }, { idleMs: 500 }],
+  ] as const)(
+    'retires %s without blocking unrelated settings edits',
+    async (key, value, changed) => {
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const config = {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+      };
+      const before = fs.readFileSync(settingsPath, 'utf8');
+      await expect(
+        store.upsert('bot', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...config, [key]: value },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+      expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+
+      writeWorkspaceSettings(
+        JSON.stringify({
+          $version: 4,
+          channels: {
+            bot: {
+              ...config,
+              clientSecret: '$BOT_TOKEN',
+              [key]: value,
+            },
+          },
+        }),
+      );
+      const stored = fs.readFileSync(settingsPath, 'utf8');
+      await expect(
+        store.upsert('bot', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...config, [key]: changed },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+      expect(fs.readFileSync(settingsPath, 'utf8')).toBe(stored);
+
+      const preserved = await store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...config, senderPolicy: 'open', [key]: value },
+      });
+      expect(preserved.channels['bot']?.[key]).toEqual(value);
+      const removed = await store.upsert('bot', {
+        expectedRevision: preserved.revision,
+        config,
+      });
+      expect(removed.channels['bot']).not.toHaveProperty(key);
+    },
+  );
 
   it('accepts string-list and record descriptor fields', async () => {
     const store = new WorkspaceChannelSettingsStore(workspace);

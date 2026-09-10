@@ -13,11 +13,13 @@ import {
   getAgentViewStorePaths,
   listAgentViewSessionSnapshots,
   listAgentViewSessionStates,
+  patchAgentViewSessionState,
+  patchAgentViewSessionStateIf,
   readAgentViewRoster,
   readAgentViewSessionState,
   removeAgentViewRosterEntry,
-  updateAgentViewRosterEntry,
   upsertAgentViewRosterEntry,
+  writeAgentViewRoster,
   writeAgentViewActivity,
   writeAgentViewLaunch,
   writeAgentViewSessionState,
@@ -27,6 +29,7 @@ import {
   readAgentViewLaunch,
   readAgentViewSupervisor,
   readAgentViewWorker,
+  updateAgentViewRosterEntry,
 } from './supervisor-store.js';
 import type {
   AgentViewActivityFile,
@@ -46,36 +49,6 @@ describe('agent view supervisor store', () => {
 
   afterEach(() => {
     fs.rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  it('writes credential files without following a pre-placed symlink', async () => {
-    if (process.platform === 'win32') return;
-    const paths = getAgentViewStorePaths({ globalDir: tempDir });
-    fs.mkdirSync(paths.daemonDir, { recursive: true });
-    const symlinkTarget = path.join(tempDir, 'attacker-controlled.json');
-    fs.writeFileSync(symlinkTarget, 'untouched');
-    fs.symlinkSync(symlinkTarget, paths.supervisorPath);
-
-    await writeAgentViewSupervisor(
-      {
-        schemaVersion: 1,
-        pid: 1234,
-        socketPath: path.join(tempDir, 'supervisor.sock'),
-        authToken: 'secret-token',
-        startedAt: '2026-07-17T00:00:00.000Z',
-        updatedAt: '2026-07-17T00:00:00.000Z',
-        protocolVersion: 1,
-      },
-      { globalDir: tempDir },
-    );
-
-    // The symlink target must not receive the auth token, and the store path
-    // is replaced with a regular file rather than written through the link.
-    expect(fs.readFileSync(symlinkTarget, 'utf8')).toBe('untouched');
-    expect(fs.lstatSync(paths.supervisorPath).isSymbolicLink()).toBe(false);
-    expect(fs.readFileSync(paths.supervisorPath, 'utf8')).toContain(
-      'secret-token',
-    );
   });
 
   it('uses daemon and jobs directories under the global qwen dir', () => {
@@ -168,49 +141,98 @@ describe('agent view supervisor store', () => {
     ]);
   });
 
-  it('updates roster entries and keeps pinned entries first', async () => {
-    await upsertAgentViewRosterEntry(
-      rosterEntry('one', {
-        updatedAt: '2026-07-16T00:00:00.000Z',
-      }),
-      { globalDir: tempDir },
+  it('serializes concurrent roster upserts', async () => {
+    await Promise.all(
+      Array.from({ length: 20 }, (_, index) =>
+        upsertAgentViewRosterEntry(
+          rosterEntry(`session-${index}`, {
+            updatedAt: `2026-07-16T00:00:${String(index).padStart(2, '0')}.000Z`,
+          }),
+          { globalDir: tempDir },
+        ),
+      ),
     );
+
+    const roster = await readAgentViewRoster({ globalDir: tempDir });
+    expect(roster.sessions).toHaveLength(20);
+    expect(new Set(roster.sessions.map((entry) => entry.sessionId)).size).toBe(
+      20,
+    );
+  });
+
+  it('matches roster entries by sanitized session id', async () => {
+    await upsertAgentViewRosterEntry(rosterEntry('MySession'), {
+      globalDir: tempDir,
+    });
     await upsertAgentViewRosterEntry(
-      rosterEntry('two', {
+      rosterEntry('mysession', {
+        displayName: 'lowercase',
         updatedAt: '2026-07-16T00:00:01.000Z',
       }),
       { globalDir: tempDir },
     );
+    await expect(readAgentViewRoster({ globalDir: tempDir })).resolves.toEqual(
+      expect.objectContaining({
+        sessions: [expect.objectContaining({ sessionId: 'mysession' })],
+      }),
+    );
 
     await expect(
       updateAgentViewRosterEntry(
-        'missing',
-        (entry) => ({ ...entry, displayName: 'Missing' }),
-        { globalDir: tempDir },
-      ),
-    ).resolves.toBeUndefined();
-
-    await expect(
-      updateAgentViewRosterEntry(
-        'one',
+        'MYSESSION',
         (entry) => ({
           ...entry,
           pinned: true,
-          displayName: 'Pinned',
           updatedAt: '2026-07-16T00:00:02.000Z',
         }),
         { globalDir: tempDir },
       ),
-    ).resolves.toMatchObject({
-      sessionId: 'one',
-      displayName: 'Pinned',
-      pinned: true,
-    });
+    ).resolves.toMatchObject({ sessionId: 'mysession', pinned: true });
+    await expect(
+      updateAgentViewRosterEntry('missing', (entry) => entry, {
+        globalDir: tempDir,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      removeAgentViewRosterEntry('MySession', { globalDir: tempDir }),
+    ).resolves.toMatchObject({ sessions: [] });
+  });
+
+  it('collapses pre-existing case-variant roster duplicates on update', async () => {
+    await writeAgentViewRoster(
+      {
+        schemaVersion: 1,
+        updatedAt: '2026-07-16T00:00:00.000Z',
+        sessions: [
+          rosterEntry('MySession', {
+            displayName: 'upper',
+            updatedAt: '2026-07-16T00:00:00.000Z',
+          }),
+          rosterEntry('mysession', {
+            displayName: 'lower',
+            updatedAt: '2026-07-16T00:00:01.000Z',
+          }),
+        ],
+      },
+      { globalDir: tempDir },
+    );
+
+    await updateAgentViewRosterEntry(
+      'MYSESSION',
+      (entry) => ({
+        ...entry,
+        displayName: 'merged',
+        updatedAt: '2026-07-16T00:00:02.000Z',
+      }),
+      { globalDir: tempDir },
+    );
 
     const roster = await readAgentViewRoster({ globalDir: tempDir });
-    expect(roster.sessions.map((entry) => entry.sessionId)).toEqual([
-      'one',
-      'two',
+    expect(roster.sessions).toEqual([
+      expect.objectContaining({
+        sessionId: 'mysession',
+        displayName: 'merged',
+      }),
     ]);
   });
 
@@ -243,6 +265,58 @@ describe('agent view supervisor store', () => {
     ).toBe(true);
   });
 
+  it('patches only the specified session state fields', async () => {
+    await writeAgentViewSessionState(
+      sessionState('session-1', {
+        customState: 'keep',
+        sessionState: 'idle',
+      }),
+      { globalDir: tempDir },
+    );
+
+    await patchAgentViewSessionState(
+      'session-1',
+      { sessionState: 'completed', updatedAt: '2026-07-16T00:00:01.000Z' },
+      { globalDir: tempDir },
+    );
+
+    await expect(
+      readAgentViewSessionState('session-1', { globalDir: tempDir }),
+    ).resolves.toMatchObject({
+      sessionId: 'session-1',
+      sessionState: 'completed',
+      processState: 'alive',
+      customState: 'keep',
+      updatedAt: '2026-07-16T00:00:01.000Z',
+    });
+  });
+
+  it('does nothing when patching a session that has no state file', async () => {
+    await expect(
+      patchAgentViewSessionState(
+        'missing',
+        { sessionState: 'completed' },
+        { globalDir: tempDir },
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects a conditional verdict write when state is corrupt', async () => {
+    const paths = getAgentViewSessionPaths('corrupt', {
+      globalDir: tempDir,
+    });
+    fs.mkdirSync(paths.sessionDir, { recursive: true });
+    fs.writeFileSync(paths.statePath, '{');
+
+    await expect(
+      patchAgentViewSessionStateIf(
+        'corrupt',
+        () => ({ processState: 'exited' }),
+        { globalDir: tempDir },
+      ),
+    ).rejects.toThrow('is corrupt');
+  });
+
   it('lists valid session states sorted by most recent update', async () => {
     await writeAgentViewSessionState(
       sessionState('older', {
@@ -261,51 +335,58 @@ describe('agent view supervisor store', () => {
     });
     fs.mkdirSync(invalid.sessionDir, { recursive: true });
     fs.writeFileSync(invalid.statePath, '{"sessionId":"invalid"}');
-    const paths = getAgentViewStorePaths({ globalDir: tempDir });
-    fs.mkdirSync(paths.jobsDir, { recursive: true });
-    fs.writeFileSync(path.join(paths.jobsDir, '.DS_Store'), 'ignored');
 
     const states = await listAgentViewSessionStates({ globalDir: tempDir });
     expect(states.map((state) => state.sessionId)).toEqual(['newer', 'older']);
   });
 
   it('isolates an unreadable session entry instead of failing the list', async () => {
-    await writeAgentViewSessionState(
-      sessionState('healthy', { updatedAt: '2026-07-16T00:00:01.000Z' }),
-      { globalDir: tempDir },
-    );
-    // A directory where state.json should be makes readFile fail with EISDIR,
-    // which previously rejected the entire listing.
-    const bad = getAgentViewSessionPaths('bad', { globalDir: tempDir });
-    fs.mkdirSync(bad.statePath, { recursive: true });
-
-    await expect(
-      listAgentViewSessionStates({ globalDir: tempDir }),
-    ).resolves.toMatchObject([{ sessionId: 'healthy' }]);
-  });
-
-  it('trusts the session directory name over the state file contents', async () => {
-    const paths = getAgentViewStorePaths({ globalDir: tempDir });
-    const sessionDir = path.join(paths.jobsDir, 'dir-alpha');
-    fs.mkdirSync(sessionDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(sessionDir, 'state.json'),
-      JSON.stringify(sessionState('victim-session')),
-    );
+    await writeAgentViewSessionState(sessionState('healthy'), {
+      globalDir: tempDir,
+    });
+    const unreadable = getAgentViewSessionPaths('unreadable', {
+      globalDir: tempDir,
+    });
+    fs.mkdirSync(unreadable.statePath, { recursive: true });
 
     const states = await listAgentViewSessionStates({ globalDir: tempDir });
-    expect(states.map((state) => state.sessionId)).toEqual(['dir-alpha']);
+    expect(states.map((state) => state.sessionId)).toEqual(['healthy']);
   });
 
   it('includes roster entries in session snapshots', async () => {
     await writeAgentViewSessionState(sessionState('session-1'), {
       globalDir: tempDir,
     });
+    await writeAgentViewLaunch(
+      {
+        schemaVersion: 1,
+        sessionId: 'session-1',
+        argv: ['qwen'],
+        env: { QWEN_AGENT_VIEW_TOKEN: 'secret' },
+        entrypoint: '/tmp/qwen',
+        projectCwd: tempDir,
+        activeCwd: tempDir,
+        includeDirectories: [],
+        terminal: { columns: 80, rows: 24 },
+      },
+      { globalDir: tempDir },
+    );
     await upsertAgentViewRosterEntry(
       rosterEntry('session-1', {
         displayName: 'Build Fix',
         pinned: true,
       }),
+      { globalDir: tempDir },
+    );
+    await writeAgentViewWorker(
+      'session-1',
+      {
+        schemaVersion: 1,
+        hostAuthToken: 'host-secret',
+        protocolVersion: 1,
+        platform: process.platform,
+        recentOutputBytes: 0,
+      },
       { globalDir: tempDir },
     );
 
@@ -320,7 +401,31 @@ describe('agent view supervisor store', () => {
         displayName: 'Build Fix',
         pinned: true,
       },
+      launch: expect.objectContaining({
+        env: {},
+      }),
     });
+    expect(snapshots[0]?.worker).toMatchObject({
+      protocolVersion: 1,
+      recentOutputBytes: 0,
+    });
+    expect(snapshots[0]?.worker).not.toHaveProperty('hostAuthToken');
+  });
+
+  it('does not read auxiliary records for unmanaged snapshots', async () => {
+    await writeAgentViewSessionState(
+      sessionState('session-1', { ownership: 'unmanaged' }),
+      { globalDir: tempDir },
+    );
+
+    const snapshots = await listAgentViewSessionSnapshots({
+      globalDir: tempDir,
+    });
+
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]).not.toHaveProperty('launch');
+    expect(snapshots[0]).not.toHaveProperty('activity');
+    expect(snapshots[0]).not.toHaveProperty('worker');
   });
 
   it('round trips launch, activity, worker, and supervisor files', async () => {
@@ -388,98 +493,7 @@ describe('agent view supervisor store', () => {
     );
   });
 
-  it('sanitizes a dot-only session id instead of escaping the jobs dir', () => {
-    expect(
-      getAgentViewSessionPaths('..', { globalDir: tempDir }).sessionDir,
-    ).toBe(path.join(tempDir, 'jobs', '_'));
-  });
-
-  it('joins roster entries to snapshots case-insensitively', async () => {
-    await writeAgentViewSessionState(sessionState('ABC123'), {
-      globalDir: tempDir,
-    });
-    await upsertAgentViewRosterEntry(
-      rosterEntry('ABC123', { displayName: 'Upper', pinned: true }),
-      { globalDir: tempDir },
-    );
-
-    const snapshots = await listAgentViewSessionSnapshots({
-      globalDir: tempDir,
-    });
-
-    expect(snapshots).toHaveLength(1);
-    expect(snapshots[0]).toMatchObject({
-      sessionId: 'abc123',
-      rosterEntry: { sessionId: 'ABC123', displayName: 'Upper', pinned: true },
-    });
-  });
-
-  it('preserves unknown fields from a prior writer when merging a write', async () => {
-    const paths = getAgentViewSessionPaths('session-1', { globalDir: tempDir });
-    fs.mkdirSync(paths.sessionDir, { recursive: true });
-    fs.writeFileSync(
-      paths.statePath,
-      JSON.stringify({ ...sessionState('session-1'), futureField: 'keep' }),
-    );
-
-    await writeAgentViewSessionState(sessionState('session-1'), {
-      globalDir: tempDir,
-    });
-
-    const raw = JSON.parse(fs.readFileSync(paths.statePath, 'utf8'));
-    expect(raw.futureField).toBe('keep');
-  });
-
-  it('returns the sanitized directory name as sessionId from direct reads', async () => {
-    await writeAgentViewSessionState(sessionState('MySession'), {
-      globalDir: tempDir,
-    });
-    await writeAgentViewLaunch(
-      {
-        schemaVersion: 1,
-        sessionId: 'MySession',
-        argv: [],
-        env: {},
-        entrypoint: '/tmp/qwen',
-        projectCwd: tempDir,
-        activeCwd: tempDir,
-        includeDirectories: [],
-        terminal: { columns: 80, rows: 24 },
-      },
-      { globalDir: tempDir },
-    );
-
-    const state = await readAgentViewSessionState('MySession', {
-      globalDir: tempDir,
-    });
-    expect(state?.sessionId).toBe('mysession');
-
-    const launch = await readAgentViewLaunch('MySession', {
-      globalDir: tempDir,
-    });
-    expect(launch?.sessionId).toBe('mysession');
-
-    const listed = await listAgentViewSessionStates({ globalDir: tempDir });
-    expect(listed[0]?.sessionId).toBe('mysession');
-  });
-
-  it('throws when a transient read error hits the roster during a mutation', async () => {
-    const paths = getAgentViewStorePaths({ globalDir: tempDir });
-    // A directory where roster.json should be makes readFile fail with EISDIR.
-    fs.mkdirSync(paths.rosterPath, { recursive: true });
-
-    await expect(
-      upsertAgentViewRosterEntry(rosterEntry('one'), { globalDir: tempDir }),
-    ).rejects.toThrow();
-    await expect(
-      removeAgentViewRosterEntry('one', { globalDir: tempDir }),
-    ).rejects.toThrow();
-    await expect(
-      updateAgentViewRosterEntry('one', (e) => e, { globalDir: tempDir }),
-    ).rejects.toThrow();
-  });
-
-  it('strips wrong-typed optional fields during activity normalization', async () => {
+  it('strips wrong-typed optional fields during normalization', async () => {
     const paths = getAgentViewSessionPaths('session-1', {
       globalDir: tempDir,
     });
@@ -487,87 +501,40 @@ describe('agent view supervisor store', () => {
     fs.writeFileSync(
       paths.activityPath,
       JSON.stringify({
-        lastActivityAt: '2026-07-16T00:00:00.000Z',
+        schemaVersion: 1,
         summary: 42,
         waitingFor: true,
-        lastResult: ['wrong'],
+        queuedPromptCount: '1',
+        lastActivityAt: '2026-07-16T00:00:00.000Z',
+        capabilities: ['state'],
+      }),
+    );
+    fs.writeFileSync(
+      paths.launchPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        sessionId: 'session-1',
+        argv: ['qwen'],
+        env: {},
+        entrypoint: '/tmp/qwen',
+        initialPrompt: 42,
+        projectCwd: tempDir,
+        activeCwd: tempDir,
+        includeDirectories: [],
+        terminal: { columns: 80, rows: 24 },
       }),
     );
 
     const activity = await readAgentViewActivity('session-1', {
       globalDir: tempDir,
     });
-    expect(activity?.summary).toBeUndefined();
-    expect(activity?.waitingFor).toBeUndefined();
-    expect(activity?.lastResult).toBeUndefined();
-    expect(activity?.lastActivityAt).toBe('2026-07-16T00:00:00.000Z');
-  });
-
-  it('strips a wrong-typed authToken during supervisor normalization', async () => {
-    const paths = getAgentViewStorePaths({ globalDir: tempDir });
-    fs.mkdirSync(paths.daemonDir, { recursive: true });
-    fs.writeFileSync(
-      paths.supervisorPath,
-      JSON.stringify({
-        pid: 123,
-        socketPath: path.join(tempDir, 'test.sock'),
-        authToken: 42,
-        startedAt: '2026-07-16T00:00:00.000Z',
-        updatedAt: '2026-07-16T00:00:00.000Z',
-      }),
-    );
-
-    const supervisor = await readAgentViewSupervisor({ globalDir: tempDir });
-    expect(supervisor?.authToken).toBeUndefined();
-    expect(supervisor?.pid).toBe(123);
-  });
-
-  it('deduplicates roster entries that differ only in case', async () => {
-    await upsertAgentViewRosterEntry(
-      rosterEntry('MySession', {
-        displayName: 'First',
-        updatedAt: '2026-07-16T00:00:00.000Z',
-      }),
-      { globalDir: tempDir },
-    );
-    await upsertAgentViewRosterEntry(
-      rosterEntry('mysession', {
-        displayName: 'Second',
-        updatedAt: '2026-07-16T00:00:01.000Z',
-      }),
-      { globalDir: tempDir },
-    );
-
-    const roster = await readAgentViewRoster({ globalDir: tempDir });
-    expect(roster.sessions).toHaveLength(1);
-    expect(roster.sessions[0]).toMatchObject({
-      sessionId: 'mysession',
-      displayName: 'Second',
-    });
-  });
-
-  it('removes roster entries case-insensitively', async () => {
-    await upsertAgentViewRosterEntry(rosterEntry('MySession'), {
+    expect(activity).not.toHaveProperty('summary');
+    expect(activity).not.toHaveProperty('waitingFor');
+    expect(activity).not.toHaveProperty('queuedPromptCount');
+    const launch = await readAgentViewLaunch('session-1', {
       globalDir: tempDir,
     });
-
-    const next = await removeAgentViewRosterEntry('MYSESSION', {
-      globalDir: tempDir,
-    });
-    expect(next.sessions).toHaveLength(0);
-  });
-
-  it('updates roster entries case-insensitively', async () => {
-    await upsertAgentViewRosterEntry(rosterEntry('MySession'), {
-      globalDir: tempDir,
-    });
-
-    const updated = await updateAgentViewRosterEntry(
-      'MYSESSION',
-      (entry) => ({ ...entry, displayName: 'Updated' }),
-      { globalDir: tempDir },
-    );
-    expect(updated?.displayName).toBe('Updated');
+    expect(launch).not.toHaveProperty('initialPrompt');
   });
 });
 

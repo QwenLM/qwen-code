@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import { Ajv } from 'ajv';
 import {
   extractAnthropicContent,
-  extractGeminiContent,
+  extractLlmContent,
   extractOpenAiContent,
   GenAiOutputAccumulator,
   stringifyGenAiJson,
@@ -251,7 +251,7 @@ describe('GenAI content conversion', () => {
   });
 
   it('converts Gemini media and lowercases JSON Schema types', () => {
-    const content = extractGeminiContent({
+    const content = extractLlmContent({
       contents: [
         {
           role: 'model',
@@ -317,7 +317,7 @@ describe('GenAI content conversion', () => {
 
   it('omits only invalid optional parameters but rejects missing identity', () => {
     expect(
-      extractGeminiContent({
+      extractLlmContent({
         config: {
           tools: [
             {
@@ -366,7 +366,7 @@ describe('GenAI content conversion', () => {
 
   it('preserves boolean Draft-07 tool parameter schemas', () => {
     expect(
-      extractGeminiContent({
+      extractLlmContent({
         config: {
           tools: [
             {
@@ -702,7 +702,7 @@ describe('GenAI output accumulation', () => {
 
   it('uses error for unfinished candidates only on failure', () => {
     const failed = new GenAiOutputAccumulator(true, 10_000);
-    failed.recordGeminiResponse({
+    failed.recordLlmResponse({
       candidates: [
         { index: 0, content: { role: 'model', parts: [{ text: 'a' }] } },
       ],
@@ -711,7 +711,7 @@ describe('GenAI output accumulation', () => {
     expect(failed.finishReasons).toEqual(['error']);
 
     const successful = new GenAiOutputAccumulator(true, 10_000);
-    successful.recordGeminiResponse({
+    successful.recordLlmResponse({
       candidates: [
         { index: 0, content: { role: 'model', parts: [{ text: 'a' }] } },
       ],
@@ -739,7 +739,7 @@ describe('GenAI output accumulation', () => {
       [
         new GenAiOutputAccumulator(false, 10_000),
         (accumulator) =>
-          accumulator.recordGeminiResponse({
+          accumulator.recordLlmResponse({
             candidates: [{ index: 0, content: { role: 'model', parts: [] } }],
           }),
       ],
@@ -754,7 +754,7 @@ describe('GenAI output accumulation', () => {
 
   it('accumulates Gemini text chunks without replacing earlier content', () => {
     const output = new GenAiOutputAccumulator(true, 10_000);
-    output.recordGeminiChunk({
+    output.recordLlmChunk({
       candidates: [
         {
           index: 0,
@@ -765,7 +765,7 @@ describe('GenAI output accumulation', () => {
         },
       ],
     });
-    output.recordGeminiChunk({
+    output.recordLlmChunk({
       candidates: [
         {
           index: 0,
@@ -773,7 +773,7 @@ describe('GenAI output accumulation', () => {
         },
       ],
     });
-    output.recordGeminiChunk({
+    output.recordLlmChunk({
       candidates: [
         {
           index: 0,
@@ -833,7 +833,7 @@ describe('GenAI output accumulation', () => {
     expect(output.finalize(true)).toBeUndefined();
 
     const missing = new GenAiOutputAccumulator(true, 10_000);
-    missing.recordGeminiResponse({});
+    missing.recordLlmResponse({});
     expect(missing.finalize(false)).toBeUndefined();
   });
 
@@ -880,11 +880,11 @@ describe('GenAI output accumulation', () => {
       ],
     };
     const expected = new GenAiOutputAccumulator(true, 10_000);
-    expected.recordGeminiChunk(chunk);
+    expected.recordLlmChunk(chunk);
     const serialized = expected.finalize(true)!;
 
     const exact = new GenAiOutputAccumulator(true, serialized.length);
-    exact.recordGeminiChunk(chunk);
+    exact.recordLlmChunk(chunk);
     expect(exact.finalize(true)).toBe(serialized);
   });
 });

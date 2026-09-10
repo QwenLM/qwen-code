@@ -19,6 +19,10 @@
   gap: 2px;
 }
 
+.chatSummaryParallelAgents {
+  padding: 2px 0;
+}
+
 /* Completed thinking folded into the merged tool summary: a clickable line
    like a tool row, expanding to the thought content on click. */
 .chatSummaryThought {
@@ -29,7 +33,6 @@
 .chatSummaryThoughtHeader {
   display: flex;
   align-items: center;
-  gap: 7px;
   margin: 0;
   padding: 0;
   border: none;
@@ -42,11 +45,28 @@
 }
 
 .chatSummaryThoughtHeader:hover,
-.chatSummaryThoughtHeader:focus-visible {
+.chatSummaryThoughtSummary:focus-visible {
   color: var(--primary);
 }
 
-.chatSummaryThoughtHeader:focus-visible {
+.chatSummaryThoughtSummary {
+  flex: 0 1 auto;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.chatSummaryThoughtSummary:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--primary) 45%, transparent);
   outline-offset: 2px;
   border-radius: 4px;
@@ -80,8 +100,8 @@
 
 .chatSummaryThoughtHeader:hover .chatSummaryThoughtChevronRight,
 .chatSummaryThoughtHeader:hover .chatSummaryThoughtChevronDown,
-.chatSummaryThoughtHeader:focus-within .chatSummaryThoughtChevronRight,
-.chatSummaryThoughtHeader:focus-within .chatSummaryThoughtChevronDown {
+.chatSummaryThoughtSummary:focus-visible ~ .chatSummaryThoughtChevronRight,
+.chatSummaryThoughtSummary:focus-visible ~ .chatSummaryThoughtChevronDown {
   opacity: 1;
 }
 
@@ -212,6 +232,17 @@
   min-width: 0;
 }
 
+.workflowLineDetail {
+  padding: 8px 0 2px;
+}
+
+.workflowFallback {
+  padding: 10px 12px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .chatSummary {
   width: 100%;
   margin: 0;
@@ -228,14 +259,26 @@
   font: inherit;
 }
 
-.chatSummary:hover,
+.chatSummary[aria-disabled='true'],
+.lineExpandable[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.chatSummary[aria-disabled='true']:focus-visible,
+.lineExpandable[aria-disabled='true']:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}
+
+.chatSummary:not([aria-disabled='true']):hover,
 .chatSummary:focus-visible,
 .chatSummary[aria-expanded='true'] {
   color: var(--primary);
   outline: none;
 }
 
-.chatSummary:hover .chatSummaryTextActive,
+.chatSummary:not([aria-disabled='true']):hover .chatSummaryTextActive,
 .chatSummary:focus-visible .chatSummaryTextActive,
 .chatSummary[aria-expanded='true'] .chatSummaryTextActive {
   background-image: none;
@@ -255,6 +298,29 @@
 
 .chatSummaryIcon svg {
   display: block;
+}
+
+/* Marks the row's only active work as a detached agent. The tint is not
+   motion, so it stays on under reduced motion — otherwise such a card would
+   remain indistinguishable from a finished one. */
+.chatSummaryIconDetached {
+  color: var(--agent-blue-500);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chatSummaryIconDetached {
+    animation: chat-summary-agent-pulse 2.4s ease-in-out infinite;
+  }
+
+  @keyframes chat-summary-agent-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
 }
 
 .chatSummaryToolIcon {
@@ -333,8 +399,8 @@
   border-radius: 1px;
 }
 
-.chatSummary:hover .chatChevronRight,
-.chatSummary:hover .chatChevronDown,
+.chatSummary:not([aria-disabled='true']):hover .chatChevronRight,
+.chatSummary:not([aria-disabled='true']):hover .chatChevronDown,
 .chatSummary:focus-visible .chatChevronRight,
 .chatSummary:focus-visible .chatChevronDown {
   opacity: 1;
@@ -378,9 +444,10 @@
   grid-template-rows: 1fr;
   min-height: 0;
   overflow: hidden;
-  transition: grid-template-rows 180ms ease;
 }
 
+/* Collapsed groups that stay mounted (workflow details keep their live state)
+   collapse the grid row instead of unmounting via `display: none`. */
 .chatSummaryContentCollapsed {
   grid-template-rows: 0fr;
 }
@@ -412,9 +479,11 @@
 
 .lineName {
   flex-shrink: 0;
+  font-size: 13px;
 }
 
 .lineArg {
+  font-size: 13px;
   min-width: 0;
   flex: 1;
   overflow: hidden;
@@ -444,14 +513,14 @@
 }
 
 .lineExpandable * {
-  cursor: pointer;
+  cursor: inherit;
 }
 
 .lineExpandable .lineArg {
   flex: 0 1 auto;
 }
 
-.lineExpandable:hover,
+.lineExpandable:not([aria-disabled='true']):hover,
 .lineExpandable:focus-visible {
   color: var(--foreground);
 }
@@ -487,8 +556,8 @@
   transform: rotate(45deg);
 }
 
-.lineExpandable:hover .lineChevronRight,
-.lineExpandable:hover .lineChevronDown,
+.lineExpandable:not([aria-disabled='true']):hover .lineChevronRight,
+.lineExpandable:not([aria-disabled='true']):hover .lineChevronDown,
 .lineExpandable:focus-visible .lineChevronRight,
 .lineExpandable:focus-visible .lineChevronDown {
   opacity: 1;
@@ -599,6 +668,11 @@
   overflow-x: auto;
   max-height: 400px;
   overflow-y: auto;
+}
+
+:global([data-transcript-render-mode='document']) .expandedOutput {
+  max-height: none;
+  overflow-y: visible;
 }
 
 .expandedEdit {

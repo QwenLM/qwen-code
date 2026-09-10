@@ -12,7 +12,7 @@ const WINDOWS_ABSOLUTE_PATH_RE = /^([A-Za-z]):[\\/](.*)$/;
 /**
  * Maps a Windows-shaped absolute path to the container mount produced by the
  * host-side sandbox launcher (`C:\work\proj` → `/c/work/proj`, mirroring
- * `getContainerPath` in `cli/src/utils/sandbox.ts`).
+ * `getContainerPath` in `cli/src/serve/sandbox.ts`).
  *
  * A Windows host relaunching `qwen serve` into a Linux Docker/Podman sandbox
  * translates the bind mount and `--workdir`, but path-valued CLI arguments

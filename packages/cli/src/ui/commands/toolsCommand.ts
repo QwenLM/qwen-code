@@ -42,14 +42,18 @@ export const toolsCommand: SlashCommand = {
 
     const tools = toolRegistry.getAllTools();
     // Filter out MCP tools by checking for the absence of a serverName property
-    const geminiTools = tools.filter((tool) => !('serverName' in tool));
+    const llmTools = tools.filter((tool) => !('serverName' in tool));
 
     const toolsListItem: HistoryItemToolsList = {
       type: MessageType.TOOLS_LIST,
-      tools: geminiTools.map((tool) => ({
+      tools: llmTools.map((tool) => ({
         name: tool.name,
         displayName: tool.displayName,
         description: tool.description,
+        // Surface the deferred/eager split so a `tools.eager` allowlist is
+        // visible rather than silently reshaping the model's toolset — the
+        // user-facing half of #10075.
+        deferred: toolRegistry.isDeferredAndHidden(tool.name),
       })),
       showDescriptions: useShowDescriptions,
     };

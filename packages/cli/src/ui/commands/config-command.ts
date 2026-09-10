@@ -16,10 +16,12 @@ import { t } from '../../i18n/index.js';
 import {
   getAllSettingKeys,
   getFlattenedSchema,
+  getDefaultValue,
   getNestedProperty,
+  nextBooleanSettingValue,
   getSettingDefinition,
   validateSettingValue,
-} from '../../utils/settingsUtils.js';
+} from '../../config/settingsUtils.js';
 
 const SETTABLE_TYPES = new Set(['boolean', 'string', 'number', 'enum']);
 
@@ -298,7 +300,10 @@ export const configCommand: SlashCommand = {
     }
 
     if (isToggle && def.type === 'boolean') {
-      const newValue = !currentValue;
+      const newValue = nextBooleanSettingValue(
+        currentValue,
+        getDefaultValue(key),
+      );
       try {
         context.services.settings.setValues([
           { scope: SettingScope.User, key, value: newValue },

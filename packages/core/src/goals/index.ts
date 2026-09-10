@@ -5,7 +5,6 @@
  */
 
 export type {
-  ActiveGoal,
   GoalTerminalEvent,
   GoalTerminalKind,
   GoalTerminalObserver,
@@ -57,6 +56,7 @@ export {
   projectGoalStateToLegacy,
 } from './goal-legacy-projection.js';
 export type {
+  ActiveGoal,
   LegacyActiveGoal,
   LegacyGoalProjection,
   LegacyGoalStatus,
@@ -64,8 +64,26 @@ export type {
   LegacyGoalTerminal,
 } from './goal-legacy-projection.js';
 export * from './goal-evidence.js';
+export * from './goal-tool-result-provenance.js';
 export * from './goal-checkpoint.js';
 export * from './goal-checkpoint-verifier.js';
 export * from './goal-verifier.js';
 export * from './goal-runtime.js';
+export {
+  applyPendingGoalProposal,
+  formatProposeGoalRecoveryFailed,
+  formatProposeGoalRecoveryNotStarted,
+  ProposeGoalTool,
+} from './goal-tools.js';
+export type { PendingGoalProposal } from './goal-tools.js';
 export { goalTurnContext } from './goal-turn-context.js';
+export {
+  buildGoalContinuationParts,
+  renderGoalContinuationPrompt,
+  renderGoalContinuationTurn,
+} from './goal-continuation-prompt.js';
+export type {
+  GoalContinuationPromptInput,
+  GoalContinuationTurn,
+  GoalContinuationUsage,
+} from './goal-continuation-prompt.js';

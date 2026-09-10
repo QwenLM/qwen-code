@@ -254,7 +254,8 @@ export interface MediatorDeps {
    * snapshot, so an empty set is harmless.
    * Under `consensus` policy, an empty `votersAtIssue` means EVERY vote on
    * the request gets rejected for "not in voter set" — the request
-   * can only resolve via `forgetSession` cleanup or `permissionTimeoutMs`.
+   * can only resolve via voter cancellation, `forgetSession` cleanup, or an
+   * enabled `permissionTimeoutMs`.
    * The bridge's torn-down-session race is short enough that this is
    * acceptable; document if a longer-window source of empty-voter
    * snapshots emerges.
@@ -446,21 +447,22 @@ export class MultiClientPermissionMediator implements PermissionMediator {
       this.safeAudit(() =>
         this.deps.audit.recordRequested(record, policy, votersAtIssue),
       );
+      const unresolvedWithoutDecision =
+        timeoutMs > 0
+          ? `voter cancellation, session cancellation, or permissionTimeoutMs (${timeoutMs}ms)`
+          : 'voter or session cancellation because permissionTimeoutMs is disabled';
       // When consensus is in
       // force but the bridge captured zero eligible voters at
-      // issue time, the request can ONLY resolve via timeout (no
-      // vote will ever pass `votersAtIssue.has(clientId)`). Emit
+      // issue time, the request can ONLY resolve via cancellation or
+      // timeout (no selection vote will pass `votersAtIssue.has(clientId)`). Emit
       // a stderr breadcrumb so operators don't have to derive that
-      // from "5 minutes of silence + permission_request frame".
-      // Doesn't change semantics; the timer still fires per the
-      // configured `permissionTimeoutMs`.
+      // from a silent permission request.
       if (policy === 'consensus' && votersAtIssue.size === 0) {
         try {
           process.stderr.write(
             `permissionMediator: consensus request ${record.requestId} ` +
               `for session ${record.sessionId} issued with empty ` +
-              `votersAtIssue; can only resolve via permissionTimeoutMs ` +
-              `(${timeoutMs}ms)\n`,
+              `votersAtIssue; can only resolve via ${unresolvedWithoutDecision}\n`,
           );
         } catch {
           // Stderr unavailable — silent drop.
@@ -496,7 +498,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
               `for session ${record.sessionId} requires unanimity ` +
               `(votersAtIssue.size=${votersAtIssue.size}, default ` +
               `quorum=floor(M/2)+1=${votersAtIssue.size}); split votes ` +
-              `will only resolve via permissionTimeoutMs (${timeoutMs}ms). ` +
+              `will only resolve via ${unresolvedWithoutDecision}. ` +
               `This breadcrumb fires once per mediator lifetime; ` +
               `subsequent unanimity-required requests are silent.\n`,
           );

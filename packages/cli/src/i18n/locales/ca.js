@@ -477,6 +477,7 @@ export default {
   'Hide Window Title': 'Amaga el títol de la finestra',
   'Show Status in Title': "Mostra l'estat al títol",
   'Hide Tips': 'Amaga els consells',
+  'Show Tool Call Arguments': 'Mostra els arguments de les crides a eines',
   'Show Line Numbers in Code': 'Mostra els números de línia al codi',
   'Show Citations': 'Mostra les cites',
   'Custom Witty Phrases': 'Frases enginyoses personalitzades',
@@ -851,8 +852,8 @@ export default {
     "L'entrada a l'ordre és JSON amb tool_name, tool_input, tool_use_id, error, error_type, is_interrupt i is_timeout.",
   'Input to command is JSON with notification message and type.':
     "L'entrada a l'ordre és JSON amb el missatge de notificació i el tipus.",
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'L’entrada de l’ordre és JSON amb "prompt" (el prompt actual vinculat al model) i el camp opcional "submitted_prompt" (la projecció de text de la TUI interactiva compatible).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'L’entrada de l’ordre és JSON amb "prompt" (el prompt actual vinculat al model) i el camp opcional "submitted_prompt" (la projecció de text capturada en un límit d’enviament compatible).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     "L'entrada a l'ordre és JSON amb command_name, command_args i el text del missatge expandit.",
   'Input to command is JSON with session start source.':
@@ -1179,6 +1180,12 @@ export default {
     "La compressió de l'historial del xat no ha reduït la mida. Això pot indicar problemes amb el missatge de compressió.",
   'Could not compress chat history due to a token counting error.':
     "No s'ha pogut comprimir l'historial del xat per un error de recompte de tokens.",
+  'Could not compress chat history because the compression summary was empty.':
+    "No s'ha pogut comprimir l'historial del xat perquè el resum de compressió era buit.",
+  'Could not compress chat history because the compression summary was truncated.':
+    "No s'ha pogut comprimir l'historial del xat perquè el resum de compressió s'ha truncat.",
+  'Could not compress chat history due to an API error.':
+    "No s'ha pogut comprimir l'historial del xat per un error de l'API.",
   // ============================================================================
   // Ordres - Directori
   // ============================================================================
@@ -1593,6 +1600,7 @@ export default {
     'rebutjat — editeu la configuració per tornar a aprovar',
   'Background agent needs approval': "L'agent en segon pla necessita aprovació",
   'Approve or deny the request above': 'Aprova o denega la sol·licitud de dalt',
+  'from nested agent': "de l'agent imbricat",
   Running: 'En execució',
   Pausing: 'Pausant',
   Paused: 'En pausa',
@@ -2402,6 +2410,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': 'Artefacte',
   'toolDisplayName.RecordArtifact': "Enregistra l'artefacte",
+  'toolDisplayName.ReportFindings': 'Informa de les troballes',
   'toolDisplayName.Skill': 'Habilitat',
   'toolDisplayName.EnterPlanMode': 'Entra al mode de planificació',
   'toolDisplayName.ExitPlanMode': 'Surt del mode de planificació',
@@ -2423,6 +2432,7 @@ export default {
   'toolDisplayName.TeamCreate': 'Crea equip',
   'toolDisplayName.TeamDelete': 'Suprimeix equip',
   'toolDisplayName.TeamPlanApproval': "Aprovació del pla d'equip",
+  'toolDisplayName.RequestShutdown': "Sol·licita l'aturada",
   'toolDisplayName.SendMessage': 'Envia missatge',
   'toolDisplayName.StructuredOutput': 'Sortida estructurada',
   'toolDisplayName.Monitor': 'Monitor',

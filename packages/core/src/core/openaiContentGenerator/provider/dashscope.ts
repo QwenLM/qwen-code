@@ -21,9 +21,28 @@ import {
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
 } from '../../modalityDefaults.js';
+import type { ReasoningEffort } from '../../reasoning-effort.js';
+import {
+  clampReasoningEffort,
+  parseModelReasoningCapabilities,
+} from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
+import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
+
+/**
+ * Legacy input ladder for routes without an explicit reasoning capability.
+ * DashScope accepts high/max as xhigh aliases; configured presets expose only
+ * native low/medium/xhigh choices. Keep this fallback's clamp and warning for
+ * existing unconfigured routes.
+ */
+const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+] as const;
 
 export type DashScopeThinkingKnobSelection = {
   source: 'extra_body' | 'samplingParams' | 'reasoning';
@@ -41,8 +60,9 @@ export function selectDashScopeThinkingKnob(
   extraBody: Record<string, unknown> | undefined,
   samplingParams: Record<string, unknown> | undefined,
   reasoningEffort: unknown,
+  tieredModel = isTieredEffortWireModel(model),
 ): DashScopeThinkingKnobSelection | undefined {
-  if (!isTieredEffortWireModel((model ?? '').toLowerCase())) {
+  if (!tieredModel) {
     return undefined;
   }
 
@@ -305,6 +325,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       maxRetries,
       defaultHeaders,
       ...(runtimeOptions || {}),
+      fetch: buildSessionAwareFetch(
+        runtimeOptions?.fetch,
+        this.cliConfig,
+        this.contentGeneratorConfig.customHeaders,
+      ),
     });
   }
 
@@ -359,9 +384,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     // Apply output token limits using parent class logic.
     const requestWithTokenLimits = this.applyOutputTokenLimit(request);
 
-    const isTieredQwenModel = isTieredEffortWireModel(
-      this.resolveWireModel(request.model),
-    );
+    const isTieredQwenModel = this.isTieredEffortModel(request.model);
     const extraBody = isTieredQwenModel
       ? withoutNullishThinkingKnobs(this.contentGeneratorConfig.extra_body)
       : this.contentGeneratorConfig.extra_body;
@@ -397,6 +420,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
           extraBody,
           requestParams,
           qwenEffortConfig['reasoning_effort'],
+          isTieredQwenModel,
         )
       : undefined;
 
@@ -424,7 +448,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         delete visionResult['reasoning'];
       }
       return this.mergeExtraBodyAndResolveKnobs(
-        visionResult,
+        hasQwenEffortConfig
+          ? visionResult
+          : this.clampConfiguredReasoningEffort(visionResult),
         extraBody,
         request.model,
         selectedThinkingKnob,
@@ -450,8 +476,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (hasQwenEffortConfig && 'reasoning' in result) {
       delete result['reasoning'];
     }
+    // No qwen effort field means the nested `reasoning` object is what ships,
+    // so it needs the same ceiling any other OpenAI-compatible request gets.
     return this.mergeExtraBodyAndResolveKnobs(
-      result,
+      hasQwenEffortConfig
+        ? result
+        : this.clampConfiguredReasoningEffort(result),
       extraBody,
       request.model,
       selectedThinkingKnob,
@@ -499,7 +529,25 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       dropped.add(key);
     }
     this.warnConflictingKnobDrop(model, reasoningEffort, [...dropped]);
+    this.flattenGptReasoningEffort(merged);
     return merged as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+  }
+
+  private getConfiguredReasoning(model: string | undefined) {
+    const { authType, baseUrl } = this.contentGeneratorConfig;
+    const wireModel = model ?? this.contentGeneratorConfig.model;
+    const reasoning = authType
+      ? this.cliConfig.getResolvedModelConfig?.(authType, wireModel, baseUrl)
+          ?.capabilities.reasoning
+      : undefined;
+    return parseModelReasoningCapabilities(reasoning);
+  }
+
+  private isTieredEffortModel(model: string | undefined): boolean {
+    return isTieredEffortWireModel(
+      model ?? this.contentGeneratorConfig.model,
+      this.getConfiguredReasoning(model),
+    );
   }
 
   private resolveWireModel(model: string | undefined): string {
@@ -523,13 +571,36 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       return {};
     }
     const wireModel = this.resolveWireModel(model);
-    if (isTieredEffortWireModel(wireModel)) {
-      return { reasoning_effort: reasoning.effort };
+    if (this.isTieredEffortModel(model)) {
+      const configured = this.getConfiguredReasoning(model);
+      if (configured && !configured.toggleOnly) {
+        return configured.efforts.includes(reasoning.effort)
+          ? { reasoning_effort: reasoning.effort }
+          : {};
+      }
+      return { reasoning_effort: this.clampTieredEffort(reasoning.effort) };
     }
     if (isQwenFamilyWireModel(wireModel)) {
       return { enable_thinking: true };
     }
     return {};
+  }
+
+  /**
+   * Preserve the legacy clamp for a route without an explicit capability.
+   * Only the unified reasoning.effort preference reaches this fallback;
+   * extra_body and samplingParams remain verbatim provider overrides.
+   */
+  private clampTieredEffort(effort: ReasoningEffort): ReasoningEffort {
+    const clamped = clampReasoningEffort(effort, DASHSCOPE_TIERED_EFFORTS);
+    if (clamped !== effort && !this.effortClampWarned) {
+      debugLogger.warn(
+        `reasoning.effort='${effort}' is not accepted by the DashScope ` +
+          `tiered-effort family; using '${clamped}'.`,
+      );
+      this.effortClampWarned = true;
+    }
+    return clamped;
   }
 
   /**
@@ -565,7 +636,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (!isQwenFamilyWireModel(wireModel)) {
       return [];
     }
-    const isTieredEffortModel = isTieredEffortWireModel(wireModel);
+    const isTieredEffortModel = this.isTieredEffortModel(model);
     if (
       isTieredEffortModel &&
       selectedThinkingKnob?.field === 'enable_thinking' &&

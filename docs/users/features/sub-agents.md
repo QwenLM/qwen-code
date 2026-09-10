@@ -131,11 +131,19 @@ When a session is restored, compatible background agents are added back to the s
 
 Use continuation for related follow-up work. Launch a new agent when the task is unrelated or the previous agent cannot be resumed.
 
+## Notification Queue
+
+In the interactive TUI and ACP session, completion notifications from background agents, shells, monitors and workflows share a queue that drains into a model turn once the session is idle. These queues hold at most 20 notifications so a noisy producer cannot accumulate an unbounded backlog. The headless CLI's local queue is not capped by this rule.
+
+When a 21st notification arrives, Qwen Code evicts an interim monitor pulse first — the monitor's next poll supersedes it — and otherwise the oldest queued notification. Agent results, workflow results and scheduled prompts are never evicted in the interactive TUI; a notification that would displace one is dropped instead, and so is an arriving pulse when only terminal results are queued.
+
+Discarded notifications are reported rather than dropped quietly. The summary appears before the next notification in the live transcript. ACP also prefixes it to that turn's model input; the TUI keeps it parked for the next Notification batch so cron prompts still pass unchanged through slash, shell and `@` preprocessing. A daemon notification is recorded before it is acknowledged, so after a reload its durable record can precede the later overflow summary. ACP can discard a pending summary if the session is cleared or switched, or if a client cancels or preempts the notification turn. Discarding a notification never stops or deletes its task, and completed tasks retain their results; the summary points at `/tasks` and task output files when there is a task to inspect. A discarded scheduled prompt was never delivered and is not retried. A daemon notification that was recorded but could not be delivered live remains available in the session transcript and is reported separately from lost notifications.
+
 ## Agent Working Directory
 
 For a named regular subagent, `working_dir` pins the agent to an existing git worktree of the current repository. Relative paths resolve from the current directory, and the worktree must already be registered with git as a linked worktree of this repository.
 
-A `working_dir` launch runs in the foreground because Qwen Code does not own that worktree's lifecycle. It cannot be combined with `subagent_type: "fork"` or background execution. If both `working_dir` and `isolation: "worktree"` are supplied, Qwen Code reuses the caller-owned worktree instead of creating another one. Workflow scripts are deliberately stricter: a workflow `agent()` call that receives both `workingDir` and `isolation` is rejected rather than run with `isolation` ignored.
+`working_dir` cannot be combined with `subagent_type: "fork"`. An unnamed caller-owned `working_dir` launch runs in the foreground because Qwen Code does not own that worktree's lifecycle: an explicit `run_in_background: true` request is rejected, while a configured background default (`background: true` in a subagent definition) is rejected at the top level and downgraded to the foreground when nested. If both `working_dir` and `isolation: "worktree"` are supplied, Qwen Code reuses the caller-owned worktree instead of creating another one. Workflow scripts are deliberately stricter: a workflow `agent()` call that receives both `workingDir` and `isolation` is rejected rather than run with `isolation` ignored.
 
 ## Getting Started
 

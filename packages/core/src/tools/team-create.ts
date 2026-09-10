@@ -229,7 +229,7 @@ This creates:
 4. **Assign tasks** using TaskUpdate with \`owner\` to give tasks to idle teammates
 5. **Teammates work on assigned tasks** and mark them completed via TaskUpdate
 6. **Teammates go idle between turns** - after each turn, teammates automatically go idle and send a notification. IMPORTANT: Be patient with idle teammates! Don't comment on their idleness until it actually impacts your work.
-7. **Shutdown your team** - when the task is completed, gracefully shut down your teammates via SendMessage with \`type: "shutdown_request"\` (a top-level parameter alongside \`to\` and \`message\`).
+7. **Shutdown your team** - when the task is completed, gracefully shut down each teammate with ${ToolNames.REQUEST_SHUTDOWN} (\`to\`: the teammate name). ${ToolNames.SEND_MESSAGE} carries ordinary text only.
 
 ## Task Ownership
 

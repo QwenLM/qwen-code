@@ -19,6 +19,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { getWorkspaceRuntimeCoordinatorIfSupported } from '../workspace-runtime-coordinator.js';
 import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
 import type { AcpHttpHandle } from '../acp-http/index.js';
 import {
@@ -31,6 +32,7 @@ import {
   WorkspaceDisplayNameValidationError,
   WorkspaceRegistrationStoreCommittedError,
   WorkspaceRegistrationStoreLimitError,
+  WorkspaceRegistrationStoreTooLargeError,
   type WorkspaceRegistrationStore,
 } from '../workspace-registration-store.js';
 import {
@@ -56,6 +58,7 @@ import {
 const MAX_PATH_SUGGESTIONS = 50;
 
 export interface WorkspaceManagementRouteDeps {
+  maxRegisteredWorkspaces?: number;
   workspaceRegistry: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
@@ -71,6 +74,7 @@ export interface WorkspaceManagementRouteDeps {
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   getAcpHandle?: () => AcpHttpHandle | undefined;
   runtimeRemoval?: WorkspaceRuntimeRemovalController;
+  onWorkspaceRemoved?: (workspaceCwd: string) => void;
   pickWorkspaceDirectory?: (
     signal?: AbortSignal,
   ) => Promise<string | undefined>;
@@ -85,6 +89,7 @@ export interface WorkspaceRemovalActivity {
   memoryTasks: number;
   channelWorkers: number;
   voiceSessions: number;
+  workspaceRuntime: number;
 }
 
 export interface WorkspaceRuntimeRemovalController {
@@ -112,6 +117,7 @@ export interface WorkspaceManagementHandle {
       runtime: WorkspaceRuntime,
     ) => void | Promise<void>,
   ): Promise<WorkspaceRuntime>;
+  quarantineOwnedRuntime(runtime: WorkspaceRuntime): Promise<void>;
 }
 
 export function registerWorkspaceManagementRoutes(
@@ -119,6 +125,7 @@ export function registerWorkspaceManagementRoutes(
   deps: WorkspaceManagementRouteDeps,
 ): WorkspaceManagementHandle {
   const {
+    maxRegisteredWorkspaces = MAX_REGISTERED_WORKSPACES,
     workspaceRegistry,
     mutate,
     safeBody,
@@ -163,6 +170,11 @@ export function registerWorkspaceManagementRoutes(
     string,
     'addition' | 'promotion' | 'removal' | 'forget' | 'update'
   >();
+  // Owned Conversations publications ride the same in-flight serialization
+  // map (they must keep colliding on cwd and nesting), but they are daemon
+  // infrastructure: the capacity projection skips them just like it skips
+  // the published internal runtime.
+  const internalAdditionsInFlight = new Set<string>();
   let sealed = false;
   let activeOperations = 0;
   let pendingScratchCreations = 0;
@@ -181,6 +193,23 @@ export function registerWorkspaceManagementRoutes(
       error: 'Daemon is shutting down',
       code: 'daemon_shutting_down',
     });
+  };
+  const sendStoreCapacityError = (res: Response, error: unknown): boolean => {
+    if (error instanceof WorkspaceRegistrationStoreLimitError) {
+      res.status(409).json({
+        error: 'Workspace registration limit reached',
+        code: 'workspace_limit_reached',
+      });
+      return true;
+    }
+    if (error instanceof WorkspaceRegistrationStoreTooLargeError) {
+      res.status(409).json({
+        error: 'Workspace registration store is too large',
+        code: 'workspace_registration_store_too_large',
+      });
+      return true;
+    }
+    return false;
   };
   const attachRegistrationIds = (
     runtime: WorkspaceRuntime,
@@ -218,13 +247,20 @@ export function registerWorkspaceManagementRoutes(
     }
   };
   const projectedWorkspaceCount = (): number => {
+    // The daemon-owned Conversations runtime is daemon infrastructure, not a
+    // user workspace: it must not consume user registration capacity.
     // A scratch request reserves capacity before its cwd exists, while normal
     // additions reserve by canonical cwd. Count both forms exactly once.
     const cwdSet = new Set(
-      workspaceRegistry.listManaged().map((runtime) => runtime.workspaceCwd),
+      workspaceRegistry
+        .listManaged()
+        .filter((runtime) => !isInternalWorkspaceRuntime(runtime))
+        .map((runtime) => runtime.workspaceCwd),
     );
     for (const [cwd, operation] of inFlight) {
-      if (operation === 'addition') cwdSet.add(cwd);
+      if (operation === 'addition' && !internalAdditionsInFlight.has(cwd)) {
+        cwdSet.add(cwd);
+      }
     }
     return cwdSet.size + pendingScratchCreations;
   };
@@ -266,7 +302,12 @@ export function registerWorkspaceManagementRoutes(
     if (nestingConflict) {
       throw new Error('Workspace path nests with an existing workspace');
     }
-    if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+    // The owned Conversations runtime is daemon infrastructure: user
+    // workspaces filling the limit must not block its publication.
+    if (
+      provenance !== 'live-conversation' &&
+      projectedWorkspaceCount() >= maxRegisteredWorkspaces
+    ) {
       throw new Error('Workspace registration limit reached');
     }
   };
@@ -283,6 +324,9 @@ export function registerWorkspaceManagementRoutes(
     }
     assertOwnedRuntimeAdmission(canonicalCwd, provenance);
     inFlight.set(canonicalCwd, 'addition');
+    if (provenance === 'live-conversation') {
+      internalAdditionsInFlight.add(canonicalCwd);
+    }
     operationStarted();
     let runtime: WorkspaceRuntime | undefined;
     let registered = false;
@@ -310,7 +354,10 @@ export function registerWorkspaceManagementRoutes(
         if (nestingConflict) {
           throw new Error('Workspace path nests with an existing workspace');
         }
-        if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+        if (
+          provenance !== 'live-conversation' &&
+          projectedWorkspaceCount() >= maxRegisteredWorkspaces
+        ) {
           throw new Error('Workspace registration limit reached');
         }
         workspaceRegistry.add(runtime!);
@@ -348,6 +395,76 @@ export function registerWorkspaceManagementRoutes(
           });
       }
       inFlight.delete(canonicalCwd);
+      internalAdditionsInFlight.delete(canonicalCwd);
+      operationFinished();
+    }
+  };
+
+  const quarantineOwnedRuntime = async (
+    runtime: WorkspaceRuntime,
+  ): Promise<void> => {
+    if (
+      runtime.primary ||
+      runtime.provenance !== 'live-conversation' ||
+      !runtime.trusted ||
+      runtime.removable !== false
+    ) {
+      throw new Error(
+        'Only the owned Conversations runtime may be quarantined',
+      );
+    }
+    if (!runtimeRemoval) {
+      throw new Error('Managed workspace runtime removal is unavailable');
+    }
+    if (sealed) throw new Error('Daemon is shutting down');
+    if (inFlight.has(runtime.workspaceCwd)) {
+      throw new Error('Workspace runtime transition is already in progress');
+    }
+    inFlight.set(runtime.workspaceCwd, 'removal');
+    operationStarted();
+    let disposed = false;
+    const failures: unknown[] = [];
+    try {
+      if (!workspaceRegistry.beginDrain(runtime)) {
+        throw new Error('Workspace runtime is no longer active');
+      }
+      try {
+        runtimeRemoval.beginDrain(runtime);
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        workspaceRegistry.commitDrain(runtime);
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        await runtimeRemoval.disposeRuntime(runtime, 'workspace_removed');
+        disposed = true;
+      } catch (error) {
+        failures.push(error);
+      }
+      if (disposed) {
+        try {
+          runtimeRemoval.completeDrain(runtime);
+        } catch (error) {
+          failures.push(error);
+        }
+        try {
+          workspaceRegistry.completeDrain(runtime);
+          deps.onWorkspaceRemoved?.(runtime.workspaceCwd);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures,
+          'Failed to quarantine the Conversations runtime',
+        );
+      }
+    } finally {
+      inFlight.delete(runtime.workspaceCwd);
       operationFinished();
     }
   };
@@ -388,7 +505,7 @@ export function registerWorkspaceManagementRoutes(
       });
       return;
     }
-    if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+    if (projectedWorkspaceCount() >= maxRegisteredWorkspaces) {
       res.status(409).json({
         error: 'Workspace registration limit reached',
         code: 'workspace_limit_reached',
@@ -867,7 +984,7 @@ export function registerWorkspaceManagementRoutes(
           const alreadyPersisted = persistedWorkspaces.length > 0;
           if (
             !alreadyPersisted &&
-            snapshot.workspaces.length >= MAX_REGISTERED_WORKSPACES - 1
+            snapshot.workspaces.length >= maxRegisteredWorkspaces - 1
           ) {
             res.status(409).json({
               error: 'Workspace registration limit reached',
@@ -897,13 +1014,11 @@ export function registerWorkspaceManagementRoutes(
               const persistedDisplayName = hasDisplayName
                 ? displayName
                 : existingRuntime.displayName;
-              added =
-                persistedDisplayName === undefined
-                  ? await workspaceRegistrationStore!.add(canonical)
-                  : await workspaceRegistrationStore!.add(
-                      canonical,
-                      persistedDisplayName,
-                    );
+              added = await workspaceRegistrationStore!.add(
+                canonical,
+                persistedDisplayName,
+                maxRegisteredWorkspaces,
+              );
             } catch (err) {
               if (!(err instanceof WorkspaceRegistrationStoreCommittedError)) {
                 throw err;
@@ -942,18 +1057,12 @@ export function registerWorkspaceManagementRoutes(
             persisted: true,
           });
         } catch (err) {
-          if (err instanceof WorkspaceRegistrationStoreLimitError) {
-            res.status(409).json({
-              error: 'Workspace registration limit reached',
-              code: 'workspace_limit_reached',
-            });
-            return;
-          }
           writeStderrLine(
             `qwen serve: failed to persist existing workspace registration: ${
               err instanceof Error ? err.message : String(err)
             }`,
           );
+          if (sendStoreCapacityError(res, err)) return;
           res.status(500).json({
             error: 'Failed to persist workspace registration',
             code: 'workspace_registration_store_error',
@@ -998,7 +1107,7 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
 
-      if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+      if (projectedWorkspaceCount() >= maxRegisteredWorkspaces) {
         res.status(409).json({
           error: 'Workspace registration limit reached',
           code: 'workspace_limit_reached',
@@ -1021,13 +1130,11 @@ export function registerWorkspaceManagementRoutes(
           if (persist) {
             try {
               try {
-                persistedRecordAdded =
-                  displayName === undefined
-                    ? await workspaceRegistrationStore!.add(canonical)
-                    : await workspaceRegistrationStore!.add(
-                        canonical,
-                        displayName,
-                      );
+                persistedRecordAdded = await workspaceRegistrationStore!.add(
+                  canonical,
+                  displayName,
+                  maxRegisteredWorkspaces,
+                );
               } catch (err) {
                 if (
                   !(err instanceof WorkspaceRegistrationStoreCommittedError)
@@ -1140,6 +1247,7 @@ export function registerWorkspaceManagementRoutes(
           }`,
         );
         if (persistenceFailed) {
+          if (sendStoreCapacityError(res, err)) return;
           res.status(500).json({
             error: 'Failed to persist workspace registration',
             code: 'workspace_registration_store_error',
@@ -1176,6 +1284,11 @@ export function registerWorkspaceManagementRoutes(
       memoryTasks: acpActivity.memoryTasks,
       channelWorkers: controllerActivity.channelWorkers,
       voiceSessions: controllerActivity.voiceSessions,
+      workspaceRuntime:
+        getWorkspaceRuntimeCoordinatorIfSupported(runtime)?.hasActiveWork() ===
+        true
+          ? 1
+          : 0,
     };
   };
   const isBusy = (activity: WorkspaceRemovalActivity): boolean =>
@@ -1386,6 +1499,9 @@ export function registerWorkspaceManagementRoutes(
       let controllerDraining = false;
       let acpDraining = false;
       let removalCommitted = false;
+      let runtimeCoordinatorDraining = false;
+      const runtimeCoordinator =
+        getWorkspaceRuntimeCoordinatorIfSupported(runtime);
       const rollbackDrain = (): void => {
         if (removalCommitted) return;
         if (acpDraining) {
@@ -1403,6 +1519,14 @@ export function registerWorkspaceManagementRoutes(
             // Continue rolling back the remaining gates.
           }
           controllerDraining = false;
+        }
+        if (runtimeCoordinatorDraining) {
+          try {
+            runtimeCoordinator?.cancelDrain();
+          } catch {
+            // Continue rolling back the remaining gates.
+          }
+          runtimeCoordinatorDraining = false;
         }
         if (registryDraining) {
           try {
@@ -1474,6 +1598,7 @@ export function registerWorkspaceManagementRoutes(
         }
         try {
           workspaceRegistry.completeDrain(runtime);
+          deps.onWorkspaceRemoved?.(runtime.workspaceCwd);
         } catch (err) {
           logCleanupFailure(
             `qwen serve: failed to complete workspace registry drain: ${
@@ -1484,6 +1609,7 @@ export function registerWorkspaceManagementRoutes(
         registryDraining = false;
         controllerDraining = false;
         acpDraining = false;
+        runtimeCoordinatorDraining = false;
       };
 
       try {
@@ -1495,6 +1621,8 @@ export function registerWorkspaceManagementRoutes(
           });
           return;
         }
+        runtimeCoordinator?.beginDrain();
+        runtimeCoordinatorDraining = runtimeCoordinator !== undefined;
         runtimeRemoval.beginDrain(runtime);
         controllerDraining = true;
         getAcpHandle?.()?.beginWorkspaceDrain(runtime.workspaceId);
@@ -1784,6 +1912,7 @@ export function registerWorkspaceManagementRoutes(
 
   return {
     publishOwnedRuntime,
+    quarantineOwnedRuntime,
     async sealAndWait() {
       sealed = true;
       if (activeOperations === 0) return;

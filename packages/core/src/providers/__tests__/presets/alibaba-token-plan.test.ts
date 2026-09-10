@@ -34,6 +34,8 @@ describe('token plan provider', () => {
       modelIds: getDefaultModelIds(tokenPlanProvider),
     });
 
+    expect(tokenPlanProvider.supportsModelDiscovery).toBe(true);
+
     expect(template.map((model) => model.id)).toEqual([
       'qwen3.7-plus',
       'qwen3.6-plus',
@@ -51,6 +53,8 @@ describe('token plan provider', () => {
       'glm-5.1',
       'glm-5',
       'MiniMax-M2.5',
+      'qwen3.8-flash',
+      'deepseek-v4-pro-0813',
     ]);
     expect(
       template.find((model) => model.id === 'deepseek-v4-pro')
@@ -217,5 +221,9 @@ describe('token plan provider', () => {
         envKey: 'SOME_OTHER_API_KEY',
       }),
     ).toBe(false);
+  });
+
+  it('declares the built-in web search backend', () => {
+    expect(tokenPlanProvider.webSearch).toEqual({ backend: 'dashscope' });
   });
 });

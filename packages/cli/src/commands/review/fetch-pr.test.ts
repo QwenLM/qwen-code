@@ -7,7 +7,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createHash } from 'node:crypto';
 import type { Argv, CommandModule } from 'yargs';
-import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import {
   fetchPrCommand,
   countDiffChangedLines,
@@ -26,6 +27,7 @@ import {
 } from '../../services/review-worktree-lease.js';
 import { classifyHeavy } from './lib/heavy.js';
 import { DEADLINE_ENV, hasReviewDeadline } from './lib/deadline.js';
+import { PREBUILD_BUDGET_S, PREBUILD_ENV } from './lib/prebuild.js';
 import type { MergeBaseResult } from './lib/merge-base.js';
 import { buildRoleBrief } from './agent-prompt.js';
 import { PARSE_ARGS_REPORT, tmpFile, worktreePath } from './lib/paths.js';
@@ -276,6 +278,18 @@ const producerMocks = vi.hoisted(() => ({
   buildDiffPlan: vi.fn(),
   actualBuildDiffPlan: undefined as unknown as (...a: unknown[]) => unknown,
   writeStderrLine: vi.fn(),
+  // Admits by default, which is what the real one answers for every checkout
+  // outside a review temp dir — the shape all but one of these tests are in.
+  // The ordering test steers it to a refusal; nothing else touches it.
+  untrustedRepositoryFrom: vi.fn((..._args: unknown[]): string | null => null),
+  // The prebuild runs Agent 7's real build-test against the plan just
+  // written; stubbed here because this suite's fs is a mock and the wiring —
+  // when it runs, against what, and what lands in the plan — is the contract.
+  // The cover gate beside it is exercised here but owned by prebuild.test.ts;
+  // default-covered so the wiring tests run the prebuild they set the env
+  // for, overridable for the skip path.
+  prebuildCovered: vi.fn(() => true),
+  prebuildWorktree: vi.fn(),
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -323,15 +337,31 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLineSafe: producerMocks.writeStderrLine,
 }));
 
-vi.mock('../../services/review-worktree-lease.js', () => ({
-  clearReviewWorktreeLease: vi.fn(),
-  clearReviewWorktreeLeaseIfOwned: vi.fn(),
-  createReviewWorktreeLease: vi.fn(),
-  readReviewWorktreeLease: vi.fn((): unknown => null),
-  reviewLeaseHeldByAnotherSession: vi.fn((): boolean => false),
-  reviewLeasePath: (repositoryRoot: string, target: string) =>
-    `${repositoryRoot}/.qwen/tmp/qwen-review-lease-${target}.json`,
-}));
+vi.mock('../../services/review-worktree-lease.js', () => {
+  const readReviewWorktreeLease = vi.fn(
+    (_repositoryRoot: string, _target: string): unknown => null,
+  );
+  return {
+    clearReviewWorktreeLease: vi.fn(),
+    clearReviewWorktreeLeaseIfOwned: vi.fn(),
+    createReviewWorktreeLease: vi.fn(),
+    readReviewWorktreeLease,
+    // The found-at variant the held-lease refusal uses: delegate so the
+    // `mockReturnValueOnce` steering above reaches both.
+    readReviewWorktreeLeaseAt: (repositoryRoot: string, target: string) => {
+      const lease = readReviewWorktreeLease(repositoryRoot, target);
+      return lease
+        ? {
+            lease,
+            path: `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
+          }
+        : null;
+    },
+    reviewLeaseHeldByAnotherSession: vi.fn((): boolean => false),
+    reviewLeasePath: (repositoryRoot: string, target: string) =>
+      `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
+  };
+});
 
 vi.mock('./lib/gh.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/gh.js')>();
@@ -351,6 +381,14 @@ vi.mock('./lib/git.js', () => ({
   gitWithInput: vi.fn((): string => ''),
   refExists: producerMocks.refExists,
   releaseWorktree: producerMocks.releaseWorktree,
+}));
+
+// PARTIAL: only the launch-directory gate is steered. The rest of this module
+// — `sanitizedGitEnv`, `untrustedGitfile` — has to stay real, because the
+// worktree gate is one of the things the report-assembly path exercises.
+vi.mock('./lib/worktree.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./lib/worktree.js')>()),
+  untrustedRepositoryFrom: producerMocks.untrustedRepositoryFrom,
 }));
 
 vi.mock('./lib/merge-base.js', () => ({
@@ -404,9 +442,42 @@ vi.mock('./lib/diff-plan.js', async (importOriginal) => {
   ) => unknown;
   return { ...actual, buildDiffPlan: producerMocks.buildDiffPlan };
 });
+vi.mock('./lib/prebuild.js', async (importOriginal) => {
+  // `prebuildRequested` stays real: the env gate — and its refusal of a
+  // .env-sourced value — is what the wiring tests below exercise.
+  const actual = await importOriginal<typeof import('./lib/prebuild.js')>();
+  return {
+    ...actual,
+    prebuildCovered: producerMocks.prebuildCovered,
+    prebuildWorktree: producerMocks.prebuildWorktree,
+  };
+});
+
+// Hermetic against the ambient opt-in this same PR welds into CI's review
+// sessions: post-merge every review-session shell inherits
+// QWEN_REVIEW_PREBUILD=1, and every suite in this FILE that drives the
+// handler passes the REAL env gate (the prebuild module mock keeps
+// prebuildRequested real) before dereferencing the bare prebuildWorktree
+// stub — so the scrub must cover the whole file, not one describe (R5-1).
+// The prebuild describe re-sets the variable for the tests that are about
+// it: its describe-level beforeEach runs after this file-level one.
+const ambientPrebuild = process.env['QWEN_REVIEW_PREBUILD'];
+beforeEach(() => {
+  delete process.env['QWEN_REVIEW_PREBUILD'];
+});
+afterAll(() => {
+  if (ambientPrebuild === undefined) {
+    delete process.env['QWEN_REVIEW_PREBUILD'];
+  } else {
+    process.env['QWEN_REVIEW_PREBUILD'] = ambientPrebuild;
+  }
+});
 
 describe('fetch-pr report assembly', () => {
-  const savedEnv: { sessionId?: string; promptId?: string } = {};
+  const savedEnv: {
+    sessionId?: string;
+    promptId?: string;
+  } = {};
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -422,6 +493,7 @@ describe('fetch-pr report assembly', () => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
     producerMocks.refExists.mockReturnValue(false);
+    producerMocks.untrustedRepositoryFrom.mockReturnValue(null);
     producerMocks.git.mockImplementation((...args: string[]) =>
       args[0] === 'rev-parse' ? 'f00df00df00d' : '',
     );
@@ -803,6 +875,171 @@ describe('fetch-pr report assembly', () => {
   // The lease is also a lock (#9205): a concurrent same-PR fetch-pr used to
   // stale-clean the holder's worktree before failing on, destroying it. The
   // refusal must precede every destructive step, including the lease write.
+  describe('prebuild (issue #10108)', () => {
+    const OUT = '/tmp/fetch-report.json';
+    const DEPS = {
+      installed: true,
+      built: true,
+      note: '',
+      report: tmpFile('pr-42', 'prebuild.json'),
+      durationMs: 1234,
+    };
+    let savedPrebuild: string | undefined;
+
+    beforeEach(() => {
+      savedPrebuild = process.env['QWEN_REVIEW_PREBUILD'];
+      process.env['QWEN_REVIEW_PREBUILD'] = '1';
+      producerMocks.prebuildWorktree.mockReturnValue(DEPS);
+      // Same reason as the defaults above: clearAllMocks keeps a
+      // mockReturnValue the skip test below sets, so re-assert the
+      // covered default every test starts from.
+      producerMocks.prebuildCovered.mockReturnValue(true);
+    });
+
+    afterEach(() => {
+      if (savedPrebuild === undefined) {
+        delete process.env['QWEN_REVIEW_PREBUILD'];
+      } else {
+        process.env['QWEN_REVIEW_PREBUILD'] = savedPrebuild;
+      }
+    });
+
+    /** Every write of the plan, in order, parsed. */
+    function planWrites(): Array<Record<string, unknown>> {
+      return producerMocks.writeFileSync.mock.calls
+        .filter(([path]: unknown[]) => path === OUT)
+        .map(([, body]: unknown[]) => JSON.parse(String(body)));
+    }
+
+    it('runs the prebuild against the fresh worktree and records it in the plan', async () => {
+      const report = await reportFor({});
+      expect(report.dependencies).toEqual(DEPS);
+      // Agent 7's build-test reads the plan this command wrote, builds in
+      // the worktree this command created, and writes beside the plan.
+      expect(producerMocks.prebuildWorktree).toHaveBeenCalledTimes(1);
+      expect(producerMocks.prebuildWorktree).toHaveBeenCalledWith({
+        plan: OUT,
+        worktree: worktreePath('42'),
+        report: tmpFile('pr-42', 'prebuild.json'),
+      });
+    });
+
+    it('writes the plan first, rewrites it with the outcome, and ledgers the FINAL write', async () => {
+      await reportFor({});
+      // build-test reads the plan for its file list, so the plan exists
+      // before the prebuild runs; the outcome then lands in a rewrite.
+      const writes = planWrites();
+      expect(writes).toHaveLength(2);
+      expect(writes[0]).not.toHaveProperty('dependencies');
+      expect(writes[1]).toHaveProperty('dependencies', DEPS);
+      const [firstWrite, secondWrite] =
+        producerMocks.writeFileSync.mock.invocationCallOrder.filter(
+          (_order: number, i: number) =>
+            producerMocks.writeFileSync.mock.calls[i][0] === OUT,
+        );
+      const prebuildOrder =
+        producerMocks.prebuildWorktree.mock.invocationCallOrder[0];
+      expect(prebuildOrder).toBeGreaterThan(firstWrite);
+      expect(prebuildOrder).toBeLessThan(secondWrite);
+      // The session ledger keys on the plan's mtime — the run epoch every
+      // downstream fence reads through — so it must record the rewrite,
+      // not the write the prebuild superseded.
+      const { appendRunSession } = await import('./lib/run-ledger.js');
+      expect(vi.mocked(appendRunSession)).toHaveBeenCalledWith(OUT);
+      expect(
+        vi.mocked(appendRunSession).mock.invocationCallOrder[0],
+      ).toBeGreaterThan(secondWrite);
+    });
+
+    it('is absent from the plan when the environment did not ask for it', async () => {
+      delete process.env['QWEN_REVIEW_PREBUILD'];
+      const report = await reportFor({});
+      expect(report).not.toHaveProperty('dependencies');
+      expect(producerMocks.prebuildWorktree).not.toHaveBeenCalled();
+      // And the plan is written exactly once — byte-for-byte the pre-prebuild
+      // fetch, for every local review.
+      expect(planWrites()).toHaveLength(1);
+    });
+
+    it('skips the prebuild and warns when the session-shell cover is absent', async () => {
+      // The local shape: the opt-in is set, but no covering session
+      // default is welded — a prebuild started under the built-in 120s
+      // default dies mid-install with the whole fetch-pr call, so the
+      // review degrades to the pre-prebuild flow instead.
+      producerMocks.prebuildCovered.mockReturnValue(false);
+      const report = await reportFor({});
+      expect(report).not.toHaveProperty('dependencies');
+      expect(producerMocks.prebuildWorktree).not.toHaveBeenCalled();
+      expect(planWrites()).toHaveLength(1);
+      const line = producerMocks.writeStderrLine.mock.calls
+        .map(([l]: unknown[]) => String(l))
+        .find((l) => l.startsWith('Prebuild skipped:'));
+      expect(line).toContain(PREBUILD_ENV);
+    });
+
+    it('skips the prebuild on an empty diff, where the skill stops before any agent runs', async () => {
+      // A resolvable base whose range diffs to nothing: the capture
+      // succeeds and is empty, which is the one shape `emptyDiff` accepts.
+      producerMocks.resolveMergeBase.mockReturnValue({
+        sha: 'b'.repeat(40),
+        baseFetchFailed: false,
+      });
+      const report = await reportFor({});
+      expect(report.emptyDiff).toBe(true);
+      expect(report).not.toHaveProperty('dependencies');
+      expect(producerMocks.prebuildWorktree).not.toHaveBeenCalled();
+    });
+
+    it('announces the prebuild on stderr before the call, and the outcome after', async () => {
+      // The call is a blocking prefix that emits nothing until it returns,
+      // so the start line must precede it — a run killed mid-prebuild
+      // otherwise ends its log at the plan write with no trace of where it
+      // died. DEPS' 1234ms rounds to the 1s the success line quotes.
+      await reportFor({});
+      const calls = producerMocks.writeStderrLine.mock.calls;
+      const startIdx = calls.findIndex(([line]: unknown[]) =>
+        String(line).startsWith('Prebuilding the worktree via build-test'),
+      );
+      expect(startIdx).toBeGreaterThanOrEqual(0);
+      const prebuildOrder =
+        producerMocks.prebuildWorktree.mock.invocationCallOrder[0];
+      expect(
+        producerMocks.writeStderrLine.mock.invocationCallOrder[startIdx],
+      ).toBeLessThan(prebuildOrder);
+      expect(String(calls[startIdx][0])).toContain(
+        `(${PREBUILD_ENV}=1, budget ${PREBUILD_BUDGET_S}s)`,
+      );
+      const doneIdx = calls.findIndex(([line]: unknown[]) =>
+        String(line).startsWith('Prebuilt the worktree in'),
+      );
+      expect(doneIdx).toBeGreaterThan(startIdx);
+      expect(String(calls[doneIdx][0])).toBe(
+        'Prebuilt the worktree in 1s: dependencies installed and the ' +
+          "scoped build closure compiled; build-test's install is a no-op " +
+          'on this tree.',
+      );
+    });
+
+    it('discloses an incomplete prebuild on stderr, with the note', async () => {
+      producerMocks.prebuildWorktree.mockReturnValue({
+        installed: false,
+        built: false,
+        note: 'npm ci exited 1',
+        report: null,
+        durationMs: 4321,
+      });
+      await reportFor({});
+      const line = producerMocks.writeStderrLine.mock.calls
+        .map(([l]: unknown[]) => String(l))
+        .find((l) => l.startsWith('Prebuild did not complete in'));
+      expect(line).toBe(
+        'Prebuild did not complete in 4s (installed: false, built: false; ' +
+          'npm ci exited 1); build-test installs and builds on its own ' +
+          'path as before.',
+      );
+    });
+  });
+
   describe('lease lock', () => {
     const foreignLease = {
       sessionId: 'session-other',
@@ -952,8 +1189,37 @@ describe('fetch-pr report assembly', () => {
         producerMocks.git.mock.invocationCallOrder[0]!,
       );
       expect(leaseOrder).toBeLessThan(
-        producerMocks.execFileSync.mock.invocationCallOrder[0]!,
+        producerMocks.gitOpt.mock.invocationCallOrder[0]!,
       );
+    });
+
+    it('refuses a poisoned launch directory before the sweep and the fetch', async () => {
+      // The launch directory is where every git command here without an
+      // explicit `-C` finds its repository, and in the nested geometry that
+      // directory sits inside the OUTER review's read-write mount. Gating only
+      // the `worktree add` at step 4 left `cleanStale`'s force-remove and the
+      // PR fetch resolving through the very pointer the gate distrusts — a
+      // fetch through a planted repository loads its transport config and runs
+      // it on the host.
+      //
+      // So the assertion is ordering, not just refusal: NOTHING may have run.
+      // Not the lease read, not the sweep, not one git call.
+      producerMocks.untrustedRepositoryFrom.mockReturnValue(
+        'the launch dir resolves to an admin entry inside the review temp dir',
+      );
+
+      await expect(reportFor({})).rejects.toThrow(
+        /refusing to review PR #42 from this directory/,
+      );
+
+      expect(producerMocks.untrustedRepositoryFrom).toHaveBeenCalledWith(
+        process.cwd(),
+      );
+      expect(producerMocks.releaseWorktree).not.toHaveBeenCalled();
+      expect(producerMocks.git).not.toHaveBeenCalled();
+      expect(producerMocks.execFileSync).not.toHaveBeenCalled();
+      expect(vi.mocked(readReviewWorktreeLease)).not.toHaveBeenCalled();
+      expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
     });
   });
 
@@ -1010,13 +1276,17 @@ describe('fetch-pr report assembly', () => {
       await expect(reportFor({})).rejects.toThrow(
         'Failed to fetch PR #42 metadata',
       );
-      expect(producerMocks.execFileSync).toHaveBeenCalledWith(
-        'git',
-        ['branch', '-D', 'qwen-review/pr-42'],
-        // Sanitized env: a delete must land in the repository the caller
-        // named, not the one an exported `GIT_DIR` points at.
-        expect.objectContaining({ stdio: 'pipe', env: expect.any(Object) }),
+      // Through `lib/git`'s gated wrapper, not a direct `execFileSync`: the
+      // rollback runs from the launch directory, `branch -D` is a
+      // reference-transaction hook channel, and an ungated spawn there executes
+      // whatever hooks a planted pointer configures. The wrapper also carries
+      // the sanitized env and the timeout the direct spawn lacked.
+      expect(producerMocks.gitOpt).toHaveBeenCalledWith(
+        'branch',
+        '-D',
+        'qwen-review/pr-42',
       );
+      expect(producerMocks.execFileSync).not.toHaveBeenCalled();
       expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalledWith(
         process.cwd(),
         'pr-42',
@@ -1027,11 +1297,106 @@ describe('fetch-pr report assembly', () => {
       // `branch -D` lets another session through the emptied gate while the
       // deletion is still pending. Compare the FIRST clear: the outer catch's
       // second clear fires after the branch leg anyway.
-      expect(
-        producerMocks.execFileSync.mock.invocationCallOrder[0]!,
-      ).toBeLessThan(
+      expect(producerMocks.gitOpt.mock.invocationCallOrder[0]!).toBeLessThan(
         vi.mocked(clearReviewWorktreeLeaseIfOwned).mock.invocationCallOrder[0]!,
       );
+    });
+
+    it('lets the step-4 launch-dir refusal propagate unwrapped, with no rollback', async () => {
+      // The second ask sits OUTSIDE the try whose catch rolls the fetched ref
+      // back. Thrown inside, the refusal was caught by that rollback, which
+      // deleted the ref through the very pointer the refusal had just declared
+      // untrusted — `branch -D` is a reference-transaction hook channel — and
+      // then re-wrapped the refusal as `Failed to create worktree at …`,
+      // indistinguishable from an infrastructure failure. Outside, it reaches
+      // the lease rollback, which spawns no git at all, and the user unmangled.
+      producerMocks.untrustedRepositoryFrom
+        .mockReturnValueOnce(null) // the hoisted gate at the top of the run
+        .mockReturnValueOnce(
+          '/repo/.qwen/tmp/review-pr-42 resolves to an admin entry inside the review temp dir',
+        );
+
+      await expect(reportFor({})).rejects.toThrow(
+        /^refusing to create a review worktree: /,
+      );
+      expect(producerMocks.gitOpt).not.toHaveBeenCalledWith(
+        'branch',
+        '-D',
+        'qwen-review/pr-42',
+      );
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalled();
+    });
+
+    it('refuses the step-4 create when a symlinked ancestor of the worktree path survived the sweep (R27-9)', async () => {
+      // `cleanStale`'s releaseWorktree DECLINES to free through a symlinked
+      // ancestor — it prints a line and leaves the link standing — so "the
+      // sweep just ran" is not proof the parent of `wt` is real. Without the
+      // ancestor arm beside the launch-dir gate, `mkdirSync(dirname(wt))`
+      // creates through the link and `git worktree add` checks the PR's code
+      // out at the link's target: outside the review temp dir, where
+      // `mountRootFor` answers null and the build/test phase runs
+      // unsandboxed in a directory the planter chose.
+      const tmpParent = join(process.cwd(), '.qwen', 'tmp');
+      const linkStat = {
+        isSymbolicLink: () => true,
+        isFile: () => false,
+      };
+      producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+        if (String(path) === tmpParent) return linkStat;
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+
+      await expect(reportFor({})).rejects.toThrow(
+        /refusing to create a review worktree at .*is a symlink/,
+      );
+      // Nothing was created through the link — no mkdir, no worktree add —
+      // and the fetched ref survives the refusal for the next run's
+      // cleanStale to sweep (the arm sits outside the rollback try).
+      expect(producerMocks.mkdirSync).not.toHaveBeenCalled();
+      expect(producerMocks.git).not.toHaveBeenCalledWith(
+        'worktree',
+        'add',
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(producerMocks.gitOpt).not.toHaveBeenCalledWith(
+        'branch',
+        '-D',
+        'qwen-review/pr-42',
+      );
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalled();
+    });
+
+    it('refuses the step-4 create when the link sits AT the worktree path (R32-11)', async () => {
+      // The ancestor arm asked `dirname(wt)` and never `wt` itself, so a link
+      // planted at the destination — the cheaper plant of the two — walked
+      // straight through it. `releaseWorktree` unlinks a leaf link it can
+      // reach, but `cleanStale` only WARNS when the release reports
+      // `freed: false` (an EACCES on `.qwen/tmp` is enough) and runs on to
+      // here; `mkdirSync(dirname(wt))` is then a no-op on the real parent and
+      // `git worktree add wt ref` creates and checks out THROUGH the link —
+      // measured on git 2.43, exit 0 with the tree in the external directory.
+      const wt = join(process.cwd(), '.qwen', 'tmp', 'review-pr-42');
+      const linkStat = {
+        isSymbolicLink: () => true,
+        isFile: () => false,
+      };
+      producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+        if (String(path) === wt) return linkStat;
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+
+      await expect(reportFor({})).rejects.toThrow(
+        /refusing to create a review worktree at .*is a symlink/,
+      );
+      expect(producerMocks.mkdirSync).not.toHaveBeenCalled();
+      expect(producerMocks.git).not.toHaveBeenCalledWith(
+        'worktree',
+        'add',
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalled();
     });
 
     it('clears the lease when the worktree add fails', async () => {
@@ -1448,6 +1813,10 @@ describe('fetch-pr report assembly', () => {
     // …and the PLAN is the delta's, not the full range's: a re-plan over
     // fullText would pair a 200-line plan with an 8-line published diff.
     expect(report.diffLines).toBe(NARROWED.trimEnd().split('\n').length);
+    const narrowedSrcDiffLines = buildDiffPlan(NARROWED).srcDiffLines;
+    const fullSrcDiffLines = buildDiffPlan(FULL_DIFF).srcDiffLines;
+    expect(fullSrcDiffLines).toBeGreaterThan(narrowedSrcDiffLines);
+    expect(report.fullSrcDiffLines).toBe(fullSrcDiffLines);
     expect(report.emptyDiff).toBeUndefined();
     expect(report.collapsedFromUpstream).toBeUndefined();
     // The probe wiring, pinned by invocation shape: a transposed
@@ -1964,10 +2333,10 @@ describe('fetch-pr report assembly', () => {
       .spyOn(mod, 'gitProbe')
       .mockImplementation((...args: string[]) =>
         args[0] === 'merge-base'
-          ? { out: null, status: 128 }
+          ? { out: null, status: 128, refusal: null }
           : args[0] === 'rev-parse'
-            ? { out: ANCHOR, status: 0 }
-            : { out: '', status: 0 },
+            ? { out: ANCHOR, status: 0, refusal: null }
+            : { out: '', status: 0, refusal: null },
       );
     try {
       const report = await reportFor({ since: ANCHOR });
@@ -2054,10 +2423,13 @@ describe('fetch-pr report assembly', () => {
         .spyOn(mod, 'gitProbe')
         .mockImplementation((...args: string[]) =>
           args[0] === probe
-            ? (answer as { out: string | null; status: number })
+            ? {
+                ...(answer as { out: string | null; status: number }),
+                refusal: null,
+              }
             : args[0] === 'rev-parse'
-              ? { out: ANCHOR, status: 0 }
-              : { out: '', status: 0 },
+              ? { out: ANCHOR, status: 0, refusal: null }
+              : { out: '', status: 0, refusal: null },
         );
       try {
         const report = await reportFor({ since: ANCHOR });
@@ -4179,7 +4551,11 @@ describe('fetch-pr --resume', () => {
 });
 
 describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
-  const OUT = '/tmp/fetch-report.json';
+  // The deadline helpers derive the record dir through resolve(OUT), so OUT
+  // must be a native absolute path: a POSIX literal gains a drive letter and
+  // backslashes on Windows, the disk-routing mock below stops matching, and
+  // /tmp also maps to an unwritable drive root there.
+  const OUT = join(tmpdir(), 'fetch-report.json');
   const DIFF_BYTES = 'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+x\n';
 
   function prevReport(over: Record<string, unknown> = {}): string {
@@ -4470,7 +4846,7 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
       actualDeadline.writeRoundCapStop(OUT, 2, 2, now + 2000);
 
       await run();
-      const stampsFile = `${recordDir}/budget-rounds.json`;
+      const stampsFile = join(recordDir, 'budget-rounds.json');
       // Resume 1 kept the stop — and the stamps that price its rounds.
       expect(actualDeadline.readBudgetStop(OUT)).not.toBeNull();
       expect(realFs.existsSync(stampsFile)).toBe(true);

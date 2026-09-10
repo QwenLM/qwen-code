@@ -6,6 +6,8 @@
 
 import type OpenAI from 'openai';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
+import type { ReasoningEffort } from '../../reasoning-effort.js';
+import { REASONING_EFFORT_TIERS } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 
@@ -55,12 +57,48 @@ export function isZaiProvider(
   return model.toLowerCase().startsWith('glm-');
 }
 
+/**
+ * True for GLM model ids at 5.2 or newer, the family Z.ai documents as taking
+ * the tiered `reasoning_effort` (including `max`). Older GLM ids do not, so a
+ * blanket `glm-*` check would claim a tier the endpoint can reject.
+ * See https://docs.z.ai/guides/capabilities/thinking.
+ */
+export function isGlmTieredEffortModel(model: string | undefined): boolean {
+  if (!model) {
+    return false;
+  }
+  const parsed = /^glm-(\d+)(?:\.(\d+))?/.exec(model.toLowerCase());
+  if (!parsed) {
+    return false;
+  }
+  const major = Number(parsed[1]);
+  const minor = Number(parsed[2] ?? 0);
+  return major > 5 || (major === 5 && minor >= 2);
+}
+
 export class ZaiOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   static isZaiProvider = isZaiProvider;
   static isZaiHostname = isZaiHostname;
 
   // Latch so the skipped-flatten warning fires once per provider lifetime.
   private nonZaiHostnameFlattenWarned = false;
+
+  /**
+   * The full ladder, including `max`, only on a verified Z.ai host running a
+   * GLM-5.2+ model. Both halves matter: `isZaiProvider` also routes here on a
+   * bare `glm-*` model name, which says nothing about what an arbitrary
+   * self-hosted backend accepts, and older GLM ids predate the tiered field.
+   * Anything else keeps the generic ceiling, matching the hostname gate the
+   * wire reshape below already uses.
+   */
+  protected override supportedReasoningEffortsFor(
+    model: string | undefined,
+  ): readonly ReasoningEffort[] {
+    return isZaiHostname(this.contentGeneratorConfig) &&
+      isGlmTieredEffortModel(model ?? this.contentGeneratorConfig.model)
+      ? REASONING_EFFORT_TIERS
+      : super.supportedReasoningEffortsFor(model);
+  }
 
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,

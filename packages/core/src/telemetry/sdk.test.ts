@@ -258,6 +258,55 @@ describe('Telemetry SDK', () => {
     );
   });
 
+  it.each([
+    ['unset limits', undefined, undefined, Infinity],
+    ['span-specific priority', '256', '512', 256],
+    ['invalid span-specific fallback', 'invalid', '384', 384],
+    ['zero span-specific value', '0', '256', 0],
+    ['negative span-specific value', '-1', '256', -1],
+  ])(
+    'pins the %s OTel attribute limit in the SDK',
+    async (_name, spanLimit, generalLimit, expected) => {
+      const previousSpanLimit =
+        process.env['OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT'];
+      const previousGeneralLimit =
+        process.env['OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT'];
+      if (spanLimit === undefined) {
+        delete process.env['OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT'];
+      } else {
+        process.env['OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT'] = spanLimit;
+      }
+      if (generalLimit === undefined) {
+        delete process.env['OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT'];
+      } else {
+        process.env['OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT'] = generalLimit;
+      }
+
+      try {
+        await initializeTelemetry(mockConfig);
+
+        expect(NodeSDK).toHaveBeenCalledWith(
+          expect.objectContaining({
+            spanLimits: { attributeValueLengthLimit: expected },
+          }),
+        );
+      } finally {
+        if (previousSpanLimit === undefined) {
+          delete process.env['OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT'];
+        } else {
+          process.env['OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT'] =
+            previousSpanLimit;
+        }
+        if (previousGeneralLimit === undefined) {
+          delete process.env['OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT'];
+        } else {
+          process.env['OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT'] =
+            previousGeneralLimit;
+        }
+      }
+    },
+  );
+
   describe('lazy init lifecycle', () => {
     it('shares a single in-flight init across concurrent callers', async () => {
       await Promise.all([

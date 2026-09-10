@@ -41,6 +41,14 @@ export interface SessionHookEntry {
   sequential?: boolean;
   /** Optional skill root path for skill-scoped hooks */
   skillRoot?: string;
+  /**
+   * Registered from repository-controlled configuration — a project
+   * skill's frontmatter — and therefore executed only while the folder is
+   * trusted: the event handler re-reads `Config.isTrustedFolder()` at fire
+   * time, so a trust revoked mid-session silences the hook without a
+   * restart, and a trust granted again lets it fire.
+   */
+  trustGated?: boolean;
 }
 
 /**
@@ -142,7 +150,11 @@ export class SessionHooksManager {
     event: HookEventName,
     matcher: string,
     hook: CommandHookConfig | HttpHookConfig,
-    options?: { sequential?: boolean; skillRoot?: string },
+    options?: {
+      sequential?: boolean;
+      skillRoot?: string;
+      trustGated?: boolean;
+    },
   ): string {
     const hookId = generateHookId();
 
@@ -153,6 +165,7 @@ export class SessionHooksManager {
       config: hook,
       sequential: options?.sequential,
       skillRoot: options?.skillRoot,
+      ...(options?.trustGated ? { trustGated: true } : {}),
     };
 
     const storage = this.getSessionStorage(sessionId);

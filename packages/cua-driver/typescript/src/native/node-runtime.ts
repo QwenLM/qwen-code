@@ -1,8 +1,8 @@
 import { createRequire } from "node:module"
-import { dirname, join } from "node:path"
-import { fileURLToPath } from "node:url"
-
-import { resolveLibPath } from "@ubjs/node/typescript/dist/resolve-lib.js"
+import {
+  resolveCuaSdkLibraryPath,
+  resolveCuaSdkRuntimePath,
+} from "../native-assets.js"
 
 const FfiType = {
   UInt8: { tag: "UInt8" },
@@ -27,13 +27,9 @@ const FfiType = {
   MutReference: (inner: unknown) => ({ tag: "MutReference", inner }),
 }
 
-const sdkLibrary = resolveLibPath({
-  crateName: "cua_driver_sdk",
-  callerUrl: import.meta.url,
-  npmPackageBase: "@trycua/cua-driver-",
-  tripleStyle: "node",
-})
-const runtimePath = join(dirname(sdkLibrary), "cua_driver_node_runtime.node")
+const sdkLibrary = resolveCuaSdkLibraryPath()
+const runtimePath = resolveCuaSdkRuntimePath()
+const resolveLibPath = () => sdkLibrary
 const require = createRequire(import.meta.url)
 const { UniffiNativeModule } = require(runtimePath) as {
   UniffiNativeModule: unknown

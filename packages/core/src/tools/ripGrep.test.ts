@@ -24,7 +24,7 @@ import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.j
 import { tildeifyPath } from '../utils/paths.js';
 import { spawn } from 'node:child_process';
 import { runRipgrep } from '../utils/ripgrepUtils.js';
-import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
+import { DEFAULT_FILE_FILTERING_OPTIONS } from '../utils/file-filtering-options.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { logRipgrepRuntimeRecovery } from '../telemetry/loggers.js';
 

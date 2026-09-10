@@ -184,11 +184,18 @@ describe('WebShellTranscript DOM integration', () => {
     const summaries = Array.from(
       container.querySelectorAll<HTMLButtonElement>('button'),
     ).filter((button) => button.textContent?.includes('Updated task list'));
-    expect(summaries).toHaveLength(2);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].textContent).toContain('2 times');
     act(() => {
-      summaries[1].click();
+      summaries[0].click();
     });
-    const completedSnapshot = summaries[1].parentElement;
+    const completedSnapshot = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((row) => row.textContent?.includes('1/1'))?.parentElement;
+    expect(completedSnapshot).not.toBeNull();
+    act(() => {
+      completedSnapshot?.querySelector<HTMLElement>('[role="button"]')?.click();
+    });
     const detailButton = completedSnapshot?.querySelector<HTMLButtonElement>(
       'button[title="Show task detail"]',
     );
@@ -335,9 +342,211 @@ describe('WebShellTranscript DOM integration', () => {
       <WebShellTranscript blocks={blocks} collapseCompletedTurns={false} />,
     );
 
-    expect(container.textContent).toContain('Ask user 1 question');
+    expect(container.querySelector('[class*="chatBubble"]')).toBeNull();
+    const summary = container.querySelector<HTMLButtonElement>(
+      'button[aria-expanded]',
+    )!;
+    expect(summary.textContent).toContain('Asked 1 question');
+    act(() => summary.click());
     expect(container.textContent).toContain('User answer: Staging');
     expect(container.querySelector('button[type="submit"]')).toBeNull();
+  });
+
+  it.each(['readonly', 'document'] as const)(
+    'keeps question and multiline answers visible in %s mode',
+    (renderMode) => {
+      const questions = [
+        { header: 'Choice', question: 'Which target?', options: [], raw: {} },
+        { header: 'Choice', question: 'Which code?', options: [], raw: {} },
+      ];
+      const answer = '```ts\nconst value = 1;\nconsole.log(value);\n```';
+      const text = `User has provided the following answers:\n\n**Choice**: Staging\n**Choice**: ${answer}`;
+      const answers = [
+        { question: 'Which target?', answer: 'Staging' },
+        { question: 'Which code?', answer },
+      ];
+      const { container } = render(
+        <WebShellTranscript
+          renderMode={renderMode}
+          blocks={[
+            block({ id: 'u1', kind: 'user', text: 'Configure the project' }),
+            block(
+              {
+                id: 'read',
+                kind: 'tool',
+                toolCallId: 'read-1',
+                title: 'read_file',
+                toolName: 'read_file',
+                status: 'completed',
+                preview: { kind: 'file_read', path: 'package.json' },
+              },
+              2,
+            ),
+            block(
+              {
+                id: 'ask',
+                kind: 'tool',
+                toolCallId: 'ask-1',
+                title: 'ask_user_question',
+                toolName: 'ask_user_question',
+                status: 'completed',
+                preview: { kind: 'ask_user_question', questions },
+                rawInput: { questions },
+                rawOutput: { type: 'ask_user_question_answers', text, answers },
+                resultPreview: { kind: 'question_answers', text, answers },
+              },
+              3,
+            ),
+            block({ id: 'a1', kind: 'assistant', text: 'Configured.' }, 4),
+          ]}
+        />,
+      );
+      const bubble = container.querySelector(
+        '[data-transcript-tool-call-id="ask-1"]',
+      )!;
+      expect(bubble).not.toBeNull();
+      expect(
+        [...bubble.querySelectorAll('dt')].map((el) => el.textContent),
+      ).toEqual(['Which target?', 'Which code?']);
+      expect(
+        [...bubble.querySelectorAll('dd')].map((el) => el.textContent),
+      ).toEqual(['Staging', answer]);
+      expect(bubble.querySelector('button')).toBeNull();
+      if (renderMode === 'readonly') {
+        expect(
+          container.querySelector('[data-transcript-tool-call-id="read-1"]'),
+        ).toBeNull();
+      }
+    },
+  );
+
+  it.each([undefined, '', '   \n'])(
+    'omits empty question bubbles: %s',
+    (text) => {
+      const { container } = render(
+        <WebShellTranscript
+          blocks={[
+            block({
+              id: 'ask',
+              kind: 'tool',
+              toolCallId: 'ask-1',
+              toolName: 'ask_user_question',
+              title: 'ask_user_question',
+              status: 'completed',
+              preview: { kind: 'generic' },
+              rawOutput: text,
+            }),
+          ]}
+        />,
+      );
+      expect(
+        container.querySelector('[data-transcript-tool-call-id="ask-1"]'),
+      ).toBeNull();
+    },
+  );
+
+  it.each(['readonly', 'document'] as const)(
+    'uses structured partial answers without parsing text in %s mode',
+    (renderMode) => {
+      const text = 'Display wording can change independently.';
+      const answer = 'first\n**B**: embedded';
+      const answers = [{ question: 'Question A?', answer }];
+      const { container } = render(
+        <WebShellTranscript
+          renderMode={renderMode}
+          blocks={[
+            block({
+              id: 'ask',
+              kind: 'tool',
+              toolCallId: 'ask-1',
+              title: 'ask_user_question',
+              toolName: 'ask_user_question',
+              status: 'completed',
+              preview: { kind: 'generic' },
+              rawInput: { questions: [] },
+              rawOutput: { type: 'ask_user_question_answers', text, answers },
+              resultPreview: { kind: 'question_answers', text, answers },
+            }),
+          ]}
+        />,
+      );
+      expect(
+        [...container.querySelectorAll('dt')].map((el) => el.textContent),
+      ).toEqual(['Question A?']);
+      expect(
+        [...container.querySelectorAll('dd')].map((el) => el.textContent),
+      ).toEqual([answer]);
+      expect(container.textContent).not.toContain(text);
+    },
+  );
+
+  it.each([
+    'User declined to answer the questions.',
+    'User has provided the following answers:\n\nNo valid answers were provided.',
+    'User has provided the following answers:\n\n**Target**: answer\n**Example**: literal answer text',
+    'User has provided answers to all questions:\n\n**Target**: answer',
+  ])('keeps unstructured results in the left tool display: %s', (text) => {
+    const { container } = render(
+      <WebShellTranscript
+        blocks={[
+          block({
+            id: 'ask',
+            kind: 'tool',
+            toolCallId: 'ask-1',
+            title: 'ask_user_question',
+            toolName: 'ask_user_question',
+            status: 'completed',
+            preview: { kind: 'generic' },
+            rawInput: {
+              questions: [{ header: 'Target', question: 'Which target?' }],
+            },
+            rawOutput: text,
+          }),
+        ]}
+      />,
+    );
+    expect(container.querySelector('[class*="chatBubble"]')).toBeNull();
+    expect(container.querySelector('dl')).toBeNull();
+    const summary = container.querySelector<HTMLButtonElement>(
+      'button[aria-expanded]',
+    )!;
+    expect(summary.getAttribute('aria-expanded')).toBe('false');
+    act(() => summary.click());
+    expect(container.textContent).toContain(text.split('\n')[0]);
+  });
+
+  it.each([
+    {
+      type: 'ask_user_question_answers',
+      text: 'Invalid answer data',
+      answers: [{ question: 'A?', answer: 1 }],
+    },
+    { type: 'ask_user_question_answers', text: 'No answers', answers: [] },
+  ])('handles empty or invalid structured answers: $text', (result) => {
+    const { container } = render(
+      <WebShellTranscript
+        blocks={[
+          block({
+            id: 'ask',
+            kind: 'tool',
+            toolCallId: 'ask-1',
+            title: 'ask_user_question',
+            toolName: 'ask_user_question',
+            status: 'completed',
+            preview: { kind: 'generic' },
+            rawOutput: result,
+          }),
+        ]}
+      />,
+    );
+    expect(container.querySelector('dl')).toBeNull();
+    if (result.answers.length) {
+      expect(container.querySelector('[class*="chatBubble"]')).toBeNull();
+    } else {
+      expect(
+        container.querySelector('[class*="chatBubble"]')?.textContent,
+      ).toBe(result.text);
+    }
   });
 
   it('keeps MessageList turn expansion as a local viewing interaction', () => {

@@ -5,11 +5,15 @@
  */
 
 /**
- * Image MIME types the image tokenizer can decode for metadata extraction.
- * This is a capability list, not an acceptance contract: the file-read path
- * only forwards a narrower set to model endpoints (see
- * PROVIDER_SAFE_IMAGE_MIME_TYPES in fileUtils.ts and #9291), so some types
- * here are omitted from requests before they ever reach the tokenizer.
+ * Image MIME types accepted for vision input (attachment/thumbnail paths).
+ * This is an acceptance list for inputs, not a decode-capability list:
+ * token accounting uses the flat DEFAULT_IMAGE_TOKEN_ESTIMATE in
+ * compactionInputSlimming.ts — the former request-tokenizer estimator
+ * cluster, including ImageTokenizer and its dimension parsing, was removed
+ * as orphaned in PR #9676. The file-read path forwards only the narrower
+ * PIPELINE_IMAGE_MIME_TYPES subset to model endpoints (see
+ * PROVIDER_SAFE_IMAGE_MIME_TYPES in fileUtils.ts and #9291); anything else
+ * is omitted from requests with an in-band notice.
  */
 export const SUPPORTED_IMAGE_MIME_TYPES = [
   'image/bmp',
@@ -58,7 +62,7 @@ export function isSupportedImageMimeType(
 
 /**
  * Get a human-readable list of image formats the pipeline forwards to the
- * model (not the tokenizer's wider decode capability).
+ * model (the narrower pipeline subset, not the full acceptance list above).
  * @returns Comma-separated string of forwarded formats
  */
 export function getSupportedImageFormatsString(): string {

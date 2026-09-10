@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
@@ -12,8 +13,13 @@ import {
   UI_COMPACT_CLEARED_IMAGE_MESSAGE,
 } from './useHistoryManager.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
-import type { HistoryItemWithoutId, HistoryItemToolGroup } from '../types.js';
+import type {
+  HistoryItem,
+  HistoryItemWithoutId,
+  HistoryItemToolGroup,
+} from '../types.js';
 import { ToolCallStatus } from '../types.js';
+import { SUPERSEDED_FINDINGS_MESSAGE } from '../utils/findings-coalescing.js';
 
 const { debugLoggerMock } = vi.hoisted(() => ({
   debugLoggerMock: {
@@ -60,6 +66,56 @@ describe('useHistoryManager', () => {
     );
     // Basic check that ID incorporates timestamp
     expect(result.current.history[0].id).toBeGreaterThanOrEqual(timestamp);
+  });
+
+  it('replaces earlier findings displays when a new report_findings group commits', () => {
+    // A delivered findings list REPLACES the session's earlier one: the
+    // previous group's display collapses to the marker at commit time, so
+    // every re-render surface shows only the latest list.
+    const { result } = renderHook(() => useHistory());
+    const findingsGroup = (id: string, outcome?: 'fixed') => ({
+      type: 'tool_group' as const,
+      tools: [
+        {
+          callId: id,
+          name: 'ReportFindings',
+          description: 'Report 1 finding',
+          status: ToolCallStatus.Success,
+          confirmationDetails: undefined,
+          resultDisplay: {
+            type: 'findings_list' as const,
+            findings: [
+              {
+                id: 'R1-1',
+                severity: 'Critical' as const,
+                file: 'src/foo.ts',
+                summary: 's',
+                shortSummary: 's',
+                failureScenario: 'f',
+                ...(outcome ? { outcome } : {}),
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    act(() => {
+      result.current.addItem(findingsGroup('call-1'), Date.now());
+    });
+    act(() => {
+      result.current.addItem(findingsGroup('call-2', 'fixed'), Date.now());
+    });
+
+    expect(result.current.history).toHaveLength(2);
+    const [first, second] = result.current.history as HistoryItemToolGroup[];
+    expect(first.tools[0].resultDisplay).toBe(SUPERSEDED_FINDINGS_MESSAGE);
+    const latest = second.tools[0].resultDisplay as {
+      type: string;
+      findings: Array<{ outcome?: string }>;
+    };
+    expect(latest.type).toBe('findings_list');
+    expect(latest.findings[0].outcome).toBe('fixed');
   });
 
   it('should generate unique IDs for items added with the same base timestamp', () => {
@@ -372,6 +428,81 @@ describe('useHistoryManager', () => {
       ).tools[0];
       expect(recentTool.resultDisplay).toBe('some file content here');
       expect(recentTool.detailedDisplay).toBe('full secret file content here');
+    });
+
+    it('also drops the carried superseded findings display when compacting (Ctrl+O privacy)', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+      const findingsGroup = (callId: string) => ({
+        type: 'tool_group' as const,
+        tools: [
+          {
+            callId,
+            name: 'report_findings',
+            description: 'Report findings',
+            status: ToolCallStatus.Success,
+            confirmationDetails: undefined,
+            resultDisplay: {
+              type: 'findings_list' as const,
+              findings: [
+                {
+                  id: 'R1-1',
+                  severity: 'Critical' as const,
+                  file: 'src/foo.ts',
+                  summary: 's',
+                  shortSummary: 's',
+                  failureScenario: 'f',
+                },
+              ],
+            },
+          },
+        ],
+      });
+
+      act(() => {
+        result.current.addItem(findingsGroup('call-1'), ts);
+      });
+      act(() => {
+        result.current.addItem(findingsGroup('call-2'), ts + 1);
+      });
+      // The second report superseded the first; the first tool now carries
+      // the marker plus the original display for rewind recovery.
+      const superseded = (
+        result.current.history[0] as unknown as HistoryItemToolGroup
+      ).tools[0];
+      expect(superseded.resultDisplay).toBe(SUPERSEDED_FINDINGS_MESSAGE);
+      expect(superseded.supersededFindingsDisplay).toBeDefined();
+
+      for (let i = 0; i < 24; i++) {
+        act(() => {
+          result.current.addItem(
+            {
+              type: 'tool_group',
+              tools: [
+                {
+                  callId: `plain-${i}`,
+                  name: 'read_file',
+                  description: '',
+                  resultDisplay: `content-${i}`,
+                  status: ToolCallStatus.Success,
+                  confirmationDetails: undefined,
+                },
+              ],
+            } as unknown as HistoryItemWithoutId,
+            ts + 2 + i,
+          );
+        });
+      }
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      const compacted = (
+        result.current.history[0] as unknown as HistoryItemToolGroup
+      ).tools[0];
+      expect(compacted.resultDisplay).toBe(UI_COMPACT_CLEARED_MESSAGE);
+      expect(compacted.supersededFindingsDisplay).toBeUndefined();
     });
 
     it('clears image payloads from old tool results', () => {
@@ -1041,6 +1172,46 @@ describe('useHistoryManager', () => {
         expect(tools[0].resultDisplay).toBe(`content-${i}`);
         expect(tools[1].resultDisplay).toBe(UI_COMPACT_CLEARED_MESSAGE);
       }
+    });
+  });
+
+  describe('loadHistory message-ID reconciliation', () => {
+    it('keeps addItem IDs out of the restored ID window', () => {
+      // buildResumedHistoryItems stamps restored items with Date.now() + i
+      // (i = 1..N) at load time. On --resume the scheduled-tasks startup
+      // banner is the first unconditional addItem(Date.now()) after the
+      // restore, so without reconciliation its ID (Date.now() + ++counter,
+      // counter never advanced by loadHistory) lands inside the restored
+      // range whenever the banner renders within N-1 ms — two <Static>
+      // children then share one React key.
+      const { result } = renderHook(() => useHistory());
+      const restoreBase = Date.now();
+      const restoredCount = 50;
+      const restoredItems: HistoryItem[] = Array.from(
+        { length: restoredCount },
+        (_, i) => ({
+          type: 'user' as const,
+          text: `restored-${i}`,
+          id: restoreBase + i + 1,
+        }),
+      );
+
+      act(() => {
+        result.current.loadHistory(restoredItems);
+      });
+
+      let bannerId = -1;
+      act(() => {
+        bannerId = result.current.addItem(
+          { type: 'warning', text: '1 active scheduled task.' },
+          Date.now(),
+        );
+      });
+
+      // The banner ID must clear the whole restored window, not just the
+      // current timestamp, so no restored item shares its React key.
+      expect(bannerId).toBeGreaterThan(restoreBase + restoredCount);
+      expect(restoredItems.some((item) => item.id === bannerId)).toBe(false);
     });
   });
 });

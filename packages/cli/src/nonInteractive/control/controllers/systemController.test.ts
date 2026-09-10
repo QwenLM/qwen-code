@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, expect, it, vi } from 'vitest';
 import { InputFormat } from '@qwen-code/qwen-code-core';
@@ -223,6 +224,37 @@ describe('SystemController', () => {
       );
 
       expect(context.sdkCanUseToolTimeoutMs).toBeUndefined();
+    });
+  });
+
+  describe('initialize MCP configuration', () => {
+    it('preserves explicit automatic version negotiation', async () => {
+      const context = createContext();
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      await controller.handleRequest(
+        {
+          subtype: 'initialize',
+          mcpServers: {
+            automatic: {
+              command: 'node',
+              versionNegotiation: 'auto',
+            },
+          },
+        },
+        'mcp-1',
+      );
+
+      expect(context.config.addMcpServers).toHaveBeenCalledWith({
+        automatic: expect.objectContaining({
+          command: 'node',
+          versionNegotiation: 'auto',
+        }),
+      });
     });
   });
 

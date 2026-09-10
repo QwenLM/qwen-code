@@ -357,6 +357,7 @@ export default {
   'Vim Mode': 'Vim モード',
   'Output Format': '出力形式',
   'Hide Tips': 'ヒントを非表示',
+  'Show Tool Call Arguments': 'ツール呼び出し引数を表示',
   Text: 'テキスト',
   JSON: 'JSON',
   Plan: 'プラン',
@@ -582,8 +583,8 @@ export default {
     'コマンドへの入力は tool_name、tool_input、tool_use_id、error、error_type、is_interrupt、is_timeout を持つ JSON です。',
   'Input to command is JSON with notification message and type.':
     'コマンドへの入力は通知メッセージとタイプを持つ JSON です。',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'コマンド入力は、"prompt"（現在のモデル向けプロンプト）と、オプションの "submitted_prompt"（サポート対象の対話型 TUI で入力されたテキストの投影）を含む JSON です。',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'コマンド入力は、"prompt"（現在のモデル向けプロンプト）と、オプションの "submitted_prompt"（サポート対象の送信境界でキャプチャされたテキスト投影）を含む JSON です。',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'コマンドへの入力は command_name、command_args、展開後のプロンプトテキストを持つ JSON です。',
   'Input to command is JSON with session start source.':
@@ -816,6 +817,12 @@ export default {
     'チャット履歴の圧縮でサイズが減少しませんでした。圧縮プロンプトに問題がある可能性があります',
   'Could not compress chat history due to a token counting error.':
     'トークンカウントエラーのため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history because the compression summary was empty.':
+    '圧縮サマリーが空だったため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history because the compression summary was truncated.':
+    '圧縮サマリーが切り詰められたため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history due to an API error.':
+    'API エラーのため、チャット履歴を圧縮できませんでした',
   // Directory
   'Configuration is not available.': '設定が利用できません',
   'Please provide at least one path to add.':
@@ -971,6 +978,7 @@ export default {
   'rejected — edit config to re-approve': '拒否済み — 設定を編集して再承認',
   'Background agent needs approval':
     'バックグラウンドエージェントが承認待ちです',
+  'from nested agent': 'ネストされた agent から',
   'Approve or deny the request above':
     '上のリクエストを承認または拒否してください',
   Running: '実行中',

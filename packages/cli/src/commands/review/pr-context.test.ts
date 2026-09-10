@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { FIXED_RULING_MARKER } from './lib/review-footer.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,6 +19,7 @@ const {
   ensureAuthenticatedMock,
   setGhHostMock,
   writeFileSyncMock,
+  renameSyncMock,
   rmSyncMock,
   mkdirSyncMock,
   getPlatformReaderMock,
@@ -30,6 +32,7 @@ const {
   ensureAuthenticatedMock: vi.fn(),
   setGhHostMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
+  renameSyncMock: vi.fn(),
   rmSyncMock: vi.fn(),
   mkdirSyncMock: vi.fn(),
   getPlatformReaderMock: vi.fn(),
@@ -87,13 +90,14 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     mkdirSync: mkdirSyncMock,
     writeFileSync: writeFileSyncMock,
+    renameSync: renameSyncMock,
     rmSync: rmSyncMock,
   };
   return { ...mock, default: mock };
 });
 import {
   prContextCommand,
-  anyRootCarriesCriticalMarker,
+  anyCommentCarriesCriticalMarker,
   isLegacySuggestionSummary,
   isReviewWorthShowing,
   SUMMARY_MARKER,
@@ -237,7 +241,7 @@ describe('buildMarkdown section order', () => {
       );
       process.env['QWEN_CODE_MODEL_IDENTITY'] = 'other-model@9f8e7d6c';
       expect(buildMarkdown('1', 'o/r', meta, [], [], [], ledger)).toContain(
-        'Do NOT pass the reviewed-at sha',
+        'Do NOT pass the anchor above',
       );
     } finally {
       if (prev === undefined) delete process.env['QWEN_CODE_MODEL_IDENTITY'];
@@ -636,6 +640,78 @@ describe('buildMarkdown — a markerless maintainer blocker must not render as a
     expect(blocker).toBeLessThan(25_000);
   });
 
+  it('renders the round-1 root AND the re-post that carries the standing claim (#9940 review, round 30)', () => {
+    // The root is the reviewed claim and the only place it appears in the
+    // file; the re-post is what to rule on and the only one naming where
+    // the finding sits now. Both, never one instead of the other.
+    const md = buildMarkdown(
+      '9940',
+      'QwenLM/qwen-code',
+      meta,
+      [
+        {
+          id: 201,
+          user: { login: 'qwen-bot' },
+          path: 'packages/core/src/guard.ts',
+          line: 42,
+          body: '**[Suggestion]** R1-4: consider hardening the trust check here',
+        },
+        {
+          id: 202,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 201,
+          path: 'packages/core/src/guard.ts',
+          line: 42,
+          body: '**[Critical]** R1-4: still stands at HEAD — an untrusted workspace reaches the file-read tool with full permissions (packages/cli/src/config/settingsSchema.ts:88)',
+        },
+      ],
+      [],
+      [],
+      null,
+      'qwen-bot',
+    );
+    const section = md.indexOf('## Blockers to re-check');
+    expect(section).toBeGreaterThanOrEqual(0);
+    expect(md).toContain('consider hardening the trust check here');
+    expect(md).toContain('still stands at HEAD');
+    expect(md).toContain('`packages/cli/src/config/settingsSchema.ts:88`');
+    expect(md).toContain('(comment 201)');
+    expect(md).toContain('Re-asserted by @qwen-bot (comment 202)');
+    // Quoted once each: the lead is not repeated as a reply snippet.
+    expect(md.split('still stands at HEAD').length - 1).toBe(1);
+
+    // A long re-post degrades to a snippet rather than spending the
+    // section budget that later blockers need for their own roots.
+    const long = buildMarkdown(
+      '9940',
+      'QwenLM/qwen-code',
+      meta,
+      [
+        {
+          id: 301,
+          user: { login: 'qwen-bot' },
+          path: 'packages/core/src/guard.ts',
+          line: 42,
+          body: '**[Critical]** R1-4: the guard drops a valid case',
+        },
+        {
+          id: 302,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 301,
+          path: 'packages/core/src/guard.ts',
+          line: 42,
+          body: `**[Critical]** R1-4: still stands at HEAD ${'and here is why '.repeat(300)}`,
+        },
+      ],
+      [],
+      [],
+      null,
+      'qwen-bot',
+    );
+    expect(long).toContain('the guard drops a valid case');
+    expect(long).toContain('section budget spent');
+  });
+
   it('does not promote the triage bot saying there are NO blockers', () => {
     // "No critical blockers." is the triage bot's own template line. A
     // whole-body keyword scan fired on it, on every PR it ever commented on —
@@ -792,6 +868,57 @@ describe('extractCodeRefs', () => {
 });
 
 describe('carriesBlockerSignal', () => {
+  it('strips every GFM quoting form, in renderer precedence, before scanning (R14-4)', () => {
+    // ~~~ fences, a 4-backtick fence CONTAINING ```, inline code spans and
+    // indented code are all quoted text; a mid-line ``` run is not a fence;
+    // whichever of a fence / an HTML comment opens first owns the text.
+    expect(
+      carriesBlockerSignal('note\n~~~\n[critical] in tilde fence\n~~~\n'),
+    ).toBe(false);
+    expect(
+      carriesBlockerSignal('note\n````\n```\n[critical] nested\n```\n````\n'),
+    ).toBe(false);
+    expect(carriesBlockerSignal('see `[critical]` in the log')).toBe(false);
+    expect(carriesBlockerSignal('para\n\n    [critical] indented code\n')).toBe(
+      false,
+    );
+    // A mid-line ``` run is text, not a delimiter: the blocker claim before
+    // it and after it are both still the comment's own words.
+    expect(carriesBlockerSignal('this is blocking ``` still ``` yes')).toBe(
+      true,
+    );
+    // A `<!--` INSIDE a fence is fence content — it must not pair with a
+    // `-->` outside and delete a visible claim across the boundary.
+    expect(
+      carriesBlockerSignal('```\n<!--\n```\nthis is a blocker --> for real'),
+    ).toBe(true);
+    // A fence opener INSIDE an open comment is comment text: the comment
+    // still closes where it closes.
+    expect(carriesBlockerSignal('<!-- ``` -->\nmust-fix before merge')).toBe(
+      true,
+    );
+  });
+
+  it('ignores blocker tokens inside a fenced code block — quoted output is not a claim (R14-4)', () => {
+    // The posting contract mandates a fenced witness under every finding, and
+    // program output routinely prints literal markers ("[Critical]", "still
+    // fails"). Scanning inside the fence would self-promote a non-blocking
+    // Suggestion into the blocker section every round.
+    const fenced =
+      'Suggestion: tidy the helper.\n\nWitness:\n```\n[Critical] printed by the suite\nstill fails here\nblocking: test log\n```\n';
+    expect(carriesBlockerSignal(fenced)).toBe(false);
+    // The identical tokens OUTSIDE a fence still promote.
+    expect(carriesBlockerSignal('[Critical] printed by the suite')).toBe(true);
+    // An unclosed fence swallows the rest, as GitHub renders it.
+    expect(carriesBlockerSignal('note\n```\n[critical] never closed')).toBe(
+      false,
+    );
+    // A blocker claim BEFORE the fence is still seen.
+    expect(carriesBlockerSignal('This is a blocker.\n```\nlog\n```')).toBe(
+      true,
+    );
+  });
+
   it('recognises a blocker that never uses the [Critical] marker', () => {
     // The real PR #6486 heading. Only /review emits `[Critical]`; a human
     // types whatever they type, and the old literal-marker gate saw none of it.
@@ -1169,6 +1296,230 @@ describe('classifyInlineThreads', () => {
     expect(t.repliesByRoot.get(1)!.map((c) => c.id)).toEqual([2]);
   });
 
+  it("promotes a thread whose blocker claim is a REPLY, and rules on the reply's body (#9940 review, round 30)", () => {
+    // The thread lifecycle re-posts a still-standing finding as a reply
+    // inside its original thread instead of a new root, and a later round
+    // may raise its severity. Reading the ROOT alone, a Critical carried
+    // into a Suggestion-rooted thread promoted nothing: the blocker left
+    // the mandatory section and settled under "Already discussed — do NOT
+    // re-report" as a snippet.
+    const inline: RawComment[] = [
+      {
+        id: 201,
+        user: { login: 'qwen-bot' },
+        path: 'packages/core/src/guard.ts',
+        line: 42,
+        body: '**[Suggestion]** R1-4: consider hardening the trust check here',
+      },
+      {
+        id: 202,
+        user: { login: 'qwen-bot' },
+        in_reply_to_id: 201,
+        path: 'packages/core/src/guard.ts',
+        line: 42,
+        body: '**[Critical]** R1-4: still stands at HEAD — an untrusted workspace reaches the file-read tool with full permissions (packages/cli/src/config/settingsSchema.ts:88)',
+      },
+    ];
+    const t = classifyInlineThreads(inline, 'qwen-bot');
+    expect(t.repliedBlockerRoots.map((c) => c.id)).toEqual([201]);
+    expect(t.repliedRoots).toEqual([]);
+    // The claim to rule on is the newest blocker-shaped comment.
+    expect(t.blockerLeads.get(201)!.id).toBe(202);
+    // A thread with no blocker anywhere in it stays out.
+    const quiet = classifyInlineThreads(
+      [
+        { id: 301, user: { login: 'qwen-bot' }, body: '**[Suggestion]** nit' },
+        {
+          id: 302,
+          user: { login: 'a' },
+          in_reply_to_id: 301,
+          body: 'done, thanks',
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quiet.repliedBlockerRoots).toEqual([]);
+    expect(quiet.blockerLeads.size).toBe(0);
+    // The steady state: a blocker root re-asserted every round. The NEWEST
+    // assertion is the standing claim — it names where the finding sits
+    // now, while the root's text is rounds old.
+    const restated = classifyInlineThreads(
+      [
+        {
+          id: 401,
+          user: { login: 'qwen-bot' },
+          body: '**[Critical]** R1-4: the guard drops a valid case',
+        },
+        {
+          id: 402,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 401,
+          body: '**[Critical]** R1-4: still stands at HEAD — now at src/guard.ts:88',
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(restated.blockerLeads.get(401)!.id).toBe(402);
+    // A THIRD PARTY's blocker-shaped reply promotes the thread (widening
+    // promotion can only add one) but is never the standing claim: the
+    // "Quote reply" button quotes the root's `**[Critical]**` marker
+    // verbatim, and rendering that as the claim evicted the reviewer's
+    // own Critical from the file.
+    const quoted = classifyInlineThreads(
+      [
+        {
+          id: 501,
+          user: { login: 'qwen-bot' },
+          body: '**[Suggestion]** R1-4: consider hardening the trust check',
+        },
+        {
+          id: 502,
+          user: { login: 'author-person' },
+          in_reply_to_id: 501,
+          body: '> **[Critical]** R1-4: …\n\nI do not think so.',
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quoted.repliedBlockerRoots.map((c) => c.id)).toEqual([501]);
+    expect(quoted.blockerLeads.size).toBe(0);
+    // The account match is case-insensitive, and an unknown account has
+    // no own re-post to prefer.
+    const cased = [
+      {
+        id: 601,
+        user: { login: 'Qwen-Bot' },
+        body: '**[Critical]** R1-4: the guard drops a valid case',
+      },
+      {
+        id: 602,
+        user: { login: 'QWEN-bot' },
+        in_reply_to_id: 601,
+        body: '**[Critical]** R1-4: still stands at HEAD',
+      },
+    ];
+    expect(
+      classifyInlineThreads(cased, 'qwen-bot').blockerLeads.get(601)!.id,
+    ).toBe(602);
+    expect(classifyInlineThreads(cased, '').blockerLeads.size).toBe(0);
+    // The lifecycle's own `fixed` ruling note is neither: its `by` clause
+    // routinely carries blocker prose, and read as a claim it promoted
+    // retired threads and displaced the real re-post.
+    const ruled = classifyInlineThreads(
+      [
+        {
+          id: 701,
+          user: { login: 'qwen-bot' },
+          body: '**[Suggestion]** R1-2: consider a guard here',
+        },
+        {
+          id: 702,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 701,
+          body: `R1-2 fixed by removing the blocking wait ${FIXED_RULING_MARKER}`,
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(ruled.repliedBlockerRoots).toEqual([]);
+    expect(ruled.blockerLeads.size).toBe(0);
+    // …matched by the note's posted SHAPE over the WHOLE body: the
+    // marker string is public, and a review of the file that defines it
+    // quotes it verbatim — read as a substring, that Critical demoted
+    // itself out of the mandatory section (#9940 review, round 30).
+    const quotingMarker = classifyInlineThreads(
+      [
+        {
+          id: 711,
+          user: { login: 'qwen-bot' },
+          body: `**[Critical]** R3-1: the filter \`${FIXED_RULING_MARKER}\` is substring-anywhere`,
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quotingMarker.openBlockerRoots.map((c) => c.id)).toEqual([711]);
+    // …and a comment that quotes a WHOLE ruling line and then states its
+    // own finding underneath is a finding: anchoring the note's line
+    // alone demoted it out of the mandatory section (#9940 review,
+    // round 31).
+    const quotesThenFinds = classifyInlineThreads(
+      [
+        {
+          id: 741,
+          user: { login: 'qwen-bot' },
+          body: `R1-2 fixed by x ${FIXED_RULING_MARKER}\n\n**[Critical]** R3-4: the auth check is still missing`,
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quotesThenFinds.openBlockerRoots.map((c) => c.id)).toEqual([741]);
+    // A reply that quotes a whole ruling line and carries on is a claim,
+    // not a note: the shape ends at the marker.
+    const quotesWholeLine = classifyInlineThreads(
+      [
+        {
+          id: 731,
+          user: { login: 'qwen-bot' },
+          body: '**[Suggestion]** R1-2: consider a guard here',
+        },
+        {
+          id: 732,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 731,
+          body: `**[Critical]** R1-2: \`R1-2 fixed by x ${FIXED_RULING_MARKER}\` is what the census matches, and it must not demote this finding`,
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quotesWholeLine.repliedBlockerRoots.map((c) => c.id)).toEqual([731]);
+    expect(quotesWholeLine.blockerLeads.get(731)!.id).toBe(732);
+    // The root is never its own lead — it is already rendered as the
+    // root, and a lead is the thing quoted BESIDE it.
+    const rootOnly = classifyInlineThreads(
+      [
+        {
+          id: 801,
+          user: { login: 'qwen-bot' },
+          body: '**[Critical]** R1-4: the guard drops a valid case',
+        },
+        {
+          id: 802,
+          user: { login: 'author-person' },
+          in_reply_to_id: 801,
+          body: 'thanks, looking now',
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(rootOnly.repliedBlockerRoots.map((c) => c.id)).toEqual([801]);
+    expect(rootOnly.blockerLeads.size).toBe(0);
+    // Among several own re-posts the NEWEST is the standing claim: it is
+    // the one that names where the finding sits now.
+    const twice = classifyInlineThreads(
+      [
+        {
+          id: 901,
+          user: { login: 'qwen-bot' },
+          body: '**[Critical]** R1-4: the guard drops a valid case',
+        },
+        {
+          id: 902,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 901,
+          body: '**[Critical]** R1-4: still stands — round 2',
+        },
+        {
+          id: 903,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 901,
+          body: '**[Critical]** R1-4: still stands — round 3, now at src/guard.ts:88',
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(twice.blockerLeads.get(901)!.id).toBe(903);
+  });
+
   it('promotes an attribution-off Critical through its invisible severity marker', () => {
     // The posted shape with attribution off: no prefix, the severity rides
     // the comment marker — and a Critical must still land in the re-check
@@ -1345,34 +1696,37 @@ describe('classifyInlineThreads', () => {
   });
 });
 
-describe('anyRootCarriesCriticalMarker', () => {
-  it('fires only on a critical marker carried by a ROOT comment', () => {
+describe('anyCommentCarriesCriticalMarker', () => {
+  it('fires on a critical marker carried by a root OR a reply (#9940 review, round 30)', () => {
     expect(
-      anyRootCarriesCriticalMarker([
+      anyCommentCarriesCriticalMarker([
         { body: 'x\n\n<!-- qwen-review critical -->' },
       ]),
     ).toBe(true);
     // A suggestion marker decides nothing: only critical promotes.
     expect(
-      anyRootCarriesCriticalMarker([
+      anyCommentCarriesCriticalMarker([
         { body: 'x\n\n<!-- qwen-review suggestion -->' },
       ]),
     ).toBe(false);
-    // A reply's marker is never read: promotion reads root bodies only, so
-    // a planted reply must not turn a tolerable identity blip into a
-    // repeating hard refusal.
+    // A reply's marker IS read: since the thread lifecycle (#9906) a
+    // still-standing Critical re-asserts itself as a reply, and the
+    // identity gates whether that marker promotes — so an unknown
+    // identity must fail closed on it exactly as it does on a root's.
     expect(
-      anyRootCarriesCriticalMarker([
+      anyCommentCarriesCriticalMarker([
         { in_reply_to_id: 1, body: 'x\n\n<!-- qwen-review critical -->' },
       ]),
-    ).toBe(false);
-    expect(anyRootCarriesCriticalMarker([{ body: 'plain prose' }])).toBe(false);
+    ).toBe(true);
+    expect(anyCommentCarriesCriticalMarker([{ body: 'plain prose' }])).toBe(
+      false,
+    );
     expect(
-      anyRootCarriesCriticalMarker([
+      anyCommentCarriesCriticalMarker([
         { body: '<!-- qwen-review critical --> mid-body' },
       ]),
     ).toBe(false);
-    expect(anyRootCarriesCriticalMarker([])).toBe(false);
+    expect(anyCommentCarriesCriticalMarker([])).toBe(false);
   });
 });
 
@@ -1480,6 +1834,331 @@ describe('latestLedger — the split trust surface', () => {
     expect(own?.ledger).toEqual(anchored);
   });
 
+  it('grafts the anchor forward from an earlier OWN marker when the winner closed without one', () => {
+    // Issue #9902: a fail-closed round withholds its anchor on purpose, but
+    // the withhold is about THAT round's range — the anchor an earlier clean
+    // round certified stays true, and scoping the next round `sha..HEAD`
+    // re-covers the gap. Recovery used to read only the winning marker, so
+    // one non-clean round dropped the incremental state permanently and
+    // every later round re-read the whole diff.
+    const failClosed = (round: number) =>
+      `x <!-- qwen-review-ledger {"v":1,"round":${round},"findings":[{"id":"R${round}-1","sev":"C","file":"b.ts","title":"uncertified"}]} -->`;
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored)),
+        review('bot', '2026-01-02T00:00:00Z', failClosed(3)),
+        review('bot', '2026-01-03T00:00:00Z', failClosed(4)),
+      ],
+      'bot',
+    );
+    // The work list is the winner's (round-first); the anchor is round 2's.
+    expect(recovered?.ledger.round).toBe(4);
+    expect(recovered?.ledger.sha).toBe(anchored.sha);
+    expect(recovered?.ledger.model).toBe(anchored.model);
+    // …and the provenance rides, so the renderer never claims round 4
+    // "reviewed at" a sha it certified nothing about.
+    expect(recovered?.anchorFromRound).toBe(2);
+  });
+
+  it('never grafts a FOREIGN anchor — the graft source is own markers only', () => {
+    // The strip and the graft are the same rule at two seams: an untrusted
+    // body must not decide which lines this pipeline stops looking at, and
+    // recovering around the strip through the lookback would reopen it.
+    const failClosed =
+      'x <!-- qwen-review-ledger {"v":1,"round":3,"findings":[{"id":"R3-1","sev":"C","file":"b.ts","title":"uncertified"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('stranger', '2026-01-01T00:00:00Z', serializeLedger(anchored)),
+        review('bot', '2026-01-02T00:00:00Z', failClosed),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(3);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.ledger.model).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('grafts the own anchor over a FOREIGN winner — the sha still never crosses accounts', () => {
+    // The winner is another account's higher-round marker (its anchor is
+    // stripped at the seam), but this account's OWN earlier marker carried
+    // one it certified. Restoring it is the union's own principle applied to
+    // the anchor: nothing foreign enters; the own certified state rides.
+    const foreignWinner =
+      'y <!-- qwen-review-ledger {"v":1,"round":5,"findings":[{"id":"R5-1","sev":"S","file":"c.ts","title":"theirs"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored)),
+        review('ci-bot', '2026-01-02T00:00:00Z', foreignWinner),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(5);
+    expect(recovered?.foreign).toBe(true);
+    expect(recovered?.ledger.sha).toBe(anchored.sha);
+    expect(recovered?.ledger.model).toBe(anchored.model);
+    expect(recovered?.anchorFromRound).toBe(2);
+  });
+
+  it('never grafts on an ANONYMOUS walk — no marker is attributable without a login', () => {
+    // Same fail-safe as the anonymous strip: with `me` unknown every marker
+    // walks as foreign, and a drive-by anchor must not scope the diff.
+    const failClosed =
+      'x <!-- qwen-review-ledger {"v":1,"round":3,"findings":[]} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored)),
+        review('bot', '2026-01-02T00:00:00Z', failClosed),
+      ],
+      null,
+    );
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('does not graft when the winner carries its own anchor', () => {
+    const { recovered } = recoverLedger(
+      [review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored))],
+      'bot',
+    );
+    expect(recovered?.ledger.sha).toBe(anchored.sha);
+    // The anchor is the winner's own — no provenance to disclose.
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('never grafts onto a PARTIAL work list — dropped entries would retire silently', () => {
+    // A fail-closed round that ran FULL range sheds findings spanning the
+    // whole diff, some before the candidate sha; grafting past them scopes
+    // `sha..HEAD` and the dropped entries never re-enter view — the exact
+    // shape the serializer's truncation withhold exists to prevent. The
+    // partial list degrades to the full range instead.
+    const truncated =
+      'x <!-- qwen-review-ledger {"v":1,"round":4,"findings":[{"id":"R4-1","sev":"C","file":"b.ts","title":"kept"}],"dropped":7} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored)),
+        review('bot', '2026-01-02T00:00:00Z', truncated),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(4);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('never grafts from a SAME-round marker — one round cannot both certify and withhold', () => {
+    // Two same-round own markers (a concurrent lane): one closed cleanly
+    // with an anchor, one closed without and won the tiebreak. Grafting the
+    // same round's sha would render "round N certified it; round N closed
+    // without an anchor" — a self-contradiction in the provenance the
+    // wording exists to keep honest. The shape degrades to the full range.
+    const failClosed =
+      'x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[{"id":"R2-1","sev":"C","file":"b.ts","title":"uncertified"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored)),
+        review('bot', '2026-01-02T00:00:00Z', failClosed),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(2);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('grafts the LATEST anchored own marker, not the earliest', () => {
+    // Two clean own rounds, then a fail-closed winner: the graft must take
+    // the newer sha — scoping from the older one re-reads code the newer
+    // round already certified, and an older sha may have been rebased away
+    // while the newer one is still valid.
+    const older =
+      'x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[],"sha":"aaaa1111aaaa1111","model":"m@1a2b3c4d"} -->';
+    const newer =
+      'x <!-- qwen-review-ledger {"v":1,"round":5,"findings":[],"sha":"bbbb2222bbbb2222","model":"m@1a2b3c4d"} -->';
+    const failClosed =
+      'x <!-- qwen-review-ledger {"v":1,"round":6,"findings":[{"id":"R6-1","sev":"C","file":"b.ts","title":"uncertified"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', older),
+        review('bot', '2026-01-02T00:00:00Z', newer),
+        review('bot', '2026-01-03T00:00:00Z', failClosed),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.sha).toBe('bbbb2222bbbb2222');
+    expect(recovered?.anchorFromRound).toBe(5);
+  });
+
+  it('never grafts an anchor the winner itself RAN at — the same-sha stop would abandon the work list', () => {
+    // A fail-closed round at an UNMOVED head — the documented `--comment`
+    // full review of an up-to-date PR, or a model-switch full review — ran
+    // at exactly the head the candidate anchor certifies. Grafting it hands
+    // Step 1 `--since <sha>` with the sha equal to the live head: fetch-pr
+    // rules `upToDate`, and the same-sha stop ends the round before any
+    // agent launches — the winner's work list is never re-ruled, and every
+    // later round at the same head repeats the stop, freezing the PR's
+    // review state until new commits land. Before the graft the side file
+    // had no sha there and the round was full-range; the refuse keeps it so.
+    // (Step 1's fence on the stop itself covers the shapes this equality
+    // cannot see — a missing commit_id, a rewound head.)
+    const head = 'a'.repeat(40);
+    const atHead = `x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[],"sha":"${head}","model":"m@1a2b3c4d"} -->`;
+    const failClosed =
+      'x <!-- qwen-review-ledger {"v":1,"round":3,"findings":[{"id":"R3-1","sev":"C","file":"b.ts","title":"uncertified"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        { ...review('bot', '2026-01-01T00:00:00Z', atHead), commit_id: head },
+        {
+          ...review('bot', '2026-01-02T00:00:00Z', failClosed),
+          commit_id: head,
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(3);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+    // …but one commit lands between the certified head and the winner's
+    // head, and `sha..HEAD` re-covers a real gap again — the graft rides.
+    const moved = recoverLedger(
+      [
+        { ...review('bot', '2026-01-01T00:00:00Z', atHead), commit_id: head },
+        {
+          ...review('bot', '2026-01-02T00:00:00Z', failClosed),
+          commit_id: 'b'.repeat(40),
+        },
+      ],
+      'bot',
+    );
+    expect(moved.recovered?.ledger.sha).toBe(head);
+    expect(moved.recovered?.anchorFromRound).toBe(2);
+  });
+
+  it('never grafts an anchor the FOREIGN winner ran at — the same-sha stop would abandon the merged list', () => {
+    // The same abandonment through the foreign seam: the winner is another
+    // account's marker (its anchor stripped), and it ran at the head this
+    // account's own earlier marker certified. A graft there hands Step 1
+    // the same same-sha stop; the merged work list is owed rulings by
+    // whoever runs next, so the refuse is account-blind.
+    const head = 'c'.repeat(40);
+    const ownAtHead = `x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[],"sha":"${head}","model":"m@1a2b3c4d"} -->`;
+    const foreignWinner =
+      'y <!-- qwen-review-ledger {"v":1,"round":5,"findings":[{"id":"R5-1","sev":"S","file":"c.ts","title":"theirs"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', ownAtHead),
+          commit_id: head,
+        },
+        {
+          ...review('ci-bot', '2026-01-02T00:00:00Z', foreignWinner),
+          commit_id: head,
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(5);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('never grafts past a union re-capped OVER the findings cap — the merge-generated dropped counts too', () => {
+    // A foreign winner whose union with this account's findings exceeds
+    // LEDGER_MAX_FINDINGS gets its `dropped` only AFTER the re-cap. Reading
+    // the winner's PRE-merge `dropped` (none) would fire the graft past the
+    // capped list — the exact silent-retirement shape the guard exists to
+    // prevent.
+    const ownFindings = Array.from({ length: 26 }, (_, i) => ({
+      id: `R2-${i + 1}`,
+      sev: 'S' as const,
+      file: 'own.ts',
+      title: `own ${i + 1}`,
+    }));
+    const foreignFindings = Array.from({ length: 26 }, (_, i) => ({
+      id: `R5-${i + 1}`,
+      sev: 'S' as const,
+      file: 'theirs.ts',
+      title: `theirs ${i + 1}`,
+    }));
+    const ownAnchored: Ledger = {
+      v: 1,
+      round: 2,
+      findings: ownFindings,
+      sha: 'abc1234def567890',
+      model: 'm@1a2b3c4d',
+    };
+    const foreignWinner = `y <!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 5,
+      findings: foreignFindings,
+    })} -->`;
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', serializeLedger(ownAnchored)),
+        review('ci-bot', '2026-01-02T00:00:00Z', foreignWinner),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(5);
+    expect(recovered?.merged).toBe(true);
+    expect(recovered?.ledger.findings).toHaveLength(LEDGER_MAX_FINDINGS);
+    expect(recovered?.ledger.dropped).toBe(2);
+    // The union overflow makes the work list PARTIAL — the graft refuses.
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('never grafts over a foreign winner POSTED truncated — its dropped survives the strip', () => {
+    // The winner was itself capped when it posted. `dropped` is not a
+    // volume field, so stripForeignVolume keeps it, and the graft guard
+    // must read it: a graft over a truncated list retires the dropped
+    // entries outside the grafted scope. The own list is empty, so no
+    // merge re-derives the count — the refusal pins the strip's survival.
+    const ownClean =
+      'x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[],"sha":"abc1234def567890","model":"m@1a2b3c4d"} -->';
+    const foreignWinner =
+      'y <!-- qwen-review-ledger {"v":1,"round":5,"findings":[{"id":"R5-1","sev":"S","file":"c.ts","title":"kept"}],"dropped":3} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', ownClean),
+        review('ci-bot', '2026-01-02T00:00:00Z', foreignWinner),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(5);
+    expect(recovered?.ledger.dropped).toBe(3);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
+  it('never grafts when the own latest marker parses empty but PARTIAL — its dropped is invisible to the merge', () => {
+    // The completeness guard reads `ledger.dropped`, but a FOREIGN winner's
+    // own-side count reaches it only through the merge branch — gated on a
+    // non-empty own list. An own latest marker that parses to zero findings
+    // with non-zero `dropped` (entries the admission test rejects under
+    // version drift, or a hand-edited marker) therefore never enters the
+    // merge, the winner's own `dropped` is zero, and the guard would graft
+    // past findings that are in no work list and may reference code before
+    // the candidate sha — the silent retirement the guard exists to
+    // prevent. The shape degrades to the full range instead.
+    const ownPartial =
+      'x <!-- qwen-review-ledger {"v":1,"round":4,"findings":[],"dropped":2} -->';
+    const foreignWinner =
+      'y <!-- qwen-review-ledger {"v":1,"round":5,"findings":[{"id":"R5-1","sev":"S","file":"c.ts","title":"theirs"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored)),
+        review('bot', '2026-01-02T00:00:00Z', ownPartial),
+        review('ci-bot', '2026-01-03T00:00:00Z', foreignWinner),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(5);
+    expect(recovered?.foreign).toBe(true);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
   it('drops the churn state from ANOTHER account, keeping the work list', () => {
     // The streak is the same class of claim as the anchor: a fact ABOUT
     // the round that posted it, certified by the account that ran it.
@@ -1496,12 +2175,20 @@ describe('latestLedger — the split trust surface', () => {
       round: 4,
       findings: [{ id: 'R4-1', sev: 'C', file: 'a.ts', title: 't' }],
       churnRounds: 4,
+      // 2 is the honest maximum at round 4 — the flat streak clamps tighter
+      // than the churn one, so a higher planted value would measure the
+      // seam through the clamp instead of the strip.
+      flatRounds: 2,
     };
     const foreign = latestLedger(
       [review('ci-bot', '2026-01-01T00:00:00Z', serializeLedger(churning))],
       'maintainer',
     );
     expect(foreign?.ledger.churnRounds).toBeUndefined();
+    // The floor trigger's streak is the same class of claim: a stranger's
+    // planted value must not ride the identity-known write into the side
+    // file and latch THIS account's floor off rounds it never measured.
+    expect(foreign?.ledger.flatRounds).toBeUndefined();
     expect(foreign?.ledger.findings).toEqual(churning.findings);
     expect(foreign?.ledger.round).toBe(4);
     // The OWN account's churn state round-trips through the same seam: it is
@@ -1513,6 +2200,7 @@ describe('latestLedger — the split trust surface', () => {
       'bot',
     );
     expect(own?.ledger.churnRounds).toBe(4);
+    expect(own?.ledger.flatRounds).toBe(2);
   });
 
   it("recovers the winning review's own commit_id as the age reference", () => {
@@ -2365,7 +3053,7 @@ describe('renderLedgerSection', () => {
     // file stayed green: the antecedent that says WHAT to pass, and the
     // statement that the CLI is what validates and scopes it. Without the
     // first, `pass it as --since <sha>` refers to nothing.
-    expect(anchored).toContain('The reviewed-at sha is the incremental anchor');
+    expect(anchored).toContain('The anchor above is the incremental anchor');
     expect(anchored).toContain('validates it against the fetched history');
     // …and the two fragments the block's own comment claims but does not
     // reach: the command that takes the flag, and what it does with it.
@@ -2391,16 +3079,159 @@ describe('renderLedgerSection', () => {
     );
     expect(noSha).not.toContain('reviewed at');
     // …and the routing tail goes with it: asserting only the space-form
-    // phrase let a mutant hoist the tail out of the ternary, since its own
-    // wording says "reviewed-at sha".
+    // phrase let a mutant hoist the tail out of the ternary, since the tail
+    // does not itself contain the heading phrase.
     expect(noSha).not.toContain('--since');
     // Every sentence of the tail, not just the ones carrying `--since`. The
-    // first one is written "reviewed-at sha" — hyphenated — so it matches
-    // neither the space-form phrase nor `--since`, and could be hoisted out
-    // of the ternary with every assertion above still green: a sha-less
-    // ledger would then render a dangling reference to a reviewed-at sha the
-    // side file deliberately withholds.
-    expect(noSha).not.toContain('reviewed-at sha');
+    // first one reads "The anchor above" — matching neither the space-form
+    // phrase nor `--since` — and could be hoisted out of the ternary with
+    // every assertion above still green: a sha-less ledger would then render
+    // a dangling reference to an anchor the side file deliberately withholds.
+    expect(noSha).not.toContain('The anchor above');
+  });
+
+  it('says "anchoring at", never "reviewed at", when the anchor was grafted forward', () => {
+    // A grafted anchor (issue #9902) is an EARLIER round's verdict carried
+    // by a round that certified no range. "Round 4, reviewed at sha" would
+    // attribute round 2's reading to round 4 — and Step 1's orchestrator
+    // acts on which round read what.
+    const grafted = renderLedgerSection(
+      {
+        v: 1,
+        round: 4,
+        findings: [{ id: 'R4-1', sev: 'C', file: 'a.ts', title: 't' }],
+        sha: 'abc1234def56789',
+        model: 'm@1a2b3c4d',
+      },
+      'm@1a2b3c4d',
+      null,
+      false,
+      null,
+      2,
+    );
+    expect(grafted).toContain('anchoring at `abc1234def56789`');
+    expect(grafted).toContain(
+      "carried forward from this account's round-2 marker",
+    );
+    expect(grafted).toContain('round 4 itself closed without an anchor');
+    expect(grafted).not.toContain('reviewed at');
+    // …and never the hyphenated form either: anchorRuling's verdict says
+    // "The anchor above", not "the reviewed-at sha" — the heading says
+    // "anchoring at", and the one section must not contradict itself.
+    expect(grafted).not.toContain('reviewed-at');
+    expect(grafted).toContain('The anchor above is the incremental anchor');
+    // The routing tail still fires — the graft IS the recovered anchor Step
+    // 1 passes, under the same-model contract of the round that made it.
+    expect(grafted).toContain(
+      'pass it as `--since <sha> --since-model <model>`',
+    );
+  });
+
+  it('drops the full-range fallback wording when a graft over a foreign winner supplies the anchor', () => {
+    // "This round is full-range unless a local cache supplies one" is the
+    // no-anchor reading; with a graft in hand the anchor already came from
+    // this account's own earlier marker, and the section must say which.
+    const grafted = renderLedgerSection(
+      {
+        v: 1,
+        round: 5,
+        findings: [{ id: 'R5-1', sev: 'C', file: 'a.ts', title: 't' }],
+        sha: 'abc1234def56789',
+        model: 'm@1a2b3c4d',
+      },
+      'm@1a2b3c4d',
+      'ci-bot',
+      false,
+      null,
+      2,
+    );
+    expect(grafted).toContain('the sha never crosses accounts');
+    expect(grafted).toContain('not the foreign one');
+    // The graft-over-foreign clause must not claim to know how the foreign
+    // round closed: it may have closed cleanly and had its anchor STRIPPED
+    // at the seam, or been fail-closed and carried none — the renderer
+    // cannot tell a stripped anchor from an absent one, so the clause states
+    // only what it knows: nothing usable crossed.
+    expect(grafted).toContain(
+      "round 5's marker carried no anchor this account could use",
+    );
+    expect(grafted).not.toContain('closed without an anchor');
+    expect(grafted).not.toContain(
+      'this round is full-range unless a local cache supplies one',
+    );
+    // …while the un-grafted foreign winner keeps the fallback wording.
+    const ungrafted = renderLedgerSection(
+      {
+        v: 1,
+        round: 5,
+        findings: [{ id: 'R5-1', sev: 'C', file: 'a.ts', title: 't' }],
+      },
+      'm@1a2b3c4d',
+      'ci-bot',
+    );
+    expect(ungrafted).toContain(
+      'this round is full-range unless a local cache supplies one',
+    );
+  });
+
+  it('keeps the graft provenance clause in the MERGED branch too — the production shape of a foreign-winner graft', () => {
+    // The merged-foreign branch interpolates the same no-crossing wording,
+    // and a foreign-winner graft over non-empty own findings renders
+    // through it (`mergedOverOwn` true) — the recovery test's exact shape.
+    // Re-inlining the old fallback text in that branch alone would say
+    // "full-range unless a local cache supplies one" beside a grafted
+    // anchor and a `--since` routing verdict: contradictory prose in the
+    // context file the orchestrator acts on, with every test green.
+    const merged = renderLedgerSection(
+      {
+        v: 1,
+        round: 5,
+        findings: [{ id: 'R5-1', sev: 'C', file: 'a.ts', title: 't' }],
+        sha: 'abc1234def56789',
+        model: 'm@1a2b3c4d',
+      },
+      'm@1a2b3c4d',
+      'ci-bot',
+      true,
+      null,
+      2,
+    );
+    expect(merged).toContain('MERGED over this account');
+    expect(merged).toContain('the sha never crosses accounts');
+    expect(merged).toContain('not the foreign one');
+    expect(merged).not.toContain(
+      'this round is full-range unless a local cache supplies one',
+    );
+  });
+
+  it('drops the "certified it" clause when the graft source carries no model', () => {
+    // An attribution-off source round posts a marker with a sha and NO model,
+    // so a graft can carry a model-less anchor. The heading then must not
+    // assert "the round that certified it" beside the ruling's "certified by
+    // nothing" — one section contradicting itself is the exact defect class
+    // the "anchoring at" wording exists to prevent. The ruling's absence text
+    // names BOTH causes of a model-less marker, not just the pre-field one.
+    const graftNoModel = renderLedgerSection(
+      {
+        v: 1,
+        round: 4,
+        findings: [{ id: 'R4-1', sev: 'C', file: 'a.ts', title: 't' }],
+        sha: 'abc1234def56789',
+      },
+      'm@1a2b3c4d',
+      null,
+      false,
+      null,
+      2,
+    );
+    expect(graftNoModel).toContain('anchoring at `abc1234def56789`');
+    expect(graftNoModel).toContain(
+      "carried forward from this account's round-2 marker",
+    );
+    expect(graftNoModel).not.toContain('the round that certified it');
+    expect(graftNoModel).toContain('attribution off');
+    expect(graftNoModel).toContain('predates the field');
+    expect(graftNoModel).toContain('Do NOT pass the anchor above');
   });
 
   it('refuses when the side file holds a DIFFERENT anchor than the one recovered', () => {
@@ -2481,7 +3312,7 @@ describe('renderLedgerSection', () => {
       ledger('m@9f8e7d6c'),
       'm@1a2b3c4d',
     );
-    expect(otherProvider).toContain('Do NOT pass the reviewed-at sha');
+    expect(otherProvider).toContain('Do NOT pass the anchor above');
     expect(otherProvider).toContain('Review the FULL range');
     expect(otherProvider).not.toContain('--since <sha>');
     // It names both sides, so a maintainer asking "why the full diff again?"
@@ -2504,7 +3335,7 @@ describe('renderLedgerSection', () => {
     // identity at all: both are "unknown", and unknown is a mismatch.
     const preField = renderLedgerSection(ledger(), 'm@1a2b3c4d');
     expect(preField).not.toContain(' by `');
-    expect(preField).toContain('the marker predates the field');
+    expect(preField).toContain('predates the field');
     expect(preField).toContain('Do NOT pass');
     const noRuntime = renderLedgerSection(ledger('m@1a2b3c4d'), '');
     expect(noRuntime).toContain('an unpublished identity');
@@ -2898,6 +3729,92 @@ describe('buildMarkdown host baking', () => {
   });
 });
 
+describe('runPrContext stale context-file removal (handler level)', () => {
+  // The same-repo context-unavailable flow (SKILL.md) launches Agent 0 and
+  // 6d against "a context file that is not on disk". An interrupted earlier
+  // round breaks that premise: it WROTE the file, and nothing else removes
+  // the path between rounds (fetch-pr's stale-clean sweeps the worktree and
+  // branch only). A failed re-run must therefore leave NO file behind — the
+  // documented missing-file returns are the only shape the launched agents
+  // can meet. The `-prev-ledger.json` side file is the deliberate exception:
+  // compose-review reads it for the round counter, and
+  // persistRecoveredLedger owns its deletion licensing — a run that failed
+  // before recovery never re-vouched it and must not reset it.
+  const sideFile = '/tmp/qwen-review-pr-6711-prev-ledger.json';
+
+  const run = () =>
+    (prContextCommand.handler as (a: unknown) => Promise<void>)({
+      _: [],
+      $0: 'qwen',
+      pr_number: '6711',
+      owner_repo: 'o/r',
+      out: '/tmp/ctx.md',
+    });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ensureAuthenticatedMock.mockReturnValue(undefined);
+    process.exitCode = undefined;
+  });
+
+  it('removes a prior context file when the fetch fails', async () => {
+    // The R4-1 shape on #9717: round 1 wrote the context file and was
+    // interrupted before cleanup; round 2's pr-context fails on a rate
+    // limit. Without the removal the stale file survives the failure and
+    // the launched agents read the context the run just lost, against the
+    // paragraph's own closing invariant.
+    ghMock.mockImplementation(() => {
+      throw new Error('HTTP 403: rate limited');
+    });
+    await expect(run()).rejects.toThrow(/rate limited/);
+    expect(rmSyncMock).toHaveBeenCalledWith('/tmp/ctx.md', { force: true });
+    expect(rmSyncMock.mock.calls.some((c) => String(c[0]) === sideFile)).toBe(
+      false,
+    );
+  });
+
+  it('removes the prior file BEFORE authenticating — an auth failure is still a failed run', async () => {
+    ensureAuthenticatedMock.mockImplementation(() => {
+      throw new Error('not logged in');
+    });
+    await expect(run()).rejects.toThrow(/not logged in/);
+    expect(rmSyncMock).toHaveBeenCalledWith('/tmp/ctx.md', { force: true });
+  });
+
+  it('removes nothing over an invalid invocation', async () => {
+    // Usage errors precede every side effect: a pr_number this predicate
+    // rejects must not delete a file the run was never committed to write.
+    await expect(
+      (prContextCommand.handler as (a: unknown) => Promise<void>)({
+        _: [],
+        $0: 'qwen',
+        pr_number: '0',
+        owner_repo: 'o/r',
+        out: '/tmp/ctx.md',
+      }),
+    ).rejects.toThrow(/positive integer/);
+    expect(rmSyncMock).not.toHaveBeenCalled();
+  });
+
+  it('removes nothing over a malformed owner_repo either', async () => {
+    // The owner_repo shield sits above the removal too: a malformed invocation
+    // must not delete the previous round's context file before rejecting, or the
+    // corrected re-run fetches against nothing and the round proceeds down the
+    // context-unavailable path over a typo. Moving the `indexOf('/')` check below
+    // `rmSync` must fail here.
+    await expect(
+      (prContextCommand.handler as (a: unknown) => Promise<void>)({
+        _: [],
+        $0: 'qwen',
+        pr_number: '6711',
+        owner_repo: 'malformed',
+        out: '/tmp/ctx.md',
+      }),
+    ).rejects.toThrow(/must look like/);
+    expect(rmSyncMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('runPrContext identity failure (handler level)', () => {
   const metaJson = JSON.stringify({
     title: 't',
@@ -2950,7 +3867,14 @@ describe('runPrContext identity failure (handler level)', () => {
       owner_repo: 'o/r',
       out: '/tmp/ctx.md',
     });
-    expect(rmSyncMock).not.toHaveBeenCalled();
+    // Narrowed to the side file: the run's up-front removal of its own
+    // --out legitimately rm's the context path; the side file's deletion
+    // licensing is what this test pins.
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(false);
   });
 
   it('never deletes the side file over an EMPTY login — exit 0 is not identity', async () => {
@@ -2968,7 +3892,14 @@ describe('runPrContext identity failure (handler level)', () => {
       owner_repo: 'o/r',
       out: '/tmp/ctx.md',
     });
-    expect(rmSyncMock).not.toHaveBeenCalled();
+    // Narrowed to the side file: the run's up-front removal of its own
+    // --out legitimately rm's the context path; the side file's deletion
+    // licensing is what this test pins.
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(false);
   });
 
   const run = async () =>
@@ -2981,8 +3912,90 @@ describe('runPrContext identity failure (handler level)', () => {
     });
   const contextWrite = () =>
     (writeFileSyncMock.mock.calls.find(
-      (c) => c[0] === '/tmp/ctx.md',
+      // The context is written temp-then-renamed to --out.
+      (c) => String(c[0]).startsWith('/tmp/ctx.md'),
     )?.[1] as string) ?? '';
+
+  it('writes the context temp-then-rename — the rename is the commit point', async () => {
+    // The up-front removal of a STALE file already ran by the time the final
+    // write starts, so a direct writeFileSync that threw mid-write (ENOSPC
+    // creates the file then throws) would leave a truncated-but-readable
+    // context at --out — the one shape the missing-context branches the
+    // launch flow keys on cannot see. This pins the SHAPE — a tmp write, a
+    // rename onto --out, never a direct write; a reverted direct write
+    // leaves no tmp path and never calls rename. The failure itself is the
+    // next test's.
+    currentUserMock.mockReturnValue('someone');
+    await run();
+    const tmpWrite = writeFileSyncMock.mock.calls.find(
+      (c) =>
+        String(c[0]).startsWith('/tmp/ctx.md.') &&
+        String(c[0]).endsWith('.tmp'),
+    );
+    expect(tmpWrite).toBeDefined();
+    // The temp name embeds this process's pid, so two concurrent runs at
+    // the same --out cannot rename each other's half-written file.
+    expect(String(tmpWrite?.[0])).toBe(`/tmp/ctx.md.${process.pid}.tmp`);
+    expect(renameSyncMock).toHaveBeenCalledWith(tmpWrite?.[0], '/tmp/ctx.md');
+    expect(
+      writeFileSyncMock.mock.calls.some((c) => c[0] === '/tmp/ctx.md'),
+    ).toBe(false);
+  });
+
+  it('a failed rename removes the tmp debris and re-throws', async () => {
+    // The other half of the same catch: the temp write succeeded and the
+    // commit point failed (EXDEV, EACCES on --out's directory). The debris
+    // is removed and the failure propagates; --out was never written.
+    currentUserMock.mockReturnValue('someone');
+    renameSyncMock.mockImplementationOnce(() => {
+      throw Object.assign(new Error('EACCES: permission denied'), {
+        code: 'EACCES',
+      });
+    });
+    await expect(run()).rejects.toThrow('EACCES');
+    expect(rmSyncMock).toHaveBeenCalledWith(`/tmp/ctx.md.${process.pid}.tmp`, {
+      force: true,
+    });
+    expect(
+      writeFileSyncMock.mock.calls.some((c) => c[0] === '/tmp/ctx.md'),
+    ).toBe(false);
+  });
+
+  it('a mid-write failure leaves nothing at --out, and takes its tmp debris with it', async () => {
+    // ENOSPC creates the file then throws. With the temp write inside the
+    // same try, the catch removes the tmp path and re-throws: nothing was
+    // ever written at --out and the rename never ran, so the launch flow's
+    // missing-context branches see exactly a missing context. Deleting the
+    // catch ships green without this test — the throw still propagates, but
+    // the `.tmp` stays beside the missing context.
+    currentUserMock.mockReturnValue('someone');
+    const enospc = Object.assign(new Error('ENOSPC: no space left on device'), {
+      code: 'ENOSPC',
+    });
+    writeFileSyncMock.mockImplementation((target: unknown) => {
+      const path = String(target);
+      if (path.startsWith('/tmp/ctx.md.') && path.endsWith('.tmp')) {
+        throw enospc;
+      }
+    });
+    try {
+      await expect(run()).rejects.toThrow('ENOSPC');
+      const tmp = writeFileSyncMock.mock.calls.find(
+        (c) =>
+          String(c[0]).startsWith('/tmp/ctx.md.') &&
+          String(c[0]).endsWith('.tmp'),
+      )?.[0];
+      expect(tmp).toBeDefined();
+      expect(rmSyncMock).toHaveBeenCalledWith(tmp, { force: true });
+      expect(renameSyncMock).not.toHaveBeenCalled();
+      expect(
+        writeFileSyncMock.mock.calls.some((c) => c[0] === '/tmp/ctx.md'),
+      ).toBe(false);
+    } finally {
+      // `beforeEach` clears calls, not implementations.
+      writeFileSyncMock.mockReset();
+    }
+  });
 
   it('recovery SURVIVES the identity throw — isolation, not just non-deletion', async () => {
     // The marker-less fixture above cannot tell the two arms apart: with the
@@ -3027,7 +4040,14 @@ describe('runPrContext identity failure (handler level)', () => {
     // licence — deletion fires:
     currentUserMock.mockReturnValue('bot');
     await run();
-    expect(rmSyncMock).toHaveBeenCalled();
+    // Narrowed to the side file: the up-front --out removal fires on
+    // every committed run, so "rmSync was called" no longer discriminates
+    // the licensed side-file deletion this test pins.
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(true);
   });
 
   it('a marker-less OWN review is a persistent state, not proven absence', async () => {
@@ -3037,7 +4057,14 @@ describe('runPrContext identity failure (handler level)', () => {
     // exists to prevent.
     currentUserMock.mockReturnValue('someone');
     await run();
-    expect(rmSyncMock).not.toHaveBeenCalled();
+    // Narrowed to the side file: the run's up-front removal of its own
+    // --out legitimately rm's the context path; the side file's deletion
+    // licensing is what this test pins.
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(false);
   });
 
   it('wires the foreign marker through to the rendered context and the side file', async () => {
@@ -3137,6 +4164,51 @@ describe('runPrContext identity failure (handler level)', () => {
     const ctx = contextWrite();
     expect(ctx).toContain("MERGED over this account's own latest findings");
     expect(ctx).not.toContain('THEIR claims');
+  });
+
+  it('wires the grafted anchor provenance through the handler to context and side file', async () => {
+    // The provenance is one hardcodable constant: with
+    // `prevRecovered?.anchorFromRound` dropped at the buildMarkdown call
+    // site every other test stays green — the recovery tests assert the
+    // field on the return value and the renderer tests pass it directly,
+    // but no handler fixture held a fail-closed winner beside an earlier
+    // own marker that carries the anchor. The shipped context would then
+    // claim round 3 "reviewed at" a sha round 2 certified.
+    currentUserMock.mockReturnValue('bot');
+    ghApiAllMock.mockReset();
+    ghApiAllMock
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([
+        {
+          id: 41,
+          user: { login: 'bot' },
+          state: 'COMMENTED',
+          submitted_at: '2026-08-01',
+          body: 'x <!-- qwen-review-ledger {"v":1,"round":2,"findings":[{"id":"R2-1","sev":"S","file":"a.ts","title":"t"}],"sha":"deadbeef00112233","model":"m@1a2b3c4d"} -->',
+        },
+        {
+          id: 42,
+          user: { login: 'bot' },
+          state: 'COMMENTED',
+          submitted_at: '2026-08-02',
+          body: 'x <!-- qwen-review-ledger {"v":1,"round":3,"findings":[{"id":"R3-1","sev":"C","file":"b.ts","title":"uncertified"}]} -->',
+        },
+      ]);
+    await run();
+    const ctx = contextWrite();
+    expect(ctx).toContain('anchoring at');
+    expect(ctx).toContain('round-2 marker');
+    expect(ctx).not.toContain('reviewed at');
+    // The side file carries the grafted sha AND its provenance — what
+    // compose-review's chain check reads to tell a carried anchor from a
+    // certified one.
+    const sideWrite = writeFileSyncMock.mock.calls.find((c) =>
+      String(c[0]).includes('prev-ledger.json'),
+    );
+    expect(sideWrite).toBeDefined();
+    expect(String(sideWrite?.[1])).toContain('"sha": "deadbeef00112233"');
+    expect(String(sideWrite?.[1])).toContain('"anchorFromRound": 2');
   });
 
   it('round-trips the review commit_id through the GitHub reader into the side file', async () => {
@@ -3439,9 +4511,10 @@ describe('prContextCommand handler — Aone routing', () => {
       ...extra,
     });
     // The ledger side file is written BEFORE the context file — find the
-    // context by path, not by call order.
+    // context by path, not by call order. The context itself lands at a
+    // `.<pid>.tmp` path first, renamed to --out.
     const call = writeFileSyncMock.mock.calls.find((c) =>
-      String(c[0]).endsWith('ctx-aone.md'),
+      String(c[0]).startsWith('/tmp/ctx-aone.md'),
     );
     return call?.[1] as string;
   }
@@ -3568,5 +4641,37 @@ describe('prContextCommand handler — Aone routing', () => {
     expect(written).not.toContain('--host ghe.example.com');
     // The refetches still carry --pr (per-MR addressing is host-agnostic).
     expect(written).toContain('--pr 7');
+  });
+});
+
+describe("the work-list table carries a Critical's axes (#10291)", () => {
+  it('spells the recorded axes beside the severity, and nothing beside an unclassified entry', () => {
+    const md = renderLedgerSection(
+      {
+        v: 1,
+        round: 7,
+        findings: [
+          {
+            id: 'R6-1',
+            sev: 'C',
+            d: 'f',
+            b: 'n',
+            file: 'src/sparse.ts',
+            line: 12,
+            title: 'sparse wedge',
+          },
+          { id: 'R6-2', sev: 'C', d: 'c', file: 'src/stop.ts', title: 'lie' },
+          { id: 'R6-3', sev: 'C', file: 'src/x.ts', title: 'unclassified' },
+        ],
+      },
+      'm',
+    );
+    expect(md).toContain(
+      '| R6-1 | Critical (fails-closed, new-surface) | `src/sparse.ts:12` | sparse wedge |',
+    );
+    expect(md).toContain(
+      '| R6-2 | Critical (certifies-falsely) | `src/stop.ts` | lie |',
+    );
+    expect(md).toContain('| R6-3 | Critical | `src/x.ts` | unclassified |');
   });
 });

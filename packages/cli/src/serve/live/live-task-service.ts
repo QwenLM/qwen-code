@@ -26,6 +26,7 @@ import {
   type LiveTaskToolName,
   type LiveTaskToolRequestInfo,
 } from '@qwen-code/acp-bridge/bridgeOptions';
+import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -40,7 +41,16 @@ import {
   isCompatibleLiveSessionSource,
   readLoadableLiveConversationMetadata,
 } from '../../runtime/live-session-source.js';
-import { conversationRuntimeUnavailableError } from '../conversations/conversation-runtime-errors.js';
+import {
+  ConversationRuntimeOwnershipError,
+  conversationRuntimeUnavailableError,
+} from '../conversations/conversation-runtime-errors.js';
+import { DaemonDrainingError } from '../server/session-archive.js';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
+import {
+  StandaloneSessionServiceError,
+  type StandaloneSessionService,
+} from '../conversations/standalone-session-service.js';
 
 const DEFAULT_LIST_LIMIT = 20;
 const DEFAULT_READ_TURN_LIMIT = 3;
@@ -50,6 +60,8 @@ const DEFAULT_ITEM_TEXT_CHARS = 4_000;
 
 interface LocatedTask {
   runtime: WorkspaceRuntime;
+  threadId: string;
+  bridgeSessionId: string;
   persisted: Awaited<ReturnType<SessionService['loadSession']>>;
   summary: BridgeSessionSummary;
 }
@@ -94,8 +106,23 @@ interface TaskToolMarker {
 export interface LiveTaskServiceOptions {
   workspaceRegistry: WorkspaceRegistry;
   ensureConversationRuntime: () => Promise<WorkspaceRuntime>;
+  standaloneSessionService?: Pick<
+    StandaloneSessionService,
+    | 'createWithInitialPrompt'
+    | 'getForInternalTask'
+    | 'list'
+    | 'resumeForInternalTask'
+  > & {
+    dispatchPrompt(
+      sessionId: string,
+      dispatch: (
+        runtime: WorkspaceRuntime,
+        canonicalSessionId: string,
+        onPromptAdmitted: () => void,
+      ) => Promise<void>,
+    ): Promise<void>;
+  };
   materializeConversationDirectory: (sessionId: string) => Promise<string>;
-  discardEmptyConversationDirectory: (sessionId: string) => Promise<unknown>;
 }
 
 function boundedString(
@@ -454,6 +481,15 @@ export class LiveTaskService {
 
   constructor(private readonly options: LiveTaskServiceOptions) {}
 
+  private getStandaloneSessionService(): NonNullable<
+    LiveTaskServiceOptions['standaloneSessionService']
+  > {
+    if (!this.options.standaloneSessionService) {
+      throw conversationRuntimeUnavailableError();
+    }
+    return this.options.standaloneSessionService;
+  }
+
   interruptWait(callerSessionId: string): void {
     for (const controller of this.activeWaits.get(callerSessionId) ?? []) {
       controller.abort('user_input');
@@ -545,17 +581,23 @@ export class LiveTaskService {
     let cursor: string | undefined;
     let ordinaryCount = 0;
     do {
-      const result = await listWorkspaceSessionsForResponse(
-        runtime.bridge,
-        runtime.workspaceCwd,
-        {
-          size: Math.min(100, Math.max(ordinaryLimit, 1)),
-          view: 'organized',
-          group: 'all',
-          ...(cursor ? { cursor } : {}),
-        },
-        { runtimeBaseDir: runtime.sessionRuntimeBaseDir },
-      );
+      const result =
+        runtime.provenance === 'live-conversation'
+          ? await this.getStandaloneSessionService().list({
+              size: Math.min(100, Math.max(ordinaryLimit, 1)),
+              ...(cursor ? { cursor } : {}),
+            })
+          : await listWorkspaceSessionsForResponse(
+              runtime.bridge,
+              runtime.workspaceCwd,
+              {
+                size: Math.min(100, Math.max(ordinaryLimit, 1)),
+                view: 'organized',
+                group: 'all',
+                ...(cursor ? { cursor } : {}),
+              },
+              { runtimeBaseDir: runtime.sessionRuntimeBaseDir },
+            );
       for (const session of result.sessions) {
         const pinned = session.isPinned === true;
         if (!pinned) ordinaryCount += 1;
@@ -801,11 +843,11 @@ export class LiveTaskService {
     const { cursor } = decodeCursor(target.afterCursor, target.threadId);
     const lastEventId =
       cursor.eventEpoch ===
-      task.runtime.bridge.getSessionEventEpoch(target.threadId)
+      task.runtime.bridge.getSessionEventEpoch(task.bridgeSessionId)
         ? cursor.eventId
-        : task.runtime.bridge.getSessionLastEventId(target.threadId);
+        : task.runtime.bridge.getSessionLastEventId(task.bridgeSessionId);
     for await (const event of task.runtime.bridge.subscribeEvents(
-      target.threadId,
+      task.bridgeSessionId,
       { lastEventId, signal },
     )) {
       const reason = eventWakeReason(event);
@@ -831,9 +873,11 @@ export class LiveTaskService {
       ...(task.summary.clientCount > 0
         ? {
             eventEpoch: task.runtime.bridge.getSessionEventEpoch(
-              target.threadId,
+              task.bridgeSessionId,
             ),
-            eventId: task.runtime.bridge.getSessionLastEventId(target.threadId),
+            eventId: task.runtime.bridge.getSessionLastEventId(
+              task.bridgeSessionId,
+            ),
           }
         : {}),
       updatedAt: laterActivityTimestamp(
@@ -861,7 +905,7 @@ export class LiveTaskService {
     const failed = task.summary.hasTurnError === true;
     const revision =
       task.summary.clientCount > 0
-        ? task.runtime.bridge.getSessionLastEventId(target.threadId)
+        ? task.runtime.bridge.getSessionLastEventId(task.bridgeSessionId)
         : epochSeconds(
             laterActivityTimestamp(
               task.summary.updatedAt,
@@ -931,8 +975,7 @@ export class LiveTaskService {
     return (
       [...(task.persisted?.conversation.messages ?? [])]
         .reverse()
-        .find((record) => record.type === 'user')?.uuid ??
-      task.summary.sessionId
+        .find((record) => record.type === 'user')?.uuid ?? task.threadId
     );
   }
 
@@ -944,7 +987,24 @@ export class LiveTaskService {
     localHost(args['hostId']);
     const located = await this.locateTask(threadId);
     await this.ensureResident(located);
-    await this.dispatchPrompt(located.runtime.bridge, threadId, prompt);
+    if (isReservedStandaloneSessionSourceType(located.summary.sourceType)) {
+      await this.getStandaloneSessionService().dispatchPrompt(
+        threadId,
+        (runtime, canonicalSessionId, onPromptAdmitted) =>
+          this.dispatchPrompt(
+            runtime.bridge,
+            canonicalSessionId,
+            prompt,
+            onPromptAdmitted,
+          ),
+      );
+    } else {
+      await this.dispatchPrompt(
+        located.runtime.bridge,
+        located.bridgeSessionId,
+        prompt,
+      );
+    }
     return { threadId };
   }
 
@@ -958,8 +1018,16 @@ export class LiveTaskService {
     }
     const record = target as Record<string, unknown>;
     if (record['type'] === 'projectless') {
-      const runtime = await this.options.ensureConversationRuntime();
-      return this.createInRuntime(runtime, prompt, true);
+      const created =
+        await this.getStandaloneSessionService().createWithInitialPrompt(
+          { sessionId: randomUUID() },
+          prompt,
+        );
+      return {
+        threadId: created.session.sessionId,
+        projectlessOutputDirectory: created.projectlessOutputDirectory,
+        hostId: 'local',
+      };
     }
     if (record['type'] === 'project') {
       const projectId = boundedString(record['projectId'], 'projectId', 256);
@@ -968,7 +1036,7 @@ export class LiveTaskService {
       if (!runtime || runtime.provenance === 'live-conversation') {
         throw new Error(`Unknown project: ${projectId}`);
       }
-      return this.createInRuntime(runtime, prompt, false);
+      return this.createInRuntime(runtime, prompt);
     }
     throw new Error('Unsupported task target.');
   }
@@ -976,35 +1044,13 @@ export class LiveTaskService {
   private async createInRuntime(
     runtime: WorkspaceRuntime,
     prompt: string,
-    projectless: boolean,
   ): Promise<Record<string, unknown>> {
     const session = await runtime.bridge.spawnOrAttach({
       workspaceCwd: runtime.workspaceCwd,
       sessionScope: 'thread',
-      ...(projectless ? { sourceType: 'default' } : {}),
     });
-    let directory: string | undefined;
     let admitted = false;
     try {
-      if (projectless) {
-        if (session.sourcePersisted !== true) {
-          throw new Error('Projectless task metadata was not persisted.');
-        }
-        directory = await this.options.materializeConversationDirectory(
-          session.sessionId,
-        );
-        const changed = await runtime.bridge.changeSessionCwd(
-          session.sessionId,
-          {
-            path: directory,
-            allowedRoots: [runtime.workspaceCwd],
-            managedRelocation: 'live-conversation',
-          },
-        );
-        if (changed.newCwd !== directory) {
-          throw new Error('Projectless task relocation was rejected.');
-        }
-      }
       await this.dispatchPrompt(
         runtime.bridge,
         session.sessionId,
@@ -1015,14 +1061,11 @@ export class LiveTaskService {
       );
       return {
         threadId: session.sessionId,
-        ...(projectless && directory
-          ? { projectlessOutputDirectory: directory }
-          : {}),
         hostId: 'local',
       };
     } catch (error) {
       if (!admitted) {
-        await this.rollbackFreshSession(runtime, session, projectless);
+        await this.rollbackFreshSession(runtime, session);
       }
       throw error;
     }
@@ -1053,33 +1096,36 @@ export class LiveTaskService {
 
   private async ensureResident(task: LocatedTask): Promise<void> {
     try {
-      task.runtime.bridge.getSessionSummary(task.summary.sessionId);
+      task.runtime.bridge.getSessionSummary(task.bridgeSessionId);
       return;
     } catch (error) {
       if (!(error instanceof SessionNotFoundError)) throw error;
     }
+    if (isReservedStandaloneSessionSourceType(task.summary.sourceType)) {
+      await this.getStandaloneSessionService().resumeForInternalTask(
+        task.summary.sessionId,
+      );
+      return;
+    }
     const service = createWorkspaceRuntimeSessionService(task.runtime);
     const metadata =
       task.runtime.provenance === 'live-conversation'
-        ? await readLoadableLiveConversationMetadata(
-            task.summary.sessionId,
-            service,
-          )
-        : await service.readCreationMetadata(task.summary.sessionId);
+        ? await readLoadableLiveConversationMetadata(task.threadId, service)
+        : await service.readCreationMetadata(task.threadId);
     if (metadata === undefined) {
-      throw new SessionNotFoundError(task.summary.sessionId);
+      throw new SessionNotFoundError(task.bridgeSessionId);
     }
     await task.runtime.bridge.resumeSession({
-      sessionId: task.summary.sessionId,
+      sessionId: task.bridgeSessionId,
       workspaceCwd: task.runtime.workspaceCwd,
       ...metadata,
     });
     if (task.runtime.provenance === 'live-conversation') {
       const directory = await this.options.materializeConversationDirectory(
-        task.summary.sessionId,
+        task.bridgeSessionId,
       );
       const changed = await task.runtime.bridge.changeSessionCwd(
-        task.summary.sessionId,
+        task.bridgeSessionId,
         {
           path: directory,
           allowedRoots: [task.runtime.workspaceCwd],
@@ -1095,7 +1141,6 @@ export class LiveTaskService {
   private async rollbackFreshSession(
     runtime: WorkspaceRuntime,
     session: BridgeSession,
-    projectless: boolean,
   ): Promise<void> {
     let removed = false;
     try {
@@ -1124,50 +1169,70 @@ export class LiveTaskService {
       );
       if (persistedRemoved) runtime.bridge.markSessionCatalogChanged();
     }
-    if (projectless && removed) {
-      await this.options
-        .discardEmptyConversationDirectory(session.sessionId)
-        .catch(() => undefined);
-    }
   }
 
   private async locateTask(threadId: string): Promise<LocatedTask> {
+    const bridgeSessionId = normalizeSessionIdForLookup(threadId);
+    const storedRuntimes =
+      bridgeSessionId === threadId
+        ? undefined
+        : await this.findStoredTaskRuntimes(threadId);
+    if (storedRuntimes && storedRuntimes.length > 1) {
+      throw new Error(`Task id is ambiguous: ${threadId}`);
+    }
     const live =
-      this.options.workspaceRegistry.resolveLiveSessionOwner(threadId);
+      this.options.workspaceRegistry.resolveLiveSessionOwner(bridgeSessionId);
     if (live.kind === 'ambiguous') {
       throw new Error(`Task id is ambiguous: ${threadId}`);
     }
     if (live.kind === 'unavailable') {
       throw conversationRuntimeUnavailableError();
     }
-    const runtimes =
-      live.kind === 'found'
-        ? [live.runtime]
-        : (
-            await Promise.all(
-              (
-                this.options.workspaceRegistry.listAll?.() ??
-                this.options.workspaceRegistry.list()
-              ).map(async (runtime) => ({
-                runtime,
-                exists:
-                  await createWorkspaceRuntimeSessionService(
-                    runtime,
-                  ).sessionExists(threadId),
-              })),
-            )
-          )
-            .filter((entry) => entry.exists)
-            .map((entry) => entry.runtime);
+    if (
+      storedRuntimes?.length === 1 &&
+      live.kind === 'found' &&
+      storedRuntimes[0] !== live.runtime
+    ) {
+      throw new Error(`Task id is ambiguous: ${threadId}`);
+    }
+    let runtimes = storedRuntimes;
+    if (runtimes === undefined) {
+      runtimes =
+        live.kind === 'found'
+          ? [live.runtime]
+          : await this.findStoredTaskRuntimes(threadId);
+    } else if (runtimes.length === 0 && live.kind === 'found') {
+      runtimes = [live.runtime];
+    }
     if (runtimes.length === 0) throw new SessionNotFoundError(threadId);
     if (runtimes.length > 1)
       throw new Error(`Task id is ambiguous: ${threadId}`);
     const runtime = runtimes[0]!;
     const service = createWorkspaceRuntimeSessionService(runtime);
-    const persisted = await service.loadSession(threadId);
     let summary: BridgeSessionSummary;
+    if (runtime.provenance === 'live-conversation') {
+      const standalone =
+        await this.getStandaloneSessionService().getForInternalTask(threadId);
+      if ('state' in standalone) {
+        throw new Error(`Task is still being created: ${threadId}`);
+      }
+      const storageSessionId =
+        await service.findSessionIdIgnoringCase(threadId);
+      if (storageSessionId === undefined) {
+        throw new SessionNotFoundError(threadId);
+      }
+      const persisted = await service.loadSession(storageSessionId);
+      return {
+        runtime,
+        threadId,
+        bridgeSessionId,
+        persisted,
+        summary: standalone,
+      };
+    }
+    const persisted = await service.loadSession(threadId);
     try {
-      summary = runtime.bridge.getSessionSummary(threadId);
+      summary = runtime.bridge.getSessionSummary(bridgeSessionId);
     } catch (error) {
       if (
         !(error instanceof SessionNotFoundError) &&
@@ -1193,7 +1258,45 @@ export class LiveTaskService {
       if (!found) throw new SessionNotFoundError(threadId);
       summary = found;
     }
-    return { runtime, persisted, summary };
+    return { runtime, threadId, bridgeSessionId, persisted, summary };
+  }
+
+  private async findStoredTaskRuntimes(
+    threadId: string,
+  ): Promise<WorkspaceRuntime[]> {
+    const entries = await Promise.all(
+      (
+        this.options.workspaceRegistry.listAll?.() ??
+        this.options.workspaceRegistry.list()
+      ).map(async (runtime) => ({
+        runtime,
+        exists:
+          runtime.provenance === 'live-conversation'
+            ? await this.getStandaloneSessionService()
+                .getForInternalTask(threadId)
+                .then((summary) => !('state' in summary))
+                .catch((error) => {
+                  if (
+                    error instanceof SessionNotFoundError ||
+                    (error instanceof StandaloneSessionServiceError &&
+                      (error.code === 'standalone_session_not_found' ||
+                        error.code === 'invalid_request')) ||
+                    error instanceof DaemonDrainingError ||
+                    (error instanceof ConversationRuntimeOwnershipError &&
+                      error.code === 'conversation_runtime_unavailable')
+                  ) {
+                    return false;
+                  }
+                  throw error;
+                })
+            : await createWorkspaceRuntimeSessionService(runtime).sessionExists(
+                threadId,
+              ),
+      })),
+    );
+    return entries
+      .filter((entry) => entry.exists)
+      .map((entry) => entry.runtime);
   }
 }
 

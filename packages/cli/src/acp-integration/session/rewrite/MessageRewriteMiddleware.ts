@@ -88,11 +88,12 @@ export class MessageRewriteMiddleware {
     // Always send original message as-is
     await this.sendUpdate(update);
 
+    const source = (
+      updateRecord['_meta'] as Record<string, unknown> | undefined
+    )?.['source'];
     if (
       updateType === 'agent_message_chunk' &&
-      (updateRecord['_meta'] as Record<string, unknown> | undefined)?.[
-        'source'
-      ] === 'slash_command'
+      (source === 'slash_command' || source === 'vision_bridge_notice')
     ) {
       return;
     }

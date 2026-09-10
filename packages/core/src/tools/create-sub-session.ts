@@ -8,11 +8,17 @@
  * `create_sub_session` tool — spawns a FRESH top-level sub-session (a sibling
  * of the current session, its own transcript) and runs a prompt in it.
  *
- * Daemon-only: it works only when running under `qwen serve`, where the ACP
- * session wires a {@link SubSessionSpawner} that routes the request to the
- * daemon bridge (`spawnOrAttach` + `sendPrompt`). In interactive TUI / headless
- * there is no bridge, so no spawner is wired and the tool reports itself
- * unavailable.
+ * Daemon-only: it only ever exists under `qwen serve`, where the ACP session
+ * both wires a {@link SubSessionSpawner} (routing the request to the daemon
+ * bridge via `spawnOrAttach` + `sendPrompt`) and registers this tool. In
+ * interactive TUI / headless there is no bridge, so the tool is never
+ * registered and never pollutes the model's action space. The
+ * spawner-missing check in `execute()` stays as a defensive guard for the
+ * one path that can still reach it — a daemon session whose spawner was
+ * cleared mid-flight (yielding `DAEMON_ONLY_MESSAGE`). In non-daemon
+ * sessions the tool is absent from the registry entirely, so a stale
+ * direct call is rejected by the registry-miss error before `execute()`
+ * is ever reached.
  *
  * Two completion modes:
  *  - `'sent'`      — resolve as soon as the prompt is dispatched (fire-and-
@@ -224,7 +230,7 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
         'separate session — e.g. a self-contained sub-task you want isolated ' +
         'from this conversation.\n\n' +
         'ONLY available when running under `qwen serve` (daemon mode); it is ' +
-        'inert in a plain interactive session.\n\n' +
+        'not declared at all in plain interactive or headless sessions.\n\n' +
         '## Completion modes\n' +
         "- `first-turn` (default): waits for the sub-session's first turn to " +
         'finish and returns its result to you. Use when you need the answer ' +

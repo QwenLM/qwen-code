@@ -38,6 +38,7 @@ export type DaemonUiEventType =
   // Session-meta events
   | 'session.metadata.changed'
   | 'session.artifact.changed'
+  | 'session.source.changed'
   | 'session.approval_mode.changed'
   | 'session.available_commands'
   | 'session.state_resync_required'
@@ -90,6 +91,8 @@ export interface DaemonUiEventBase {
   serverTimestamp?: number;
   /** Ordered persisted ChatRecord identities that contributed to this event. */
   sourceRecordIds?: readonly string[];
+  /** Stable identity for one projected segment within a persisted record. */
+  segmentId?: string;
   /** Admitted prompt identifier for events belonging to one turn. */
   promptId?: string;
   /** Durable checkpoint UUID for branching from this Assistant response. */
@@ -134,6 +137,8 @@ export interface DaemonUiUserImageEvent extends DaemonUiEventBase {
   type: 'user.image.delta';
   data: string;
   mimeType: string;
+  /** Present when the image is a session attachment; keeps it re-fetchable. */
+  attachmentId?: string;
   meta?: DaemonTextDeltaMeta;
 }
 
@@ -181,7 +186,11 @@ export interface DaemonTurnUsage {
 export interface DaemonUiAssistantUsageEvent extends DaemonUiEventBase {
   type: 'assistant.usage';
   usage: DaemonTurnUsage;
-  /** Set when the usage belongs to a sub-agent round; folded into the parent turn total. */
+  /**
+   * Set for sub-agent usage; folded into its parent tool in compact mode. In
+   * retain mode it is folded into the active top-level assistant block, or
+   * dropped after a tool update has finalized that block.
+   */
   parentToolCallId?: string;
 }
 
@@ -198,6 +207,7 @@ export type DaemonUiToolProvenance = 'builtin' | 'mcp' | 'subagent' | 'unknown';
 
 export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
   type: 'tool.update';
+  subagentSessionReady?: boolean;
   toolCallId: string;
   title?: string;
   status?: string;
@@ -238,6 +248,8 @@ export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
   details?: string;
   rawInput?: unknown;
   rawOutput?: unknown;
+  /** Typed, redacted output presentation supplied by a trusted projector. */
+  resultPreview?: DaemonToolResultPreview;
 }
 
 export interface DaemonUiShellOutputEvent extends DaemonUiEventBase {
@@ -332,7 +344,7 @@ export type DaemonUnrecognizedDiagnosticReason =
 
 /**
  * Membership over the runtime reason array, exported so every routing guard
- * (reducer sidechannel here, provider flush/drop guard pair in webui)
+ * (reducer sidechannel here, provider flush/drop guard pair in Web Shell)
  * classifies against one source. A reason added to the array routes onto the
  * sidechannel everywhere without hand-editing each consumer (#8823 review).
  */
@@ -411,6 +423,12 @@ export interface DaemonUiSessionMetadataChangedEvent extends DaemonUiEventBase {
   type: 'session.metadata.changed';
   sessionId: string;
   displayName?: string;
+}
+
+export interface DaemonUiSessionSourceChangedEvent extends DaemonUiEventBase {
+  type: 'session.source.changed';
+  sessionId: string;
+  revision: number;
 }
 
 export interface DaemonUiSessionArtifactChangedEvent extends DaemonUiEventBase {
@@ -714,6 +732,7 @@ export type DaemonUiEvent =
   // Session-meta events
   | DaemonUiSessionMetadataChangedEvent
   | DaemonUiSessionArtifactChangedEvent
+  | DaemonUiSessionSourceChangedEvent
   | DaemonUiSessionApprovalModeChangedEvent
   | DaemonUiSessionAvailableCommandsEvent
   | DaemonUiStateResyncRequiredEvent
@@ -767,6 +786,24 @@ export interface DaemonTranscriptQuestion {
   question: string;
   options: DaemonTranscriptQuestionOption[];
   raw: unknown;
+}
+
+export interface DaemonTranscriptTodoItem {
+  id: string;
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  priority?: 'high' | 'medium' | 'low';
+  blockedBy?: readonly string[];
+}
+
+export interface DaemonTodoListPreview {
+  kind: 'todo_list';
+  entries: readonly DaemonTranscriptTodoItem[];
+  /** Legacy runtime-renderer summary; document/export uses typed entries. */
+  summary?: string;
+  truncated?: boolean;
+  planId?: string;
+  revision?: number;
 }
 
 export type DaemonToolPreview =
@@ -864,6 +901,23 @@ export type DaemonToolPreview =
       kind: 'key_value';
       rows: Array<{ label: string; value: string }>;
     }
+  | DaemonTodoListPreview
+  | {
+      kind: 'generic';
+      summary?: string;
+    };
+
+export type DaemonToolResultPreview =
+  | DaemonTodoListPreview
+  | {
+      kind: 'question_answers';
+      text: string;
+      answers: Array<{ question: string; answer: string }>;
+    }
+  | {
+      kind: 'text';
+      text: string;
+    }
   | {
       kind: 'generic';
       summary?: string;
@@ -904,6 +958,8 @@ export interface DaemonTranscriptBlockBase {
   serverTimestamp?: number;
   /** Ordered persisted ChatRecord identities that contributed to this block. */
   sourceRecordIds?: readonly string[];
+  /** Stable projected segment identity when no daemon event cursor exists. */
+  segmentId?: string;
   /** Admitted prompt identifier for content belonging to one turn. */
   promptId?: string;
   /** Durable checkpoint UUID for branching from this Assistant response. */
@@ -933,7 +989,12 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   kind: 'user' | 'assistant' | 'thought';
   text: string;
   /** Images attached to this user message (base64 data URIs). */
-  images?: Array<{ data: string; mimeType: string }>;
+  images?: Array<{
+    data: string;
+    mimeType: string;
+    /** Present when the image is a session attachment; keeps it re-fetchable. */
+    attachmentId?: string;
+  }>;
   /** File attachments on this user message. */
   files?: Array<{
     name: string;
@@ -958,6 +1019,7 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
 }
 
 export interface DaemonToolTranscriptBlock extends DaemonTranscriptBlockBase {
+  subagentSessionReady?: boolean;
   kind: 'tool';
   toolCallId: string;
   title: string;
@@ -965,6 +1027,10 @@ export interface DaemonToolTranscriptBlock extends DaemonTranscriptBlockBase {
   toolName?: string;
   toolKind?: string;
   preview: DaemonToolPreview;
+  /** Typed, redacted result data for explicit document/export projection. */
+  resultPreview?: DaemonToolResultPreview;
+  /** Safe presentation signal that this tool continues as a background task. */
+  background?: boolean;
   content?: unknown;
   locations?: unknown;
   details?: string;
@@ -1017,6 +1083,10 @@ export interface DaemonPermissionTranscriptBlock
   options: DaemonUiPermissionOption[];
   toolCall?: unknown;
   preview: DaemonToolPreview;
+  /** Safe tool identity retained after the raw tool call is removed. */
+  toolCallId?: string;
+  toolName?: string;
+  toolKind?: string;
   resolved?: string;
 }
 

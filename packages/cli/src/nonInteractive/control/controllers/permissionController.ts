@@ -14,20 +14,21 @@
  * Abstracts all permission logic from the session manager to keep it clean.
  */
 
+import type { TeammateApprovalRequestEvent } from '@qwen-code/qwen-code-core/agents/team/team-events.js';
+import type { WorkflowApproval } from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
+import type { WaitingToolCall } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type {
-  WaitingToolCall,
   ToolExecuteConfirmationDetails,
   ToolMcpConfirmationDetails,
-  ApprovalMode,
-  TeammateApprovalRequestEvent,
   ToolConfirmationPayload,
-  WorkflowApproval,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
-  InputFormat,
-  ToolConfirmationOutcome,
-  ToolNames,
-} from '@qwen-code/qwen-code-core';
+  ApprovalMode,
+  APPROVAL_MODES,
+} from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import { InputFormat } from '@qwen-code/qwen-code-core/output/types.js';
+import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type {
   CLIControlPermissionRequest,
   CLIControlSetPermissionModeRequest,
@@ -36,7 +37,7 @@ import type {
   PermissionSuggestion,
 } from '../../types.js';
 import { BaseController } from './baseController.js';
-import { buildPermissionSuggestions } from '../../../utils/permission-suggestions.js';
+import { buildPermissionSuggestions } from '../../permission-suggestions.js';
 
 const DEFAULT_CAN_USE_TOOL_TIMEOUT_MS = 60_000;
 
@@ -146,22 +147,23 @@ export class PermissionController extends BaseController {
   private checkPermissionMode(): { allowed: boolean; message?: string } {
     const mode = this.context.permissionMode;
 
-    // Map permission modes to approval logic (aligned with VALID_APPROVAL_MODE_VALUES)
-    switch (mode) {
-      case 'yolo': // Allow all tools
-      case 'auto-edit': // Auto-approve edit operations
-      case 'auto': // Auto-approve via LLM classifier — coreToolScheduler enforces the gate
-      case 'plan': // Auto-approve planning operations
-        return { allowed: true };
-
-      case 'default': // TODO: allow all tools for test
-      default:
-        return {
-          allowed: false,
-          message:
-            'Tool execution requires manual approval. Update permission mode or approve via host.',
-        };
+    if (mode === ApprovalMode.DEFAULT) {
+      return {
+        allowed: false,
+        message:
+          'Tool execution requires manual approval. Update permission mode or approve via host.',
+      };
     }
+
+    const validModes = APPROVAL_MODES as readonly PermissionMode[];
+    if (validModes.includes(mode)) {
+      return { allowed: true };
+    }
+
+    return {
+      allowed: false,
+      message: `Invalid permission mode: ${mode}. Valid values are: ${validModes.join(', ')}`,
+    };
   }
 
   /**
@@ -217,13 +219,7 @@ export class PermissionController extends BaseController {
     }
 
     const mode = payload.mode;
-    const validModes: PermissionMode[] = [
-      'default',
-      'plan',
-      'auto-edit',
-      'auto',
-      'yolo',
-    ];
+    const validModes = APPROVAL_MODES as readonly PermissionMode[];
 
     if (!validModes.includes(mode)) {
       throw new Error(
@@ -332,7 +328,9 @@ export class PermissionController extends BaseController {
   ): Promise<void> {
     try {
       if (this.context.abortSignal.aborted) {
-        await event.respond(ToolConfirmationOutcome.Cancel);
+        await event.respond(ToolConfirmationOutcome.Cancel, {
+          cancelMessage: `The host approval request for "${event.toolName}" was aborted.`,
+        });
         return;
       }
 
@@ -340,7 +338,9 @@ export class PermissionController extends BaseController {
       if (inputFormat !== InputFormat.STREAM_JSON) {
         // Should not happen under the current wiring; cancel
         // safely rather than silently auto-proceeding.
-        await event.respond(ToolConfirmationOutcome.Cancel);
+        await event.respond(ToolConfirmationOutcome.Cancel, {
+          cancelMessage: this.getInteractionUnavailableMessage(event.toolName),
+        });
         return;
       }
 
@@ -362,7 +362,9 @@ export class PermissionController extends BaseController {
       );
 
       if (response.subtype !== 'success') {
-        await event.respond(ToolConfirmationOutcome.Cancel);
+        await event.respond(ToolConfirmationOutcome.Cancel, {
+          cancelMessage: this.getInteractionUnavailableMessage(event.toolName),
+        });
         return;
       }
 
@@ -396,9 +398,7 @@ export class PermissionController extends BaseController {
             : undefined;
         await event.respond(
           ToolConfirmationOutcome.Cancel,
-          cancelMessage
-            ? ({ cancelMessage } as ToolConfirmationPayload)
-            : undefined,
+          cancelMessage ? { cancelMessage } : undefined,
         );
       }
     } catch (error) {
@@ -413,7 +413,11 @@ export class PermissionController extends BaseController {
       // an escaped rejection here is an unhandledRejection that can
       // take down an SDK session.
       try {
-        await event.respond(ToolConfirmationOutcome.Cancel);
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        await event.respond(ToolConfirmationOutcome.Cancel, {
+          cancelMessage: `The host approval request for "${event.toolName}" failed: ${errorMessage}`,
+        });
       } catch (cancelError) {
         this.debugLogger.error(
           '[PermissionController] Teammate approval cancel failed:',
@@ -509,10 +513,9 @@ export class PermissionController extends BaseController {
   ): Promise<void> {
     const requiresUserInteraction =
       toolCall.invocation?.requiresUserInteraction?.() === true;
-    const interactionUnavailableMessage =
-      toolCall.request.name === ToolNames.EXIT_PLAN_MODE
-        ? 'The host could not present plan-exit approval. Use the host mode selector or /plan exit to leave plan mode.'
-        : `The host could not present the required approval for "${toolCall.request.name}".`;
+    const interactionUnavailableMessage = this.getInteractionUnavailableMessage(
+      toolCall.request.name,
+    );
     try {
       // Check if already aborted
       if (signal.aborted) {
@@ -578,7 +581,16 @@ export class PermissionController extends BaseController {
       const behavior = String(payload['behavior'] || '').toLowerCase();
 
       if (behavior === 'allow') {
-        if (requiresUserInteraction) {
+        // exit_plan_mode approves through the dialog alone: its onConfirm
+        // takes no payload, and the approved plan must not be replaced by
+        // the host's updatedInput. Any other requiresUserInteraction tool
+        // (e.g. ask_user_question) must take the updatedInput path below —
+        // that channel carries the user's answers.
+        if (
+          requiresUserInteraction &&
+          toolCall.request.name === ToolNames.EXIT_PLAN_MODE &&
+          toolCall.invocation?.canAutoApproveOnAllow?.() !== false
+        ) {
           await toolCall.confirmationDetails.onConfirm(
             ToolConfirmationOutcome.ProceedOnce,
           );
@@ -660,5 +672,11 @@ export class PermissionController extends BaseController {
     } finally {
       this.pendingOutgoingRequests.delete(toolCall.request.callId);
     }
+  }
+
+  private getInteractionUnavailableMessage(toolName: string): string {
+    return toolName === ToolNames.EXIT_PLAN_MODE
+      ? 'The host could not present plan-exit approval. Use the host mode selector or /plan exit to leave plan mode.'
+      : `The host could not present the required approval for "${toolName}".`;
   }
 }

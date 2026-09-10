@@ -10,6 +10,8 @@ import type { ConfigParameters } from './config.js';
 import { Config } from './config.js';
 import * as fs from 'node:fs';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
+import { ToolNames } from '../tools/tool-names.js';
+import { AuthType } from '../core/contentGenerator.js';
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -62,7 +64,7 @@ vi.mock('../tools/tool-registry', () => {
   return { ToolRegistry: ToolRegistryMock };
 });
 
-vi.mock('../utils/memoryDiscovery.js', () => ({
+vi.mock('../memory/memoryDiscovery.js', () => ({
   loadServerHierarchicalMemory: vi.fn().mockResolvedValue({
     memoryContent: '',
     fileCount: 0,
@@ -113,7 +115,7 @@ vi.mock('../skills/skill-manager.js', () => {
 });
 
 vi.mock('../core/contentGenerator.js', () => ({
-  AuthType: { QWEN_API_KEY: 'qwen_api_key' },
+  AuthType: { USE_OPENAI: 'openai' },
   Protocol: {
     OPENAI: 'openai',
     QWEN_OAUTH: 'qwen-oauth',
@@ -137,9 +139,9 @@ vi.mock('../core/contentGenerator.js', () => ({
 }));
 
 vi.mock('../core/client.js', () => {
-  const GeminiClientMock = vi.fn();
-  GeminiClientMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
-  return { GeminiClient: GeminiClientMock };
+  const LlmClientMock = vi.fn();
+  LlmClientMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
+  return { LlmClient: LlmClientMock };
 });
 
 vi.mock('../telemetry/index.js', () => ({
@@ -251,6 +253,32 @@ describe('Config safe mode', () => {
   });
 
   describe('safe mode disables subsystems', () => {
+    it('does not register web search even when core Config could derive it', async () => {
+      process.env['DASHSCOPE_API_KEY'] = 'sk-test';
+      const config = new Config({
+        ...baseParams,
+        safeMode: true,
+        authType: AuthType.USE_OPENAI,
+        webSearch: { enabled: true, model: 'test-model' },
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'test-model',
+              envKey: 'DASHSCOPE_API_KEY',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            },
+          ],
+        },
+      });
+      await config.initialize();
+      const registry = config.getToolRegistry() as unknown as {
+        registerFactory: Mock;
+      };
+      expect(
+        registry.registerFactory.mock.calls.map(([name]) => name),
+      ).not.toContain(ToolNames.WEB_SEARCH);
+    });
+
     it('disables all hooks in safe mode', () => {
       const config = new Config({ ...baseParams, safeMode: true });
       expect(config.getDisableAllHooks()).toBe(true);
@@ -469,7 +497,7 @@ describe('Config safe mode', () => {
       await config.initialize();
       expect(config.getUserMemory()).toBe('');
       expect(config.getAutoMemoryPrompt()).toBe('');
-      expect(config.getGeminiMdFileCount()).toBe(0);
+      expect(config.getMemoryFileCount()).toBe(0);
     });
 
     it('records every fixed Config startup phase in order when skipped', async () => {

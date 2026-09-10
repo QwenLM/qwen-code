@@ -63,6 +63,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/worktree-reset',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/worktree-reset',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/branch',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/branch',
@@ -105,6 +111,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'GET',
+    path: '/session/:id/turn-index',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/turn-index',
+  },
+  {
+    method: 'GET',
     path: '/session/:id/context',
     attribution: 'handler_resolved',
     route: 'GET /session/:id/context',
@@ -135,6 +147,18 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'GET',
+    path: '/session/:id/agents',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/agents',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/agent-trace',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/agent-trace',
+  },
+  {
+    method: 'GET',
     path: '/session/:id/subagents/:subagentRef',
     attribution: 'handler_resolved',
     route: 'GET /session/:id/subagents/:subagentRef',
@@ -150,6 +174,12 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/lsp',
     attribution: 'handler_resolved',
     route: 'GET /session/:id/lsp',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/resources',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/resources',
   },
   {
     method: 'GET',
@@ -176,10 +206,40 @@ export const legacySessionTelemetryRoutes = [
     route: 'DELETE /session/:id/artifacts/:artifactId',
   },
   {
+    method: 'GET',
+    path: '/session/:id/sources',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/sources',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/sources',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/sources',
+  },
+  {
+    method: 'DELETE',
+    path: '/session/:id/sources/:sourceId',
+    attribution: 'handler_resolved',
+    route: 'DELETE /session/:id/sources/:sourceId',
+  },
+  {
     method: 'POST',
     path: '/session/:id/tasks/:taskId/cancel',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/tasks/:taskId/cancel',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/tasks/:taskId/workflow-action',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/tasks/:taskId/workflow-action',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/saved-workflows/:name',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/saved-workflows/:name',
   },
   {
     method: 'POST',
@@ -210,6 +270,12 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/attachments',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/attachments',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/attachments',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/attachments',
   },
   {
     method: 'GET',
@@ -541,6 +607,15 @@ export function resolveDaemonTelemetryRoute(
       sessionId: decodePathSegment(workspaceTranscript[1]),
     };
   }
+  const workspaceTurnIndex = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/turn-index$/,
+  );
+  if (workspaceTurnIndex?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/turn-index',
+      sessionId: decodePathSegment(workspaceTurnIndex[1]),
+    };
+  }
   const workspaceExport = path.match(
     /^\/workspaces\/[^/]+\/session\/([^/]+)\/export$/,
   );
@@ -674,6 +749,9 @@ export function resolveDaemonTelemetryRoute(
   }
   if (req.method === 'POST' && path === '/workspace/reload') {
     return { route: 'POST /workspace/reload' };
+  }
+  if (req.method === 'POST' && path === '/language') {
+    return { route: 'POST /language' };
   }
   const mcpRestart = path.match(/^\/workspace\/mcp\/([^/]+)\/restart$/);
   if (mcpRestart?.[1] && req.method === 'POST') {

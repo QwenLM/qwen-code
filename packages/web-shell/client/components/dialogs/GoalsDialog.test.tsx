@@ -9,8 +9,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
-import { GOAL_EVIDENCE_LIMIT_REASONS } from '../../utils/goalGate';
-
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 interface MockGoal {
@@ -32,6 +30,8 @@ interface MockGoal {
       evidenceCursor: { recordId: string | null };
       turnCount: number;
       activeTimeMs: number;
+      tokensUsed?: number;
+      tokenBudget?: number;
       createdAt: number;
       updatedAt: number;
       lastReason?: string;
@@ -48,7 +48,7 @@ const { actions } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspaceActions: () => actions,
 }));
 
@@ -204,6 +204,46 @@ describe('GoalsDialog', () => {
     expect(document.querySelector('[data-testid="goals-dropped"]')).toBeNull();
   });
 
+  const withSpend = (over: Partial<MockGoal['snapshot']['goal']>): MockGoal => {
+    const base = baseGoal();
+    return {
+      ...base,
+      snapshot: {
+        ...base.snapshot,
+        goal: { ...base.snapshot.goal, ...over },
+      },
+    };
+  };
+
+  it('shows spend against the budget once a turn has billed', async () => {
+    await mount([withSpend({ tokensUsed: 1_234, tokenBudget: 30_000_000 })]);
+
+    expect(
+      document.querySelector('[data-testid="goal-tokens"]')?.textContent,
+    ).toBe('1.2k / 30.0M tokens');
+  });
+
+  it('shows spend alone when the Goal has no budget', async () => {
+    await mount([withSpend({ tokensUsed: 1_234 })]);
+
+    expect(
+      document.querySelector('[data-testid="goal-tokens"]')?.textContent,
+    ).toBe('1.2k tokens');
+  });
+
+  it('shows nothing for a Goal that has not billed a turn', async () => {
+    await mount([withSpend({ tokensUsed: 0, tokenBudget: 30_000_000 })]);
+
+    expect(document.querySelector('[data-testid="goal-tokens"]')).toBeNull();
+  });
+
+  it('shows nothing for a daemon that does not report spend', async () => {
+    // An older daemon's snapshot carries neither field.
+    await mount([baseGoal()]);
+
+    expect(document.querySelector('[data-testid="goal-tokens"]')).toBeNull();
+  });
+
   const stopped = (
     over: Partial<MockGoal['snapshot']['goal']> = {},
   ): MockGoal => {
@@ -228,26 +268,24 @@ describe('GoalsDialog', () => {
     expect(resumeButton()).not.toBeNull();
   });
 
-  it('hides resume for an evidence-limited Goal', async () => {
-    // The reducer refuses `resume` on a Goal stopped at an evidence bound, so
-    // offering the control only earns the user an invalid-transition 409.
+  it('offers resume for an evidence-limited Goal', async () => {
     await mount([stopped({ limitKind: 'evidence_catalog' })]);
-    expect(resumeButton()).toBeNull();
+    expect(resumeButton()).not.toBeNull();
   });
 
-  // One `it` per sentinel: `mount` installs a fresh container each call and
-  // only the last is torn down, so two mounts in one test strand a stale DOM
-  // that every later test then queries.
-  it.each([...GOAL_EVIDENCE_LIMIT_REASONS])(
-    'hides resume for a Goal evidence-limited before `limitKind` existed (%#)',
-    async (lastReason) => {
-      // The sentinel prose shipped before the `limitKind` field did: a Goal
-      // persisted in that window restores as `usage_limited` with no
-      // `limitKind`, and this gate used to read it as resumable.
-      await mount([stopped({ lastReason })]);
-      expect(resumeButton()).toBeNull();
-    },
-  );
+  it('offers resume for a Goal evidence-limited before `limitKind` existed', async () => {
+    // The sentinel prose shipped before the `limitKind` field did: a Goal
+    // persisted in that window restores as `usage_limited` with no
+    // `limitKind`. The dialog does not parse the prose -- resumability is
+    // decided by status alone -- so one representative sentinel is enough.
+    await mount([
+      stopped({
+        lastReason:
+          'The current Goal revision exceeded the bounded evidence catalog. Automatic retries cannot recover. Edit or replace the Goal before resuming it.',
+      }),
+    ]);
+    expect(resumeButton()).not.toBeNull();
+  });
 
   it('renders a goal with its condition, turn count and judge verdict', async () => {
     await mount([

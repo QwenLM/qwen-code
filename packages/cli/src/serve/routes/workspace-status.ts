@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Application, Request, RequestHandler, Response } from 'express';
+import type { Application, RequestHandler } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
@@ -12,10 +12,7 @@ import {
   MAX_SERVER_NAME_LENGTH,
 } from '../server/request-helpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
-import {
-  requireTrustedWorkspaceRuntime,
-  resolveWorkspaceRuntimeFromParam,
-} from '../workspace-route-runtime.js';
+import { resolveTrustedRuntime } from '../workspace-route-runtime.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -227,16 +224,6 @@ export function registerWorkspaceStatusRoutes(
       sendBridgeError(res, err, { route: 'GET /workspace/providers' });
     }
   });
-}
-
-function resolveTrustedRuntime(
-  registry: WorkspaceRegistry,
-  req: Request,
-  res: Response,
-): WorkspaceRuntime | null {
-  const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
-  if (!runtime) return null;
-  return requireTrustedWorkspaceRuntime(runtime, res) ? runtime : null;
 }
 
 export function registerWorkspaceQualifiedStatusRoutes(

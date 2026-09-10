@@ -1,0 +1,1287 @@
+/**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Decides what happens to an inbound peer message before this session's
+ * model ever sees it.
+ *
+ * Four outcomes: **accept** (queue it), **hold** (park it for the user to
+ * review, model never sees it), **refuse** (turn it away because policy
+ * says so, and tell the sender), **dropped** (never metered in at all —
+ * see the admission note below).
+ *
+ * The explicit `crossSessionInbound` setting wins when set. When it is
+ * unset the policy is derived from **approval-mode parity**, which
+ * encodes one idea: a message auto-delivers only between sessions of
+ * the same review class. Every approval mode falls in one of two
+ * classes — `prompting`, where a person still inspects each action, and
+ * `bypass`, where some actions can be applied with no one looking — and
+ * the sender asserts its class on the frame.
+ *
+ *   arriving faster than this session takes  → dropped (before policy)
+ *   sender is a process this session started → accept
+ *   sender presented a controller grant       → accept
+ *   receiver mode unknown/unrecognized        → hold  (fail closed)
+ *   sender asserts no class                   → hold
+ *   sender class equals receiver class        → accept
+ *   sender class differs from receiver class  → hold
+ *   policy setting unreadable                 → hold  (fail closed)
+ *
+ * The first two rows are the cases where the transport knows something
+ * about the sender. A connection that authenticated with the child token
+ * was opened by a script or hook this session itself ran, and whatever it
+ * can ask for, the session already chose to run the thing that is asking.
+ * A connection that presented a controller grant belongs to a program the
+ * user minted a token for by hand and handed it to, to relay their own
+ * instructions; parity compares two sessions' review classes, and that is
+ * not a session. Parity has nothing to weigh in either case. The explicit
+ * setting still wins over both — a user who said `hold` reviews
+ * everything, own processes and controllers included.
+ *
+ * The rule holds in both directions on purpose. A bypassing receiver has
+ * to be careful about a prompting sender because a peer can ask it for a
+ * file change that no human or classifier sees: auto-edit approves every
+ * edit-shaped tool call outright, and AUTO's in-workspace edit fast path
+ * runs before its classifier. A prompting receiver has a per-action
+ * backstop, but that backstop guards single actions, not the session's
+ * agenda: a message from a session nobody is watching is model-authored
+ * input, and a user who chose to review everything did not choose to
+ * have their model steered by it one benign-looking step at a time.
+ * Per-action prompts are also exactly the surface that fatigue turns
+ * into rubber stamps. So the prompting receiver holds it too, and the
+ * user releases it from `/peers` if they want it.
+ *
+ * A frame that asserts no class comes from a script, an older build, or
+ * an external process. The receiver has nothing to pair it with, so it
+ * is held for every receiver; an external process the user wants driving
+ * their session earns delivery through a controller grant — explicit
+ * trust the user minted — rather than through the receiver guessing.
+ *
+ * A hold is not open-ended. The sender is blocked on a decision that
+ * only a person can give, so a parked message expires after
+ * `agents.crossSessionHeldExpiry` (five minutes by default) and the
+ * sender is told, rather than being left unable to distinguish "still
+ * waiting" from "never coming". The two negative receipts stay distinct
+ * for the same reason: `refused` means this session's policy turns peer
+ * messages away and nobody looked, `denied` means somebody did.
+ *
+ * The sender's half of the parity is self-asserted and unverifiable —
+ * nothing authenticates `fromMode`, and any process running as this user
+ * can claim anything. It is a cooperation signal that keeps honest
+ * sessions from surprising each other, not an access control; the
+ * envelope's authority notice and the classifier are what stand up to a
+ * hostile peer.
+ *
+ * Before any of that, a message has to get past the admission meter
+ * (`peer-admission.ts`). A `rate-limited` or `duplicate` drop happens
+ * there, above policy, so it carries no policy verdict and nobody decided
+ * anything about it. A `queue-full` drop is the other half of the same
+ * outcome and sits lower: policy already said accept, and the buffer it
+ * was accepted into — the session's input queue, or the hold buffer —
+ * had no room. Whichever it was, the message is never seen by the model
+ * or by the user, and none of them leaves a tombstone, so an honest retry
+ * later can still land. The sender is told once per burst rather than
+ * once per message — see `peer-drop-reports.ts` for why a report about a
+ * flood must not scale with it.
+ */
+
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { APPROVAL_MODES, ApprovalMode } from '../config/approval-mode.js';
+import { PeerAdmission, type PeerDropReason } from './peer-admission.js';
+import type { PeerControllerIdentity } from './peer-controllers.js';
+import { canonicalizeMsgId, type PeerUserFrame } from './peer-frames.js';
+
+const debugLogger = createDebugLogger('PEER_INBOUND');
+
+export type InboundPolicy = 'accept' | 'hold' | 'refuse';
+export type GateDecision = 'accept' | 'held' | 'refused' | 'dropped';
+
+/**
+ * Why a message ended up where it did. Surfaced to the user so a held
+ * message explains itself instead of just appearing.
+ */
+export type HoldCause =
+  | 'explicit-setting'
+  | 'mode-mismatch'
+  | 'no-mode-asserted'
+  | 'mode-unknown'
+  | 'policy-unreadable';
+
+/**
+ * Cap on parked messages.
+ *
+ * A hold buffer is reachable by anything that can write to the socket, so
+ * it needs a ceiling or a chatty peer becomes a memory leak in a session
+ * whose user stepped away. Once full it turns arrivals away rather than
+ * making room: what is already parked is the user's to decide, and an
+ * arrival must not be able to destroy it.
+ */
+export const MAX_HELD_MESSAGES = 50;
+
+/**
+ * Cap on settled-id memory.
+ *
+ * Tombstones only have to outlive a sender's retry window; a map that
+ * grew with every id the session ever saw would be the same leak the
+ * hold buffer's ceiling exists to prevent. Oldest is pruned first,
+ * mirroring the hold buffer.
+ */
+export const MAX_SETTLED_IDS = 512;
+
+/**
+ * True when a human prompt still inspects each action this session takes.
+ *
+ * YOLO reviews nothing. AUTO_EDIT approves edit-shaped confirmations
+ * outright. AUTO's accept-edits fast path also applies in-workspace edits
+ * before the classifier runs. A peer asking either mode for a file change
+ * can therefore have it applied with no prompt, classifier, or user in the
+ * loop — the one thing auto-delivery is supposed to rule out.
+ */
+export function receiverReviewsActions(mode: ApprovalMode): boolean {
+  return (
+    mode !== ApprovalMode.YOLO &&
+    mode !== ApprovalMode.AUTO_EDIT &&
+    mode !== ApprovalMode.AUTO
+  );
+}
+
+/**
+ * The two review classes the parity rule compares. This is the vocabulary
+ * of `fromMode` on the wire, and the one predicate above decides both
+ * sides of the comparison, so two sessions in the same mode always land
+ * in the same class.
+ */
+export type ModeClass = 'prompting' | 'bypass';
+
+export function modeClass(mode: ApprovalMode): ModeClass {
+  return receiverReviewsActions(mode) ? 'prompting' : 'bypass';
+}
+
+/**
+ * Which settings scope produced the explicit policy. Only used to word the
+ * hold cause: "your setting" is wrong when the repository or the machine
+ * set it, and a user who never touched the key should be told where to
+ * look.
+ */
+export type PolicyScope = 'user' | 'workspace' | 'system';
+
+/** Narrow an untyped setting value; anything else is unreadable. */
+function isInboundPolicy(value: unknown): value is InboundPolicy {
+  return value === 'accept' || value === 'hold' || value === 'refuse';
+}
+
+/**
+ * A hold always has a reason; an accept or a refuse has none to give.
+ *
+ * Modelled as a union rather than an optional field because the previous
+ * shape let every branch carry `cause: 'explicit-setting'`, which the UI
+ * rendered as "your crossSessionInbound setting is 'hold'" even for
+ * messages that sailed straight through on mode parity.
+ */
+export type PolicyDecision =
+  | { policy: 'hold'; cause: HoldCause; scope?: PolicyScope }
+  | { policy: 'accept' | 'refuse' };
+
+/**
+ * What the transport could establish about a frame's sender. Kept apart
+ * from the frame because it is not on the wire: a peer writes the frame,
+ * the inbox determines this.
+ */
+export interface PeerOrigin {
+  /**
+   * The connection authenticated with the child token, so the frame came
+   * from a process this session started.
+   */
+  selfSent: boolean;
+  /**
+   * The connection presented a controller grant the user minted, and this
+   * names it.
+   *
+   * Mutually exclusive with `selfSent` in practice — one connection
+   * presents one token — but not modelled as a union, because every
+   * existing caller constructs a `PeerOrigin` from `selfSent` alone and a
+   * union would churn all of them to say the same thing.
+   */
+  controller?: PeerControllerIdentity;
+}
+
+/**
+ * Longest self-asserted address the metering key keeps.
+ *
+ * `from` is peer-chosen and only type-checked on arrival, inside a frame
+ * that may be a megabyte, while the key it becomes is retained per sender
+ * in three tables at once. No address that can actually be dialled comes
+ * near this: `sun_path` holds 108 bytes on Linux and 104 on macOS, and a
+ * Windows named pipe is shorter still. So the cap costs nothing a real
+ * sender could use, and bounds what an unreal one can make this session
+ * hold.
+ */
+export const MAX_SENDER_KEY_CHARS = 256;
+
+/**
+ * The identity rate limiting and drop reporting meter a sender by.
+ *
+ * The branch is chosen by what the *transport* established, never by what
+ * the frame claims, and the self-asserted address is namespaced inside
+ * it. Otherwise a peer could simply write `from: "own-process"` and share
+ * a bucket — and a drop-notice line — with the scripts this session
+ * itself started: it would spend their allowance, its flood would be
+ * announced to the user as coming from their own process, and the
+ * receipts would be addressed to a socket path that does not exist.
+ *
+ * A sender with no address is still distinguished by what the transport
+ * knows, so a script and a controller do not fall into one anonymous
+ * bucket with every stranger. Two anonymous strangers do share `unknown`,
+ * which is the one collision nothing here can separate — the transport
+ * established nothing about either of them.
+ */
+export function peerSenderKey(
+  frame: Pick<PeerUserFrame, 'from'>,
+  origin: PeerOrigin,
+): string {
+  if (origin.controller) return `controller:${origin.controller.id}`;
+  const address = (frame.from ?? '').slice(0, MAX_SENDER_KEY_CHARS);
+  if (origin.selfSent) return `own:${address}`;
+  return address ? `peer:${address}` : 'unknown';
+}
+
+/**
+ * setTimeout's 32-bit ceiling. Above it Node clamps the delay to 1 ms and
+ * warns, so an unclamped re-arm becomes a busy loop.
+ */
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
+export interface HeldMessage {
+  frame: PeerUserFrame;
+  cause: HoldCause;
+  /** For the setting-driven causes: which scope set the policy, if known. */
+  policyScope?: PolicyScope;
+  heldAt: number;
+  /**
+   * Monotonic counterpart of `heldAt`, from `performance.now()`.
+   *
+   * `heldAt` is wall-clock because the UI renders a countdown from it,
+   * but expiry must not move when the system clock steps. A backward NTP
+   * correction would otherwise stretch a 5-minute hold to over an hour
+   * with no receipt, and a step past ~24.8 days would push the delay
+   * beyond setTimeout's 32-bit range, where Node clamps it to 1 ms and
+   * the re-arm spins at ~1 kHz.
+   *
+   * Optional so entries built by hand (tests, older callers) still work;
+   * those fall back to the wall clock.
+   */
+  monotonicAt?: number;
+  /** Set when the message came from one of this session's own processes. */
+  selfSent?: true;
+  /**
+   * The controller grant that admitted the message, when one did.
+   *
+   * Kept on the entry because a controller's message is still parked by
+   * an explicit `hold`, and releasing it has to rebuild the same envelope
+   * it would have had on arrival. The in-session revoke path removes this
+   * identity before the message can be released or re-evaluated.
+   */
+  controller?: PeerControllerIdentity;
+}
+
+export interface InboundGateOptions {
+  /**
+   * Current approval mode, or null when it cannot be determined — which
+   * is treated as unknown, not as permissive.
+   */
+  getApprovalMode: () => ApprovalMode | null;
+  /** Explicit user setting, if any. */
+  getPolicySetting: () => InboundPolicy | undefined;
+  /**
+   * Which scope the explicit setting came from, when the host can tell.
+   * Read only to word a hold cause; absent or throwing means the cause is
+   * worded without a scope.
+   */
+  getPolicyScope?: () => PolicyScope | undefined;
+  /** Whether a controller grant still exists. Absent means valid. */
+  isControllerValid?: (id: string) => boolean;
+  /**
+   * Rate and duplicate control, applied before policy. A gate without one
+   * meters with the default limits; sharing one across gates would make
+   * two sessions in one process compete for the same allowance.
+   */
+  admission?: PeerAdmission;
+  /**
+   * Tell the sender its message was dropped. Best-effort, like
+   * `reportStatus`, and expected to fold a burst into few receipts rather
+   * than answering each drop.
+   */
+  reportDropped?: (
+    frame: PeerUserFrame,
+    reason: PeerDropReason,
+    origin?: PeerOrigin,
+  ) => void;
+  /** Tell this session's user. Absent means nobody is told. */
+  onDropped?: (
+    frame: PeerUserFrame,
+    origin: PeerOrigin,
+    reason: PeerDropReason,
+  ) => void;
+  /** Deliver an accepted message into the session's input queue. */
+  deliver: (frame: PeerUserFrame, origin: PeerOrigin) => void;
+  /** Report a terminal outcome back to the sender. Best-effort. */
+  reportStatus?: (
+    frame: PeerUserFrame,
+    status:
+      | 'held'
+      | 'denied'
+      | 'refused'
+      | 'expired'
+      | 'delivered'
+      | 'misaddressed',
+  ) => void;
+  /**
+   * The session id this process holds now, when pinning is wired. A
+   * parked frame pinned to another id was addressed to whoever held the
+   * socket before an in-process session swap (/clear, /resume), and a
+   * release path must drop it as misaddressed rather than deliver it
+   * into the session that replaced its addressee.
+   */
+  getSessionId?: () => string | undefined;
+  /**
+   * For a process hosting several sessions: whether `id` is one of them.
+   *
+   * Wired instead of `getSessionId`, which asks "what is the one session
+   * here" — a question such a process has no single answer to. A frame
+   * that names no session at all is not for any of them: with one session
+   * an unpinned frame can only have meant that one, and with several
+   * there is nothing to guess from.
+   */
+  ownsSessionId?: (id: string) => boolean;
+  /**
+   * How long a message may sit parked before it expires, in
+   * milliseconds, or null to keep it until the session ends. Read on
+   * every reschedule rather than captured once, so changing the setting
+   * takes effect on messages already waiting.
+   */
+  getHeldExpiryMs?: () => number | null;
+  /** Called whenever the held set changes, for UI. */
+  onHeldChange?: (held: readonly HeldMessage[]) => void;
+}
+
+/**
+ * How long a held message waits for a decision by default.
+ *
+ * A hold is a question put to a person who may not be at the keyboard,
+ * and the sender is blocked on the answer. Five minutes is long enough
+ * for someone who is there to notice `/peers` and short enough that a
+ * sender is not left indefinitely unable to tell "still waiting" from
+ * "never coming".
+ */
+export const DEFAULT_HELD_EXPIRY_MS = 5 * 60 * 1000;
+
+/** The hold lifetimes `agents.crossSessionHeldExpiry` accepts. */
+const HELD_EXPIRY_VALUES: Record<string, number | null> = {
+  '1m': 60 * 1000,
+  '5m': DEFAULT_HELD_EXPIRY_MS,
+  '10m': 10 * 60 * 1000,
+  never: null,
+};
+
+/**
+ * The accepted `crossSessionHeldExpiry` values, in schema order.
+ *
+ * Exported so the settings schema's option list can be asserted against
+ * this table rather than kept in step by hand. An option added there
+ * without an entry here does not fail anywhere: `parseHeldExpiry` takes
+ * its unrecognized branch, logs at debug level, and silently returns the
+ * five-minute default -- so a user who asked for thirty minutes gets a
+ * review window six times shorter, with no error and a green suite.
+ */
+export const HELD_EXPIRY_OPTIONS: readonly string[] =
+  Object.keys(HELD_EXPIRY_VALUES);
+
+/**
+ * Turn the configured hold lifetime into milliseconds, or null for
+ * "never".
+ *
+ * An unset or unrecognized value is the default rather than "never":
+ * this setting decides how long a *sender* waits without an answer, and
+ * failing closed here means bounding that wait, not extending it
+ * indefinitely on a typo.
+ */
+export function parseHeldExpiry(value: unknown): number | null {
+  if (value === undefined) return DEFAULT_HELD_EXPIRY_MS;
+  if (typeof value !== 'string' || !Object.hasOwn(HELD_EXPIRY_VALUES, value)) {
+    debugLogger.debug(
+      `unrecognized crossSessionHeldExpiry value (using the default): ${String(
+        value,
+      )}`,
+    );
+    return DEFAULT_HELD_EXPIRY_MS;
+  }
+  return HELD_EXPIRY_VALUES[value] ?? null;
+}
+
+/**
+ * Per-session gate. Holds parked messages in memory only: a message the
+ * user never reviewed should not outlive the session that received it.
+ */
+export class InboundGate {
+  private readonly held: HeldMessage[] = [];
+  /**
+   * Canonicalized ids this gate already settled, with their verdict.
+   * A re-sent id repeats its verdict instead of re-entering the gate:
+   * the duplicate guard over `held` alone would let a peer slip a
+   * different body behind an id the user already decided — or saw
+   * evicted — and have it decided again.
+   */
+  private readonly settled = new Map<
+    string,
+    'delivered' | 'denied' | 'refused' | 'expired' | 'misaddressed'
+  >();
+  private shuttingDown = false;
+  /**
+   * One timer for the whole buffer, armed for the message that expires
+   * first. A timer per message would be up to `MAX_HELD_MESSAGES` of
+   * them, all firing to do the same sweep.
+   */
+  private expiryTimer: NodeJS.Timeout | null = null;
+  /** How fast senders may arrive. See `peer-admission.ts`. */
+  private readonly admission: PeerAdmission;
+  private admissionSessionObserved = false;
+  private admissionSessionId: string | undefined;
+
+  constructor(private readonly options: InboundGateOptions) {
+    this.admission = options.admission ?? new PeerAdmission();
+  }
+
+  /** Messages currently parked, oldest first. */
+  getHeld(): readonly HeldMessage[] {
+    this.forgetInvalidControllers();
+    return this.held;
+  }
+
+  /** Remove a revoked grant's authority from messages already waiting. */
+  forgetController(id: string): number {
+    const isControllerValid = this.options.isControllerValid;
+    return this.forgetControllersWhere(
+      (controller) =>
+        controller.id === id ||
+        (isControllerValid !== undefined && !isControllerValid(controller.id)),
+    );
+  }
+
+  private forgetInvalidControllers(): number {
+    const isControllerValid = this.options.isControllerValid;
+    if (!isControllerValid) return 0;
+    return this.forgetControllersWhere(
+      (controller) => !isControllerValid(controller.id),
+    );
+  }
+
+  private forgetControllersWhere(
+    shouldForget: (controller: PeerControllerIdentity) => boolean,
+  ): number {
+    let forgotten = 0;
+    for (let index = 0; index < this.held.length; index += 1) {
+      const entry = this.held[index];
+      if (!entry?.controller || !shouldForget(entry.controller)) continue;
+
+      const next = { ...entry };
+      delete next.controller;
+      this.held[index] = withCause(
+        next,
+        this.resolvePolicy(next.frame, originOf(next)),
+      );
+      forgotten += 1;
+    }
+    if (forgotten > 0) this.notifyHeldChange();
+    return forgotten;
+  }
+
+  /**
+   * The current hold lifetime in milliseconds, or null when holds do not
+   * expire. Exposed so `/peers` can tell the user how long a message has
+   * left rather than making them guess.
+   */
+  getHeldExpiryMs(): number | null {
+    if (this.options.getHeldExpiryMs === undefined) {
+      return DEFAULT_HELD_EXPIRY_MS;
+    }
+    try {
+      return this.options.getHeldExpiryMs();
+    } catch (error) {
+      debugLogger.debug(
+        `held-expiry getter threw; falling back to the default: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return DEFAULT_HELD_EXPIRY_MS;
+    }
+  }
+
+  /**
+   * Resolve the policy for a frame, and explain it.
+   *
+   * Exposed for tests and for the UI, which shows the cause next to a
+   * held message.
+   */
+  resolvePolicy(
+    frame?: Pick<PeerUserFrame, 'fromMode'>,
+    origin?: PeerOrigin,
+  ): PolicyDecision {
+    // The setting is read from user configuration, so it can be missing,
+    // misspelled, or backed by a getter that throws mid-teardown. None of
+    // those are "the user asked for accept".
+    let explicit: InboundPolicy | undefined;
+    try {
+      const configured = this.options.getPolicySetting();
+      if (configured !== undefined && !isInboundPolicy(configured)) {
+        debugLogger.debug(
+          `unrecognized crossSessionInbound value (failing closed): ${String(
+            configured,
+          )}`,
+        );
+        return this.hold('policy-unreadable', this.policyScope());
+      }
+      explicit = configured;
+    } catch (error) {
+      debugLogger.debug(
+        `policy-setting getter threw (failing closed): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return { policy: 'hold', cause: 'policy-unreadable' };
+    }
+    if (explicit === 'hold') {
+      return this.hold('explicit-setting', this.policyScope());
+    }
+    if (explicit !== undefined) {
+      return { policy: explicit };
+    }
+
+    // Known sender: parity compares what two sessions may do, and a
+    // process this session ran is not another session.
+    if (origin?.selfSent) {
+      return { policy: 'accept' };
+    }
+
+    // Nor is a program the user minted a controller grant for. It has no
+    // review class to compare and needs none: the user granted it the
+    // right to speak into their sessions, out of band, by hand. Below the
+    // explicit setting above, for the same reason self-sent is.
+    if (origin?.controller) {
+      return { policy: 'accept' };
+    }
+
+    let mode: ApprovalMode | null;
+    try {
+      mode = this.options.getApprovalMode();
+    } catch (error) {
+      debugLogger.debug(
+        `approval-mode getter threw (failing closed): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      mode = null;
+    }
+    // A mode this build does not know about is unknown, not permissive:
+    // the parity rule can say nothing about a mode whose gating behaviour
+    // it has never seen.
+    if (mode === null || !APPROVAL_MODES.includes(mode)) {
+      return { policy: 'hold', cause: 'mode-unknown' };
+    }
+
+    // Same class, either class, auto-delivers; anything else waits for
+    // the user. A sender that says nothing gives the receiver nothing to
+    // compare, so it waits too.
+    const sender = frame?.fromMode;
+    if (sender === undefined) {
+      return { policy: 'hold', cause: 'no-mode-asserted' };
+    }
+    return sender === modeClass(mode)
+      ? { policy: 'accept' }
+      : { policy: 'hold', cause: 'mode-mismatch' };
+  }
+
+  private hold(
+    cause: HoldCause,
+    scope: PolicyScope | undefined,
+  ): PolicyDecision {
+    return scope === undefined
+      ? { policy: 'hold', cause }
+      : { policy: 'hold', cause, scope };
+  }
+
+  /** The scope is decoration on a cause; a broken getter must not change the verdict. */
+  private policyScope(): PolicyScope | undefined {
+    try {
+      return this.options.getPolicyScope?.();
+    } catch (error) {
+      debugLogger.debug(
+        `policy-scope getter threw (ignored): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Run a freshly-arrived message through the gate. `origin` defaults to
+   * an ordinary peer — the transport asserts self-sent, never the frame.
+   */
+  admit(
+    frame: PeerUserFrame,
+    origin: PeerOrigin = { selfSent: false },
+  ): GateDecision {
+    // Only a process holding one session can "change session" — that is
+    // what a `/clear` or a resume does, and the meter starts over because
+    // the conversation it was pacing is gone. A process hosting several
+    // wires `ownsSessionId` instead, has no single id to compare, and
+    // meters across all of them: its sessions come and go constantly, and
+    // resetting on each would hand a flooding peer a fresh allowance.
+    const sessionId = this.options.getSessionId?.();
+    if (
+      this.admissionSessionObserved &&
+      this.admissionSessionId !== sessionId
+    ) {
+      this.admission.reset();
+    }
+    this.admissionSessionObserved = true;
+    this.admissionSessionId = sessionId;
+    // Timers can be starved or slept through (a suspended laptop), so
+    // every entry point sweeps before it reads the buffer rather than
+    // trusting the timer to have fired.
+    this.expireOverdue();
+
+    // Metered before the id lookups below, not after: those two answer a
+    // re-sent id with a receipt each, so a peer looping on one id would
+    // draw one outbound connection per message — and receipts share a
+    // ceiling with everything else this session sends, so the messages
+    // that lose their receipt first would be the legitimate ones. A drop
+    // is reported through a path that folds a burst instead.
+    const verdict = this.admission.admit({
+      senderKey: peerSenderKey(frame, origin),
+      body: frame.message.content,
+      messageId: frame.msgId,
+      // A hook reporting the same line twice, or a user repeating
+      // themselves to a controller, is not the model-driven repetition
+      // the duplicate check exists to stop. Both are still rate limited.
+      exemptFromDedup: origin.selfSent || origin.controller !== undefined,
+    });
+    if (!verdict.admitted) {
+      return this.drop(frame, origin, verdict.reason);
+    }
+
+    // An id that is already settled has a final answer: repeat its
+    // receipt and stop. This is what keeps a re-send from re-parking a
+    // swapped body under a handle the user already reviewed.
+    const settled = this.settled.get(canonicalizeMsgId(frame.msgId));
+    if (settled !== undefined) {
+      debugLogger.debug(
+        `re-sent msgId ${frame.msgId}; repeating earlier verdict ${settled}`,
+      );
+      this.forgetAdmittedBody(frame, origin);
+      void this.report(frame, settled);
+      return 'refused';
+    }
+
+    // An id that is already parked has an answer. A second frame under
+    // the same id is the sender retrying, or a peer slipping a different
+    // body behind an id the user has already been shown — and two entries
+    // sharing an id can never be decided individually, because `/peers`
+    // rejects an id that matches more than one message. Repeat the
+    // verdict and keep exactly one entry per id. Compared in the same
+    // canonical form `/peers` prints and resolves — dashes stripped, case
+    // folded — so a case- or dash-variant clone is the same handle.
+    if (
+      this.held.some(
+        (entry) =>
+          canonicalizeMsgId(entry.frame.msgId) ===
+          canonicalizeMsgId(frame.msgId),
+      )
+    ) {
+      debugLogger.debug(`duplicate msgId ${frame.msgId}; already held`);
+      this.forgetAdmittedBody(frame, origin);
+      void this.report(frame, 'held');
+      return 'held';
+    }
+
+    const decision = this.resolvePolicy(frame, origin);
+    const { policy } = decision;
+
+    if (policy === 'refuse') {
+      debugLogger.debug(`refused peer message ${frame.msgId}`);
+      // Not 'denied': nobody looked at it. A sender told its message was
+      // declined waits for a person to change their mind; one told the
+      // session refuses peer messages knows to stop — and it must keep
+      // hearing that, so its repeat record is rolled back rather than
+      // turning the next verbatim attempt into a `duplicate`, which would
+      // replace "stop" with "fold it into a later message".
+      this.forgetAdmittedBody(frame, origin);
+      this.recordSettled(frame.msgId, 'refused');
+      void this.report(frame, 'refused');
+      return 'refused';
+    }
+
+    if (this.shuttingDown) {
+      // Nothing will act on a message accepted now — the input queue goes
+      // away with the session — and nothing will ever release one parked
+      // now. Either way the honest receipt is 'expired'; 'delivered'
+      // would leave the sender believing the peer has the message.
+      debugLogger.debug(
+        `not admitting peer message ${frame.msgId} during shutdown; expiring it`,
+      );
+      this.forgetAdmittedBody(frame, origin);
+      void this.report(frame, 'expired');
+      return 'refused';
+    }
+
+    if (policy === 'accept') {
+      if (!this.tryDeliver(frame, origin)) {
+        // The only way delivery throws in production is the accepted
+        // backlog being full, so this is a queue-full drop rather than an
+        // expiry: 'expired' would tell the sender a decision ran out when
+        // no decision was ever pending. The id is deliberately not
+        // settled, so an honest retry once the queue drains can land.
+        this.forgetAdmittedBody(frame, origin);
+        return this.drop(frame, origin, 'queue-full');
+      }
+      this.recordSettled(frame.msgId, 'delivered');
+      void this.report(frame, 'delivered');
+      return 'accept';
+    }
+
+    if (this.held.length >= MAX_HELD_MESSAGES) {
+      // The newcomer is turned away rather than a parked message evicted.
+      // Evicting made an arrival destroy someone else's message: a flood
+      // walked the user's real backlog out one entry at a time, and each
+      // eviction told an uninvolved sender its message had `expired` when
+      // what actually happened was that a stranger arrived. Refusing the
+      // newcomer costs only the sender that could not fit, tells it the
+      // truth, and lets it retry — the same shape the accept path above
+      // already had.
+      this.forgetAdmittedBody(frame, origin);
+      return this.drop(frame, origin, 'queue-full');
+    }
+
+    const cause = decision.policy === 'hold' ? decision.cause : 'mode-unknown';
+    const scope = decision.policy === 'hold' ? decision.scope : undefined;
+    this.held.push({
+      frame,
+      cause,
+      ...(scope === undefined ? {} : { policyScope: scope }),
+      heldAt: Date.now(),
+      monotonicAt: performance.now(),
+      ...(origin.selfSent ? { selfSent: true } : {}),
+      ...(origin.controller ? { controller: origin.controller } : {}),
+    });
+    debugLogger.debug(
+      `held peer message ${frame.msgId} (cause=${cause}, ${this.held.length} held)`,
+    );
+    void this.report(frame, 'held');
+    this.notifyHeldChange();
+    this.rescheduleExpiry();
+    return 'held';
+  }
+
+  /**
+   * Release or drop one parked message.
+   *
+   * Returns 'gone' when the id is unknown — it may have been evicted,
+   * expired at shutdown, or already decided. Callers surface that rather
+   * than treating it as an error, because a stale UI action is normal.
+   *
+   * Returns 'failed' when an approved message could not be delivered
+   * (the input queue is full or tearing down). The message is parked
+   * again exactly where it was, so it stays reviewable and the user can
+   * retry; claiming 'done' would report a release that never happened.
+   */
+  decide(
+    msgId: string,
+    decision: 'approve' | 'deny',
+  ): 'done' | 'failed' | 'gone' {
+    // Before the lookup: an expired message must read as 'gone' rather
+    // than be released by a user acting on a listing that has gone stale.
+    this.expireOverdue();
+    this.forgetInvalidControllers();
+    const index = this.held.findIndex((entry) => entry.frame.msgId === msgId);
+    if (index === -1) return 'gone';
+    const [entry] = this.held.splice(index, 1);
+    if (!entry) return 'gone';
+
+    if (decision === 'approve') {
+      if (!this.pinStillValid(entry.frame)) {
+        // Dropped, not released: the id is tombstoned like every other
+        // terminal outcome, and the caller is told the message is gone
+        // rather than that it will appear on the next turn.
+        this.forgetAdmittedBody(entry.frame, originOf(entry));
+        this.recordSettled(entry.frame.msgId, 'misaddressed');
+        void this.report(entry.frame, 'misaddressed');
+        this.notifyHeldChange();
+        this.rescheduleExpiry();
+        return 'gone';
+      }
+      if (!this.tryDeliver(entry.frame, originOf(entry))) {
+        // Parked again at its old position, keeping its original
+        // `heldAt`: a failed release does not restart the clock, or a
+        // full input queue could keep a message alive indefinitely.
+        this.held.splice(index, 0, entry);
+        void this.report(entry.frame, 'held');
+        this.notifyHeldChange();
+        this.rescheduleExpiry();
+        return 'failed';
+      }
+      this.recordSettled(entry.frame.msgId, 'delivered');
+      void this.report(entry.frame, 'delivered');
+    } else {
+      // A person saw this one, so the far *model* still did not: a
+      // verbatim retry deserves the same review rather than a `duplicate`
+      // asserting the content is already over there.
+      this.forgetAdmittedBody(entry.frame, originOf(entry));
+      this.recordSettled(entry.frame.msgId, 'denied');
+      void this.report(entry.frame, 'denied');
+    }
+    this.notifyHeldChange();
+    this.rescheduleExpiry();
+    return 'done';
+  }
+
+  /**
+   * Re-run every parked message through the gate.
+   *
+   * Called when the approval mode or the setting changes: a message held
+   * only because the modes disagreed should be delivered once they agree,
+   * without the user having to approve it by hand. The reverse also
+   * holds — switching to `refuse` drops the backlog.
+   *
+   * Returns the number of messages released.
+   */
+  reevaluate(reason: string): number {
+    // Runs on every settings change, which is also how a changed hold
+    // lifetime reaches the buffer: sweep against the new one, then re-arm
+    // the timer for whatever survives.
+    this.expireOverdue();
+    this.forgetInvalidControllers();
+    this.rescheduleExpiry();
+    if (this.held.length === 0) return 0;
+
+    const stillHeld: HeldMessage[] = [];
+    const release: HeldMessage[] = [];
+    let dropped = 0;
+
+    for (const entry of this.held) {
+      const decision = this.resolvePolicy(entry.frame, originOf(entry));
+      const { policy } = decision;
+      if (policy === 'accept') {
+        release.push(entry);
+      } else if (policy === 'refuse') {
+        dropped += 1;
+        // 'denied', not 'refused': this message was admitted and parked,
+        // and what settles it now is the user switching the setting —
+        // a decision, made after the fact, by a person.
+        this.forgetAdmittedBody(entry.frame, originOf(entry));
+        this.recordSettled(entry.frame.msgId, 'denied');
+        void this.report(entry.frame, 'denied');
+      } else {
+        stillHeld.push(withCause(entry, decision));
+      }
+    }
+
+    let released = 0;
+    let misaddressed = 0;
+    for (const entry of release) {
+      if (!this.pinStillValid(entry.frame)) {
+        misaddressed += 1;
+        this.forgetAdmittedBody(entry.frame, originOf(entry));
+        this.recordSettled(entry.frame.msgId, 'misaddressed');
+        void this.report(entry.frame, 'misaddressed');
+        continue;
+      }
+      if (this.tryDeliver(entry.frame, originOf(entry))) {
+        released += 1;
+        this.recordSettled(entry.frame.msgId, 'delivered');
+        void this.report(entry.frame, 'delivered');
+      } else {
+        // A failed delivery must not drop a message the user can still
+        // review: park it again and tell the sender it is still waiting.
+        stillHeld.push(entry);
+        void this.report(entry.frame, 'held');
+      }
+    }
+
+    this.held.length = 0;
+    // Sorted, not appended in loop order: a failed release keeps its
+    // original (older) timestamp, and pushing it behind newer entries
+    // would leave `held.shift()` evicting the newest message at
+    // MAX_HELD_MESSAGES -- the opposite of "evict the oldest".
+    //
+    // Ordered by `ageOf`, not by `heldAt`: expiry judges age on the same
+    // function, and sorting on the wall clock alone reintroduces the
+    // inversion this sort exists to prevent. After a backward wall-clock
+    // step, entries admitted since the step carry a smaller `heldAt` and
+    // would sort ahead of genuinely older ones -- so `held.shift()` would
+    // evict a newer message and receipt its sender `expired` early.
+    // Descending age is oldest-first.
+    stillHeld.sort((a, b) => this.ageOf(b) - this.ageOf(a));
+    this.held.push(...stillHeld);
+    this.rescheduleExpiry();
+
+    if (release.length > 0 || dropped > 0) {
+      debugLogger.debug(
+        `reevaluate (${reason}): released ${released}, dropped ${dropped}, misaddressed ${misaddressed}, ${this.held.length} still held`,
+      );
+      this.notifyHeldChange();
+    }
+    return released;
+  }
+
+  /**
+   * Settle every parked message as expired and refuse new holds.
+   *
+   * A sender blocked on a decision has to learn that no decision is
+   * coming; silence would look identical to "delivered and ignored".
+   */
+  shutdown(): Promise<void> {
+    this.shuttingDown = true;
+    if (this.expiryTimer !== null) {
+      clearTimeout(this.expiryTimer);
+      this.expiryTimer = null;
+    }
+    if (this.held.length === 0) return Promise.resolve();
+    const settling = this.held.splice(0, this.held.length);
+    debugLogger.debug(
+      `shutdown: expiring ${settling.length} held peer message(s)`,
+    );
+    const receipts = settling.map((entry) => {
+      this.forgetAdmittedBody(entry.frame, originOf(entry));
+      return this.report(entry.frame, 'expired');
+    });
+    this.notifyHeldChange();
+    // The caller tears the socket down next and the process exits right
+    // after: a receipt still in flight when close resolves is a receipt
+    // the sender never receives.
+    return Promise.allSettled(receipts).then(() => undefined);
+  }
+
+  /** Remember a settled id, pruning the oldest beyond the cap. */
+  private recordSettled(
+    msgId: string,
+    verdict: 'delivered' | 'denied' | 'refused' | 'expired' | 'misaddressed',
+  ): void {
+    const key = canonicalizeMsgId(msgId);
+    // Delete-then-set refreshes recency: Map iterates in insertion
+    // order, and the prune below drops the oldest.
+    this.settled.delete(key);
+    this.settled.set(key, verdict);
+    while (this.settled.size > MAX_SETTLED_IDS) {
+      const oldest = this.settled.keys().next().value;
+      if (oldest === undefined) break;
+      this.settled.delete(oldest);
+    }
+  }
+
+  /**
+   * A frame's pin is judged at arrival, but a session swap can happen
+   * while it sits parked; the release paths re-judge against the id the
+   * session holds now, not the one the frame saw on arrival.
+   */
+  private pinStillValid(frame: PeerUserFrame): boolean {
+    const ownsSessionId = this.options.ownsSessionId;
+    if (ownsSessionId) {
+      // A process hosting several sessions cannot act on an unpinned
+      // frame: there is no one session it could have meant.
+      return (
+        frame.toSessionId !== undefined && ownsSessionId(frame.toSessionId)
+      );
+    }
+    if (frame.toSessionId === undefined) return true;
+    const ownSessionId = this.options.getSessionId?.();
+    return ownSessionId === undefined || frame.toSessionId === ownSessionId;
+  }
+
+  /**
+   * Receipt a terminal outcome without letting the transport take the
+   * gate down with it.
+   *
+   * These run inside loops that have already removed entries from the
+   * held set: a throw partway through would strand every message after it
+   * with no receipt and no way for the user to reach it — the exact
+   * silent loss the receipts exist to prevent.
+   */
+  private report(
+    frame: PeerUserFrame,
+    status:
+      | 'held'
+      | 'denied'
+      | 'refused'
+      | 'expired'
+      | 'delivered'
+      | 'misaddressed',
+  ): Promise<void> {
+    try {
+      return Promise.resolve(this.options.reportStatus?.(frame, status));
+    } catch (error) {
+      debugLogger.debug(
+        `reportStatus(${status}) threw: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return Promise.resolve();
+    }
+  }
+
+  /**
+   * Undo the repeat record an admitted message left, when the gate went on
+   * to settle it as something the far model never saw.
+   *
+   * Admission records a body before the gate decides what to do with it,
+   * so every terminal that is not a delivery or a hold leaves a record for
+   * content that never arrived — and the sender's honest retry then comes
+   * back `duplicate`, a verdict whose whole premise is that the far side
+   * already has it. Keyed exactly as admission keyed it, or it is a
+   * silent no-op.
+   */
+  private forgetAdmittedBody(frame: PeerUserFrame, origin: PeerOrigin): void {
+    this.admission.forgetBody(
+      peerSenderKey(frame, origin),
+      frame.message.content,
+      frame.msgId,
+    );
+  }
+
+  /** Undo an admitted queued message that was invalidated outside the gate. */
+  forgetAdmittedMessage(senderKey: string, messageId: string): void {
+    this.admission.forgetMessage(senderKey, messageId);
+  }
+
+  /**
+   * Turn a message away without the model or the user ever seeing it, and
+   * say so to both audiences.
+   *
+   * Two of the three reasons are decided above policy; `queue-full` is
+   * decided below it, when a buffer the message was already accepted into
+   * had no room. What they share is that nothing was *decided about the
+   * message*, which is why none of them leaves a tombstone: a sender that
+   * waits and retries should find the same gate it would have found if it
+   * had waited in the first place.
+   *
+   * Both reporters are best-effort and neither may take the gate down,
+   * for the same reason `report` is wrapped: this runs on the arrival
+   * path of every message.
+   */
+  private drop(
+    frame: PeerUserFrame,
+    origin: PeerOrigin,
+    reason: PeerDropReason,
+  ): GateDecision {
+    debugLogger.debug(`dropped peer message ${frame.msgId} (${reason})`);
+    try {
+      this.options.reportDropped?.(frame, reason, origin);
+    } catch (error) {
+      debugLogger.debug(`reportDropped(${reason}) threw: ${describe(error)}`);
+    }
+    try {
+      this.options.onDropped?.(frame, origin, reason);
+    } catch (error) {
+      debugLogger.debug(`onDropped(${reason}) threw: ${describe(error)}`);
+    }
+    return 'dropped';
+  }
+
+  /** Hand a message to the session, reporting whether it landed. */
+  private tryDeliver(frame: PeerUserFrame, origin: PeerOrigin): boolean {
+    try {
+      this.options.deliver(frame, origin);
+      return true;
+    } catch (error) {
+      debugLogger.error(
+        `deliver threw for ${frame.msgId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * How long `entry` has been parked: the larger of the wall-clock and
+   * monotonic elapsed times.
+   *
+   * Neither clock alone is right. The wall clock is what a suspended
+   * machine advances -- CLOCK_MONOTONIC does not tick across suspend, so
+   * a monotonic-only age would keep a message parked through a two-hour
+   * sleep. But the wall clock also moves when nothing elapsed: a
+   * backward NTP correction of an hour would stretch a five-minute hold
+   * past sixty, and a step over ~24.8 days pushes the re-armed delay
+   * beyond setTimeout's range.
+   *
+   * Taking the larger keeps the suspend case working and makes a
+   * backward step a no-op, at the cost of treating a forward step as
+   * elapsed time -- which is the conservative direction, and in any case
+   * a forward step is indistinguishable from a suspend from in here.
+   */
+  private ageOf(entry: HeldMessage): number {
+    const wall = Date.now() - entry.heldAt;
+    if (entry.monotonicAt === undefined) return wall;
+    return Math.max(wall, performance.now() - entry.monotonicAt);
+  }
+
+  /**
+   * Settle every message whose hold has run out.
+   *
+   * Expiry is judged against the lifetime configured *now*, not the one
+   * in force when each message arrived: shortening the setting expires a
+   * backlog that is already too old, and lengthening it gives the
+   * backlog the longer window. Either reading is defensible; this one
+   * has the property that what `/peers` shows as remaining is what
+   * actually happens.
+   */
+  private expireOverdue(): void {
+    const expiryMs = this.getHeldExpiryMs();
+    if (expiryMs === null || this.held.length === 0) return;
+    const survivors: HeldMessage[] = [];
+    const expired: HeldMessage[] = [];
+    for (const entry of this.held) {
+      (this.ageOf(entry) >= expiryMs ? expired : survivors).push(entry);
+    }
+    if (expired.length === 0) return;
+
+    this.held.length = 0;
+    this.held.push(...survivors);
+    for (const entry of expired) {
+      debugLogger.debug(
+        `held peer message ${entry.frame.msgId} expired after ${expiryMs} ms`,
+      );
+      this.forgetAdmittedBody(entry.frame, originOf(entry));
+      this.recordSettled(entry.frame.msgId, 'expired');
+      void this.report(entry.frame, 'expired');
+    }
+    this.notifyHeldChange();
+    // Every entry point sweeps, and several of them return without
+    // touching the buffer afterwards (`decide` answering 'gone',
+    // `admit`'s non-hold paths). Without this a survivor's own deadline
+    // would wait on the next unrelated frame, or on a stale timer.
+    this.rescheduleExpiry();
+  }
+
+  /**
+   * Arm the timer for whichever message expires first, or clear it when
+   * nothing is waiting and when holds do not expire.
+   *
+   * Called after every change to the buffer. Unref'd: a session with a
+   * message parked should still be able to exit, and shutdown settles
+   * the backlog anyway.
+   */
+  private rescheduleExpiry(): void {
+    if (this.expiryTimer !== null) {
+      clearTimeout(this.expiryTimer);
+      this.expiryTimer = null;
+    }
+    if (this.shuttingDown) return;
+    const expiryMs = this.getHeldExpiryMs();
+    if (expiryMs === null) return;
+    let oldestAge: number | null = null;
+    for (const entry of this.held) {
+      const age = this.ageOf(entry);
+      if (oldestAge === null || age > oldestAge) oldestAge = age;
+    }
+    if (oldestAge === null) return;
+
+    // Scanned rather than read from `held[0]`: a failed release re-parks
+    // an entry keeping its original timestamp, so the buffer is not
+    // reliably oldest-first and the head can carry a later deadline.
+    //
+    // Never negative, and never zero: a zero-delay timer that fires
+    // inside the same tick as the change that armed it would recurse.
+    // Never above setTimeout's 32-bit ceiling either, where Node clamps
+    // to 1 ms and the callback re-arms the same oversized delay.
+    const delay = Math.min(MAX_TIMEOUT_MS, Math.max(1, expiryMs - oldestAge));
+    this.expiryTimer = setTimeout(() => {
+      this.expiryTimer = null;
+      this.expireOverdue();
+      this.rescheduleExpiry();
+    }, delay);
+    this.expiryTimer.unref?.();
+  }
+
+  private notifyHeldChange(): void {
+    try {
+      this.options.onHeldChange?.(this.held);
+    } catch (error) {
+      debugLogger.debug(
+        `onHeldChange threw: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function originOf(entry: HeldMessage): PeerOrigin {
+  return {
+    selfSent: entry.selfSent === true,
+    ...(entry.controller ? { controller: entry.controller } : {}),
+  };
+}
+
+/**
+ * The same entry with the cause a fresh evaluation gave it, keeping the
+ * object identity when nothing changed so observers can compare by
+ * reference.
+ */
+function withCause(entry: HeldMessage, decision: PolicyDecision): HeldMessage {
+  if (decision.policy !== 'hold') return entry;
+  const { cause, scope } = decision;
+  if (cause === entry.cause && scope === entry.policyScope) return entry;
+  const { policyScope: _dropped, ...rest } = entry;
+  return scope === undefined
+    ? { ...rest, cause }
+    : { ...rest, cause, policyScope: scope };
+}
+
+/**
+ * One-line explanation of why a message is parked, for the UI.
+ *
+ * The scope, when known, names who set the policy: a user who never
+ * touched the key should not read "your setting".
+ */
+export function describeHoldCause(
+  cause: HoldCause,
+  scope?: PolicyScope,
+): string {
+  switch (cause) {
+    case 'explicit-setting':
+      switch (scope) {
+        case 'workspace':
+          return 'this repository\'s settings hold messages from other sessions (agents.crossSessionInbound is "hold" in workspace settings)';
+        case 'system':
+          return 'a system setting holds messages from other sessions (agents.crossSessionInbound is "hold" in system settings)';
+        default:
+          return 'your crossSessionInbound setting is "hold"';
+      }
+    case 'mode-mismatch':
+      return 'the sender and this session are in different review modes: one reviews each action and the other can apply some without per-action review';
+    case 'no-mode-asserted':
+      return 'the sender did not say whether it reviews each action';
+    case 'mode-unknown':
+      return "this session's approval mode could not be determined";
+    case 'policy-unreadable':
+      switch (scope) {
+        case 'workspace':
+          return "the agents.crossSessionInbound value in this repository's workspace settings could not be read";
+        case 'system':
+          return 'the agents.crossSessionInbound value in system settings could not be read';
+        default:
+          return 'your crossSessionInbound setting could not be read';
+      }
+    default: {
+      const exhaustive: never = cause;
+      return exhaustive;
+    }
+  }
+}

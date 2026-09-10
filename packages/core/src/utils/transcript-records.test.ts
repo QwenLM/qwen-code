@@ -29,6 +29,44 @@ function record(
 }
 
 describe('prepareTranscriptRecords', () => {
+  it.each([undefined, '', '   ', 42, { id: 'untrusted' }])(
+    'keeps user content readable without a valid daemonPromptId (%j)',
+    (daemonPromptId) => {
+      const prepared = prepareTranscriptRecords([
+        record('user', null, { daemonPromptId }),
+      ]);
+      expect(prepared.records).toHaveLength(1);
+      expect(prepared.records[0]?.daemonPromptId).toBeUndefined();
+      expect(prepared.records[0]?.message?.parts).toEqual([{ text: 'user' }]);
+    },
+  );
+
+  it('preserves distinct daemon identities for identical user prompts', () => {
+    const message = { role: 'user', parts: [{ text: 'same prompt' }] };
+    const prepared = prepareTranscriptRecords([
+      record('first', null, { message, daemonPromptId: 'daemon-first' }),
+      record('second', 'first', { message, daemonPromptId: 'daemon-second' }),
+    ]);
+    expect(prepared.records.map((item) => item.daemonPromptId)).toEqual([
+      'daemon-first',
+      'daemon-second',
+    ]);
+  });
+
+  it('does not use CLI history prompt IDs as daemon identities', () => {
+    const prepared = prepareTranscriptRecords([
+      record('legacy', null, { promptId: 'session-1########42' }),
+      record('current', 'legacy', {
+        promptId: 'session-1########43',
+        daemonPromptId: 'daemon-current',
+      }),
+    ]);
+    expect(prepared.records.map((item) => item.daemonPromptId)).toEqual([
+      undefined,
+      'daemon-current',
+    ]);
+  });
+
   it('selects the active branch and aggregates same-uuid fragments', () => {
     const prepared = prepareTranscriptRecords([
       record('root', null),

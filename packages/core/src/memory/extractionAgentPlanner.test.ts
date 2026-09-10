@@ -13,7 +13,7 @@ import {
   getAutoMemoryRoot,
   getUserAutoMemoryRoot,
 } from './paths.js';
-import { runForkedAgent, getCacheSafeParams } from '../utils/forkedAgent.js';
+import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 vi.mock('./scan.js', async (importOriginal) => {
@@ -38,7 +38,7 @@ vi.mock('./paths.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../utils/forkedAgent.js', () => ({
+vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
   getCacheSafeParams: vi.fn(),
 }));
@@ -94,6 +94,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
       hasToolActivity: true,
       systemMessage: 'Managed auto-memory updated: user.md',
     });
+    expect(getCacheSafeParams).toHaveBeenCalledWith('session-1');
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         tools: [

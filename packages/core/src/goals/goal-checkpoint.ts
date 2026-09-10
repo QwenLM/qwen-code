@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ValidatedGoalEvidenceRecord } from './goal-evidence.js';
+import type {
+  GoalEvidenceCheckpointWindow,
+  ValidatedGoalEvidenceRecord,
+} from './goal-evidence.js';
 import type {
   GoalEvidenceCheckpoint,
   GoalEvidenceCheckpointClaim,
@@ -43,6 +46,36 @@ export type GoalCheckpointVerifier = (
   attemptSignal?: AbortSignal,
 ) => Promise<GoalCheckpointVerificationResult>;
 
+/**
+ * Whether a checkpoint ran at the compaction ceiling without relieving the
+ * window it compacted.
+ *
+ * Compaction has two levers: folding evidence into claims, and moving the
+ * cursor past what was folded. A checkpoint that comes back holding the
+ * maximum number of claims has exhausted the first lever -- the next
+ * checkpoint can only merge, not absorb -- and a window that was already
+ * truncated when this one ran shows the second lever is not keeping up
+ * either: eligible evidence was left behind uncatalogued. Both at once means
+ * the Goal is paying a checkpoint verifier call every turn and still losing
+ * evidence; that is the stall the runtime counts, not a busy turn (which
+ * truncates while the claims still have room) nor a full claim list on a
+ * quiet Goal (which never truncates).
+ */
+export function isGoalCheckpointStalled(
+  window: Pick<GoalEvidenceCheckpointWindow, 'truncated'>,
+  checkpoint: Pick<GoalEvidenceCheckpoint, 'claims'>,
+): boolean {
+  return (
+    window.truncated && checkpoint.claims.length >= GOAL_CHECKPOINT_CLAIM_LIMIT
+  );
+}
+
+/**
+ * An unusable checkpoint verifier result. Nothing in production branches on
+ * the class -- the stall breaker counts by window state, not error class --
+ * so it is a diagnostic carrier: its name and message are what an
+ * investigation into a stalled Goal gets to see.
+ */
 export class InvalidGoalCheckpointError extends Error {
   constructor(message: string) {
     super(message);

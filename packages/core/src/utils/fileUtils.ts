@@ -12,7 +12,7 @@ import type { Part, PartListUnion } from '@google/genai';
 import mime from 'mime/lite';
 import { isUtf8CompatibleEncoding } from './encoding.js';
 import { loadIconvLite } from './load-iconv-lite.js';
-import { ToolErrorType } from '../tools/tool-error.js';
+import { ToolErrorType } from './tool-error-type.js';
 import { BINARY_EXTENSIONS } from './ignorePatterns.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
@@ -34,8 +34,13 @@ import {
   renderPDFPagesToImages,
   shouldRequirePDFPageRange,
 } from './pdf.js';
-import { VISION_BRIDGE_MAX_IMAGES } from '../services/visionBridge/vision-bridge-constants.js';
+import { VISION_BRIDGE_MAX_IMAGES } from './vision-bridge-constants.js';
 import type { VisionBridgePdfContinuation } from '../services/visionBridge/vision-bridge-service.js';
+import {
+  extensionForMimeType,
+  looksLikeText,
+  sniffFileKind,
+} from './binary-content.js';
 import { readNotebookWithMetadata } from './notebook.js';
 import {
   readTextRange,
@@ -59,6 +64,27 @@ const CANONICAL_IMAGE_MIME_TYPES = new Set([
   'image/png',
   'image/webp',
 ]);
+// Magic-matched canonical images may be valid even when their image extension
+// differs. GIF is intentionally excluded because the canonical overview path
+// cannot render it and must not forward it under a mismatched image MIME.
+const CANONICAL_IMAGE_EXTENSIONS = new Set(
+  [...CANONICAL_IMAGE_MIME_TYPES].map((mimeType) =>
+    extensionForMimeType(mimeType),
+  ),
+);
+// Every entry must have a magic signature in sniffFileKind (binary-content.ts)
+// AND a MIME_EXTENSIONS entry (same file) mapping the mime to the exact
+// extension string the magic branch returns; missing either classifies every
+// valid image of that format as 'binary'.
+// Other image MIME types intentionally retain extension-only behavior until
+// their magic signatures and safe rendering paths are added here.
+const SNIFFABLE_IMAGE_MIME_TYPES = new Set([
+  'image/gif',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
+const IMAGE_SNIFF_BYTES = 8192;
 
 // Image MIME types a model endpoint can safely consume as-is. Anything else
 // (image/heic, image/tiff, ...) must never be forwarded verbatim: providers
@@ -802,6 +828,58 @@ const MIME_LITE_MISSING_VIDEO_TYPES: ReadonlyMap<string, string> = new Map([
   ['.m4v', 'video/x-m4v'],
 ]);
 
+async function classifyImageContent(
+  filePath: string,
+  mimeType: string,
+): Promise<FileType> {
+  if (!SNIFFABLE_IMAGE_MIME_TYPES.has(mimeType)) return 'image';
+
+  let handle: fs.promises.FileHandle | undefined;
+  try {
+    handle = await fs.promises.open(
+      filePath,
+      (fs.constants?.O_RDONLY ?? 0) | (fs.constants?.O_NONBLOCK ?? 0),
+    );
+    // Above the image source limit the read is rejected as an oversized image;
+    // sniffing anyway would reclassify zero-filled/text payloads and route them
+    // past the 100 MB gate.
+    if ((await handle.stat()).size > IMAGE_MAX_SOURCE_BYTES) return 'image';
+    const sample = Buffer.alloc(IMAGE_SNIFF_BYTES);
+    const { bytesRead } = await handle.read(sample, 0, sample.length, 0);
+    const bytes = sample.subarray(0, bytesRead);
+    if (bytes.length === 0) return 'image';
+
+    const sniffed = sniffFileKind(bytes, mimeType, '', `file://${filePath}`);
+    let result: FileType;
+    if (sniffed.magicMatched) {
+      result =
+        sniffed.extension === extensionForMimeType(mimeType) ||
+        CANONICAL_IMAGE_EXTENSIONS.has(sniffed.extension)
+          ? 'image'
+          : 'binary';
+    } else {
+      result =
+        bytes.length < 3 || !(detectBOM(bytes) || looksLikeText(bytes))
+          ? 'binary'
+          : 'text';
+    }
+    if (result !== 'image') {
+      debugLogger.debug(
+        `classifyImageContent: ${filePath} -> ${result} (mime ${mimeType})`,
+      );
+    }
+    return result;
+  } catch (error) {
+    debugLogger.debug(
+      `Unable to sniff image content for ${filePath}; preserving extension classification`,
+      error instanceof Error ? error.message : String(error),
+    );
+    return 'image';
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 /**
  * Detects the type of file based on extension and content.
  * @param filePath Path to the file.
@@ -836,7 +914,7 @@ export async function detectFileType(filePath: string): Promise<FileType> {
     mime.getType(filePath) ?? MIME_LITE_MISSING_VIDEO_TYPES.get(ext) ?? null;
   if (lookedUpMimeType) {
     if (lookedUpMimeType.startsWith('image/')) {
-      return 'image';
+      return classifyImageContent(filePath, lookedUpMimeType);
     }
     if (lookedUpMimeType.startsWith('audio/')) {
       return 'audio';
@@ -992,6 +1070,8 @@ export interface ProcessSingleFileContentOptions {
   textFileHandle?: FileHandle;
   textFileStats?: import('node:fs').Stats;
   textFileMaxScanBytes?: number;
+  /** Reuse a classification already performed by a validated caller. */
+  fileType?: FileType;
 }
 
 /**
@@ -1120,13 +1200,21 @@ export async function processSingleFileContent(
       };
     }
 
-    const fileType = options.textFileHandle
-      ? 'text'
-      : await detectFileType(filePath);
     const mediaMimeType =
       mime.getType(filePath) ??
       MIME_LITE_MISSING_VIDEO_TYPES.get(path.extname(filePath).toLowerCase()) ??
       'application/octet-stream';
+    // Bridge callers (`preserveUnsupportedImage`) contract for the raw bytes so
+    // a vision model can transcribe them; content sniffing must not reroute
+    // text-looking image files to the text path and break that handoff (#9291).
+    const bridgePreservesImage =
+      preserveUnsupportedImage &&
+      mediaMimeType.startsWith('image/') &&
+      SNIFFABLE_IMAGE_MIME_TYPES.has(mediaMimeType);
+    const fileType = options.textFileHandle
+      ? 'text'
+      : (options.fileType ??
+        (bridgePreservesImage ? 'image' : await detectFileType(filePath)));
     const shouldRenderImageOverview =
       fileType === 'image' && CANONICAL_IMAGE_MIME_TYPES.has(mediaMimeType);
     const displayName = path.basename(displayPath);

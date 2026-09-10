@@ -4,10 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isInternalSecretEnvVar } from './sanitize-child-env.js';
+
 /**
  * Resolves environment variables in a string.
  * Replaces $VAR_NAME and ${VAR_NAME} with their corresponding environment variable values.
  * If the environment variable is not defined, the original placeholder is preserved.
+ *
+ * Qwen-internal secrets (see `INTERNAL_SECRET_ENV_VARS`) are never
+ * substituted, from `process.env` or from `customEnv`: the settings and
+ * extension files this resolves can come from a repository, and a resolved
+ * value is baked into hook commands, URLs or MCP configs before child-env
+ * sanitization ever applies. Their placeholders are preserved exactly like
+ * an unset variable's.
+ * Session-ID placeholders are also reserved for per-request custom header
+ * expansion, including bare, braced, and case-insensitive spellings.
  *
  * @param value - The string that may contain environment variable placeholders
  * @returns The string with environment variables resolved
@@ -24,6 +35,14 @@ export function resolveEnvVarsInString(
   const envVarRegex = /\$(?:(\w+)|{([^}]+)})/g; // Find $VAR_NAME or ${VAR_NAME}
   return value.replace(envVarRegex, (match, varName1, varName2) => {
     const varName = varName1 || varName2;
+    const normalizedVarName = varName.toUpperCase();
+    if (
+      normalizedVarName === 'SESSION_ID' ||
+      normalizedVarName === 'QWEN_CODE_SESSION_ID' ||
+      isInternalSecretEnvVar(varName)
+    ) {
+      return match;
+    }
     if (customEnv && typeof customEnv[varName] === 'string') {
       return customEnv[varName];
     }

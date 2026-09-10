@@ -19,6 +19,7 @@ Add things you'd otherwise have to repeat every session:
 - Coding conventions your team follows ("all new files must have JSDoc comments")
 - Architectural decisions ("we use the repository pattern, never call the database directly from controllers")
 - Personal preferences ("always use pnpm, not npm")
+- A verification policy for high-stakes work — for example "verify against the database before concluding" (see [Enforce evidence-based conclusions](../common-workflow.md#enforce-evidence-based-conclusions) for a ready-made template)
 
 Don't include things Qwen can figure out by reading your code. QWEN.md works best when it's short and specific — the longer it gets, the less reliably Qwen follows it.
 

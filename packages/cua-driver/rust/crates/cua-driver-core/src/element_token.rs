@@ -195,6 +195,30 @@ impl TokenRegistry {
         before - entries.len()
     }
 
+    /// Invalidate every snapshot owned by a process across runtime lanes.
+    /// Platform target-lifecycle watchers call this only after the process is
+    /// confirmed exited, so PID-wide cleanup cannot revoke a live peer.
+    pub fn clear_pid(&self, pid: i32) -> usize {
+        let mut entries = self.by_runtime_and_pid.lock().unwrap();
+        let before = entries.len();
+        entries.retain(|(_, entry_pid), _| *entry_pid != pid);
+        before - entries.len()
+    }
+
+    /// Invalidate snapshots for one exact process/window target across runtime
+    /// lanes while preserving snapshots for the process's other live windows.
+    pub fn clear_target(&self, pid: i32, window_id: u32) -> usize {
+        let mut entries = self.by_runtime_and_pid.lock().unwrap();
+        let before = entries.values().map(Vec::len).sum::<usize>();
+        entries.retain(|(_, entry_pid), snapshots| {
+            if *entry_pid == pid {
+                snapshots.retain(|entry| entry.window_id != window_id);
+            }
+            !snapshots.is_empty()
+        });
+        before - entries.values().map(Vec::len).sum::<usize>()
+    }
+
     /// Build the canonical token string for `snapshot_id` / `element_index`.
     /// Pure helper, mirrors [`format_token`] but lives on the registry so
     /// callers don't have to import the free function.
@@ -364,6 +388,24 @@ pub fn resolve_element_args(
         }))
     };
     let resolve_token = |tok: &str| {
+        if crate::observation_revision::is_revision_token(tok) {
+            let (window_id, element_index, snapshot_id) =
+                crate::observation_revision::revision_tokens()
+                    .resolve_current(pid, tok)
+                    .map_err(|error| refusal(error.code(), error.to_string()))?;
+            let snapshot_token = token_for(snapshot_id, element_index);
+            let (snapshot_window_id, snapshot_element_index) = global()
+                .resolve(pid, &snapshot_token)
+                .map_err(|message| refusal("stale_element_token", message))?;
+            if snapshot_window_id != window_id || snapshot_element_index != element_index {
+                return Err(refusal(
+                    "stale_element_token",
+                    "revision element_token no longer matches the current platform snapshot"
+                        .to_owned(),
+                ));
+            }
+            return Ok((window_id, element_index));
+        }
         let (wid, idx) = global().resolve(pid, tok).map_err(|message| {
             let code = if message.contains("another runtime generation") {
                 "generation_mismatch"
@@ -618,6 +660,32 @@ mod tests {
         let _ = reg.register_snapshot(1, 1, 1);
         reg.clear();
         assert_eq!(reg.snapshot_count(1), 0);
+    }
+
+    #[test]
+    fn process_exit_cleanup_invalidates_only_that_pid() {
+        let reg = fresh_registry();
+        let dead = reg.register_snapshot(41, 1, 1);
+        let live = reg.register_snapshot(42, 2, 1);
+        assert_eq!(reg.clear_pid(41), 1);
+        assert_eq!(
+            reg.resolve(41, &format_token(dead, 0)).unwrap_err(),
+            STALE_TOKEN_ERROR
+        );
+        assert_eq!(reg.resolve(42, &format_token(live, 0)).unwrap().0, 2);
+    }
+
+    #[test]
+    fn target_cleanup_preserves_other_windows_for_the_same_pid() {
+        let reg = fresh_registry();
+        let closed = reg.register_snapshot(43, 10, 1);
+        let live = reg.register_snapshot(43, 11, 1);
+        assert_eq!(reg.clear_target(43, 10), 1);
+        assert_eq!(
+            reg.resolve(43, &format_token(closed, 0)).unwrap_err(),
+            STALE_TOKEN_ERROR
+        );
+        assert_eq!(reg.resolve(43, &format_token(live, 0)).unwrap().0, 11);
     }
 
     // ── resolve_element_args precedence rule ─────────────────────────

@@ -8,6 +8,7 @@ import {
   extractTodosFromToolCall,
   getAgentToolsForPlan,
   getFloatingTodos,
+  getSessionWorkflowTodos,
   getActiveTodosForPlanRevision,
   getTodoStatusIcon,
   getTodoWindow,
@@ -40,6 +41,7 @@ function todoWriteMessage(
   todos: TodoItem[],
   stats?: TodoStatsSnapshot,
   planId?: string,
+  sessionWorkflow = false,
 ): Message {
   const tool: ACPToolCall = {
     callId: `call-${id}`,
@@ -47,11 +49,12 @@ function todoWriteMessage(
     status: 'completed',
     kind: 'think',
     args: { todos },
-    ...(stats || planId
+    ...(stats || planId || sessionWorkflow
       ? {
           rawOutput: {
             ...(stats ? { stats } : {}),
             ...(planId ? { plan: { id: planId } } : {}),
+            ...(sessionWorkflow ? { sessionWorkflow: true } : {}),
           },
         }
       : {}),
@@ -236,6 +239,28 @@ describe('getFloatingTodos', () => {
     expect(state.todos).toHaveLength(2);
     expect(state.allCompleted).toBe(true);
     expect(state.sourceMessageId).toBe('p1');
+  });
+});
+
+describe('getSessionWorkflowTodos', () => {
+  it('retains the latest workflow after a later user message', () => {
+    const state = getSessionWorkflowTodos([
+      todoWriteMessage(
+        'done',
+        [todo('first', 'completed'), todo('second', 'completed')],
+        undefined,
+        'plan-1',
+        true,
+      ),
+      userMessage('follow-up'),
+      todoWriteMessage('ordinary', [todo('unrelated', 'pending')]),
+      assistantMessage('reply'),
+    ]);
+
+    expect(state.todos.map((todo) => todo.id)).toEqual(['first', 'second']);
+    expect(state.planId).toBe('plan-1');
+    expect(state.allCompleted).toBe(true);
+    expect(state.sourceMessageId).toBe('done');
   });
 });
 
@@ -686,9 +711,33 @@ describe('extractTodosFromToolCall', () => {
 
   it('reads todos from args', () => {
     const todos = extractTodosFromToolCall(
-      toolCall({ args: { todos: [item('1', 'A', 'pending')] } }),
+      toolCall({
+        args: {
+          todos: [item('1', 'A', 'pending')],
+          entries: [item('2', 'B', 'completed')],
+        },
+      }),
     );
     expect(todos).toEqual([{ id: '1', content: 'A', status: 'pending' }]);
+  });
+
+  it('reads safe todo preview entries from args', () => {
+    const todos = extractTodosFromToolCall(
+      toolCall({
+        args: {
+          entries: [
+            {
+              content: 'A',
+              status: 'pending',
+              _meta: { qwenTodo: { id: 'a' } },
+            },
+          ],
+        },
+        rawOutput: 'Todos updated',
+      }),
+    );
+
+    expect(todos).toEqual([{ id: 'a', content: 'A', status: 'pending' }]);
   });
 
   it('reads todos from rawOutput.todos', () => {
@@ -1285,6 +1334,38 @@ describe('computeTodoDetails', () => {
       toolTimeMs: 1200,
     });
   });
+
+  it('uses todo tool timestamps inside a merged tool group', () => {
+    const start = todoWriteMessage('m1', [todo('1', 'in_progress')]);
+    const end = todoWriteMessage('m2', [todo('1', 'completed')]);
+    if (start.role !== 'tool_group' || end.role !== 'tool_group') {
+      throw new Error('Expected tool groups');
+    }
+    const details = computeTodoDetails([
+      {
+        id: 'merged',
+        role: 'tool_group',
+        timestamp: 50,
+        tools: [
+          { ...start.tools[0]!, startTime: 1000, endTime: 1100 },
+          {
+            callId: 'read',
+            toolName: 'read',
+            status: 'completed',
+            startTime: 1200,
+            endTime: 1700,
+          },
+          { ...end.tools[0]!, startTime: 1900, endTime: 2000 },
+        ],
+      },
+    ]);
+
+    expect(details.get(todoStateKey(todo('1', 'pending')))).toEqual({
+      startTs: 1100,
+      endTs: 2000,
+      resources: { toolTimeMs: 500 },
+    });
+  });
 });
 
 describe('plan stats contract (SDK normalizer → extractTodoStats)', () => {
@@ -1334,6 +1415,20 @@ describe('plan stats contract (SDK normalizer → extractTodoStats)', () => {
 });
 
 describe('todoDetailSignature', () => {
+  it('changes when a todo tool end time arrives', () => {
+    const message = todoWriteMessage('m1', [todo('1', 'in_progress')]);
+    if (message.role !== 'tool_group') throw new Error('Expected tool group');
+    const tool = message.tools[0]!;
+    const before = todoDetailSignature([
+      { ...message, tools: [{ ...tool, startTime: 1000 }] },
+    ]);
+    const after = todoDetailSignature([
+      { ...message, tools: [{ ...tool, startTime: 1000, endTime: 2000 }] },
+    ]);
+
+    expect(after).not.toBe(before);
+  });
+
   it('changes when a snapshot timestamp changes', () => {
     const a = todoDetailSignature([
       at(planMessage('p1', [todo('1', 'in_progress')]), 1000),

@@ -86,6 +86,22 @@ export function classifyPath(path: string): PathKind {
   return 'source';
 }
 
+/**
+ * The vocabulary of a wrapping type's name — a cache, proxy, decorator,
+ * adapter, delegate, facade. The roster's Agent 1e gate keys on it
+ * (`hasWrapperTypes`), so the signal is computed here, where the diff's lines
+ * are already walking past.
+ *
+ * Case-insensitive SUBSTRING, not word-boundary: a wrapping type is usually
+ * PascalCase (`CachedModelProvider`, `RetryDecorator`), and camelCase carries
+ * no word boundary between the words, so `\bwrapper\b` would miss exactly the
+ * names the gate exists for. Bare `cache` is deliberately out — too common an
+ * ordinary identifier for the gate to stay a gate; `cached`/`caching` keep the
+ * wrapping-type shapes (`CachedProvider`, `CachingLayer`).
+ */
+export const WRAPPER_SIGNAL_RE =
+  /(wrapper|proxy|decorator|adapter|delegate|facade|cached|caching)/i;
+
 /** One file's section of the diff, from `diff --git` to the next one. */
 export interface DiffFile {
   /** New-side path, or the old path for a deletion. */
@@ -116,6 +132,12 @@ export interface DiffFile {
   removedLines: number;
   /** True for `Binary files ... differ` sections (no hunks to review). */
   binary: boolean;
+  /**
+   * The path or an added line matched `WRAPPER_SIGNAL_RE` — the diff may add
+   * or modify a wrapping type. A hint for the roster's 1e gate, not a verdict:
+   * the gate fails safe, and the agent confirms (see `hasWrapperTypes`).
+   */
+  wrapperSignal: boolean;
 }
 
 /** A contiguous slice of the diff file assigned to exactly one agent. */
@@ -182,6 +204,14 @@ export interface DiffPlan {
   testDiffLines: number;
   generatedDiffLines: number;
   docsDiffLines: number;
+  /**
+   * Any file's path or added lines matched the wrapper vocabulary. Written
+   * into the plan report so the roster's 1e gate reads one value everywhere;
+   * only an explicit `false` keeps Agent 1e out of the roster (see
+   * `hasWrapperTypes` — a plan an older CLI wrote carries no field, and an
+   * absent signal must roster the check, not drop it).
+   */
+  wrapperSignal: boolean;
   files: DiffFile[];
   chunks: DiffChunk[];
 }
@@ -218,8 +248,12 @@ const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
  * — `git show`, the heaviness metrics, the filename an agent is told it is
  * reviewing — then refers to a file that does not exist.
  */
-function unquote(raw: string): string {
-  return unquoteCStylePath(raw.trim());
+export function unquote(raw: string): string {
+  // No trim: git keeps edge whitespace as part of the path (a path ending in a
+  // space is emitted unquoted, with a TAB after it to delimit). Trimming here
+  // would make the model resolve `x` while git operates on `x ` — the two
+  // sides of every tree-grounded check then disagree.
+  return unquoteCStylePath(raw);
 }
 
 /** Drop git's `a/` / `b/` decoration. `fetch-pr` pins those prefixes. */
@@ -227,9 +261,23 @@ function stripPrefix(p: string): string {
   return p.startsWith('a/') || p.startsWith('b/') ? p.slice(2) : p;
 }
 
+/**
+ * Cut at the first raw TAB — the `\t<timestamp>` suffix that `diff -u` /
+ * `diff -ur` / svn captures carry on `---` / `+++` header tokens, and the
+ * delimiter git itself appends after a path that ends in whitespace. git's own
+ * header parser truncates at the tab and KEEPS everything before it (edge
+ * spaces included), so this cuts only, never trims. A C-quoted token never
+ * carries a raw tab (an embedded tab is escaped `\t` inside the quotes), so
+ * the cut cannot land inside a quoted path.
+ */
+export function stripHeaderTimestamp(raw: string): string {
+  const tab = raw.indexOf('\t');
+  return tab >= 0 ? raw.slice(0, tab) : raw;
+}
+
 /** Unquote then de-prefix a `diff --git` / `---` / `+++` path token. */
-function cleanPath(raw: string): string {
-  return stripPrefix(unquote(raw));
+export function cleanPath(raw: string): string {
+  return stripPrefix(unquote(stripHeaderTimestamp(raw)));
 }
 
 /** Read a C-quoted token starting at `i`; returns the token and the next index. */
@@ -340,6 +388,11 @@ export function parseDiff(diffText: string): {
       // Binary and mode-only sections carry no `+++` header, so classify here
       // as well; for the common case this just re-confirms what `+++` set.
       cur.kind = classifyPath(cur.path);
+      // The path is only final here — `+++` / `rename to` refine it after the
+      // header. A wrapping type usually lives in a file named after it, and
+      // the path catches a MODIFIED wrapper whose changed lines never spell
+      // the name.
+      if (WRAPPER_SIGNAL_RE.test(cur.path)) cur.wrapperSignal = true;
       files.push(cur);
       cur = null;
     }
@@ -366,6 +419,7 @@ export function parseDiff(diffText: string): {
         addedLines: 0,
         removedLines: 0,
         binary: false,
+        wrapperSignal: false,
       };
       continue;
     }
@@ -390,20 +444,31 @@ export function parseDiff(diffText: string): {
       }
       if (line.startsWith('rename to ')) {
         // A rename states its new path outright, without an `a/`/`b/` prefix.
-        cur.path = unquote(line.slice('rename to '.length));
+        // Honoured only in the position git emits it — paired with a preceding
+        // `rename from`, and BEFORE the `---`/`+++` headers (oldPath is still
+        // unset). A stray or unpaired `rename to` later in the section (a
+        // hand-assembled capture) must not re-key the path away from the
+        // `---`/`+++` tokens that every downstream consumer, and git apply
+        // itself, actually resolves against.
+        if (cur.renameFrom !== undefined && oldPath === '') {
+          cur.path = unquote(line.slice('rename to '.length));
+        }
         continue;
       }
       // `diff --git a/x b/x` is ambiguous when a path contains a space (git
       // only C-quotes non-ASCII and control bytes, not spaces), so prefer the
       // unambiguous `+++` / `---` headers. For a deletion `+++` is `/dev/null`,
       // and the old path from `---` is the right label.
+      // Cut the `\t<timestamp>` suffix BEFORE the /dev/null discrimination:
+      // a `diff -u` deletion reads `+++ /dev/null\t<mtime>`, and comparing the
+      // raw token would key the section `/dev/null` instead of its old path.
       if (line.startsWith('--- ')) {
-        const p = line.slice(4);
+        const p = stripHeaderTimestamp(line.slice(4));
         if (p !== '/dev/null') oldPath = cleanPath(p);
         continue;
       }
       if (line.startsWith('+++ ')) {
-        const p = line.slice(4);
+        const p = stripHeaderTimestamp(line.slice(4));
         if (p !== '/dev/null') cur.path = cleanPath(p);
         else if (oldPath) cur.path = oldPath;
         cur.kind = classifyPath(cur.path);
@@ -436,6 +501,9 @@ export function parseDiff(diffText: string): {
         cur.addedLines++;
         noteAdded(cur, newCursor);
         newCursor++;
+        if (!cur.wrapperSignal) {
+          cur.wrapperSignal = WRAPPER_SIGNAL_RE.test(line);
+        }
       } else if (line.startsWith('-')) {
         cur.removedLines++;
       } else if (line === '' || line.startsWith(' ')) {
@@ -738,6 +806,7 @@ export function buildDiffPlan(
     testDiffLines: linesOf('test'),
     generatedDiffLines: linesOf('generated'),
     docsDiffLines: linesOf('docs'),
+    wrapperSignal: files.some((f) => f.wrapperSignal),
     files,
     chunks,
   };
@@ -762,4 +831,34 @@ export function chunksCoverDiff(
     expected = c.endLine + 1;
   }
   return expected === diffLines + 1;
+}
+
+/**
+ * Cut a captured diff down to the file sections named by `keep`, by BYTES.
+ *
+ * The capture contract is bytes end to end: a decode/re-encode rewrites the
+ * content of every hunk touching a file git handed over in a non-UTF-8
+ * encoding. The caller passes the 1-based inclusive LINE ranges `parseDiff`
+ * reported per file (`diffStart`/`diffEnd`), and this maps them to byte
+ * ranges over the same newline structure `parseDiff` walked. Slicing an
+ * existing diff — rather than re-capturing with pathspecs — is also what
+ * keeps RENAME sections intact: a pathspec-scoped `git diff` cannot see the
+ * rename source, un-pairs the rename, and renders the file as a whole-file
+ * add whose hunks exist nowhere in the original diff.
+ */
+export function sliceDiffByLines(
+  diff: Buffer,
+  keep: ReadonlyArray<{ startLine: number; endLine: number }>,
+): Buffer {
+  // Byte offset of the start of each 1-based line; sentinel = buffer length.
+  const starts: number[] = [0];
+  for (let i = 0; i < diff.length; i++) {
+    if (diff[i] === 0x0a) starts.push(i + 1);
+  }
+  const offsetOf = (line1: number): number =>
+    line1 - 1 < starts.length ? starts[line1 - 1] : diff.length;
+  const parts = [...keep]
+    .sort((a, b) => a.startLine - b.startLine)
+    .map((r) => diff.subarray(offsetOf(r.startLine), offsetOf(r.endLine + 1)));
+  return Buffer.concat(parts);
 }

@@ -16,6 +16,7 @@ function createActions(
     clearSession: vi.fn(async () => {}),
     releaseSession: vi.fn(async () => {}),
     setModel: vi.fn(async () => modelResult),
+    setReasoningEffort: vi.fn(async () => {}),
     ...overrides,
   };
 }
@@ -23,7 +24,7 @@ function createActions(
 function prepareSession(
   args: Omit<CreateSessionArgs, 'getCurrentSessionId'> &
     Partial<Pick<CreateSessionArgs, 'getCurrentSessionId'>>,
-): Promise<void> {
+) {
   return createAndAttachSessionForPrompt({
     getCurrentSessionId: () => sessionResult.sessionId,
     ...args,
@@ -63,6 +64,234 @@ describe('createAndAttachSessionForPrompt', () => {
     // Model is still a post-create call, sequenced after attach.
     expect(order).toEqual(['create', 'attach', 'model']);
     expect(actions.setModel).toHaveBeenCalledWith('qwen3');
+  });
+
+  it('enables Plan with the selected execution permission after attach', async () => {
+    const order: string[] = [];
+    const actions = createActions({
+      attachSession: vi.fn(async () => {
+        order.push('attach');
+      }),
+      setApprovalMode: vi.fn(async () => {
+        order.push('plan');
+        return { mode: 'plan' };
+      }),
+    });
+    await prepareSession({
+      sessionActions: actions,
+      modeId: 'yolo',
+      planMode: true,
+    });
+    expect(actions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ approvalMode: 'yolo' }),
+    );
+    expect(actions.setApprovalMode).toHaveBeenCalledWith('yolo', {
+      planMode: true,
+    });
+    expect(order).toEqual(['attach', 'plan']);
+  });
+
+  it.each(['rejected', 'unconfirmed'])(
+    'releases the new session if Plan is %s',
+    async (failure) => {
+      const actions = createActions({
+        setApprovalMode: vi.fn(async () => {
+          if (failure === 'rejected') throw new Error('Denied');
+          return { mode: 'yolo' };
+        }),
+      });
+      await expect(
+        prepareSession({
+          sessionActions: actions,
+          modeId: 'yolo',
+          planMode: true,
+          warn: vi.fn(),
+        }),
+      ).rejects.toThrow();
+      expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+      expect(actions.clearSession).toHaveBeenCalled();
+    },
+  );
+
+  it('does not enable Plan on a session selected during model preparation', async () => {
+    let currentSession = 'session-1';
+    const actions = createActions({
+      setModel: vi.fn(async () => {
+        currentSession = 'session-2';
+        return modelResult;
+      }),
+      setApprovalMode: vi.fn(async () => ({ mode: 'plan' })),
+    });
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        modeId: 'yolo',
+        modelId: 'qwen3',
+        planMode: true,
+        getCurrentSessionId: () => currentSession,
+        warn: vi.fn(),
+      }),
+    ).rejects.toThrow('Session changed');
+    expect(actions.setApprovalMode).not.toHaveBeenCalled();
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+    expect(actions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('creates standalone sessions without workspace-only fields', async () => {
+    const actions = createActions();
+
+    await prepareSession({
+      sessionActions: actions,
+      modelId: 'qwen3.8-max(USE_OPENAI)',
+      reasoningEffort: 'high',
+      modeId: 'yolo',
+      workspaceCwd: '/must-not-leak',
+      sessionContext: { kind: 'standalone' },
+      worktree: { slug: 'must-not-leak' },
+      branch: { name: 'must-not-leak' },
+      sessionSourceType: 'must-not-leak',
+    });
+
+    expect(actions.createSession).toHaveBeenCalledWith({
+      sessionContext: { kind: 'standalone' },
+      modelServiceId: 'qwen3.8-max(USE_OPENAI)',
+      approvalMode: 'yolo',
+    });
+    expect(actions.setModel).not.toHaveBeenCalled();
+    expect(actions.setReasoningEffort).toHaveBeenCalledWith('high', {
+      persist: false,
+    });
+  });
+
+  it('releases the standalone session when the create landed on the wrong model with a reasoning effort bound', async () => {
+    const warn = vi.fn();
+    const actions = createActions({
+      createSession: vi.fn(async () => ({
+        sessionId: 'session-1',
+        modelApplied: false,
+      })),
+    });
+
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        modelId: 'qwen3.8-max(USE_OPENAI)',
+        reasoningEffort: 'high',
+        sessionContext: { kind: 'standalone' },
+        warn,
+      }),
+    ).rejects.toThrow(/was not applied to the standalone session/);
+
+    expect(actions.setReasoningEffort).not.toHaveBeenCalled();
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+    expect(actions.clearSession).toHaveBeenCalledOnce();
+  });
+
+  it('warns and keeps a standalone session that landed on the default model', async () => {
+    const warn = vi.fn();
+    const actions = createActions({
+      createSession: vi.fn(async () => ({
+        sessionId: 'session-1',
+        modelApplied: false,
+      })),
+    });
+
+    await prepareSession({
+      sessionActions: actions,
+      modelId: 'qwen3.8-max(USE_OPENAI)',
+      sessionContext: { kind: 'standalone' },
+      warn,
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('agent default model'),
+    );
+    expect(actions.releaseSession).not.toHaveBeenCalled();
+    expect(actions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('applies an explicit reasoning effort after the model and before resolving', async () => {
+    const order: string[] = [];
+    const actions = createActions({
+      createSession: vi.fn(async () => {
+        order.push('create');
+        return sessionResult;
+      }),
+      attachSession: vi.fn(async () => {
+        order.push('attach');
+      }),
+      setModel: vi.fn(async () => {
+        order.push('model');
+        return modelResult;
+      }),
+      setReasoningEffort: vi.fn(async () => {
+        order.push('reasoning');
+      }),
+    });
+
+    await prepareSession({
+      sessionActions: actions,
+      modelId: 'qwen3.8-max',
+      reasoningEffort: 'medium',
+    });
+
+    expect(order).toEqual(['create', 'attach', 'model', 'reasoning']);
+    expect(actions.setReasoningEffort).toHaveBeenCalledWith('medium', {
+      persist: true,
+    });
+  });
+
+  it('releases and clears the session when an explicit reasoning effort cannot be applied', async () => {
+    const error = new Error('reasoning failed');
+    const warn = vi.fn();
+    const actions = createActions({
+      setReasoningEffort: vi.fn(async () => {
+        throw error;
+      }),
+    });
+
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        modelId: 'qwen3.8-max',
+        reasoningEffort: 'medium',
+        warn,
+      }),
+    ).rejects.toThrow(error);
+
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+    expect(actions.clearSession).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] failed to set reasoning effort:',
+      error,
+    );
+  });
+
+  it('fails closed when the target model cannot be set for an explicit reasoning effort', async () => {
+    const error = new Error('model failed');
+    const warn = vi.fn();
+    const actions = createActions({
+      setModel: vi.fn(async () => {
+        throw error;
+      }),
+    });
+
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        modelId: 'qwen3.8-max',
+        reasoningEffort: 'medium',
+        warn,
+      }),
+    ).rejects.toThrow(error);
+
+    expect(actions.setReasoningEffort).not.toHaveBeenCalled();
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+    expect(actions.clearSession).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] failed to set model for new session:',
+      error,
+    );
   });
 
   it('omits approvalMode when the mode is not a recognized daemon approval mode', async () => {
@@ -254,6 +483,18 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: '/ws/secondary',
       sourceType: 'default',
+    });
+  });
+
+  it('records the host source type so embedded channels stay attributable', async () => {
+    const actions = createActions();
+    await prepareSession({
+      sessionActions: actions,
+      sessionSourceType: 'vscode',
+    });
+    expect(actions.createSession).toHaveBeenCalledWith({
+      workspaceCwd: undefined,
+      sourceType: 'vscode',
     });
   });
 

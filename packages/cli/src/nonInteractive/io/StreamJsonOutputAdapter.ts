@@ -7,12 +7,12 @@
 import { randomUUID } from 'node:crypto';
 import type {
   Config,
-  ServerGeminiStreamEvent,
+  ServerLlmStreamEvent,
   ToolCallRequestInfo,
   McpToolProgressData,
   ShellProgressData,
 } from '@qwen-code/qwen-code-core';
-import { GeminiEventType } from '@qwen-code/qwen-code-core';
+import { LlmEventType } from '@qwen-code/qwen-code-core';
 import type {
   CLIAssistantMessage,
   CLIMessage,
@@ -29,7 +29,7 @@ import {
   type ResultOptions,
   type JsonOutputAdapterInterface,
 } from './BaseJsonOutputAdapter.js';
-import { observeHeadlessToolResultWire } from '../../utils/tool-result-boundary-diagnostics.js';
+import { observeHeadlessToolResultWire } from '../tool-result-boundary-diagnostics.js';
 
 /**
  * Stream JSON output adapter that emits messages immediately
@@ -95,6 +95,26 @@ export class StreamJsonOutputAdapter
     super.startAssistantMessage();
   }
 
+  override restartAttempt(
+    preserveText: boolean,
+    discardedToolCalls: ToolCallRequestInfo[],
+  ): void {
+    if (preserveText && discardedToolCalls.length === 0) {
+      return;
+    }
+    // Stream frames cannot be retracted. Close the abandoned assistant first,
+    // then pair every flushed tool_use with a synthetic not-started result so
+    // transcript replay remains valid before the replacement attempt begins.
+    if (
+      this.mainAgentMessageState.messageStarted &&
+      !this.mainAgentMessageState.finalized
+    ) {
+      this.finalizeAssistantMessage();
+    }
+    this.emitDiscardedAttemptToolResults(discardedToolCalls);
+    super.restartAttempt(false, discardedToolCalls);
+  }
+
   finalizeAssistantMessage(): CLIAssistantMessage {
     const message = this.finalizeAssistantMessageInternal(
       this.mainAgentMessageState,
@@ -131,8 +151,8 @@ export class StreamJsonOutputAdapter
     this.emitMessage(message);
   }
 
-  override processEvent(event: ServerGeminiStreamEvent): void {
-    if (event.type === GeminiEventType.GoalState) {
+  override processEvent(event: ServerLlmStreamEvent): void {
+    if (event.type === LlmEventType.GoalState) {
       const signature = JSON.stringify(event.value);
       if (signature === this.lastGoalStateSignature) return;
       this.lastGoalStateSignature = signature;
@@ -153,7 +173,7 @@ export class StreamJsonOutputAdapter
     // Active goal updates are session-level metadata, not message content.
     // They intentionally bypass the base finalized guard so late goal state
     // changes can still reach stream consumers.
-    if (event.type === GeminiEventType.ActiveGoal) {
+    if (event.type === LlmEventType.ActiveGoal) {
       this.emitStreamEventIfEnabled(
         {
           type: 'active_goal',

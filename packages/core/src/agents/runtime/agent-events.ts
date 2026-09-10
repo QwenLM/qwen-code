@@ -204,6 +204,12 @@ export interface AgentExternalMessageEvent {
 export interface AgentFinishEvent {
   subagentId: string;
   terminateReason: string;
+  /**
+   * Which loop detector fired when terminateReason is LOOP_DETECTED
+   * (issue #9450), so stops are attributable in journals/telemetry instead
+   * of collapsing into one generic label.
+   */
+  loopType?: string;
   timestamp: number;
   rounds?: number;
   totalDurationMs?: number;
@@ -253,6 +259,10 @@ export interface AgentEventMap {
   [AgentEventType.STATUS_CHANGE]: AgentStatusChangeEvent;
 }
 
+export type AgentEventListener<E extends keyof AgentEventMap> = (
+  payload: AgentEventMap[E],
+) => void;
+
 // ─── Event Emitter ──────────────────────────────────────────
 
 export class AgentEventEmitter {
@@ -260,16 +270,22 @@ export class AgentEventEmitter {
 
   on<E extends keyof AgentEventMap>(
     event: E,
-    listener: (payload: AgentEventMap[E]) => void,
+    listener: AgentEventListener<E>,
   ): void {
     this.ee.on(event, listener as (...args: unknown[]) => void);
   }
 
   off<E extends keyof AgentEventMap>(
     event: E,
-    listener: (payload: AgentEventMap[E]) => void,
+    listener: AgentEventListener<E>,
   ): void {
     this.ee.off(event, listener as (...args: unknown[]) => void);
+  }
+
+  rawListeners<E extends keyof AgentEventMap>(
+    event: E,
+  ): Array<AgentEventListener<E>> {
+    return this.ee.rawListeners(event) as Array<AgentEventListener<E>>;
   }
 
   emit<E extends keyof AgentEventMap>(

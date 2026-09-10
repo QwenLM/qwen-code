@@ -5,12 +5,18 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
-import { CompactModeContext } from '../App';
+import { CompactModeContext } from '../WebShellContexts';
 import type { WebShellAssistantTurnFooterRenderInfo } from '../customization';
 import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
 import { UserMessage } from './messages/UserMessage';
+import { QuestionAnswerMessage } from './messages/QuestionAnswerMessage';
+import {
+  extractText,
+  getQuestionAnswerResult,
+  isCompletedAskUserQuestion,
+} from './messages/toolFormatting';
 import {
   AssistantMessage,
   ThinkingMessage,
@@ -18,6 +24,7 @@ import {
 } from './messages/AssistantMessage';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
+import { isSummaryRunId } from './summaryRunId';
 import { PlanMessage } from './messages/PlanMessage';
 import { BtwMessage } from './messages/BtwMessage';
 import { UserShellMessage } from './messages/UserShellMessage';
@@ -33,11 +40,13 @@ interface MessageItemProps {
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+  onInsightReportOpen?: (path: string) => void;
   workspaceCwd?: string;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   sendFailed?: boolean;
   onRetrySend?: () => void;
+  onEditUserMessage?: () => void;
   onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
   branchRecordId?: string;
   showAssistantActions?: boolean;
@@ -53,11 +62,13 @@ export const MessageItem = memo(function MessageItem({
   onShowContextDetail,
   onImagePreview,
   onAttachmentPreview,
+  onInsightReportOpen,
   workspaceCwd,
   showRetryHint = false,
   onRetryClick,
   sendFailed = false,
   onRetrySend,
+  onEditUserMessage,
   onBranchSession,
   branchRecordId,
   showAssistantActions = false,
@@ -75,7 +86,17 @@ export const MessageItem = memo(function MessageItem({
     [onBranchSession, branchRecordId],
   );
   const compactMode = useContext(CompactModeContext);
+  const questionTool =
+    message.role === 'tool_group' &&
+    message.tools.length === 1 &&
+    isCompletedAskUserQuestion(message.tools[0])
+      ? message.tools[0]
+      : undefined;
+  const questionAnswer = questionTool
+    ? getQuestionAnswerResult(questionTool)
+    : null;
   const isUserStyled =
+    !!questionAnswer ||
     message.role === 'user' ||
     (message.role === 'system' &&
       message.source === 'mid_turn_message_injected');
@@ -91,6 +112,7 @@ export const MessageItem = memo(function MessageItem({
             isLocateFlashing={isLocateFlashing}
             sendFailed={sendFailed}
             onRetrySend={onRetrySend}
+            onEdit={onEditUserMessage}
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
           />
@@ -119,10 +141,29 @@ export const MessageItem = memo(function MessageItem({
           />
         );
       case 'tool_group':
+        if (
+          questionTool &&
+          !questionAnswer &&
+          !extractText(questionTool)?.trim()
+        ) {
+          return null;
+        }
+        if (questionAnswer && questionTool) {
+          if (!questionAnswer.answers.length && !questionAnswer.text.trim())
+            return null;
+          return (
+            <QuestionAnswerMessage
+              tool={questionTool}
+              result={questionAnswer}
+              isLocateFlashing={isLocateFlashing}
+            />
+          );
+        }
         return (
           <ToolGroup
             tools={message.tools}
             thoughts={message.thoughts}
+            compactSummary={compactMode && isSummaryRunId(message.id)}
             pendingApproval={pendingApproval}
             workspaceCwd={workspaceCwd}
             isLocateFlashing={isLocateFlashing}
@@ -176,7 +217,12 @@ export const MessageItem = memo(function MessageItem({
           />
         );
       case 'insight_ready':
-        return <InsightReady path={message.path} />;
+        return (
+          <InsightReady
+            path={message.path}
+            onInsightReportOpen={onInsightReportOpen}
+          />
+        );
       case 'insight_error':
         return (
           <div style={{ color: 'var(--error-color, #e06c75)' }}>
@@ -248,7 +294,9 @@ export const MessageItem = memo(function MessageItem({
       timestamp={message.timestamp}
       chatMode={isUserStyled}
       toolGroupSpacing={message.role === 'tool_group' && compactMode}
-      copyText={isUserStyled ? message.content : undefined}
+      copyText={
+        isUserStyled && 'content' in message ? message.content : undefined
+      }
       copyTitle={t('common.copy')}
     >
       {selectableSafeBody}
@@ -296,6 +344,8 @@ function areMessageItemPropsEqual(
   if (prev.onRetryClick !== next.onRetryClick) return false;
   if (prev.sendFailed !== next.sendFailed) return false;
   if (prev.onRetrySend !== next.onRetrySend) return false;
+  if (prev.onEditUserMessage !== next.onEditUserMessage) return false;
+  if (prev.onInsightReportOpen !== next.onInsightReportOpen) return false;
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.branchRecordId !== next.branchRecordId) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
@@ -427,6 +477,7 @@ function areToolCallsEqual(
     prev.callId === next.callId &&
     prev.toolName === next.toolName &&
     prev.status === next.status &&
+    prev.subagentSessionReady === next.subagentSessionReady &&
     prev.title === next.title &&
     prev.kind === next.kind &&
     prev.startTime === next.startTime &&

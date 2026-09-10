@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { MAX_REGISTERED_WORKSPACES } from './workspace-inputs.js';
 import type { ServeProtocolVersions } from './capabilities.js';
 import type { AcpHttpHandle, AcpHttpSnapshot } from './acp-http/index.js';
 import {
@@ -135,6 +136,7 @@ export interface BuildDaemonStatusOptions {
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  maxChannelControlWorkspaces?: number;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
@@ -183,6 +185,8 @@ interface DaemonStatusSecurity {
 }
 
 interface DaemonStatusLimits {
+  maxRegisteredWorkspaces: number;
+  maxChannelControlWorkspaces?: number;
   maxSessions: number | null;
   maxTotalSessions: number | null;
   maxPendingPromptsPerSession: number | null;
@@ -195,6 +199,7 @@ interface DaemonStatusLimits {
   writerIdleTimeoutMs: number | null;
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
+  sessionPromptSettledCloseGraceMs: number;
   acpConnectionCap: number | null;
   acpPreAttachMaxFramesPerStream: number | null;
   acpPreAttachMaxFramesPerConnection: number | null;
@@ -975,6 +980,11 @@ export async function buildDaemonStatusResponse(
       sessionShellCommandEnabled: input.sessionShellCommandEnabled,
     },
     limits: {
+      maxRegisteredWorkspaces:
+        input.opts.maxRegisteredWorkspaces ?? MAX_REGISTERED_WORKSPACES,
+      ...(input.maxChannelControlWorkspaces !== undefined
+        ? { maxChannelControlWorkspaces: input.maxChannelControlWorkspaces }
+        : {}),
       maxSessions: bridgeSnapshot.limits.maxSessions,
       maxTotalSessions: positiveFiniteOrNull(input.opts.maxTotalSessions),
       maxPendingPromptsPerSession:
@@ -988,6 +998,8 @@ export async function buildDaemonStatusResponse(
       writerIdleTimeoutMs: positiveFiniteOrNull(input.opts.writerIdleTimeoutMs),
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,
       sessionIdleTimeoutMs: bridgeSnapshot.limits.sessionIdleTimeoutMs,
+      sessionPromptSettledCloseGraceMs:
+        bridgeSnapshot.limits.sessionPromptSettledCloseGraceMs,
       acpConnectionCap: acpSnapshot?.connectionCap ?? null,
       acpPreAttachMaxFramesPerStream:
         acpSnapshot !== undefined ? ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM : null,

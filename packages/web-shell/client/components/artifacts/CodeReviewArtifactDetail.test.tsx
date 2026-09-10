@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonWorkspaceActions } from '@qwen-code/web-shell/daemon-react-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { CodeReviewArtifactDetail } from './CodeReviewArtifactDetail';

@@ -6,12 +6,17 @@
 //! MCP and daemon transports are downstream adapters rather than peer contracts.
 
 use cua_driver_contract::{
-    ActionResult, ClickInput, ClipboardReadInput, ClipboardWriteInput, DragInput, EndSessionInput,
-    EndSessionOutput, EscalateSessionInput, GetAgentCursorStateInput, GetCursorPositionInput,
-    GetDesktopStateInput, GetScreenSizeInput, GetSessionStateInput, HotkeyInput, InvokeMenuInput,
-    MoveCursorInput, PressKeyInput, ScrollInput, SessionStateOutput, SetAgentCursorEnabledInput,
-    SetAgentCursorMotionInput, SetAgentCursorThemeInput, SetWindowFrameInput, StartSessionInput,
+    ActionResult, ClickInput, ClipboardReadInput, ClipboardWriteInput, DoubleClickInput, DragInput,
+    EndSessionInput, EndSessionOutput, EscalateSessionInput, GetAgentCursorStateInput,
+    GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput, GetSessionInput,
+    GetSessionStateInput, GetWindowStateInput, HotkeyInput, InvokeMenuInput, ListAppsInput,
+    ListSessionsInput, ListSessionsOutput, ListWindowsInput, MoveCursorInput,
+    PerformSecondaryActionInput, PressKeyInput, RightClickInput, ScrollInput, SessionOutput,
+    SessionStateOutput, SetAgentCursorEnabledInput, SetAgentCursorMotionInput,
+    SetAgentCursorThemeInput, SetValueInput, SetWindowFrameInput, StartSessionInput,
     StartSessionOutput, ToolInput, TypeTextInput, VerifyStateInput, VerifyStateOutput,
+    WindowClickInput, WindowDragInput, WindowHotkeyInput, WindowPressKeyInput, WindowScrollInput,
+    WindowTypeTextInput,
 };
 use cua_driver_core::daemon::{
     is_daemon_listening, request_daemon_metadata, send_request, socket_path_for_namespace,
@@ -42,6 +47,43 @@ use remote::{DriverEnvelopeChannel, RemoteBoundSession, RemoteDriverClient};
 use runtime::RuntimeOptions;
 use service_session::ServiceSessionClient;
 use worker::{ActionCompletion, PrivateWorkerClient};
+
+fn host_sessions_json_for_prefix(runtime_prefix: &str) -> Value {
+    let sessions = cua_driver_core::session::list_session_snapshots_with_prefix(
+        runtime_prefix,
+        cua_driver_core::session::DEFAULT_SESSION_IDLE_TTL,
+    )
+    .into_iter()
+    .map(|session| {
+        let transport = match session.transport {
+            cua_driver_core::session::SessionTransport::Cli => "cli",
+            cua_driver_core::session::SessionTransport::Daemon => "daemon",
+            cua_driver_core::session::SessionTransport::McpStdio => "mcp_stdio",
+            cua_driver_core::session::SessionTransport::McpHttp => "mcp_http",
+        };
+        let client_kind = match session.client_kind {
+            cua_driver_core::session::SessionClientKind::Cli => "cli",
+            cua_driver_core::session::SessionClientKind::Direct => "direct",
+            cua_driver_core::session::SessionClientKind::Mcp => "mcp",
+            cua_driver_core::session::SessionClientKind::PythonSdk => "python_sdk",
+            cua_driver_core::session::SessionClientKind::TypescriptSdk => "typescript_sdk",
+        };
+        serde_json::json!({
+            "session": session.public_label.as_deref().and_then(cursor_overlay::sanitize_session_label),
+            "implicit": session.implicit,
+            "state": if session.ending { "ending" } else { "active" },
+            "client_kind": client_kind,
+            "transport": transport,
+            "cursor_visible": cua_driver_core::session::cursor_visible(&session.runtime_id),
+            "recording_active": cua_driver_core::session::recording_active(&session.runtime_id),
+            "started_seconds_ago": session.started_for.as_secs(),
+            "idle_seconds": session.idle.as_secs(),
+            "expires_in_seconds": session.expires_in.as_secs(),
+        })
+    })
+    .collect::<Vec<_>>();
+    serde_json::json!({"count": sessions.len(), "sessions": sessions})
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ImageContent {
@@ -241,11 +283,15 @@ enum DriverBackend {
 
 struct DaemonBackend {
     socket_path: String,
+    transport_session: String,
 }
 
 impl DaemonBackend {
     fn new(socket_path: String) -> Arc<Self> {
-        Arc::new(Self { socket_path })
+        Arc::new(Self {
+            socket_path,
+            transport_session: format!("sdk-{}", uuid::Uuid::new_v4()),
+        })
     }
 
     async fn compatible_metadata(&self) -> Result<DaemonMetadata, DriverError> {
@@ -265,6 +311,20 @@ impl DaemonBackend {
             })?;
         validate_daemon_metadata(&metadata)?;
         Ok(metadata)
+    }
+}
+
+impl Drop for DaemonBackend {
+    fn drop(&mut self) {
+        let request = DaemonRequest {
+            method: "session_end".into(),
+            name: None,
+            args: None,
+            session_id: Some(self.transport_session.clone()),
+            observation_origin: Some(ToolObservationOrigin::Direct),
+            client_kind: Some(DaemonClientKind::Unknown),
+        };
+        let _ = send_request(&self.socket_path, &request);
     }
 }
 
@@ -346,10 +406,15 @@ pub struct RuntimeAuthorizationOptions {
     /// Mode inherited by calls made through the released `CuaDriver` object
     /// rather than a trusted session-bound action surface.
     pub compatibility_mode: SessionPermissionMode,
-    /// Required only when `compatibility_mode` is bounded.
+    /// Optional in standard and unrestricted; required when compatibility mode is bounded.
+    #[uniffi(default = None)]
+    pub compatibility_capability_manifest_path: Option<String>,
+    /// Deprecated alias for `compatibility_capability_manifest_path`.
     pub compatibility_bounded_manifest_path: Option<String>,
     pub unrestricted_acknowledged: bool,
+    /// Zero together with `max_idle_ttl_seconds` permits owner-lifetime sessions.
     pub max_session_ttl_seconds: u64,
+    /// Zero together with `max_session_ttl_seconds` permits owner-lifetime sessions.
     pub max_idle_ttl_seconds: u64,
 }
 
@@ -373,6 +438,7 @@ fn configured_driver_options_json(options: &ConfiguredDriverOptions) -> Value {
         "authorization": {
             "allowed_modes": allowed_modes,
             "compatibility_mode": options.authorization.compatibility_mode.as_str(),
+            "compatibility_capability_manifest_path": options.authorization.compatibility_capability_manifest_path.clone(),
             "compatibility_bounded_manifest_path": options.authorization.compatibility_bounded_manifest_path.clone(),
             "unrestricted_acknowledged": options.authorization.unrestricted_acknowledged,
             "max_session_ttl_seconds": options.authorization.max_session_ttl_seconds,
@@ -386,8 +452,13 @@ fn configured_driver_options_json(options: &ConfiguredDriverOptions) -> Value {
 pub struct TrustedSessionOptions {
     pub public_session: String,
     pub mode: SessionPermissionMode,
+    /// Zero together with `idle_ttl_seconds` binds the session to owner lifetime.
     pub ttl_seconds: u64,
+    /// Zero together with `ttl_seconds` disables idle expiration.
     pub idle_ttl_seconds: u64,
+    #[uniffi(default = None)]
+    pub capability_manifest_path: Option<String>,
+    /// Deprecated alias for `capability_manifest_path`.
     pub bounded_manifest_path: Option<String>,
 }
 
@@ -551,7 +622,10 @@ impl From<SdkClientKind> for DaemonClientKind {
 macro_rules! desktop_tool_methods {
     ($callback:ident) => {
         $callback! {
+            list_apps: ListAppsInput,
+            list_windows: ListWindowsInput,
             get_desktop_state: GetDesktopStateInput,
+            get_window_state: GetWindowStateInput,
             get_screen_size: GetScreenSizeInput,
             get_cursor_position: GetCursorPositionInput,
             verify_state: VerifyStateInput,
@@ -559,13 +633,23 @@ macro_rules! desktop_tool_methods {
             set_window_frame: SetWindowFrameInput,
             invoke_menu: InvokeMenuInput,
             click: ClickInput,
+            window_click: WindowClickInput,
+            double_click: DoubleClickInput,
+            right_click: RightClickInput,
             drag: DragInput,
+            window_drag: WindowDragInput,
             scroll: ScrollInput,
+            window_scroll: WindowScrollInput,
             clipboard_read: ClipboardReadInput,
             clipboard_write: ClipboardWriteInput,
             type_text: TypeTextInput,
+            window_type_text: WindowTypeTextInput,
             press_key: PressKeyInput,
+            window_press_key: WindowPressKeyInput,
             hotkey: HotkeyInput,
+            window_hotkey: WindowHotkeyInput,
+            set_value: SetValueInput,
+            perform_secondary_action: PerformSecondaryActionInput,
             set_agent_cursor_enabled: SetAgentCursorEnabledInput,
             set_agent_cursor_motion: SetAgentCursorMotionInput,
             set_agent_cursor_theme: SetAgentCursorThemeInput,
@@ -606,6 +690,8 @@ macro_rules! define_exported_tool_names {
         const EXPORTED_TOOL_NAMES: &[&str] = &[
             <StartSessionInput as ToolInput>::TOOL_NAME,
             <EscalateSessionInput as ToolInput>::TOOL_NAME,
+            <GetSessionInput as ToolInput>::TOOL_NAME,
+            <ListSessionsInput as ToolInput>::TOOL_NAME,
             <GetSessionStateInput as ToolInput>::TOOL_NAME,
             <EndSessionInput as ToolInput>::TOOL_NAME,
             $(<$input as ToolInput>::TOOL_NAME,)*
@@ -961,6 +1047,7 @@ impl CuaDriver {
                     "mode": options.mode.as_str(),
                     "ttl_seconds": options.ttl_seconds,
                     "idle_ttl_seconds": options.idle_ttl_seconds,
+                    "capability_manifest_path": options.capability_manifest_path,
                     "bounded_manifest_path": options.bounded_manifest_path,
                 });
                 Ok(Arc::new(CuaDriverSession {
@@ -998,6 +1085,40 @@ impl CuaDriver {
                         .into(),
             }),
         }
+    }
+
+    /// Daemon-host bridge for reconnecting one trusted host lease without
+    /// exposing its transport identity through generated bindings.
+    #[doc(hidden)]
+    pub fn create_trusted_session_for_transport(
+        &self,
+        options: TrustedSessionOptions,
+        transport_session: &str,
+    ) -> Result<Arc<CuaDriverSession>, DriverError> {
+        let DriverBackend::Embedded(runtime) = &self.backend else {
+            return Err(DriverError::Configuration {
+                reason:
+                    "stable trusted-session transport binding requires an embedded host runtime"
+                        .into(),
+            });
+        };
+        if transport_session.trim().is_empty() {
+            return Err(DriverError::Configuration {
+                reason: "trusted-session transport identity must not be empty".into(),
+            });
+        }
+        let native_options = serde_json::json!({
+            "public_session": options.public_session,
+            "mode": options.mode.as_str(),
+            "ttl_seconds": options.ttl_seconds,
+            "idle_ttl_seconds": options.idle_ttl_seconds,
+            "capability_manifest_path": options.capability_manifest_path,
+            "bounded_manifest_path": options.bounded_manifest_path,
+            "transport_session": transport_session,
+        });
+        Ok(Arc::new(CuaDriverSession {
+            backend: SessionBackend::Embedded(Arc::new(runtime.create_session(native_options)?)),
+        }))
     }
 
     /// Bind a trusted session through an authenticated remote carrier without
@@ -1065,20 +1186,16 @@ impl CuaDriver {
                     reason: format!("authorization configuration is invalid: {error}"),
                 }
             })?;
-        let manifest = if mode == cua_driver_core::authorization::PermissionMode::Bounded {
-            cua_driver_core::session_manifest::configured_session_manifest()
-                .map_err(|error| DriverError::Configuration { reason: error })?
-                .cloned()
-                .map(Arc::new)
-        } else {
-            None
-        };
+        let manifest = cua_driver_core::session_manifest::configured_capability_manifest()
+            .map_err(|error| DriverError::Configuration { reason: error })?
+            .cloned()
+            .map(Arc::new);
         let ceiling =
             cua_driver_core::session_authorization::SessionModeCeiling::for_trusted_sessions(
                 [mode],
                 mode == cua_driver_core::authorization::PermissionMode::Unrestricted,
-                std::time::Duration::from_secs(24 * 60 * 60),
-                std::time::Duration::from_secs(60 * 60),
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
             )
             .map_err(|reason| DriverError::Configuration { reason })?;
         Ok(Arc::new(Self {
@@ -1121,6 +1238,7 @@ impl CuaDriver {
             "authorization": {
                 "allowed_modes": allowed_modes,
                 "compatibility_mode": options.authorization.compatibility_mode.as_str(),
+                "compatibility_capability_manifest_path": options.authorization.compatibility_capability_manifest_path,
                 "compatibility_bounded_manifest_path": options.authorization.compatibility_bounded_manifest_path,
                 "unrestricted_acknowledged": options.authorization.unrestricted_acknowledged,
                 "max_session_ttl_seconds": options.authorization.max_session_ttl_seconds,
@@ -1156,6 +1274,18 @@ pub fn create_trusted_session(
     options: TrustedSessionOptions,
 ) -> Result<Arc<CuaDriverSession>, DriverError> {
     driver.create_trusted_session(options)
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn create_trusted_session_async(
+    driver: Arc<CuaDriver>,
+    options: TrustedSessionOptions,
+) -> Result<Arc<CuaDriverSession>, DriverError> {
+    tokio::task::spawn_blocking(move || driver.create_trusted_session(options))
+        .await
+        .map_err(|error| DriverError::Protocol {
+            reason: format!("join trusted session creation: {error}"),
+        })?
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -1208,7 +1338,7 @@ impl CuaDriver {
                     method: "list".into(),
                     name: None,
                     args: None,
-                    session_id: None,
+                    session_id: Some(daemon.transport_session.clone()),
                     observation_origin: Some(ToolObservationOrigin::Direct),
                     client_kind: Some(self.client_kind),
                 };
@@ -1227,6 +1357,54 @@ impl CuaDriver {
                         reason: response
                             .error
                             .unwrap_or_else(|| "list request failed".into()),
+                    });
+                }
+                response.result.unwrap_or(Value::Null)
+            }
+        };
+        serde_json::to_string(&result).map_err(|error| DriverError::Protocol {
+            reason: error.to_string(),
+        })
+    }
+
+    /// Content-free lifecycle summaries for the trusted host's runtime or
+    /// host-lease namespace. This is deliberately separate from the
+    /// agent-facing `list_sessions` tool, whose view is transport scoped.
+    pub async fn list_host_sessions_json(&self) -> Result<String, DriverError> {
+        let result = match &self.backend {
+            DriverBackend::Embedded(runtime) => {
+                let prefix = format!("__cua_runtime_{}:", runtime.runtime_scope_key());
+                host_sessions_json_for_prefix(&prefix)
+            }
+            DriverBackend::PrivateWorker(worker) => worker.list_host_sessions().await?,
+            DriverBackend::Remote(remote) => remote.list_host_sessions().await?,
+            DriverBackend::Daemon(daemon) => {
+                daemon.compatible_metadata().await?;
+                let socket_path = daemon.socket_path.clone();
+                let request_path = socket_path.clone();
+                let request = DaemonRequest {
+                    method: "sessions_list".into(),
+                    name: None,
+                    args: None,
+                    session_id: None,
+                    observation_origin: Some(ToolObservationOrigin::Direct),
+                    client_kind: Some(self.client_kind),
+                };
+                let response =
+                    tokio::task::spawn_blocking(move || send_request(&request_path, &request))
+                        .await
+                        .map_err(|error| DriverError::Protocol {
+                            reason: format!("host session listing task failed: {error}"),
+                        })?
+                        .map_err(|error| DriverError::Transport {
+                            socket_path,
+                            reason: error.to_string(),
+                        })?;
+                if !response.ok {
+                    return Err(DriverError::Protocol {
+                        reason: response
+                            .error
+                            .unwrap_or_else(|| "host session listing failed".into()),
                     });
                 }
                 response.result.unwrap_or(Value::Null)
@@ -1264,6 +1442,21 @@ impl CuaDriver {
             .typed_success(GetSessionStateInput::TOOL_NAME)
     }
 
+    pub async fn get_session(&self, input: GetSessionInput) -> Result<SessionOutput, DriverError> {
+        self.invoke_typed(GetSessionInput::TOOL_NAME, input)
+            .await?
+            .typed_success(GetSessionInput::TOOL_NAME)
+    }
+
+    pub async fn list_sessions(
+        &self,
+        input: ListSessionsInput,
+    ) -> Result<ListSessionsOutput, DriverError> {
+        self.invoke_typed(ListSessionsInput::TOOL_NAME, input)
+            .await?
+            .typed_success(ListSessionsInput::TOOL_NAME)
+    }
+
     pub async fn end_session(
         &self,
         input: EndSessionInput,
@@ -1291,6 +1484,10 @@ desktop_tool_methods!(define_session_desktop_tool_methods);
 
 #[uniffi::export(async_runtime = "tokio")]
 impl CuaDriverSession {
+    pub async fn close_async(&self) {
+        self.backend.close_async().await;
+    }
+
     pub async fn call_tool(
         &self,
         name: String,
@@ -1325,6 +1522,21 @@ impl CuaDriverSession {
         self.invoke_typed(GetSessionStateInput::TOOL_NAME, input)
             .await?
             .typed_success(GetSessionStateInput::TOOL_NAME)
+    }
+
+    pub async fn get_session(&self, input: GetSessionInput) -> Result<SessionOutput, DriverError> {
+        self.invoke_typed(GetSessionInput::TOOL_NAME, input)
+            .await?
+            .typed_success(GetSessionInput::TOOL_NAME)
+    }
+
+    pub async fn list_sessions(
+        &self,
+        input: ListSessionsInput,
+    ) -> Result<ListSessionsOutput, DriverError> {
+        self.invoke_typed(ListSessionsInput::TOOL_NAME, input)
+            .await?
+            .typed_success(ListSessionsInput::TOOL_NAME)
     }
 
     pub async fn end_session(
@@ -1461,7 +1673,7 @@ impl CuaDriver {
                     method: "call".into(),
                     name: Some(name.into()),
                     args: Some(arguments),
-                    session_id: None,
+                    session_id: Some(daemon.transport_session.clone()),
                     observation_origin: Some(ToolObservationOrigin::Direct),
                     client_kind: Some(self.client_kind),
                 };
@@ -1656,15 +1868,20 @@ mod tests {
 
     #[test]
     fn exported_typed_methods_cover_every_published_contract() {
-        let mut expected = cua_driver_contract::manifest()
+        let expected = cua_driver_contract::manifest()
             .tools
             .into_iter()
             .map(|tool| tool.name)
-            .collect::<Vec<_>>();
-        expected.sort();
-        let mut exported = EXPORTED_TOOL_NAMES.to_vec();
-        exported.sort_unstable();
-        assert_eq!(exported, expected);
+            .collect::<std::collections::BTreeSet<_>>();
+        let exported = EXPORTED_TOOL_NAMES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        let missing = expected.difference(&exported).cloned().collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "typed SDK methods missing for {missing:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -1706,6 +1923,7 @@ mod tests {
             authorization: RuntimeAuthorizationOptions {
                 allowed_modes: vec![SessionPermissionMode::Standard],
                 compatibility_mode: SessionPermissionMode::Standard,
+                compatibility_capability_manifest_path: None,
                 compatibility_bounded_manifest_path: None,
                 unrestricted_acknowledged: false,
                 max_session_ttl_seconds: 60,
@@ -1736,6 +1954,7 @@ mod tests {
                 authorization: RuntimeAuthorizationOptions {
                     allowed_modes: vec![SessionPermissionMode::Standard],
                     compatibility_mode: SessionPermissionMode::Standard,
+                    compatibility_capability_manifest_path: None,
                     compatibility_bounded_manifest_path: None,
                     unrestricted_acknowledged: false,
                     max_session_ttl_seconds: 60,
@@ -1767,6 +1986,7 @@ mod tests {
             authorization: RuntimeAuthorizationOptions {
                 allowed_modes: vec![SessionPermissionMode::Unrestricted],
                 compatibility_mode: SessionPermissionMode::Unrestricted,
+                compatibility_capability_manifest_path: None,
                 compatibility_bounded_manifest_path: None,
                 unrestricted_acknowledged: true,
                 max_session_ttl_seconds: 60,
@@ -1875,6 +2095,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trusted_host_listing_spans_its_runtime_without_exposing_owner_keys() {
+        let _runtime_test = crate::runtime::TEST_RUNTIME_LOCK.lock().unwrap();
+        let driver = CuaDriver::create(None).unwrap();
+        let public = format!("host-listing-{}", uuid::Uuid::new_v4());
+        driver
+            .start_session(StartSessionInput {
+                session: Some(public.clone()),
+                capture_scope: None,
+                cursor_theme: None,
+            })
+            .await
+            .unwrap();
+
+        let listed: Value =
+            serde_json::from_str(&driver.list_host_sessions_json().await.unwrap()).unwrap();
+        let session = listed["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|session| {
+                session["session"]
+                    .as_str()
+                    .is_some_and(|label| label.starts_with("host-listing-"))
+            })
+            .unwrap_or_else(|| {
+                panic!("host-scoped listing omitted its live named session: {listed}")
+            });
+        assert_eq!(session["implicit"], false);
+        assert!(session.get("owner_transport").is_none());
+        assert!(session.get("runtime_id").is_none());
+
+        driver
+            .end_session(EndSessionInput {
+                session: Some(public),
+            })
+            .await
+            .unwrap();
+        driver.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn shutdown_drains_an_already_admitted_call() {
         let _runtime_test = crate::runtime::TEST_RUNTIME_LOCK.lock().unwrap();
         let driver = CuaDriver::try_create_for_host(DriverHostOptions {
@@ -1969,6 +2230,7 @@ mod tests {
                     SessionPermissionMode::Unrestricted,
                 ],
                 compatibility_mode: SessionPermissionMode::Standard,
+                compatibility_capability_manifest_path: None,
                 compatibility_bounded_manifest_path: None,
                 unrestricted_acknowledged: true,
                 max_session_ttl_seconds: 60,
@@ -1982,6 +2244,7 @@ mod tests {
                 mode: SessionPermissionMode::Standard,
                 ttl_seconds: 60,
                 idle_ttl_seconds: 30,
+                capability_manifest_path: None,
                 bounded_manifest_path: None,
             })
             .unwrap();
@@ -1991,6 +2254,7 @@ mod tests {
                 mode: SessionPermissionMode::Unrestricted,
                 ttl_seconds: 60,
                 idle_ttl_seconds: 30,
+                capability_manifest_path: None,
                 bounded_manifest_path: None,
             })
             .unwrap();
@@ -2127,6 +2391,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trusted_session_idle_ttl_reaches_the_lifecycle_contract() {
+        let _runtime_test = crate::runtime::TEST_RUNTIME_LOCK.lock().unwrap();
+        let driver = configured_standard_driver();
+        let session = driver
+            .create_trusted_session(TrustedSessionOptions {
+                public_session: "trusted-lifecycle-ttl".into(),
+                mode: SessionPermissionMode::Standard,
+                ttl_seconds: 60,
+                idle_ttl_seconds: 2,
+                capability_manifest_path: None,
+                bounded_manifest_path: None,
+            })
+            .unwrap();
+
+        let started = session
+            .call_tool("start_session".into(), "{}".into())
+            .await
+            .unwrap();
+        assert!(!started.is_error, "{}", started.text);
+
+        let inspected = session
+            .call_tool("get_session".into(), "{}".into())
+            .await
+            .unwrap();
+        assert!(!inspected.is_error, "{}", inspected.text);
+        let lifecycle: Value =
+            serde_json::from_str(inspected.structured_json.as_deref().unwrap()).unwrap();
+        let expires_in = lifecycle["expires_in_seconds"].as_u64().unwrap();
+        assert!(
+            expires_in <= 2,
+            "trusted lifecycle TTL was not applied: {lifecycle}"
+        );
+        assert_eq!(lifecycle["session"], "trusted-lifecycle-ttl");
+
+        session.close();
+        driver.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn owner_lifetime_trusted_session_has_no_timer_expiration() {
+        let _runtime_test = crate::runtime::TEST_RUNTIME_LOCK.lock().unwrap();
+        let driver = CuaDriver::create_configured(ConfiguredDriverOptions {
+            claude_code_compatibility: false,
+            authorization: RuntimeAuthorizationOptions {
+                allowed_modes: vec![SessionPermissionMode::Standard],
+                compatibility_mode: SessionPermissionMode::Standard,
+                compatibility_capability_manifest_path: None,
+                compatibility_bounded_manifest_path: None,
+                unrestricted_acknowledged: false,
+                max_session_ttl_seconds: 0,
+                max_idle_ttl_seconds: 0,
+            },
+        })
+        .unwrap();
+        let session = driver
+            .create_trusted_session(TrustedSessionOptions {
+                public_session: "owner-lifetime-session".into(),
+                mode: SessionPermissionMode::Standard,
+                ttl_seconds: 0,
+                idle_ttl_seconds: 0,
+                capability_manifest_path: None,
+                bounded_manifest_path: None,
+            })
+            .unwrap();
+
+        let started = session
+            .call_tool("start_session".into(), "{}".into())
+            .await
+            .unwrap();
+        assert!(!started.is_error, "{}", started.text);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let inspected = session
+            .call_tool("get_session".into(), "{}".into())
+            .await
+            .unwrap();
+        assert!(!inspected.is_error, "{}", inspected.text);
+        let lifecycle: Value =
+            serde_json::from_str(inspected.structured_json.as_deref().unwrap()).unwrap();
+        assert!(
+            lifecycle["expires_in_seconds"].as_u64().unwrap() > 24 * 60 * 60,
+            "owner-lifetime session inherited a finite default TTL: {lifecycle}"
+        );
+
+        session.close();
+        driver.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn trusted_session_can_rebind_its_public_label_after_close() {
+        let _runtime_test = crate::runtime::TEST_RUNTIME_LOCK.lock().unwrap();
+        let driver = configured_standard_driver();
+        let options = TrustedSessionOptions {
+            public_session: "trusted-reconnect".into(),
+            mode: SessionPermissionMode::Standard,
+            ttl_seconds: 60,
+            idle_ttl_seconds: 30,
+            capability_manifest_path: None,
+            bounded_manifest_path: None,
+        };
+        let first = driver.create_trusted_session(options.clone()).unwrap();
+        first.close();
+
+        let replacement = driver.create_trusted_session(options).unwrap();
+        let result = replacement
+            .call_tool("health_report".into(), "{}".into())
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.text);
+
+        replacement.close();
+        driver.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn authorization_expiry_in_one_runtime_does_not_affect_another() {
         let _runtime_test = crate::runtime::TEST_RUNTIME_LOCK.lock().unwrap();
         let expiring = CuaDriver::create_configured(ConfiguredDriverOptions {
@@ -2134,6 +2512,7 @@ mod tests {
             authorization: RuntimeAuthorizationOptions {
                 allowed_modes: vec![SessionPermissionMode::Standard],
                 compatibility_mode: SessionPermissionMode::Standard,
+                compatibility_capability_manifest_path: None,
                 compatibility_bounded_manifest_path: None,
                 unrestricted_acknowledged: false,
                 max_session_ttl_seconds: 2,
@@ -2148,6 +2527,7 @@ mod tests {
                 mode: SessionPermissionMode::Standard,
                 ttl_seconds: 1,
                 idle_ttl_seconds: 1,
+                capability_manifest_path: None,
                 bounded_manifest_path: None,
             })
             .unwrap();
@@ -2157,6 +2537,7 @@ mod tests {
                 mode: SessionPermissionMode::Standard,
                 ttl_seconds: 60,
                 idle_ttl_seconds: 30,
+                capability_manifest_path: None,
                 bounded_manifest_path: None,
             })
             .unwrap();
@@ -2166,7 +2547,10 @@ mod tests {
             .call_tool("health_report".into(), "{}".into())
             .await
             .unwrap();
-        assert_eq!(expired.error_code.as_deref(), Some("permission_denied"));
+        assert_eq!(
+            expired.error_code.as_deref(),
+            Some("authorization_context_expired")
+        );
         let live = stable_session
             .call_tool("health_report".into(), "{}".into())
             .await
@@ -2191,6 +2575,7 @@ mod tests {
                     mode: SessionPermissionMode::Standard,
                     ttl_seconds: 60,
                     idle_ttl_seconds: 30,
+                    capability_manifest_path: None,
                     bounded_manifest_path: None,
                 })
                 .unwrap();
@@ -2235,6 +2620,7 @@ mod tests {
                     SessionPermissionMode::Unrestricted,
                 ],
                 compatibility_mode: SessionPermissionMode::Standard,
+                compatibility_capability_manifest_path: None,
                 compatibility_bounded_manifest_path: None,
                 unrestricted_acknowledged: true,
                 max_session_ttl_seconds: 60,
@@ -2248,6 +2634,7 @@ mod tests {
                 mode: SessionPermissionMode::Standard,
                 ttl_seconds: 60,
                 idle_ttl_seconds: 30,
+                capability_manifest_path: None,
                 bounded_manifest_path: None,
             })
             .unwrap();
@@ -2290,6 +2677,7 @@ mod tests {
                 mode: SessionPermissionMode::Unrestricted,
                 ttl_seconds: 60,
                 idle_ttl_seconds: 30,
+                capability_manifest_path: None,
                 bounded_manifest_path: None,
             }),
             Err(DriverError::Configuration { .. })
@@ -2300,6 +2688,7 @@ mod tests {
                 mode: SessionPermissionMode::Unrestricted,
                 ttl_seconds: 60,
                 idle_ttl_seconds: 30,
+                capability_manifest_path: None,
                 bounded_manifest_path: None,
             })
             .unwrap();
@@ -2554,7 +2943,7 @@ mod tests {
         let driver = CuaDriver::connect(Some(socket)).unwrap();
         let output = driver
             .start_session(StartSessionInput {
-                session: "run-2".into(),
+                session: Some("run-2".into()),
                 capture_scope: Some(cua_driver_contract::CaptureScope::Auto),
                 cursor_theme: None,
             })
@@ -2660,6 +3049,7 @@ mod tests {
                 mode: SessionPermissionMode::Standard,
                 ttl_seconds: 60,
                 idle_ttl_seconds: 30,
+                capability_manifest_path: None,
                 bounded_manifest_path: None,
             })
             .await
@@ -2862,6 +3252,7 @@ mod tests {
                 mode: SessionPermissionMode::Standard,
                 ttl_seconds: 60,
                 idle_ttl_seconds: 30,
+                capability_manifest_path: None,
                 bounded_manifest_path: None,
             })
             .await

@@ -12,4 +12,6 @@ export enum ApprovalMode {
   YOLO = 'yolo',
 }
 
+export type ApprovalModeValue = `${ApprovalMode}`;
+
 export const APPROVAL_MODES = Object.values(ApprovalMode);
