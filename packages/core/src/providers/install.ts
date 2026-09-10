@@ -94,16 +94,30 @@ function applyModelProvidersPatch(
     patch.authType === AuthType.USE_OPENAI &&
     patch.mergeStrategy !== 'append'
   ) {
+    const ownsModel = patch.ownsModel;
     const legacyModels = existingModelProviders[AuthType.USE_OPENAI_RESPONSES];
-    const preservedLegacy = legacyModels?.filter(
-      (model) =>
-        !patch.models.some(
-          (newModel) =>
-            isSameModelIdentity(newModel, model) &&
-            resolveModelProtocol(patch.authType, newModel) ===
+    const preservedLegacy = legacyModels?.filter((model) => {
+      // The same ownership gate as the canonical bucket above: when the patch
+      // declares ownership, a legacy entry owned by another provider's
+      // credentials must survive even when it matches the install by identity
+      // and effective protocol.
+      if (ownsModel) {
+        return (
+          !ownsModel(model) ||
+          !patch.models.some(
+            (newModel) =>
+              resolveModelProtocol(patch.authType, newModel) ===
               resolveModelProtocol(AuthType.USE_OPENAI_RESPONSES, model),
-        ),
-    );
+          )
+        );
+      }
+      return !patch.models.some(
+        (newModel) =>
+          isSameModelIdentity(newModel, model) &&
+          resolveModelProtocol(patch.authType, newModel) ===
+            resolveModelProtocol(AuthType.USE_OPENAI_RESPONSES, model),
+      );
+    });
     if (preservedLegacy && preservedLegacy.length !== legacyModels?.length) {
       updated[AuthType.USE_OPENAI_RESPONSES] = preservedLegacy;
     }
@@ -296,14 +310,16 @@ export async function applyProviderInstallPlan(
     // it; a genuine first-time setup still adopts the provider default. (#5819)
     currentStep = 'modelSelection';
     let effectiveModelSelection = plan.modelSelection;
+    // When the install moves the current model onto a different API route, the
+    // live session must still be re-synced below even though the model itself
+    // is kept.
+    let routeResyncSelection: { modelId: string; baseUrl?: string } | undefined;
     if (effectiveModelSelection?.modelId) {
       const currentModelId = settings.getValue('model.name');
       const currentBaseUrl = settings.getValue('model.baseUrl') as
         | string
         | undefined;
       const planOffersCurrentModel =
-        (previousAuthType === undefined ||
-          previousAuthType === plan.authType) &&
         typeof currentModelId === 'string' &&
         currentModelId.length > 0 &&
         (plan.modelProviders ?? []).some((patch) =>
@@ -320,6 +336,18 @@ export async function applyProviderInstallPlan(
         );
       if (planOffersCurrentModel) {
         effectiveModelSelection = undefined;
+        if (
+          previousAuthType !== undefined &&
+          previousAuthType !== plan.authType
+        ) {
+          // Keep the user's model, but re-sync onto the new wire for the SAME
+          // model rather than adopting the plan's default (whose modelId is
+          // always the plan's first model).
+          routeResyncSelection = {
+            modelId: currentModelId,
+            ...(currentBaseUrl ? { baseUrl: currentBaseUrl } : {}),
+          };
+        }
       }
     }
     if (effectiveModelSelection?.modelId) {
@@ -351,12 +379,15 @@ export async function applyProviderInstallPlan(
     // Reload runtime config
     currentStep = 'reloadModelProviders';
     reloadModelProviders?.(updatedModelProviders);
-    if (effectiveModelSelection?.modelId) {
+    const syncSelection = effectiveModelSelection?.modelId
+      ? effectiveModelSelection
+      : routeResyncSelection;
+    if (syncSelection) {
       currentStep = 'syncAuthState';
       syncAuthState?.(
         plan.authType,
-        effectiveModelSelection.modelId,
-        effectiveModelSelection.baseUrl,
+        syncSelection.modelId,
+        syncSelection.baseUrl,
       );
     }
     if (doRefreshAuth && refreshAuth) {

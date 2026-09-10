@@ -51,6 +51,7 @@ import {
   loadOutputStyleCatalog,
   stripAnsiAndControl,
   type OutputStyleDefinition,
+  resolveModelProtocol,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -1920,6 +1921,26 @@ export async function loadCliConfig(
     (bareMode ? undefined : settings.security?.auth?.selectedType) ||
     /* getAuthTypeFromEnv means no authType was explicitly provided, we infer the authType from env vars */
     getAuthTypeFromEnv();
+
+  // Validate per-model `api` fields up front: the same validation throws from
+  // resolveCliGenerationConfig below when a model is selected, and from the
+  // ModelRegistry constructor inside `new Config` when it is not — classifying
+  // it here keeps every startup shape a FatalConfigError instead of a stack
+  // trace before the TUI starts.
+  for (const [providerId, models] of Object.entries(
+    settings.modelProviders ?? {},
+  )) {
+    if (!Array.isArray(models)) continue;
+    for (const model of models) {
+      try {
+        resolveModelProtocol(providerId, model, settings.providerProtocol);
+      } catch (err) {
+        throw new FatalConfigError(
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+  }
 
   // Unified resolution of generation config with source attribution
   let resolvedCliConfig: ReturnType<typeof resolveCliGenerationConfig>;

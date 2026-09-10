@@ -10,6 +10,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import {
@@ -43,6 +44,20 @@ export {
 };
 
 const debugLogger = createDebugLogger('ModelsConfig');
+
+/**
+ * Normalize an OpenAI-family baseUrl for the credential-reuse comparison. A
+ * baseUrl-less Chat entry resolves to DEFAULT_OPENAI_BASE_URL while a
+ * baseUrl-less Responses entry resolves to '', yet both wires dial the same
+ * origin (the Responses pipeline strips any trailing `/v1` itself), so map
+ * both onto that origin to compare effective endpoints rather than raw
+ * strings.
+ */
+function normalizeOpenAiSiblingBaseUrl(baseUrl: string | undefined): string {
+  return (baseUrl || DEFAULT_OPENAI_BASE_URL)
+    .replace(/\/v1\/?$/, '')
+    .replace(/\/$/, '');
+}
 
 /**
  * Callback for when the model changes.
@@ -542,15 +557,24 @@ export class ModelsConfig {
           authType === AuthType.USE_OPENAI_RESPONSES) &&
         (previousAuthType === AuthType.USE_OPENAI ||
           previousAuthType === AuthType.USE_OPENAI_RESPONSES);
+      const sameEndpoint = (a: string | undefined, b: string | undefined) =>
+        a === b ||
+        (sharesOpenAICredentials &&
+          normalizeOpenAiSiblingBaseUrl(a) ===
+            normalizeOpenAiSiblingBaseUrl(b));
       const canReusePreviousApiKey =
         authType !== AuthType.QWEN_OAUTH &&
         (!isAuthTypeChange ||
           (sharesOpenAICredentials &&
-            rollbackSnapshot.generationConfig.baseUrl === model.baseUrl)) &&
+            sameEndpoint(
+              rollbackSnapshot.generationConfig.baseUrl,
+              model.baseUrl,
+            ))) &&
         !!rollbackSnapshot.generationConfig.apiKey &&
         !!model.envKey &&
-        previousModel?.envKey === model.envKey &&
-        previousModel.baseUrl === model.baseUrl;
+        previousModel !== undefined &&
+        previousModel.envKey === model.envKey &&
+        sameEndpoint(previousModel.baseUrl, model.baseUrl);
       const previousApiKey = canReusePreviousApiKey
         ? rollbackSnapshot.generationConfig.apiKey
         : undefined;

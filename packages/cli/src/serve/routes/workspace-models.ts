@@ -5,6 +5,7 @@
  */
 
 import type { Application, Request, Response } from 'express';
+import { AuthType, resolveModelProtocol } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   getModelProvidersOwnerScope,
@@ -203,6 +204,32 @@ export function registerWorkspaceModelsRoutes(
           modelId: parsed.modelId,
           ...(removedBaseUrl ? { baseUrl: removedBaseUrl } : {}),
         };
+        // Deleting the active route must not clear the persisted selection
+        // when a surviving OpenAI sibling still carries it: with per-model
+        // `api`, the other wire of the same id+baseUrl keeps resolving the
+        // same selection, so the tombstone would destroy a selection that is
+        // not dangling.
+        const selectionSurvivesRemoval = Object.entries(next).some(
+          ([providerId, models]) =>
+            Array.isArray(models) &&
+            models.some((model) => {
+              if (model.id !== parsed.modelId) return false;
+              const protocol = resolveModelProtocol(
+                providerId,
+                model,
+                loaded.merged.providerProtocol,
+              );
+              if (
+                protocol !== AuthType.USE_OPENAI &&
+                protocol !== AuthType.USE_OPENAI_RESPONSES
+              ) {
+                return false;
+              }
+              return removedBaseUrl
+                ? (model.baseUrl ?? '') === removedBaseUrl
+                : true;
+            }),
+        );
         for (const activeScope of getWritableScopes(loaded)) {
           const scopeModel = loaded.forScope(activeScope).settings.model;
           const selectedAuthType =
@@ -219,6 +246,7 @@ export function registerWorkspaceModelsRoutes(
               }).authType
             : undefined;
           if (
+            !selectionSurvivesRemoval &&
             isActiveModelSelection(
               scopeModel?.name,
               scopeModel?.baseUrl,

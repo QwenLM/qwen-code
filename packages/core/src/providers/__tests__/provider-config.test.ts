@@ -88,6 +88,33 @@ describe('buildInstallPlan', () => {
     );
   });
 
+  it('skips version metadata when the install resolves to a non-default API route', () => {
+    const config = makeConfig();
+    const responsesPlan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+      api: 'responses',
+    });
+    // A version hashed from an `api`-stamped model list can never match the
+    // drift check's template rebuild (no `api`, and the default route's
+    // generationConfig shape), so the provider would prompt an "update" on
+    // every launch — and accepting it would duplicate every model. No version
+    // metadata, no perpetual drift prompt.
+    expect(responsesPlan.providerState).toBeUndefined();
+
+    const chatPlan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+    });
+    expect(chatPlan.providerState?.['providerMetadata.test']?.['version']).toBe(
+      computeModelListVersion(
+        buildProviderTemplate(config, 'https://api.test.com/v1'),
+      ),
+    );
+  });
+
   it('applies advancedConfig to editable unknown model IDs only', () => {
     const config = makeConfig({ modelsEditable: true });
     const plan = buildInstallPlan(config, {

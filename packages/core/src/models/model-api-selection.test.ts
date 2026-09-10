@@ -239,6 +239,35 @@ describe('model API selection', () => {
     },
   );
 
+  it('reuses an injected key across sibling APIs when neither entry pins a baseUrl', async () => {
+    vi.stubEnv('SHARED_KEY', undefined);
+    const config = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'shared',
+        apiKey: 'injected-key',
+        apiKeyEnvKey: 'SHARED_KEY',
+      },
+      generationConfigSources: {
+        apiKey: { kind: 'env', envKey: 'SHARED_KEY' },
+      },
+      modelProvidersConfig: {
+        openai: [
+          { id: 'shared', envKey: 'SHARED_KEY' },
+          { id: 'shared', api: 'responses', envKey: 'SHARED_KEY' },
+        ],
+      },
+      onModelChange: vi.fn(),
+    });
+    // The two wires default differently for a baseUrl-less entry (Chat resolves
+    // to DEFAULT_OPENAI_BASE_URL, Responses to ''), but both dial the same
+    // origin — the switch must carry the key rather than dropping it.
+    await config.switchModel(AuthType.USE_OPENAI_RESPONSES, 'shared');
+    expect(config.getGenerationConfig().apiKey).toBe('injected-key');
+    await config.switchModel(AuthType.USE_OPENAI, 'shared');
+    expect(config.getGenerationConfig().apiKey).toBe('injected-key');
+  });
+
   it('does not refresh a removed API into its sibling or an unrelated default', async () => {
     const config = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI_RESPONSES,

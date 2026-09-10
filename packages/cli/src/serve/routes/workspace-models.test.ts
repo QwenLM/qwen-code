@@ -267,6 +267,31 @@ describe('DELETE /workspace/models', () => {
     },
   );
 
+  it('keeps the active selection when its deleted route has a surviving API sibling', async () => {
+    const baseUrl = 'https://api.example/v1';
+    const responses = { id: 'same', baseUrl, api: 'responses' };
+    writeUserSettings({
+      modelProviders: { openai: [{ id: 'same', baseUrl }, responses] },
+      model: { name: 'same', baseUrl },
+      security: { auth: { selectedType: 'openai' } },
+    });
+    const { app } = makeApp();
+    const res = await request(app).delete('/workspace/models').send({
+      authType: 'openai',
+      modelId: 'same',
+      baseUrl,
+    });
+    expect(res.status).toBe(200);
+    // The deleted Chat route was the active selection, but the surviving
+    // Responses sibling still resolves the same persisted selection — clearing
+    // it would destroy a selection that is not dangling.
+    expect(res.body.clearedActiveModel).toBe(false);
+    expect(readUserSettings()).toMatchObject({
+      model: { name: 'same', baseUrl },
+      modelProviders: { openai: [responses] },
+    });
+  });
+
   it('clears canonical Responses selected through the shared OpenAI auth type', async () => {
     const baseUrl = 'https://api.example/v1';
     writeUserSettings({

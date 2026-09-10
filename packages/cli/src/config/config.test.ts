@@ -1272,6 +1272,53 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it('reports an invalid model api as a config error even with no model selected', async () => {
+    process.argv = ['node', 'script.js'];
+    // Clear every auth env var getAuthTypeFromEnv can read so no selectedType
+    // is inferred from the runner environment.
+    for (const key of [
+      'QWEN_OAUTH',
+      'OPENAI_API_KEY',
+      'OPENAI_MODEL',
+      'QWEN_MODEL',
+      'OPENAI_BASE_URL',
+      'GEMINI_API_KEY',
+      'GEMINI_MODEL',
+      'GOOGLE_API_KEY',
+      'GOOGLE_MODEL',
+      'GOOGLE_CLOUD_PROJECT',
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_MODEL',
+      'ANTHROPIC_BASE_URL',
+    ]) {
+      vi.stubEnv(key, undefined);
+    }
+    const argv = await parseArguments();
+    const settings: Settings = {
+      // No security.auth.selectedType and no model.name: generation-config
+      // resolution never touches the model, so the invalid `api` is first hit
+      // by the ModelRegistry constructor inside `new Config` — still a config
+      // error, not an unexpected crash with a stack trace.
+      modelProviders: {
+        openai: [
+          {
+            id: 'gpt-model',
+            api: 'resposnes' as 'responses',
+            envKey: 'RESPONSES_KEY',
+          },
+        ],
+      },
+    };
+
+    const err = await loadCliConfig(settings, argv).catch((e: unknown) => e);
+    vi.unstubAllEnvs();
+
+    expect(err).toBeInstanceOf(FatalConfigError);
+    expect((err as Error).message).toMatch(
+      /Invalid api "resposnes" for provider "openai"/,
+    );
+  });
+
   it('registers the external agent executor factory so executor definitions dispatch (R1-7)', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

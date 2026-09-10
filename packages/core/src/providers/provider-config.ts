@@ -346,7 +346,15 @@ export function buildInstallPlan(
         ...(ownsModel ? { ownsModel } : {}),
       },
     ],
-    providerState: resolveProviderState(config, inputs.baseUrl, models),
+    // The drift check (findAllPendingUpdates) rebuilds the reference version
+    // from the provider's own protocol template, which can never reproduce an
+    // `api`-stamped install (different generationConfig shape). Recording a
+    // version for such an install would prompt a spurious model-list update on
+    // every launch — and accepting it would duplicate every model.
+    providerState:
+      protocol === config.protocol
+        ? resolveProviderState(config, inputs.baseUrl, models)
+        : undefined,
   };
 }
 

@@ -159,11 +159,17 @@ export function useProviderSetupFlow(
       );
       // For presets the baseUrl is fixed (string) or selected from options;
       // for the custom provider it's empty and the placeholder hints at the
-      // default endpoint for the chosen protocol.
+      // default endpoint for the effective route.
       const resolved = resolveBaseUrl(config);
       setBaseUrl(resolved);
       setBaseUrlPlaceholder(
-        resolved ? '' : getDefaultBaseUrlForProtocol(proto),
+        resolved
+          ? ''
+          : getDefaultBaseUrlForProtocol(
+              initial === AuthType.USE_OPENAI_RESPONSES
+                ? AuthType.USE_OPENAI_RESPONSES
+                : proto,
+            ),
       );
       setBaseUrlOptionIndex(0);
       setBaseUrlError(null);
@@ -225,32 +231,46 @@ export function useProviderSetupFlow(
         selectedProtocol === AuthType.USE_OPENAI_RESPONSES
           ? AuthType.USE_OPENAI
           : selectedProtocol;
-      setProtocol(proto);
-      setApi((current) =>
+      const nextApi: ModelApi =
         selectedProtocol === AuthType.USE_OPENAI_RESPONSES
           ? 'responses'
           : proto === protocol
-            ? current
-            : 'chat-completions',
-      );
+            ? api
+            : 'chat-completions';
+      setProtocol(proto);
+      setApi(nextApi);
       if (provider) setVisibleSteps(getVisibleSteps(provider, proto));
-      // Clear baseUrl so the user types fresh; show the protocol's default
-      // endpoint as a placeholder (used if they submit blank).
+      // Clear baseUrl so the user types fresh; show the default endpoint of
+      // the effective route as a placeholder (used if they submit blank).
       setBaseUrl('');
-      setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(proto));
+      setBaseUrlPlaceholder(
+        getDefaultBaseUrlForProtocol(
+          nextApi === 'responses' ? AuthType.USE_OPENAI_RESPONSES : proto,
+        ),
+      );
       setApiKey('');
       setApiKeyError(null);
       goNext();
     },
-    [goNext, provider, protocol],
+    [goNext, provider, protocol, api],
   );
 
   const selectApi = useCallback(
     (selectedApi: ModelApi) => {
       setApi(selectedApi);
+      // The placeholder follows the effective wire route, so a blank Base URL
+      // submission persists the same default a pre-split Responses protocol
+      // choice would have.
+      setBaseUrlPlaceholder(
+        getDefaultBaseUrlForProtocol(
+          selectedApi === 'responses'
+            ? AuthType.USE_OPENAI_RESPONSES
+            : protocol,
+        ),
+      );
       goNext();
     },
-    [goNext],
+    [goNext, protocol],
   );
 
   const selectBaseUrl = useCallback(
@@ -308,7 +328,13 @@ export function useProviderSetupFlow(
       const hasAdvanced = thinkingEnabled || modalityEnabled || ctxSize > 0;
       return {
         protocol: provider?.protocolOptions ? protocol : undefined,
-        ...(provider && shouldShowStep(provider, 'api', protocol)
+        // Keep a Responses API prefilled from an existing install even when
+        // the provider has no API step to render (only the custom provider
+        // shows one) — dropping it would silently move a working Responses
+        // route back to Chat Completions on re-authentication.
+        ...(provider &&
+        (shouldShowStep(provider, 'api', protocol) ||
+          (api === 'responses' && protocol === AuthType.USE_OPENAI))
           ? { api }
           : {}),
         baseUrl: baseUrl.trim(),

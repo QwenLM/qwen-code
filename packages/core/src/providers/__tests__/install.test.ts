@@ -398,11 +398,104 @@ describe('applyProviderInstallPlan', () => {
       },
       { settings: adapter, syncAuthState },
     );
+    // The reinstall still persists the merged providers map — preserving the
+    // selection must not silently skip the install itself.
+    expect(adapter.setValue).toHaveBeenCalledWith(
+      'modelProviders.openai',
+      models,
+    );
     expect(adapter.setValue).not.toHaveBeenCalledWith(
       'model.name',
       expect.anything(),
     );
     expect(syncAuthState).not.toHaveBeenCalled();
+  });
+
+  it('keeps a non-first current model when reinstalling across an API route change', async () => {
+    const baseUrl = 'https://gateway.test/v1';
+    const chatModels = ['glm-4.6', 'qwen3-max', 'deepseek-v3'].map((id) => ({
+      id,
+      baseUrl,
+      envKey: 'TEST_API_KEY',
+    }));
+    const responsesModels = chatModels.map((model) => ({
+      ...model,
+      api: 'responses' as const,
+    }));
+    const adapter = createAdapter({ openai: chatModels });
+    vi.mocked(adapter.getValue).mockImplementation(
+      (key) =>
+        (
+          ({
+            'security.auth.selectedType': AuthType.USE_OPENAI,
+            'model.name': 'qwen3-max',
+            'model.baseUrl': baseUrl,
+          }) as Record<string, unknown>
+        )[key],
+    );
+    const syncAuthState = vi.fn();
+    await applyProviderInstallPlan(
+      {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        modelSelection: { modelId: 'glm-4.6', baseUrl },
+        modelProviders: [
+          {
+            authType: AuthType.USE_OPENAI,
+            models: responsesModels,
+            mergeStrategy: 'prepend-and-remove-owned',
+          },
+        ],
+      },
+      { settings: adapter, syncAuthState },
+    );
+    // The plan still offers the user's chosen model on the new route: keep it
+    // instead of adopting the plan's first model, but still re-sync the live
+    // session onto the new wire.
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.name',
+      expect.anything(),
+    );
+    expect(syncAuthState).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI_RESPONSES,
+      'qwen3-max',
+      baseUrl,
+    );
+  });
+
+  it('keeps a legacy Responses route owned by another provider when the patch owns models', async () => {
+    const baseUrl = 'https://api.openai.com/v1';
+    const foreign = { id: 'gpt-5.1', baseUrl, envKey: 'WORK_KEY' };
+    const adapter = createAdapter({ 'openai-responses': [foreign] });
+    const updated = {
+      id: 'gpt-5.1',
+      baseUrl,
+      api: 'responses' as const,
+      envKey: 'DEEPSEEK_API_KEY',
+    };
+    const result = await applyProviderInstallPlan(
+      {
+        providerId: 'deepseek',
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        modelProviders: [
+          {
+            authType: AuthType.USE_OPENAI,
+            models: [updated],
+            mergeStrategy: 'prepend-and-remove-owned',
+            ownsModel: (model) => model.envKey === 'DEEPSEEK_API_KEY',
+          },
+        ],
+      },
+      { settings: adapter },
+    );
+    // The legacy entry matches id+baseUrl+protocol but belongs to another
+    // provider's credentials — the ownership gate the canonical bucket applies
+    // must protect it from the legacy prune as well.
+    expect(result.updatedModelProviders['openai-responses']).toEqual([foreign]);
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'modelProviders.openai-responses',
+      expect.anything(),
+    );
   });
 
   it('replaces a reinstalled legacy Responses route without deleting its other models', async () => {
