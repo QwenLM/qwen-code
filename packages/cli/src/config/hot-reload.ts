@@ -18,6 +18,7 @@ import { assembleMcpServers } from './mcpServers.js';
 import {
   getPendingGatedMcpServers,
   getPromptableMcpServers,
+  isMcpApprovalGateArmed,
 } from './mcpApprovals.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 
@@ -148,6 +149,14 @@ export function registerMcpHotReload(
     // already-running bare/safe-mode session; only the top-tier servers this
     // session started with (explicit, per-invocation, not ambient state)
     // survive.
+    const isYolo = config.getApprovalMode() === ApprovalMode.YOLO;
+    // Same gate-armed condition as loadCliConfig: no expansion when nothing
+    // will ask the user before connecting.
+    const gateArmed = isMcpApprovalGateArmed(
+      config.getBareMode(),
+      config.isSafeMode(),
+      config.getApprovalMode(),
+    );
     const next =
       config.getBareMode() || config.isSafeMode()
         ? { ...topTierMcpServers }
@@ -155,8 +164,8 @@ export function registerMcpHotReload(
             settings.merged.mcpServers,
             cwd,
             topTierMcpServers,
+            { expandEnv: gateArmed },
           );
-    const isYolo = config.getApprovalMode() === ApprovalMode.YOLO;
     // Same bare/safe guard as `next` above, applied to the admission lists:
     // `recomputeMcpGating` reads settings.merged.mcp.allowed/excluded
     // unconditionally, with no bare/safe check of its own — a live

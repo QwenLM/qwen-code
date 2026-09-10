@@ -174,7 +174,12 @@ const { mockMcpApprovals, mockGetPendingGatedMcpServers } = vi.hoisted(() => ({
   mockGetPendingGatedMcpServers: vi.fn().mockReturnValue([]),
 }));
 
-vi.mock('../config/mcpApprovals.js', () => ({
+vi.mock('../config/mcpApprovals.js', async (importOriginal) => ({
+  // The gate predicate is pure; keep the real one so the ACP reload path runs
+  // the real armed/off decision instead of a stand-in.
+  isMcpApprovalGateArmed: (
+    await importOriginal<typeof import('../config/mcpApprovals.js')>()
+  ).isMcpApprovalGateArmed,
   loadMcpApprovals: () => mockMcpApprovals,
   getPendingGatedMcpServers: mockGetPendingGatedMcpServers,
   getPromptableMcpServers: vi.fn().mockReturnValue([]),
@@ -252,6 +257,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   SessionSourceError: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).SessionSourceError,
+  // Pure; the real `.mcp.json` loader needs it for the reload expansion tests.
+  normalizeClaudeMcpServer: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).normalizeClaudeMcpServer,
   BranchPointInvalidError: class BranchPointInvalidError extends Error {
     constructor(readonly recordId: string) {
       super(`Invalid or inactive branch point: ${recordId}`);
@@ -28245,6 +28254,67 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  // With the approval gate off (--yolo) nothing shows the user a
+  // repository-supplied server before it connects, so this reload path must
+  // not turn a `.mcp.json` placeholder into the real value. Asserted on what
+  // reaches reinitializeMcpServers, through the real loader.
+  it.each([
+    ['yolo', 'Bearer ${ACP_RELOAD_TOKEN}'],
+    ['default', 'Bearer real-secret'],
+  ])(
+    'workspaceMcpReload expands .mcp.json placeholders only while the approval gate is armed (approval mode %s)',
+    async (approvalMode, expectedHeader) => {
+      const projectDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'acp-mcp-json-'),
+      );
+      try {
+        await fs.writeFile(
+          path.join(projectDir, '.mcp.json'),
+          JSON.stringify({
+            mcpServers: {
+              proj: {
+                httpUrl: 'https://proj.example/mcp',
+                headers: { Authorization: 'Bearer ${ACP_RELOAD_TOKEN}' },
+              },
+            },
+          }),
+        );
+        process.env['ACP_RELOAD_TOKEN'] = 'real-secret';
+        mockConfig.getTargetDir = vi.fn().mockReturnValue(projectDir);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(approvalMode);
+        vi.mocked(loadSettings).mockReturnValue({
+          merged: { mcpServers: {} },
+          forScope: vi.fn().mockReturnValue({ settings: {} }),
+          getUserHooks: vi.fn().mockReturnValue({}),
+          getProjectHooks: vi.fn().mockReturnValue({}),
+        } as unknown as LoadedSettings);
+
+        const { agent, agentPromise } = await getAgent();
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpReload, {}),
+        ).resolves.toEqual({ accepted: true });
+        await vi.waitFor(() =>
+          expect(mockConfig.reinitializeMcpServers).toHaveBeenCalled(),
+        );
+        const servers = vi.mocked(mockConfig.reinitializeMcpServers).mock
+          .calls[0][0] as Record<
+          string,
+          { headers?: Record<string, string>; scope?: string }
+        >;
+        expect(servers['proj']?.scope).toBe('project');
+        expect(servers['proj']?.headers).toEqual({
+          Authorization: expectedHeader,
+        });
+
+        mockConnectionState.resolve();
+        await agentPromise;
+      } finally {
+        delete process.env['ACP_RELOAD_TOKEN'];
+        await fs.rm(projectDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('bare mode: workspaceMcpReload does NOT leak settings.mcpServers/mcp.allowed into an already-running session', async () => {
     // Bare-mode counterpart of the safe-mode test above — suggested by an

@@ -223,7 +223,10 @@ import {
   normalizeSessionIdForLookup,
   parseCallerSuppliedSessionId,
 } from '../config/session-id.js';
-import { loadMcpApprovals } from '../config/mcpApprovals.js';
+import {
+  isMcpApprovalGateArmed,
+  loadMcpApprovals,
+} from '../config/mcpApprovals.js';
 import { assembleMcpServers } from '../config/mcpServers.js';
 import { recomputeMcpGating } from '../config/hot-reload.js';
 import {
@@ -4047,12 +4050,21 @@ class QwenAgent implements Agent {
           // watcher) fixes earlier in this PR, found here in the third
           // reload path.
           const isBareOrSafe = config.getBareMode() || config.isSafeMode();
+          const isYolo = config.getApprovalMode() === ApprovalMode.YOLO;
           const mcpServers = isBareOrSafe
             ? { ...config.getTopTierMcpServers() }
             : assembleMcpServers(
                 settings.merged.mcpServers,
                 cwd,
                 config.getTopTierMcpServers(),
+                // No expansion when the approval gate is off for this config.
+                {
+                  expandEnv: isMcpApprovalGateArmed(
+                    config.getBareMode(),
+                    config.isSafeMode(),
+                    config.getApprovalMode(),
+                  ),
+                },
               );
           const bootAllowed = config.getCliAllowedMcpServerNames();
           const gating = isBareOrSafe
@@ -4062,7 +4074,7 @@ class QwenAgent implements Agent {
                 mcpServers,
                 cwd,
                 bootAllowed,
-                config.getApprovalMode() === ApprovalMode.YOLO,
+                isYolo,
               );
           config.setExcludedMcpServers(gating.excluded ?? []);
           config.setAllowedMcpServers(gating.allowed);

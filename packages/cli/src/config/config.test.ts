@@ -32,6 +32,7 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
+import { assembleMcpServers } from './mcpServers.js';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
@@ -102,6 +103,24 @@ vi.mock('./trustedFolders.js', () => ({
     .fn()
     .mockReturnValue({ isTrusted: true, source: 'file' }), // Default to trusted
 }));
+
+// Pass-through spy on `assembleMcpServers`, so the `.mcp.json` expansion
+// decision loadCliConfig makes can be observed. `fs.writeFileSync` is mocked in
+// this file, so a real `.mcp.json` cannot be planted; the argument is the
+// observable instead.
+const mcpServersActual = vi.hoisted(() => ({
+  assembleMcpServers: undefined as
+    | typeof import('./mcpServers.js').assembleMcpServers
+    | undefined,
+}));
+vi.mock('./mcpServers.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./mcpServers.js')>();
+  mcpServersActual.assembleMcpServers = actual.assembleMcpServers;
+  return {
+    ...actual,
+    assembleMcpServers: vi.fn(actual.assembleMcpServers),
+  };
+});
 
 const nativeLspServiceMock = vi.mocked(NativeLspService);
 const getLastLspInstance = () => {
@@ -6207,4 +6226,62 @@ describe('normalizeModelProposedGoals', () => {
     expect(normalizeModelProposedGoals(undefined)).toBeUndefined();
     expect(normalizeModelProposedGoals(true)).toBeUndefined();
   });
+});
+
+describe('loadCliConfig `.mcp.json` expansion follows the approval gate', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    process.argv = ['node', 'script.js'];
+    vi.mocked(isWorkspaceTrusted).mockReturnValue({
+      isTrusted: true,
+      source: 'file',
+    });
+    // Sibling suites call `vi.resetAllMocks()`; re-arm the pass-through so the
+    // real assembly still runs and only the arguments are observed.
+    vi.mocked(assembleMcpServers).mockImplementation(
+      mcpServersActual.assembleMcpServers!,
+    );
+    mockConfigConstructorParams.mockClear();
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  const lastConfigParams = () =>
+    mockConfigConstructorParams.mock.calls.at(-1)?.[0] as
+      | { pendingMcpServers?: string[] }
+      | undefined;
+
+  it('expands and computes pending servers when the gate is armed', async () => {
+    const argv = await parseArguments();
+    await loadCliConfig({}, argv, undefined, []);
+
+    expect(assembleMcpServers).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(assembleMcpServers).mock.calls[0][3]).toEqual({
+      expandEnv: true,
+    });
+    expect(lastConfigParams()?.pendingMcpServers).toEqual([]);
+  });
+
+  it.each([['--yolo'], ['-y'], ['--approval-mode', 'yolo']])(
+    'does not expand and skips pending servers under %s',
+    async (...flags: string[]) => {
+      process.argv = ['node', 'script.js', ...flags];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv, undefined, []);
+
+      expect(assembleMcpServers).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(assembleMcpServers).mock.calls[0][3]).toEqual({
+        expandEnv: false,
+      });
+      expect(lastConfigParams()?.pendingMcpServers).toBeUndefined();
+    },
+  );
 });

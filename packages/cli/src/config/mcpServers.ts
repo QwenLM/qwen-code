@@ -28,6 +28,7 @@ export function assembleMcpServers(
   mergedSettingsServers: Record<string, MCPServerConfig> | undefined,
   cwd: string,
   cliMcpServers?: Record<string, MCPServerConfig> | null,
+  options: { expandEnv?: boolean } = {},
 ): Record<string, MCPServerConfig> {
   const belowProject: Record<string, MCPServerConfig> = {};
   const aboveProject: Record<string, MCPServerConfig> = {};
@@ -41,7 +42,11 @@ export function assembleMcpServers(
     }
   }
 
-  const projectResult = loadProjectMcpServers(cwd);
+  // `expandEnv: false` when the approval gate is off — see
+  // LoadProjectMcpServersOptions.
+  const projectResult = loadProjectMcpServers(cwd, {
+    expandEnv: options.expandEnv,
+  });
   for (const error of projectResult.errors) {
     writeStderrLine(`Warning: ${error}`);
   }

@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  ApprovalMode,
   getErrorMessage,
   hashMcpServerConfig,
   isGatedMcpScope,
@@ -21,20 +22,33 @@ import { writeStderrLine } from '../utils/stdioHelpers.js';
 export const MCP_APPROVALS_FILENAME = 'mcpApprovals.json';
 
 /**
+ * Whether anything will ask the user before a gated MCP server connects.
+ *
+ * Bare and safe mode drop file-sourced servers entirely, and `--yolo` skips the
+ * prompt, so in all three nothing stands between a checked-in `.mcp.json` and a
+ * live connection. Callers use this for two decisions that must agree: whether
+ * to compute `pendingMcpServers`, and whether to expand `$VAR` placeholders
+ * while loading `.mcp.json` (see `LoadProjectMcpServersOptions.expandEnv`).
+ * Kept in one place so those two cannot drift apart.
+ */
+export function isMcpApprovalGateArmed(
+  bareMode: boolean,
+  safeMode: boolean,
+  approvalMode: ApprovalMode | undefined,
+): boolean {
+  return !bareMode && !safeMode && approvalMode !== ApprovalMode.YOLO;
+}
+
+/**
  * The user's persisted decision for one project-scoped MCP server. A decision is
  * bound to `hash` — the canonical hash of the exact config the user reviewed. If
  * `.mcp.json` is later edited, the live hash no longer matches and the server is
  * treated as `pending` again (see issue #4615).
  *
- * "The exact config the user reviewed" means the config AFTER `$VAR` / `${VAR}`
- * expansion, because that is what the dialog renders and what the transport will
- * actually use. So the binding is to the effective config, not to the bytes of
- * `.mcp.json`: rotating a referenced env var re-opens the approval even though
- * the file is untouched. That is the intended trade-off, not an oversight —
- * hashing the unexpanded text would leave an approval valid while
- * `${MCP_HOST}` silently re-pointed the approved server at a different
- * endpoint, which is precisely the substitution this gate exists to catch.
- * The re-prompt is the cost of that guarantee; the approval dialog states it.
+ * The digest is taken over the config AFTER `$VAR` expansion — what the dialog
+ * shows and the transport uses — so rotating a referenced variable re-opens the
+ * approval even with the file untouched. Hashing the raw text instead would let
+ * `${MCP_HOST}` silently re-point an approved server.
  */
 export type McpApprovalStatus = 'approved' | 'rejected';
 

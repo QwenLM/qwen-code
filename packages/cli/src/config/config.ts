@@ -98,7 +98,10 @@ export { isValidSessionId } from './session-id.js';
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
-import { getPendingGatedMcpServers } from './mcpApprovals.js';
+import {
+  getPendingGatedMcpServers,
+  isMcpApprovalGateArmed,
+} from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
@@ -1257,13 +1260,9 @@ function parseMcpConfig(
     debugLogger.debug(
       `Loaded ${Object.keys(servers).length} MCP server(s) from --mcp-config`,
     );
-    // Bound nesting before handing the document to the recursive resolver, for
-    // the same reason `loadProjectMcpServers` does: `resolveEnvVarsInObject`
-    // recurses per level and overflows the stack on a deep enough document. The
-    // enclosing `try` would catch that `RangeError` and report a
-    // `FatalConfigError`, so this is not the difference between a crash and an
-    // error — it is the difference between a deterministic message and one that
-    // depends on how much stack happened to be left. Reject explicitly instead.
+    // Bound nesting before the recursive resolver sees it, so a pathological
+    // document fails with a deterministic message naming the server rather than
+    // a stack-dependent `RangeError`.
     for (const [name, server] of Object.entries(servers)) {
       if (exceedsMaxDepth(server, MAX_MCP_SERVER_CONFIG_DEPTH)) {
         throw new Error(
@@ -1272,31 +1271,10 @@ function parseMcpConfig(
       }
     }
 
-    // Expand `$VAR` / `${VAR}` like every settings scope does. Without this,
-    // `--mcp-config` is the single source that ships the literal placeholder to
-    // the server as an auth header and the failure surfaces as an opaque 401
-    // (issue #11499). The resolver keeps its internal-secret guard.
-    //
-    // Note this resolves the WHOLE object, so `--mcp-config` gets full settings
-    // parity — including metadata like `description` — whereas
-    // `loadProjectMcpServers` expands only transport fields. The reason for the
-    // asymmetry is the provenance the two arguments normally carry: a
-    // `.mcp.json` is always the file sitting in the repository being opened,
-    // while `--mcp-config` is typed (or scripted) by whoever launches the
-    // command, alongside their own settings files.
-    //
-    // That is a statement about typical use, NOT a check: nothing here verifies
-    // authorship, and the value may equally be a path to a file inside the
-    // repository, in which case it is exactly as untrusted as `.mcp.json` while
-    // getting the wider rule. Treat the operator's choice to pass a path as the
-    // trust decision, because that is all this code can observe. Anything that
-    // needs a real trust boundary must gate on the approval flow, which is what
-    // `scope: 'project'` and `isGatedMcpScope` exist for — `--mcp-config`
-    // servers are deliberately not gated, and that predates this change.
-    //
-    // A document deep enough to overflow the resolver is rejected above; unlike
-    // a repo-supplied `.mcp.json`, where one bad entry is skipped and reported
-    // through `errors`, an explicit operator argument fails loudly and whole.
+    // Expand placeholders as every settings scope does (#11499: a literal
+    // placeholder reaches the server as an auth header and surfaces as a 401).
+    // Unlike `.mcp.json` this resolves the WHOLE object, metadata included, and
+    // is not gated by approval — `--mcp-config` servers never are.
     return resolveEnvVarsInObject(servers) as Record<string, MCPServerConfig>;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -2158,20 +2136,26 @@ export async function loadCliConfig(
   // ambient, file-sourced state they're meant to distrust) — but top-tier
   // servers are an explicit, per-invocation argument from the caller (ACP
   // `session/new`, `--mcp-config`), not ambient local state, so they survive.
+  const mcpApprovalGateArmed = isMcpApprovalGateArmed(
+    bareMode,
+    safeMode,
+    approvalMode,
+  );
   const mcpServers =
     bareMode || safeMode
       ? { ...topTierMcpServers }
-      : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
+      : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers, {
+          expandEnv: mcpApprovalGateArmed,
+        });
   // Top-tier servers are never gated (#4615, see the comment above), so this
   // is a no-op for them either way today. Skipped under safe mode anyway
   // (Copilot review, PR #7827): getPendingGatedMcpServers reads the local
   // mcpApprovals.json file, and safe mode shouldn't touch local/ambient
   // state at all, not even a read with no behavioral effect. Revisit if a
   // future gated top-tier source needs this to run under safe mode too.
-  const pendingMcpServers =
-    bareMode || safeMode || approvalMode === ApprovalMode.YOLO
-      ? undefined
-      : getPendingGatedMcpServers(mcpServers, cwd);
+  const pendingMcpServers = !mcpApprovalGateArmed
+    ? undefined
+    : getPendingGatedMcpServers(mcpServers, cwd);
 
   const configParams: ConfigParameters = {
     sessionId,
