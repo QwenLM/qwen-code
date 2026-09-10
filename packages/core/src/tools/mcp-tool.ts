@@ -168,6 +168,51 @@ type ParentAbortOutcome = {
   reason: unknown;
 };
 
+/**
+ * Only genuine user cancels may arm abort recovery. The scheduler's
+ * per-tool execution timeout aborts with a `TimeoutError` DOMException while
+ * deliberately leaving server-side work running, and shutdown / wind-down /
+ * preemption producers abort with their own reasons or none at all —
+ * none of them argue for tearing down and respawning a server. An
+ * allowlist (rather than a `TimeoutError` denylist) keeps the no-reason
+ * shutdown producer out. The kind must come from `signal.reason`:
+ * `createParentAbortRace` overwrites the propagated error with a generic
+ * AbortError, so the caught error no longer carries it.
+ */
+const USER_CANCEL_ABORT_REASONS: ReadonlySet<string> = new Set([
+  // Session.ts's USER_CANCEL_ABORT_REASON; duplicated as a literal because
+  // core cannot import from the cli package.
+  'qwen:user-cancel',
+]);
+
+function isUserCancelAbort(signal: AbortSignal): boolean {
+  return USER_CANCEL_ABORT_REASONS.has(String(signal.reason));
+}
+
+/**
+ * Per-server cooldown for abort-triggered recovery (module-level: the
+ * registry and its manager survive tool instances). The scheduler aborts
+ * every in-flight call on one cancel, so several invocations can land in
+ * the abort branch together and each would fire its own registry purge
+ * plus spawn attempt; staggered cancels repeat the cost indefinitely
+ * against a server that stays dead. `serverDiscoveryPromises` collapses
+ * only strictly-concurrent passes and only after the registry is already
+ * purged, so the guard must live before any work. Matches the health
+ * monitor's cadence (30s `checkIntervalMs`, the sibling recovery path's
+ * retry bound); first recovery per window is never suppressed.
+ */
+const ABORT_RECOVERY_LAST_ATTEMPT = new Map<string, number>();
+const ABORT_RECOVERY_COOLDOWN_MS = 30_000;
+
+/** Test-only: clear the per-server cooldown so suites start unbiased. */
+export function resetAbortRecoveryCooldownForTests(serverName?: string): void {
+  if (serverName === undefined) {
+    ABORT_RECOVERY_LAST_ATTEMPT.clear();
+  } else {
+    ABORT_RECOVERY_LAST_ATTEMPT.delete(serverName);
+  }
+}
+
 function createToolCallAbortError(): Error {
   return Object.assign(new Error('Tool call aborted'), { name: 'AbortError' });
 }
@@ -215,6 +260,15 @@ function createParentAbortRace(
 }
 
 type ToolParams = Record<string, unknown>;
+
+/**
+ * The slice of `McpClientManager` the abort-recovery evidence check reads.
+ * Kept structural so this file needs no manager import and test fixtures
+ * can supply a plain object.
+ */
+interface McpClientManagerLike {
+  getServerStatus(serverName: string): MCPServerStatus;
+}
 
 /**
  * Minimal interface for the raw MCP Client's callTool method.
@@ -316,6 +370,15 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   private static readonly MAX_RECONNECT_RETRIES = 3;
   private static readonly UNSAFE_REPLAY_ERROR_MESSAGE =
     'MCP tool execution may have completed before the connection failed. Automatic replay was skipped because the call could not be verified as safe to replay. Do not retry automatically; verify the outcome before trying again.';
+
+  /**
+   * Settled rejection of the SDK `callPromise` observed out-of-band while the
+   * parent-abort race was winning. When a cancel and a transport death land
+   * together, this is the only abort-site evidence THIS invocation's
+   * transport died (the raced rejection is the generic abort error). Cleared
+   * in `executeWithDirectClient`'s finally.
+   */
+  private losingCallError?: unknown;
 
   constructor(
     private readonly mcpTool: CallableTool,
@@ -433,19 +496,40 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
    * `handleReconnectOnError` (correctly — the call must not be replayed),
    * so without this the dead connection would linger until a manual
    * `/mcp reconnect` that Channel/daemon operators cannot run (#11272).
-   * Only fires on a *recorded* DISCONNECTED — `getMCPServerStatus`
-   * defaults unknown names to DISCONNECTED, and a misfire would delete the
-   * server's tools from the registry mid-session. Same form as
-   * `isExecutionTimeoutFailure`. A healthy server's cancel stays untouched.
+   * Fires only on positive evidence that THIS call's transport died:
+   * a *recorded* DISCONNECTED (the status map's default for unknown names
+   * is DISCONNECTED, so a missing entry is no evidence) plus either the
+   * losing callPromise's connection-style rejection or this manager's own
+   * client for the server reporting it disconnected — the same
+   * client-scoped read `performHealthCheck` uses, which a different
+   * runtime's same-named server cannot forge. A healthy server's cancel
+   * stays untouched.
    */
-  private scheduleRecoveryAfterAbort(): void {
+  private scheduleRecoveryAfterAbort(losingCallError?: unknown): void {
     if (!this.cliConfig) {
       return;
     }
-    const statuses = getAllMCPServerStatuses();
-    if (statuses.get(this.serverName) !== MCPServerStatus.DISCONNECTED) {
+    if (!this.hasAbortRecoveryEvidence(losingCallError)) {
       return;
     }
+    // Pool-backed sessions bake the daemon's bootstrap Config into the tool;
+    // recovering through it would purge the bootstrap registry and spawn a
+    // legacy child outside the pool while the cancelling session keeps its
+    // torn-down view (exactly what `skipMcpDiscovery` on the bootstrap
+    // exists to prevent). Pool entries recover through their own
+    // eviction/re-acquire path; skip here.
+    if (this.cliConfig.getMcpTransportPool?.()) {
+      return;
+    }
+    const now = Date.now();
+    const lastAttempt = ABORT_RECOVERY_LAST_ATTEMPT.get(this.serverName);
+    if (
+      lastAttempt !== undefined &&
+      now - lastAttempt < ABORT_RECOVERY_COOLDOWN_MS
+    ) {
+      return;
+    }
+    ABORT_RECOVERY_LAST_ATTEMPT.set(this.serverName, now);
     debugLogger.info(
       `MCP server '${this.serverName}' disconnected at abort time; ` +
         `re-arming connection in background for the next call`,
@@ -461,6 +545,51 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     // `skipHistoryReveal` matches a background refresh: there is no user
     // turn to reveal history into.
     void this.reconnectAndRefreshDeclarations();
+  }
+
+  /**
+   * Positive evidence that the transport THIS invocation used is dead.
+   * A recorded DISCONNECTED alone is not enough: the status map is
+   * process-global and keyed by name only, so another runtime's dead
+   * same-named server or a stale entry can set it while our client is
+   * alive. Either the losing call rejected with a connection-style error
+   * (the SDK settles it with `ConnectionClosed` on transport death), or
+   * the manager's own client for this server — reached through this
+   * invocation's registry, not the global map — reports disconnected.
+   */
+  private hasAbortRecoveryEvidence(losingCallError?: unknown): boolean {
+    const statuses = getAllMCPServerStatuses();
+    if (statuses.get(this.serverName) !== MCPServerStatus.DISCONNECTED) {
+      return false;
+    }
+    if (
+      losingCallError !== undefined &&
+      this.isConnectionDeathError(losingCallError)
+    ) {
+      return true;
+    }
+    // Test fixtures stub the registry without the manager; fall back to the
+    // recorded status only when there is no client-scoped source at all.
+    const registry = this.cliConfig?.getToolRegistry?.() as
+      | { getMcpClientManager?: () => McpClientManagerLike }
+      | undefined;
+    const manager = registry?.getMcpClientManager?.();
+    if (!manager) {
+      return true;
+    }
+    return (
+      manager.getServerStatus(this.serverName) === MCPServerStatus.DISCONNECTED
+    );
+  }
+
+  private isConnectionDeathError(error: unknown): boolean {
+    if (isMcpDeadSessionHttpError(error)) {
+      return true;
+    }
+    const message = getErrorMessage(error);
+    return MCP_CONNECTION_ERROR_PATTERNS.some((pattern) =>
+      pattern.test(message),
+    );
   }
 
   private async reconnectAndRefreshDeclarations(): Promise<void> {
@@ -485,6 +614,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     error: unknown,
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
+    losingCallError?: unknown,
   ): Promise<ToolResult> {
     debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
 
@@ -494,9 +624,13 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       // (server crash racing the user's cancel), the cancel path would skip
       // every recovery branch below and the dead connection would stay
       // unrepaired until a manual `/mcp reconnect` — unrecoverable in
-      // Channel/daemon mode with no TTY (issue #11272). Best-effort re-arm
-      // the connection for the NEXT call; this call still throws the abort.
-      this.scheduleRecoveryAfterAbort();
+      // Channel/daemon mode with no TTY (issue #11272). Only genuine user
+      // cancels arm the recovery: timeout/shutdown/preemption aborts have
+      // their own semantics and must not tear down a server. Best-effort
+      // re-arm the connection for the NEXT call; this call still throws.
+      if (isUserCancelAbort(signal)) {
+        this.scheduleRecoveryAfterAbort(losingCallError);
+      }
       throw error;
     }
 
@@ -722,6 +856,19 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           signal: combinedSignal,
         },
       );
+      // Observe the SDK call's rejection without altering how the race
+      // settles: when the parent abort wins, `callPromise` still rejects in
+      // the background (with `ConnectionClosed` if the transport died
+      // together with the cancel), and that late rejection is the only
+      // positive evidence at the abort site. Capturing it on a side channel
+      // preserves the pre-existing race semantics exactly — including which
+      // rejection wins when both settle in the same turn (#8180 review).
+      // The capture handler runs before any timer, so the abort handler
+      // (a microtask later) already sees it; a death recorded later than
+      // that is handled by the next call's reconnect path.
+      void callPromise.then(undefined, (callError: unknown) => {
+        this.losingCallError = callError;
+      });
       const outcome = await Promise.race([
         callPromise,
         parentAbortRace.promise,
@@ -768,6 +915,11 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
+      // When the parent abort won the race, `error` is the generic abort
+      // error and carries no transport information; `losingCallError` (set
+      // by the side-channel observer on the SDK call) is the SDK's own
+      // rejection — the only abort-site evidence THIS transport died.
+      const losingCallError = this.losingCallError;
       // `idleTimeoutWon` is our own client-side timer firing, so it is an
       // execution timeout regardless of what the transport thinks.
       if (
@@ -779,8 +931,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           ToolErrorType.EXECUTION_TIMEOUT,
         );
       }
-      return this.handleReconnectOnError(error, signal, updateOutput);
+      return this.handleReconnectOnError(
+        error,
+        signal,
+        updateOutput,
+        losingCallError,
+      );
     } finally {
+      this.losingCallError = undefined;
       // Clear the idle timeout in all cases
       if (idleTimeoutId) {
         clearTimeout(idleTimeoutId);

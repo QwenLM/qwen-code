@@ -558,6 +558,17 @@ export class McpClientManager {
    */
   private stopTimedOut = false;
 
+  /**
+   * Set synchronously at the top of `stop()` and cleared only by the bulk
+   * `discoverAllMcpTools` fresh start that immediately follows its own
+   * `stop()` call: post-stop, this manager is being torn down, so any
+   * discovery that lands late must not register a fresh client the
+   * teardown snapshot never saw. The legacy single-server path checks it
+   * right before `this.clients.set(...)` — the analogue of the pool
+   * path's `stopTimedOut` gate, but lifetime-scoped rather than per-pass.
+   */
+  private stopped = false;
+
   constructor(
     config: Config,
     toolRegistry: ToolRegistry,
@@ -1070,6 +1081,10 @@ export class McpClientManager {
       return this.discoverAllMcpToolsViaPool(cliConfig);
     }
     await this.stop();
+    // `stop()` sets `stopped` for teardown (R1-6 gate). This call is the
+    // documented fresh start that follows it — same lifecycle as the
+    // `reservedSlots`/`clients` clears `stop()` performs for this path.
+    this.stopped = false;
 
     const servers = this.getEffectiveMcpServers();
 
@@ -1403,6 +1418,22 @@ export class McpClientManager {
       this.cliConfig.getDebugMode(),
       sdkCallback,
     );
+
+    // `stop()` may have run while the awaits above held this function
+    // (existing-client disconnect, budget reservation). Its snapshot of
+    // `this.clients` is already gone; registering now would orphan a
+    // connected client no teardown path will ever see. Drop the just-built
+    // client instead. Mirrors the pool path's `stopTimedOut` gate, which
+    // exists for exactly this interleaving on `pool.acquire`.
+    if (this.stopped) {
+      try {
+        await client.disconnect();
+      } catch {
+        // best-effort transport cleanup; nothing is registered to lose
+      }
+      this.releaseSlotName(serverName);
+      return;
+    }
 
     this.clients.set(serverName, client);
     this.eventEmitter?.emit('mcp-client-update', this.clients);
@@ -1784,6 +1815,14 @@ export class McpClientManager {
    * This is the cleanup method to be called on application exit.
    */
   async stop(): Promise<void> {
+    // Flag BEFORE any await: a discovery that resolves during this stop()
+    // must observe it and drop the client it just built instead of
+    // re-populating `this.clients` after the snapshot below. Synchronous
+    // set is what bounds the legacy path's post-stop window — the drain
+    // below only guards the pool pass (`discoveryInFlight`), and
+    // `serverDiscoveryPromises` is cleared unawaited.
+    this.stopped = true;
+
     // Stop all health checks first
     this.stopAllHealthChecks();
 
@@ -1931,12 +1970,22 @@ export class McpClientManager {
           `Error disconnecting client '${serverName}': ${getErrorMessage(error)}`,
         );
       } finally {
-        this.clients.delete(serverName);
-        this.connectedConfigKeys.delete(serverName);
-        this.consecutiveFailures.delete(serverName);
-        this.isReconnecting.delete(serverName);
-        this.serverDiscoveryPromises.delete(serverName);
-        this.eventEmitter?.emit('mcp-client-update', this.clients);
+        // Identity-check the delete: the await above spans a full transport
+        // teardown (~2s for stdio with a request in flight), and a
+        // concurrent rediscovery can install a NEW client for the same name
+        // in that window. Deleting by name would evict that replacement —
+        // a connected client with a live child that no one holds a
+        // reference to (`stop()` snapshots `this.clients`, so it is never
+        // reaped). Only drop the entry if it is still the client we
+        // actually disconnected.
+        if (this.clients.get(serverName) === client) {
+          this.clients.delete(serverName);
+          this.connectedConfigKeys.delete(serverName);
+          this.consecutiveFailures.delete(serverName);
+          this.isReconnecting.delete(serverName);
+          this.serverDiscoveryPromises.delete(serverName);
+          this.eventEmitter?.emit('mcp-client-update', this.clients);
+        }
       }
     }
     // explicit operator-driven disconnect releases the budget

@@ -21,6 +21,8 @@ import { MockTool } from '../test-utils/mock-tool.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 
 import { McpClientManager } from './mcp-client-manager.js';
+import { PromptRegistry } from '../prompts/prompt-registry.js';
+import { ResourceRegistry } from '../resources/resource-registry.js';
 import {
   getAllMCPServerStatuses,
   MCPServerStatus,
@@ -1650,6 +1652,72 @@ describe('ToolRegistry', () => {
 
       // The good tool should still have been loaded despite the failure.
       expect(await toolRegistry.ensureTool('good-tool')).toBe(goodTool);
+    });
+  });
+
+  describe('discoverToolsForServer failure restore (R1-3)', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      for (const name of getAllMCPServerStatuses().keys()) {
+        removeMCPServerStatus(name);
+      }
+    });
+
+    it('restores the previously registered tools/prompts/resources when rediscovery fails', async () => {
+      // R1-3: the purge runs before the await, so a FAILED rediscovery
+      // previously left the server with nothing for the rest of the
+      // session — exactly the moment the cancel-recovery path fires.
+      // The old registrations must come back so `ensureTool` and the
+      // registries keep resolving them.
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+      expect(toolRegistry.getTool(mcpTool.name)).toBe(mcpTool);
+
+      // The global beforeEach mocks the registries with stubs; this test
+      // needs the real ones so restoration is observable.
+      const promptRegistry = new PromptRegistry();
+      const resourceRegistry = new ResourceRegistry();
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(promptRegistry);
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(resourceRegistry);
+      promptRegistry.registerPrompt({
+        serverName: 'flaky-server',
+        name: 'review',
+        description: 'd',
+        arguments: [],
+        invoke: vi.fn(),
+      } as any);
+      resourceRegistry.registerResource({
+        serverName: 'flaky-server',
+        uri: 'file:///review.md',
+        name: 'review.md',
+        description: 'd',
+        mimeType: 'text/markdown',
+      });
+
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockRejectedValue(new Error('reconnect failed'));
+
+      await expect(
+        toolRegistry.discoverToolsForServer('flaky-server'),
+      ).rejects.toThrow('reconnect failed');
+
+      // The pre-failure registrations must be restorable — the next call
+      // has a tool to run instead of a permanently emptied server.
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBe(mcpTool);
+      expect(
+        promptRegistry.getPromptsByServer('flaky-server').map((p) => p.name),
+      ).toEqual(['review']);
+      expect(
+        resourceRegistry.getResourcesByServer('flaky-server').map((r) => r.uri),
+      ).toEqual(['file:///review.md']);
     });
   });
 

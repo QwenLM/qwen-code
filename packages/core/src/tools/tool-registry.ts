@@ -621,25 +621,72 @@ export class ToolRegistry {
    * @param serverName - The name of the server to discover tools from.
    */
   async discoverToolsForServer(serverName: string): Promise<void> {
-    // Remove any previously discovered tools from this server
+    // Snapshot the server's current registrations so a FAILED rediscovery
+    // can put them back. The purge below runs before the await, so without
+    // restoration a failed rediscovery leaves the server with no tools for
+    // the rest of the session — nothing else re-registers them (the
+    // manager's internal catch only logs). Cancel-triggered recovery is
+    // exactly the caller that must not widen that window.
+    const previousTools: DiscoveredMCPTool[] = [];
+    const previousRevealed: Array<[string, boolean]> = [];
     for (const [name, tool] of this.tools.entries()) {
       if (tool instanceof DiscoveredMCPTool && tool.serverName === serverName) {
-        this.tools.delete(name);
+        previousTools.push(tool);
+        previousRevealed.push([name, this.revealedDeferred.has(name)]);
         // Drop reveal state too so a re-discovered tool of the same
         // name doesn't inherit a `revealed: true` from before the
         // disconnect (would surface in declarations before any
         // ToolSearch call this session).
         this.revealedDeferred.delete(name);
+        this.tools.delete(name);
       }
     }
+    const previousPrompts = this.config
+      .getPromptRegistry()
+      .getPromptsByServer(serverName);
+    const previousResources = this.config
+      .getResourceRegistry()
+      .getResourcesByServer(serverName);
 
     this.config.getPromptRegistry().removePromptsByServer(serverName);
     this.config.getResourceRegistry().removeResourcesByServer(serverName);
 
-    await this.mcpClientManager.discoverMcpToolsForServer(
-      serverName,
-      this.config,
-    );
+    try {
+      await this.mcpClientManager.discoverMcpToolsForServer(
+        serverName,
+        this.config,
+      );
+    } catch (error) {
+      // Rediscovery failed: the old registrations point at a client the
+      // manager has already disconnected, but they are still the best
+      // available state — `ensureTool` keeps resolving them and the
+      // connection-error paths (`shouldAttemptReconnect`) can repair on
+      // the next call. An empty registry would leave the server's tools
+      // uncallable instead, with no path back short of a full restart.
+      // Best-effort and deliberately silent about re-registration errors:
+      // the original discovery error is the one callers should see.
+      try {
+        for (const tool of previousTools) {
+          this.registerTool(tool);
+        }
+        for (const [name, revealed] of previousRevealed) {
+          if (revealed) {
+            this.revealedDeferred.add(name);
+          }
+        }
+        for (const prompt of previousPrompts) {
+          this.config.getPromptRegistry().registerPrompt(prompt);
+        }
+        for (const resource of previousResources) {
+          this.config.getResourceRegistry().registerResource(resource);
+        }
+      } catch (restoreError) {
+        debugLogger.error(
+          `Failed to restore registrations for MCP server '${serverName}' after rediscovery failure: ${restoreError}`,
+        );
+      }
+      throw error;
+    }
   }
 
   private async discoverAndRegisterToolsFromCommand(): Promise<void> {

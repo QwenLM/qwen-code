@@ -11,6 +11,7 @@ import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import {
   DiscoveredMCPTool,
   generateValidName,
+  resetAbortRecoveryCooldownForTests,
   type McpDirectClient,
   type McpToolAnnotations,
 } from './mcp-tool.js';
@@ -234,6 +235,7 @@ describe('DiscoveredMCPTool', () => {
 
   afterEach(() => {
     removeMCPServerStatus(serverName);
+    resetAbortRecoveryCooldownForTests(serverName);
     vi.restoreAllMocks();
   });
 
@@ -2368,8 +2370,10 @@ describe('DiscoveredMCPTool', () => {
       const invocation = reconnectTool.build(params);
       const execution = invocation.execute(controller.signal);
       // Abort before the rejected call settles so the error is observed as a
-      // cancellation, not a bare transport failure.
-      controller.abort();
+      // cancellation, not a bare transport failure. The reason matches
+      // Session.ts's USER_CANCEL_ABORT_REASON — the only abort kind that
+      // arms background recovery.
+      controller.abort('qwen:user-cancel');
       await expect(execution).rejects.toThrow('The operation was aborted');
 
       // The cancelled call itself must never be replayed...
@@ -2387,6 +2391,86 @@ describe('DiscoveredMCPTool', () => {
       // registry-only re-registration would never reach the model.
       await vi.waitFor(() => expect(setTools).toHaveBeenCalledTimes(1));
       expect(setTools).toHaveBeenCalledWith({ skipHistoryReveal: true });
+
+      // A second cancel inside the cooldown window must not fire another
+      // purge + spawn cycle: recovery is bounded per server. Without the
+      // cooldown guard the count grows to 2.
+      const secondCancel = new AbortController();
+      const secondExecution = reconnectTool
+        .build(params)
+        .execute(secondCancel.signal);
+      secondCancel.abort('qwen:user-cancel');
+      await expect(secondExecution).rejects.toThrow(
+        'The operation was aborted',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not retry a callTool AbortError when the signal was never aborted', async () => {
+      // Pins the non-abort classifier path the re-arm tests replaced: a
+      // bare AbortError rejection from `callTool` against a DISCONNECTED
+      // server, with a live (never-aborted) parent signal, must be a
+      // plain cancel-shaped failure — no retry, no reconnect, no
+      // recovery side effects.
+      const params = { param: 'test' };
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(),
+      };
+
+      const retryClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockResolvedValueOnce({ content: [{ type: 'text', text: 'OK' }] }),
+      };
+      const retryTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        retryClient,
+      );
+
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn().mockResolvedValue(retryTool);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool,
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      (mockMcpClient.callTool as any).mockRejectedValue(abortError);
+
+      const reconnectTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const invocation = reconnectTool.build(params);
+      await expect(
+        invocation.execute(new AbortController().signal),
+      ).rejects.toThrow('The operation was aborted');
+
+      expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(ensureTool).not.toHaveBeenCalled();
+      expect(retryClient.callTool).not.toHaveBeenCalled();
     });
 
     it('should not trigger background recovery on abort while the server is connected', async () => {
@@ -2427,6 +2511,51 @@ describe('DiscoveredMCPTool', () => {
 
       // A cancel against a healthy server must stay a pure cancel: no retry,
       // no reconnect churn.
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+    });
+
+    it('should not trigger background recovery on a timeout-kind abort against a disconnected server', async () => {
+      // The scheduler aborts timed-out tools with a `TimeoutError`
+      // DOMException — an abort, but not a user cancel. Recovery must
+      // read the kind from `signal.reason` and stay dark for it, even
+      // with a recorded DISCONNECTED and a dead-session rejection.
+      const params = { param: 'test' };
+      const deadSession = Object.assign(
+        new Error('HTTP 404: session not found'),
+        { code: -32001 },
+      );
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(deadSession),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const controller = new AbortController();
+      const invocation = tool.build(params);
+      const execution = invocation.execute(controller.signal);
+      controller.abort(new DOMException('Timeout', 'TimeoutError'));
+      await expect(execution).rejects.toBeTruthy();
+
       expect(discoverToolsForServer).not.toHaveBeenCalled();
     });
 
@@ -2926,7 +3055,9 @@ describe('DiscoveredMCPTool', () => {
         .execute(abortController.signal);
 
       updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
-      abortController.abort();
+      // User-cancel reason (Session.ts's USER_CANCEL_ABORT_REASON): the
+      // abort kind that legitimately arms background recovery.
+      abortController.abort('qwen:user-cancel');
 
       const rejection = await executePromise.catch((error) => error);
       expect(rejection).toMatchObject({ name: 'AbortError' });

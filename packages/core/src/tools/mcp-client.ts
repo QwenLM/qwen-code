@@ -609,6 +609,26 @@ export class McpClient {
       this.instructions = this.client.getInstructions();
       bindInvocationContextPolicy(this.client, this.transport);
 
+      // Chain, don't replace, any onclose the SDK or a wrapper installed
+      // (`connectToMcpServer`'s directory-listener cleanup relies on this).
+      // A stdio child's exit reaches the MCP SDK as a transport *close*, not
+      // an error: StdioClientTransport maps `process.on('close')` to
+      // `onclose`, and `Protocol._onclose` settles pending requests with
+      // `SdkError(ConnectionClosed)` — `onerror` never fires. Without this
+      // write, a crashed stdio child stays CONNECTED in the status registry
+      // and every recorded-status consumer (abort recovery, timeout
+      // diversion, Footer pill) misreads a dead transport as healthy.
+      // `isDisconnecting` guard matches `onerror`: intentional teardown
+      // already writes DISCONNECTED via `disconnect()` itself, and
+      // post-teardown late closes must not resurrect a dropped entry.
+      const previousOnclose = this.client.onclose;
+      this.client.onclose = () => {
+        previousOnclose?.();
+        if (!this.isDisconnecting) {
+          this.updateStatus(MCPServerStatus.DISCONNECTED);
+        }
+      };
+
       this.updateStatus(MCPServerStatus.CONNECTED);
     } catch (error) {
       this.instructions = undefined;
