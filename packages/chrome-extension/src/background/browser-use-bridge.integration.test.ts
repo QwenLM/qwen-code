@@ -167,6 +167,11 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     Uint8Array,
     chrome: {
       runtime: { id: 'extension-id', connectNative: () => port },
+      alarms: {
+        get: async () => undefined,
+        create: async () => undefined,
+        onAlarm: noOpEvent('alarm'),
+      },
       storage: {
         session: {
           async get(keys: string | string[]) {
@@ -392,20 +397,13 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   await api.dispatch('tabs.attach', { tabId: 1 });
   hangOverlayCleanup = true;
   const detaching = api.dispatch('tabs.detach', { tabId: 1 });
-  await waitFor(() => !api.attachedTabs.has(1));
-  await assert.rejects(
-    api.dispatch('cdp.send', {
-      tabId: 1,
-      method: 'Page.enable',
-      params: {},
-    }),
-    (error: unknown) =>
-      typeof error === 'object' &&
-      error !== null &&
-      'code' in error &&
-      error.code === 'TAB_DEBUGGER_CONFLICT',
-  );
-  await detaching;
+  const reattaching = api.dispatch('cdp.send', {
+    tabId: 1,
+    method: 'Page.enable',
+    params: {},
+  });
+  await Promise.all([detaching, reattaching]);
+  assert.ok(debuggerAttachedTabIds.has(1));
   hangOverlayCleanup = false;
   assert.ok(
     debuggerCommands.some(

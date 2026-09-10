@@ -44,9 +44,7 @@ export async function installChromeNativeHost(
 ): Promise<NativeHostInstallResult> {
   const resolved = resolveOptions(options);
   await access(resolved.nativeHostPath);
-  const existingLauncher = await readFile(resolved.launcherPath, 'utf8').catch(
-    () => null,
-  );
+  const existingLauncher = await readExistingFile(resolved.launcherPath);
   if (existingLauncher !== null && !isOwnedLauncher(existingLauncher)) {
     throw new Error(
       'Refusing to replace a foreign Native Host launcher: ' +
@@ -86,7 +84,7 @@ export async function installChromeNativeHost(
     ) + '\n';
   const skippedForeignPaths: string[] = [];
   for (const manifestPath of resolved.manifestPaths) {
-    const existing = await readFile(manifestPath, 'utf8').catch(() => null);
+    const existing = await readExistingFile(manifestPath);
     if (
       existing === null &&
       !(await pathExists(dirname(dirname(manifestPath))))
@@ -116,7 +114,7 @@ export async function uninstallChromeNativeHost(
   const resolved = resolveOptions(options);
   const skippedForeignPaths: string[] = [];
   for (const manifestPath of resolved.manifestPaths) {
-    const contents = await readFile(manifestPath, 'utf8').catch(() => null);
+    const contents = await readExistingFile(manifestPath);
     if (contents === null) continue;
     if (isOwnedManifest(contents, resolved.launcherPath)) {
       await rm(manifestPath, { force: true });
@@ -125,9 +123,7 @@ export async function uninstallChromeNativeHost(
     }
   }
 
-  const launcher = await readFile(resolved.launcherPath, 'utf8').catch(
-    () => null,
-  );
+  const launcher = await readExistingFile(resolved.launcherPath);
   if (launcher !== null) {
     if (isOwnedLauncher(launcher)) {
       await rm(resolved.launcherPath, { force: true });
@@ -149,7 +145,7 @@ export async function statusChromeNativeHost(
   const installedPaths: string[] = [];
   const skippedForeignPaths: string[] = [];
   for (const manifestPath of resolved.manifestPaths) {
-    const contents = await readFile(manifestPath, 'utf8').catch(() => null);
+    const contents = await readExistingFile(manifestPath);
     if (contents === null) continue;
     if (isOwnedManifest(contents, resolved.launcherPath)) {
       installedPaths.push(manifestPath);
@@ -157,9 +153,7 @@ export async function statusChromeNativeHost(
       skippedForeignPaths.push(manifestPath);
     }
   }
-  const launcher = await readFile(resolved.launcherPath, 'utf8').catch(
-    () => null,
-  );
+  const launcher = await readExistingFile(resolved.launcherPath);
   if (launcher !== null && isOwnedLauncher(launcher)) {
     installedPaths.push(resolved.launcherPath);
   } else if (launcher !== null) {
@@ -201,7 +195,7 @@ function resolveOptions(options: NativeHostInstallOptions): {
     platform === 'darwin'
       ? [
           'Library/Application Support/Google/Chrome/NativeMessagingHosts',
-          'Library/Application Support/Google/ChromeForTesting/NativeMessagingHosts',
+          'Library/Application Support/Google/Chrome for Testing/NativeMessagingHosts',
           'Library/Application Support/Chromium/NativeMessagingHosts',
         ]
       : [
@@ -237,6 +231,15 @@ function isOwnedManifest(contents: string, launcherPath: string): boolean {
 
 function isOwnedLauncher(contents: string): boolean {
   return contents.startsWith('#!/bin/sh\n' + LAUNCHER_MARKER + '\n');
+}
+
+async function readExistingFile(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
 }
 
 async function atomicWrite(

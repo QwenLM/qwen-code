@@ -145,7 +145,7 @@ export class PlaywrightRuntime {
     switch (method) {
       case 'browsers.list':
         try {
-          await this.bridge.request('ping', {}, 1_500);
+          await this.bridge.request('ping');
           return [this.browserInfo()];
         } catch (error) {
           if (

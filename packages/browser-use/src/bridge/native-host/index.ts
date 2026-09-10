@@ -9,6 +9,7 @@
 import { connect, type Socket } from 'node:net';
 
 import { defaultChromeBridgeSocketPath } from '../protocol.js';
+import { verifySocketPeerPath } from '../socket-path.js';
 import { encodeFrame, FrameDecoder } from '../transport/framing.js';
 import { encodeNativeMessagingOutput } from './native-messaging-output.js';
 
@@ -17,36 +18,28 @@ const nativeDecoder = new FrameDecoder();
 const queued: unknown[] = [];
 let latestHello: unknown;
 let socket: Socket | undefined;
-let retryTimer: NodeJS.Timeout | undefined;
-let closing = false;
 let outputSequence = 0;
 
-function connectBackend(): void {
-  if (closing || socket !== undefined) return;
+function shutdown(code = 0): never {
+  socket?.destroy();
+  process.exit(code);
+}
+
+async function connectBackend(): Promise<void> {
+  try {
+    await verifySocketPeerPath(socketPath);
+  } catch {
+    shutdown();
+  }
   const candidate = connect(socketPath);
+  socket = candidate;
   candidate.once('connect', () => {
-    socket = candidate;
     if (latestHello !== undefined) candidate.write(encodeFrame(latestHello));
     for (const message of queued.splice(0))
       candidate.write(encodeFrame(message));
   });
-  const reconnect = (): void => {
-    const backendWasConnected = socket === candidate;
-    if (backendWasConnected) socket = undefined;
-    candidate.destroy();
-    if (backendWasConnected) {
-      closing = true;
-      process.exit(0);
-    }
-    if (!closing && retryTimer === undefined) {
-      retryTimer = setTimeout(() => {
-        retryTimer = undefined;
-        connectBackend();
-      }, 1_000);
-    }
-  };
-  candidate.once('error', reconnect);
-  candidate.once('close', reconnect);
+  candidate.once('error', () => shutdown());
+  candidate.once('close', () => shutdown());
   const backendDecoder = new FrameDecoder();
   candidate.on('data', (chunk) => {
     try {
@@ -60,7 +53,7 @@ function connectBackend(): void {
         }
       }
     } catch {
-      reconnect();
+      shutdown(1);
     }
   });
 }
@@ -75,11 +68,11 @@ process.stdin.on('data', (chunk: Buffer) => {
         message.type === 'hello'
       ) {
         latestHello = message;
-        if (socket !== undefined && !socket.destroyed)
+        if (socket !== undefined && !socket.connecting && !socket.destroyed)
           socket.write(encodeFrame(message));
         continue;
       }
-      if (socket !== undefined && !socket.destroyed)
+      if (socket !== undefined && !socket.connecting && !socket.destroyed)
         socket.write(encodeFrame(message));
       else {
         queued.push(message);
@@ -87,17 +80,12 @@ process.stdin.on('data', (chunk: Buffer) => {
       }
     }
   } catch {
-    process.exitCode = 1;
-    process.stdin.destroy();
+    shutdown(1);
   }
 });
 
-process.stdin.on('end', () => {
-  closing = true;
-  if (retryTimer !== undefined) clearTimeout(retryTimer);
-  socket?.destroy();
-  process.exit(0);
-});
+process.stdin.on('end', () => shutdown());
+process.stdin.on('error', () => shutdown(1));
 
-process.stdout.on('error', () => process.exit(0));
-connectBackend();
+process.stdout.on('error', () => shutdown());
+void connectBackend();

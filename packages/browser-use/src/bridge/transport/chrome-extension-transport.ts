@@ -26,6 +26,7 @@ import {
 } from '../protocol.js';
 import { BrowserRuntimeError, type RuntimeErrorCode } from '../errors.js';
 import { encodeFrame, FrameDecoder } from './framing.js';
+import { prepareSocketDirectory } from '../socket-path.js';
 
 export type BridgeEventListener = (event: BridgeEvent) => void;
 export type BridgeConnectionListener = (connected: boolean) => void;
@@ -91,7 +92,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
 
   constructor(options: ChromeExtensionTransportOptions = {}) {
     this.socketPath = options.socketPath ?? defaultChromeBridgeSocketPath();
-    this.connectTimeoutMs = options.connectTimeoutMs ?? 5_000;
+    this.connectTimeoutMs = options.connectTimeoutMs ?? 35_000;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
   }
 
@@ -131,10 +132,12 @@ export class ChromeExtensionTransport implements ChromeBridge {
   async request(
     method: string,
     params: Record<string, unknown> = {},
-    timeoutMs = this.requestTimeoutMs,
+    timeoutMs?: number,
   ): Promise<unknown> {
     await this.start();
-    await this.waitForConnection(Math.min(this.connectTimeoutMs, timeoutMs));
+    await this.waitForConnection(
+      Math.min(this.connectTimeoutMs, timeoutMs ?? this.connectTimeoutMs),
+    );
     const socket = this.socket;
     if (socket === undefined || socket.destroyed) {
       throw disconnectedError();
@@ -156,7 +159,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
             `Chrome bridge request timed out: ${method}`,
           ),
         );
-      }, timeoutMs);
+      }, timeoutMs ?? this.requestTimeoutMs);
       this.pending.set(id, { resolve, reject, timer });
     });
     try {
@@ -183,6 +186,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
     const server = createServer((socket) => this.accept(socket));
     this.server = server;
     try {
+      await prepareSocketDirectory(this.socketPath);
       try {
         await listen(server, this.socketPath);
       } catch (error) {

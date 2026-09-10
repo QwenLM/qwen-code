@@ -23,7 +23,7 @@ export function defaultChromeBridgeSocketPath(
   }
   const uid =
     typeof process.getuid === 'function' ? process.getuid() : 'default';
-  return join('/tmp', `qwen-browser-use-${uid}.sock`);
+  return join('/tmp', `qwen-browser-use-${uid}`, 'bridge.sock');
 }
 
 export interface BridgeHello {

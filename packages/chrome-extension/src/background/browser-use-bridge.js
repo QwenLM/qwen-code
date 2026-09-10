@@ -11,6 +11,8 @@ const NATIVE_HOST = 'com.qwen.browser';
 const PROTOCOL_VERSION = 1;
 /** @type {Set<number>} */
 const attachedTabs = new Set();
+/** @type {Map<number, Promise<void>>} */
+const tabOperations = new Map();
 /** @type {Map<number, number>} */
 const derivedTabParents = new Map();
 /** @type {Set<number>} */
@@ -28,6 +30,7 @@ const nativeMessageChunks = new Map();
 const DERIVED_TAB_WINDOW_MS = 2_500;
 const DISCONNECT_DRAIN_MS = 250;
 const CDP_CLEANUP_TIMEOUT_MS = 250;
+const RECONNECT_ALARM = 'browser-use-reconnect';
 const NATIVE_MESSAGE_CHUNK_TYPE = 'qwen.browser.chunk';
 const MAX_NATIVE_MESSAGE_CHUNKS = 32;
 const DEFAULT_SESSION_NAME = 'Qwen Browser';
@@ -91,8 +94,6 @@ const AGENT_OVERLAY_BOOTSTRAP = `(() => {
 
 /** @type {chrome.runtime.Port | undefined} */
 let nativePort;
-/** @type {ReturnType<typeof setTimeout> | undefined} */
-let reconnectTimer;
 let sessionName = DEFAULT_SESSION_NAME;
 let groupOperation = Promise.resolve();
 let connectionGeneration = 0;
@@ -170,6 +171,18 @@ function stateSnapshot() {
 
 function connectNative() {
   if (nativePort) return;
+  let backendConnected = false;
+  const disconnected = () => {
+    nativePort = undefined;
+    connectionGeneration += 1;
+    if (backendConnected || attachedTabs.size > 0 || agentOwnedTabs.size > 0) {
+      void cleanupBackendState()
+        .catch(() => undefined)
+        .finally(scheduleReconnect);
+    } else {
+      scheduleReconnect();
+    }
+  };
   // Unlike the /cdp path, a live Native Messaging port keeps the MV3 worker
   // alive on every supported Chrome version.
   try {
@@ -177,6 +190,8 @@ function connectNative() {
     nativePort = port;
     const generation = ++connectionGeneration;
     port.onMessage.addListener((message) => {
+      if (nativePort !== port) return;
+      backendConnected = true;
       const operation = handleNativeMessage(port, message, generation);
       inFlightDispatches.add(operation);
       void operation.then(
@@ -185,10 +200,9 @@ function connectNative() {
       );
     });
     port.onDisconnect.addListener(() => {
+      void chrome.runtime.lastError;
       if (nativePort !== port) return;
-      nativePort = undefined;
-      connectionGeneration += 1;
-      void cleanupBackendState().finally(scheduleReconnect);
+      disconnected();
     });
     port.postMessage({
       type: 'hello',
@@ -196,18 +210,15 @@ function connectNative() {
       extensionId: chrome.runtime.id,
     });
   } catch {
+    const port = nativePort;
     nativePort = undefined;
-    connectionGeneration += 1;
-    void cleanupBackendState().finally(scheduleReconnect);
+    port?.disconnect();
+    disconnected();
   }
 }
 
 function scheduleReconnect() {
-  if (reconnectTimer) return;
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = undefined;
-    connectNative();
-  }, 1_000);
+  void chrome.alarms.create(RECONNECT_ALARM, { delayInMinutes: 0.5 });
 }
 
 async function cleanupBackendState() {
@@ -215,12 +226,16 @@ async function cleanupBackendState() {
   await drainOperations(operations);
   for (const operation of operations) inFlightDispatches.delete(operation);
   groupOperation = Promise.resolve();
-  await Promise.allSettled([...attachedTabs].map((tabId) => detach(tabId)));
+  await settleWithin(
+    [...new Set([...attachedTabs, ...tabOperations.keys()])].map((tabId) =>
+      detach(tabId),
+    ),
+    CDP_CLEANUP_TIMEOUT_MS * 2,
+  );
   const ownedTabIds = [...agentOwnedTabs];
   await Promise.allSettled(
     ownedTabIds.map((tabId) => chrome.tabs.ungroup(tabId)),
   );
-  attachedTabs.clear();
   derivedTabParents.clear();
   agentOwnedTabs.clear();
   managedGroupIdsByWindow.clear();
@@ -436,16 +451,26 @@ async function dispatch(method, params, generation = connectionGeneration) {
         url: 'about:blank',
         active: false,
       });
-      if (tab.id == null)
+      const tabId = tab.id;
+      if (tabId == null)
         throw bridgeError('STALE_TAB', 'Chrome did not return a tab id');
       if (generation !== connectionGeneration) {
-        await chrome.tabs.remove(tab.id).catch(() => undefined);
+        await chrome.tabs.remove(tabId).catch(() => undefined);
         assertActiveGeneration(generation);
       }
-      agentOwnedTabs.add(tab.id);
-      await persistState(generation);
-      await groupAgentOwnedTab(tab, generation);
-      await ensureAttached(tab.id, generation);
+      try {
+        agentOwnedTabs.add(tabId);
+        await persistState(generation);
+        await groupAgentOwnedTab(tab, generation);
+        await ensureAttached(tabId, generation);
+      } catch (error) {
+        await chrome.tabs.remove(tabId).then(
+          () => forgetTab(tabId),
+          () => undefined,
+        );
+        await persistState().catch(() => undefined);
+        throw error;
+      }
       return tabInfo({
         ...tab,
         url: tab.url || tab.pendingUrl || 'about:blank',
@@ -469,16 +494,18 @@ async function dispatch(method, params, generation = connectionGeneration) {
     }
     case 'tabs.release': {
       const tabId = numberParam(params, 'tabId');
-      assertActiveGeneration(generation);
-      await detach(tabId);
-      assertActiveGeneration(generation);
-      if (agentOwnedTabs.has(tabId)) {
-        await chrome.tabs.ungroup(tabId);
+      await runTabOperation(tabId, async () => {
         assertActiveGeneration(generation);
-        agentOwnedTabs.delete(tabId);
-        derivedTabParents.delete(tabId);
-        await persistState(generation);
-      }
+        await detachDebugger(tabId);
+        assertActiveGeneration(generation);
+        if (agentOwnedTabs.has(tabId)) {
+          await chrome.tabs.ungroup(tabId);
+          assertActiveGeneration(generation);
+          agentOwnedTabs.delete(tabId);
+          derivedTabParents.delete(tabId);
+          await persistState(generation);
+        }
+      });
       return null;
     }
     case 'tabs.close': {
@@ -685,43 +712,60 @@ function timestampParam(value, name) {
  * @param {number} generation
  */
 async function ensureAttached(tabId, generation) {
-  assertActiveGeneration(generation);
-  if (attachedTabs.has(tabId)) return;
-  try {
-    await chrome.debugger.attach({ tabId }, '1.3');
-    if (generation !== connectionGeneration) {
-      await chrome.debugger.detach({ tabId }).catch(() => undefined);
-      assertActiveGeneration(generation);
-    }
-    attachedTabs.add(tabId);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.includes('Another debugger is already attached')) {
-      throw bridgeError(
-        'TAB_DEBUGGER_CONFLICT',
-        `Another debugger is already attached to tab ${tabId}`,
-      );
-    } else {
-      throw error;
-    }
-  }
-  await installAgentOverlay(tabId, generation);
-  if (generation !== connectionGeneration) {
-    await detach(tabId);
+  let newlyAttached = false;
+  await runTabOperation(tabId, async () => {
     assertActiveGeneration(generation);
-  }
+    if (attachedTabs.has(tabId)) return;
+    try {
+      await chrome.debugger.attach({ tabId }, '1.3');
+      attachedTabs.add(tabId);
+      if (generation !== connectionGeneration) {
+        await detachDebugger(tabId);
+        assertActiveGeneration(generation);
+      }
+      newlyAttached = true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('Another debugger is already attached')) {
+        throw bridgeError(
+          'TAB_DEBUGGER_CONFLICT',
+          `Another debugger is already attached to tab ${tabId}`,
+        );
+      } else {
+        throw error;
+      }
+    }
+  });
+  if (!newlyAttached) return;
+  await installAgentOverlay(tabId, generation);
+  assertActiveGeneration(generation);
 }
 
 /** @param {number} tabId */
-async function detach(tabId) {
+function detach(tabId) {
+  return runTabOperation(tabId, () => detachDebugger(tabId));
+}
+
+/**
+ * @param {number} tabId
+ * @param {() => Promise<void>} operation
+ */
+function runTabOperation(tabId, operation) {
+  const previous = tabOperations.get(tabId) || Promise.resolve();
+  const pending = previous.catch(() => undefined).then(operation);
+  tabOperations.set(tabId, pending);
+  return pending.finally(() => {
+    if (tabOperations.get(tabId) === pending) tabOperations.delete(tabId);
+  });
+}
+
+/** @param {number} tabId */
+async function detachDebugger(tabId) {
   derivedTabDeadlines.delete(tabId);
   if (!attachedTabs.has(tabId)) return;
-  attachedTabs.delete(tabId);
   await removeAgentOverlay(tabId);
-  await settleWithin(
-    [chrome.debugger.detach({ tabId })],
-    CDP_CLEANUP_TIMEOUT_MS,
-  );
+  await chrome.debugger.detach({ tabId });
+  attachedTabs.delete(tabId);
 }
 
 /**
@@ -729,7 +773,7 @@ async function detach(tabId) {
  * @param {number} generation
  */
 async function installAgentOverlay(tabId, generation) {
-  if (generation !== connectionGeneration) return;
+  if (generation !== connectionGeneration || !attachedTabs.has(tabId)) return;
   if (!overlayScriptIds.has(tabId)) {
     try {
       const result = /** @type {{ identifier?: string }} */ (
@@ -741,6 +785,7 @@ async function installAgentOverlay(tabId, generation) {
       );
       if (
         generation === connectionGeneration &&
+        attachedTabs.has(tabId) &&
         typeof result?.identifier === 'string'
       )
         overlayScriptIds.set(tabId, result.identifier);
@@ -748,7 +793,7 @@ async function installAgentOverlay(tabId, generation) {
       // Overlay setup is advisory and must not block browser control.
     }
   }
-  if (generation !== connectionGeneration) return;
+  if (generation !== connectionGeneration || !attachedTabs.has(tabId)) return;
   try {
     await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
       expression: AGENT_OVERLAY_BOOTSTRAP,
@@ -836,7 +881,7 @@ function armDerivedTabWindow(tabId, method, params) {
   } else if (method === 'Input.dispatchKeyEvent') {
     const type = params.type;
     if (type !== 'keyDown' && type !== 'rawKeyDown') return;
-    if (params.key !== 'Enter' && params.key !== ' ') return;
+    if (params.key !== 'Enter') return;
   } else {
     return;
   }
@@ -1013,14 +1058,18 @@ function normalizeError(error) {
   };
 }
 
-chrome.tabs.onRemoved.addListener((tabId) => {
-  const wasAttached = attachedTabs.has(tabId);
-  attachedTabs.delete(tabId);
+/** @param {number} tabId */
+function forgetTab(tabId) {
+  const wasAttached = attachedTabs.delete(tabId);
   agentOwnedTabs.delete(tabId);
   overlayScriptIds.delete(tabId);
   derivedTabParents.delete(tabId);
   derivedTabDeadlines.delete(tabId);
-  if (wasAttached) postEvent(tabId, 'qwenBrowser.tabRemoved', {});
+  return wasAttached;
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (forgetTab(tabId)) postEvent(tabId, 'qwenBrowser.tabRemoved', {});
   void persistState();
 });
 
@@ -1042,6 +1091,17 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   derivedTabDeadlines.delete(source.tabId);
   attachedTabs.delete(source.tabId);
   overlayScriptIds.delete(source.tabId);
+  if (reason === 'canceled_by_user') {
+    const tabId = source.tabId;
+    const wasOwned = agentOwnedTabs.delete(tabId);
+    derivedTabParents.delete(tabId);
+    void persistState().catch(() => undefined);
+    if (wasOwned) {
+      void groupOperation
+        .then(() => chrome.tabs.ungroup(tabId))
+        .catch(() => undefined);
+    }
+  }
   postEvent(source.tabId, 'qwenBrowser.detached', {
     reason: reason || 'unknown',
   });
@@ -1052,4 +1112,10 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   postEvent(source.tabId, method, params, source.sessionId);
 });
 
-void restoreState().finally(connectNative);
+const stateRestored = restoreState().catch(() => undefined);
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === RECONNECT_ALARM) void stateRestored.then(connectNative);
+});
+void stateRestored.then(async () => {
+  if (!(await chrome.alarms.get(RECONNECT_ALARM))) connectNative();
+});

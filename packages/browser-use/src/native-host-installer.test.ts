@@ -51,11 +51,59 @@ describe('Chrome Native Host installer', () => {
       type: 'stdio',
       allowed_origins: ['chrome-extension://' + CHROME_EXTENSION_ID + '/'],
     });
-    expect(fs.statSync(result.launcherPath).mode & 0o777).toBe(0o700);
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(result.launcherPath).mode & 0o777).toBe(0o700);
+    }
     const launcher = fs.readFileSync(result.launcherPath, 'utf8');
     expect(launcher.startsWith('#!/bin/sh\n')).toBe(true);
     expect(launcher).toContain("'" + fixture.nativeHostPath + "'");
   });
+
+  it('registers the documented macOS Chrome for Testing profile', async () => {
+    const fixture = createFixture();
+    createBrowserProfile(fixture.homeDir, 'darwin', 'chrome-for-testing');
+    const options = { ...fixture, platform: 'darwin' as const };
+    await installChromeNativeHost(options);
+    expect((await statusChromeNativeHost(options)).installedPaths).toContain(
+      path.join(
+        fixture.homeDir,
+        'Library/Application Support/Google/Chrome for Testing/NativeMessagingHosts/com.qwen.browser.json',
+      ),
+    );
+  });
+
+  it
+    .skipIf(process.platform === 'win32' || process.getuid?.() === 0)
+    .each(['launcher', 'manifest'])(
+    'preserves an unreadable %s during install, status and uninstall',
+    async (kind) => {
+      const fixture = createFixture();
+      createBrowserProfile(fixture.homeDir, 'darwin', 'chrome');
+      const options = { ...fixture, platform: 'darwin' as const };
+      const installed = await installChromeNativeHost(options);
+      const target =
+        kind === 'launcher'
+          ? installed.launcherPath
+          : installed.manifestPaths[0]!;
+      fs.writeFileSync(target, 'foreign file');
+      fs.chmodSync(target, 0);
+      try {
+        for (const operation of [
+          installChromeNativeHost,
+          statusChromeNativeHost,
+          uninstallChromeNativeHost,
+        ]) {
+          await expect(operation(options)).rejects.toMatchObject({
+            code: 'EACCES',
+          });
+          expect(fs.statSync(target).mode & 0o777).toBe(0);
+        }
+      } finally {
+        fs.chmodSync(target, 0o600);
+      }
+      expect(fs.readFileSync(target, 'utf8')).toBe('foreign file');
+    },
+  );
 
   it('uses the documented Linux user paths and updates idempotently', async () => {
     const fixture = createFixture();
@@ -201,7 +249,7 @@ function createBrowserProfile(
       ? {
           chrome: 'Library/Application Support/Google/Chrome',
           'chrome-for-testing':
-            'Library/Application Support/Google/ChromeForTesting',
+            'Library/Application Support/Google/Chrome for Testing',
           chromium: 'Library/Application Support/Chromium',
         }
       : {

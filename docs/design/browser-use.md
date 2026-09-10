@@ -72,7 +72,9 @@ Chrome for Testing, and Chromium profile roots. It refuses to overwrite
 foreign files: a conflicting launcher aborts initialization, while a
 conflicting browser manifest is skipped. Running
 `node <skill-base>/runtime/scripts/native-host-setup.js uninstall` removes
-files owned by Browser Use. The Chrome extension only opens the registered host
+files owned by Browser Use. Only a missing file is treated as absent; other
+read failures abort the operation without overwriting the unreadable file. The
+Chrome extension only opens the registered host
 through `connectNative()`.
 
 ## Responsibilities
@@ -250,7 +252,20 @@ The Node Kernel directly owns the local Chrome extension transport:
 - closing and reinitializing Browser Use creates a new SDK object generation;
   handles retained from the closed generation remain stale.
 
-Browser Use does not add a polling heartbeat to the extension service worker.
+On Unix, both endpoints use `/tmp/qwen-browser-use-<uid>/bridge.sock`. The
+backend creates a user-owned directory with mode `0700` and a socket with mode
+`0600`. Both endpoints reject unsafe ownership, permissions, and replaceable
+ancestors; the Native Host also rejects socket symlinks before forwarding any
+traffic. An explicit socket override must use the same private-directory
+boundary. Same-user processes remain inside the trust boundary.
+
+When no backend is listening, the Native Host exits. The extension schedules
+one retry using a 30-second Chrome alarm, which survives worker suspension;
+it does not run a one-second retry loop or rewrite empty session state on
+failed discovery. Initial backend discovery can wait up to 35 seconds, with
+the normal request execution timeout starting after connection. Browser
+listing and selection both allow this discovery window; explicit short
+transport request timeouts still cap discovery.
 The active `runtime.connectNative()` port keeps the worker alive on Chrome 105
 and later, and an active `chrome.debugger` session provides an additional
 keepalive on Chrome 118 and later. This differs from the separate `/cdp`
@@ -262,7 +277,13 @@ When the backend socket disappears after connecting, the Native Host exits and
 Chrome closes its Native Messaging port. The extension handles that port
 disconnect by detaching the session's controlled tabs, removing Browser Use
 overlays, clearing ownership and derived-tab state, ungrouping managed tabs
-without closing them, and reconnecting the Native Host for a future backend.
+without closing them, and scheduling Native Host discovery for a future backend.
+Debugger attach and detach operations are serialized per tab. A successful
+release waits for Chrome to complete detach; a timeout in disconnect cleanup
+does not discard an unfinished per-tab operation. If new-tab initialization
+fails, the extension removes that newly created tab. Explicit user cancellation
+of debugging releases ownership and the derived relationship, persists that
+state, and ungroups the tab on a best-effort basis.
 
 At the end of a browser turn, `tabs.finalize()` treats `keep` as the complete
 set for that call: it closes unlisted agent-created tabs and releases unlisted
