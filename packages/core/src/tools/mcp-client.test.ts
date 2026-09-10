@@ -1629,47 +1629,52 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(promptRegistry.registerPrompt).not.toHaveBeenCalled();
     });
 
-    it('rejects a partial discovery snapshot when the transport closes during listing', async () => {
-      const mockedClient = {
-        connect: vi.fn(),
-        registerCapabilities: vi.fn(),
-        setRequestHandler: vi.fn(),
-        getServerCapabilities: () => ({ prompts: {} }),
-        request: vi
-          .fn()
-          .mockResolvedValue({ prompts: [{ name: 'surviving-prompt' }] }),
-        listTools: vi.fn().mockResolvedValue({ tools: [] }),
-        getInstructions: vi.fn(),
-        onclose: undefined as (() => void) | undefined,
-      };
-      vi.mocked(ClientLib.Client).mockReturnValue(
-        mockedClient as unknown as ClientLib.Client,
-      );
-      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
-        {} as SdkClientStdioLib.StdioClientTransport,
-      );
-      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
-        tool: async () => {
-          mockedClient.onclose?.();
-          throw new Error('Connection closed');
-        },
-      } as unknown as GenAiLib.CallableTool);
-      const client = new McpClient(
-        'partial-server',
-        { command: 'test-command' },
-        {} as ToolRegistry,
-        {} as PromptRegistry,
-        {} as WorkspaceContext,
-        false,
-        undefined,
-        { trackTransportClose: true },
-      );
-      await client.connect();
-      await expect(
-        client.discoverAndReturn(cfgWithResources()),
-      ).rejects.toThrow('connection closed during discovery');
-      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
-    });
+    it.each([undefined, new Error('write EPIPE during listing')])(
+      'rejects a partial snapshot and retains the transport cause: %s',
+      async (transportError) => {
+        const mockedClient = {
+          connect: vi.fn(),
+          registerCapabilities: vi.fn(),
+          setRequestHandler: vi.fn(),
+          getServerCapabilities: () => ({ prompts: {} }),
+          request: vi
+            .fn()
+            .mockResolvedValue({ prompts: [{ name: 'surviving-prompt' }] }),
+          listTools: vi.fn().mockResolvedValue({ tools: [] }),
+          getInstructions: vi.fn(),
+          onclose: undefined as (() => void) | undefined,
+          onerror: undefined as ((error: Error) => void) | undefined,
+        };
+        vi.mocked(ClientLib.Client).mockReturnValue(
+          mockedClient as unknown as ClientLib.Client,
+        );
+        vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+          {} as SdkClientStdioLib.StdioClientTransport,
+        );
+        vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+          tool: async () => {
+            if (transportError) mockedClient.onerror?.(transportError);
+            mockedClient.onclose?.();
+            throw new Error('Connection closed');
+          },
+        } as unknown as GenAiLib.CallableTool);
+        const client = new McpClient(
+          'partial-server',
+          { command: 'test-command' },
+          {} as ToolRegistry,
+          {} as PromptRegistry,
+          {} as WorkspaceContext,
+          false,
+          undefined,
+          { trackTransportClose: true },
+        );
+        await client.connect();
+        await expect(
+          client.discoverAndReturn(cfgWithResources()),
+        ).rejects.toThrow(transportError?.message ?? 'MCP transport closed');
+        expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+      },
+    );
 
     it('marks discovered tools alwaysLoad when the MCP server config requests it', async () => {
       const mockedClient = {

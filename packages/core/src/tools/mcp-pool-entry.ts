@@ -99,6 +99,7 @@ export function defaultPoolEntryOptions(
  */
 export interface PooledConnection {
   readonly id: ConnectionId;
+  readonly state: PoolEntryState;
   /** Stable transport identity; unlike `id`, this is stable for unpooled handles. */
   readonly transportId: ConnectionId;
   readonly serverName: string;
@@ -1306,6 +1307,9 @@ class PooledConnectionImpl implements PooledConnection {
 
   get id(): ConnectionId {
     return this.entry.id;
+  }
+  get state(): PoolEntryState {
+    return this.entry.currentState;
   }
   get transportId(): ConnectionId {
     return this.entry.transportId;

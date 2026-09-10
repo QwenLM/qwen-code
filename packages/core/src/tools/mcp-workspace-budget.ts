@@ -87,8 +87,6 @@ export class WorkspaceMcpBudget {
     string,
     McpRefusedServer['transport']
   >();
-  private preserveRefusals = false;
-  private refusalRemoved = false;
 
   /**
    * Hysteresis state for `budget_warning`. Initial `true` = "armed";
@@ -232,12 +230,8 @@ export class WorkspaceMcpBudget {
    * owns the reset; pending results from either scope share the final flush.
    */
   beginBulkPass(options: { preserveRefusals?: boolean } = {}): void {
-    if (this.bulkPassDepth === 0) {
-      this.preserveRefusals = options.preserveRefusals === true;
-    }
     // A full discovery reevaluates every server; recovery touches a subset.
     if (options.preserveRefusals !== true) {
-      this.preserveRefusals = false;
       this.lastRefusedServerNames = [];
       this.lastRefusedTransports.clear();
     }
@@ -251,7 +245,6 @@ export class WorkspaceMcpBudget {
       this.lastRefusedServerNames = Object.freeze([
         ...this.lastRefusedTransports.keys(),
       ]);
-      this.refusalRemoved = true;
     }
   }
 
@@ -273,7 +266,6 @@ export class WorkspaceMcpBudget {
     this.bulkPassDepth -= 1;
     if (this.bulkPassDepth > 0) return;
     this.flushRefusedBatch();
-    this.preserveRefusals = false;
   }
 
   /**
@@ -283,7 +275,7 @@ export class WorkspaceMcpBudget {
    * (the out-of-bulk-pass length-1 inline flush).
    */
   private flushRefusedBatch(): void {
-    if (this.pendingRefusalNames.size === 0 && !this.refusalRemoved) return;
+    if (this.pendingRefusalNames.size === 0) return;
     if (this.clientBudget === undefined || this.mode !== 'enforce') {
       // Should be unreachable per recordRefusal's mode gate; defensive
       // drain to avoid leaking refusals into the next pass.
@@ -291,22 +283,15 @@ export class WorkspaceMcpBudget {
       this.pendingRefusalTransports.clear();
       return;
     }
-    if (!this.preserveRefusals) this.lastRefusedTransports.clear();
+    const refusedServers: McpRefusedServer[] = [];
     for (const name of this.pendingRefusalNames) {
       const transport = this.pendingRefusalTransports.get(name) ?? 'unknown';
       this.lastRefusedTransports.set(name, transport);
+      refusedServers.push({ name, transport, reason: 'budget_exhausted' });
     }
-    const refusedServers: McpRefusedServer[] = [
-      ...this.lastRefusedTransports,
-    ].map(([name, transport]) => ({
-      name,
-      transport,
-      reason: 'budget_exhausted',
-    }));
     this.lastRefusedServerNames = Object.freeze([
       ...this.lastRefusedTransports.keys(),
     ]);
-    this.refusalRemoved = false;
     this.pendingRefusalNames.clear();
     this.pendingRefusalTransports.clear();
     if (this.onEvent) {

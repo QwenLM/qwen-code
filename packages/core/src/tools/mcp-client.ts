@@ -771,7 +771,10 @@ export class McpClient {
       // Individual listings swallow transport errors. A partial snapshot must
       // not mark a connection active after another listing observed its close.
       if (this.getStatus() !== MCPServerStatus.CONNECTED) {
-        throw new Error('MCP connection closed during discovery.');
+        throw (
+          this.lastTransportError ??
+          new Error('MCP connection closed during discovery.')
+        );
       }
       const tools = applyListingAppResourceUi(toolDiscovery.tools, resources);
 

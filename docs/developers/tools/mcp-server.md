@@ -37,7 +37,9 @@ Each discovered MCP tool is wrapped in a `DiscoveredMCPTool` instance that:
 - **Processes responses** for both the LLM context and user display
 - **Maintains connection state** and handles timeouts
 
-After a connection loss, the current invocation is replayed only for a trusted server in a trusted workspace when the tool explicitly declares `idempotentHint: true`, or declares `readOnlyHint: true` without a conflicting `destructiveHint: true` or `idempotentHint: false`. Missing or conflicting annotations, and annotations from an untrusted server or workspace, are treated as unsafe because the server may have completed a side effect before the response was lost. Tool authors should publish accurate MCP annotations; administrators should still verify them before enabling server trust.
+Outside the workspace MCP pool, a lost invocation is replayed only for a trusted server in a trusted workspace when the tool explicitly declares `idempotentHint: true`, or declares `readOnlyHint: true` without a conflicting `destructiveHint: true` or `idempotentHint: false`. Missing or conflicting annotations, and annotations from an untrusted server or workspace, are treated as unsafe because the server may have completed a side effect before the response was lost. Tool authors should publish accurate MCP annotations; administrators should still verify them before enabling server trust.
+
+Pool-managed daemon/ACP tools never replay the interrupted invocation, regardless of annotations. A later model send can restore the session's connection through the workspace pool. Cancellation stops the request; it does not authorize repeating the operation. See [shared connection recovery](../../users/features/mcp.md#shared-daemon--acp-connection-recovery).
 
 ### Transport Mechanisms
 

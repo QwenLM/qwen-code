@@ -18,6 +18,7 @@ import { StringDecoder } from 'node:string_decoder';
 import type { SendSdkMcpMessage } from './mcp-client.js';
 import { removeMCPServerStatus } from './mcp-client.js';
 import { McpClientManager } from './mcp-client-manager.js';
+import { populateMcpServerCommand } from './mcp-client.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { connectionIdOf } from './mcp-pool-key.js';
 import { mcpSessionMetadataKey } from './mcp-session-config.js';
@@ -482,13 +483,17 @@ export class ToolRegistry {
     }
   }
 
-  async refreshMcpTools(signal: AbortSignal): Promise<void> {
+  async refreshMcpTools(
+    signal: AbortSignal,
+    serverName?: string,
+  ): Promise<void> {
     if (signal.aborted) return;
     const source = this.copiedMcpToolsSource;
-    await source?.refreshMcpTools(signal);
+    await source?.refreshMcpTools(signal, serverName);
     if (signal.aborted || source !== this.copiedMcpToolsSource) return;
     await this.mcpClientManager.recoverFailedConnections(signal, {
       consumeNotices: false,
+      ...(serverName === undefined ? {} : { serverName }),
     });
     if (signal.aborted || !source || source !== this.copiedMcpToolsSource)
       return;
@@ -534,20 +539,43 @@ export class ToolRegistry {
   ): boolean {
     if (
       !this.config.isTrustedFolder() ||
+      this.mcpClientManager.ownsMcpServer(serverName) ||
       this.config.isMcpServerDisabled(serverName) ||
       this.config.isMcpServerPendingApproval(serverName)
     )
       return false;
-    const local = this.config.getMcpServers()?.[serverName];
-    const inherited = source.config.getMcpServers()?.[serverName];
+    const localServers = this.config.getMcpServers() ?? {};
+    const sourceServers = source.config.getMcpServers() ?? {};
+    const localCommand = this.config.getMcpServerCommand();
+    const sourceCommand = source.config.getMcpServerCommand();
+    // The legacy command replaces any raw "mcp" entry. A borrower keeps
+    // that command's source cwd, just as it does for a shared raw recipe.
+    if (serverName === 'mcp' && (localCommand || sourceCommand))
+      return !!localCommand && localCommand === sourceCommand;
+    // Borrowing the same recipe keeps the source's ownership. An independent
+    // override must also match the effective cwd used for its own discovery.
+    if (
+      localServers[serverName] &&
+      localServers[serverName] === sourceServers[serverName]
+    )
+      return true;
+    const local = populateMcpServerCommand(
+      localServers,
+      localCommand,
+      this.config.getTargetDir(),
+    )[serverName];
+    const inherited = populateMcpServerCommand(
+      sourceServers,
+      sourceCommand,
+      source.config.getTargetDir(),
+    )[serverName];
     // Overrides own their discovery even when it has not produced tools yet.
     return (
-      local === inherited ||
-      (!!local &&
-        !!inherited &&
-        connectionIdOf(serverName, local) ===
-          connectionIdOf(serverName, inherited) &&
-        mcpSessionMetadataKey(local) === mcpSessionMetadataKey(inherited))
+      !!local &&
+      !!inherited &&
+      connectionIdOf(serverName, local) ===
+        connectionIdOf(serverName, inherited) &&
+      mcpSessionMetadataKey(local) === mcpSessionMetadataKey(inherited)
     );
   }
 
@@ -1174,7 +1202,7 @@ export class ToolRegistry {
     }
     if (owner !== this) {
       const signal = options?.signal ?? new AbortController().signal;
-      await owner.refreshMcpTools(signal);
+      await this.refreshMcpTools(signal, serverName);
       signal.throwIfAborted();
       if (
         inheritedFrom.some(

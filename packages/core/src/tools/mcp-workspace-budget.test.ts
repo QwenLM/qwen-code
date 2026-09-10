@@ -154,7 +154,7 @@ describe('WorkspaceMcpBudget', () => {
   });
 
   describe('refused batch coalescing', () => {
-    it('preserves unrelated refusals across partial recovery and publishes the merged state', () => {
+    it('preserves refusal status across partial recovery and emits only new refusals', () => {
       const onEvent = vi.fn();
       const budget = new WorkspaceMcpBudget({
         clientBudget: 1,
@@ -176,8 +176,6 @@ describe('WorkspaceMcpBudget', () => {
       expect(budget.getRefusedServerNames()).toEqual(['a', 'b', 'c']);
       expect(onEvent).toHaveBeenCalledOnce();
       expect(onEvent.mock.calls[0][0].refusedServers).toEqual([
-        { name: 'a', transport: 'stdio', reason: 'budget_exhausted' },
-        { name: 'b', transport: 'sse', reason: 'budget_exhausted' },
         { name: 'c', transport: 'http', reason: 'budget_exhausted' },
       ]);
       onEvent.mockClear();
@@ -185,11 +183,17 @@ describe('WorkspaceMcpBudget', () => {
       budget.clearRefusal('a');
       budget.endBulkPass();
       expect(budget.getRefusedServerNames()).toEqual(['b', 'c']);
-      expect(
-        onEvent.mock.calls[0][0].refusedServers.map(
-          (s: { name: string }) => s.name,
-        ),
-      ).toEqual(['b', 'c']);
+      expect(onEvent).not.toHaveBeenCalled();
+      budget.recordRefusal('d', 'stdio');
+      expect(budget.getRefusedServerNames()).toEqual(['b', 'c', 'd']);
+      expect(onEvent).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          kind: 'refused_batch',
+          refusedServers: [
+            { name: 'd', transport: 'stdio', reason: 'budget_exhausted' },
+          ],
+        }),
+      );
       budget.beginBulkPass();
       budget.endBulkPass();
       expect(budget.getRefusedServerNames()).toEqual([]);

@@ -223,7 +223,8 @@ export class McpTransportPool {
       // acquire returns successfully. Cooldowns expire on their own.
       return await this.acquire(...args);
     } catch (error) {
-      this.recordRecoveryFailure(id);
+      if (!(error instanceof BudgetExhaustedError))
+        this.recordRecoveryFailure(id);
       throw error;
     }
   }
@@ -749,7 +750,11 @@ export class McpTransportPool {
       row.entryCount += 1;
       row.entrySummary.push({
         entryIndex: entry.entryIndex,
-        refs: entry.refs.size,
+        refs: [...this.sessionToEntries.values()].filter((seats) =>
+          [...seats].some(
+            ([seatId, ids]) => ids.has(entry.id) && entry.refs.has(seatId),
+          ),
+        ).length,
         status,
       });
       byName.set(entry.serverName, row);

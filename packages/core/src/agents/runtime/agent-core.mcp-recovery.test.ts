@@ -21,6 +21,7 @@ function fixture() {
     targetDir: process.cwd(),
     model: 'test-model',
     debugMode: false,
+    mcpServers: { server: { command: 'node' } },
   });
   const source = new ToolRegistry(config);
   const child = new ToolRegistry(config);

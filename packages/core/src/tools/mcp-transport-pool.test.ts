@@ -22,7 +22,10 @@ import {
   type McpTransportPoolOptions,
 } from './mcp-transport-pool.js';
 import { SessionMcpView } from './session-mcp-view.js';
-import { McpClientManager } from './mcp-client-manager.js';
+import {
+  BudgetExhaustedError,
+  McpClientManager,
+} from './mcp-client-manager.js';
 import type { ToolRegistry } from './tool-registry.js';
 
 vi.mock('@modelcontextprotocol/client', async (importOriginal) => {
@@ -177,6 +180,36 @@ describe('McpTransportPool', () => {
   });
 
   describe('demand recovery', () => {
+    it('keeps budget refusals observable and retries as soon as capacity is free', async () => {
+      const { WorkspaceMcpBudget } = await import('./mcp-workspace-budget.js');
+      const budget = new WorkspaceMcpBudget({
+        clientBudget: 1,
+        mode: 'enforce',
+      });
+      budget.tryReserve('occupied');
+      const mocked = mockMcpSuccess();
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions({ budget }));
+      const cfg = new MCPServerConfig('node');
+      const r = mkSessionRegistries();
+      const acquire = () =>
+        pool.acquireForRecovery(
+          'srv',
+          cfg,
+          'session',
+          r.tools,
+          r.prompts,
+          r.resources,
+        );
+      await expect(acquire()).rejects.toBeInstanceOf(BudgetExhaustedError);
+      await expect(acquire()).rejects.toBeInstanceOf(BudgetExhaustedError);
+      expect(mocked.connect).not.toHaveBeenCalled();
+      budget.release('occupied');
+      const handle = await acquire();
+      expect(handle.client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+      expect(mocked.connect).toHaveBeenCalledOnce();
+      await pool.drainAll();
+    });
+
     const cleanupTransports: Array<{
       transport: string;
       cfg: MCPServerConfig;
@@ -202,6 +235,8 @@ describe('McpTransportPool', () => {
         current.prompts,
         current.resources,
       );
+      const staleListener = vi.fn();
+      oldHandle.on('event', staleListener);
       const handle = await pool.acquire(
         'srv',
         cfg,
@@ -213,6 +248,16 @@ describe('McpTransportPool', () => {
       const entries = (pool as unknown as { entries: Map<string, PoolEntry> })
         .entries;
       const entry = entries.get(handle.id)!;
+      entry.emit({
+        kind: 'toolsChanged',
+        serverName: 'srv',
+        snapshot: [],
+        generation: 0,
+      });
+      expect(staleListener).not.toHaveBeenCalled();
+      expect(() =>
+        oldHandle.updateConfig({ command: 'node', trust: true }),
+      ).toThrow('released');
       vi.mocked(current.tools.removeMcpToolsByServer).mockClear();
       vi.mocked(current.resources.removeResourcesByServer).mockClear();
       oldHandle.release();
@@ -283,7 +328,7 @@ describe('McpTransportPool', () => {
       ]);
       expect(nextParent.client).toBe(nextChild.client);
       expect(mocked.connect).toHaveBeenCalledTimes(2);
-      expect(pool.getSnapshot().byName['srv'].entrySummary[0].refs).toBe(2);
+      expect(pool.getSnapshot().byName['srv'].entrySummary[0].refs).toBe(1);
       await pool.drainAll();
     });
 
@@ -370,7 +415,7 @@ describe('McpTransportPool', () => {
       await pool.drainAll();
     });
 
-    it.each(cleanupTransports.filter(({ transport }) => transport !== 'sse'))(
+    it.each(cleanupTransports)(
       'releases all $transport registry seats under the logical session only',
       async ({ cfg }) => {
         mockMcpSuccess();
@@ -1706,74 +1751,67 @@ describe('McpTransportPool', () => {
       expect(entry.currentState).toBe('failed');
     });
 
-    it('W125 else-if path: stale terminal entry evicted with budget released (R22 W125-followup A)', async () => {
-      // Reproduces the race where `forceShutdown` has run its sync
-      // portion (state='closed' + listener detach + emit + subscriber
-      // detach) but the async tail (`await sweepAndDisconnect` →
-      // `updateGlobalStatus` → `onClosed`) is still pending. During
-      // that window pool.entries still holds the terminal entry, and
-      // a concurrent `pool.acquire` for the same id hits W125's
-      // else-if path. Pre-R22 the bare `entries.delete(id)` here
-      // permanently leaked the budget slot — the entry's own onClosed
-      // (firing later when sweep finished) saw `entries.get(id) ===
-      // undefined` and skipped budget release. Post-R22 the eviction
-      // routes through `evictEntry` which inline-releases the slot,
-      // and `onClosed`'s identity check makes its later eviction a
-      // safe no-op.
+    it('waits for retirement before replacing a closed entry without leaking budget', async () => {
       const { WorkspaceMcpBudget } = await import('./mcp-workspace-budget.js');
       const budget = new WorkspaceMcpBudget({
         clientBudget: 1,
         mode: 'enforce',
       });
-      mockMcpSuccess({ toolNames: ['t1'] });
+      const release = vi.spyOn(budget, 'release');
+      const client = mockMcpSuccess({ toolNames: ['t1'] });
       const pool = new McpTransportPool(cliConfig, mkPoolOptions({ budget }));
       const cfg = new MCPServerConfig('node');
-      const r1 = mkSessionRegistries();
-      await pool.acquire('srv', cfg, 's1', r1.tools, r1.prompts, r1.resources);
-      expect(budget.getReservedSlots()).toEqual(['srv']);
-      const targetId = connectionIdOf('srv', cfg);
+      const first = mkSessionRegistries();
+      await pool.acquire(
+        'srv',
+        cfg,
+        's1',
+        first.tools,
+        first.prompts,
+        first.resources,
+      );
+      const id = connectionIdOf('srv', cfg);
       const entries = (pool as unknown as { entries: Map<string, PoolEntry> })
         .entries;
-      const oldEntry = entries.get(targetId)!;
-      // Fire-and-forget forceShutdown — sync portion runs (state='closed',
-      // listener detached, subscribers torn down) but the
-      // `await sweepAndDisconnect` and subsequent `onClosed` are
-      // pending in the microtask queue.
-      void oldEntry.forceShutdown('manual');
+      const oldEntry = entries.get(id)!;
+      let finishClose!: () => void;
+      client.close.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          finishClose = resolve;
+        }),
+      );
+      const closing = oldEntry.forceShutdown('manual');
       expect(oldEntry.currentState).toBe('closed');
-      // Critical precondition: pool.entries STILL has the terminal
-      // entry (onClosed hasn't run yet). Without this, the else-if
-      // path is unreachable.
-      expect(entries.get(targetId)).toBe(oldEntry);
+      expect(entries.get(id)).toBe(oldEntry);
 
-      // Concurrent acquire for the same fingerprint. Hits the W125
-      // else-if path: existing && existing.isTerminated() → evictEntry
-      // → fall through to spawn → fresh entry.
-      const r2 = mkSessionRegistries();
-      const conn2 = await pool.acquire(
+      // Acquire waits for the retiring entry's cleanup. This no longer
+      // exercises the stale-cache eviction branch: retirement owns removal.
+      const next = mkSessionRegistries();
+      const acquiring = pool.acquire(
         'srv',
         cfg,
         's2',
-        r2.tools,
-        r2.prompts,
-        r2.resources,
+        next.tools,
+        next.prompts,
+        next.resources,
       );
-      // Fresh entry: different object, different entryIndex.
-      const newEntry = entries.get(targetId)!;
-      expect(newEntry).not.toBe(oldEntry);
-      expect(conn2.entryIndex).toBe(1);
-      // Budget slot is held by the fresh spawn (was released by
-      // evictEntry, then re-reserved by the spawn path) — net 1 slot
-      // reserved, not the 0 (leak) of pre-R22 nor the 2 of double-
-      // reserve regression.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(client.close).toHaveBeenCalledOnce();
+      expect(ClientLib.Client).toHaveBeenCalledTimes(1);
+      expect(release).not.toHaveBeenCalled();
       expect(budget.getReservedSlots()).toEqual(['srv']);
 
-      // Drain the pending forceShutdown microtasks. The OLD entry's
-      // onClosed will fire and hit `evictEntry`'s identity check
-      // (`current === newEntry !== oldEntry` → no-op). New entry must
-      // survive intact.
+      finishClose();
+      await closing;
+      const connection = await acquiring;
+      const newEntry = entries.get(id)!;
+      expect(newEntry).not.toBe(oldEntry);
+      expect(connection.entryIndex).toBe(1);
+      expect(ClientLib.Client).toHaveBeenCalledTimes(2);
+      expect(release).toHaveBeenCalledExactlyOnceWith('srv');
+      expect(budget.getReservedSlots()).toEqual(['srv']);
       await vi.runAllTimersAsync();
-      expect(entries.get(targetId)).toBe(newEntry);
+      expect(entries.get(id)).toBe(newEntry);
       expect(budget.getReservedSlots()).toEqual(['srv']);
     });
 

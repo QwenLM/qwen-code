@@ -543,14 +543,13 @@ export class McpClientManager {
    * call `pool.acquire`, with the second `set(name, conn2)` silently
    * overwriting the first → conn1 leaks (refcount never reaches 0,
    * drain timer never fires). The mutex serializes passes; a second
-   * caller awaits the same promise and sees the resolved state.
+   * caller reconciles after the active pass with its own current intent.
    */
   private discoveryInFlight?: Promise<void>;
-  private pooledRecoveryInFlight?: Promise<void>;
   private runtimeMcpAddInFlight?: Promise<void>;
   private readonly runtimeMcpAddTokens = new Map<string, object>();
   private pooledDiscoveryGeneration = 0;
-  private readonly queuedPooledDiscoveryExclusions = new Set<Set<string>>();
+  private readonly pooledDiscoveryExclusions = new Set<Set<string>>();
   private readonly recoveryNotices = new Map<string, string>();
   private readonly failedPooledConnections = new Map<
     string,
@@ -1528,44 +1527,36 @@ export class McpClientManager {
    * only need to drop the manager's own pool refs because cross-
    * session pool entries still belong to the pool.
    */
-  private discoverAllMcpToolsViaPool(
-    cliConfig: Config,
-    excludedNames: ReadonlySet<string> = new Set(),
-  ): Promise<void> {
-    // Re-entrancy guard : if a pass is in flight, return the
-    // same promise so the caller awaits the in-flight resolution
-    // instead of triggering a parallel pass that races on
-    // `pooledConnections`. Cleanup runs in `.finally` so the next
-    // call (after this pass completes) starts fresh.
-    // A recovery pass handles failed entries only. A config refresh must run
-    // its own reconciliation after recovery, including healthy entries.
-    const pendingMutation =
-      this.pooledRecoveryInFlight ?? this.runtimeMcpAddInFlight;
-    if (pendingMutation) {
-      const generation = this.pooledDiscoveryGeneration;
-      const exclusions = new Set(excludedNames);
-      this.queuedPooledDiscoveryExclusions.add(exclusions);
-      const reconcile = () => {
-        if (generation !== this.pooledDiscoveryGeneration) return;
-        return this.discoverAllMcpToolsViaPool(cliConfig, exclusions);
-      };
-      return pendingMutation
-        .then(reconcile, reconcile)
-        .finally(() => this.queuedPooledDiscoveryExclusions.delete(exclusions));
-    }
-    if (this.discoveryInFlight) return this.discoveryInFlight;
-    this.discoveryInFlight = this.runDiscoverAllMcpToolsViaPool(
-      cliConfig,
-      excludedNames,
-    ).finally(() => {
-      this.discoveryInFlight = undefined;
-    });
-    return this.discoveryInFlight;
+  private discoverAllMcpToolsViaPool(cliConfig: Config): Promise<void> {
+    const generation = this.pooledDiscoveryGeneration;
+    const exclusions = new Set<string>();
+    this.pooledDiscoveryExclusions.add(exclusions);
+    // Each request retains its own invalidations while waiting. A newer
+    // explicit refresh must not inherit an older request's disconnects.
+    const reconcile = (): Promise<void> => {
+      if (generation !== this.pooledDiscoveryGeneration)
+        return Promise.resolve();
+      const pending = this.runtimeMcpAddInFlight ?? this.discoveryInFlight;
+      if (pending) return pending.then(reconcile, reconcile);
+      const pass = this.runDiscoverAllMcpToolsViaPool(
+        cliConfig,
+        exclusions,
+        generation,
+      ).finally(() => {
+        if (this.discoveryInFlight === pass) this.discoveryInFlight = undefined;
+      });
+      this.discoveryInFlight = pass;
+      return pass;
+    };
+    return reconcile().finally(() =>
+      this.pooledDiscoveryExclusions.delete(exclusions),
+    );
   }
 
   private async runDiscoverAllMcpToolsViaPool(
     cliConfig: Config,
     excludedNames: ReadonlySet<string>,
+    generation: number,
   ): Promise<void> {
     if (!this.pool) return; // unreachable; caller already gates
     // reset the
@@ -1637,19 +1628,28 @@ export class McpClientManager {
         desiredIds.set(name, connectionIdOf(name, config));
       }
       for (const [name, failure] of this.failedPooledConnections) {
+        if (excludedNames.has(name)) continue;
         if (desiredIds.get(name) !== failure.transportId) {
           this.failedPooledConnections.delete(name);
           this.recoveryNotices.delete(name);
         }
       }
       for (const name of this.recoveryNotices.keys()) {
+        if (excludedNames.has(name)) continue;
         if (!desiredIds.has(name)) this.recoveryNotices.delete(name);
       }
       // Release connections that are stale (no longer wanted, or
       // wanted but with a different fingerprint).
       for (const [name, conn] of [...this.pooledConnections]) {
+        // Superseded work has no authority over a subsequent explicit add.
+        if (excludedNames.has(name)) continue;
         const desired = desiredIds.get(name);
-        if (desired === undefined || desired !== conn.transportId) {
+        if (
+          desired === undefined ||
+          desired !== conn.transportId ||
+          conn.state === 'closed' ||
+          conn.state === 'failed'
+        ) {
           try {
             conn.release();
           } catch (err) {
@@ -1721,9 +1721,26 @@ export class McpClientManager {
               promptRegistry,
               resourceRegistry,
             );
-            if (excludedNames.has(name)) {
+            const current = this.getEffectiveMcpServers()[name];
+            if (
+              excludedNames.has(name) ||
+              generation !== this.pooledDiscoveryGeneration ||
+              !current ||
+              !cliConfig.isTrustedFolder() ||
+              cliConfig.isMcpServerDisabled(name) ||
+              cliConfig.isMcpServerPendingApproval?.(name) ||
+              connectionIdOf(name, current) !== conn.transportId
+            ) {
               conn.release();
               return;
+            }
+            try {
+              if (conn.client.getStatus() !== MCPServerStatus.CONNECTED)
+                throw new Error('MCP connection closed during discovery');
+              conn.updateConfig(current);
+            } catch (error) {
+              conn.release();
+              throw error;
             }
             this.trackPooledConnection(name, conn);
           } catch (err) {
@@ -1796,7 +1813,7 @@ export class McpClientManager {
   /** Restore session registrations before a new model send; never call a tool. */
   async recoverFailedConnections(
     signal: AbortSignal,
-    options: { consumeNotices?: boolean } = {},
+    options: { consumeNotices?: boolean; serverName?: string } = {},
   ): Promise<Array<{ serverName: string; message: string }>> {
     if (!this.pool || signal.aborted || !this.cliConfig.isTrustedFolder()) {
       return [];
@@ -1804,14 +1821,25 @@ export class McpClientManager {
     const recover = async () => {
       if (this.failedPooledConnections.size === 0) return;
       while (this.discoveryInFlight || this.runtimeMcpAddInFlight) {
-        await (this.discoveryInFlight ?? this.runtimeMcpAddInFlight);
+        await (this.discoveryInFlight ?? this.runtimeMcpAddInFlight)?.catch(
+          (error) => {
+            debugLogger.debug(
+              `Previous MCP change failed: ${getErrorMessage(error)}`,
+            );
+          },
+        );
       }
       if (signal.aborted || this.failedPooledConnections.size === 0) return;
+      const candidates = [...this.failedPooledConnections].filter(
+        ([name]) =>
+          options.serverName === undefined || name === options.serverName,
+      );
+      if (candidates.length === 0) return;
       const servers = this.getEffectiveMcpServers();
       const budget = this.pool!.getBudget();
       budget?.beginBulkPass({ preserveRefusals: true });
       const recovery = Promise.all(
-        [...this.failedPooledConnections].map(async ([name, failure]) => {
+        candidates.map(async ([name, failure]) => {
           const config = servers[name];
           const stillWanted = () =>
             this.failedPooledConnections.get(name) === failure &&
@@ -1872,14 +1900,11 @@ export class McpClientManager {
           this.eventEmitter?.emit('mcp-client-update', this.clients);
         });
       this.discoveryInFlight = recovery;
-      this.pooledRecoveryInFlight = recovery;
       try {
         await recovery;
       } finally {
         if (this.discoveryInFlight === recovery)
           this.discoveryInFlight = undefined;
-        if (this.pooledRecoveryInFlight === recovery)
-          this.pooledRecoveryInFlight = undefined;
       }
     };
     // A turn cancellation stops waiting, not the workspace's shared connect.
@@ -2063,7 +2088,7 @@ export class McpClientManager {
     this.runtimeMcpAddTokens.delete(serverName);
     // Only this server is excluded from older queued refreshes. Sibling
     // servers must still receive configuration and permission changes.
-    for (const exclusions of this.queuedPooledDiscoveryExclusions) {
+    for (const exclusions of this.pooledDiscoveryExclusions) {
       exclusions.add(serverName);
     }
     this.failedPooledConnections.delete(serverName);
@@ -2113,6 +2138,18 @@ export class McpClientManager {
 
   getDiscoveryState(): MCPDiscoveryState {
     return this.discoveryState;
+  }
+
+  /** A manager that discovers owns its configured set, including failures and
+   * explicit disconnects. A registry built with skipDiscovery borrows instead. */
+  ownsMcpServer(serverName: string): boolean {
+    return (
+      this.discoveryState !== MCPDiscoveryState.NOT_STARTED ||
+      this.pooledConnections.has(serverName) ||
+      this.failedPooledConnections.has(serverName) ||
+      this.clients.has(serverName) ||
+      this.runtimeMcpAddTokens.has(serverName)
+    );
   }
 
   getServerInstructions(): Map<string, string> {
@@ -2822,7 +2859,10 @@ export class McpClientManager {
       }
       if (!pooled) {
         const signal = options?.signal ?? new AbortController().signal;
-        await this.recoverFailedConnections(signal, { consumeNotices: false });
+        await this.recoverFailedConnections(signal, {
+          consumeNotices: false,
+          serverName,
+        });
         signal.throwIfAborted();
         pooled = this.pooledConnections.get(serverName);
       }
@@ -2836,19 +2876,27 @@ export class McpClientManager {
         pooled.transportId !== connectionIdOf(serverName, current)
       ) {
         throw new Error(
-          `MCP server '${serverName}' pool connection unavailable; retry after discovery.`,
+          `MCP server '${serverName}' pool connection unavailable; use MCP management to connect it.`,
         );
       }
     }
     if (pooled) {
-      // A resource read can observe a restart before the failed event arrives.
-      // Preserve recovery ownership in the pool; never spawn a private client.
-      if (pooled.client.getStatus() !== MCPServerStatus.CONNECTED) {
-        pooled.release();
-        this.pooledConnections.delete(serverName);
-        this.failedPooledConnections.set(serverName, {
-          transportId: pooled.transportId,
-        });
+      // A restart temporarily disconnects the client while the pool still owns
+      // a live entry. Only a terminal entry can relinquish this session's seat.
+      if (
+        pooled.state === 'closed' ||
+        pooled.state === 'failed' ||
+        pooled.client.getStatus() !== MCPServerStatus.CONNECTED
+      ) {
+        if (pooled.state === 'failed' || pooled.state === 'closed') {
+          pooled.release();
+          this.pooledConnections.delete(serverName);
+          if (pooled.state === 'failed') {
+            this.failedPooledConnections.set(serverName, {
+              transportId: pooled.transportId,
+            });
+          }
+        }
         throw new Error(
           `MCP server '${serverName}' pool entry disconnected; retry after discovery.`,
         );
@@ -3317,8 +3365,6 @@ export class McpClientManager {
     // Release existing connection for this name (if replacing with
     // different fingerprint)
     const replaced = this.pooledConnections.has(name) || this.clients.has(name);
-    this.failedPooledConnections.delete(name);
-    this.recoveryNotices.delete(name);
     if (existingConn) {
       try {
         existingConn.release();
@@ -3482,15 +3528,18 @@ export class McpClientManager {
     name: string,
     originatorClientId: string,
   ): Promise<RemoveRuntimeMcpServerResult> {
-    this.runtimeMcpAddTokens.delete(name);
-    this.failedPooledConnections.delete(name);
-    this.recoveryNotices.delete(name);
     // Check whether this name is a runtime entry
     // Config.removeRuntimeMcpServer returns true only if the entry was
     // in the runtime map.
     const wasRuntime = this.cliConfig.removeRuntimeMcpServer(name);
     if (!wasRuntime) {
       return { name, skipped: true, reason: 'not_present' };
+    }
+    this.runtimeMcpAddTokens.delete(name);
+    this.failedPooledConnections.delete(name);
+    this.recoveryNotices.delete(name);
+    for (const exclusions of this.pooledDiscoveryExclusions) {
+      exclusions.add(name);
     }
 
     // Detect whether this was shadowing a settings-layer entry

@@ -5,13 +5,18 @@
  */
 
 import type { CallableTool } from '@google/genai';
+import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Config, type MCPServerConfig } from '../config/config.js';
 import { ToolRegistry } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import type { McpTransportPool } from './mcp-transport-pool.js';
+import { MCPServerStatus } from './mcp-client.js';
+import { connectionIdOf } from './mcp-pool-key.js';
 
-function makeConfig(servers: Record<string, MCPServerConfig> = {}) {
+function makeConfig(
+  servers: Record<string, MCPServerConfig> = { server: { command: 'node' } },
+) {
   return new Config({
     cwd: process.cwd(),
     targetDir: process.cwd(),
@@ -21,13 +26,18 @@ function makeConfig(servers: Record<string, MCPServerConfig> = {}) {
   });
 }
 
-function makeTool(config: Config, name = 'read', trust = true) {
+function makeTool(
+  config: Config,
+  name = 'read',
+  trust = true,
+  serverName = 'server',
+) {
   const callTool = vi.fn().mockResolvedValue({
     content: [{ type: 'text', text: 'fresh result' }],
   });
   const tool = new DiscoveredMCPTool(
     {} as CallableTool,
-    'server',
+    serverName,
     name,
     name,
     { type: 'object', properties: {} },
@@ -45,6 +55,219 @@ function makeTool(config: Config, name = 'read', trust = true) {
 afterEach(() => vi.restoreAllMocks());
 
 describe('inherited MCP recovery', () => {
+  it.each(['connected', 'failed', 'disconnected'])(
+    'keeps independently discovered HTTP resources in the child when %s',
+    async (state) => {
+      const recipe = { httpUrl: 'https://example.invalid/mcp' };
+      const sourceConfig = makeConfig({ server: recipe });
+      const childConfig = makeConfig({ server: { ...recipe } });
+      const childRead = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'test://resource', text: 'child session' }],
+      });
+      const handle = Object.assign(new EventEmitter(), {
+        id: connectionIdOf('server', recipe),
+        transportId: connectionIdOf('server', recipe),
+        state: 'active' as const,
+        client: {
+          getStatus: () => MCPServerStatus.CONNECTED,
+          readResource: childRead,
+        },
+        updateConfig: vi.fn(),
+        release: vi.fn(),
+      });
+      const pool = {
+        acquire: vi.fn().mockResolvedValue(handle),
+        acquireForRecovery: vi
+          .fn()
+          .mockRejectedValue(new Error('child unavailable')),
+        getBudget: () => undefined,
+      } as unknown as McpTransportPool;
+      sourceConfig.setMcpTransportPool(pool);
+      childConfig.setMcpTransportPool(pool);
+      const source = new ToolRegistry(sourceConfig);
+      const child = new ToolRegistry(childConfig);
+      child.copyDiscoveredToolsFrom(source);
+      const parentRead = vi
+        .spyOn(source.getMcpClientManager(), 'readResource')
+        .mockResolvedValue({
+          contents: [{ uri: 'test://resource', text: 'parent session' }],
+        });
+      await child.getMcpClientManager().discoverAllMcpTools(childConfig);
+      if (state === 'failed')
+        handle.emit('event', {
+          kind: 'failed',
+          serverName: 'server',
+          generation: 0,
+        });
+      if (state === 'disconnected')
+        await child.getMcpClientManager().disconnectServer('server');
+      const reading = child.readMcpResource('server', 'test://resource');
+      if (state === 'connected')
+        await expect(reading).resolves.toEqual({
+          contents: [{ uri: 'test://resource', text: 'child session' }],
+        });
+      else await expect(reading).rejects.toThrow('pool connection unavailable');
+      expect(parentRead).not.toHaveBeenCalled();
+      expect(childRead).toHaveBeenCalledTimes(state === 'connected' ? 1 : 0);
+      await child.stop();
+    },
+  );
+
+  it('refreshes the calling child tool after inherited resource recovery', async () => {
+    const config = makeConfig();
+    config.setMcpTransportPool({} as McpTransportPool);
+    const source = new ToolRegistry(config);
+    const child = new ToolRegistry(config);
+    const old = makeTool(config);
+    const fresh = makeTool(config);
+    source.registerTool(old.tool);
+    child.copyDiscoveredToolsFrom(source);
+    vi.spyOn(
+      source.getMcpClientManager(),
+      'recoverFailedConnections',
+    ).mockImplementation(async () => {
+      source.removeMcpToolsByServer('server');
+      source.registerTool(fresh.tool);
+      return [];
+    });
+    vi.spyOn(source.getMcpClientManager(), 'readResource').mockResolvedValue({
+      contents: [],
+    });
+    await child.readMcpResource('server', 'test://resource');
+    await child
+      .getTool(fresh.tool.name)!
+      .build({})
+      .execute(new AbortController().signal);
+    expect(fresh.callTool).toHaveBeenCalledOnce();
+    expect(old.callTool).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { trust: false },
+    { includeTools: ['inspect'] },
+    { excludeTools: ['read'] },
+    { alwaysLoadTools: true },
+  ])(
+    'does not replace an unavailable child override with parent policy %j',
+    async (metadata) => {
+      const sourceConfig = makeConfig({
+        server: { command: 'node', trust: true },
+      });
+      const childConfig = makeConfig({
+        server: { command: 'node', trust: true, ...metadata },
+      });
+      const source = new ToolRegistry(sourceConfig);
+      const child = new ToolRegistry(childConfig);
+      const tool = makeTool(sourceConfig).tool;
+      source.registerTool(tool);
+      child.copyDiscoveredToolsFrom(source);
+      child.removeMcpToolsByServer('server');
+      await child.refreshMcpTools(new AbortController().signal);
+      expect(child.getToolsByServer('server')).toEqual([]);
+      expect(source.getTool(tool.name)).toBe(tool);
+    },
+  );
+
+  it.each([false, true])(
+    'compares the effective cwd of an independent override (same directory: %s)',
+    async (sameDirectory) => {
+      const sourceConfig = makeConfig({ server: { command: 'node' } });
+      const childConfig = makeConfig({ server: { command: 'node' } });
+      vi.spyOn(sourceConfig, 'getTargetDir').mockReturnValue('/parent');
+      vi.spyOn(childConfig, 'getTargetDir').mockReturnValue(
+        sameDirectory ? '/parent' : '/child',
+      );
+      const source = new ToolRegistry(sourceConfig);
+      const child = new ToolRegistry(childConfig);
+      const tool = makeTool(sourceConfig).tool;
+      source.registerTool(tool);
+      child.copyDiscoveredToolsFrom(source);
+      child.removeMcpToolsByServer('server');
+      await child.refreshMcpTools(new AbortController().signal);
+      expect(child.getTool(tool.name)).toBe(sameDirectory ? tool : undefined);
+    },
+  );
+
+  it('keeps source ownership when a working-tree child borrows the same recipe', async () => {
+    const servers = { server: { command: 'node' } };
+    const sourceConfig = makeConfig(servers);
+    const childConfig = makeConfig(servers);
+    vi.spyOn(sourceConfig, 'getTargetDir').mockReturnValue('/parent');
+    vi.spyOn(childConfig, 'getTargetDir').mockReturnValue('/child');
+    const source = new ToolRegistry(sourceConfig);
+    const child = new ToolRegistry(childConfig);
+    const tool = makeTool(sourceConfig).tool;
+    source.registerTool(tool);
+    child.copyDiscoveredToolsFrom(source);
+    await child.refreshMcpTools(new AbortController().signal);
+    expect(child.getTool(tool.name)).toBe(tool);
+  });
+
+  it.each([
+    {
+      sourceCommand: 'node parent.mjs',
+      childCommand: 'node parent.mjs',
+      inherit: true,
+      rawEntry: false,
+    },
+    {
+      sourceCommand: 'node parent.mjs',
+      childCommand: 'node parent.mjs',
+      inherit: true,
+      rawEntry: true,
+    },
+    {
+      sourceCommand: 'node parent.mjs',
+      childCommand: 'node child.mjs',
+      inherit: false,
+      rawEntry: true,
+    },
+    {
+      sourceCommand: 'node parent.mjs',
+      childCommand: undefined,
+      inherit: false,
+      rawEntry: true,
+    },
+    {
+      sourceCommand: undefined,
+      childCommand: 'node child.mjs',
+      inherit: false,
+      rawEntry: true,
+    },
+  ])(
+    'keeps command-derived MCP ownership for a working-tree borrower: %j',
+    async ({ sourceCommand, childCommand, inherit, rawEntry }) => {
+      // The command-derived service replaces a raw entry named "mcp".
+      const servers: Record<string, MCPServerConfig> = rawEntry
+        ? { mcp: { command: 'node', args: ['raw.mjs'] } }
+        : {};
+      const sourceConfig = makeConfig(servers);
+      const childConfig = makeConfig(servers);
+      vi.spyOn(sourceConfig, 'getMcpServerCommand').mockReturnValue(
+        sourceCommand,
+      );
+      vi.spyOn(childConfig, 'getMcpServerCommand').mockReturnValue(
+        childCommand,
+      );
+      vi.spyOn(sourceConfig, 'getTargetDir').mockReturnValue('/parent');
+      vi.spyOn(childConfig, 'getTargetDir').mockReturnValue('/child');
+      const source = new ToolRegistry(sourceConfig);
+      const child = new ToolRegistry(childConfig);
+      const { tool, callTool } = makeTool(sourceConfig, 'read', true, 'mcp');
+      source.registerTool(tool);
+      child.copyDiscoveredToolsFrom(source);
+      await child.refreshMcpTools(new AbortController().signal);
+      expect(child.getTool(tool.name)).toBe(inherit ? tool : undefined);
+      if (inherit) {
+        await child
+          .getTool(tool.name)!
+          .build({})
+          .execute(new AbortController().signal);
+        expect(callTool).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
   it('reads inherited resources through their owning pool manager', async () => {
     const config = makeConfig({ server: { command: 'parent-mcp' } });
     config.setMcpTransportPool({} as McpTransportPool);
