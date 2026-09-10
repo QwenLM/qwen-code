@@ -9235,6 +9235,91 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('holds GET /brand until the deferred runtime is ready, then answers 200', async () => {
+    // `/brand` is not a bootstrap route: on the default deferred path the
+    // delegating app must hold the request until the runtime is up and then
+    // answer it, per the protocol reference. Adding it to
+    // BOOTSTRAP_SERVE_PATHS would instead answer the bootstrap 503, which the
+    // client's brand fetch treats as retryable-but-never-settled.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-brand-hold-')),
+    );
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const qwenHome = path.join(tmpDir, 'qwen-home');
+    fs.mkdirSync(qwenHome, { recursive: true });
+    process.env['QWEN_HOME'] = qwenHome;
+    const logBaseDir = path.join(tmpDir, 'debug');
+    let resolveTelemetry:
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
+    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
+      (resolve) => {
+        resolveTelemetry = resolve;
+      },
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockReturnValue(
+      telemetryPromise,
+    );
+    const bridge = makeRuntimeBridge();
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+        daemonLogBaseDir: logBaseDir,
+      },
+    );
+
+    let closed = false;
+    try {
+      let brandStatus: number | undefined;
+      let brandBody: unknown;
+      const brandPending = fetch(`${handle.url}/brand`).then(async (res) => {
+        brandStatus = res.status;
+        brandBody = await res.json();
+      });
+
+      // Held, not answered: no status yet. (The final assertions below are
+      // what discriminate — a bootstrap catch-all would answer 503 at once.)
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(brandStatus).toBeUndefined();
+
+      // The health probe triggers the deferred runtime start; once it
+      // settles, the held brand request is answered by the real route.
+      const healthRes = await fetch(`${handle.url}/health`);
+      expect(healthRes.status).toBe(200);
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+
+      await brandPending;
+      expect(brandStatus).toBe(200);
+      expect(brandBody).toEqual({});
+      await handle.close();
+      closed = true;
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      if (!closed) {
+        await handle.close();
+      }
+    }
+  });
+
   it('returns retryable bootstrap deep health while starting deferred runtime', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-deep-first-')),

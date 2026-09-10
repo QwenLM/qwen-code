@@ -28,6 +28,14 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_RUNTIME_DIR',
   'QWEN_CODE_MCP_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
+  // These two select which file becomes the System / SystemDefaults settings
+  // layer. A project `.env` must never redirect them: the System layer
+  // outranks the operator's own User settings, so a repository could promote
+  // its own file into the highest-precedence layer — renaming the product in
+  // every connected browser via `ui.brand`, among other operator-only
+  // settings that read only the operator scopes.
+  'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+  'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
   // Downloaded updates execute as the user; a project must not select them.
   'QWEN_UPDATE_BASE_URL',
   // This points to a host temp file that carries build warnings. A project
