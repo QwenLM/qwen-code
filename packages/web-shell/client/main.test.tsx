@@ -84,6 +84,9 @@ describe('StandaloneApp', () => {
     expect(testState.props?.webShellProps.environmentPanel?.items).toContain(
       'attachments',
     );
+    expect(testState.props?.webShellProps.environmentPanel?.items).toContain(
+      'sources',
+    );
     expect(testState.props?.webShellProps.header?.items).toContain(
       'contextUsage',
     );
