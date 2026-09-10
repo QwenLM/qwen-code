@@ -607,6 +607,7 @@ export class AnthropicContentConverter {
             type: 'thinking',
             thinking: part.text || '',
           };
+          let dropThinkingBlock = false;
           if (
             'thoughtSignature' in part &&
             typeof part.thoughtSignature === 'string'
@@ -615,21 +616,30 @@ export class AnthropicContentConverter {
             // reasoning replay payload (`{"id":…,"encrypted_content":…}`)
             // reaches here unchanged after a provider switch. It is not an
             // Anthropic signature — forwarding it puts a foreign opaque blob
-            // on the wire as `thinking.signature`. Drop the payload and keep
-            // the visible reasoning text set above, mirroring the fallback
-            // `responses-converter.ts` already applies in the other direction
-            // for an unreplayable signature.
+            // on the wire as `thinking.signature`. Drop the payload instead,
+            // mirroring the fallback `responses-converter.ts` already applies
+            // in the other direction for an unreplayable signature.
             // https://github.com/QwenLM/qwen-code/issues/9453
             if (isResponsesReasoningSignature(part.thoughtSignature)) {
               debugLogger.debug(
-                'Dropping a Responses reasoning replay payload from thoughtSignature; keeping thinking text unsigned',
+                'Dropping a Responses reasoning replay payload from thoughtSignature',
               );
+              // An unsigned `thinking` block is exactly the shape the passes
+              // below treat as a proxy protocol violation
+              // (`dropUnsignedThinkingFromAssistantMessages`), so do not emit
+              // one. Keep the visible summary as plain text when present.
+              dropThinkingBlock = true;
+              if (part.text) {
+                contentBlocks.push({ type: 'text', text: part.text });
+              }
             } else {
               (thinkingBlock as { signature?: string }).signature =
                 part.thoughtSignature;
             }
           }
-          contentBlocks.push(thinkingBlock as AnthropicContentBlockParam);
+          if (!dropThinkingBlock) {
+            contentBlocks.push(thinkingBlock as AnthropicContentBlockParam);
+          }
         }
       }
 

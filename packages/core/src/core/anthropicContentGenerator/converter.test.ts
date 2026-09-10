@@ -4489,14 +4489,124 @@ describe('AnthropicContentConverter', () => {
         type: string;
         thinking?: string;
         signature?: string;
+        text?: string;
       }>;
-      const thinkingBlock = blocks.find((b) => b.type === 'thinking');
 
-      // The foreign replay payload must not be sent as a native signature...
-      expect(thinkingBlock?.signature).toBeUndefined();
-      // ...but the visible reasoning summary survives.
-      expect(thinkingBlock?.thinking).toBe('Reasoning summary');
+      // The foreign replay payload must not be sent as a native signature,
+      // and no unsigned thinking block is emitted for it...
+      expect(blocks.some((b) => b.type === 'thinking')).toBe(false);
+      // ...but the visible reasoning summary survives as plain text.
+      expect(blocks).toContainEqual({
+        type: 'text',
+        text: 'Reasoning summary',
+      });
       expect(blocks).toContainEqual({ type: 'text', text: 'Visible answer' });
+    });
+
+    it('does not throw on an active tool-use turn when dropping the replay payload', () => {
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user' as const, parts: [{ text: 'First' }] },
+            {
+              role: 'model' as const,
+              parts: [
+                {
+                  text: 'Reasoning summary',
+                  thought: true,
+                  thoughtSignature: responsesReplaySignature,
+                },
+                {
+                  functionCall: { id: 'call-1', name: 'tool_name', args: {} },
+                },
+              ],
+            },
+            {
+              role: 'user' as const,
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'call-1',
+                    name: 'tool_name',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { dropUnsignedAssistantThinking: true },
+      );
+
+      // Must not throw "proxy omitted the thinking signature": the replay
+      // payload is dropped rather than emitted as an unsigned thinking block,
+      // so dropUnsignedThinkingFromAssistantMessages never sees an unsigned
+      // thinking block on this active tool-use turn.
+      const assistant = messages.find((m) => m.role === 'assistant');
+      const blocks = Array.isArray(assistant?.content)
+        ? assistant!.content
+        : [];
+      expect(blocks.some((b) => b.type === 'tool_use')).toBe(true);
+    });
+
+    it('drops a signature-only replay payload without emitting a thinking block', () => {
+      // flushThoughtEpisode always sets `text` (to '' for a signature-only
+      // episode), so the shape reaching this converter is an empty-text
+      // thought part, not a part with no `text` key.
+      const signatureOnlyPart = {
+        text: '',
+        thought: true,
+        thoughtSignature: responsesReplaySignature,
+      };
+
+      const build = (isLatestTurn: boolean) => ({
+        model: 'models/test',
+        contents: [
+          { role: 'user' as const, parts: [{ text: 'First' }] },
+          {
+            role: 'model' as const,
+            parts: [signatureOnlyPart, { text: 'Visible answer' }],
+          },
+          ...(isLatestTurn
+            ? []
+            : [{ role: 'user' as const, parts: [{ text: 'Second' }] }]),
+        ],
+      });
+
+      const assertShape = (result: {
+        messages: Array<{ role: string; content: unknown }>;
+      }) => {
+        const assistant = result.messages.find((m) => m.role === 'assistant');
+        expect(assistant?.content).toEqual([
+          { type: 'text', text: 'Visible answer' },
+        ]);
+      };
+
+      // Latest-turn and non-latest-turn positions, under both the production
+      // proxy option set (dropUnsignedAssistantThinking) and the bare option
+      // set. The replay payload must never surface as a thinking block or a
+      // signature in any of them.
+      assertShape(
+        converter.convertLlmRequestToAnthropic(build(false), {
+          dropUnsignedAssistantThinking: true,
+        }),
+      );
+      assertShape(
+        converter.convertLlmRequestToAnthropic(build(true), {
+          dropUnsignedAssistantThinking: true,
+        }),
+      );
+      assertShape(
+        converter.convertLlmRequestToAnthropic(build(false), {
+          enableCacheControl: false,
+        }),
+      );
+      assertShape(
+        converter.convertLlmRequestToAnthropic(build(true), {
+          enableCacheControl: false,
+        }),
+      );
     });
   });
 });
