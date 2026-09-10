@@ -196,6 +196,7 @@ describe('sidebar brand', () => {
     // `""` means "use the built-in name" on the settings surface, so a host
     // that builds its prop the same way must not get an empty sidebar row and
     // a version tooltip reading " v1.2.3".
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '360');
     renderSidebar({ name: '' });
 
     expect(container.textContent).toContain('Qwen Code');
@@ -205,6 +206,7 @@ describe('sidebar brand', () => {
   });
 
   it('names the version tooltip after the brand', () => {
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '360');
     renderSidebar({ name: 'QiuQiu Code' });
 
     expect(
