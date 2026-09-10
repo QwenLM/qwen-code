@@ -202,4 +202,17 @@ describe('resolveMaxRegisteredWorkspaces', () => {
       );
     },
   );
+  it('names the configuration source that supplied the invalid value', () => {
+    expect(() =>
+      resolveMaxRegisteredWorkspaces(undefined, {
+        QWEN_SERVE_MAX_WORKSPACES: ' abc ',
+      }),
+    ).toThrow('Invalid QWEN_SERVE_MAX_WORKSPACES=" abc "');
+    expect(() => resolveMaxRegisteredWorkspaces(300, {})).toThrow(
+      'Invalid maxRegisteredWorkspaces option 300',
+    );
+    expect(() => resolveMaxRegisteredWorkspaces(300, {})).not.toThrow(
+      /QWEN_SERVE_MAX_WORKSPACES/,
+    );
+  });
 });

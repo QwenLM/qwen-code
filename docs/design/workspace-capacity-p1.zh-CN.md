@@ -26,18 +26,18 @@ P1 同时需要明确全局 session 策略、约束 channel 事务，以及确�
 
 以下结论已对照源码基线核查，包括原 P0 diff 之外的消费者。
 
-| 关注点         | 当前行为与源码                                                                                                                                                                                                                                                  |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 注册           | [workspace-inputs.ts](../../packages/cli/src/serve/workspace-inputs.ts#L10) 定义 25；[run-qwen-serve.ts](../../packages/cli/src/serve/run-qwen-serve.ts#L3733) 的启动检查和持久化合并读取该值。                                                                 |
-| Runtime 准入   | [workspace-management.ts](../../packages/cli/src/serve/routes/workspace-management.ts#L229) 统计受管理的用户 runtime、待完成添加和 scratch reservation。内部 Live Conversation runtime 豁免；用户 scratch runtime 计数。                                        |
-| Session        | [deriveDefaultMaxTotalSessions](../../packages/cli/src/serve/run-qwen-serve.ts#L465) 在只有一个启动工作区时不设总上限，否则用每工作区上限乘启动数量；每工作区默认 32。动态注册不会重算。                                                                        |
-| 强制准入所有者 | [total-session-admission.ts](../../packages/cli/src/serve/total-session-admission.ts#L41) 检查存活 session 加 reservation；[run-qwen-serve.ts](../../packages/cli/src/serve/run-qwen-serve.ts#L5182) 在所创建的 bridge 间共享该控制器，包括动态和内部 runtime。 |
-| Store          | [workspace-registration-store.ts](../../packages/cli/src/serve/workspace-registration-store.ts#L20) 最多读取 24 条 secondary、256 KiB。更新会在锁内重读，但原子写入前没有序列化字节检查。                                                                       |
-| 启动溢出       | [持久化合并](../../packages/cli/src/serve/run-qwen-serve.ts#L3814) 跳过无效、保留路径、嵌套路径以及容量满后的额外条目。Store 读取错误回退到只启动显式工作区。                                                                                                   |
-| Channel 分组   | [channel-workspace-grouping.ts](../../packages/cli/src/serve/channel-workspace-grouping.ts#L105) 按选中 channel 的唯一 owner 分组。`all` 只选择 primary；空注册工作区不会各自创建 channel worker。                                                              |
-| Channel 事务   | [channel-worker-group.ts](../../packages/cli/src/serve/channel-worker-group.ts#L624) 顺序停止、启动和回滚；回滚清理失败可能同时保留新旧 owner，目前没有独立的 owner 数量守卫。                                                                                  |
-| 超时客户端     | [DaemonClient.ts](../../packages/sdk-typescript/src/daemon/DaemonClient.ts#L4927) 的 legacy 和 qualified 写操作采用固定 2,130,000 ms channel 默认值。Web Shell 调用这些 SDK 方法；Java 当前没有 channel 控制方法，并保留原始 capability map。                   |
-| 配置来源       | [fast-path-settings.ts](../../packages/cli/src/serve/fast-path-settings.ts#L292) 可能在 daemon 构造前加载项目环境值；运营方专属 key 在 [shared-env-keys.ts](../../packages/cli/src/config/shared-env-keys.ts#L26) 中排除。                                      |
+| 关注点         | 当前行为与源码                                                                                                                                                                                                                                        |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 注册           | [workspace-inputs.ts](../../packages/cli/src/serve/workspace-inputs.ts) 定义 25；[run-qwen-serve.ts](../../packages/cli/src/serve/run-qwen-serve.ts) 的启动检查和持久化合并读取该值。                                                                 |
+| Runtime 准入   | [workspace-management.ts](../../packages/cli/src/serve/routes/workspace-management.ts) 统计受管理的用户 runtime、待完成添加和 scratch reservation。内部 Live Conversation runtime 豁免；用户 scratch runtime 计数。                                   |
+| Session        | [deriveDefaultMaxTotalSessions](../../packages/cli/src/serve/run-qwen-serve.ts) 在只有一个启动工作区时不设总上限，否则用每工作区上限乘启动数量；每工作区默认 32。动态注册不会重算。                                                                   |
+| 强制准入所有者 | [total-session-admission.ts](../../packages/cli/src/serve/total-session-admission.ts) 检查存活 session 加 reservation；[run-qwen-serve.ts](../../packages/cli/src/serve/run-qwen-serve.ts) 在所创建的 bridge 间共享该控制器，包括动态和内部 runtime。 |
+| Store          | [workspace-registration-store.ts](../../packages/cli/src/serve/workspace-registration-store.ts) 最多读取 24 条 secondary、256 KiB。更新会在锁内重读，但原子写入前没有序列化字节检查。                                                                 |
+| 启动溢出       | [持久化合并](../../packages/cli/src/serve/run-qwen-serve.ts) 跳过无效、保留路径、嵌套路径以及容量满后的额外条目。Store 读取错误回退到只启动显式工作区。                                                                                               |
+| Channel 分组   | [channel-workspace-grouping.ts](../../packages/cli/src/serve/channel-workspace-grouping.ts) 按选中 channel 的唯一 owner 分组。`all` 只选择 primary；空注册工作区不会各自创建 channel worker。                                                         |
+| Channel 事务   | [channel-worker-group.ts](../../packages/cli/src/serve/channel-worker-group.ts) 顺序停止、启动和回滚；回滚清理失败可能同时保留新旧 owner，目前没有独立的 owner 数量守卫。                                                                             |
+| 超时客户端     | [DaemonClient.ts](../../packages/sdk-typescript/src/daemon/DaemonClient.ts) 的 legacy 和 qualified 写操作采用固定 2,130,000 ms channel 默认值。Web Shell 调用这些 SDK 方法；Java 当前没有 channel 控制方法，并保留原始 capability map。               |
+| 配置来源       | [fast-path-settings.ts](../../packages/cli/src/serve/fast-path-settings.ts) 可能在 daemon 构造前加载项目环境值；运营方专属 key 在 [shared-env-keys.ts](../../packages/cli/src/config/shared-env-keys.ts) 中排除。                                     |
 
 [2026-09-08 的测量](workspace-capacity-baseline-2026-09-08.md) 在一台 macOS
 主机上发现：空的启动工作区从 25 增至 256，daemon GC 后堆增加约 20.6 MiB；

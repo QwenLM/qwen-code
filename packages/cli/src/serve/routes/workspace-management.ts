@@ -1057,12 +1057,12 @@ export function registerWorkspaceManagementRoutes(
             persisted: true,
           });
         } catch (err) {
-          if (sendStoreCapacityError(res, err)) return;
           writeStderrLine(
             `qwen serve: failed to persist existing workspace registration: ${
               err instanceof Error ? err.message : String(err)
             }`,
           );
+          if (sendStoreCapacityError(res, err)) return;
           res.status(500).json({
             error: 'Failed to persist workspace registration',
             code: 'workspace_registration_store_error',

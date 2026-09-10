@@ -1773,6 +1773,60 @@ describe('POST /workspaces', () => {
     expect(res.body.code).toBe('persistence_not_available');
   });
 
+  it('logs the store diagnostic when promoting an existing registration is refused', async () => {
+    const { app } = createApp({
+      workspaceRegistrationStore: {
+        read: vi.fn().mockResolvedValue({ workspaces: [] }),
+        add: vi
+          .fn()
+          .mockRejectedValue(
+            new WorkspaceRegistrationStoreTooLargeError(
+              'Workspace registration store exceeds 8388608 bytes',
+            ),
+          ),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .post('/workspaces')
+      .send({ cwd: REAL_DIR, persist: true });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('workspace_registration_store_too_large');
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: failed to persist existing workspace registration: Workspace registration store exceeds 8388608 bytes',
+    );
+  });
+
+  it.each([
+    ['a persisted registration', { cwd: REAL_DIR, persist: true }],
+    ['a transient registration', { cwd: REAL_DIR }],
+  ])(
+    'enforces the injected registration cap on %s before touching the store',
+    async (_label, body) => {
+      const add = vi.fn();
+      const registry = createMockRegistry([
+        makeRuntime('/primary', { primary: true }),
+        makeRuntime('/user-1'),
+      ]);
+      const { app } = createApp({
+        maxRegisteredWorkspaces: 2,
+        workspaceRegistry: registry,
+        workspaceRegistrationStore: {
+          read: vi.fn().mockResolvedValue({ workspaces: [] }),
+          add,
+        } as unknown as WorkspaceRegistrationStore,
+      });
+
+      const res = await request(app).post('/workspaces').send(body);
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('workspace_limit_reached');
+      expect(add).not.toHaveBeenCalled();
+      expect(registry.add).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([
     [
       new WorkspaceRegistrationStoreLimitError('full'),

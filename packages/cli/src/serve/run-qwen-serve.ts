@@ -3866,6 +3866,10 @@ async function runQwenServeImpl(
     );
   }
   let workspaceRegistrationStore = deps.workspaceRegistrationStore;
+  // Snapshot before the restore loop below pushes persisted records into
+  // `workspaceInputs`, so the overflow diagnostic can tell the operator which
+  // component they can actually shrink.
+  const explicitWorkspaceCount = workspaceInputs.length;
   if (
     workspaceRegistrationStore === undefined &&
     process.env['QWEN_SERVE_NO_PERSISTENT_REGISTRATION'] !== '1'
@@ -3947,7 +3951,9 @@ async function runQwenServeImpl(
   }
   if (workspaceInputs.length > opts.maxRegisteredWorkspaces!) {
     throw new Error(
-      `Restored ${workspaceInputs.length} workspaces exceed the configured limit of ${opts.maxRegisteredWorkspaces}. ` +
+      `${explicitWorkspaceCount} explicit + ${
+        workspaceInputs.length - explicitWorkspaceCount
+      } restored workspaces exceed the configured limit of ${opts.maxRegisteredWorkspaces}. ` +
         'Restart with the previous capacity, forget registrations and reduce explicit --workspace values before lowering the limit. The registration store was not changed.',
     );
   }

@@ -4534,6 +4534,31 @@ describe('createServeApp', () => {
       ).toThrow(/Initial workspace registry exceeds/);
     });
 
+    it('exempts the internal Conversations runtime from that limit', () => {
+      const runtimes: WorkspaceRuntime[] = [
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'user-0',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: fakeBridge(),
+        }),
+        {
+          ...makeWorkspaceRuntimeForTest({
+            workspaceId: 'live-0',
+            workspaceCwd: '/workspace/conversations',
+            primary: false,
+            bridge: fakeBridge(),
+          }),
+          provenance: 'live-conversation',
+        },
+      ];
+      expect(() =>
+        createServeApp({ ...baseOpts, maxRegisteredWorkspaces: 1 }, undefined, {
+          workspaceRegistry: createWorkspaceRegistry(runtimes),
+        }),
+      ).not.toThrow();
+    });
+
     it('advertises an explicitly enforced channel limit and total admission with one workspace', async () => {
       const app = createServeApp(
         { ...baseOpts, maxTotalSessions: 800 },

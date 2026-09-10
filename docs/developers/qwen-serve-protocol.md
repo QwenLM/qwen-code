@@ -104,7 +104,7 @@ Use this to detect mismatch pre-flight: read `workspaceCwd` off `/capabilities` 
 }
 ```
 
-When `--max-total-sessions` rejects a fresh session, the same response shape is returned with `"scope": "total"`.
+When the effective daemon-wide total cap rejects a fresh session — `--max-total-sessions`, or the default described under `limits.maxTotalSessions` — the same response shape is returned with `"scope": "total"`.
 
 Attaches to existing sessions are NOT counted toward the cap, so an idle daemon's reconnects keep working even when at-capacity.
 
@@ -702,8 +702,10 @@ Response shape:
     "sessionShellCommandEnabled": false
   },
   "limits": {
+    "maxRegisteredWorkspaces": 256,
+    "maxChannelControlWorkspaces": 25,
     "maxSessions": 32,
-    "maxTotalSessions": null,
+    "maxTotalSessions": 800,
     "maxPendingPromptsPerSession": 5,
     "listenerMaxConnections": 256,
     "eventRingSize": 8000,
@@ -789,9 +791,9 @@ runtime routes return `503`.
 
 `runtime.memory.pressure` is additive within that block and reports the daemon root's own memory pressure: `mode` (`off` / `observe`), `level` (`normal` / `soft` / `hard` / `critical`), `source` (`rss` / `heap` / `unknown`), `ratio`, and the six raw figures the ratios come from — `rssBytes`, `rssRatio`, `availableBytes`, `heapUsedBytes`, `heapRatio`, `heapLimitBytes`. `ratio` is the larger of `rssRatio` and `heapRatio`, and `source` names which one it was; ties are reported as `rss`. `availableBytes` is `limits.memory.availableMemoryMb` in bytes — deliberately the detected cgroup/host figure rather than `effectiveBudgetMb`, because what ends the process is the real limit, not an operator's policy number. `source: "unknown"` means neither denominator was measurable and must not be read as healthy; `level` is `normal` in that case only because there is nothing to classify. The figures cover the daemon **root process only**: they are this process's own `memoryUsage()`, so children growing does not move them. `runtime.memory.children` reports those separately, and neither figure is process-tree memory. Both modes report the whole block; only `observe` additionally raises the path-free `daemon_memory_pressure` warning into the status rollup, so `off` leaves the top-level `status` unchanged. Nothing remediates in either mode. The field is optional in the SDK mirror because daemons that shipped `runtime.memory` before it exists send the block without it.
 
-`limits.maxRegisteredWorkspaces` is additive and reports the resolved user registration cap (default 256, configurable from 1 through 256). `limits.maxChannelControlWorkspaces` reports the independent control/recovery owner cap of 25 on the standard daemon, even while channels are disabled. Custom controllers advertise that field only when they enforce it. These fields are present on both bootstrap and ready responses; older daemons may omit them. The channel controller rejects initial or transitional owner unions over its cap with `409 channel_control_workspace_limit_reached` before constructing candidate workers. Registration capacity does not determine the SDK channel timeout.
+`limits.maxRegisteredWorkspaces` is additive and reports the resolved user registration cap (default 256, configurable from 1 through 256). `limits.maxChannelControlWorkspaces` reports the independent control/recovery owner cap of 25 on the standard daemon, even while channels are disabled. Custom controllers advertise that field only when they enforce it. These fields are present on both bootstrap and ready responses; older daemons may omit them. The channel controller rejects transitional owner unions over its cap with `409 channel_control_workspace_limit_reached` before constructing candidate workers; an initial boot-time union over the cap fails startup before the listener is published, so it has no HTTP surface. Registration capacity does not determine the SDK channel timeout.
 
-`limits.maxTotalSessions` is additive. `null` means the effective daemon-wide fresh-session cap is disabled. When the resolved registration capacity (default 256, configurable through `QWEN_SERVE_MAX_WORKSPACES` or embedded `maxRegisteredWorkspaces`) exceeds 25 and `--max-total-sessions` is omitted, the standard daemon uses a fixed total of 800, even with one startup workspace. At registration capacities of 25 or less, several startup/restored workspaces with a finite `maxSessionsPerWorkspace` derive the effective total once as `maxSessionsPerWorkspace * startupWorkspaceCount`; a single startup workspace retains an unlimited default. Explicit total limits, including disabled values, take precedence. Later dynamic registration does not recompute the total. Direct `createServeApp` embeds must supply their own shared admission policy. When set, it limits fresh session creation across the daemon and reports total-limit failures with the existing `session_limit_exceeded` error shape plus `scope: "total"`.
+`limits.maxTotalSessions` is additive. `null` means the effective daemon-wide fresh-session cap is disabled. When the resolved registration capacity (default 256, configurable through `QWEN_SERVE_MAX_WORKSPACES` or embedded `maxRegisteredWorkspaces`) exceeds 25 and `--max-total-sessions` is omitted, the standard daemon uses a fixed total of 800, even with one startup workspace. At registration capacities of 25 or less, several startup/restored workspaces with a finite `maxSessionsPerWorkspace` derive the effective total once as `maxSessionsPerWorkspace * workspaceCount` over that same startup-plus-restored count; one startup or restored workspace retains an unlimited default. Explicit total limits, including disabled values, take precedence. Later dynamic registration does not recompute the total. Direct `createServeApp` embeds must supply their own shared admission policy. When set, it limits fresh session creation across the daemon and reports total-limit failures with the existing `session_limit_exceeded` error shape plus `scope: "total"`.
 
 `runtime.channel.live` reports the ACP bridge channel inside the daemon. It is
 not the channel-adapter worker. Daemon-managed channels use
@@ -899,7 +901,7 @@ Stable control errors are:
 
 - `400 invalid_channel_selection`, `channel_workspace_mismatch`, or `ambiguous_channel_workspace`
 - `403 untrusted_workspace`
-- `409 channel_service_conflict` or `channel_worker_not_enabled`
+- `409 channel_service_conflict`, `channel_worker_not_enabled`, or `channel_control_workspace_limit_reached`
 - `500 channel_worker_stop_failed`
 - `502 channel_worker_start_failed`, with `rolledBack` and an optional credential-redacted `rollbackError`
 - `503 daemon_draining`
@@ -1109,9 +1111,11 @@ path-free `daemon_log_degraded` warning to the normal status rollup.
     "..."
   ],
   "limits": {
+    "maxRegisteredWorkspaces": 256,
+    "maxChannelControlWorkspaces": 25,
     "maxPendingPromptsPerSession": 5,
     "maxSessionsPerWorkspace": 32,
-    "maxTotalSessions": 64,
+    "maxTotalSessions": 800,
     "sessionRestoreTimeoutMs": 60000
   },
   "modelServices": [],

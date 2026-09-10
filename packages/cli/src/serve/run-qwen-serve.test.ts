@@ -8470,13 +8470,167 @@ describe('runQwenServe runtime startup failures', () => {
           },
         ),
       ).rejects.toThrow(
-        `Restored ${capacity + 1} workspaces exceed the configured limit of ${capacity}`,
+        `${capacity} explicit + 1 restored workspaces exceed the configured limit of ${capacity}`,
       );
       expect(fs.readFileSync(store.filePath)).toEqual(before);
       expect(httpServerFactory).not.toHaveBeenCalled();
       expect(createBridge).not.toHaveBeenCalled();
     },
   );
+
+  function stubCapacityRuntimeDeps() {
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeRuntimeBridge(),
+    );
+    const observed: {
+      maxRegisteredWorkspaces?: number;
+      maxTotalSessions?: number;
+      runtimeCount?: number;
+    } = {};
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(
+      (opts, _getPort, deps) => {
+        observed.maxRegisteredWorkspaces = opts.maxRegisteredWorkspaces;
+        observed.maxTotalSessions = opts.maxTotalSessions;
+        observed.runtimeCount = deps?.workspaceRegistry?.list().length;
+        return express();
+      },
+    );
+    return observed;
+  }
+
+  function makeCapacityWorkspaces(count: number): string[] {
+    return Array.from({ length: count }, (_, index) => {
+      const cwd = path.join(tmpDir!, `workspace-${index}`);
+      fs.mkdirSync(cwd);
+      return cwd;
+    });
+  }
+
+  it('resolves the registration cap and legacy session default from the launch environment', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-env-capacity-')),
+    );
+    const workspaces = makeCapacityWorkspaces(3);
+    const observed = stubCapacityRuntimeDeps();
+    const boot = (workspace: string | string[]) =>
+      runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          serveWebShell: false,
+        },
+        {
+          daemonLogBaseDir: path.join(tmpDir!, 'debug'),
+          resolveOnListen: true,
+        },
+      );
+    const original = process.env['QWEN_SERVE_MAX_WORKSPACES'];
+    try {
+      process.env['QWEN_SERVE_MAX_WORKSPACES'] = '25';
+      const handle = await boot(workspaces[0]!);
+      try {
+        await handle.runtimeReady;
+        expect(observed.maxRegisteredWorkspaces).toBe(25);
+        expect(observed.maxTotalSessions).toBeUndefined();
+      } finally {
+        await handle.close();
+      }
+
+      process.env['QWEN_SERVE_MAX_WORKSPACES'] = '2';
+      await expect(boot(workspaces)).rejects.toThrow(
+        'At most 2 --workspace values may be registered.',
+      );
+
+      process.env['QWEN_SERVE_MAX_WORKSPACES'] = 'abc';
+      await expect(boot(workspaces[0]!)).rejects.toThrow(
+        'Invalid QWEN_SERVE_MAX_WORKSPACES="abc"',
+      );
+    } finally {
+      if (original === undefined) {
+        delete process.env['QWEN_SERVE_MAX_WORKSPACES'];
+      } else {
+        process.env['QWEN_SERVE_MAX_WORKSPACES'] = original;
+      }
+    }
+  });
+
+  it('derives the legacy session total from the workspace count at capacity 25', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-legacy-total-')),
+    );
+    const workspaces = makeCapacityWorkspaces(2);
+    const observed = stubCapacityRuntimeDeps();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: workspaces,
+        maxRegisteredWorkspaces: 25,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(observed.maxRegisteredWorkspaces).toBe(25);
+      expect(observed.maxTotalSessions).toBe(2);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('admits a restored union exactly at the configured capacity', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-restored-at-limit-')),
+    );
+    const workspaces = makeCapacityWorkspaces(2);
+    const store = new WorkspaceRegistrationStore(
+      workspaces[0]!,
+      path.join(tmpDir, 'home'),
+    );
+    await store.add(workspaces[1]!, 'Saved');
+    const before = fs.readFileSync(store.filePath);
+    const observed = stubCapacityRuntimeDeps();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: workspaces[0]!,
+        maxRegisteredWorkspaces: 2,
+        serveWebShell: false,
+      },
+      {
+        workspaceRegistrationStore: store,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(observed.runtimeCount).toBe(2);
+      expect(fs.readFileSync(store.filePath)).toEqual(before);
+    } finally {
+      await handle.close();
+    }
+  });
 
   it('filters secondary workspace roots before constructing the bridge filesystem', async () => {
     tmpDir = fs.realpathSync(

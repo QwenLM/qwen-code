@@ -28,8 +28,14 @@ export function resolveMaxRegisteredWorkspaces(
     value < 1 ||
     value > MAX_CONFIGURED_REGISTERED_WORKSPACES
   ) {
+    // Name the source that actually supplied the value: an embedder who passed
+    // a bad option must not be sent grepping for an env var they never set.
+    const source =
+      configured === undefined
+        ? `${QWEN_SERVE_MAX_WORKSPACES_ENV}=${JSON.stringify(raw)}`
+        : `maxRegisteredWorkspaces option ${String(configured)}`;
     throw new TypeError(
-      `Invalid maxRegisteredWorkspaces (${QWEN_SERVE_MAX_WORKSPACES_ENV}): must be an integer from 1 to ${MAX_CONFIGURED_REGISTERED_WORKSPACES}.`,
+      `Invalid ${source}: must be an integer from 1 to ${MAX_CONFIGURED_REGISTERED_WORKSPACES}.`,
     );
   }
   return value;
