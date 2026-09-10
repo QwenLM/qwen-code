@@ -79,7 +79,7 @@ qwen channel pairing approve dws-work CODE
 
 For a group-only channel, set `dmPolicy` to `disabled` and choose an enabled `groupPolicy`. For a direct-message-only channel, set `groupPolicy` to `disabled` and keep `dmPolicy` as `open`.
 
-Re-enabling either chat source starts its history recovery at the re-enable time. This fail-closed boundary prevents messages from the disabled interval from being replayed, but it also discards any older messages that arrived while the source was enabled and the channel was not polling.
+Disabling a chat source takes effect at the next connect or poll and is destructive for work already accepted from it: parked pending messages and pending document notifications belonging to that source are discarded and recorded as processed (the channel logs `discarded N pending DWS message(s) because their chat sources are disabled`), so re-enabling does not replay them. Re-enabling either chat source starts its history recovery at the re-enable time. This fail-closed boundary prevents messages from the disabled interval from being replayed, but it also discards any older messages that arrived while the source was enabled and the channel was not polling.
 
 `groups` controls mention behavior. A concrete group ID overrides `"*"`. With `requireMention: true`, only an @ message wakes the channel. With `requireMention: false`, ordinary messages are also received after the group and sender policies pass.
 

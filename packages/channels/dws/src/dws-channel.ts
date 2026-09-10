@@ -901,12 +901,17 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     if (this.alignSourcePolicyState(this.connectionStartedAt)) {
       this.saveCursor();
     }
+    // A boundary written by this connect's own align must be captured even
+    // when an authenticated profile already exists: the identity reset below
+    // otherwise wipes a floor the same connect just wrote. An older floor
+    // with a known selfProfile is deliberately not captured, so a profile
+    // switch never inherits the previous identity's history window.
     const initialProfileMentionBoundary =
-      this.cursor.selfProfile === undefined &&
+      (this.cursor.selfProfile === undefined ||
+        this.cursor.mentionHistoryFloor === this.connectionStartedAt) &&
       this.cursor.groupMessagesEnabled === true &&
       this.cursor.mentionHistoryFloor !== undefined &&
-      this.cursor.mentionWatermark !== undefined &&
-      this.cursor.mentionHistoryFloorProfile !== undefined
+      this.cursor.mentionWatermark !== undefined
         ? {
             floor: this.cursor.mentionHistoryFloor,
             watermark: this.cursor.mentionWatermark,
@@ -914,11 +919,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
           }
         : undefined;
     const initialProfileNotificationBoundary =
-      this.cursor.selfProfile === undefined &&
+      (this.cursor.selfProfile === undefined ||
+        this.cursor.notificationHistoryFloor === this.connectionStartedAt) &&
       this.cursor.directMessagesEnabled === true &&
       this.cursor.notificationHistoryFloor !== undefined &&
-      this.cursor.notificationWatermark !== undefined &&
-      this.cursor.notificationHistoryFloorProfile !== undefined
+      this.cursor.notificationWatermark !== undefined
         ? {
             floor: this.cursor.notificationHistoryFloor,
             watermark: this.cursor.notificationWatermark,
@@ -967,14 +972,22 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.directMessagesEnabled = undefined;
       this.cursor.notificationCheckpoint = undefined;
       this.cursor.mentionCheckpoint = undefined;
-      if (initialProfileMentionBoundary?.profile === identity.profile) {
+      if (
+        initialProfileMentionBoundary !== undefined &&
+        (initialProfileMentionBoundary.profile === undefined ||
+          initialProfileMentionBoundary.profile === identity.profile)
+      ) {
         this.cursor.mentionHistoryFloor = initialProfileMentionBoundary.floor;
         this.cursor.mentionWatermark = initialProfileMentionBoundary.watermark;
         this.cursor.mentionHistoryFloorProfile =
           initialProfileMentionBoundary.profile;
         this.cursor.groupMessagesEnabled = true;
       }
-      if (initialProfileNotificationBoundary?.profile === identity.profile) {
+      if (
+        initialProfileNotificationBoundary !== undefined &&
+        (initialProfileNotificationBoundary.profile === undefined ||
+          initialProfileNotificationBoundary.profile === identity.profile)
+      ) {
         this.cursor.notificationHistoryFloor =
           initialProfileNotificationBoundary.floor;
         this.cursor.notificationWatermark =
@@ -2088,8 +2101,13 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.mentionWatermark =
         referenceTime + NOTIFICATION_HISTORY_OVERLAP_MS;
       this.cursor.mentionHistoryFloor = referenceTime;
+      // The configured profile is the identity this client is guaranteed to
+      // resolve to; a stale persisted selfProfile must not win the tag.
       this.cursor.mentionHistoryFloorProfile =
-        this.cursor.selfProfile ?? this.configuredProfile;
+        this.configuredProfile ?? this.cursor.selfProfile;
+      process.stderr.write(
+        `[Channel:${this.name}] group-message history restarts at ${referenceTime}; earlier history will not be fetched\n`,
+      );
       changed = true;
     }
     if (this.cursor.directMessagesEnabled === false && directMessagesEnabled) {
@@ -2103,7 +2121,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         referenceTime + NOTIFICATION_HISTORY_OVERLAP_MS;
       this.cursor.notificationHistoryFloor = referenceTime;
       this.cursor.notificationHistoryFloorProfile =
-        this.cursor.selfProfile ?? this.configuredProfile;
+        this.configuredProfile ?? this.cursor.selfProfile;
+      process.stderr.write(
+        `[Channel:${this.name}] direct-message history restarts at ${referenceTime}; earlier history will not be fetched\n`,
+      );
       this.notificationWatermarkPulledBack = false;
       changed = true;
     }
@@ -3045,7 +3066,12 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       processed.add(key);
       keysToMark.push(key);
     }
-    this.cursor.processedMessages.push(...keysToMark.reverse());
+    // Discarded keys sit at the eviction front so that later ordinary marks
+    // evict them before any preserved enabled-source dedup key.
+    this.cursor.processedMessages = [
+      ...keysToMark.reverse(),
+      ...this.cursor.processedMessages,
+    ].slice(-MAX_PROCESSED_ITEMS);
     const disabledKeys = new Set(
       disabled.map((item) => messageKey(item.message)),
     );
