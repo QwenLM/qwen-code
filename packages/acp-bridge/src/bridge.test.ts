@@ -6585,73 +6585,10 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('serves the in-memory journal on refreshed load while a question is pending', async () => {
-    const handle = makeChannel({
-      loadSessionImpl: () => ({
-        _meta: {
-          'qwen.session.loadReplay': {
-            v: 1,
-            updates: [
-              {
-                sessionUpdate: 'user_message_chunk',
-                content: { type: 'text', text: 'initial prompt' },
-              },
-            ],
-          },
-        },
-      }),
-      extMethodImpl: (method, params) => {
-        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
-          throw new Error(`unexpected extMethod ${method}`);
-        }
-        // The persisted page can never contain the pending question:
-        // permission requests are journaled in memory only.
-        return {
-          v: 1,
-          sessionId: params['sessionId'],
-          events: [
-            {
-              v: 1,
-              type: 'session_update',
-              data: {
-                sessionUpdate: 'user_message_chunk',
-                content: { type: 'text', text: 'persisted tail' },
-                _meta: { 'qwen.session.recordId': 'record-persisted' },
-              },
-            },
-          ],
-          hasMore: false,
-        };
-      },
-    });
-    // Count only the refreshed-load loop's fetches (identified by the
-    // requested page size); the pagination-anchor backfill fetches with a
-    // different fixed limit and must not be attributed to the guard.
-    const loopTranscriptFetches = () =>
-      handle.agent.extMethodCalls.filter(
-        (call) =>
-          call.method === SERVE_STATUS_EXT_METHODS.sessionTranscript &&
-          (call.params as { limit?: number }).limit === 100,
-      ).length;
-    const bridge = makeBridge({ channelFactory: async () => handle.channel });
-    const loaded = await bridge.loadSession({
-      sessionId: 'persisted-pending-question',
-      workspaceCwd: WS_A,
-      historyReplay: 'response',
-      historyPageSize: 100,
-    });
-
-    // Park the session on an unanswered ask_user_question. A parked
-    // Goal/background-notification turn does not keep promptActive set, so
-    // the refreshed-load guard would otherwise serve the persisted page with
-    // an empty liveJournal — stranding the interaction (badge on, no card)
-    // for the re-opening client.
-    const pendingAnswer = (
-      handle.agentConnection as unknown as {
-        requestPermission(p: unknown): Promise<unknown>;
-      }
-    ).requestPermission({
-      sessionId: loaded.sessionId,
+  it.each([
+    {
+      label: 'question',
+      sessionSuffix: 'question',
       toolCall: {
         toolCallId: 'q1',
         title: 'Ask user 1 question',
@@ -6665,134 +6602,16 @@ describe('createAcpSessionBridge', () => {
         { optionId: 'proceed_once', name: 'Submit', kind: 'allow_once' },
         { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
       ],
-    });
-    await vi.waitFor(() =>
-      expect(
-        bridge.getSessionSummary(loaded.sessionId)?.isWaitingForUserQuestion,
-      ).toBe(true),
-    );
-
-    const reopened = await bridge.loadSession({
-      sessionId: loaded.sessionId,
-      workspaceCwd: WS_A,
-      clientId: 'client-reopen',
-      historyReplay: 'response',
-      historyPageSize: 100,
-    });
-
-    const frame = (reopened.liveJournal ?? []).find(
-      (event) => event.type === 'permission_request',
-    );
-    expect(frame).toBeDefined();
-    // The re-presented card must carry the payload that makes it answerable
-    // (questions + options), not merely the frame's type.
-    expect(JSON.stringify(frame?.data)).toContain('Continue?');
-    expect(JSON.stringify(frame?.data)).toContain('proceed_once');
-    // The card the client renders must be the interaction the mediator
-    // accepts a vote for: the delivered frame's id equals the registry key.
-    const frameRequestId = (frame?.data as { requestId?: string } | undefined)
-      ?.requestId;
-    expect(frameRequestId).toBeDefined();
-    const registryRequestId = bridge.getSessionSummary(loaded.sessionId)
-      ?.pendingInteractions?.[0]?.requestId;
-    expect(frameRequestId).toBe(registryRequestId);
-    // The guard's observable effect: no persisted-page fetch happens at all
-    // while an interaction is pending (this fixture's journal emits no
-    // history_truncated marker, so the anchor backfill fetches nothing here).
-    expect(loopTranscriptFetches()).toBe(0);
-    // The guarded branch switches the history source to the in-memory
-    // replay; the session's prior history must survive the switch.
-    const reopenedEvents = [
-      ...(reopened.compactedReplay ?? []),
-      ...(reopened.liveJournal ?? []),
-    ];
-    expect(
-      reopenedEvents.some(
-        (event) =>
-          event.type === 'session_update' &&
-          JSON.stringify(event.data).includes('initial prompt'),
-      ),
-    ).toBe(true);
-
-    // Delivery alone is not enough — the re-presented card must stay
-    // answerable for the client that just attached: vote with its
-    // registered identity through the session-scoped route.
-    expect(
-      bridge.respondToSessionPermission(
-        loaded.sessionId,
-        frameRequestId!,
-        { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
-        { clientId: reopened.clientId },
-      ),
-    ).toBe(true);
-    await expect(pendingAnswer).resolves.toEqual({
-      outcome: { outcome: 'selected', optionId: 'proceed_once' },
-    });
-    await bridge.shutdown();
-  });
-
-  it('serves the in-memory journal on refreshed load while a tool permission is pending', async () => {
-    const handle = makeChannel({
-      loadSessionImpl: () => ({
-        _meta: {
-          'qwen.session.loadReplay': {
-            v: 1,
-            updates: [
-              {
-                sessionUpdate: 'user_message_chunk',
-                content: { type: 'text', text: 'initial prompt' },
-              },
-            ],
-          },
-        },
-      }),
-      extMethodImpl: (method, params) => {
-        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
-          throw new Error(`unexpected extMethod ${method}`);
-        }
-        // The persisted page can never contain the pending interaction:
-        // permission requests are journaled in memory only.
-        return {
-          v: 1,
-          sessionId: params['sessionId'],
-          events: [
-            {
-              v: 1,
-              type: 'session_update',
-              data: {
-                sessionUpdate: 'user_message_chunk',
-                content: { type: 'text', text: 'persisted tail' },
-                _meta: { 'qwen.session.recordId': 'record-persisted' },
-              },
-            },
-          ],
-          hasMore: false,
-        };
-      },
-    });
-    const loopTranscriptFetches = () =>
-      handle.agent.extMethodCalls.filter(
-        (call) =>
-          call.method === SERVE_STATUS_EXT_METHODS.sessionTranscript &&
-          (call.params as { limit?: number }).limit === 100,
-      ).length;
-    const bridge = makeBridge({ channelFactory: async () => handle.channel });
-    const loaded = await bridge.loadSession({
-      sessionId: 'persisted-pending-permission',
-      workspaceCwd: WS_A,
-      historyReplay: 'response',
-      historyPageSize: 100,
-    });
-
-    // The guard is kind-agnostic ("A pending permission/question"): park a
-    // plain tool-approval request with no question metadata. Narrowing the
-    // guard to the question kind must turn this test red.
-    const pendingAnswer = (
-      handle.agentConnection as unknown as {
-        requestPermission(p: unknown): Promise<unknown>;
-      }
-    ).requestPermission({
-      sessionId: loaded.sessionId,
+      waitFlag: 'isWaitingForUserQuestion' as const,
+      voteOptionId: 'proceed_once',
+      payloadMarks: ['Continue?', 'proceed_once'],
+    },
+    {
+      // The guard is kind-agnostic: a plain tool-approval request with no
+      // question metadata must be re-presented exactly like a question.
+      // Narrowing the guard to the question kind must turn this variant red.
+      label: 'tool permission',
+      sessionSuffix: 'permission',
       toolCall: {
         toolCallId: 'perm-1',
         title: 'Run command',
@@ -6802,50 +6621,155 @@ describe('createAcpSessionBridge', () => {
         { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
         { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
       ],
-    });
-    await vi.waitFor(() =>
+      waitFlag: 'isWaitingForPermission' as const,
+      voteOptionId: 'allow',
+      // 'allow' alone would be satisfied by the option kind ("allow_once")
+      // even if its optionId were stripped — match the frame's own spelling.
+      payloadMarks: ['Run command', '"optionId":"allow"'],
+    },
+  ])(
+    'serves the in-memory journal on refreshed load while a $label is pending',
+    async (variant) => {
+      const handle = makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              updates: [
+                {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'initial prompt' },
+                },
+              ],
+            },
+          },
+        }),
+        extMethodImpl: (method, params) => {
+          if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+            throw new Error(`unexpected extMethod ${method}`);
+          }
+          // The persisted page can never contain the pending interaction:
+          // permission requests are journaled in memory only.
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'persisted tail' },
+                  _meta: { 'qwen.session.recordId': 'record-persisted' },
+                },
+              },
+            ],
+            hasMore: false,
+          };
+        },
+      });
+      // Count only the refreshed-load loop's fetches (identified by the
+      // requested page size); the pagination-anchor backfill fetches with a
+      // different fixed limit and must not be attributed to the guard.
+      const loopTranscriptFetches = () =>
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_STATUS_EXT_METHODS.sessionTranscript &&
+            (call.params as { limit?: number }).limit === 100,
+        ).length;
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const loaded = await bridge.loadSession({
+        sessionId: `persisted-pending-${variant.sessionSuffix}`,
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      // Park the session on an unanswered interaction. A parked
+      // Goal/background-notification turn does not keep promptActive set, so
+      // the refreshed-load guard would otherwise serve the persisted page
+      // with an empty liveJournal — stranding the interaction (badge on, no
+      // card) for the re-opening client.
+      const pendingAnswer = (
+        handle.agentConnection as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: loaded.sessionId,
+        toolCall: variant.toolCall,
+        options: variant.options,
+      });
+      await vi.waitFor(() =>
+        expect(
+          bridge.getSessionSummary(loaded.sessionId)?.[variant.waitFlag],
+        ).toBe(true),
+      );
+
+      const reopened = await bridge.loadSession({
+        sessionId: loaded.sessionId,
+        workspaceCwd: WS_A,
+        clientId: 'client-reopen',
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      const frame = (reopened.liveJournal ?? []).find(
+        (event) => event.type === 'permission_request',
+      );
+      expect(frame).toBeDefined();
+      // The re-presented card must carry the payload that makes it
+      // answerable (questions + options), not merely the frame's type.
+      for (const mark of variant.payloadMarks) {
+        expect(JSON.stringify(frame?.data)).toContain(mark);
+      }
+      // The card the client renders must be the interaction the mediator
+      // accepts a vote for: the delivered frame's id equals the registry key.
+      const frameRequestId = (frame?.data as { requestId?: string } | undefined)
+        ?.requestId;
+      expect(frameRequestId).toBeDefined();
+      const registryRequestId = bridge.getSessionSummary(loaded.sessionId)
+        ?.pendingInteractions?.[0]?.requestId;
+      expect(frameRequestId).toBe(registryRequestId);
+      // The guard's observable effect: no persisted-page fetch happens at all
+      // while an interaction is pending (this fixture's journal emits no
+      // history_truncated marker, so the anchor backfill fetches nothing).
+      expect(loopTranscriptFetches()).toBe(0);
+      // The guarded branch switches the history source to the in-memory
+      // replay; the session's prior history must survive the switch.
+      const reopenedEvents = [
+        ...(reopened.compactedReplay ?? []),
+        ...(reopened.liveJournal ?? []),
+      ];
       expect(
-        bridge.getSessionSummary(loaded.sessionId)?.isWaitingForPermission,
-      ).toBe(true),
-    );
+        reopenedEvents.some(
+          (event) =>
+            event.type === 'session_update' &&
+            JSON.stringify(event.data).includes('initial prompt'),
+        ),
+      ).toBe(true);
 
-    const reopened = await bridge.loadSession({
-      sessionId: loaded.sessionId,
-      workspaceCwd: WS_A,
-      clientId: 'client-reopen',
-      historyReplay: 'response',
-      historyPageSize: 100,
-    });
-
-    const frame = (reopened.liveJournal ?? []).find(
-      (event) => event.type === 'permission_request',
-    );
-    expect(frame).toBeDefined();
-    expect(JSON.stringify(frame?.data)).toContain('Run command');
-    // 'allow' alone would be satisfied by the option's kind ("allow_once")
-    // even if its optionId were stripped — match the frame's own spelling.
-    expect(JSON.stringify(frame?.data)).toContain('"optionId":"allow"');
-    const frameRequestId = (frame?.data as { requestId?: string } | undefined)
-      ?.requestId;
-    expect(frameRequestId).toBeDefined();
-    const registryRequestId = bridge.getSessionSummary(loaded.sessionId)
-      ?.pendingInteractions?.[0]?.requestId;
-    expect(frameRequestId).toBe(registryRequestId);
-    expect(loopTranscriptFetches()).toBe(0);
-
-    expect(
-      bridge.respondToSessionPermission(
-        loaded.sessionId,
-        frameRequestId!,
-        { outcome: { outcome: 'selected', optionId: 'allow' } },
-        { clientId: reopened.clientId },
-      ),
-    ).toBe(true);
-    await expect(pendingAnswer).resolves.toEqual({
-      outcome: { outcome: 'selected', optionId: 'allow' },
-    });
-    await bridge.shutdown();
-  });
+      // Delivery alone is not enough — the re-presented card must stay
+      // answerable for the client that just attached: vote with its
+      // registered identity through the session-scoped route.
+      expect(
+        bridge.respondToSessionPermission(
+          loaded.sessionId,
+          frameRequestId!,
+          {
+            outcome: {
+              outcome: 'selected',
+              optionId: variant.voteOptionId,
+            },
+          },
+          { clientId: reopened.clientId },
+        ),
+      ).toBe(true);
+      await expect(pendingAnswer).resolves.toEqual({
+        outcome: { outcome: 'selected', optionId: variant.voteOptionId },
+      });
+      await bridge.shutdown();
+    },
+  );
 
   it.each([
     {
