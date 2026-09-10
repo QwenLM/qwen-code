@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   redactWorkflowsFromAvailableCommandsEvent,
+  redactWorkflowsFromSupportedCommands,
   redactWorkflowsFromReplayArrays,
 } from './workflow-session-gate.js';
 
@@ -122,5 +123,20 @@ describe('redactWorkflowsFromReplayArrays', () => {
   it('returns its input unchanged when no replay arrays are present', () => {
     const session = { sessionId: 'sess-1', compactedReplay: undefined };
     expect(redactWorkflowsFromReplayArrays(session)).toBe(session);
+  });
+});
+
+describe('structured workflow capability trust gate', () => {
+  it('removes structured run capability on an untrusted workspace', () => {
+    expect(
+      redactWorkflowsFromSupportedCommands({
+        v: 1,
+        sessionId: 's-1',
+        availableCommands: [],
+        availableSkills: [],
+        workflowsEnabled: true,
+        workflowRunV1: true,
+      }),
+    ).toMatchObject({ workflowsEnabled: false, workflowRunV1: false });
   });
 });

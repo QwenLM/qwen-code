@@ -10,6 +10,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { Extension } from '../../extension/extensionManager.js';
 import {
   WorkflowOrchestrator,
   WorkflowExecutionError,
@@ -2399,6 +2400,104 @@ describe('createProductionDispatch', () => {
     nextFinalText.value = undefined;
     nextTerminateMode.value = 'GOAL';
     nextExecuteHook.value = undefined;
+  });
+
+  it('loads selected active extension context before starting the leaf agent', async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'workflow-leaf-extension-'),
+    );
+    const contextFile = path.join(root, 'QWEN.md');
+    fs.writeFileSync(
+      contextFile,
+      'EXPERT_RULE: verify the table schema first.',
+    );
+    const extension: Extension = {
+      id: 'data-expert',
+      name: 'data-expert',
+      version: '1',
+      isActive: true,
+      path: root,
+      config: {
+        name: 'data-expert',
+        version: '1',
+        description: 'Inspect tables',
+      },
+      contextFiles: [contextFile],
+    };
+    const config = {
+      getActiveExtensions: () => [extension],
+    } as unknown as Config;
+    try {
+      await createProductionDispatch(config)('check the table', {
+        extensions: ['data-expert'],
+        stepId: 'inspect',
+      });
+      expect(created).toHaveLength(1);
+      expect(created[0].prompt).toContain('check the table');
+      expect(created[0].prompt).toContain(
+        'EXPERT_RULE: verify the table schema first.',
+      );
+      expect(created[0].prompt).toContain('untrusted third-party content');
+      expect(created[0].prompt).toContain(
+        'Invoke listed Skills through the Skill tool',
+      );
+      expect(created[0].toolConfig?.disallowedTools).toContain('send_message');
+      expect(created[0].taskName).toBe(created[0].prompt);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses unavailable extension context before any leaf starts', async () => {
+    const config = { getActiveExtensions: () => [] } as unknown as Config;
+    await expect(
+      createProductionDispatch(config)('check', { extensions: ['missing'] }),
+    ).rejects.toThrow(/active extension 'missing' was not found/);
+    expect(created).toHaveLength(0);
+  });
+
+  it.each([false, true])(
+    'does not start a leaf when its extension is disabled or unreadable (active=%s)',
+    async (isActive) => {
+      const root = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'workflow-missing-extension-'),
+      );
+      const extension: Extension = {
+        id: 'expert',
+        name: 'expert',
+        version: '1',
+        isActive,
+        path: root,
+        config: { name: 'expert', version: '1' },
+        contextFiles: [path.join(root, 'missing.md')],
+      };
+      const config = {
+        getActiveExtensions: () => [extension],
+      } as unknown as Config;
+      try {
+        await expect(
+          createProductionDispatch(config)('check', { extensions: ['expert'] }),
+        ).rejects.toThrow(
+          isActive ? /Unreadable extension context/ : /active extension/,
+        );
+        expect(created).toHaveLength(0);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('records unavailable extensions as a failed dispatch rather than successful prose', async () => {
+    const config = { getActiveExtensions: () => [] } as unknown as Config;
+    const orchestrator = new WorkflowOrchestrator(
+      createProductionDispatch(config),
+    );
+    const outcome = await orchestrator.run({
+      script: 'return await agent("check", { extensions: ["missing"] });',
+      args: undefined,
+    });
+    expect(outcome.result).toBeNull();
+    expect(created).toHaveLength(0);
   });
 
   it('routes calls through AgentHeadless and returns getFinalText', async () => {

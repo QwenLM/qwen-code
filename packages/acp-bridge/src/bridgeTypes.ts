@@ -55,6 +55,8 @@ import type {
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeSessionWorkflowTaskStatus,
+  ServeSessionWorkflowRunRequest,
+  ServeSessionWorkflowRunResult,
   ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpToolsStatus,
@@ -2052,6 +2054,13 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     taskKind: 'agent' | 'shell' | 'monitor' | 'workflow',
     context?: BridgeClientRequestContext,
   ): Promise<{ cancelled: boolean }>;
+
+  /** Start an explicitly requested workflow in the live session owner. */
+  runSessionWorkflow(
+    sessionId: string,
+    request: ServeSessionWorkflowRunRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<ServeSessionWorkflowRunResult>;
 
   /** Control a run, delete history, or start a saved workflow definition. */
   controlSessionWorkflowTask(

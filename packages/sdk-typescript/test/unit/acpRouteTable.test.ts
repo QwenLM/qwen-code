@@ -464,9 +464,16 @@ describe('acpRouteTable – matchRoute', () => {
       result!.segments,
       undefined,
       'GET',
-      new URLSearchParams('includeWorkflows=true'),
+      new URLSearchParams({
+        includeWorkflows: 'true',
+        expectedWorkspaceCwd: '/workspace',
+      }),
     );
-    expect(params).toEqual({ sessionId: 's17', includeWorkflows: true });
+    expect(params).toEqual({
+      sessionId: 's17',
+      includeWorkflows: true,
+      expectedWorkspaceCwd: '/workspace',
+    });
   });
 
   it('POST /session/:id/tasks/:taskId/cancel maps to _qwen/session/tasks/cancel', () => {
@@ -482,6 +489,24 @@ describe('acpRouteTable – matchRoute', () => {
       sessionId: 's17',
       taskId: 'task/1',
       kind: 'workflow',
+    });
+  });
+
+  it('maps structured workflow requests for ACP HTTP and WebSocket transports', () => {
+    const result = matchRoute('/session/s%2F17/workflows/run', 'POST')!;
+    const request = {
+      script: 'return args;',
+      args: { input: ['a'] },
+      sourceRef: { id: 'flow-1', revision: 'r1' },
+      clientRequestId: 'request-1',
+      expectedWorkspaceCwd: '/workspace',
+    };
+    expect(result.mapping.method).toBe('_qwen/session/workflows/run');
+    expect(
+      result.mapping.extractParams(result.segments, request, 'POST'),
+    ).toEqual({
+      sessionId: 's/17',
+      request,
     });
   });
 

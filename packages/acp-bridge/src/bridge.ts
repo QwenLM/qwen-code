@@ -91,6 +91,7 @@ import {
   type ServeSessionSavedWorkflowStatus,
   type ServeSessionTasksStatus,
   type ServeSessionWorkflowTaskStatus,
+  type ServeSessionWorkflowRunResult,
   type ServeWorkspaceMcpResourcesStatus,
   type ServeWorkspaceMcpStatus,
   type ServeWorkspaceMcpToolsStatus,
@@ -12741,6 +12742,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         sessionId,
         SERVE_CONTROL_EXT_METHODS.sessionTaskCancel,
         { taskId, taskKind },
+      );
+    },
+
+    async runSessionWorkflow(sessionId, request, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      assertSessionResetNotPending(sessionId);
+      return requestSessionStatus<ServeSessionWorkflowRunResult>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionWorkflowRun,
+        { request },
       );
     },
 

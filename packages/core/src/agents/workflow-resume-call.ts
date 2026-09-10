@@ -16,6 +16,7 @@
  * misses every journal key and re-dispatches the whole fan-out.
  */
 
+import type { WorkflowSourceRef } from './workflow-source-ref.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 
 /**
@@ -32,6 +33,7 @@ export interface WorkflowResumeTarget {
   scriptPath?: string;
   /** The structured value the original run was launched with. */
   args?: unknown;
+  sourceRef?: WorkflowSourceRef;
   /** Preserve background execution when the current surface accepts it. */
   resumeInBackground?: boolean;
 }
@@ -76,8 +78,11 @@ export function buildResumeCall(target: WorkflowResumeTarget): string | null {
   const runId = stripAnsiAndControl(target.runId);
   const args = serializeResumeArgs(target.args);
   const argsPart = args === null ? '' : `, args: ${args}`;
+  const sourcePart = target.sourceRef
+    ? `, sourceRef: ${JSON.stringify(target.sourceRef)}`
+    : '';
   const backgroundPart = target.resumeInBackground
     ? ', run_in_background: true'
     : '';
-  return `Workflow({ scriptPath: ${JSON.stringify(scriptPath)}, resumeFromRunId: ${JSON.stringify(runId)}${argsPart}${backgroundPart} })`;
+  return `Workflow({ scriptPath: ${JSON.stringify(scriptPath)}, resumeFromRunId: ${JSON.stringify(runId)}${argsPart}${sourcePart}${backgroundPart} })`;
 }

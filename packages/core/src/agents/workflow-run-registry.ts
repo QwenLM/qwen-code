@@ -22,6 +22,7 @@
  * consumer replacing the other.
  */
 
+import type { WorkflowSourceRef } from './workflow-source-ref.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Config } from '../config/config.js';
 import type { TaskBase, TaskRegistration } from './tasks/types.js';
@@ -207,6 +208,7 @@ export interface WorkflowPhaseVisit {
 
 export interface WorkflowDispatchTrace {
   id: string;
+  stepId?: string;
   phaseVisitId: string | null;
   label: string;
   prompt: string;
@@ -221,6 +223,7 @@ export interface WorkflowDispatchTrace {
 
 export interface WorkflowDispatchQueued {
   id: string;
+  stepId?: string;
   label?: string;
   prompt: string;
   dependsOn: string[];
@@ -292,6 +295,7 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   toolUseId?: string;
   /** Saved workflow definition name, when this run came from one. */
   workflowName?: string;
+  sourceRef?: WorkflowSourceRef;
   /** Run whose result or journal led to this attempt. */
   sourceRunId?: string;
   /** Whether this attempt reused the journal or started from scratch. */
@@ -1138,6 +1142,7 @@ export class WorkflowRunRegistry {
     const fallbackLabel = `Agent ${entry.dispatches.length + 1}`;
     entry.dispatches.push({
       id: event.id,
+      ...(event.stepId !== undefined ? { stepId: event.stepId } : {}),
       phaseVisitId: entry.currentPhaseVisitId,
       label:
         stripAnsiAndControl(event.label ?? '').slice(0, 200) || fallbackLabel,

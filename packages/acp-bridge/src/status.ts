@@ -5,7 +5,10 @@
  */
 
 import type { AvailableCommand } from '@agentclientprotocol/sdk';
-import type { HookEventName } from '@qwen-code/qwen-code-core';
+import type {
+  HookEventName,
+  WorkflowSourceRef,
+} from '@qwen-code/qwen-code-core';
 import { SkillError } from '@qwen-code/qwen-code-core';
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
@@ -217,6 +220,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
   sessionWorkflowTaskAction: 'qwen/control/session/task/workflow-action',
+  sessionWorkflowRun: 'qwen/control/session/workflows/run',
   sessionGoalControl: 'qwen/control/session/goal/control',
   sessionGoalClear: 'qwen/control/session/goal/clear',
   /**
@@ -686,11 +690,27 @@ export interface ServeSessionSupportedCommandsStatus {
   availableSkills: string[];
   /** Whether Workflow is available for this session. */
   workflowsEnabled?: boolean;
+  /** Structured run requests with session-lifetime idempotency are available. */
+  workflowRunV1?: boolean;
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
     name: string;
     source: 'project' | 'user';
   }>;
+}
+
+/** Idempotency is scoped to this live ACP session instance, not persisted history. */
+export interface ServeSessionWorkflowRunRequest {
+  script: string;
+  args?: unknown;
+  sourceRef: WorkflowSourceRef;
+  clientRequestId: string;
+  expectedWorkspaceCwd?: string;
+}
+
+export interface ServeSessionWorkflowRunResult {
+  sessionId: string;
+  runId: string;
 }
 
 /** Parsed `export const meta` contract of a saved workflow script. */
@@ -857,6 +877,7 @@ export type ServeWorkflowDispatchStatus =
 
 export interface ServeWorkflowDispatchStatusEntry {
   id: string;
+  stepId?: string;
   phaseVisitId: string | null;
   label: string;
   prompt: string;
@@ -922,6 +943,11 @@ export type ServeWorkflowEvent =
 
 export interface ServeSessionWorkflowTaskStatus {
   kind: 'workflow';
+  /** JSON result up to 64 KiB; use status to determine completion. */
+  result?: unknown;
+  /** Result could not be represented within the response limit. */
+  resultOmitted?: boolean;
+  sourceRef?: WorkflowSourceRef;
   id: string;
   /** Tool call in the parent session that launched this workflow. */
   toolUseId?: string;

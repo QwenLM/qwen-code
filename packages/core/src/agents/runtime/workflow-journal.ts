@@ -109,6 +109,7 @@ export interface JournalReplay {
  * it projected away, a resume that changed only the directory would replay
  * the previous tree's answers as if they were this one's.
  */
+// stepId 与 extensions 固定业务节点和显式选择的能力；旧脚本未设置时保持原有 journal key。
 export function canonicalizeAgentOpts(opts: WorkflowAgentOpts): string {
   const projected: Record<string, unknown> = {};
   for (const k of [
@@ -117,6 +118,8 @@ export function canonicalizeAgentOpts(opts: WorkflowAgentOpts): string {
     'isolation',
     'agentType',
     'workingDir',
+    'stepId',
+    'extensions',
   ] as const) {
     const v = opts[k];
     if (v === undefined || typeof v === 'function') continue;

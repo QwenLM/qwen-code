@@ -186,16 +186,34 @@ function serializeMonitorTask(
   };
 }
 
+function workflowResultFields(result: unknown): {
+  result?: unknown;
+  resultOmitted?: boolean;
+} {
+  if (result === undefined) return {};
+  try {
+    const json = JSON.stringify(result);
+    if (json === undefined || Buffer.byteLength(json, 'utf8') > 64 * 1024) {
+      return { resultOmitted: true };
+    }
+    return { result: JSON.parse(json) as unknown };
+  } catch {
+    return { resultOmitted: true };
+  }
+}
+
 function serializeWorkflowTask(
   entry: WorkflowTask,
   now: number,
 ): ServeSessionWorkflowTaskStatus {
   return {
     kind: 'workflow',
+    ...workflowResultFields(entry.result),
     id: entry.runId,
     ...optionalField('toolUseId', entry.toolUseId),
     ...optionalField('workflowName', entry.workflowName),
     ...optionalField('sourceRunId', entry.sourceRunId),
+    ...optionalField('sourceRef', entry.sourceRef && { ...entry.sourceRef }),
     ...optionalField('startMode', entry.startMode),
     label:
       entry.meta?.name ??
@@ -239,11 +257,16 @@ function serializeWorkflowSnapshot(
 ): ServeSessionWorkflowTaskStatus {
   return {
     kind: 'workflow',
+    ...workflowResultFields(snapshot.result),
     id: snapshot.runId,
     isHistorical: true,
     ...optionalField('toolUseId', snapshot.toolUseId),
     ...optionalField('workflowName', snapshot.workflowName),
     ...optionalField('sourceRunId', snapshot.sourceRunId),
+    ...optionalField(
+      'sourceRef',
+      snapshot.sourceRef && { ...snapshot.sourceRef },
+    ),
     ...optionalField('startMode', snapshot.startMode),
     label:
       snapshot.meta?.name ??

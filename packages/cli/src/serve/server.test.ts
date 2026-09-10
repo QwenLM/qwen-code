@@ -2657,6 +2657,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return cancelSessionTaskImpl(sessionId, taskId, taskKind, context);
     },
+    async runSessionWorkflow(sessionId) {
+      return { sessionId, runId: 'wf-structured' };
+    },
     async controlSessionWorkflowTask(sessionId, taskId, action, context) {
       controlSessionWorkflowTaskCalls.push({
         sessionId,
@@ -10986,6 +10989,112 @@ describe('createServeApp', () => {
       expect(untrustedBridge.sessionSavedWorkflowCalls).toEqual([]);
     });
 
+    it('runs structured requests in the live owner and refuses untrusted or mismatched workspaces', async () => {
+      const bridge = fakeBridge();
+      const run = vi.spyOn(bridge, 'runSessionWorkflow');
+      const opts = { ...baseOpts, token: 'secret', workspace: WS_BOUND };
+      const app = createServeApp(opts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const body = {
+        script: 'return args;',
+        args: { input: 1 },
+        sourceRef: { id: 'flow-1', revision: 'r1' },
+        clientRequestId: 'request-1',
+        expectedWorkspaceCwd: WS_BOUND,
+      };
+      const post = (target: typeof app, payload = body, sessionId = 's-1') =>
+        request(target)
+          .post(`/session/${sessionId}/workflows/run`)
+          .set('Host', `127.0.0.1:${opts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send(payload);
+      const tasks = vi.spyOn(bridge, 'getSessionTasksStatus');
+      const foreignTasks = await request(app)
+        .get('/session/s-1/tasks')
+        .query({ includeWorkflows: 'true', expectedWorkspaceCwd: '/other' })
+        .set('Host', `127.0.0.1:${opts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(foreignTasks.status).toBe(409);
+      expect(foreignTasks.body.code).toBe('workflow_workspace_mismatch');
+      expect(tasks).not.toHaveBeenCalled();
+      const result = await post(app);
+      expect(result.status).toBe(200);
+      expect(result.body).toEqual({ sessionId: 's-1', runId: 'wf-structured' });
+      expect(run).toHaveBeenCalledWith('s-1', body, undefined);
+      const mismatch = await post(app, {
+        ...body,
+        expectedWorkspaceCwd: '/unrelated',
+      });
+      expect(mismatch.status).toBe(409);
+      expect(mismatch.body.code).toBe('workflow_workspace_mismatch');
+      const invalid = await post(app, { ...body, script: '' });
+      expect(invalid.status).toBe(400);
+      run.mockRejectedValueOnce(new SessionNotFoundError('missing'));
+      expect((await post(app, body, 'missing')).status).toBe(404);
+      const untrusted = createServeApp(opts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: false,
+      });
+      expect((await post(untrusted)).status).toBe(403);
+      expect(run).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps structured workflow starts in the secondary owner while its prompt is active', async () => {
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        summaryImpl: (sessionId) => {
+          if (sessionId !== 'secondary-session')
+            throw new SessionNotFoundError(sessionId);
+          return {
+            sessionId,
+            workspaceCwd: WS_DIFFERENT,
+            createdAt: '2026-09-10T00:00:00Z',
+            clientCount: 1,
+            hasActivePrompt: true,
+          };
+        },
+      });
+      const primaryRun = vi.spyOn(primaryBridge, 'runSessionWorkflow');
+      const secondaryRun = vi.spyOn(secondaryBridge, 'runSessionWorkflow');
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const opts = { ...baseOpts, token: 'secret', workspace: WS_BOUND };
+      const app = createServeApp(opts, undefined, {
+        workspaceRegistry: registry,
+      });
+      const body = {
+        script: 'return 1;',
+        sourceRef: { id: 'flow-1', revision: 'r1' },
+        clientRequestId: 'request-1',
+        expectedWorkspaceCwd: WS_DIFFERENT,
+      };
+      const post = (sessionId: string) =>
+        request(app)
+          .post(`/session/${sessionId}/workflows/run`)
+          .set('Host', `127.0.0.1:${opts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send(body);
+      expect((await post('secondary-session')).status).toBe(200);
+      expect(secondaryRun).toHaveBeenCalledOnce();
+      expect((await post('missing')).status).toBe(404);
+      expect(primaryRun).not.toHaveBeenCalled();
+      expect(secondaryRun).toHaveBeenCalledOnce();
+    });
+
     it('controls live runs, saved definitions, and history through one route', async () => {
       const bridge = fakeBridge({
         controlSessionWorkflowTaskImpl: async (_sessionId, _taskId, action) =>
@@ -11129,6 +11238,7 @@ describe('createServeApp', () => {
       expect(commandsRes.status).toBe(200);
       expect(commandsRes.body).toMatchObject({
         workflowsEnabled: false,
+        workflowRunV1: false,
         savedWorkflows: [],
       });
       expect(commandsRes.body.availableCommands).toEqual([

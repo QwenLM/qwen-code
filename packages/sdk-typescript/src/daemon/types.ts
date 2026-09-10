@@ -2824,11 +2824,37 @@ export interface DaemonSessionSupportedCommandsStatus {
   availableSkills: string[];
   /** Whether Workflow is available for this session. */
   workflowsEnabled?: boolean;
+  /** Structured workflow start with idempotency scoped to the live session instance. */
+  workflowRunV1?: boolean;
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
     name: string;
     source: 'project' | 'user';
   }>;
+}
+
+/** External task definition associated with this run. */
+export interface DaemonWorkflowSourceRef {
+  id: string;
+  revision: string;
+  digest?: string;
+  title?: string;
+}
+
+export interface DaemonSessionWorkflowRunRequest {
+  /** Nonempty JavaScript, at most 256 KiB in UTF-8. */
+  script: string;
+  /** JSON value, at most 256 KiB serialized in UTF-8. */
+  args?: unknown;
+  sourceRef: DaemonWorkflowSourceRef;
+  /** Reuse for retries only within the same live session instance. */
+  clientRequestId: string;
+  expectedWorkspaceCwd?: string;
+}
+
+export interface DaemonSessionWorkflowRunResult {
+  sessionId: string;
+  runId: string;
 }
 
 /** Parsed `export const meta` contract of a saved workflow script. */
@@ -2971,6 +2997,7 @@ export type DaemonWorkflowDispatchStatus =
 
 export interface DaemonWorkflowDispatchStatusEntry {
   id: string;
+  stepId?: string;
   phaseVisitId: string | null;
   label: string;
   prompt: string;
@@ -3036,6 +3063,11 @@ export type DaemonWorkflowEvent =
 
 export interface DaemonSessionWorkflowTaskStatus {
   kind: 'workflow';
+  /** JSON result up to 64 KiB; use status to determine completion. */
+  result?: unknown;
+  /** Result could not be represented within the response limit. */
+  resultOmitted?: boolean;
+  sourceRef?: DaemonWorkflowSourceRef;
   id: string;
   /** Tool call in the parent session that launched this workflow. */
   toolUseId?: string;

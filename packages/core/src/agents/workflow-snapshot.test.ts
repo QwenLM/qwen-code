@@ -199,6 +199,60 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     ]);
   });
 
+  it('round-trips source and repeated step references through disk', async () => {
+    const config = fakeConfig(projectDir);
+    const sourceRef = { id: 'flow-1', revision: '7', digest: 'sha256:abc' };
+    const dispatches = ['inspect', 'inspect'].map((stepId, index) => ({
+      id: `dispatch-${index + 1}`,
+      stepId,
+      phaseVisitId: null,
+      label: 'Check',
+      prompt: 'check',
+      status: 'completed' as const,
+      dependsOn: [],
+      queuedAt: 1,
+      endedAt: 2,
+    }));
+    const original = task({ runId: 'wf_source', sourceRef, dispatches });
+    const snapshot = toSnapshot(original);
+    sourceRef.revision = '8';
+    expect(snapshot.sourceRef?.revision).toBe('7');
+    original.sourceRef = snapshot.sourceRef;
+    await writeWorkflowSnapshot(config, original);
+    const [loaded] = await listWorkflowSnapshots(config);
+    expect(loaded.sourceRef).toEqual(snapshot.sourceRef);
+    expect(loaded.dispatches).toEqual(dispatches);
+  });
+
+  it.each([
+    { sourceRef: { id: 'flow', revision: '' } },
+    {
+      dispatches: [
+        {
+          id: 'dispatch-1',
+          stepId: '',
+          phaseVisitId: null,
+          label: 'Check',
+          prompt: 'check',
+          status: 'completed',
+          dependsOn: [],
+          queuedAt: 1,
+        },
+      ],
+    },
+  ])('skips persisted malformed references %j', async (fields) => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_invalidref' }));
+    const snapshotPath =
+      config.storage.getWorkflowRunSnapshotPath('wf_invalidref');
+    const snapshot = JSON.parse(await fs.readFile(snapshotPath, 'utf8'));
+    await fs.writeFile(
+      snapshotPath,
+      JSON.stringify({ ...snapshot, ...fields }),
+    );
+    expect(await listWorkflowSnapshots(config)).toEqual([]);
+  });
+
   it('loads a legacy snapshot without an event ledger', async () => {
     const config = fakeConfig(projectDir);
     await writeWorkflowSnapshot(config, task({ runId: 'wf_legacy' }));

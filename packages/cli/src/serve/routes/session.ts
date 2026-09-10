@@ -9,6 +9,12 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { inspect } from 'node:util';
 import {
+  parseWorkflowRunRequest,
+  parseExpectedWorkflowWorkspaceCwd,
+  WorkflowRunRequestError,
+  workflowRunErrorStatus,
+} from '../../acp-integration/workflow-run-request.js';
+import {
   APPROVAL_MODES,
   BTW_MAX_INPUT_LENGTH,
   GROUP_COLOR_OPTIONS,
@@ -6187,6 +6193,30 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/tasks',
       async (req, res, sessionId, runtime) => {
+        let expectedWorkspaceCwd: string | undefined;
+        try {
+          expectedWorkspaceCwd = parseExpectedWorkflowWorkspaceCwd(
+            req.query['expectedWorkspaceCwd'],
+          );
+        } catch (error) {
+          res.status(400).json({
+            error:
+              error instanceof Error ? error.message : 'Invalid workspace.',
+            code: 'invalid_workflow_run_request',
+          });
+          return;
+        }
+        if (
+          expectedWorkspaceCwd !== undefined &&
+          canonicalizeWorkspace(expectedWorkspaceCwd) !==
+            canonicalizeWorkspace(runtime.workspaceCwd)
+        ) {
+          res.status(409).json({
+            error: 'The session owner workspace has changed.',
+            code: 'workflow_workspace_mismatch',
+          });
+          return;
+        }
         res.status(200).json(
           await runtime.bridge.getSessionTasksStatus(sessionId, {
             // Same fail-closed shape as the workflow control surfaces:
@@ -6521,6 +6551,58 @@ export function registerSessionRoutes(
               clientId !== undefined ? { clientId } : undefined,
             ),
           );
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/workflows/run',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/workflows/run',
+      async (req, res, sessionId, runtime) => {
+        try {
+          const request = parseWorkflowRunRequest(safeBody(req));
+          if (!runtime.trusted) {
+            throw new WorkflowRunRequestError(
+              'workflow_disabled',
+              'Workflow requires a trusted workspace.',
+            );
+          }
+          if (
+            request.expectedWorkspaceCwd !== undefined &&
+            canonicalizeWorkspace(request.expectedWorkspaceCwd) !==
+              canonicalizeWorkspace(runtime.workspaceCwd)
+          ) {
+            throw new WorkflowRunRequestError(
+              'workflow_workspace_mismatch',
+              'The session owner workspace has changed.',
+            );
+          }
+          const clientId = parseClientIdHeader(req, res);
+          if (clientId === null) return;
+          res
+            .status(200)
+            .json(
+              await runtime.bridge.runSessionWorkflow(
+                sessionId,
+                request,
+                clientId !== undefined ? { clientId } : undefined,
+              ),
+            );
+        } catch (error) {
+          const code = (error as { data?: { errorKind?: string } } | null)?.data
+            ?.errorKind;
+          const status = workflowRunErrorStatus(error);
+          if (status === undefined) throw error;
+          res.status(status).json({
+            error:
+              error instanceof Error
+                ? error.message
+                : 'Workflow run request failed.',
+            code,
+          });
+        }
       },
     ),
   );

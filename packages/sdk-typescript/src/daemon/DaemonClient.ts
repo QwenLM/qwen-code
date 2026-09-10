@@ -86,6 +86,8 @@ import type {
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
+  DaemonSessionWorkflowRunRequest,
+  DaemonSessionWorkflowRunResult,
   DaemonSessionWorkflowTasksStatus,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceFile,
@@ -3699,6 +3701,27 @@ export class DaemonClient {
       'cancel',
       { kind },
       clientId,
+    );
+  }
+
+  async sessionRunWorkflow(
+    sessionId: string,
+    request: DaemonSessionWorkflowRunRequest,
+    clientId?: string,
+  ): Promise<DaemonSessionWorkflowRunResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/workflows/run`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(request),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/workflows/run');
+        }
+        return (await res.json()) as DaemonSessionWorkflowRunResult;
+      },
     );
   }
 

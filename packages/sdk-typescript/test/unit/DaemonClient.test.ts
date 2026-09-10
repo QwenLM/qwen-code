@@ -926,6 +926,46 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('sessionRunWorkflow', () => {
+    it('posts structured JSON and the client identity without altering the request ID', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { sessionId: 's/1', runId: 'wf-1' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const request = {
+        script: 'return args;',
+        args: { input: ['a'] },
+        sourceRef: { id: 'flow-1', revision: 'r1' },
+        clientRequestId: 'request-1',
+        expectedWorkspaceCwd: '/workspace',
+      };
+      await expect(
+        client.sessionRunWorkflow('s/1', request, 'client-1'),
+      ).resolves.toEqual({ sessionId: 's/1', runId: 'wf-1' });
+      expect(calls[0]?.url).toBe('http://daemon/session/s%2F1/workflows/run');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual(request);
+    });
+    it('surfaces idempotency conflicts without retrying', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(409, { code: 'workflow_request_conflict' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.sessionRunWorkflow('s-1', {
+          script: 'return null;',
+          sourceRef: { id: 'flow-1', revision: 'r1' },
+          clientRequestId: 'request-1',
+        }),
+      ).rejects.toMatchObject({
+        status: 409,
+        body: { code: 'workflow_request_conflict' },
+      });
+      expect(calls).toHaveLength(1);
+    });
+  });
+
   describe('deleteModel', () => {
     it.each([undefined, 'applied', 'deferred', 'failed'] as const)(
       'DELETEs /workspace/models and accepts runtime sync status %s',

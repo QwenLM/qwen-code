@@ -5,6 +5,12 @@
  */
 
 import {
+  parseWorkflowRunRequest,
+  parseExpectedWorkflowWorkspaceCwd,
+  workflowRunErrorStatus,
+  WorkflowRunRequestError,
+} from '../../acp-integration/workflow-run-request.js';
+import {
   APPROVAL_MODES,
   type ApprovalMode,
   BTW_MAX_INPUT_LENGTH,
@@ -650,6 +656,17 @@ export function toRpcError(err: unknown): {
   message: string;
   data?: Record<string, unknown>;
 } {
+  const workflowStatus = workflowRunErrorStatus(err);
+  if (workflowStatus !== undefined) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: errMsg(err),
+      data: {
+        ...(err as { data: { errorKind: string } }).data,
+        httpStatus: workflowStatus,
+      },
+    };
+  }
   if (err instanceof InvalidRequestedSessionIdError) {
     return {
       code: RPC.INVALID_PARAMS,
@@ -3765,6 +3782,19 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/tasks`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
+          const expectedWorkspaceCwd = parseExpectedWorkflowWorkspaceCwd(
+            params['expectedWorkspaceCwd'],
+          );
+          if (
+            expectedWorkspaceCwd !== undefined &&
+            canonicalizeWorkspace(expectedWorkspaceCwd) !==
+              canonicalizeWorkspace(this.boundWorkspace)
+          ) {
+            throw new WorkflowRunRequestError(
+              'workflow_workspace_mismatch',
+              'The session owner workspace has changed.',
+            );
+          }
           const result = await this.bridge.getSessionTasksStatus(sessionId, {
             // Same fail-closed shape as the workflow control surfaces:
             // opting in here leaks strictly more than the redacted
@@ -3861,6 +3891,36 @@ export class AcpDispatcher {
               sessionId,
               taskId,
               kind,
+              this.sessionCtx(conn, sessionId, loopback),
+            );
+            this.replyConn(conn, id, result as unknown);
+          });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/workflows/run`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          await this.withMutableOwned(conn, sessionId, id, async () => {
+            if (!this.isWorkspaceTrusted()) {
+              throw new WorkflowRunRequestError(
+                'workflow_disabled',
+                'Workflow requires a trusted workspace.',
+              );
+            }
+            const request = parseWorkflowRunRequest(params['request']);
+            if (
+              request.expectedWorkspaceCwd !== undefined &&
+              canonicalizeWorkspace(request.expectedWorkspaceCwd) !==
+                canonicalizeWorkspace(this.boundWorkspace)
+            ) {
+              throw new WorkflowRunRequestError(
+                'workflow_workspace_mismatch',
+                'The session owner workspace has changed.',
+              );
+            }
+            const result = await this.bridge.runSessionWorkflow(
+              sessionId,
+              request,
               this.sessionCtx(conn, sessionId, loopback),
             );
             this.replyConn(conn, id, result as unknown);

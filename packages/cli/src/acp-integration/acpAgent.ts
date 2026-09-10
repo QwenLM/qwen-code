@@ -270,6 +270,7 @@ import {
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
 } from './extension-skills.js';
+import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { Session, registerCreateSubSessionTool } from './session/Session.js';
 import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
@@ -473,6 +474,12 @@ import {
   GENERATION_TIMEOUT_MS,
   type GenerationEvent,
 } from './generation.js';
+
+import {
+  parseWorkflowRunRequest,
+  SessionWorkflowRunRequests,
+  WorkflowRunRequestError,
+} from './workflow-run-request.js';
 
 type SessionOwnedWorkflowTool = {
   buildSessionOwnedBackground(
@@ -3522,6 +3529,10 @@ class QwenAgent implements Agent {
    * an orphaned live run out from under itself. Pruned as they drain.
    */
   private readonly detachedWorkflowRegistries = new Set<WorkflowRunRegistry>();
+  private readonly workflowRunRequests = new WeakMap<
+    Session,
+    SessionWorkflowRunRequests
+  >();
   private activePromptCalls = new Map<string, Set<ActivePromptCall>>();
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
@@ -8179,6 +8190,7 @@ class QwenAgent implements Agent {
           : availableCommands.filter((command) => command.name !== 'workflows'),
       availableSkills: availableSkills ?? [],
       workflowsEnabled,
+      workflowRunV1: workflowsEnabled,
       savedWorkflows,
     };
   }
@@ -12189,6 +12201,74 @@ class QwenAgent implements Agent {
           }
         }
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionWorkflowRun: {
+        try {
+          const sessionId = params['sessionId'];
+          if (typeof sessionId !== 'string' || !sessionId) {
+            throw new WorkflowRunRequestError(
+              'invalid_workflow_run_request',
+              'sessionId is required.',
+            );
+          }
+          const request = parseWorkflowRunRequest(params['request']);
+          const session = this.sessionOrThrow(sessionId);
+          const config = session.getConfig();
+          if (!this.canUseWorkflowControls(config)) {
+            throw new WorkflowRunRequestError(
+              'workflow_disabled',
+              'Workflow is unavailable in this session.',
+            );
+          }
+          if (
+            request.expectedWorkspaceCwd !== undefined &&
+            canonicalizeWorkspace(request.expectedWorkspaceCwd) !==
+              canonicalizeWorkspace(config.getTargetDir())
+          ) {
+            throw new WorkflowRunRequestError(
+              'workflow_workspace_mismatch',
+              'The session workspace has changed.',
+            );
+          }
+          let requests = this.workflowRunRequests.get(session);
+          if (!requests) {
+            requests = new SessionWorkflowRunRequests();
+            this.workflowRunRequests.set(session, requests);
+          }
+          const started = await requests.run(request, async () => {
+            const workflowTool = config
+              .getToolRegistry()
+              .getTool(ToolNames.WORKFLOW);
+            if (!isSessionOwnedWorkflowTool(workflowTool)) {
+              throw new WorkflowRunRequestError(
+                'workflow_disabled',
+                'The workflow tool is unavailable.',
+              );
+            }
+            const result = await workflowTool
+              .buildSessionOwnedBackground({
+                script: request.script,
+                ...(request.args === undefined ? {} : { args: request.args }),
+                sourceRef: request.sourceRef,
+              })
+              .execute(new AbortController().signal);
+            if (!result.workflowRunId) {
+              throw new WorkflowRunRequestError(
+                'workflow_start_failed',
+                typeof result.llmContent === 'string'
+                  ? result.llmContent
+                  : 'Workflow did not return a run id.',
+              );
+            }
+            return { sessionId, runId: result.workflowRunId };
+          });
+          return { ...started };
+        } catch (error) {
+          if (error instanceof WorkflowRunRequestError) {
+            throw RequestError.invalidParams(error.data, error.message);
+          }
+          throw error;
+        }
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -12359,6 +12439,7 @@ class QwenAgent implements Agent {
                   ? { scriptPath: readableScriptPath }
                   : { script: task.script }),
                 args: task.args,
+                ...(task.sourceRef ? { sourceRef: task.sourceRef } : {}),
                 ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
               };
               const result = (await workflowTool

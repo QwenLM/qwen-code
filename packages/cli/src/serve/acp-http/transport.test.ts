@@ -629,6 +629,22 @@ class FakeBridge {
         context: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[3];
       }
     | undefined;
+  lastWorkflowRun:
+    | {
+        sessionId: string;
+        request: Parameters<HttpAcpBridge['runSessionWorkflow']>[1];
+        context: Parameters<HttpAcpBridge['runSessionWorkflow']>[2];
+      }
+    | undefined;
+  async runSessionWorkflow(
+    sessionId: string,
+    request: Parameters<HttpAcpBridge['runSessionWorkflow']>[1],
+    context: Parameters<HttpAcpBridge['runSessionWorkflow']>[2],
+  ) {
+    this.lastWorkflowRun = { sessionId, request, context };
+    return { sessionId, runId: 'wf-structured' };
+  }
+
   async controlSessionWorkflowTask(
     sessionId: string,
     taskId: string,
@@ -8796,6 +8812,61 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it('starts a structured workflow through ACP and rejects cross-workspace task reads', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      const workflowRequest = {
+        script: 'return args;',
+        args: { answer: 42 },
+        sourceRef: { id: 'flow-1', revision: 'r1' },
+        clientRequestId: 'request-1',
+        expectedWorkspaceCwd: TEST_WORKSPACE,
+      };
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 60,
+        method: '_qwen/session/workflows/run',
+        params: {
+          sessionId: 'sess-1',
+          request: workflowRequest,
+          clientId: 'forged-client',
+        },
+      });
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 61,
+        method: '_qwen/session/tasks',
+        params: {
+          sessionId: 'sess-1',
+          includeWorkflows: true,
+          expectedWorkspaceCwd: '/other',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 3);
+      expect(frames[1]).toMatchObject({
+        result: { sessionId: 'sess-1', runId: 'wf-structured' },
+      });
+      expect(bridge.lastWorkflowRun).toEqual({
+        sessionId: 'sess-1',
+        request: workflowRequest,
+        context: { clientId: 'client-1', fromLoopback: true },
+      });
+      expect(frames[2]).toMatchObject({
+        error: {
+          data: { errorKind: 'workflow_workspace_mismatch', httpStatus: 409 },
+        },
+      });
+      expect(bridge.lastSessionTasksOptions).toBeUndefined();
+    });
+
     it('fails the Workflow surfaces closed for an untrusted workspace', async () => {
       await restartServer({ primaryTrusted: false });
       bridge.getSessionSupportedCommandsStatus = async (
@@ -8882,6 +8953,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(byId.get(60)).toMatchObject({
         result: {
           workflowsEnabled: false,
+          workflowRunV1: false,
           savedWorkflows: [],
           availableCommands: [{ name: 'init', description: 'Initialize' }],
         },

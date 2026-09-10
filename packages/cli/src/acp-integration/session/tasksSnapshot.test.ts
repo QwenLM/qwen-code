@@ -565,6 +565,8 @@ describe('buildSessionTasksStatus workflow graph', () => {
       kind: 'workflow',
       id: 'wf_graph',
       runId: 'wf_graph',
+      sourceRef: { id: 'flow-1', revision: 'r1' },
+      result: { answer: 42 },
       toolUseId: 'workflow-call-1',
       description: 'wf_graph',
       meta: null,
@@ -665,6 +667,8 @@ describe('buildSessionTasksStatus workflow graph', () => {
     expect(task).toMatchObject({
       kind: 'workflow',
       id: 'wf_graph',
+      sourceRef: { id: 'flow-1', revision: 'r1' },
+      result: { answer: 42 },
       toolUseId: 'workflow-call-1',
       workflowName: 'review-and-fix',
       label: 'review-and-fix',
@@ -714,6 +718,48 @@ describe('buildSessionTasksStatus workflow graph', () => {
         },
       ],
     });
+  });
+
+  it('returns source identity, design step IDs, and bounded JSON results from history', () => {
+    const sourceRef = { id: 'flow-1', revision: 'r1', digest: 'sha256:abc' };
+    const snapshot = workflowSnapshot({
+      status: 'completed',
+      sourceRef,
+      result: { answer: 42 },
+      dispatches: [
+        {
+          id: 'dispatch-1',
+          stepId: 'step-1',
+          phaseVisitId: null,
+          label: 'Inspect',
+          prompt: 'inspect',
+          status: 'completed',
+          dependsOn: [],
+          queuedAt: 1,
+        },
+      ],
+    });
+    const status = buildSessionTasksStatus(
+      'session-1',
+      configWith([]),
+      2_000,
+      [snapshot],
+      { includeWorkflows: true },
+    );
+    expect(status.tasks[0]).toMatchObject({
+      sourceRef,
+      result: { answer: 42 },
+      dispatches: [{ id: 'dispatch-1', stepId: 'step-1' }],
+    });
+    const large = buildSessionTasksStatus(
+      'session-1',
+      configWith([]),
+      2_000,
+      [{ ...snapshot, result: 'a'.repeat(64 * 1024) }],
+      { includeWorkflows: true },
+    );
+    expect(large.tasks[0]).toMatchObject({ resultOmitted: true });
+    expect(large.tasks[0]).not.toHaveProperty('result');
   });
 
   it('restores persisted workflow runs as read-only task history', () => {

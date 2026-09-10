@@ -58,6 +58,38 @@ describe('canonicalizeAgentOpts', () => {
     );
   });
 
+  it('separates business steps while preserving label changes and legacy keys', () => {
+    const prompt = 'check the selected table';
+    const first = deriveAgentKey('', prompt, {
+      stepId: 'validate',
+      label: 'Check',
+    });
+    expect(first).not.toBe(
+      deriveAgentKey('', prompt, { stepId: 'publish', label: 'Check' }),
+    );
+    expect(first).toBe(
+      deriveAgentKey('', prompt, { stepId: 'validate', label: 'Verify' }),
+    );
+    expect(canonicalizeAgentOpts({ stepId: undefined })).toBe('{}');
+    expect(deriveAgentKey('', prompt, {})).toBe(
+      deriveAgentKey('', prompt, { stepId: undefined }),
+    );
+    expect(deriveAgentKey(first, prompt, { stepId: 'validate' })).not.toBe(
+      first,
+    );
+  });
+
+  it('includes selected extensions in resume identity and leaves legacy keys unchanged', () => {
+    const first = deriveAgentKey('', 'check', { extensions: ['tables'] });
+    expect(first).not.toBe(
+      deriveAgentKey('', 'check', { extensions: ['files'] }),
+    );
+    expect(first).toBe(deriveAgentKey('', 'check', { extensions: ['tables'] }));
+    expect(deriveAgentKey('', 'check', {})).toBe(
+      deriveAgentKey('', 'check', { extensions: undefined }),
+    );
+  });
+
   it('sorts object keys deeply so reordered schemas hash the same', () => {
     const a = canonicalizeAgentOpts({
       schema: { type: 'object', properties: { b: 1, a: 2 } },

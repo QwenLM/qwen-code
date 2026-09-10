@@ -447,6 +447,16 @@ describe('worktree reset session transfer', () => {
           ),
         ).rejects.toBeInstanceOf(SessionResetPendingError);
         await expect(
+          bridge.runSessionWorkflow(session.sessionId, {
+            script: 'return null;',
+            sourceRef: { id: 'flow-1', revision: 'r1' },
+            clientRequestId: 'request-1',
+          }),
+        ).rejects.toBeInstanceOf(SessionResetPendingError);
+        expect(
+          handle.agent.extMethodCalls.map((call) => call.method),
+        ).not.toContain(SERVE_CONTROL_EXT_METHODS.sessionWorkflowRun);
+        await expect(
           bridge.controlSessionWorkflowTask(session.sessionId, 'wf-1', 'rerun'),
         ).rejects.toBeInstanceOf(SessionResetPendingError);
         await expect(

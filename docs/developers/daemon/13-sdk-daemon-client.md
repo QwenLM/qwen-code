@@ -221,6 +221,57 @@ await client.updateWorkspace(workspace.id, { displayName: null });
 
 ## Workflow
 
+### Start a Dynamic Workflow from an external definition
+
+Read `client.sessionSupportedCommands(sessionId)` first. `workflowRunV1: true`
+allows structured background startup; `false` means the feature is disabled or
+the workspace is untrusted, while an absent field indicates an older runtime.
+
+```ts
+const started = await client.sessionRunWorkflow(
+  sessionId,
+  {
+    script:
+      'return await agent("Inspect the supplied input: " + JSON.stringify(args), {stepId:"inspect", extensions:["data-suite"]});',
+    args: { date: '2026-09-10' },
+    sourceRef: {
+      id: 'external-flow-id',
+      revision: '3',
+      title: 'Daily inspection',
+    },
+    clientRequestId: requestId,
+    expectedWorkspaceCwd: workspaceCwd,
+  },
+  clientId,
+);
+const snapshot = await client.sessionWorkflowTasks(sessionId, clientId);
+const run = snapshot.tasks.find(
+  (task) => task.kind === 'workflow' && task.id === started.runId,
+);
+```
+
+The HTTP endpoint is `POST /session/:id/workflows/run`; ACP transports map it to
+`_qwen/session/workflows/run`. It requires the existing live session owner and a
+trusted workspace, follows worktree-reset admission, and can start while the
+parent prompt is active. It never attaches a missing session or falls back to the
+primary workspace. Supply `expectedWorkspaceCwd` when selecting a workspace in a
+host UI. `GET /session/:id/tasks?includeWorkflows=true` also accepts this optional
+query parameter, and rejects owner mismatches before reading task data.
+
+Reuse the same `clientRequestId` and request content after an uncertain response.
+Concurrent duplicates share the same result; changed content returns
+`workflow_request_conflict`. Receipts belong to the live session instance and do
+not guarantee exactly-once execution across owner restarts.
+
+Scripts and JSON arguments are each limited to 256 KiB. `sourceRef` is provenance,
+not an authorization token. Each `agent()` can set `stepId` for a stable external
+node mapping and `extensions` for explicit loading of active extension context;
+both participate in journal identity. Missing or unreadable extension context
+fails the dispatch. Existing scripts that omit these options keep their journal
+keys. Final task status includes `sourceRef`, dispatch `stepId`, and a complete
+JSON `result` up to 64 KiB; larger or unserializable values set `resultOmitted`.
+An accepted run ID is not completion: inspect the task's lifecycle status.
+
 ### Create-or-attach + first prompt
 
 ```mermaid

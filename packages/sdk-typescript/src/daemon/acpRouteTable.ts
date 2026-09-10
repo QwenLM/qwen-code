@@ -452,6 +452,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: (segs, _body, _method, query) => ({
         sessionId: segs[0],
         ...boolParam(query, 'includeWorkflows'),
+        ...strParam(query, 'expectedWorkspaceCwd'),
       }),
     },
   },
@@ -465,6 +466,18 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
         ...bodyRecord(body),
         sessionId: segs[0],
         taskId: segs[1],
+      }),
+    },
+  },
+  // 结构化启动在两种 ACP transport 中保持同一个请求体。
+  {
+    httpMethod: 'POST',
+    pattern: /^\/session\/([^/]+)\/workflows\/run$/,
+    mapping: {
+      method: '_qwen/session/workflows/run',
+      extractParams: (segs, body) => ({
+        sessionId: segs[0],
+        request: bodyRecord(body),
       }),
     },
   },

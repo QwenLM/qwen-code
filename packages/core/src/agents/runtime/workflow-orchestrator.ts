@@ -8,6 +8,12 @@ import { randomBytes } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import * as os from 'node:os';
 import {
+  buildExtensionMentionContext,
+  EXTENSION_CONTEXT_BUDGET,
+  matchExtensionByRef,
+} from '../../utils/extension-mention.js';
+import { isWorkflowReferenceString } from '../workflow-source-ref.js';
+import {
   deriveApprovalModeConfig,
   deriveConfig,
   deriveWorktreeConfig,
@@ -518,6 +524,44 @@ export function createProductionDispatch(
     // `agent_retry` marker. Reject at the boundary instead.
     if (typeof prompt !== 'string' || prompt.length === 0) {
       throw new Error('agent() requires a non-empty string prompt.');
+    }
+    if (opts.extensions !== undefined) {
+      if (
+        !Array.isArray(opts.extensions) ||
+        opts.extensions.length === 0 ||
+        opts.extensions.length > 16 ||
+        opts.extensions.some((name) => !isWorkflowReferenceString(name, 128)) ||
+        new Set(opts.extensions.map((name) => name.toLowerCase())).size !==
+          opts.extensions.length
+      ) {
+        throw new Error(
+          'agent({extensions}): expected 1 to 16 unique non-empty extension names of at most 128 characters.',
+        );
+      }
+      const extensions = config.getActiveExtensions?.() ?? [];
+      let remainingBudget = EXTENSION_CONTEXT_BUDGET;
+      const contexts: string[] = [];
+      const loaded = new Set<string>();
+      for (const name of opts.extensions) {
+        const extension = matchExtensionByRef(name, extensions);
+        if (!extension?.isActive)
+          throw new Error(
+            `agent({extensions}): active extension '${name}' was not found.`,
+          );
+        if (loaded.has(extension.name)) continue;
+        const context = await buildExtensionMentionContext(extension, {
+          remainingBudget,
+          signal,
+          strict: true,
+        });
+        remainingBudget = context.remainingBudget;
+        contexts.push(context.text);
+        loaded.add(extension.name);
+      }
+      // 结构化选中的扩展在 leaf 启动前真实加载；不依赖只处理用户输入的 @ext 提及链路。
+      prompt +=
+        '\n\nSelected extension context follows. Invoke listed Skills through the Skill tool using the exact skill name; context does not grant additional permissions.\n' +
+        contexts.join('\n\n');
     }
     // P-stall: wrap the single-attempt dispatch in the stall watchdog +
     // retry loop. The wrapper owns the per-attempt AbortController +
@@ -1747,6 +1791,7 @@ export class WorkflowOrchestrator {
         emitter?.dispatchQueued?.({
           id,
           ...(typeof opts.label === 'string' ? { label: opts.label } : {}),
+          ...(opts.stepId !== undefined ? { stepId: opts.stepId } : {}),
           prompt,
           dependsOn,
           queuedAt: Date.now(),

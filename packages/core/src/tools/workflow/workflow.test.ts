@@ -1015,6 +1015,32 @@ await agent('scan package.json')
     await expect(run(false)).resolves.toEqual(await run(undefined));
   });
 
+  it('returns external definition provenance without changing workflow permission', async () => {
+    const { config, registry } = configWithRegistry();
+    const sourceRef = { id: 'flow-1', revision: '7', title: 'Check tables' };
+    const invocation = new WorkflowTool(config, {
+      dispatch: async () => 'ok',
+    }).build({
+      script: 'return 1;',
+      sourceRef,
+    });
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.sourceRef).toEqual(sourceRef);
+    expect(registry.list()[0].sourceRef).toEqual(sourceRef);
+  });
+
+  it.each([
+    { id: 'flow', revision: ' ' },
+    { id: 'flow', revision: '7', permissions: ['*'] },
+  ])('rejects invalid sourceRef before launch %j', (sourceRef) => {
+    const { config, registry } = configWithRegistry();
+    expect(() =>
+      new WorkflowTool(config).build({ script: 'return 1;', sourceRef }),
+    ).toThrow(/sourceRef/);
+    expect(registry.list()).toHaveLength(0);
+  });
+
   // A headless run (`qwen --prompt`, CI, a cron job) has no TUI, no approval
   // bridge, and a closed stdin. `getDefaultPermission()` is 'ask', which the
   // scheduler resolves against the run's approval mode — but nothing INSIDE

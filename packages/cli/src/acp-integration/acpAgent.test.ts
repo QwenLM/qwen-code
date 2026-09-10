@@ -246,6 +246,9 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  normalizeWorkflowSourceRef: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).normalizeWorkflowSourceRef,
   SessionSourceService: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).SessionSourceService,
@@ -12335,6 +12338,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
       availableSkills: ['review'],
       workflowsEnabled: true,
+      workflowRunV1: true,
       savedWorkflows: [
         { name: 'deep-review', source: 'project' },
         { name: 'release-check', source: 'user' },
@@ -15087,6 +15091,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
               { name: 'init', description: 'Initialize', input: null },
             ],
         workflowsEnabled: false,
+        workflowRunV1: false,
         savedWorkflows: [],
       });
       await expect(
@@ -15270,6 +15275,77 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     expect(mockListSavedWorkflows).not.toHaveBeenCalled();
 
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('starts structured workflow requests once and rejects conflicting or moved requests', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'started',
+      workflowRunId: 'wf-structured',
+    });
+    const buildSessionOwnedBackground = vi.fn().mockReturnValue({ execute });
+    Object.assign(innerConfig, {
+      isWorkflowsEnabled: vi.fn().mockReturnValue(true),
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn((name: string) =>
+          name === 'workflow' ? { buildSessionOwnedBackground } : undefined,
+        ),
+      }),
+    });
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const request = {
+      script: 'return args;',
+      args: { input: ['a'] },
+      sourceRef: { id: 'flow-1', revision: 'r1' },
+      clientRequestId: 'request-1',
+      expectedWorkspaceCwd: '/tmp',
+    };
+    const run = (body = request) =>
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowRun, {
+        sessionId,
+        request: body,
+      });
+    const results = await Promise.all([run(), run()]);
+    expect(results).toEqual([
+      { sessionId, runId: 'wf-structured' },
+      { sessionId, runId: 'wf-structured' },
+    ]);
+    expect(execute).toHaveBeenCalledOnce();
+    expect(buildSessionOwnedBackground).toHaveBeenCalledWith({
+      script: request.script,
+      args: request.args,
+      sourceRef: request.sourceRef,
+    });
+    await expect(
+      run({ ...request, script: 'return null;' }),
+    ).rejects.toMatchObject({
+      errorKind: 'workflow_request_conflict',
+    });
+    await expect(
+      run({ ...request, expectedWorkspaceCwd: '/other' }),
+    ).rejects.toMatchObject({
+      errorKind: 'workflow_workspace_mismatch',
+    });
+    innerConfig.isWorkflowsEnabled.mockReturnValue(false);
+    await expect(run()).rejects.toMatchObject({
+      errorKind: 'workflow_disabled',
+    });
+    expect(execute).toHaveBeenCalledOnce();
     mockConnectionState.resolve();
     await agentPromise;
   });

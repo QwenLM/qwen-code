@@ -19,6 +19,7 @@ export function redactWorkflowsFromSupportedCommands(
       (command) => command.name !== 'workflows',
     ),
     workflowsEnabled: false,
+    workflowRunV1: false,
     savedWorkflows: [],
   };
 }
