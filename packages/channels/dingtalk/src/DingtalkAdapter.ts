@@ -913,7 +913,6 @@ type DingtalkChannelConfig = ChannelConfig & {
   outputMode?: unknown;
   useConnectionManager?: unknown;
   interactiveCards?: unknown;
-  aggregateBackgroundAgentResponses?: unknown;
 };
 
 interface BackgroundResponseAggregation {
@@ -924,7 +923,7 @@ interface BackgroundResponseAggregation {
   status: string;
   kind: BackgroundResponseContext['kind'];
   label?: string;
-  parts: string[];
+  text: string;
   timeoutTimer?: ReturnType<typeof setTimeout>;
   retryTimer?: ReturnType<typeof setTimeout>;
   turnComplete?: boolean;
@@ -966,7 +965,7 @@ interface BackgroundResponseDelivery {
   status: string;
   kind: BackgroundResponseContext['kind'];
   label?: string;
-  parts: string[];
+  text: string;
   partial: boolean;
   attempts: number;
   composedTurnComplete?: boolean;
@@ -1051,7 +1050,6 @@ export class DingtalkChannel extends ChannelBase {
   private proactiveToken?: { token: string; expiresAt: number };
   private readonly interactiveCardConfig: DingtalkInteractiveCardConfig;
   private readonly outputMode?: 'final_only' | 'process_and_result';
-  private readonly aggregateBackgroundAgentResponses: boolean;
   protected readonly interactiveCardClient?: DingtalkInteractiveCardClient;
   private statusCardController?: StatusCardController;
   private questionCardController?: QuestionCardController;
@@ -1118,19 +1116,6 @@ export class DingtalkChannel extends ChannelBase {
       );
     }
     this.outputMode = outputMode;
-    const rawAggregateBackgroundAgentResponses = (
-      config as DingtalkChannelConfig
-    ).aggregateBackgroundAgentResponses;
-    if (
-      rawAggregateBackgroundAgentResponses !== undefined &&
-      typeof rawAggregateBackgroundAgentResponses !== 'boolean'
-    ) {
-      throw new Error(
-        `Channel "${name}" aggregateBackgroundAgentResponses must be a boolean.`,
-      );
-    }
-    this.aggregateBackgroundAgentResponses =
-      rawAggregateBackgroundAgentResponses === true;
 
     if (!config.clientId || !config.clientSecret) {
       throw new Error(
@@ -2894,8 +2879,7 @@ export class DingtalkChannel extends ChannelBase {
     }
 
     const canAggregate =
-      (this.outputMode === 'final_only' ||
-        (!this.outputMode && this.aggregateBackgroundAgentResponses)) &&
+      this.outputMode === 'final_only' &&
       context !== undefined &&
       typeof context.turnComplete === 'boolean';
     if (!canAggregate) {
@@ -3104,7 +3088,7 @@ export class DingtalkChannel extends ChannelBase {
 
     current.status = context.status;
     current.label = context.label ?? current.label;
-    this.appendBackgroundResponsePart(current, text);
+    if (text.trim()) current.text = text;
 
     if (context.turnComplete && parked && parked.resolvers > 0) {
       parked.turnComplete = true;
@@ -3147,7 +3131,7 @@ export class DingtalkChannel extends ChannelBase {
 
     let delivery = aggregation.delivery;
     if (!delivery) {
-      if (aggregation.parts.length === 0) {
+      if (!aggregation.text) {
         // A turn whose text was already drained by the bounded wait still owes
         // the user its completion: the last card it saw reads `（部分）`.
         if (!this.owesTerminalBackgroundResponseCard(aggregation)) {
@@ -3161,15 +3145,16 @@ export class DingtalkChannel extends ChannelBase {
       }
       if (aggregation.timeoutTimer) clearTimeout(aggregation.timeoutTimer);
       aggregation.timeoutTimer = undefined;
-      const parts = aggregation.parts.splice(0);
+      const text = aggregation.text;
+      aggregation.text = '';
       delivery = {
         status: aggregation.status,
         kind: aggregation.kind,
         label: aggregation.label,
-        parts,
+        text,
         partial: this.isPartialBackgroundResponseDelivery(
           aggregation,
-          parts.length,
+          text.length > 0,
         ),
         attempts: 0,
         composedTurnComplete: aggregation.turnComplete === true,
@@ -3258,7 +3243,7 @@ export class DingtalkChannel extends ChannelBase {
     ) {
       aggregation.delivery = undefined;
       aggregation.dropped = true;
-      if (aggregation.parts.length === 0) {
+      if (!aggregation.text) {
         if (aggregation.retiring || aggregation.turnComplete) {
           this.removeBackgroundResponseAggregation(key, aggregation);
         } else {
@@ -3286,10 +3271,10 @@ export class DingtalkChannel extends ChannelBase {
    */
   private isPartialBackgroundResponseDelivery(
     aggregation: BackgroundResponseAggregation,
-    partCount: number,
+    hasText: boolean,
   ): boolean {
     return (
-      partCount > 0 &&
+      hasText &&
       (aggregation.delivered === true ||
         aggregation.dropped === true ||
         aggregation.resolutionDropped === true ||
@@ -3434,7 +3419,7 @@ export class DingtalkChannel extends ChannelBase {
       status: context.status,
       kind: context.kind,
       label: context.label,
-      parts: [],
+      text: '',
     };
     this.backgroundResponseAggregations.set(key, aggregation);
     return aggregation;
@@ -3591,7 +3576,7 @@ export class DingtalkChannel extends ChannelBase {
     for (const { text, context } of pending.held.splice(0)) {
       aggregation.status = context.status;
       aggregation.label = context.label ?? aggregation.label;
-      this.appendBackgroundResponsePart(aggregation, text);
+      if (text.trim()) aggregation.text = text;
       if (context.turnComplete) {
         aggregation.turnComplete = true;
         aggregation.completionPartial = context.partial === true;
@@ -3625,8 +3610,8 @@ export class DingtalkChannel extends ChannelBase {
       aggregation.delivery.partial =
         this.isPartialBackgroundResponseDelivery(
           aggregation,
-          aggregation.delivery.parts.length,
-        ) || aggregation.parts.length > 0;
+          aggregation.delivery.text.length > 0,
+        ) || aggregation.text.length > 0;
     }
     if (aggregation.timeoutTimer) clearTimeout(aggregation.timeoutTimer);
     aggregation.timeoutTimer = undefined;
@@ -3654,7 +3639,7 @@ export class DingtalkChannel extends ChannelBase {
       status: first.context.status,
       kind: first.context.kind,
       label: first.context.label,
-      parts: [],
+      text: '',
       turnComplete: pending.turnComplete,
       completionPartial: pending.completionPartial,
       resolutionDropped: pending.resolutionDropped,
@@ -3685,7 +3670,7 @@ export class DingtalkChannel extends ChannelBase {
   private formatBackgroundResponseAggregation(
     delivery: Pick<
       BackgroundResponseDelivery,
-      'status' | 'kind' | 'label' | 'parts' | 'partial'
+      'status' | 'kind' | 'label' | 'text' | 'partial'
     >,
   ): string {
     const icon =
@@ -3702,8 +3687,7 @@ export class DingtalkChannel extends ChannelBase {
       workflow: 'Workflow',
     }[delivery.kind];
     const header = `## ${icon} ${kind} · ${label}${delivery.partial ? '（部分）' : ''}`;
-    if (delivery.parts.length === 0) return header;
-    return `${header}\n\n${delivery.parts.join('\n\n')}`;
+    return delivery.text ? `${header}\n\n${delivery.text}` : header;
   }
 
   private formatBackgroundAgentResponse(text: string, label?: string): string {
@@ -3716,15 +3700,6 @@ export class DingtalkChannel extends ChannelBase {
       .replace(/\s+/g, ' ')
       .trim();
     return escapeDingTalkMarkdown(normalized || '后台任务');
-  }
-
-  private appendBackgroundResponsePart(
-    aggregation: BackgroundResponseAggregation,
-    text: string,
-  ): void {
-    if (!text.trim()) return;
-    if (this.outputMode === 'final_only') aggregation.parts.length = 0;
-    aggregation.parts.push(text);
   }
 
   private prepareBackgroundOutput(

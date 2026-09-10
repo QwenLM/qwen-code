@@ -135,33 +135,7 @@ Use the foreground card modes with interactive status cards enabled. When status
 
 The setting applies to DingTalk conversation replies and their background follow-ups. Channel loops and webhook runs retain their existing presentation. An interrupted background turn, or one that has not ended after ten minutes, may send a labeled partial result; this bounded wait never delays the main prompt.
 
-Omitting `outputMode` preserves existing behavior. An explicit mode takes precedence over `aggregateBackgroundAgentResponses`.
-
-### Legacy Background Agent Responses
-
-When `outputMode` is unset, background Agent output is sent as soon as each response segment is available.
-Every message is labeled with the Agent name so concurrent work remains
-attributable.
-
-To buffer each Agent's notification turn and send it as one labeled message,
-enable aggregation for the DingTalk channel in `settings.json`:
-
-```json
-{
-  "channels": {
-    "my-dingtalk": {
-      "type": "dingtalk",
-      "clientId": "$DINGTALK_CLIENT_ID",
-      "clientSecret": "$DINGTALK_CLIENT_SECRET",
-      "aggregateBackgroundAgentResponses": true
-    }
-  }
-}
-```
-
-Aggregation is disabled by default. A partial labeled message is sent if the
-Agent turn is interrupted, fails before producing a final response, or does
-not finish within ten minutes.
+When `outputMode` is unset, background Agent output is sent as an ordinary message as soon as each response segment is available, labeled with the Agent name. Select `final_only` to retain the last reply from each turn. Background aggregation is controlled only by `outputMode`; there is no separate aggregation toggle or mode that concatenates every reply in a turn. Remove the obsolete aggregation setting from existing channel configurations.
 
 ## Running
 

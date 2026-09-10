@@ -37,13 +37,6 @@ export const plugin: ChannelPlugin = {
         ],
       },
       {
-        key: 'aggregateBackgroundAgentResponses',
-        label: 'Aggregate Background Agent Responses',
-        kind: 'boolean',
-        description:
-          'Buffer each background Agent turn and send one labeled result instead of labeled segments',
-      },
-      {
         key: 'interactiveCards',
         label: 'Interactive Cards',
         kind: 'object',

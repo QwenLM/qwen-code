@@ -372,14 +372,6 @@ it('uses SDK keepalive when the connection manager is disabled', () => {
   ).toBe(true);
 });
 
-it('rejects a non-boolean background Agent aggregation setting', () => {
-  expect(() =>
-    createChannel({ aggregateBackgroundAgentResponses: 'true' }),
-  ).toThrow(
-    'Channel "test-dingtalk" aggregateBackgroundAgentResponses must be a boolean.',
-  );
-});
-
 it('rejects an invalid output mode', () => {
   expect(() => createChannel({ outputMode: 'all' })).toThrow(
     'outputMode must be "final_only" or "process_and_result"',
@@ -415,9 +407,7 @@ describe('turn-scoped output modes', () => {
   it.each(['agent', 'shell', 'monitor', 'workflow'] as const)(
     'keeps only the last assistant reply in a %s follow-up turn',
     async (kind) => {
-      const { channel, create, stream } = createOutputChannel('final_only', {
-        aggregateBackgroundAgentResponses: true,
-      });
+      const { channel, create, stream } = createOutputChannel('final_only');
       const context = {
         taskId: 'task-1',
         turnId: 'turn-1',
@@ -458,9 +448,7 @@ describe('turn-scoped output modes', () => {
   );
 
   it('delivers each complete background output in process mode and ignores its empty terminal marker', async () => {
-    const { channel, create } = createOutputChannel('process_and_result', {
-      aggregateBackgroundAgentResponses: true,
-    });
+    const { channel, create } = createOutputChannel('process_and_result');
     const context = {
       taskId: 'task-1',
       turnId: 'turn-1',
@@ -8844,9 +8832,10 @@ describe('DingtalkChannel outbound file delivery', () => {
     ]);
   });
 
-  it('aggregates one agent notification turn into one ordinary Markdown message', async () => {
+  it('delivers only the latest reply of a final-only turn through ordinary Markdown fallback', async () => {
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
@@ -8892,7 +8881,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     expect(pushProactive).toHaveBeenCalledOnce();
     expect(pushProactive).toHaveBeenCalledWith(
       expect.objectContaining({ chatId: 'cidGroup==' }),
-      '## ✅ Agent · Review \\#10611\n\nFirst result.\n\nFinal result.',
+      '## ✅ Agent · Review \\#10611\n\nFinal result.',
     );
 
     await channel.dispatchBackgroundResponse('session-1', 'Fresh result.', {
@@ -8920,7 +8909,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -8970,7 +8960,8 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('uses the terminal status of a turn whose earlier segments were running', async () => {
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
@@ -9032,7 +9023,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -9081,7 +9073,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -9128,7 +9121,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -9186,7 +9180,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -9239,7 +9234,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -9293,9 +9289,10 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
-  it('joins overlapping segments of one task into a single aggregation', async () => {
+  it('keeps the latest overlapping segment of one task in a single final-only result', async () => {
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
@@ -9346,7 +9343,7 @@ describe('DingtalkChannel outbound file delivery', () => {
 
     expect(pushProactive).toHaveBeenCalledOnce();
     expect(pushProactive.mock.calls[0]![1]).toBe(
-      '## ✅ Agent · Worker one\n\nFirst result.\n\nSecond result.',
+      '## ✅ Agent · Worker one\n\nSecond result.',
     );
   });
 
@@ -9354,7 +9351,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -9398,7 +9396,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -9457,7 +9456,8 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('does not drain an aggregation whose delivery is already in flight', async () => {
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
@@ -9493,7 +9493,8 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('keeps interleaved agents in separate ordinary Markdown messages', async () => {
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
@@ -9554,15 +9555,16 @@ describe('DingtalkChannel outbound file delivery', () => {
     });
 
     expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-      '## ❌ Agent · Worker two\n\nFirst B.\n\nFinal B.',
+      '## ❌ Agent · Worker two\n\nFinal B.',
       '## ⏹️ Agent · 后台任务（部分）\n\nStopped.',
-      '## ✅ Agent · Worker one\n\nFirst A.\n\nFinal A.',
+      '## ✅ Agent · Worker one\n\nFinal A.',
     ]);
   });
 
   it('uses the terminal status for an aggregated turn', async () => {
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
@@ -9600,7 +9602,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -9638,7 +9641,8 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('applies a completion marker that races the first target resolution', async () => {
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     const target: SessionTarget = {
       channelName: 'test-dingtalk',
@@ -9699,7 +9703,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       const target: SessionTarget = {
         channelName: 'test-dingtalk',
@@ -9761,7 +9766,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       const target: SessionTarget = {
         channelName: 'test-dingtalk',
@@ -9819,7 +9825,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.advanceTimersByTimeAsync(30 * 1000);
 
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '## ✅ Agent · Worker one\n\nFirst result.\n\nSecond result.',
+        '## ✅ Agent · Worker one\n\nSecond result.',
       ]);
     } finally {
       vi.useRealTimers();
@@ -9828,7 +9834,8 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('waits for every overlapping resolver before completing a turn', async () => {
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     const target: SessionTarget = {
       channelName: 'test-dingtalk',
@@ -9897,13 +9904,14 @@ describe('DingtalkChannel outbound file delivery', () => {
 
     expect(pushProactive).toHaveBeenCalledOnce();
     expect(pushProactive.mock.calls[0]![1]).toBe(
-      '## ✅ Agent · Worker one\n\nFirst result.\n\nSecond result.',
+      '## ✅ Agent · Worker one\n\nSecond result.',
     );
   });
 
   it('keeps a parked terminal until every overlapping resolver exits', async () => {
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     const target: SessionTarget = {
       channelName: 'test-dingtalk',
@@ -9970,7 +9978,7 @@ describe('DingtalkChannel outbound file delivery', () => {
 
     expect(pushProactive).toHaveBeenCalledOnce();
     expect(pushProactive.mock.calls[0]![1]).toBe(
-      '## ✅ Agent · Worker one\n\nFirst result.\n\nSecond result.',
+      '## ✅ Agent · Worker one\n\nSecond result.',
     );
   });
 
@@ -9978,7 +9986,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     'keeps a terminal-bearing segment when its resolver %s',
     async (outcome) => {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       const target: SessionTarget = {
         channelName: 'test-dingtalk',
@@ -10045,7 +10054,7 @@ describe('DingtalkChannel outbound file delivery', () => {
 
       expect(pushProactive).toHaveBeenCalledOnce();
       expect(pushProactive.mock.calls[0]![1]).toBe(
-        '## ✅ Agent · Worker one\n\nFirst result.\n\nSecond result.',
+        '## ✅ Agent · Worker one\n\nSecond result.',
       );
     },
   );
@@ -10054,7 +10063,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       const target: SessionTarget = {
         channelName: 'test-dingtalk',
@@ -10132,7 +10142,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -10192,7 +10203,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       const target: SessionTarget = {
         channelName: 'test-dingtalk',
@@ -10292,7 +10304,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       const target: SessionTarget = {
         channelName: 'test-dingtalk',
@@ -10380,7 +10393,8 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('separates the next turn while the completed turn is still resolving', async () => {
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     const target: SessionTarget = {
       channelName: 'test-dingtalk',
@@ -10456,7 +10470,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       const target: SessionTarget = {
         channelName: 'test-dingtalk',
@@ -10507,7 +10522,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.advanceTimersByTimeAsync(30 * 1000);
 
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '## ✅ Agent · Worker one\n\nPart one.\n\nFinal part.',
+        '## ✅ Agent · Worker one\n\nFinal part.',
       ]);
       expect(
         (
@@ -10525,7 +10540,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       const target: SessionTarget = {
         channelName: 'test-dingtalk',
@@ -10593,7 +10609,8 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('applies a parked terminal when the last resolver fails', async () => {
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     const target: SessionTarget = {
       channelName: 'test-dingtalk',
@@ -10659,7 +10676,7 @@ describe('DingtalkChannel outbound file delivery', () => {
 
     expect(pushProactive).toHaveBeenCalledOnce();
     expect(pushProactive.mock.calls[0]![1]).toBe(
-      '## ✅ Agent · Worker one\n\nFirst result.\n\nSecond result.',
+      '## ✅ Agent · Worker one\n\nSecond result.',
     );
   });
 
@@ -10667,7 +10684,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       const target: SessionTarget = {
         channelName: 'test-dingtalk',
@@ -10747,7 +10765,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       const target: SessionTarget = {
         channelName: 'test-dingtalk',
@@ -10826,7 +10845,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       const target: SessionTarget = {
         channelName: 'test-dingtalk',
@@ -10908,7 +10928,8 @@ describe('DingtalkChannel outbound file delivery', () => {
       vi.useFakeTimers();
       try {
         const channel = createChannel({
-          aggregateBackgroundAgentResponses: true,
+          outputMode: 'final_only',
+          interactiveCards: undefined,
         });
         const target: SessionTarget = {
           channelName: 'test-dingtalk',
@@ -10976,7 +10997,8 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('flushes text when a session dies during target resolution', async () => {
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     const target: SessionTarget = {
       channelName: 'test-dingtalk',
@@ -11039,7 +11061,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -11098,7 +11121,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       const target: SessionTarget = {
         channelName: 'test-dingtalk',
@@ -11166,7 +11190,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -11217,7 +11242,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -11271,7 +11297,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -11329,7 +11356,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     try {
       const channel = createChannel({
         cwd: file.dir,
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedWebhook(channel, 'dm-cid');
       seedSessionTarget(channel, 'session-1', {
@@ -11405,7 +11433,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     try {
       const channel = createChannel({
         cwd: file.dir,
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedWebhook(channel, 'dm-cid');
       seedSessionTarget(channel, 'session-1', {
@@ -11489,7 +11518,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedWebhook(channel, 'dm-cid');
       seedSessionTarget(channel, 'session-1', {
@@ -11556,7 +11586,8 @@ describe('DingtalkChannel outbound file delivery', () => {
       vi.useFakeTimers();
       try {
         const channel = createChannel({
-          aggregateBackgroundAgentResponses: true,
+          outputMode: 'final_only',
+          interactiveCards: undefined,
         });
         seedWebhook(channel, 'dm-cid');
         seedSessionTarget(channel, 'session-1', {
@@ -11604,7 +11635,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -11637,7 +11669,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.advanceTimersByTimeAsync(60 * 1000);
 
       expect(pushProactive).toHaveBeenCalledOnce();
-      expect(pushProactive.mock.calls[0]![1]).toContain('First result.');
+      expect(pushProactive.mock.calls[0]![1]).not.toContain('First result.');
       expect(pushProactive.mock.calls[0]![1]).toContain('Later result.');
     } finally {
       vi.useRealTimers();
@@ -11650,7 +11682,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     // agent had already produced -- the exact case the partial card exists
     // for. Before aggregation every segment was delivered on arrival.
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
@@ -11688,7 +11721,8 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it("keeps other sessions' aggregations when one session dies", async () => {
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     const targets = new Map<string, SessionTarget>([
       [
@@ -11761,7 +11795,8 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('uses the reply fallback when draining a DM aggregation', async () => {
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
@@ -11813,7 +11848,8 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('flushes buffered output when a session retires without dying', async () => {
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
@@ -11848,7 +11884,8 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('flushes buffered output when the channel disconnects', async () => {
     const channel = createChannel({
-      aggregateBackgroundAgentResponses: true,
+      outputMode: 'final_only',
+      interactiveCards: undefined,
     });
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
@@ -11884,7 +11921,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -11924,7 +11962,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -11980,7 +12019,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -12028,7 +12068,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -12077,7 +12118,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -12137,7 +12179,8 @@ describe('DingtalkChannel outbound file delivery', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', {
         channelName: 'test-dingtalk',
@@ -12838,7 +12881,8 @@ describe('DingtalkChannel proactive send', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', groupTarget);
       vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
@@ -12872,7 +12916,8 @@ describe('DingtalkChannel proactive send', () => {
     vi.useFakeTimers();
     try {
       const channel = createChannel({
-        aggregateBackgroundAgentResponses: true,
+        outputMode: 'final_only',
+        interactiveCards: undefined,
       });
       seedSessionTarget(channel, 'session-1', groupTarget);
       vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
