@@ -123,6 +123,34 @@ async function waitFor(assertion: () => void): Promise<void> {
 }
 
 describe('reduceDaemonEventToTuiUpdates', () => {
+  it('renders structured question answers as sanitized display text', () => {
+    const updates = reduceDaemonEventToTuiUpdates({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'ask-1',
+          status: 'completed',
+          rawOutput: {
+            type: 'ask_user_question_answers',
+            text: '\x1b[31mSelected Staging\x1b[0m',
+            answers: [{ question: 'Deploy where?', answer: 'Staging' }],
+          },
+        },
+      },
+    });
+
+    expect(updates).toMatchObject([
+      {
+        type: 'tool_group_update',
+        item: { tools: [{ resultDisplay: 'Selected Staging' }] },
+      },
+    ]);
+  });
+
   it('preserves a sanitized vision bridge notice as structured output', () => {
     const updates = reduceDaemonEventToTuiUpdates({
       id: 1,

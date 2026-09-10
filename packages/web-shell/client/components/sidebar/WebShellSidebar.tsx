@@ -151,7 +151,6 @@ const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 420;
 const SIDEBAR_MAX_WIDTH_WINDOW_RATIO = 0.5;
 const SIDEBAR_FOOTER_COMPACT_WIDTH = 344;
-const SIDEBAR_FOOTER_TIGHT_WIDTH = 250;
 const SIDEBAR_DRAG_VISUAL_MIN_WIDTH = 200;
 const SIDEBAR_COLLAPSE_DRAG_THRESHOLD = 56;
 const SIDEBAR_COLLAPSE_DRAG_WIDTH =
@@ -2072,9 +2071,13 @@ export function WebShellSidebar({
       ? `v${qwenCodeVersion}`
       : qwenCodeVersion
     : '';
+  // One breakpoint degrades the whole footer: below it the settings button
+  // drops its text label, every footer button becomes a fixed 26px icon, and the
+  // version label leaves the row. That label can neither shrink nor truncate
+  // (`flex: 0 0 auto; white-space: nowrap`), so keeping it rendered past this
+  // point overflowed `.footerPrimary` into the action icons (#11453).
   const footerCompact =
     !collapsed && sidebarWidth < SIDEBAR_FOOTER_COMPACT_WIDTH;
-  const footerTight = !collapsed && sidebarWidth < SIDEBAR_FOOTER_TIGHT_WIDTH;
   const sidebarStyle = {
     '--web-shell-sidebar-width': `${sidebarWidth}px`,
     '--web-shell-sidebar-min-width': `${SIDEBAR_MIN_WIDTH}px`,
@@ -6241,11 +6244,7 @@ export function WebShellSidebar({
 
         {(footer !== false || mobileOpen) && (
           <div
-            className={cx(
-              styles.footer,
-              footerCompact && styles.footerCompact,
-              footerTight && styles.footerTight,
-            )}
+            className={cx(styles.footer, footerCompact && styles.footerCompact)}
           >
             <div className={styles.footerPrimary}>
               {footer && typeof footer === 'object' && footer.render?.()}
@@ -6268,7 +6267,7 @@ export function WebShellSidebar({
                 </button>
               )}
               {!collapsed &&
-                !footerTight &&
+                !footerCompact &&
                 versionLabel &&
                 footerItems.has('version') && (
                   <span

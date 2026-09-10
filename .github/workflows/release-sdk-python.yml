@@ -457,6 +457,10 @@ jobs:
 
           pr_url="$(gh pr list --head "${RELEASE_BRANCH}" --base main --json url --jq '.[0].url')"
           if [[ -z "${pr_url}" ]]; then
+            # `gh pr create` runs right after the branch push and release
+            # creation; wait so GitHub doesn't reject the burst with its
+            # "was submitted too quickly" secondary rate limit.
+            sleep 30
             pr_url="$(gh pr create \
               --base main \
               --head "${RELEASE_BRANCH}" \
