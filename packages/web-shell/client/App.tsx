@@ -74,6 +74,7 @@ import type {
 
 import { isGoalGateBlocked as isGoalGateBlockedFor } from './utils/goalGate';
 import { keepWorkspaceSplitSessionIds } from './utils/standalone-session-routing';
+import { setBoundedMapEntry } from './utils/bounded-map';
 import { type SessionGitIntent } from './components/GitModePopover';
 import { gitModeIntentMustReset } from './utils/gitModeIntent';
 import { LocalControlQrButton } from './components/LocalControlQrButton';
@@ -271,6 +272,8 @@ import {
   projectStreamingTailMessages,
   useMessagesFromBlocks,
 } from './hooks/useMessages';
+import { useSessionSources } from './hooks/useSessionSources';
+import type { SessionSource } from '@qwen-code/sdk/daemon';
 import { useSessionArtifacts } from './hooks/useSessionArtifacts';
 import { useSessionArtifactsChange } from './hooks/useSessionArtifactsChange';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
@@ -361,6 +364,12 @@ import {
   type TodoSnapshotDiff,
 } from './utils/todos';
 import { ThemeProvider } from './themeContext';
+import {
+  BrandProvider,
+  EMPTY_BRAND,
+  type WebShellBrand,
+  type WebShellResolvedBrand,
+} from './brandContext';
 import { InteractionBlockContext } from './interactionBlockContext';
 import {
   WebShellThemeId,
@@ -1072,6 +1081,21 @@ export interface WebShellProps {
   language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
   /** Called when `/language ui` changes the web-shell UI language. */
   onLanguageChange?: (language: WebShellLanguage) => void;
+  /**
+   * Product branding for the embedded shell. Replaces the daemon-resolved brand
+   * wholesale when provided: a host that sets `brand` owns both the name and the
+   * logo. `logo` may be any node, because the host owns its own document and
+   * Content Security Policy.
+   */
+  brand?: WebShellBrand;
+  /**
+   * Called with the resolved brand's name and logo URI once the brand is known,
+   * and again only when one of those two values changes — so a host may pass an
+   * inline handler alongside an inline `brand` object without re-firing on every
+   * render. The shell itself never writes `document.title` or the favicon; an
+   * embedded shell must not hijack its host page's tab.
+   */
+  onBrandResolved?: (brand: WebShellResolvedBrand) => void;
   /** Additional CSS class name appended to the root element. */
   className?: string;
   /** Inline styles applied to the root element. */
@@ -1432,7 +1456,7 @@ const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'sideTask',
 ];
 const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
-  ['environment', 'subagents', 'backgroundTasks', 'attachments', 'artifacts'];
+  ['environment', 'sources', 'subagents', 'backgroundTasks', 'artifacts'];
 const ATTACHMENTS_REFRESH_INTERVAL_MS = 1000;
 const SESSION_AGENTS_REFRESH_INTERVAL_MS = 3000;
 const SESSION_AGENTS_MAX_RETRY_INTERVAL_MS = 30_000;
@@ -1441,20 +1465,6 @@ const SESSION_AGENT_TRACE_FEATURE = 'session_agent_trace';
 const SESSION_ATTACHMENT_LIST_FEATURE = 'session_attachment_list';
 const BOTTOM_PANEL_GAP_PX = 6;
 const BOTTOM_PANEL_FALLBACK_INSET_PX = 40;
-
-function setBoundedMapEntry<V>(
-  map: Map<string, V>,
-  key: string,
-  value: V,
-): void {
-  map.delete(key);
-  map.set(key, value);
-  while (map.size > MAX_ARTIFACT_PANEL_SESSION_STATES) {
-    const oldest = map.keys().next().value;
-    if (!oldest) break;
-    map.delete(oldest);
-  }
-}
 
 // One preview tab per image, keyed by its content, so opening several images
 // keeps a tab each while re-clicking the same image just focuses its tab.
@@ -1626,6 +1636,7 @@ type PersistedArtifactPanelTab =
       | 'workspaceId'
       | 'previewMimeType'
       | 'previewOnly'
+      | 'sourcePreview'
       | 'attachmentId'
       | 'sourceSessionId'
     >
@@ -1711,6 +1722,8 @@ function parsePersistedArtifactPanelTab(
     optionalStrings.some(
       (key) => tab[key] !== undefined && typeof tab[key] !== 'string',
     ) ||
+    (tab['sourcePreview'] !== undefined &&
+      typeof tab['sourcePreview'] !== 'boolean') ||
     (tab['previewOnly'] !== undefined &&
       typeof tab['previewOnly'] !== 'boolean') ||
     (tab['closeWithPane'] !== undefined &&
@@ -1744,6 +1757,7 @@ function parsePersistedArtifactPanelTab(
         workspaceId: tab['workspaceId'],
         previewMimeType: tab['previewMimeType'],
         previewOnly: tab['previewOnly'],
+        sourcePreview: tab['sourcePreview'],
         attachmentId: tab['attachmentId'],
         sourceSessionId: tab['sourceSessionId'],
       } as PersistedArtifactPanelTab;
@@ -1864,6 +1878,8 @@ function serializeArtifactPanelTabs(
   return tabs.flatMap((tab): PersistedArtifactPanelTab[] => {
     const { id, title } = tab;
     switch (tab.kind) {
+      case 'source':
+        return [];
       case 'review':
         return [
           {
@@ -1891,6 +1907,7 @@ function serializeArtifactPanelTabs(
                 workspaceId: tab.workspaceId,
                 previewMimeType: tab.previewMimeType,
                 previewOnly: tab.previewOnly,
+                sourcePreview: tab.sourcePreview,
                 attachmentId: tab.attachmentId,
                 sourceSessionId: tab.sourceSessionId,
               },
@@ -2886,6 +2903,8 @@ export function App({
   onThemeChange,
   language: providedLanguage,
   onLanguageChange,
+  brand: providedBrand,
+  onBrandResolved,
   className: externalClassName,
   style: externalStyle,
   shadowDom,
@@ -3008,6 +3027,9 @@ export function App({
     chatHeaderEnabled &&
     environmentHeaderItemVisible &&
     (!renderChatHeader || Boolean(header));
+  const environmentSourcesEnabled =
+    environmentPanelItems.includes('sources') ||
+    environmentPanelItems.includes('attachments');
   const environmentGitReplacementEnabled =
     environmentPanelReachable && environmentPanelItems.includes('environment');
   const environmentTasksReplacementEnabled =
@@ -3255,6 +3277,7 @@ export function App({
     workspace.client,
   );
   const refreshWorkspaceCapabilities = workspace.refreshCapabilities;
+  const refreshWorkspaceBrand = workspace.refreshBrand;
   const workspaces = useMemo(() => {
     const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
     if (
@@ -4042,6 +4065,19 @@ export function App({
     refresh: refreshArtifacts,
     hydrated: artifactsHydrated,
   } = useSessionArtifacts();
+  const sourcesState = useSessionSources();
+  const refreshSources = sourcesState.refresh;
+  const [sourceRegistrationRetries, setSourceRegistrationRetries] = useState<
+    Array<() => Promise<void>>
+  >([]);
+  useEffect(() => {
+    setSourceRegistrationRetries([]);
+  }, [sourcesState.owner]);
+  const retrySourceRegistrations = useCallback(async () => {
+    setSourceRegistrationRetries([]);
+    await Promise.allSettled(sourceRegistrationRetries.map((retry) => retry()));
+    await refreshSources();
+  }, [sourceRegistrationRetries, refreshSources]);
   const artifactsRef = useRef(artifacts);
   artifactsRef.current = artifacts;
   const [artifactPanelExtraArtifacts, setArtifactPanelExtraArtifacts] =
@@ -4310,12 +4346,16 @@ export function App({
     sessionAttachmentsOwnerRef.current = sessionOwnerGuard.capture();
   }
   const sessionAttachmentsOwner = sessionAttachmentsOwnerRef.current;
+  const [sessionAttachmentsError, setSessionAttachmentsError] = useState<{
+    owner: DaemonSessionOwnerSnapshot;
+    message: string;
+  }>();
   const sessionAttachmentsBySessionRef = useRef(
     new Map<string, DaemonSessionAttachmentReference[]>(),
   );
   const sessionAttachmentsSkeletonLoading =
     environmentPanelReachable &&
-    environmentPanelItems.includes('attachments') &&
+    environmentSourcesEnabled &&
     (sessionAttachmentsLoading ||
       Boolean(
         environmentPanelOpen &&
@@ -4329,15 +4369,13 @@ export function App({
   const sessionAttachmentsRequestIdRef = useRef(0);
   const attachmentRetryCountRef = useRef(new Map<string, number>());
   const [attachmentRefreshNonce, setAttachmentRefreshNonce] = useState(0);
-  // The attachments panel is fed by the daemon's attachment store, never by
-  // parsing transcript blocks. Refetch while the panel is open whenever the
-  // transcript moves (a sent message is the only way the store gains
-  // attachments) — throttled so streaming appends do not hammer the route.
+  // Uploaded sources come from the daemon attachment store. Refresh on
+  // transcript updates while the panel is open, throttled during streaming.
   const transcriptRevision = blockChangeSummary?.revision ?? 0;
   const sessionAttachmentsRequestEligibleRef = useRef(false);
   sessionAttachmentsRequestEligibleRef.current =
     environmentPanelReachable &&
-    environmentPanelItems.includes('attachments') &&
+    environmentSourcesEnabled &&
     environmentPanelOpen &&
     connection.status === 'connected' &&
     Boolean(connection.sessionId && logicalSessionKey) &&
@@ -4346,8 +4384,7 @@ export function App({
     ) === true;
   useEffect(() => {
     const attachmentsSectionEnabled =
-      environmentPanelReachable &&
-      environmentPanelItems.includes('attachments');
+      environmentPanelReachable && environmentSourcesEnabled;
     const attachmentsSupported =
       connection.capabilities?.features.includes(
         SESSION_ATTACHMENT_LIST_FEATURE,
@@ -4363,14 +4400,17 @@ export function App({
         attachmentRetryCountRef.current.delete(logicalSessionKey);
       }
       setSessionAttachmentsLoading(false);
+      setSessionAttachmentsError(undefined);
       return;
     }
     if (!attachmentsSupported) {
+      setSessionAttachmentsError(undefined);
       attachmentRetryCountRef.current.delete(logicalSessionKey);
       setBoundedMapEntry(
         sessionAttachmentsBySessionRef.current,
         logicalSessionKey,
         [],
+        MAX_ARTIFACT_PANEL_SESSION_STATES,
       );
       setSessionAttachments([]);
       setSessionAttachmentsLoading(false);
@@ -4396,6 +4436,7 @@ export function App({
         fetchedAt: Date.now(),
       };
       const requestId = ++sessionAttachmentsRequestIdRef.current;
+      setSessionAttachmentsError(undefined);
       const listing = sessionActions.listAttachments();
       void listing
         .then((attachments) => {
@@ -4409,12 +4450,13 @@ export function App({
               sessionAttachmentsBySessionRef.current,
               logicalSessionKey,
               attachments,
+              MAX_ARTIFACT_PANEL_SESSION_STATES,
             );
             setSessionAttachments(attachments);
             setSessionAttachmentsLoading(false);
           }
         })
-        .catch(() => {
+        .catch((error: unknown) => {
           if (!cancelled && sessionAttachmentsOwner.isCurrent()) {
             if (firstLoad) {
               const failures =
@@ -4425,6 +4467,7 @@ export function App({
                   attachmentRetryCountRef.current,
                   logicalSessionKey,
                   failures,
+                  MAX_ARTIFACT_PANEL_SESSION_STATES,
                 );
                 retryTimer = setTimeout(
                   () => setAttachmentRefreshNonce((nonce) => nonce + 1),
@@ -4437,9 +4480,14 @@ export function App({
                 sessionAttachmentsBySessionRef.current,
                 logicalSessionKey,
                 [],
+                MAX_ARTIFACT_PANEL_SESSION_STATES,
               );
               setSessionAttachments([]);
             }
+            setSessionAttachmentsError({
+              owner: sessionAttachmentsOwner,
+              message: formatError(error, t('environment.unavailable')),
+            });
             setSessionAttachmentsLoading(false);
           }
         });
@@ -4462,6 +4510,8 @@ export function App({
     transcriptRevision,
     sessionActions,
     sessionAttachmentsOwner,
+    environmentSourcesEnabled,
+    t,
   ]);
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
   artifactPanelOpenRef.current = artifactPanelOpen;
@@ -4673,6 +4723,7 @@ export function App({
       const pending = sideTaskCreationPromisesRef.current.get(tabId);
       if (pending) return pending;
       const creation = (async () => {
+        const owner = sessionOwnerGuard.capture();
         const ownerCwd = connection.workspaceCwd;
         const parentClientId =
           connection.sessionId === parentSessionId
@@ -4685,6 +4736,9 @@ export function App({
           },
           parentClientId,
         );
+        if (owner.isCurrent() && session.sourceWarnings?.length) {
+          pushToast('warning', session.sourceWarnings.join(' '));
+        }
         if (ownerCwd) {
           sessionCatalogController.sessionCreated(ownerCwd, session.sessionId);
         }
@@ -4703,6 +4757,8 @@ export function App({
       connection.clientId,
       connection.sessionId,
       connection.workspaceCwd,
+      sessionOwnerGuard,
+      pushToast,
       sessionCatalogController,
       workspace.client,
     ],
@@ -4992,6 +5048,83 @@ export function App({
       rememberArtifactPanelTrigger,
     ],
   );
+  const openSourcePanel = useCallback(
+    (source: SessionSource) => {
+      if (!sourcesState.owner.isCurrent() || !connection.sessionId) return;
+      const tab: ArtifactPanelTab = {
+        id: `source:${connection.sessionId}:${source.id}`,
+        kind: 'source',
+        title: source.title,
+        source,
+        sourceSessionId: connection.sessionId,
+        workspaceCwd: connection.workspaceCwd,
+        workspaceId: artifactWorkspaceTarget?.workspaceId,
+        owner: sourcesState.owner,
+        sessionActions,
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [
+      sourcesState.owner,
+      connection.sessionId,
+      connection.workspaceCwd,
+      artifactWorkspaceTarget?.workspaceId,
+      sessionActions,
+      getDefaultReviewPanelWidth,
+    ],
+  );
+  useEffect(() => {
+    const tabs = artifactPanelTabsRef.current;
+    const next = tabs.flatMap<ArtifactPanelTab>((tab) => {
+      if (tab.kind !== 'source') return [tab];
+      const fresh = sourcesState.sources.find(
+        (source) => source.id === tab.source.id,
+      );
+      if (
+        !tab.owner.isCurrent() ||
+        (tab.workspaceCwd !== undefined &&
+          artifactWorkspaceCwd === undefined) ||
+        tab.workspaceId !== artifactWorkspaceTarget?.workspaceId ||
+        !sourcesState.supported ||
+        (tab.sourceSessionId === connection.sessionId &&
+          sourcesState.hydrated &&
+          !fresh)
+      )
+        return [];
+      return fresh && fresh !== tab.source
+        ? [{ ...tab, source: fresh, title: fresh.title }]
+        : [tab];
+    });
+    if (next.length === tabs.length && next.every((tab, i) => tab === tabs[i]))
+      return;
+    setArtifactPanelTabs(next);
+    if (
+      activeArtifactPanelTabId &&
+      !next.some((tab) => tab.id === activeArtifactPanelTabId)
+    ) {
+      setActiveArtifactPanelTabId(null);
+      setArtifactPanelOpen(false);
+    }
+  }, [
+    activeArtifactPanelTabId,
+    artifactWorkspaceCwd,
+    artifactWorkspaceTarget?.workspaceId,
+    sourcesState.owner,
+    sourcesState.sources,
+    sourcesState.hydrated,
+    sourcesState.supported,
+    connection.sessionId,
+  ]);
+
   const openReviewPanel = useCallback(
     (
       changes: readonly TurnOutputFileChange[],
@@ -5217,6 +5350,7 @@ export function App({
       file: AttachmentPreviewRequest,
       workspaceCwd = connection.workspaceCwd,
       sourceSessionId = connection.sessionId,
+      sourcePreview = false,
     ) => {
       if (
         onWorkspaceFileOpen &&
@@ -5239,7 +5373,7 @@ export function App({
           resolvedFile.attachmentId !== undefined;
         const tab: ArtifactPanelTab = {
           id: previewOnly
-            ? `attachment:${sourceSessionId ?? ''}:${resolvedFile.attachmentId ?? workspacePath}`
+            ? `${sourcePreview ? 'source-attachment' : 'attachment'}:${sourceSessionId ?? ''}:${resolvedFile.attachmentId ?? workspacePath}`
             : `file:${workspaceCwd ?? ''}:${workspacePath}`,
           kind: 'file',
           title: resolvedFile.name,
@@ -5256,6 +5390,7 @@ export function App({
             : {}),
           ...(sourceSessionId ? { sourceSessionId } : {}),
           ...(previewOnly ? { previewOnly: true } : {}),
+          ...(sourcePreview ? { sourcePreview: true } : {}),
           ...(workspaceCwd ? { workspaceCwd } : {}),
           ...(workspaceId ? { workspaceId } : {}),
         };
@@ -5843,6 +5978,7 @@ export function App({
         artifactPanelDeferredPersistedTabsRef.current,
         nextSessionId,
         deferredPersistedTabs,
+        MAX_ARTIFACT_PANEL_SESSION_STATES,
       );
     } else {
       artifactPanelDeferredPersistedTabsRef.current.delete(nextSessionId);
@@ -10304,6 +10440,12 @@ export function App({
 
   useEffect(() => {
     for (const notice of notices) {
+      if (notice.sourceRetry) {
+        const retry = notice.sourceRetry;
+        setSourceRegistrationRetries((previous) =>
+          previous.includes(retry) ? previous : [...previous, retry],
+        );
+      }
       if (shouldToastNotice(notice)) {
         pushToast(toastToneFromNotice(notice), notice.message);
       } else if (notice.category !== 'lifecycle') {
@@ -11041,6 +11183,49 @@ export function App({
       setSelectedLanguage(settingLanguage);
     }
   }, [providedLanguage, languageSetting?.values.effective]);
+
+  // A host that passes `brand` owns the name and the logo outright, mirroring
+  // how the `theme` and `language` props win above. The daemon-resolved brand
+  // arrives asynchronously and stays undefined on a daemon without `GET /brand`,
+  // in which case every consumer falls back to its built-in literal.
+  const resolvedBrand = providedBrand ?? workspace.brand ?? EMPTY_BRAND;
+
+  // `workspace.brand` is undefined both while the fetch is in flight and when a
+  // daemon has no brand route, so rendering can treat it as "built-in" but the
+  // resolution callback must not fire on the in-flight state — that would make
+  // the standalone entry reset the tab title and drop the pre-paint cache on
+  // every load. `brandSettled` is the distinction: it flips once the fetch
+  // reaches a definitive outcome (an answer, or a 404 from a route-less
+  // daemon), so a settled-with-no-brand result (older daemon, withdrawn host
+  // prop) is reported as an empty brand and clears stale cached chrome, while
+  // a retryable failure clears nothing. The prop check is `!= null`, matching
+  // the `??` above: an untyped host passing `null` must not open the gate
+  // during the in-flight state either.
+  const brandResolved =
+    providedBrand != null || workspace.brandSettled === true;
+
+  // Keyed on the two primitive fields with the callback behind a ref, so a host
+  // passing an inline `brand` object and an inline handler — the shape the
+  // README shows — does not re-fire on every render. Keying on identity loops
+  // forever against a handler that stores the value: each call hands it a fresh
+  // object, React never bails out, and the host re-renders into the next call.
+  // `logo` is left out because a document can only act on the title and the
+  // favicon, and a React node has no stable identity by construction.
+  const onBrandResolvedRef = useRef(onBrandResolved);
+  onBrandResolvedRef.current = onBrandResolved;
+  // Empty means unset on the settings surface; the payload must not hand a host
+  // an `''` it would write into a tab title. Truthiness matches every in-shell
+  // reader (`useBrandName`, `webShellDocumentTitle`).
+  const brandNameValue = resolvedBrand.name || undefined;
+  const brandLogoUri = resolvedBrand.logoDataUri || undefined;
+
+  useEffect(() => {
+    if (!brandResolved) return;
+    onBrandResolvedRef.current?.({
+      ...(brandNameValue === undefined ? {} : { name: brandNameValue }),
+      ...(brandLogoUri === undefined ? {} : { logoDataUri: brandLogoUri }),
+    });
+  }, [brandResolved, brandNameValue, brandLogoUri]);
 
   const handleSettingsLanguageChange = useCallback(
     (nextLanguage: WebShellLanguage, scope: 'user' | 'workspace' = 'user') => {
@@ -11868,6 +12053,8 @@ export function App({
         .branchSession(name || undefined, atRecordId)
         .then((result) => {
           if (!result.switchStarted) return;
+          if (result.sourceWarnings?.length)
+            pushToast('warning', result.sourceWarnings.join(' '));
           store.dispatch([
             {
               type: 'status',
@@ -12026,6 +12213,11 @@ export function App({
           }
           try {
             capabilities = await refreshWorkspaceCapabilities();
+            // The brand fetch fails independently of capabilities and is
+            // never retried on its own; the recovery path is the one place
+            // that can re-ask. Gated inside the provider to the genuinely-
+            // missing state, so an already-branded shell is unaffected.
+            refreshWorkspaceBrand?.();
           } catch (error) {
             reportError(error, t('session.capabilitiesFailed'));
             return false;
@@ -12123,6 +12315,7 @@ export function App({
       lockedWorkspaceCwd,
       pushToast,
       reportError,
+      refreshWorkspaceBrand,
       refreshWorkspaceCapabilities,
       reloadLoadedSkills,
       scheduleComposerFocus,
@@ -16390,8 +16583,13 @@ export function App({
   };
   const environmentPanelOwner = sessionOwnerGuard.capture();
 
+  // BrandProvider sits above I18nProvider so portals and every pane see it. The
+  // prettier-ignore keeps adding it from re-indenting the whole subtree, the
+  // same reason WebShellPortalRootContext below carries one.
   return (
     <ThemeProvider value={selectedTheme}>
+      {/* prettier-ignore */}
+      <BrandProvider value={resolvedBrand}>
       <I18nProvider language={selectedLanguage}>
         <McpAppHostContext.Provider value={workspace.baseUrl}>
           {/* prettier-ignore */}
@@ -18850,6 +19048,22 @@ export function App({
                     : []
                 }
                 attachmentsLoading={sessionAttachmentsSkeletonLoading}
+                attachmentsError={
+                  sessionAttachmentsError?.owner === sessionAttachmentsOwner &&
+                  sessionAttachmentsOwner.isCurrent()
+                    ? sessionAttachmentsError.message
+                    : undefined
+                }
+                onRetryAttachments={() =>
+                  setAttachmentRefreshNonce((value) => value + 1)
+                }
+                sources={sourcesState}
+                onOpenSource={openSourcePanel}
+                retrySourceRegistration={
+                  sourceRegistrationRetries.length
+                    ? retrySourceRegistrations
+                    : undefined
+                }
                 artifacts={artifacts}
                 artifactsLoading={artifactsLoading}
                 items={environmentPanelItems}
@@ -18874,7 +19088,9 @@ export function App({
                     openImagePanel(src, alt, source);
                   }
                 }}
-                onAttachmentPreview={openAttachmentPanel}
+                onAttachmentPreview={(file) =>
+                  openAttachmentPanel(file, undefined, undefined, true)
+                }
                 onAttachmentPreviewError={(error) => {
                   if (!environmentPanelOwner.isCurrent()) return;
                   pushToast(
@@ -19040,6 +19256,7 @@ export function App({
         </WebShellPortalRootContext.Provider>
         </McpAppHostContext.Provider>
       </I18nProvider>
+      </BrandProvider>
     </ThemeProvider>
   );
 }
