@@ -28,24 +28,9 @@ export interface WebSearchBackendConfig {
   customHeaders?: Record<string, string>;
 }
 
-/**
- * Per-tier render caps. The formatter bounds each evidence section to this
- * many pages, and the DashScope backend reads the same values so the lines it
- * removes from a narration are exactly the ones the formatter will render —
- * a page dropped from both would vanish from the result entirely.
- */
-export const MAX_OPENED_URLS = 25;
-export const MAX_CANDIDATE_URLS = 25;
-
-/**
- * One page the search produced. `title` is present only when the backend
- * actually learned it — the tool renders a titled markdown link when it did
- * and a bare URL when it did not, so a backend that cannot supply titles
- * keeps producing exactly the output it produced before.
- */
+/** One page the search produced. */
 export interface WebSearchSource {
   url: string;
-  title?: string;
   /**
    * True when the backend's extractor opened the page and did not report
    * failure — treated as stronger evidence.
@@ -57,7 +42,7 @@ export interface WebSearchSource {
 export interface WebSearchOutcome {
   /**
    * Narrated answer from the search side model, or salvaged extracted page
-   * text when the stream died before any narration arrived; may be empty.
+   * text when no narration arrived; may be empty.
    */
   answerText: string;
   /** Opened pages first, then the unopened candidates. De-duplicated. */
@@ -96,19 +81,4 @@ export interface WebSearchBackendRequest {
  */
 export interface WebSearchBackend {
   search(request: WebSearchBackendRequest): Promise<WebSearchBackendResult>;
-}
-
-/**
- * `String#slice` counts UTF-16 code units and can cut a surrogate pair in
- * half, leaving a lone surrogate that breaks serialization of the next model
- * request. Back off one unit when the cut lands after a high surrogate.
- *
- * Shared by the result formatter and by backends that bound field lengths.
- */
-export function sliceAtCharBoundary(text: string, limit: number): string {
-  if (text.length <= limit) return text;
-  let end = limit;
-  const code = text.charCodeAt(end - 1);
-  if (code >= 0xd800 && code <= 0xdbff) end--;
-  return text.slice(0, end);
 }
