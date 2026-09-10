@@ -45,6 +45,19 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
       'QWEN_CODE_WARNINGS_FILE',
     );
   });
+
+  // These select which file becomes the System / SystemDefaults layer. A
+  // project .env pointing them at a repo-shipped file would promote
+  // repository content into the highest-precedence settings layer — above
+  // the operator's own User settings (e.g. rebranding the Web Shell).
+  it('keeps the System settings layer selection operator-owned', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+    );
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+    );
+  });
   it('keeps ACP repeated-tool-failure rollout policy operator-owned', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,

@@ -435,6 +435,7 @@ function workflowSnapshot(
     dispatches: [],
     agentsDispatched: 2,
     agentsCompleted: 1,
+    agentsRespawned: 1,
     tokensSpent: 900,
     tokenBudgetTotal: 4_000,
     perPhaseTokens: [],
@@ -609,6 +610,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       ],
       agentsDispatched: 2,
       agentsCompleted: 1,
+      agentsRespawned: 3,
       recentLogs: ['Review started'],
       events: [
         {
@@ -669,6 +671,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       currentPhase: 'Review',
       agentsDispatched: 2,
       agentsCompleted: 1,
+      agentsRespawned: 3,
       tokensSpent: 1_200,
       tokenBudgetTotal: 8_000,
       sourceRunId: 'wf_source',
@@ -740,6 +743,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
         isHistorical: true,
         agentsDispatched: 2,
         agentsCompleted: 1,
+        agentsRespawned: 1,
         tokensSpent: 900,
         events: [
           {

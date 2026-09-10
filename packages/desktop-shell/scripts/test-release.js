@@ -313,36 +313,44 @@ function testDesktopReleaseSigningWorkflow() {
     ),
     'Unsigned Windows installers are only allowed when no signing config exists',
   );
-  const searchToolsStart = workflow.indexOf('# search vendor binaries');
-  const searchToolsEnd = workflow.indexOf('# Node.js runtime binary');
-  assert.ok(
-    searchToolsStart !== -1 && searchToolsEnd > searchToolsStart,
-    'the vendor signing step must keep its search-tools/Node section markers',
-  );
-  const searchToolsSigningBlock = workflow.slice(
-    searchToolsStart,
-    searchToolsEnd,
-  );
-  assert.doesNotMatch(
-    searchToolsSigningBlock,
-    /--entitlements/,
-    'search tools must not inherit the app entitlements',
+  // The step used to name the binaries it signed. It now discovers them,
+  // because the runtime is a copy of the CLI's dist tree and gains native
+  // payload without this package changing — an unsigned renderer library
+  // reached the notary service that way. These assertions pin the discovery
+  // and the properties the old list guaranteed by construction.
+  assert.match(
+    workflow,
+    /if \[ "\$\(file -b --mime-type "\$file"\)" = 'application\/x-mach-binary' \]; then/,
+    'the vendor signing step must discover Mach-O binaries rather than list them',
   );
   assert.match(
     workflow,
-    /--options runtime --timestamp \\\n\s+\{\} \+/,
-    'search-tool codesign failures must fail the signing step',
-  );
-  assert.match(
-    searchToolsSigningBlock,
-    /-name 'rg'.*-name 'bfs'.*-name 'ugrep'/,
-    'all bundled search tools must be signed',
+    /done < <\(find "\$runtime_dir" -type f -print0\)/,
+    'Mach-O discovery must cover the whole staged runtime',
   );
   assert.ok(
     workflow.includes(
-      '--entitlements src-tauri/NodeEntitlements.plist "$node_bin"',
+      '--entitlements src-tauri/NodeEntitlements.plist "$file"',
     ),
     'Node.js must use its minimal helper entitlements',
+  );
+  const entitlementFlags = workflow
+    .slice(
+      workflow.indexOf("name: 'Sign bundled vendor binaries (macOS)'"),
+      workflow.indexOf(
+        "name: 'Refresh bundled runtime checksums after signing",
+      ),
+    )
+    .match(/--entitlements/g);
+  assert.deepStrictEqual(
+    entitlementFlags,
+    ['--entitlements'],
+    'only the Node.js branch may pass entitlements; everything else signs without them',
+  );
+  assert.match(
+    workflow,
+    /codesign --verify --strict "\$file"/,
+    'the signing step must verify what it signed instead of leaving it to the notary service',
   );
   const nodeEntitlements = fs.readFileSync(
     path.join(packageDir, 'src-tauri', 'NodeEntitlements.plist'),
@@ -377,14 +385,9 @@ function testDesktopReleaseSigningWorkflow() {
     'Node.js must not receive microphone access',
   );
   assert.match(
-    searchToolsSigningBlock,
-    /-print -quit \| grep -q \./,
-    'search-tool signing must gate on at least one Darwin binary',
-  );
-  assert.match(
     workflow,
-    /No macOS search binaries found at \$vendor_dir/,
-    'missing search binaries must be visible in release logs',
+    /No Mach-O binary found under \$runtime_dir/,
+    'a runtime with no native binary must fail rather than silently sign nothing',
   );
   assert.match(
     workflow,

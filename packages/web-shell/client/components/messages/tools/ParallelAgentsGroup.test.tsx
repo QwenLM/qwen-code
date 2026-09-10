@@ -1582,6 +1582,48 @@ describe('ParallelAgentsGroup activity rendering', () => {
     expect(row.getAttribute('aria-expanded')).toBe('false');
   });
 
+  it('enables a titleless nested agent only when its session becomes ready', () => {
+    const onOpen = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const render = (subagentSessionReady: boolean) => {
+      const nested = agent({
+        callId: 'nested',
+        toolName: 'agent',
+        status: 'in_progress',
+        subagentSessionReady,
+      });
+      act(() =>
+        root.render(
+          <I18nProvider language="zh-CN">
+            <SubagentDetailsProvider onOpen={onOpen}>
+              <ParallelAgentsGroup agents={[nested]} />
+            </SubagentDetailsProvider>
+          </I18nProvider>,
+        ),
+      );
+      return nested;
+    };
+    render(false);
+    act(() =>
+      (container.querySelector('[aria-expanded]') as HTMLElement).click(),
+    );
+    const row = container.querySelector<HTMLButtonElement>(
+      'button[data-detail-mode="panel"]',
+    )!;
+    expect(row.textContent).toContain('通用');
+    expect(row.title).toBe('创建中');
+    expect(row.getAttribute('aria-disabled')).toBe('true');
+    act(() => row.click());
+    expect(onOpen).not.toHaveBeenCalled();
+    const ready = render(true);
+    expect(row.hasAttribute('aria-disabled')).toBe(false);
+    act(() => row.click());
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith(ready);
+  });
+
   it('opens nested agents through the details provider when available', () => {
     const onOpen = vi.fn();
     const nested = agent({ callId: 'nested' });
