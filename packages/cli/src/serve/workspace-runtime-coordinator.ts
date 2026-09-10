@@ -26,7 +26,8 @@ import type { WorkspaceRuntime } from './workspace-registry.js';
 
 const DEFAULT_ENSURE_TIMEOUT_MS = 60_000;
 const ENSURE_KEEP_ALIVE_MS = 10 * 60_000;
-const EXTENSIONS_RECONCILE_TIMEOUT_MS = 30_000;
+// Full refresh includes MCP discovery; match the bridge's MCP control budget.
+const EXTENSIONS_RECONCILE_TIMEOUT_MS = 5 * 60_000;
 // A latched Extension failure is retried at most once per cooldown window;
 // without a bound, a store stuck at its initial generation has no recovery
 // path (the desired generation never moves to clear the latch).

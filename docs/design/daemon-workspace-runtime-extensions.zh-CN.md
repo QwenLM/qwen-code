@@ -30,6 +30,10 @@ epoch，且已应用 generation 等于最新期望 generation，能力才标记�
 过时 generation 返回 `superseded`，不算刷新失败。drain 延后任务保留窄/完整范围，
 两者同时待处理时完整刷新优先。冷却结束后再次失败会重新开始冷却。
 
+实际刷新包含 MCP 发现，因此采用与 MCP 控制相同的五分钟预算。较短的 ensure
+观察截止时间不会取消刷新；稍后成功的结果仍可认证就绪态。
+硬超时保留 bridge 现有的通道退役策略。
+
 观察到新 generation 时，即使运行时是冷的，也使保留的 Skill 快照失效。
 投影 generation 相等不独立代表就绪，还需当前 epoch 和协调器能力状态。
 轮询器的新鲜权威读取支持存储恢复到较低 generation：清除已应用认证并推进协调器 revision。
@@ -66,6 +70,9 @@ daemon 声明 `workspace_extensions_config_runtime` 时，拓展页面：
 4. 列表页显示工作区选择器，详情页显示禁用的选择器。
 
 旧 daemon 保留现有主工作区流程。
+
+工作区激活投影和实时激活状态都不可用时，列表及详情徽标显示状态未知，
+不使用全局默认值代替。
 
 daemon 同时声明 `workspace_extension_mentions` 时，输入区 `+` 和 `@` 拓展菜单
 使用选定工作区运行时；否则保留旧主工作区加载器。

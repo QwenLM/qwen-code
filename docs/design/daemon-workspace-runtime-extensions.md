@@ -41,6 +41,11 @@ An obsolete generation returns `superseded`, not a refresh failure. Deferred
 drain work preserves its narrow/full scope; full work takes precedence when
 both are pending. A repeated failure re-arms the retry cooldown.
 
+The physical refresh has the same five-minute budget as MCP controls because
+it includes MCP discovery. The shorter ensure observation deadline does not
+cancel that refresh; a later successful result can still certify readiness.
+Hard timeouts retain the bridge's channel-retirement policy.
+
 Observing a new generation invalidates retained Skill snapshots even while the
 runtime is cold. Projection generation equality alone is not readiness: use
 the current epoch and the coordinator capability state. Restore of a lower
@@ -91,6 +96,9 @@ Extensions page:
    detail view.
 
 Older daemons keep the existing primary-workspace flow.
+
+When both the workspace activation projection and live activation state are
+unavailable, list and detail badges show unknown, not the global default.
 
 When the daemon also advertises `workspace_extension_mentions`, the composer
 uses the selected workspace runtime for both the `+` and `@` Extension menus.

@@ -154,7 +154,9 @@ function extensionTitle(extension: ManagedExtensionEntry): string {
   return extension.displayName || extension.name;
 }
 
-function extensionIsActive(extension: ManagedExtensionEntry): boolean {
+function extensionIsActive(
+  extension: ManagedExtensionEntry,
+): boolean | undefined {
   if (
     extension.workspaceActivation &&
     extension.workspaceActivation !== 'inherit'
@@ -165,7 +167,7 @@ function extensionIsActive(extension: ManagedExtensionEntry): boolean {
   // leaves the live row's state as the only workspace-scoped truth; prefer
   // it over the user-scope default.
   if (extension.workspaceActivation === undefined) {
-    return extension.isActive ?? extension.defaultActivation === 'enabled';
+    return extension.isActive;
   }
   return extension.defaultActivation
     ? extension.defaultActivation === 'enabled'
@@ -173,7 +175,9 @@ function extensionIsActive(extension: ManagedExtensionEntry): boolean {
 }
 
 function statusLabel(extension: ManagedExtensionEntry, t: T): string {
-  return extensionIsActive(extension)
+  const active = extensionIsActive(extension);
+  if (active === undefined) return t('extensions.manage.status.unknown');
+  return active
     ? t('extensions.manage.status.enabled')
     : t('extensions.manage.status.disabled');
 }

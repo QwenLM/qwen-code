@@ -161,6 +161,68 @@ describe('WorkspaceRuntimeCoordinator', () => {
     expect(harness.invalidateWorkspaceSkillsStatus).toHaveBeenCalledOnce();
   });
 
+  it('certifies a slow Extension refresh after the ensure observation expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = makeRuntime();
+      harness.setSnapshot({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      });
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+      harness.invokeWorkspaceCommand.mockImplementationOnce(
+        (
+          _method?: string,
+          _params?: Record<string, unknown>,
+          options?: { timeoutMs?: number },
+        ) =>
+          new Promise((resolve, reject) => {
+            const timeout = setTimeout(
+              () => reject(new Error('command timeout')),
+              options?.timeoutMs,
+            );
+            setTimeout(() => {
+              clearTimeout(timeout);
+              resolve({
+                configsRefreshed: 1,
+                configsFailed: 0,
+                sessionsRefreshed: 0,
+                sessionsFailed: 0,
+              });
+            }, 61_000);
+          }),
+      );
+
+      const reconciliation = coordinator.reconcileExtensionGeneration(1);
+      const ensured = coordinator.ensure();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect((await ensured).capabilities?.extensions).toMatchObject({
+        state: 'starting',
+        desiredGeneration: 1,
+        appliedGeneration: 0,
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(reconciliation).resolves.toMatchObject({
+        state: 'reconciled',
+      });
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'ready',
+        runtimeEpoch: 3,
+        appliedGeneration: 1,
+      });
+      expect(
+        harness.invokeWorkspaceCommand.mock.calls.filter(
+          (call) =>
+            (call as unknown[])[0] ===
+            'qwen/control/workspace/extensions/reconcile',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reconciles an Extension generation without a session', async () => {
     const harness = makeRuntime();
     harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
@@ -182,7 +244,7 @@ describe('WorkspaceRuntimeCoordinator', () => {
     expect(harness.invokeWorkspaceCommand).toHaveBeenCalledWith(
       'qwen/control/workspace/extensions/reconcile',
       { cwd: '/workspace' },
-      { timeoutMs: 30_000 },
+      { timeoutMs: 300_000 },
     );
 
     await coordinator.reconcileExtensionGeneration(7);
@@ -276,7 +338,7 @@ describe('WorkspaceRuntimeCoordinator', () => {
     expect(harness.invokeWorkspaceCommand).toHaveBeenCalledWith(
       'qwen/control/workspace/extensions/reconcile',
       { cwd: '/workspace', skillsOnly: true },
-      { timeoutMs: 30_000 },
+      { timeoutMs: 300_000 },
     );
     // A skills-only reconcile cannot change MCP config: the ready MCP
     // capability must not be invalidated or reloaded for it.
@@ -594,7 +656,7 @@ describe('WorkspaceRuntimeCoordinator', () => {
       expect(harness.invokeWorkspaceCommand).toHaveBeenCalledWith(
         'qwen/control/workspace/extensions/reconcile',
         { cwd: '/workspace', ...(skillsOnly ? { skillsOnly: true } : {}) },
-        { timeoutMs: 30_000 },
+        { timeoutMs: 300_000 },
       );
     },
   );

@@ -1635,6 +1635,49 @@ describe('ExtensionsManagerPage runtime-error gate and degraded reads', () => {
     await expectRuntimeErrorVisible();
   });
 
+  it.each(['enabled', 'disabled'] as const)(
+    'shows unknown activation without workspace data, regardless of the %s default',
+    async (defaultActivation) => {
+      const mocks = makeSplitWorkspaceMocks(true);
+      mocks.workspaceExtensions.mockRejectedValue(new Error('unavailable'));
+      mocks.ensureRuntime.mockResolvedValue({});
+      mocks.workspaceRuntimeExtensions.mockResolvedValue({
+        initialized: false,
+        extensions: [],
+      });
+      mocks.extensionCatalog.mockResolvedValue({
+        v: 1,
+        generation: 1,
+        extensions: [
+          {
+            id: 'ext-demo',
+            name: 'demo',
+            version: '1.0.0',
+            defaultActivation,
+            workspaceOverrideCount: 0,
+          },
+        ],
+      });
+
+      await mountPage();
+      const card = container.querySelector<HTMLElement>(
+        '[role="button"][aria-label="demo"]',
+      );
+      expect(card?.textContent).toContain('unknown');
+      expect(card?.textContent).not.toContain(defaultActivation);
+      expect(card?.querySelector('[class*="success-bg"]')).toBeNull();
+
+      await openDemoDetail();
+      expect(
+        container.querySelector('h1')?.parentElement?.textContent,
+      ).toContain('unknown');
+      expect(container.querySelector('[class*="success-bg"]')).toBeNull();
+      for (const control of container.querySelectorAll('[role="combobox"]')) {
+        expect(control.hasAttribute('disabled')).toBe(true);
+      }
+    },
+  );
+
   it('keeps the live runtime rows when the projection read fails', async () => {
     const mocks = makeSplitWorkspaceMocks(true);
     mocks.workspaceExtensions.mockResolvedValue(null);

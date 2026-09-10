@@ -2122,6 +2122,7 @@ const EN: Messages = {
   'extensions.manage.status': 'Status:',
   'extensions.manage.status.disabled': 'disabled',
   'extensions.manage.status.enabled': 'enabled',
+  'extensions.manage.status.unknown': 'unknown',
   'extensions.manage.title': 'Manage Extensions',
   'extensions.manage.unknownUpdate': 'unknown',
   'extensions.manage.uninstalled': (v) =>
@@ -5643,6 +5644,7 @@ const ZH: Messages = {
   'extensions.manage.status': '状态：',
   'extensions.manage.status.disabled': '已禁用',
   'extensions.manage.status.enabled': '已启用',
+  'extensions.manage.status.unknown': '状态未知',
   'extensions.manage.title': '管理扩展',
   'extensions.manage.unknownUpdate': '未知',
   'extensions.manage.uninstalled': (v) =>
