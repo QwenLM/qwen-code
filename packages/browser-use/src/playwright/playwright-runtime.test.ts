@@ -15,7 +15,7 @@ import type {
 import { Buffer } from 'node:buffer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { ChromeBridge } from '../bridge/index.js';
+import type { BridgeEvent, ChromeBridge } from '../bridge/index.js';
 import { BrowserRuntimeError } from '../core/errors.js';
 import type { ScreenshotEnvelope, TabInfo } from '../core/primitives.js';
 import { BrowserSdkContext } from '../sdk/context.js';
@@ -945,6 +945,141 @@ describe('PlaywrightRuntime command contracts', () => {
     });
   });
 
+  it('cancels navigation waiters when a dialog blocks the SDK wait leg', async () => {
+    const fixture = await runtimeFixture();
+    const tab = new TabProxy(
+      new BrowserSdkContext(fixture.runtime),
+      'chrome',
+      await createTab(fixture.runtime),
+    );
+    const dispatch = vi.spyOn(fixture.runtime, 'dispatch');
+    await expect(
+      tab.playwright.expectNavigation(() => {
+        openDialog(fixture, 'confirm', 'Leave?');
+      }),
+    ).rejects.toMatchObject({ code: 'DIALOG_OPEN' });
+    const cancel = dispatch.mock.calls.find(
+      ([method]) => method === 'playwright.expectNavigation.cancel',
+    );
+    const beginIndex = dispatch.mock.calls.findIndex(
+      ([method]) => method === 'playwright.expectNavigation.begin',
+    );
+    const waiterId = await dispatch.mock.results[beginIndex]!.value;
+    expect(cancel).toEqual([
+      'playwright.expectNavigation.cancel',
+      { tabId: tab.id, waiterId },
+    ]);
+    fixture.emitEvent({
+      type: 'event',
+      tabId: 17,
+      method: 'Page.javascriptDialogClosed',
+      params: {},
+    });
+    await expect(
+      fixture.runtime.dispatch('playwright.expectNavigation.wait', {
+        tabId: tab.id,
+        waiterId,
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it.each(['accept', 'dismiss'] as const)(
+    'rejects stale dialog %s handles without touching the new dialog',
+    async (method) => {
+      const fixture = await runtimeFixture();
+      const tab = new TabProxy(
+        new BrowserSdkContext(fixture.runtime),
+        'chrome',
+        await createTab(fixture.runtime),
+      );
+      const first = openDialog(fixture, 'confirm', 'Leave?');
+      const old = await tab.getJsDialog();
+      if (old?.type !== 'confirm') throw new Error('Expected confirm');
+      const second = openDialog(fixture, 'confirm', 'Delete records?');
+      await expect(old[method]()).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      expect(first[method]).not.toHaveBeenCalled();
+      expect(second[method]).not.toHaveBeenCalled();
+      const fresh = await tab.getJsDialog();
+      if (fresh?.type !== 'confirm') throw new Error('Expected confirm');
+      await fresh[method]();
+      expect(second[method]).toHaveBeenCalledOnce();
+      openDialog(fixture, 'confirm', 'Another?');
+      await expect(fresh[method]()).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
+    },
+  );
+
+  it('accepts beforeunload dialogs through the SDK', async () => {
+    const fixture = await runtimeFixture();
+    const tab = new TabProxy(
+      new BrowserSdkContext(fixture.runtime),
+      'chrome',
+      await createTab(fixture.runtime),
+    );
+    const current = openDialog(fixture, 'beforeunload', 'Leave?');
+    const dialog = await tab.getJsDialog();
+    if (dialog?.type !== 'beforeunload')
+      throw new Error('Expected beforeunload');
+    await dialog.accept();
+    expect(current.accept).toHaveBeenCalledOnce();
+    expect(current.dismiss).not.toHaveBeenCalled();
+  });
+
+  it('unblocks a tab when Chrome closes a dialog externally without navigation', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    const dialog = openDialog(fixture, 'confirm', 'Leave?');
+    fixture.emitEvent({
+      type: 'event',
+      tabId: 17,
+      method: 'Page.javascriptDialogClosed',
+      params: {},
+    });
+    await expect(
+      fixture.runtime.dispatch('tab.title', { tabId: tab.id }),
+    ).resolves.toBe('Fixture');
+    await expect(
+      fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
+    ).resolves.toBeNull();
+    expect(dialog.accept).not.toHaveBeenCalled();
+    expect(dialog.dismiss).not.toHaveBeenCalled();
+  });
+
+  it('preserves dialog order when Chrome batches close and open events', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    queueMicrotask(() => openDialog(fixture, 'alert', 'First'));
+    fixture.emitEvent({
+      type: 'event',
+      tabId: 17,
+      method: 'Page.javascriptDialogClosed',
+      params: {},
+    });
+    queueMicrotask(() => openDialog(fixture, 'confirm', 'Second'));
+    await expect(
+      fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
+    ).resolves.toMatchObject({ message: 'Second' });
+    fixture.emitEvent({
+      type: 'event',
+      tabId: 18,
+      method: 'Page.javascriptDialogClosed',
+      params: {},
+    });
+    await expect(
+      fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
+    ).resolves.toMatchObject({ message: 'Second' });
+    fixture.emitEvent({
+      type: 'event',
+      tabId: 17,
+      method: 'Page.javascriptDialogClosed',
+      params: {},
+    });
+    await expect(
+      fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
+    ).resolves.toBeNull();
+  });
+
   it('fails page operations immediately while a JavaScript dialog is open', async () => {
     const fixture = await runtimeFixture();
     const tab = await createTab(fixture.runtime);
@@ -978,7 +1113,10 @@ describe('PlaywrightRuntime command contracts', () => {
       fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
     ).resolves.toMatchObject({ type: 'confirm', message: 'Continue?' });
 
-    await fixture.runtime.dispatch('tab.dialog.dismiss', { tabId: tab.id });
+    await fixture.runtime.dispatch(
+      'tab.dialog.dismiss',
+      await dialogArgs(fixture.runtime, tab.id),
+    );
     expect(dialog.dismiss).toHaveBeenCalledOnce();
     await fixture.runtime.dispatch('tab.goto', {
       tabId: tab.id,
@@ -1008,7 +1146,10 @@ describe('PlaywrightRuntime command contracts', () => {
     listener?.(dialog);
 
     await expect(
-      fixture.runtime.dispatch('tab.dialog.dismiss', { tabId: tab.id }),
+      fixture.runtime.dispatch(
+        'tab.dialog.dismiss',
+        await dialogArgs(fixture.runtime, tab.id),
+      ),
     ).rejects.toMatchObject({ code: 'OPERATION_FAILED' });
     await fixture.runtime.dispatch('tab.goto', {
       tabId: tab.id,
@@ -1042,7 +1183,10 @@ describe('PlaywrightRuntime command contracts', () => {
     } as unknown as Dialog;
     listener?.(first);
 
-    await fixture.runtime.dispatch('tab.dialog.accept', { tabId: tab.id });
+    await fixture.runtime.dispatch(
+      'tab.dialog.accept',
+      await dialogArgs(fixture.runtime, tab.id),
+    );
 
     await expect(
       fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
@@ -1243,12 +1387,40 @@ interface RuntimeFixture {
   };
   request: ReturnType<typeof vi.fn>;
   disconnect(): void;
+  emitEvent(event: BridgeEvent): void;
 }
 
 async function createTab(runtime: PlaywrightRuntime): Promise<TabInfo> {
   return (await runtime.dispatch('tabs.new', {
     browserId: 'chrome',
   })) as TabInfo;
+}
+
+async function dialogArgs(runtime: PlaywrightRuntime, tabId: string) {
+  const descriptor = (await runtime.dispatch('tab.getJsDialog', { tabId })) as {
+    dialogId: string;
+  };
+  return { tabId, dialogId: descriptor.dialogId };
+}
+
+function openDialog(
+  fixture: RuntimeFixture,
+  type: 'alert' | 'confirm' | 'prompt' | 'beforeunload',
+  message: string,
+) {
+  const dialog = {
+    type: () => type,
+    message: () => message,
+    defaultValue: () => '',
+    accept: vi.fn(async () => undefined),
+    dismiss: vi.fn(async () => undefined),
+  };
+  const listener = fixture.page.on.mock.calls.find(
+    ([event]) => event === 'dialog',
+  )?.[1] as ((dialog: Dialog) => void) | undefined;
+  expect(listener).toBeDefined();
+  listener!(dialog as unknown as Dialog);
+  return dialog;
 }
 
 async function runtimeFixture(
@@ -1312,6 +1484,7 @@ async function runtimeFixture(
   playwrightMocks.connectOverCDP.mockResolvedValue(browser);
 
   const connectionListeners: Array<(connected: boolean) => void> = [];
+  const eventListeners = new Set<(event: BridgeEvent) => void>();
   const request = vi.fn(
     async (method: string, params: Record<string, unknown> = {}) => {
       if (method === 'tabs.create') {
@@ -1353,7 +1526,12 @@ async function runtimeFixture(
     start: vi.fn(async () => undefined),
     isConnected: () => true,
     request,
-    onEvent: () => () => undefined,
+    onEvent(listener) {
+      eventListeners.add(listener);
+      return () => {
+        eventListeners.delete(listener);
+      };
+    },
     onConnectionChange(listener) {
       connectionListeners.push(listener);
       return () => undefined;
@@ -1370,6 +1548,9 @@ async function runtimeFixture(
     locator: locator.methods,
     cdp,
     request,
+    emitEvent(event) {
+      for (const listener of eventListeners) listener(event);
+    },
     disconnect() {
       for (const listener of connectionListeners) listener(false);
     },

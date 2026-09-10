@@ -275,6 +275,7 @@ export interface BrowserAlertDialog extends BrowserDialogBase {
 
 export interface BrowserBeforeUnloadDialog extends BrowserDialogBase {
   readonly type: 'beforeunload';
+  accept(): Promise<void>;
 }
 
 export interface BrowserConfirmDialog extends BrowserDialogBase {

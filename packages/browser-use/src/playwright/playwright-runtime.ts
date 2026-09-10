@@ -86,6 +86,7 @@ export class PlaywrightRuntime {
   private readonly documentationText: string;
   private readonly session: PlaywrightSession;
   private sessionName: string | undefined;
+  private readonly dialogIds = new WeakMap<Dialog, string>();
 
   constructor(options: PlaywrightRuntimeOptions = {}) {
     this.bridge = options.bridge ?? new ChromeExtensionTransport(options);
@@ -218,6 +219,7 @@ export class PlaywrightRuntime {
         return dialog === undefined
           ? null
           : {
+              dialogId: this.dialogId(dialog),
               type: dialog.type(),
               message: dialog.message(),
               defaultPrompt: dialog.defaultValue(),
@@ -225,7 +227,7 @@ export class PlaywrightRuntime {
       }
       case 'tab.dialog.accept': {
         const tab = this.tab(args);
-        const dialog = this.requireDialog(tab);
+        const dialog = this.requireDialog(tab, args);
         try {
           await dialog.accept(
             typeof args.promptText === 'string' ? args.promptText : undefined,
@@ -240,7 +242,7 @@ export class PlaywrightRuntime {
       }
       case 'tab.dialog.dismiss': {
         const tab = this.tab(args);
-        const dialog = this.requireDialog(tab);
+        const dialog = this.requireDialog(tab, args);
         try {
           await dialog.dismiss();
         } finally {
@@ -400,11 +402,24 @@ export class PlaywrightRuntime {
     return result;
   }
 
-  private requireDialog(tab: TabState): Dialog {
-    if (tab.dialog !== undefined) return tab.dialog;
+  private dialogId(dialog: Dialog): string {
+    let id = this.dialogIds.get(dialog);
+    if (id === undefined) {
+      id = `dialog-${randomUUID()}`;
+      this.dialogIds.set(dialog, id);
+    }
+    return id;
+  }
+
+  private requireDialog(tab: TabState, args: Args): Dialog {
+    if (
+      tab.dialog !== undefined &&
+      this.dialogIds.get(tab.dialog) === stringArg(args, 'dialogId')
+    )
+      return tab.dialog;
     throw new BrowserRuntimeError(
       'NOT_FOUND',
-      'No JavaScript dialog is open on this tab',
+      'The JavaScript dialog is stale or unknown',
     );
   }
 

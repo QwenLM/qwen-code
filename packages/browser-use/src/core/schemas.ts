@@ -337,9 +337,13 @@ export const commandSchemas = {
 
   'tab.getJsDialog': tabArgs,
   'tab.dialog.accept': z
-    .object({ tabId: id, promptText: z.string().max(20_000).optional() })
+    .object({
+      tabId: id,
+      dialogId: id,
+      promptText: z.string().max(20_000).optional(),
+    })
     .strict(),
-  'tab.dialog.dismiss': tabArgs,
+  'tab.dialog.dismiss': z.object({ tabId: id, dialogId: id }).strict(),
   'dev.logs': z
     .object({
       tabId: id,

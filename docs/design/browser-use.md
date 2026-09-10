@@ -270,3 +270,17 @@ For the first release:
   macOS and Linux. Windows support and optional APIs such as clipboard, page
   assets, HAR, and read-only evaluate should be introduced independently when
   a product workflow requires them.
+
+## Dialog and navigation lifetimes
+
+A dialog handle identifies the dialog instance returned by `getJsDialog`.
+Accepting or dismissing an expired handle fails with `NOT_FOUND` and must not
+act on a replacement dialog. Dialog ids are internal to the SDK protocol;
+the public handle retains only its supported actions. Before-unload dialogs
+support both accepting the navigation and dismissing it.
+
+Chrome dialog-close events clear the runtime cache, including user actions
+outside the SDK. Their delivery must preserve Playwright's asynchronous
+ordering relative to subsequent dialog openings. An `expectNavigation` waiter
+is released when either its action or its wait fails, including rejection by
+the dialog gate before the wait implementation runs.

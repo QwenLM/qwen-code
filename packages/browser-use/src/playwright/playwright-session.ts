@@ -52,6 +52,15 @@ export class PlaywrightSession {
   constructor(options: PlaywrightSessionOptions) {
     this.bridge = options.bridge;
     this.bridge.onEvent((event) => {
+      if (event.method === 'Page.javascriptDialogClosed') {
+        // Playwright delivers dialog openings in microtasks; preserve CDP order.
+        for (const tab of this.tabs.values()) {
+          if (tab.providerTabId === event.tabId)
+            queueMicrotask(() => {
+              tab.dialog = undefined;
+            });
+        }
+      }
       if (event.method === 'qwenBrowser.derivedTabTracked') {
         const parent = record(event.params).openerTabId;
         if (

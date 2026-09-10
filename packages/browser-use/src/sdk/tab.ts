@@ -212,6 +212,10 @@ class PlaywrightProxy implements BrowserPlaywright {
     let value: Awaited<Result>;
     try {
       value = await action();
+      await this.context.call<void>('playwright.expectNavigation.wait', {
+        tabId: this.tabId,
+        waiterId,
+      });
     } catch (error) {
       try {
         await this.context.call<void>('playwright.expectNavigation.cancel', {
@@ -219,14 +223,10 @@ class PlaywrightProxy implements BrowserPlaywright {
           waiterId,
         });
       } catch {
-        // Preserve the original action failure when waiter cleanup also fails.
+        // Preserve the original failure when waiter cleanup also fails.
       }
       throw error;
     }
-    await this.context.call<void>('playwright.expectNavigation.wait', {
-      tabId: this.tabId,
-      waiterId,
-    });
     return value;
   }
   waitForLoadState(options: LoadStateOptions = {}): Promise<void> {
@@ -432,26 +432,28 @@ export class TabProxy implements BrowserTab {
   }
   async getJsDialog(): Promise<BrowserDialog | undefined> {
     const info = await this.context.call<{
+      dialogId: string;
       type: 'alert' | 'beforeunload' | 'confirm' | 'prompt';
       message: string;
       defaultPrompt: string;
     } | null>('tab.getJsDialog', { tabId: this.id });
     if (info == null) return undefined;
     const tabId = this.id;
+    const dialogId = info.dialogId;
     const context = this.context;
     const dismiss = (): Promise<void> =>
-      context.call<void>('tab.dialog.dismiss', { tabId });
+      context.call<void>('tab.dialog.dismiss', { tabId, dialogId });
     const base = {
       type: info.type,
       message: info.message,
       dismiss,
     };
-    if (info.type === 'confirm') {
+    if (info.type === 'confirm' || info.type === 'beforeunload') {
       return Object.freeze({
         ...base,
         type: info.type,
         accept: (): Promise<void> =>
-          context.call<void>('tab.dialog.accept', { tabId }),
+          context.call<void>('tab.dialog.accept', { tabId, dialogId }),
       });
     }
     if (info.type === 'prompt') {
@@ -464,6 +466,7 @@ export class TabProxy implements BrowserTab {
             throw new TypeError('Prompt dialog accept expects text');
           return context.call<void>('tab.dialog.accept', {
             tabId,
+            dialogId,
             promptText: text,
           });
         },
