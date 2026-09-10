@@ -90,6 +90,8 @@ type LastGoalSummary = Pick<
   | 'activeTimeMs'
   | 'tokensUsed'
   | 'tokenBudget'
+  | 'checkpointStalls'
+  | 'lastCheckpointFailure'
   | 'lastReason'
 >;
 
@@ -158,7 +160,7 @@ export class GetGoalTool extends BaseDeclarativeTool<
     super(
       GetGoalTool.Name,
       ToolDisplayNames.GET_GOAL,
-      `Read the current Goal identity, objective, evidence cursor, and bounded evidence-reference catalog for this permitted Goal turn. The default "summary" view keeps every read small: checkpoint claims are reported as a count (each claim is already an evidenceCatalog entry with its own preview), entries from this turn and checkpoint entries keep full previews, and entries from earlier turns carry previews shortened to ${SUMMARY_PREVIEW_BYTE_LIMIT} bytes. Every entry uuid is present in both views and is valid for update_goal; request view "full" only when a shortened preview is not enough to decide what to cite. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, tokensUsed, plus tokenBudget and lastReason when recorded) of the session's most recent Goal, so a Goal that has already stopped can still be inspected. It never returns uncited transcript history or changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.`,
+      `Read the current Goal identity, objective, evidence cursor, and bounded evidence-reference catalog for this permitted Goal turn. The default "summary" view keeps every read small: checkpoint claims are reported as a count (each claim is already an evidenceCatalog entry with its own preview), entries from this turn and checkpoint entries keep full previews, and entries from earlier turns carry previews shortened to ${SUMMARY_PREVIEW_BYTE_LIMIT} bytes. Every entry uuid is present in both views and is valid for update_goal; request view "full" only when a shortened preview is not enough to decide what to cite. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, tokensUsed, plus tokenBudget, checkpointStalls, lastCheckpointFailure and lastReason when recorded) of the session's most recent Goal, so a Goal that has already stopped can still be inspected. The Goal record's checkpointStalls counts consecutive evidence checkpoints that failed to relieve an overflowing catalog (the Goal stops at three), and lastCheckpointFailure says what the most recent failed check ran into. It never returns uncited transcript history or changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.`,
       Kind.Read,
       {
         type: 'object',
@@ -219,6 +221,14 @@ export class GetGoalTool extends BaseDeclarativeTool<
       ...(goal.tokenBudget === undefined
         ? {}
         : { tokenBudget: goal.tokenBudget }),
+      // A Goal the stall breaker stopped names the kind of failure in
+      // `lastReason`; these two say how often and what exactly it was.
+      ...(goal.checkpointStalls
+        ? { checkpointStalls: goal.checkpointStalls }
+        : {}),
+      ...(goal.lastCheckpointFailure === undefined
+        ? {}
+        : { lastCheckpointFailure: goal.lastCheckpointFailure }),
       ...(goal.lastReason === undefined ? {} : { lastReason: goal.lastReason }),
     };
   }
@@ -344,7 +354,7 @@ class UpdateGoalInvocation extends BaseToolInvocation<
           goalLifecycleChanged: false,
           checkpointRequired: true,
           nextAction:
-            'End this turn without user-facing text so the runtime can checkpoint the evidence catalog. In the next Goal turn, call get_goal and retry the terminal proposal with the new evidence UUIDs.',
+            'End this turn without user-facing text so the runtime can checkpoint the evidence catalog. In the next Goal turn, call get_goal first and retry the terminal proposal with the UUIDs it returns before running any other tool: every new tool result can push an older entry out of the bounded catalog and invalidate a UUID you meant to cite.',
         }),
         returnDisplay:
           'Goal evidence reached its bounded catalog; ending the turn to checkpoint before terminal verification.',

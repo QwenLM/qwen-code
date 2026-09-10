@@ -16,6 +16,7 @@ import type { HistoryItem } from '../model/streaming-model.js';
 import type { GoalSnapshotLike, OpenTuiStreamEvent } from './event-adapter.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
+import { GOAL_CHECKPOINT_STALL_LIMIT } from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
 import type { ArenaAgentCardData, CompressionProps } from '../types.js';
 import { ICON } from '../constants.js';
 import { formatDuration } from '../utils/formatters.js';
@@ -652,6 +653,8 @@ export type GoalCardView =
       subtitle: string | null;
       objective: string;
       reason?: string;
+      /** Checkpoint stall streak and last failure, when either is set. */
+      checkpoint?: string;
     };
 
 /** Computes the GoalStateCard view (icon/title/subtitle/objective/reason)
@@ -726,6 +729,21 @@ export function describeGoalCard(
     (goal.status ?? 'active') !== 'active' || activity === 'verifying'
       ? goal.lastReason?.trim()
       : undefined;
+  // Checkpoint health, matching the ink card: shown before the stall breaker
+  // stops the Goal, and kept on the card of a Goal it stopped.
+  const stalls = goal.checkpointStalls ?? 0;
+  const checkpointFailure = goal.lastCheckpointFailure?.trim();
+  const checkpoint =
+    goal.status === 'complete' || (stalls === 0 && !checkpointFailure)
+      ? undefined
+      : `Checkpoint: ${[
+          stalls > 0
+            ? `${stalls}/${GOAL_CHECKPOINT_STALL_LIMIT} stalled`
+            : 'last check failed',
+          checkpointFailure,
+        ]
+          .filter(Boolean)
+          .join(' · ')}`;
   return {
     state: 'card',
     icon: lifecycle.icon,
@@ -734,6 +752,7 @@ export function describeGoalCard(
     subtitle: stats.length > 0 ? stats.join(' · ') : null,
     objective: goal.objective ?? '',
     reason,
+    ...(checkpoint ? { checkpoint } : {}),
   };
 }
 

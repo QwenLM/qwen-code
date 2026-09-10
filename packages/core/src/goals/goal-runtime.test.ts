@@ -13,6 +13,8 @@ import {
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   GOAL_CHECKPOINT_STALL_LIMIT,
   GOAL_CHECKPOINT_STALLED_REASON,
+  GOAL_CHECKPOINT_UNREACHABLE_REASON,
+  GOAL_CHECKPOINT_UNUSABLE_REASON,
   GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_NO_PROGRESS_TURN_LIMIT,
   GOAL_PAUSE_REASON_NO_PROGRESS,
@@ -2033,10 +2035,11 @@ describe('goal runtime', () => {
         `window-${stall}`,
       );
       // Each stalled checkpoint is still written -- the streak is counted on
-      // the record, not held back in memory.
+      // the record, not held back in memory, and so is what it ran into.
       expect(runtime.getSnapshot().goal).toMatchObject({
         status: 'active',
         checkpointStalls: stall,
+        lastCheckpointFailure: expect.stringContaining('full claim list'),
       });
     }
     expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
@@ -2103,6 +2106,10 @@ describe('goal runtime', () => {
     expect(checkpointVerifier).toHaveBeenCalledTimes(3);
     expect(runtime.getSnapshot().goal?.status).toBe('active');
     expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
+    // A check that succeeded is the only thing that retires the diagnostic.
+    expect(runtime.getSnapshot().goal).not.toHaveProperty(
+      'lastCheckpointFailure',
+    );
 
     // The streak restarts from zero rather than continuing from two.
     await runCheckpointTurn(runtime, host, setRecords, records, 101, 'd');
@@ -2175,13 +2182,17 @@ describe('goal runtime', () => {
     expect(checkpointVerifier).toHaveBeenCalledTimes(
       GOAL_CHECKPOINT_STALL_LIMIT,
     );
+    // The stop follows the check that spent the last stall. The first two
+    // came back full, but the last never answered, so the advice is not to
+    // narrow the objective -- and the record says what the failure was.
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'idle',
       goal: {
         status: 'usage_limited',
         limitKind: 'evidence_catalog',
-        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        lastReason: GOAL_CHECKPOINT_UNREACHABLE_REASON,
         checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+        lastCheckpointFailure: 'Error: provider failed',
       },
     });
     expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
@@ -2211,9 +2222,13 @@ describe('goal runtime', () => {
       ];
       setRecords(records);
       await runtime.finishTurn(permit);
+      // The failure is on the record from the first stall on, so every
+      // surface can show it long before the breaker has to stop the Goal.
       expect(runtime.getSnapshot().goal).toMatchObject({
         status: 'active',
         checkpointStalls: turn,
+        lastCheckpointFailure:
+          'Error: Goal checkpoint verifier timed out after 30000ms',
         evidenceCursor: { recordId: cursor },
       });
       expect(runtime.getSnapshot().goal).not.toHaveProperty(
@@ -2237,8 +2252,10 @@ describe('goal runtime', () => {
       goal: {
         status: 'usage_limited',
         limitKind: 'evidence_catalog',
-        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        lastReason: GOAL_CHECKPOINT_UNREACHABLE_REASON,
         checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+        lastCheckpointFailure:
+          'Error: Goal checkpoint verifier timed out after 30000ms',
       },
     });
     expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
@@ -2282,6 +2299,9 @@ describe('goal runtime', () => {
         expect(runtime.getSnapshot().goal).toMatchObject({
           status: 'active',
           checkpointStalls: turn,
+          lastCheckpointFailure: expect.stringMatching(
+            /^InvalidGoalCheckpointError: /,
+          ),
         });
       }
     }
@@ -2289,13 +2309,18 @@ describe('goal runtime', () => {
     expect(checkpointVerifier).toHaveBeenCalledTimes(
       GOAL_CHECKPOINT_STALL_LIMIT,
     );
+    // The verifier answered every time, just not with claims: the stop says
+    // so instead of sending the user to narrow an objective that was fine.
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'idle',
       goal: {
         status: 'usage_limited',
         limitKind: 'evidence_catalog',
-        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        lastReason: GOAL_CHECKPOINT_UNUSABLE_REASON,
         checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+        lastCheckpointFailure: expect.stringMatching(
+          /^InvalidGoalCheckpointError: /,
+        ),
       },
     });
     expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
@@ -2353,9 +2378,15 @@ describe('goal runtime', () => {
     checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
     await runCheckpointTurn(runtime, host, setRecords, records, 60, 'b');
 
+    // The failure spends no stall, but it is still a failure the surfaces
+    // should show: the record carries it beside the unchanged streak.
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'running',
-      goal: { status: 'active', checkpointStalls: 1 },
+      goal: {
+        status: 'active',
+        checkpointStalls: 1,
+        lastCheckpointFailure: 'Error: provider failed',
+      },
     });
     // The room arm leaves the same trace the truncated arm does: the
     // discarded error is diagnosable from the first failure, not only once
@@ -2390,9 +2421,12 @@ describe('goal runtime', () => {
     // only. That close proved nothing about room, so it keeps the streak.
     await runCheckpointTurn(runtime, host, setRecords, records, 0, 'quiet');
 
+    // The same close proved nothing about the failure either, so the
+    // diagnostic the stall left stays until a check actually succeeds.
     expect(runtime.getSnapshot().goal).toMatchObject({
       status: 'active',
       checkpointStalls: 1,
+      lastCheckpointFailure: expect.stringContaining('full claim list'),
     });
     expect(host.started).toHaveLength(3);
   });
@@ -4996,11 +5030,14 @@ describe('goal runtime', () => {
     // stop: the restored Goal keeps the streak it crashed with, and the
     // continuation the replay mints re-earns any stall as a live turn.
     expect(checkpointVerifier).toHaveBeenCalledOnce();
+    // The exemption covers the streak, not the diagnostic: the replay did
+    // fail, and the record says so without spending a stall on it.
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'running',
       goal: {
         status: 'active',
         checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
+        lastCheckpointFailure: 'Error: provider failed',
       },
     });
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
@@ -5025,8 +5062,9 @@ describe('goal runtime', () => {
       goal: {
         status: 'usage_limited',
         limitKind: 'evidence_catalog',
-        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        lastReason: GOAL_CHECKPOINT_UNREACHABLE_REASON,
         checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+        lastCheckpointFailure: 'Error: provider failed',
       },
     });
     expect(journal.appended.map((payload) => payload.cause)).toEqual([

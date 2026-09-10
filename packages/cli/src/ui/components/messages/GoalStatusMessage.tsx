@@ -6,7 +6,11 @@
 
 import React from 'react';
 import { Box, Text } from 'ink';
-import type { GoalSnapshotV2, GoalStateCause } from '@qwen-code/qwen-code-core';
+import {
+  GOAL_CHECKPOINT_STALL_LIMIT,
+  type GoalSnapshotV2,
+  type GoalStateCause,
+} from '@qwen-code/qwen-code-core';
 import { theme } from '../../semantic-colors.js';
 import { ICON } from '../../constants.js';
 import { formatDuration } from '../../utils/formatters.js';
@@ -127,6 +131,23 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
     goal.status !== 'active' || snapshot.activity === 'verifying'
       ? goal.lastReason?.trim()
       : undefined;
+  // Checkpoint health, shown before the stall breaker has to stop the Goal:
+  // a Goal paying a failed checkpoint every turn otherwise looks like one
+  // that is working. A stopped Goal keeps the line, since its stop reason
+  // names the kind of failure but not the failure itself.
+  const stalls = goal.checkpointStalls ?? 0;
+  const checkpointFailure = goal.lastCheckpointFailure?.trim();
+  const checkpoint =
+    goal.status === 'complete' || (stalls === 0 && !checkpointFailure)
+      ? undefined
+      : [
+          stalls > 0
+            ? `${stalls}/${GOAL_CHECKPOINT_STALL_LIMIT} stalled`
+            : 'last check failed',
+          checkpointFailure,
+        ]
+          .filter(Boolean)
+          .join(' · ');
 
   return (
     <Box flexDirection="row">
@@ -151,6 +172,11 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
         {reason ? (
           <Text color={theme.text.secondary} wrap="wrap">
             Reason: {reason}
+          </Text>
+        ) : null}
+        {checkpoint ? (
+          <Text color={theme.status.warning} wrap="wrap">
+            Checkpoint: {checkpoint}
           </Text>
         ) : null}
       </Box>

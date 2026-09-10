@@ -240,6 +240,53 @@ describe('GetGoalTool', () => {
     );
   });
 
+  it('reports checkpoint health in the last Goal summary', async () => {
+    // A Goal the stall breaker stopped names the kind of failure in
+    // lastReason; only these two fields say how often and what it was.
+    const failure =
+      'InvalidGoalCheckpointError: Goal checkpoint verifier returned invalid JSON';
+    const config = makeConfig({
+      getGoalForWorker: vi.fn(),
+      getSnapshot: () => ({
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'Ship Goal v3',
+          status: 'usage_limited' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 5,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          checkpointStalls: 3,
+          lastCheckpointFailure: failure,
+          lastReason: 'checkpoints stalled',
+          limitKind: 'evidence_catalog' as const,
+        },
+      }),
+    });
+
+    const result = await execute(new GetGoalTool(config));
+
+    expect(JSON.parse(String(result.llmContent))).toEqual({
+      active: false,
+      lastGoal: {
+        goalId: 'goal-1',
+        revision: 3,
+        status: 'usage_limited',
+        turnCount: 5,
+        activeTimeMs: 10,
+        tokensUsed: 0,
+        checkpointStalls: 3,
+        lastCheckpointFailure: failure,
+        lastReason: 'checkpoints stalled',
+      },
+    });
+  });
+
   it('keeps the objective and the evidence checkpoint behind the permit', async () => {
     const config = makeConfig({
       getGoalForWorker: vi.fn(),

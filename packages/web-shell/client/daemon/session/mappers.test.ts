@@ -1015,6 +1015,49 @@ describe('updateConnectionFromDaemonEvent', () => {
     });
   });
 
+  it('carries checkpoint health through from the wire', () => {
+    // Same pin as limitKind: the field-by-field rebuild must not drop the
+    // stall streak or the failure the Goals dialog shows before a stop.
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'idle',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'active',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                  checkpointStalls: 2,
+                  lastCheckpointFailure: 'Error: provider failed',
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    expect(next.goalState?.goal).toMatchObject({
+      status: 'active',
+      checkpointStalls: 2,
+      lastCheckpointFailure: 'Error: provider failed',
+    });
+  });
+
   it('drops an unknown limitKind rather than passing it through', () => {
     const next = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace' },

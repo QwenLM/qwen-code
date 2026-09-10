@@ -743,6 +743,37 @@ describe('describeGoalCard (ink GoalStateCard)', () => {
     });
   });
 
+  it('shows checkpoint health, matching the ink card', () => {
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          checkpointStalls: 2,
+          lastCheckpointFailure: 'Error: provider failed',
+        }),
+      ),
+    ).toMatchObject({
+      checkpoint: 'Checkpoint: 2/3 stalled · Error: provider failed',
+    });
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          lastCheckpointFailure: 'Error: provider failed',
+        }),
+      ),
+    ).toMatchObject({
+      checkpoint: 'Checkpoint: last check failed · Error: provider failed',
+    });
+    const healthy = describeGoalCard(
+      snap({ objective: 'o', status: 'active' }),
+    );
+    expect(healthy).toMatchObject({ state: 'card' });
+    expect(healthy).not.toHaveProperty('checkpoint');
+  });
+
   it('builds the subtitle from turns and active time', () => {
     expect(
       describeGoalCard(

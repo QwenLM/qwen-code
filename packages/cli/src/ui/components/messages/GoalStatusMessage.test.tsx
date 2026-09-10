@@ -187,6 +187,60 @@ describe('<GoalStatusMessage />', () => {
     expect(lastFrame()).not.toContain('tokens');
   });
 
+  it('shows stalled checkpoints and the last failure on an active card', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('active', 'running', undefined, {
+          checkpointStalls: 2,
+          lastCheckpointFailure: 'Error: provider failed',
+        })}
+      />,
+    );
+
+    expect(lastFrame()).toContain(
+      'Checkpoint: 2/3 stalled · Error: provider failed',
+    );
+  });
+
+  it('shows a checkpoint failure that spent no stall', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('active', 'running', undefined, {
+          lastCheckpointFailure: 'Error: provider failed',
+        })}
+      />,
+    );
+
+    expect(lastFrame()).toContain(
+      'Checkpoint: last check failed · Error: provider failed',
+    );
+  });
+
+  it('keeps the failure on the card of a Goal the stall breaker stopped', () => {
+    // The stop reason names the kind of failure; only this line says which.
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('usage_limited', 'idle', 'checkpoints stalled', {
+          checkpointStalls: 3,
+          lastCheckpointFailure: 'Error: provider failed',
+        })}
+      />,
+    );
+
+    expect(lastFrame()).toContain('Reason: checkpoints stalled');
+    expect(lastFrame()).toContain(
+      'Checkpoint: 3/3 stalled · Error: provider failed',
+    );
+  });
+
+  it('says nothing about checkpoints on a healthy card', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage snapshot={snapshot('active', 'running')} />,
+    );
+
+    expect(lastFrame()).not.toContain('Checkpoint');
+  });
+
   it('leaves the legacy card without spend it cannot know', () => {
     // The legacy props carry an iteration count and nothing else; there is no
     // record behind them to read a spend off.

@@ -34,6 +34,8 @@ interface MockGoal {
       tokenBudget?: number;
       createdAt: number;
       updatedAt: number;
+      checkpointStalls?: number;
+      lastCheckpointFailure?: string;
       lastReason?: string;
       limitKind?: 'evidence_catalog' | 'checkpoint_request';
     };
@@ -285,6 +287,38 @@ describe('GoalsDialog', () => {
       }),
     ]);
     expect(resumeButton()).not.toBeNull();
+  });
+
+  const checkpointLine = () =>
+    document.querySelector('[data-testid="goal-checkpoint"]')?.textContent;
+
+  it('shows stalled checkpoints and the last failure before the Goal stops', async () => {
+    await mount([
+      withSpend({
+        checkpointStalls: 2,
+        lastCheckpointFailure: 'Error: provider failed',
+      }),
+    ]);
+
+    expect(checkpointLine()).toBe(
+      'Checkpoint: 2/3 checks stalled · Error: provider failed',
+    );
+  });
+
+  it('shows a checkpoint failure that spent no stall', async () => {
+    await mount([
+      withSpend({ lastCheckpointFailure: 'Error: provider failed' }),
+    ]);
+
+    expect(checkpointLine()).toBe(
+      'Checkpoint: last check failed · Error: provider failed',
+    );
+  });
+
+  it('shows no checkpoint line for a healthy Goal', async () => {
+    await mount([baseGoal()]);
+
+    expect(checkpointLine()).toBeUndefined();
   });
 
   it('renders a goal with its condition, turn count and judge verdict', async () => {

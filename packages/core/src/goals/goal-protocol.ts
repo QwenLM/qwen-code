@@ -29,8 +29,74 @@ export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
  * the loop.
  */
 export const GOAL_NO_PROGRESS_TURN_LIMIT = 3;
+/**
+ * The stall stop for a Goal whose last stalled check folded the window into a
+ * full claim list and still left evidence behind: compaction itself cannot
+ * keep up, so the objective is producing more evidence than one window holds.
+ */
 export const GOAL_CHECKPOINT_STALLED_REASON =
-  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and each check either came back with a full claim list, came back with a result that could not be folded into claims, or did not come back at all, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
+  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and the last check folded it into a full claim list that still left evidence behind, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
+
+/**
+ * The stall stop for a Goal whose last stalled check answered with something
+ * that could not be folded into claims. The objective may not be too wide at
+ * all -- the checkpoint model is returning output the runtime cannot accept --
+ * so the full-claim-list advice to narrow it would send the user to rewrite a
+ * Goal that was never the problem.
+ */
+export const GOAL_CHECKPOINT_UNUSABLE_REASON =
+  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and the last check answered with output that could not be folded into claims. Narrowing the objective does not fix this. Check that the checkpoint model returns the structured JSON it is asked for, or switch models, then resume the Goal; resuming starts a fresh evidence window.';
+
+/**
+ * The stall stop for a Goal whose last stalled check failed before the
+ * checkpoint verifier answered: a timeout, a provider error, a rate limit.
+ */
+export const GOAL_CHECKPOINT_UNREACHABLE_REASON =
+  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and the last check failed before the checkpoint verifier answered. Narrowing the objective does not fix this. Resume the Goal once the provider is reachable; resuming starts a fresh evidence window.';
+
+/**
+ * What the last stalled checkpoint check ran into, which decides the advice
+ * the stop carries. `full_claims`: the check folded the window into a full
+ * claim list and still left evidence behind. `unusable`: it answered, but not
+ * with claims the runtime could accept. `unreachable`: it never answered.
+ */
+export type GoalCheckpointFailureShape =
+  | 'full_claims'
+  | 'unusable'
+  | 'unreachable';
+
+/** The `lastReason` a checkpoint stall stop records for its last failure. */
+export function goalCheckpointStalledReason(
+  shape: GoalCheckpointFailureShape,
+): string {
+  switch (shape) {
+    case 'full_claims':
+      return GOAL_CHECKPOINT_STALLED_REASON;
+    case 'unusable':
+      return GOAL_CHECKPOINT_UNUSABLE_REASON;
+    case 'unreachable':
+      return GOAL_CHECKPOINT_UNREACHABLE_REASON;
+    default: {
+      const exhaustive: never = shape;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * Longest `lastCheckpointFailure` a record keeps. A provider error can carry a
+ * whole response body, and the record is journaled on every checkpoint check.
+ */
+export const GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS = 500;
+
+/** Trims a checkpoint failure diagnostic to the record's bound, by code point. */
+export function capGoalCheckpointFailure(text: string): string {
+  const trimmed = text.trim();
+  const codePoints = [...trimmed];
+  return codePoints.length <= GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS
+    ? trimmed
+    : `${codePoints.slice(0, GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS - 1).join('')}…`;
+}
 
 /**
  * Default autonomous spend window armed on a newly created Goal, in model
@@ -206,6 +272,17 @@ export interface GoalRecord {
    * an evidence-limited Goal.
    */
   checkpointStalls?: number;
+  /**
+   * What the most recent failed checkpoint check ran into, as a one-line
+   * diagnostic (`ErrorName: message`, or the runtime's own phrase for a full
+   * claim list), capped at GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS. Set by
+   * every check that fails, whether or not it spends a stall, and kept on the
+   * record the stall breaker stops, so the stop can be diagnosed from the
+   * record alone. Cleared by a check that succeeds and by every control
+   * action that clears `checkpointStalls`; a check that proves nothing either
+   * way (a turn that recorded no evidence) leaves it as it was.
+   */
+  lastCheckpointFailure?: string;
   /**
    * Consecutive autonomous turns that recorded neither a tool result nor a
    * terminal proposal. A model that only restates status never reaches the

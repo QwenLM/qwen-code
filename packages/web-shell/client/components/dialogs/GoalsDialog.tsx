@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { GOAL_CHECKPOINT_STALL_LIMIT } from '@qwen-code/sdk/daemon';
 import { buildGoalControlRequest } from '../../utils/goalControlRequest';
 import { canResumeGoal } from '../../utils/goalGate';
 import {
@@ -370,6 +371,24 @@ export function GoalsDialog({
           // Shared with `GoalStatusStrip` so the two gates cannot drift apart.
           const canResume = canResumeGoal(goal);
           const tokenLabel = getGoalTokenLabel(goal, t);
+          // Checkpoint health, before the stall breaker has to stop the Goal.
+          const checkpointStalls = goal.checkpointStalls ?? 0;
+          const checkpointFailure = goal.lastCheckpointFailure?.trim();
+          const checkpointLine =
+            goal.status === 'complete' ||
+            (checkpointStalls === 0 && !checkpointFailure)
+              ? undefined
+              : [
+                  checkpointStalls > 0
+                    ? t('goal.checkpointStalled', {
+                        count: checkpointStalls,
+                        limit: GOAL_CHECKPOINT_STALL_LIMIT,
+                      })
+                    : t('goal.checkpointFailed'),
+                  checkpointFailure,
+                ]
+                  .filter(Boolean)
+                  .join(' · ');
           return (
             <div key={item.sessionId} className={styles.card} role="listitem">
               <div className={styles.cardHeader}>
@@ -436,6 +455,18 @@ export function GoalsDialog({
                     {t('goal.lastCheck')}:
                   </span>{' '}
                   {goal.lastReason}
+                </div>
+              )}
+
+              {checkpointLine && (
+                <div
+                  className={styles.cardReason}
+                  data-testid="goal-checkpoint"
+                >
+                  <span className={styles.reasonLabel}>
+                    {t('goal.checkpoint')}:
+                  </span>{' '}
+                  {checkpointLine}
                 </div>
               )}
 

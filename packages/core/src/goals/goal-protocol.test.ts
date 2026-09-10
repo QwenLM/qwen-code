@@ -6,6 +6,13 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  capGoalCheckpointFailure,
+  GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS,
+  GOAL_CHECKPOINT_STALLED_REASON,
+  GOAL_CHECKPOINT_UNREACHABLE_REASON,
+  GOAL_CHECKPOINT_UNUSABLE_REASON,
+  goalCheckpointStalledReason,
+  goalLimitKindForReason,
   GOAL_PAUSE_REASON_COMMAND,
   GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
   GOAL_PAUSE_REASON_MAX_CHARACTERS,
@@ -113,5 +120,58 @@ describe('goal pause reasons', () => {
   it('names the budget that tripped', () => {
     expect(goalPauseReasonForRunBudget('wall-time')).toContain('wall-time');
     expect(goalPauseReasonForRunBudget('tool-calls')).toContain('tool-calls');
+  });
+});
+
+describe('goal checkpoint stall reasons', () => {
+  it('advises by what the check that spent the last stall ran into', () => {
+    expect(goalCheckpointStalledReason('full_claims')).toBe(
+      GOAL_CHECKPOINT_STALLED_REASON,
+    );
+    expect(goalCheckpointStalledReason('unusable')).toBe(
+      GOAL_CHECKPOINT_UNUSABLE_REASON,
+    );
+    expect(goalCheckpointStalledReason('unreachable')).toBe(
+      GOAL_CHECKPOINT_UNREACHABLE_REASON,
+    );
+    // Only the compaction shape is fixed by a narrower objective; telling a
+    // user whose provider was down to rewrite their Goal is the bug.
+    expect(GOAL_CHECKPOINT_STALLED_REASON).toContain('narrower objective');
+    for (const reason of [
+      GOAL_CHECKPOINT_UNUSABLE_REASON,
+      GOAL_CHECKPOINT_UNREACHABLE_REASON,
+    ]) {
+      expect(reason).toContain('Narrowing the objective does not fix this');
+    }
+  });
+
+  it('keeps resumability on limitKind rather than on the stop prose', () => {
+    // The stall stop writes `limitKind: 'evidence_catalog'` beside every one
+    // of these reasons; none may start denoting a kind of its own, or the
+    // prose and the field could disagree about how a resume behaves.
+    for (const reason of [
+      GOAL_CHECKPOINT_STALLED_REASON,
+      GOAL_CHECKPOINT_UNUSABLE_REASON,
+      GOAL_CHECKPOINT_UNREACHABLE_REASON,
+    ]) {
+      expect(goalLimitKindForReason(reason)).toBeUndefined();
+    }
+  });
+
+  it('caps a failure diagnostic on a code point boundary', () => {
+    expect(capGoalCheckpointFailure('  Error: provider failed  ')).toBe(
+      'Error: provider failed',
+    );
+    const exact = 'x'.repeat(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS);
+    expect(capGoalCheckpointFailure(exact)).toBe(exact);
+
+    // Astral characters are two UTF-16 units: a slice by `.length` would
+    // split one and leave a lone surrogate in the journaled record.
+    const capped = capGoalCheckpointFailure(
+      '😀'.repeat(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS + 10),
+    );
+    expect(codePoints(capped)).toBe(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS);
+    expect(capped.endsWith('…')).toBe(true);
+    expect([...capped].slice(0, -1).every((char) => char === '😀')).toBe(true);
   });
 });

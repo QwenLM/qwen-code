@@ -70,6 +70,18 @@ export interface GoalRecord {
   tokenBudget?: number;
   createdAt: number;
   updatedAt: number;
+  /**
+   * Consecutive evidence checkpoints that failed to relieve an overflowing
+   * window; the Goal stops when this reaches three. Absent means zero, which
+   * is also what an older daemon's snapshot looks like.
+   */
+  checkpointStalls?: number;
+  /**
+   * A one-line diagnostic for the most recent checkpoint check that failed,
+   * kept until a later check succeeds. Absent when the last check did not fail
+   * or the daemon predates the field.
+   */
+  lastCheckpointFailure?: string;
   lastReason?: string;
   limitKind?: GoalLimitKind;
 }
@@ -93,6 +105,13 @@ export interface GoalSnapshotV2 {
  * `GOAL_PAUSE_REASON_MAX_CHARACTERS`, or the daemon rejects the request.
  */
 export const GOAL_PAUSE_REASON_COMMAND = 'Paused with /goal pause.';
+
+/**
+ * How many consecutive stalled evidence checkpoints stop a Goal, duplicated so
+ * a client can show `checkpointStalls` against it. It must match
+ * `GOAL_CHECKPOINT_STALL_LIMIT` in `packages/core/src/goals/goal-protocol.ts`.
+ */
+export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
 
 export type GoalControlRequest =
   | { action: 'create'; objective: string }
