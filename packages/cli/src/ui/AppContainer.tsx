@@ -78,7 +78,6 @@ import {
   type WaitingToolCall,
   ToolNames,
   SendMessageType,
-  computeInitialTurnFromHistory,
   clearWorktreeSession,
   restoreWorktreeContext,
   GitWorktreeService,
@@ -89,6 +88,7 @@ import {
 import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
+  computeResumedPromptCountSeed,
   expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
 import { recoalesceFindingsHistoryItems } from './utils/findings-coalescing.js';
@@ -1198,31 +1198,15 @@ export const AppContainer = (props: AppContainerProps) => {
         loadHistoryWithLatchReconciliation(historyItems);
 
         // Seed the prompt counter from the resumed conversation so new
-        // promptIds don't collide with restored file history snapshots.
-        // A bare record count re-mints an id a resumed turn still wears:
-        // ACP and headless mint `sessionId########<n>` 1-based and skip
-        // turns that write no record, so the highest claimed turn sits
-        // above the record count (R37-31). Seed past the highest claim
-        // (+1: the TUI mint is pre-increment), floored at the record
-        // count for transcripts whose records predate claims.
-        const resumedRecords = resumedSessionData.conversation.messages;
-        const userTurnCount = resumedRecords.filter(
-          (m) =>
-            m.type === 'user' &&
-            m.subtype !== 'mid_turn_user_message' &&
-            m.subtype !== 'realtime_message',
-        ).length;
-        if (userTurnCount > 0) {
-          seedPromptCount(
-            Math.max(
-              userTurnCount,
-              computeInitialTurnFromHistory(
-                resumedRecords,
-                config.getSessionId(),
-              ) + 1,
-            ),
-          );
-        }
+        // promptIds don't collide with restored file history snapshots
+        // (R37-31). The same seed runs on the in-session /resume and
+        // /branch entrances (R38-1); monotonic, so 0 is a no-op.
+        seedPromptCount(
+          computeResumedPromptCountSeed(
+            resumedSessionData.conversation.messages,
+            config.getSessionId(),
+          ),
+        );
 
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),
@@ -1879,6 +1863,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // re-arms the latch when the rebuilt history has no announcement.
     loadHistory: loadHistoryWithLatchReconciliation,
     startNewSession,
+    seedPromptCount,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
@@ -1889,6 +1874,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings,
     historyManager,
     startNewSession,
+    seedPromptCount,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
@@ -4211,9 +4197,16 @@ export const AppContainer = (props: AppContainerProps) => {
           // last occurrence — the wrong turn's snapshot — then prunes the
           // newer snapshots and permanently deletes their backups (R36-1).
           // Refuse loudly, as the resume-side census does for the
-          // duplicates it can see.
+          // duplicates it can see. The ambiguity lives in the snapshot
+          // array, not the UI items: a conversation-only rewind drops the
+          // twin's UI item while both snapshots survive, so the snapshot
+          // census must stand on its own (R38-3).
           const promptIdIsShared = promptId
-            ? historyManager.history.some(
+            ? config
+                .getFileHistoryService()
+                .getSnapshots()
+                .filter((s) => s.promptId === promptId).length > 1 ||
+              historyManager.history.some(
                 (item) =>
                   item.id !== userItem.id &&
                   (item as HistoryItemUser).promptId === promptId,

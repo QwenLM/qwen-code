@@ -1599,7 +1599,13 @@ export class LlmClient {
       return;
     }
 
-    const currentHistory = this.getChat().getHistory();
+    // Read through the shallow accessor: getHistory()'s structuredClone
+    // drops the Symbol-keyed prompt identities (R38-4), and the setHistory
+    // below would reinstall the live history unmarked. Both switched sites
+    // only read the container/part structure, honoring getHistoryShallow's
+    // no-leaf-mutation contract.
+    const currentHistory =
+      this.getChat().getHistoryShallow?.() ?? this.getChat().getHistory();
     const startupLength = getStartupContextLength(currentHistory);
     if (startupLength === 0) {
       return;
@@ -1640,7 +1646,10 @@ export class LlmClient {
       return;
     }
 
-    const currentHistory = this.getChat().getHistory();
+    // Shallow read for the same reason as refreshStartupContextReminder:
+    // the in-flight turn's prompt identity must survive this reinstall.
+    const currentHistory =
+      this.getChat().getHistoryShallow?.() ?? this.getChat().getHistory();
     if (getStartupContextLength(currentHistory) !== 0) {
       return;
     }

@@ -24,6 +24,7 @@ import {
   isGoalCheckpointBookkeepingRecord,
   parseGoalStateRecordPayloadV2,
   projectUserTranscriptForDisplay,
+  computeInitialTurnFromHistory,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
@@ -782,6 +783,38 @@ export function stripSuppressOnRestore(item: HistoryItem): HistoryItem {
     ...item,
     display: Object.keys(rest).length > 0 ? rest : undefined,
   };
+}
+
+/**
+ * Prompt-counter seed for an entrance that just loaded resumed or restored
+ * history (startup --resume, in-session /resume, /branch, session switch).
+ * The counter must restart past every identity the transcript claims —
+ * re-minting an id a surviving resumed turn still wears collapses the
+ * rewind identity resolution to a duplicate (R37-31, R38-1). ACP and
+ * headless mint `sessionId########<n>` 1-based and skip turns that write no
+ * record, so the highest claimed turn sits above the record count; the TUI
+ * mints pre-increment, hence the +1. Floored at the user-turn count for
+ * transcripts whose records predate claims. Returns 0 when the transcript
+ * holds no user turns — a no-op for the monotonic seed consumers, so
+ * callers pass the result through unconditionally.
+ */
+export function computeResumedPromptCountSeed(
+  records: readonly ChatRecord[],
+  sessionId: string,
+): number {
+  const userTurnCount = records.filter(
+    (m) =>
+      m.type === 'user' &&
+      m.subtype !== 'mid_turn_user_message' &&
+      m.subtype !== 'realtime_message',
+  ).length;
+  if (userTurnCount === 0) {
+    return 0;
+  }
+  return Math.max(
+    userTurnCount,
+    computeInitialTurnFromHistory(records, sessionId) + 1,
+  );
 }
 
 /**

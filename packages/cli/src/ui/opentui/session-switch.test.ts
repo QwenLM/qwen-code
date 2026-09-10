@@ -20,6 +20,36 @@ import {
   handleResumeSession,
   type SessionSwitchHost,
 } from './session-switch.js';
+import {
+  nextLivePromptId,
+  resetPromptCountForTesting,
+} from './live-session.js';
+
+function sessionWithClaims(
+  sessionId: string,
+  turns: number,
+): ResumedSessionData {
+  return {
+    conversation: {
+      sessionId,
+      projectHash: 'hash',
+      startTime: new Date().toISOString(),
+      lastUpdated: new Date().toISOString(),
+      messages: Array.from({ length: turns }, (_, turn) => ({
+        uuid: `m-${turn}`,
+        parentUuid: turn === 0 ? null : `m-${turn - 1}`,
+        sessionId,
+        timestamp: '2026-07-11T00:00:00.000Z',
+        type: 'user',
+        cwd: '/tmp/project',
+        version: 'test',
+        message: { role: 'user', parts: [{ text: `turn ${turn}` }] },
+        promptId: `${sessionId}########${turn}`,
+      })),
+    },
+    historyGaps: [],
+  } as unknown as ResumedSessionData;
+}
 
 function emptySession(): ResumedSessionData {
   return {
@@ -272,6 +302,36 @@ describe('handleResumeSession', () => {
     );
   });
 
+  it('leaves the live prompt counter at zero when the transcript has no user turns', async () => {
+    resetPromptCountForTesting();
+    const { config } = createFakeConfig();
+    const host = createFakeHost(config);
+
+    await handleResumeSession(host, 'target-session');
+
+    expect(
+      nextLivePromptId({ getSessionId: () => 'target-session' } as Config),
+    ).toBe('target-session########0');
+    resetPromptCountForTesting();
+  });
+
+  it('seeds the live prompt counter past the resumed claims (R38-1)', async () => {
+    resetPromptCountForTesting();
+    vi.spyOn(SessionService.prototype, 'loadSession').mockResolvedValue(
+      sessionWithClaims('target-session', 3) as never,
+    );
+    const { config } = createFakeConfig();
+    const host = createFakeHost(config);
+
+    await handleResumeSession(host, 'target-session');
+
+    // Claims are 0..2: the next mint must start at 3, not re-mint 0.
+    expect(
+      nextLivePromptId({ getSessionId: () => 'target-session' } as Config),
+    ).toBe('target-session########3');
+    resetPromptCountForTesting();
+  });
+
   it('settles the unarmed swap transaction when the session is not found (R4-4)', async () => {
     vi.spyOn(SessionService.prototype, 'loadSession').mockResolvedValue(
       null as never,
@@ -331,6 +391,32 @@ describe('handleBranchSession', () => {
     expect(infos.length).toBe(2);
     expect(infos[0].text).toContain('You are now in the branch');
     expect(infos[1].text).toContain('/resume old-session');
+  });
+
+  it('seeds the live prompt counter past the forked claims (R38-1)', async () => {
+    resetPromptCountForTesting();
+    const { config } = createFakeConfig();
+    const forkSession = vi.fn(async (_oldId: string, _newId: string) => {});
+    const sessionService = {
+      loadSession: async (id: string) => sessionWithClaims(id, 2),
+      forkSession,
+      renameSession: vi.fn(async () => true),
+      removeSession: vi.fn(async () => true),
+      findSessionTitlesByPrefix: async () => [],
+    };
+    (
+      config as unknown as { getSessionService: () => unknown }
+    ).getSessionService = () => sessionService;
+    const host = createFakeHost(config);
+
+    await handleBranchSession(host, 'seeded');
+
+    // Claims are 0..1 on the new session id: the next mint must start at 2.
+    const newSessionId = forkSession.mock.calls[0]![1] as string;
+    expect(
+      nextLivePromptId({ getSessionId: () => newSessionId } as Config),
+    ).toBe(`${newSessionId}########2`);
+    resetPromptCountForTesting();
   });
 
   it('removes the fork and reports the failure when the title write fails', async () => {

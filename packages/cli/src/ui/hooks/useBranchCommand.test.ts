@@ -27,6 +27,7 @@ describe('useBranchCommand', () => {
   let startNewSessionConfig: ReturnType<typeof vi.fn>;
   let getGoalRuntimeReady: ReturnType<typeof vi.fn>;
   let startNewSessionUI: ReturnType<typeof vi.fn>;
+  let seedPromptCount: ReturnType<typeof vi.fn>;
   let clearPendingState: ReturnType<typeof vi.fn>;
   let findSessionTitlesByPrefix: ReturnType<typeof vi.fn>;
   let clearItems: ReturnType<typeof vi.fn>;
@@ -64,6 +65,7 @@ describe('useBranchCommand', () => {
     settings: mockSettings,
     historyManager: { clearItems, loadHistory, addItem },
     startNewSession: startNewSessionUI,
+    seedPromptCount,
     clearPendingState,
     setSessionName,
     remount,
@@ -105,6 +107,7 @@ describe('useBranchCommand', () => {
     startNewSessionConfig = vi.fn();
     getGoalRuntimeReady = vi.fn().mockResolvedValue({});
     startNewSessionUI = vi.fn();
+    seedPromptCount = vi.fn();
     clearPendingState = vi.fn();
     clearItems = vi.fn();
     loadHistory = vi.fn();
@@ -186,6 +189,35 @@ describe('useBranchCommand', () => {
     expect(blockedItem.type).toBe('error');
     expect(blockedItem.text).toContain('running background tasks');
     expect(blockedItem.text).toContain('[bg_ab12cd34]');
+  });
+
+  it('seeds the prompt counter past the forked transcript claims (R38-1)', async () => {
+    // The fork's records are remapped to the new session id by forkSession;
+    // startNewSession reinstalls promptCount 0, so without a seed the next
+    // pre-increment mint re-uses an id the forked transcript still wears.
+    // The seed is highestClaim + 1, computed against the NEW session id, and
+    // must land AFTER the stats reset.
+    loadSession.mockImplementation(async (id: string) => ({
+      conversation: {
+        messages: [0, 1].map((turn) => ({
+          ...userRecord(`turn ${turn}`),
+          sessionId: id,
+          promptId: `${id}########${turn}`,
+        })),
+      },
+      filePath: '/tmp/new.jsonl',
+      lastCompletedUuid: 'u2',
+    }));
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('seeded');
+    });
+
+    expect(seedPromptCount).toHaveBeenCalledWith(2);
+    expect(startNewSessionUI.mock.invocationCallOrder[0]).toBeLessThan(
+      seedPromptCount.mock.invocationCallOrder[0]!,
+    );
   });
 
   it('clears terminal background state after the branch initializes', async () => {

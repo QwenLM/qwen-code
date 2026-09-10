@@ -737,6 +737,7 @@ describe('AppContainer State Management', () => {
     noLlmClient?: boolean;
     history?: HistoryItem[];
     contextFilePaths?: string[];
+    snapshots?: Array<{ promptId: string }>;
   };
 
   const renderRewindHarness = (options: RewindHarnessOptions = {}) => {
@@ -806,7 +807,7 @@ describe('AppContainer State Management', () => {
         },
       );
     }
-    const snapshots = [
+    const snapshots = options.snapshots ?? [
       { promptId: 'prompt-1' },
       { promptId: 'prompt-2' },
       { promptId: 'prompt-3' },
@@ -6945,6 +6946,39 @@ describe('AppContainer State Management', () => {
         { id: 4, type: 'gemini', text: 'second response' },
       ];
       const harness = renderRewindHarness({ history });
+
+      await runRewind(history[0]!, 'both');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Cannot restore files: this turn shares its checkpoint identity with another turn.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('refuses file restore when two snapshots share the prompt id (R38-3)', async () => {
+      // A conversation-only rewind drops UI items without touching the
+      // snapshot array, so the UI-item census goes blind to a duplicated
+      // key that fhs.rewind() would still resolve by last occurrence and
+      // then destructively prune. The census must cover the snapshot array
+      // itself.
+      const history: HistoryItem[] = [
+        rewindUserItem(1, 'resumed turn five', 'prompt-5'),
+        { id: 2, type: 'gemini', text: 'first response' },
+      ];
+      const harness = renderRewindHarness({
+        history,
+        snapshots: [
+          { promptId: 'prompt-5' },
+          { promptId: 'prompt-5' },
+          { promptId: 'prompt-9' },
+        ],
+      });
 
       await runRewind(history[0]!, 'both');
 

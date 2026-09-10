@@ -104,6 +104,10 @@ import { ToolNames } from '../tools/tool-names.js';
 import { emptyGoalSnapshot } from '../goals/goal-protocol.js';
 import type { GoalRuntime } from '../goals/goal-runtime.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
+import {
+  findApiHistoryPromptIndex,
+  markApiHistoryPrompt,
+} from '../services/session-api-history.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import {
   clearCacheSafeParams,
@@ -1927,6 +1931,91 @@ describe('Gemini Client (client.ts)', () => {
         newPrelude,
         ...currentHistory.slice(2),
       ]);
+    });
+
+    it('preserves prompt-identity marks on the surviving history (R38-4)', async () => {
+      // The rewind identity is a Symbol-keyed property that structuredClone
+      // silently drops. A deep getHistory() read whose result is reinstalled
+      // via setHistory strips every mark from the live session while the
+      // transcript keeps its promptIds, so the read must go through the
+      // shallow accessor (spreads preserve symbol keys).
+      const marked: Content = { role: 'user', parts: [{ text: 'hello' }] };
+      markApiHistoryPrompt(marked, 'S########1');
+      const currentHistory: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nold deferred reminder\n</system-reminder>',
+            },
+          ],
+        },
+        marked,
+        { role: 'model', parts: [{ text: 'hi' }] },
+      ];
+      const mockChat: Partial<LlmChat> = {
+        // Faithful accessors: getHistory deep-clones (drops the symbol
+        // mark), getHistoryShallow spreads (preserves it).
+        getHistory: vi.fn(() => structuredClone(currentHistory)),
+        getHistoryShallow: vi.fn(() => currentHistory.map((c) => ({ ...c }))),
+        setHistory: vi.fn(),
+      };
+      const newPrelude: Content = {
+        role: 'user',
+        parts: [
+          { text: '<system-reminder>\nfresh prelude\n</system-reminder>' },
+        ],
+      };
+      client['chat'] = mockChat as LlmChat;
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
+        [newPrelude],
+        [],
+      ]);
+
+      await client.refreshStartupContextReminder();
+
+      const reinstalled = vi.mocked(mockChat.setHistory!).mock
+        .calls[0]![0] as Content[];
+      expect(reinstalled[0]).toEqual(newPrelude);
+      expect(findApiHistoryPromptIndex(reinstalled, 'S########1')).toBe(1);
+    });
+  });
+
+  describe('restoreStartupContextAfterCompaction', () => {
+    it('preserves prompt-identity marks when re-prepending the prelude (R38-4)', async () => {
+      // Same symbol-strip hazard as refreshStartupContextReminder: the
+      // in-flight turn's entry is the one identity is needed for (every
+      // predecessor was absorbed into the compaction summary), and a deep
+      // getHistory() read would reinstall it unmarked.
+      const marked: Content = {
+        role: 'user',
+        parts: [{ text: 'in-flight prompt' }],
+      };
+      markApiHistoryPrompt(marked, 'S########1');
+      const currentHistory: Content[] = [
+        marked,
+        { role: 'model', parts: [{ text: 'working' }] },
+      ];
+      const prelude: Content = {
+        role: 'user',
+        parts: [
+          { text: '<system-reminder>\nfresh prelude\n</system-reminder>' },
+        ],
+      };
+      const mockChat: Partial<LlmChat> = {
+        getHistory: vi.fn(() => structuredClone(currentHistory)),
+        getHistoryShallow: vi.fn(() => currentHistory.map((c) => ({ ...c }))),
+        setHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as LlmChat;
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([[prelude], []]);
+
+      await client.restoreStartupContextAfterCompaction();
+
+      const reinstalled = vi.mocked(mockChat.setHistory!).mock
+        .calls[0]![0] as Content[];
+      expect(reinstalled[0]).toEqual(prelude);
+      expect(findApiHistoryPromptIndex(reinstalled, 'S########1')).toBe(1);
     });
   });
 

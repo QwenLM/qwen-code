@@ -195,6 +195,17 @@ export function resetPromptCountForTesting(): void {
 }
 
 /**
+ * Seeds the module prompt counter past the ids a resumed transcript claims
+ * (R38-1): an unseeded counter re-mints an id a resumed turn still wears,
+ * collapsing the rewind identity resolution to a duplicate. Monotonic — the
+ * counter is module-global and never resets across in-session switches, so
+ * a later switch to a shorter session must not lower it.
+ */
+export function seedLivePromptCount(count: number): void {
+  promptCount = Math.max(promptCount, count);
+}
+
+/**
  * Ink-parity promptId (`sessionId########promptCount`): minted once per turn
  * at submit time so the echoed user item and the model request share the key
  * file checkpoints are recorded under.

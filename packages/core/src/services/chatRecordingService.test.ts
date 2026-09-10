@@ -238,6 +238,57 @@ describe('ChatRecordingService', () => {
       expect(record.systemPayload).toMatchObject({ promptIds: ['prompt-1'] });
     });
 
+    it('freezes the compression snapshot array against later live-history mutation (R38-2)', async () => {
+      // Two of the three recordChatCompression call sites pass the array
+      // that setHistory then installs as the live, in-place-mutated chat
+      // history, while the record is serialized later by the deferred
+      // writer. A mid-array splice (the orphaned-tool-use repair) or a tail
+      // push (the same turn's send) must not shift the persisted array away
+      // from the eagerly derived promptIds — the resume side re-attaches
+      // identities positionally, so order must be frozen, null slots kept.
+      const first: Content = { role: 'user', parts: [{ text: 'A' }] };
+      const second: Content = { role: 'user', parts: [{ text: 'B' }] };
+      markApiHistoryPrompt(first, 'prompt-1');
+      markApiHistoryPrompt(second, 'prompt-2');
+      const liveHistory: Content[] = [first, second];
+
+      chatRecordingService.recordChatCompression({
+        info: {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: liveHistory,
+      });
+
+      // Mutations the same turn performs before the queued write drains.
+      liveHistory.splice(1, 0, {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: { name: 'tool', response: {} },
+          } as Part,
+        ],
+      });
+      liveHistory.push({ role: 'user', parts: [{ text: 'C' }] });
+
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const payload = record.systemPayload as {
+        compressedHistory: Content[];
+        promptIds: Array<string | null>;
+      };
+      expect(payload.compressedHistory).toHaveLength(2);
+      expect(payload.compressedHistory).toHaveLength(payload.promptIds.length);
+      expect(payload.promptIds).toEqual(['prompt-1', 'prompt-2']);
+      expect(
+        payload.compressedHistory.map((c) =>
+          c.parts?.map((p) => ('text' in p ? p.text : undefined)),
+        ),
+      ).toEqual([['A'], ['B']]);
+    });
+
     it('persists the daemon prompt identity before any turn result', async () => {
       chatRecordingService.recordUserMessage(
         [{ text: 'same prompt' }],

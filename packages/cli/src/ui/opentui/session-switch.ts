@@ -37,6 +37,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
+  computeResumedPromptCountSeed,
 } from '../utils/resumeHistoryUtils.js';
 import {
   buildBackgroundWorkBlockedMessage,
@@ -45,6 +46,7 @@ import {
 } from '../utils/backgroundWorkUtils.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
 import { resumeEventsFromSession } from './resume-session.js';
+import { seedLivePromptCount } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 
 /** The UI surfaces a session switch touches (backend-provided). */
@@ -187,6 +189,15 @@ export async function handleResumeSession(
     // 2. UI swap. The commit point is the UI-side session re-key: from here
     //    on a failure must not roll core back OR undo the telemetry replay.
     host.startNewSession(sessionId);
+    // Seed the live prompt counter past the ids the resumed transcript
+    // claims before any new turn can mint one (R38-1); monotonic, so 0 is
+    // a no-op.
+    seedLivePromptCount(
+      computeResumedPromptCountSeed(
+        sessionData.conversation.messages,
+        sessionId,
+      ),
+    );
     host.setSessionName(customTitle ?? null);
     host.clearPendingState();
     host.clearItems();
@@ -358,6 +369,15 @@ export async function handleBranchSession(
     // 8. UI swap.
     const uiHistoryItems = buildUiHistoryItems(resumed, host);
     host.startNewSession(newSessionId);
+    // Seed the live prompt counter past the ids the forked transcript
+    // claims before any new turn can mint one (R38-1); monotonic, so 0 is
+    // a no-op.
+    seedLivePromptCount(
+      computeResumedPromptCountSeed(
+        resumed.conversation.messages,
+        newSessionId,
+      ),
+    );
     host.clearPendingState();
     host.clearItems();
     host.loadHistory(uiHistoryItems);

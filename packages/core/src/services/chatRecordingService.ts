@@ -2448,16 +2448,27 @@ export class ChatRecordingService {
    */
   recordChatCompression(payload: ChatCompressionRecordPayload): void {
     try {
-      const promptIds = payload.compressedHistory.map(
+      // Freeze the array: two of the three call sites hand over the array
+      // that setHistory installs as the live, in-place-mutated chat
+      // history, while the deferred writer serializes the record only after
+      // later same-turn mutations (the send's tail push, the
+      // orphaned-tool-use repair's mid-array splices). The resume side
+      // re-attaches identities positionally, so the persisted array's order
+      // must stay paired with the eagerly derived promptIds — keep null
+      // slots, copy the container.
+      const compressedHistory = [...payload.compressedHistory];
+      const promptIds = compressedHistory.map(
         (content) => getApiHistoryPromptId(content) ?? null,
       );
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
         type: 'system',
         subtype: 'chat_compression',
-        systemPayload: promptIds.some(Boolean)
-          ? { ...payload, promptIds }
-          : payload,
+        systemPayload: {
+          ...payload,
+          compressedHistory,
+          ...(promptIds.some(Boolean) ? { promptIds } : {}),
+        },
       };
 
       this.appendRecord(record);
