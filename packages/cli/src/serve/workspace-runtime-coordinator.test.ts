@@ -186,7 +186,9 @@ describe('WorkspaceRuntimeCoordinator', () => {
     );
 
     await coordinator.reconcileExtensionGeneration(7);
-    await coordinator.reconcileExtensionGeneration(6);
+    await expect(
+      coordinator.reconcileExtensionGeneration(6),
+    ).resolves.toMatchObject({ state: 'superseded' });
     expect(coordinator.status().capabilities?.extensions).toMatchObject({
       desiredGeneration: 7,
       appliedGeneration: 7,
@@ -200,6 +202,59 @@ describe('WorkspaceRuntimeCoordinator', () => {
       ),
     ).toHaveLength(1);
   });
+
+  it.each([6, 0])(
+    'adopts fresh backup recovery to generation %i',
+    async (generation) => {
+      const harness = makeRuntime();
+      harness.setSnapshot({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      });
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+      await coordinator.reconcileExtensionGeneration(7);
+      await coordinator.ensure();
+      const skillsRevision =
+        coordinator.status().capabilities!.skills!.revision;
+      const mcpRevision = coordinator.status().capabilities!.mcp!.revision;
+      const readRevision =
+        coordinator.status().capabilities!.extensions!.revision;
+      coordinator.observeExtensionGeneration(8);
+      coordinator.observeExtensionGeneration(generation, readRevision);
+      expect(
+        coordinator.status().capabilities?.extensions?.desiredGeneration,
+      ).toBe(8);
+
+      coordinator.observeExtensionGeneration(
+        generation,
+        coordinator.status().capabilities!.extensions!.revision,
+      );
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'stale',
+        desiredGeneration: generation,
+        appliedGeneration: 0,
+      });
+      if (generation === 0) {
+        await coordinator.ensure();
+      } else {
+        await expect(
+          coordinator.reconcileExtensionGeneration(generation),
+        ).resolves.toMatchObject({ state: 'reconciled' });
+      }
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'ready',
+        desiredGeneration: generation,
+        appliedGeneration: generation,
+      });
+      expect(coordinator.status().capabilities!.skills!.revision).toBe(
+        skillsRevision + 1,
+      );
+      expect(coordinator.status().capabilities!.mcp!.revision).toBe(
+        mcpRevision + 1,
+      );
+    },
+  );
 
   it('preserves the narrow refresh for Extension Skill-state changes', async () => {
     const harness = makeRuntime();
@@ -304,6 +359,68 @@ describe('WorkspaceRuntimeCoordinator', () => {
         },
       },
     });
+  });
+
+  it('does not certify a skills-only apply across runtime epochs', async () => {
+    const h = makeRuntime();
+    h.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(h.runtime);
+    await coordinator.reconcileExtensionGeneration(6);
+    h.setSnapshot({ runtimeEpoch: 4 });
+    await expect(
+      coordinator.reconcileExtensionGeneration(7, { skillsOnly: true }),
+    ).resolves.toMatchObject({ state: 'deferred' });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'stale',
+      appliedGeneration: 0,
+    });
+    await coordinator.ensure();
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      runtimeEpoch: 4,
+      appliedGeneration: 7,
+    });
+  });
+
+  it('does not certify generation zero when the runtime changes during apply', async () => {
+    const h = makeRuntime();
+    h.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(h.runtime);
+    h.getWorkspaceExtensionsStatus.mockImplementationOnce(async () => {
+      h.setSnapshot({ runtimeEpoch: 4 });
+      return {
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        runtimeEpoch: 3,
+        extensions: [],
+      };
+    });
+    await expect(
+      coordinator.reconcileExtensionGeneration(0),
+    ).resolves.toMatchObject({ state: 'deferred' });
+    expect(coordinator.status().capabilities?.extensions?.state).toBe('stale');
+    expect(h.reloadWorkspaceMcp).not.toHaveBeenCalled();
+  });
+
+  it('does not start a runtime that goes cold before queued reconciliation', async () => {
+    const h = makeRuntime();
+    h.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(h.runtime);
+    const result = coordinator.reconcileExtensionGeneration(7);
+    h.setSnapshot({ state: 'cold', runtimeLive: false });
+    await expect(result).resolves.toMatchObject({ state: 'deferred' });
+    expect(h.preheat).not.toHaveBeenCalled();
+    expect(h.invokeWorkspaceCommand).not.toHaveBeenCalled();
+  });
+
+  it('invalidates retained Skills when a cold runtime observes a new generation', () => {
+    const h = makeRuntime();
+    const coordinator = getWorkspaceRuntimeCoordinator(h.runtime);
+    coordinator.observeExtensionGeneration(7);
+    coordinator.observeExtensionGeneration(7);
+    expect(h.invalidateWorkspaceSkillsStatus).toHaveBeenCalledOnce();
+    expect(h.preheat).not.toHaveBeenCalled();
   });
 
   it('defers an Extension generation when the runtime epoch changes', async () => {
@@ -428,40 +545,59 @@ describe('WorkspaceRuntimeCoordinator', () => {
     expect(extensions?.error?.message!.length).toBeLessThanOrEqual(500);
   });
 
-  it('replays Extension reconciliation interrupted by draining', async () => {
-    const harness = makeRuntime();
-    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
-    let release!: () => void;
-    harness.invokeWorkspaceCommand.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          release = () =>
-            resolve({
-              sessionsRefreshed: 0,
-              sessionsFailed: 0,
-              configsRefreshed: 1,
-              configsFailed: 0,
-            });
+  it.each([false, true])(
+    'replays interrupted Extension reconciliation with skillsOnly=%s',
+    async (skillsOnly) => {
+      const harness = makeRuntime();
+      harness.setSnapshot({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      });
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+      await coordinator.reconcileExtensionGeneration(6);
+      harness.getWorkspaceExtensionsStatus.mockClear();
+      let release!: () => void;
+      harness.invokeWorkspaceCommand.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () =>
+              resolve({
+                sessionsRefreshed: 0,
+                sessionsFailed: 0,
+                configsRefreshed: 1,
+                configsFailed: 0,
+              });
+          }),
+      );
+      const reconciliation = coordinator.reconcileExtensionGeneration(7, {
+        skillsOnly,
+      });
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+
+      coordinator.beginDrain();
+      release();
+      await expect(reconciliation).resolves.toMatchObject({
+        state: 'deferred',
+      });
+      harness.invokeWorkspaceCommand.mockClear();
+      coordinator.cancelDrain();
+
+      await vi.waitFor(() =>
+        expect(coordinator.status().capabilities?.extensions).toMatchObject({
+          state: 'ready',
+          desiredGeneration: 7,
+          appliedGeneration: 7,
         }),
-    );
-    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
-    const reconciliation = coordinator.reconcileExtensionGeneration(7);
-    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
-
-    coordinator.beginDrain();
-    release();
-    await expect(reconciliation).resolves.toMatchObject({ state: 'deferred' });
-    coordinator.cancelDrain();
-
-    await vi.waitFor(() =>
-      expect(coordinator.status().capabilities?.extensions).toMatchObject({
-        state: 'ready',
-        desiredGeneration: 7,
-        appliedGeneration: 7,
-      }),
-    );
-    expect(harness.getWorkspaceExtensionsStatus).toHaveBeenCalledTimes(2);
-  });
+      );
+      expect(harness.getWorkspaceExtensionsStatus).toHaveBeenCalledTimes(2);
+      expect(harness.invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/control/workspace/extensions/reconcile',
+        { cwd: '/workspace', ...(skillsOnly ? { skillsOnly: true } : {}) },
+        { timeoutMs: 30_000 },
+      );
+    },
+  );
 
   it('continues preparing Skills and MCP after an Extension refresh fails', async () => {
     const harness = makeRuntime();
@@ -654,16 +790,21 @@ describe('WorkspaceRuntimeCoordinator', () => {
     // The underlying fault heals without any store write; once the cooldown
     // elapses the ensure path must retry instead of certifying the failure
     // until the runtime restarts.
-    harness.invokeWorkspaceCommand.mockResolvedValue({
-      sessionsRefreshed: 0,
-      sessionsFailed: 0,
-      configsRefreshed: 1,
-      configsFailed: 0,
-    });
     const nowSpy = vi
       .spyOn(Date, 'now')
       .mockReturnValue(Date.now() + 2 * 60_000 + 1_000);
     try {
+      await coordinator.ensure();
+      const retryCalls = harness.invokeWorkspaceCommand.mock.calls.length;
+      await coordinator.ensure();
+      expect(harness.invokeWorkspaceCommand).toHaveBeenCalledTimes(retryCalls);
+      harness.invokeWorkspaceCommand.mockResolvedValue({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 1,
+        configsFailed: 0,
+      });
+      nowSpy.mockReturnValue(Date.now() + 2 * 60_000 + 1_000);
       await coordinator.ensure();
     } finally {
       nowSpy.mockRestore();

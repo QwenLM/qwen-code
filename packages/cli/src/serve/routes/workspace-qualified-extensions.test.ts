@@ -1702,7 +1702,7 @@ describe('extension management v2 REST', () => {
     }
   });
 
-  it('does not keep a coordinator runtime pending on a rolled-back generation', async () => {
+  it('converges once after the store recovers a lower generation', async () => {
     vi.useFakeTimers();
     const h = await makeHarness();
     mockExtensionManager();
@@ -1775,11 +1775,19 @@ describe('extension management v2 REST', () => {
         ExtensionManager.prototype.refreshCacheWithSnapshot,
       ).mockResolvedValue(rolledBackSnapshot);
 
-      // The coordinator never adopts a lower generation, so the rollback
-      // must not read as pending: later ticks add no work.
       await vi.advanceTimersByTimeAsync(30_000);
+      expect(
+        getWorkspaceRuntimeCoordinator(h.secondary).status().capabilities
+          ?.extensions,
+      ).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 6,
+        appliedGeneration: 6,
+      });
+      const recovered = invalidateCount();
+      expect(recovered).toBeGreaterThan(settled);
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(invalidateCount()).toBe(settled);
+      expect(invalidateCount()).toBe(recovered);
       expect(
         h.secondary.bridge.refreshExtensionsForAllSessions,
       ).not.toHaveBeenCalled();
@@ -2581,6 +2589,64 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('cancels a pending setting when the overall preparation deadline expires', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.useFakeTimers();
+    const prepare = vi
+      .spyOn(ExtensionManager.prototype, 'prepareExtensionInstall')
+      .mockImplementation(async function (this: ExtensionManager) {
+        await new Promise((resolve) => setTimeout(resolve, 19 * 60_000));
+        await requestApiKey(this);
+        return {} as never;
+      });
+    const commit = vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    );
+    try {
+      const started = await auth(
+        request(h.app)
+          .post('/extensions/install')
+          .send({
+            source: '@scope/demo',
+            consent: true,
+            activation: { scope: 'user' },
+          }),
+      );
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(19 * 60_000);
+      const waiting = await auth(
+        request(h.app).get(
+          `/extensions/operations/${started.body.operationId}`,
+        ),
+      );
+      expect(waiting.body.status).toBe('waiting_for_input');
+      await vi.advanceTimersByTimeAsync(60_000 + 1);
+      const finished = await auth(
+        request(h.app).get(
+          `/extensions/operations/${started.body.operationId}`,
+        ),
+      );
+      expect(finished.body).toMatchObject({
+        status: 'failed',
+        code: 'extension_prepare_timeout',
+      });
+      expect(commit).not.toHaveBeenCalled();
+      const lateAnswer = await auth(
+        request(h.app)
+          .post(
+            `/workspace/extensions/operations/${started.body.operationId}/interactions/${waiting.body.interaction.id}`,
+          )
+          .send({ value: 'late' }),
+      );
+      expect(lateAnswer.status).toBe(404);
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('installs a daemon-local path through the global V2 route', async () => {
     const h = await makeHarness();
     mockExtensionManager();
@@ -2994,63 +3060,83 @@ describe('extension management v2 REST', () => {
     }
   });
 
-  it('updates archive URL extensions through the global V2 route', async () => {
-    const h = await makeHarness();
-    mockExtensionManager();
-    const prepared = {} as never;
-    let submittedSetting: string | undefined;
-    const prepareUpdate = vi
-      .spyOn(ExtensionManager.prototype, 'prepareExtensionUpdate')
-      .mockImplementation(async function (this: ExtensionManager) {
-        submittedSetting = await requestApiKey(this);
-        return { upToDate: false, prepared };
-      });
-    const commitPrepared = vi
-      .spyOn(ExtensionManager.prototype, 'commitPreparedExtension')
-      .mockResolvedValue({
-        identity: { id: extensionId, name: 'demo' },
-        version: '2.0.0',
-        generation: 8,
-      } as never);
-    const disposePrepared = vi
-      .spyOn(ExtensionManager.prototype, 'disposePreparedExtension')
-      .mockResolvedValue();
-    try {
-      const started = await auth(
-        request(h.app).post(`/extensions/${extensionId}/update`),
-      );
-
-      expect(started.status).toBe(202);
-      await answerSettingInteraction(h.app, started.body.operationId);
-      await expect(
-        pollOperation(h.app, started.body.operationId),
-      ).resolves.toMatchObject({
-        status: 'succeeded',
-        name: 'demo',
-        result: {
-          status: 'updated',
-          name: 'demo',
-          updated: true,
+  it.each([
+    `/extensions/${extensionId}/update`,
+    '/workspace/extensions/demo/update',
+  ])(
+    'supersedes a pending interactive update and completes the next archive URL update at %s',
+    async (updateRoute) => {
+      const h = await makeHarness();
+      mockExtensionManager();
+      const prepared = {} as never;
+      let submittedSetting: string | undefined;
+      const prepareUpdate = vi
+        .spyOn(ExtensionManager.prototype, 'prepareExtensionUpdate')
+        .mockImplementation(async function (this: ExtensionManager) {
+          submittedSetting = await requestApiKey(this);
+          return { upToDate: false, prepared };
+        });
+      const commitPrepared = vi
+        .spyOn(ExtensionManager.prototype, 'commitPreparedExtension')
+        .mockResolvedValue({
+          identity: { id: extensionId, name: 'demo' },
           version: '2.0.0',
-        },
-      });
-      expect(prepareUpdate).toHaveBeenCalledWith({
-        extension: expect.objectContaining({
-          id: extensionId,
-          installMetadata: expect.objectContaining({ type: 'archive-url' }),
-        }),
-        signal: expect.any(AbortSignal),
-      });
-      expect(commitPrepared).toHaveBeenCalledWith(
-        prepared,
-        expect.any(Function),
-      );
-      expect(disposePrepared).toHaveBeenCalledWith(prepared);
-      expect(submittedSetting).toBe('configured');
-    } finally {
-      await fsp.rm(h.scratch, { recursive: true, force: true });
-    }
-  });
+          generation: 8,
+        } as never);
+      const disposePrepared = vi
+        .spyOn(ExtensionManager.prototype, 'disposePreparedExtension')
+        .mockResolvedValue();
+      try {
+        const previous = await auth(request(h.app).post(updateRoute));
+        expect(previous.status).toBe(202);
+        expect(previous.body.operationId).toEqual(expect.any(String));
+        await vi.waitFor(async () => {
+          const waiting = await auth(
+            request(h.app).get(
+              `/extensions/operations/${previous.body.operationId}`,
+            ),
+          );
+          expect(waiting.body.status).toBe('waiting_for_input');
+        });
+        const started = await auth(request(h.app).post(updateRoute));
+
+        expect(started.status).toBe(202);
+        await expect(
+          pollOperation(h.app, previous.body.operationId),
+        ).resolves.toMatchObject({ status: 'failed' });
+        await answerSettingInteraction(h.app, started.body.operationId);
+        await expect(
+          pollOperation(h.app, started.body.operationId),
+        ).resolves.toMatchObject({
+          status: 'succeeded',
+          name: 'demo',
+          result: {
+            status: 'updated',
+            name: 'demo',
+            ...(updateRoute.startsWith('/extensions/')
+              ? { updated: true }
+              : {}),
+            version: '2.0.0',
+          },
+        });
+        expect(prepareUpdate).toHaveBeenCalledWith({
+          extension: expect.objectContaining({
+            id: extensionId,
+            installMetadata: expect.objectContaining({ type: 'archive-url' }),
+          }),
+          signal: expect.any(AbortSignal),
+        });
+        expect(commitPrepared).toHaveBeenCalledWith(
+          prepared,
+          expect.any(Function),
+        );
+        expect(disposePrepared).toHaveBeenCalledWith(prepared);
+        expect(submittedSetting).toBe('configured');
+      } finally {
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('reports an up-to-date V2 update as checked without committing', async () => {
     const h = await makeHarness();

@@ -588,7 +588,9 @@ export function registerWorkspaceExtensionRoutes(
   ): void => {
     for (const operation of controller.getActiveOperations()) {
       if (
-        operation.operation !== 'install' ||
+        (operation.operation !== 'install' &&
+          (operation.operation !== 'update' ||
+            operation.status !== 'waiting_for_input')) ||
         operation.operationId === currentOperationId
       ) {
         continue;
@@ -604,7 +606,9 @@ export function registerWorkspaceExtensionRoutes(
     controller: ExtensionsController,
     operationId: string,
     interaction: ExtensionInteractionRequest,
+    signal?: AbortSignal,
   ): Promise<string> => {
+    signal?.throwIfAborted();
     if (supersededInstallOperations.delete(operationId)) {
       return Promise.reject(
         new Error('Extension installation superseded by a new install request'),
@@ -623,6 +627,11 @@ export function registerWorkspaceExtensionRoutes(
       ...interaction,
       id: crypto.randomUUID(),
     } as ExtensionPendingInteraction;
+    const abort = () =>
+      cancelPendingExtensionInteraction(
+        operationId,
+        'Extension preparation cancelled',
+      );
     return new Promise<string>((resolve, reject) => {
       const timeout = setTimeout(() => {
         pendingExtensionInteractions.delete(operationId);
@@ -641,49 +650,61 @@ export function registerWorkspaceExtensionRoutes(
         reject,
         timeout,
       });
+      signal?.addEventListener('abort', abort, { once: true });
       controller.updateOperation(operationId, {
         status: 'waiting_for_input',
         phase: undefined,
         interaction: pendingInteraction,
       });
-    });
+    }).finally(() => signal?.removeEventListener('abort', abort));
   };
   const extensionInteractionHandlers = (
     controller: ExtensionsController,
     operationId: string,
+    signal?: AbortSignal,
   ) => ({
     requestSetting: (setting: ExtensionSetting) =>
-      waitForExtensionInteraction(controller, operationId, {
-        kind: 'setting',
-        setting: {
-          name: setting.name,
-          description: setting.description,
-          sensitive: setting.sensitive === true,
+      waitForExtensionInteraction(
+        controller,
+        operationId,
+        {
+          kind: 'setting',
+          setting: {
+            name: setting.name,
+            description: setting.description,
+            sensitive: setting.sensitive === true,
+          },
         },
-      }),
+        signal,
+      ),
     requestChoicePlugin: (marketplace: ClaudeMarketplaceConfig) => {
       if (marketplace.plugins.length === 0) {
         return Promise.reject(
           new Error(`Marketplace "${marketplace.name}" has no plugins`),
         );
       }
-      return waitForExtensionInteraction(controller, operationId, {
-        kind: 'marketplace_plugin',
-        marketplace: { name: marketplace.name },
-        plugins: marketplace.plugins.map((plugin) => ({
-          name: plugin.name,
-          ...(plugin.description ? { description: plugin.description } : {}),
-          source: redactExtensionDisplaySource(
-            typeof plugin.source === 'string'
-              ? plugin.source
-              : plugin.source.source === 'github'
-                ? plugin.source.repo
-                : plugin.source.url,
-          ),
-          ...(plugin.category ? { category: plugin.category } : {}),
-          ...(plugin.tags ? { tags: plugin.tags } : {}),
-        })),
-      });
+      return waitForExtensionInteraction(
+        controller,
+        operationId,
+        {
+          kind: 'marketplace_plugin',
+          marketplace: { name: marketplace.name },
+          plugins: marketplace.plugins.map((plugin) => ({
+            name: plugin.name,
+            ...(plugin.description ? { description: plugin.description } : {}),
+            source: redactExtensionDisplaySource(
+              typeof plugin.source === 'string'
+                ? plugin.source
+                : plugin.source.source === 'github'
+                  ? plugin.source.repo
+                  : plugin.source.url,
+            ),
+            ...(plugin.category ? { category: plugin.category } : {}),
+            ...(plugin.tags ? { tags: plugin.tags } : {}),
+          })),
+        },
+        signal,
+      );
     },
   });
   const runtimeReconciliationQueue = createFifoTaskQueue(1);
@@ -755,12 +776,18 @@ export function registerWorkspaceExtensionRoutes(
           boundWorkspace,
           true,
         );
+        const observations = workspaceRegistry.listAll().map((runtime) => {
+          const coordinator =
+            getWorkspaceRuntimeCoordinatorIfSupported(runtime);
+          return {
+            coordinator,
+            revision: coordinator?.status().capabilities?.extensions?.revision,
+          };
+        });
         const generation = (await manager.getExtensionStoreSnapshot())
           .generation;
-        for (const runtime of workspaceRegistry.listAll()) {
-          getWorkspaceRuntimeCoordinatorIfSupported(
-            runtime,
-          )?.observeExtensionGeneration(generation);
+        for (const { coordinator, revision } of observations) {
+          coordinator?.observeExtensionGeneration(generation, revision);
         }
         const pendingRuntimes = workspaceRegistry
           .listAll()
@@ -780,16 +807,10 @@ export function registerWorkspaceExtensionRoutes(
             }
             const extensions = status.capabilities?.extensions;
             if (!extensions) return true;
-            // The coordinator's desired generation is monotonic by design,
-            // so a rolled-back store generation is never adopted; comparing
-            // applied alone would read as permanently pending. An errored
-            // capability stays pending so a recovered Extension store heals
-            // without a generation move; the coordinator bounds the retry
-            // cadence for a latched failure.
             return (
               generation >= extensions.desiredGeneration &&
               (extensions.appliedGeneration !== generation ||
-                extensions.state === 'error')
+                extensions.state !== 'ready')
             );
           });
         if (generation === observedGeneration && pendingRuntimes.length === 0)
@@ -1162,11 +1183,11 @@ export function registerWorkspaceExtensionRoutes(
               return result!;
             },
             {
-              createManager: (operationId) =>
+              createManager: (operationId, signal) =>
                 ctrl.createExtensionManager(
                   undefined,
                   undefined,
-                  extensionInteractionHandlers(ctrl, operationId),
+                  extensionInteractionHandlers(ctrl, operationId, signal),
                 ),
               onSettled: (operationId) => {
                 supersededInstallOperations.delete(operationId);
@@ -1410,11 +1431,11 @@ export function registerWorkspaceExtensionRoutes(
             }
           },
           {
-            createManager: (operationId) =>
+            createManager: (operationId, signal) =>
               ctrl.createExtensionManager(
                 undefined,
                 undefined,
-                extensionInteractionHandlers(ctrl, operationId),
+                extensionInteractionHandlers(ctrl, operationId, signal),
               ),
             onSettled: (operationId) => {
               supersededInstallOperations.delete(operationId);
@@ -1652,7 +1673,7 @@ export function registerWorkspaceExtensionRoutes(
             'update',
             { name },
             res,
-            async (extensionManager, _signal, context) => {
+            async (extensionManager, _signal, context, operationId) => {
               const extension = findLoadedExtension(extensionManager, name);
               if (!extension) {
                 throw new Error(`Extension "${name}" not found`);
@@ -1661,13 +1682,13 @@ export function registerWorkspaceExtensionRoutes(
                 ReturnType<ExtensionManager['prepareExtensionUpdate']>
               >;
               try {
-                preparedResult = await context!.prepare(
-                  async (signal) =>
-                    await extensionManager.prepareExtensionUpdate({
-                      extension,
-                      signal,
-                    }),
-                );
+                preparedResult = await context!.prepare(async (signal) => {
+                  supersedeActiveInstallOperations(ctrl, operationId!);
+                  return await extensionManager.prepareExtensionUpdate({
+                    extension,
+                    signal,
+                  });
+                });
               } catch (error) {
                 const wrapped = new Error(
                   `Update check failed for extension "${extension.name}": ${
@@ -1707,13 +1728,14 @@ export function registerWorkspaceExtensionRoutes(
               }
             },
             {
-              createManager: (operationId) =>
+              createManager: (operationId, signal) =>
                 ctrl.createExtensionManager(
                   undefined,
                   undefined,
-                  extensionInteractionHandlers(ctrl, operationId),
+                  extensionInteractionHandlers(ctrl, operationId, signal),
                 ),
               onSettled: (operationId) => {
+                supersededInstallOperations.delete(operationId);
                 cancelPendingExtensionInteraction(
                   operationId,
                   'Extension operation ended',
@@ -1863,7 +1885,10 @@ export function registerWorkspaceExtensionRoutes(
       skillsOnly?: boolean;
       deadlineMs?: number;
       assertGenerationOpen?: () => void;
-      createManager?: (operationId: string) => ExtensionManager;
+      createManager?: (
+        operationId: string,
+        signal: AbortSignal,
+      ) => ExtensionManager;
       onSettled?: (operationId: string) => void;
     } = {},
   ): void => {
@@ -2228,11 +2253,15 @@ export function registerWorkspaceExtensionRoutes(
         }
       },
       {
-        createManager: (operationId) =>
+        createManager: (operationId, signal) =>
           primaryController.createExtensionManager(
             boundWorkspace,
             true,
-            extensionInteractionHandlers(primaryController, operationId),
+            extensionInteractionHandlers(
+              primaryController,
+              operationId,
+              signal,
+            ),
           ),
         onSettled: (operationId) => {
           supersededInstallOperations.delete(operationId);
@@ -2311,13 +2340,13 @@ export function registerWorkspaceExtensionRoutes(
           ) {
             throw new ExtensionNotUpdatableError(extension.name);
           }
-          const preparedResult = await context!.prepare(
-            async (signal) =>
-              await extensionManager.prepareExtensionUpdate({
-                extension,
-                signal,
-              }),
-          );
+          const preparedResult = await context!.prepare(async (signal) => {
+            supersedeActiveInstallOperations(primaryController, operationId!);
+            return await extensionManager.prepareExtensionUpdate({
+              extension,
+              signal,
+            });
+          });
           if (preparedResult.upToDate) {
             return {
               status: 'checked',
@@ -2347,13 +2376,18 @@ export function registerWorkspaceExtensionRoutes(
           }
         },
         {
-          createManager: (operationId) =>
+          createManager: (operationId, signal) =>
             primaryController.createExtensionManager(
               boundWorkspace,
               true,
-              extensionInteractionHandlers(primaryController, operationId),
+              extensionInteractionHandlers(
+                primaryController,
+                operationId,
+                signal,
+              ),
             ),
           onSettled: (operationId) => {
+            supersededInstallOperations.delete(operationId);
             cancelPendingExtensionInteraction(
               operationId,
               'Extension operation ended',

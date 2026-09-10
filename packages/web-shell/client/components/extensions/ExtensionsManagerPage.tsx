@@ -501,6 +501,9 @@ export function ExtensionsManagerPage({
   const [message, setMessage] = useState<string | null>(null);
   const [messageTone, setMessageTone] = useState<ManagementNoticeTone>('info');
   const [messageOwner, setMessageOwnerState] = useState<string | null>(null);
+  const noticeIsGlobal =
+    messageOwner === null ||
+    !extensions.some((extension) => extension.name === messageOwner);
   const setMessageOwner = useCallback((owner: string | null) => {
     messageOwnerRef.current = owner;
     setMessageOwnerState(owner);
@@ -1668,7 +1671,7 @@ export function ExtensionsManagerPage({
             </DropdownMenu>
           </div>
 
-          {(messageOwner === null || messageOwner === selectedExtension.name) &&
+          {(noticeIsGlobal || messageOwner === selectedExtension.name) &&
           message ? (
             <ManagementNotice
               tone={messageTone}
@@ -1988,12 +1991,10 @@ export function ExtensionsManagerPage({
           </div>
         </div>
 
-        {(messageOwner === null && message) || recoveryError ? (
+        {(noticeIsGlobal && message) || recoveryError ? (
           <ManagementNotice
             tone={recoveryError ? 'error' : messageTone}
-            noticeKey={
-              (messageOwner === null ? message : null) ?? recoveryError ?? ''
-            }
+            noticeKey={(noticeIsGlobal ? message : null) ?? recoveryError ?? ''}
             closeLabel={t('common.close')}
             onDismiss={() => {
               setMessage(null);
@@ -2001,7 +2002,7 @@ export function ExtensionsManagerPage({
             }}
             className="break-words"
           >
-            {(messageOwner === null ? message : null) ?? recoveryError}
+            {(noticeIsGlobal ? message : null) ?? recoveryError}
           </ManagementNotice>
         ) : null}
 

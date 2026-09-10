@@ -870,6 +870,40 @@ describe('ExtensionsManagerPage activation refresh', () => {
     },
   );
 
+  it.each([undefined, 'a'.repeat(64)])(
+    'shows recovered operation notices with owner %s',
+    async (name) => {
+      const running = {
+        v: 1 as const,
+        operationId: 'recovered',
+        operation: 'activation',
+        name,
+        status: 'running' as const,
+        createdAt: 1,
+        updatedAt: 2,
+      };
+      state.actions.activeExtensionOperations.mockResolvedValue({
+        v: 1,
+        operations: [running],
+      });
+      state.actions.extensionOperationStatus.mockResolvedValue(running);
+      await renderPage();
+      await vi.waitFor(() => expect(findButton('Add').disabled).toBe(true));
+      expect(container.textContent).toContain('Extension action queued');
+      state.actions.extensionOperationStatus.mockResolvedValue({
+        ...running,
+        status: 'failed',
+        error: 'recovered operation failed',
+      });
+      await vi.waitFor(
+        () =>
+          expect(container.textContent).toContain('recovered operation failed'),
+        { timeout: 3000 },
+      );
+      expect(findButton('Add').disabled).toBe(false);
+    },
+  );
+
   it('keeps the catalog load error when a stale refresh rejects', async () => {
     let rejectRefresh: ((error: Error) => void) | undefined;
     state.workspaceHandle.refreshExtensionRuntime.mockReturnValue(

@@ -1,5 +1,7 @@
 # Daemon Workspace Runtime Extensions
 
+[English](daemon-workspace-runtime-extensions.md) | [简体中文](daemon-workspace-runtime-extensions.zh-CN.md)
+
 ## Goal
 
 Move Extension management onto workspace-owned runtimes without requiring a
@@ -32,6 +34,21 @@ comes from the current runtime epoch and the applied generation equals the
 latest desired generation. Cold runtimes remain deferred and converge on the
 next `ensureRuntime()`.
 
+Only ensure starts a cold runtime; queued reconciliation rechecks liveness and
+never preheats. Applied generation is certified in a particular runtime epoch.
+A narrow Skill refresh cannot carry that certification across an epoch change.
+An obsolete generation returns `superseded`, not a refresh failure. Deferred
+drain work preserves its narrow/full scope; full work takes precedence when
+both are pending. A repeated failure re-arms the retry cooldown.
+
+Observing a new generation invalidates retained Skill snapshots even while the
+runtime is cold. Projection generation equality alone is not readiness: use
+the current epoch and the coordinator capability state. Restore of a lower
+store generation is supported by the poller's fresh authoritative read: it
+invalidates applied certification and advances the coordinator revision. A
+read overtaken by another observed mutation cannot lower the generation;
+operation receipts alone never lower it.
+
 Extension invalidation also invalidates the selected runtime's Skills and MCP
 capabilities because both catalogs include Extension contributions. A late
 refresh or catalog response from a replaced runtime cannot advance readiness.
@@ -50,6 +67,11 @@ catalog reads remain on `WorkspaceDaemonClient`.
 Source installs use the V2 global route. Archive uploads remain on the legacy
 workspace route until a V2 archive endpoint exists, so they retain the legacy
 default-activation behavior.
+
+Interactive installs and updates share the existing operation interaction
+endpoint under `/workspace/extensions/operations`. Their preparation deadline
+cancels pending input. Prepared resources remain owned by the route until its
+`finally` disposal, including when the deadline prevents commit.
 
 ## Web Shell
 
@@ -73,6 +95,17 @@ Older daemons keep the existing primary-workspace flow.
 When the daemon also advertises `workspace_extension_mentions`, the composer
 uses the selected workspace runtime for both the `+` and `@` Extension menus.
 Without that feature, it keeps the legacy primary-workspace loader.
+
+Notice attribution and the in-flight lock are distinct: an unknown or absent
+Extension name falls back to the global notice surface without releasing the
+active operation's lock.
+
+## Verification
+
+Cover cold/queued-cold runtimes, superseded generations, runtime replacement,
+same-epoch narrow refresh, drain replay, repeated failure cooldown, retained
+Skills invalidation, expired interactive preparation, and recovered notices.
+Run the existing local-install integration test without starting an ACP child.
 
 ## Downstream consumers
 

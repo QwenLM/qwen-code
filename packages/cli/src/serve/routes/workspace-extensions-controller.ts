@@ -261,7 +261,10 @@ export interface ExtensionsController {
     ) => Promise<ExtensionMutationEvent>,
     options?: {
       manager?: ExtensionManager;
-      createManager?: (operationId: string) => ExtensionManager;
+      createManager?: (
+        operationId: string,
+        signal: AbortSignal,
+      ) => ExtensionManager;
       onSettled?: (operationId: string) => void;
       refreshRuntimes?:
         | readonly WorkspaceRuntime[]
@@ -477,7 +480,10 @@ export function createExtensionsController(
     ) => Promise<ExtensionMutationEvent>,
     options: {
       manager?: ExtensionManager;
-      createManager?: (operationId: string) => ExtensionManager;
+      createManager?: (
+        operationId: string,
+        signal: AbortSignal,
+      ) => ExtensionManager;
       onSettled?: (operationId: string) => void;
       refreshRuntimes?:
         | readonly WorkspaceRuntime[]
@@ -548,11 +554,11 @@ export function createExtensionsController(
           status: 'running',
           phase: 'preparing',
         });
+        const deadlineController = new AbortController();
         const extensionManager =
           options.manager ??
-          options.createManager?.(operationId) ??
+          options.createManager?.(operationId, deadlineController.signal) ??
           createExtensionManager();
-        const deadlineController = new AbortController();
         let deadlineStarted = false;
         const startDeadline = () => {
           if (deadlineStarted) return;
@@ -612,7 +618,6 @@ export function createExtensionsController(
                   },
                 },
               );
-              deadlineController.signal.throwIfAborted();
               return prepared;
             } catch (error) {
               if (!started) {
@@ -633,6 +638,7 @@ export function createExtensionsController(
           >(
             task: (onCommitted: (generation: number) => void) => Promise<T>,
           ): Promise<T> => {
+            deadlineController.signal.throwIfAborted();
             assertGenerationOpen?.();
             updateExtensionOperation(operationId, {
               status: 'running',
@@ -640,6 +646,7 @@ export function createExtensionsController(
             });
             const result = await commitQueue.runUntilReleased(
               async (release) => {
+                deadlineController.signal.throwIfAborted();
                 assertGenerationOpen?.();
                 return await task((generation) => {
                   // sendOperation passes reserveRuntimeReconciliation even on
@@ -678,6 +685,9 @@ export function createExtensionsController(
           context,
           operationId,
         );
+        if (committedGeneration === undefined) {
+          deadlineController.signal.throwIfAborted();
+        }
         mutationEvent = event;
         if (deadline) clearTimeout(deadline);
         extensionsStatusCache = undefined;
@@ -737,6 +747,7 @@ export function createExtensionsController(
                         const reconciliationError =
                           reconciliation.error ??
                           (reconciliation.state !== 'reconciled' &&
+                          reconciliation.state !== 'superseded' &&
                           (runtimeWasLive || operation === 'refresh')
                             ? 'Extension runtime has not applied the committed generation. Retry the runtime refresh.'
                             : undefined);

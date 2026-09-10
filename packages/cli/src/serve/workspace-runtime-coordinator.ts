@@ -39,7 +39,7 @@ type LifecycleAcpSessionBridge = AcpSessionBridge & {
 };
 
 export interface WorkspaceExtensionReconciliationResult {
-  state: 'deferred' | 'failed' | 'reconciled';
+  state: 'deferred' | 'superseded' | 'failed' | 'reconciled';
   refreshed: number;
   failed: number;
   error?: string;
@@ -111,6 +111,8 @@ export class WorkspaceRuntimeCoordinator {
 
   private appliedExtensionGeneration = 0;
 
+  private appliedExtensionRuntimeEpoch: number | undefined;
+
   private skillsRevision = 0;
 
   private mcpRevision = 0;
@@ -136,7 +138,7 @@ export class WorkspaceRuntimeCoordinator {
 
   private skillsReconcileDeferred = false;
 
-  private extensionsReconcileDeferred = false;
+  private extensionsReconcileDeferred: { skillsOnly?: boolean } | undefined;
 
   private extensionsTail: Promise<void> = Promise.resolve();
 
@@ -175,9 +177,11 @@ export class WorkspaceRuntimeCoordinator {
     if (this.disposed) return;
     this.draining = false;
     if (this.extensionsReconcileDeferred) {
-      this.extensionsReconcileDeferred = false;
+      const options = this.extensionsReconcileDeferred;
+      this.extensionsReconcileDeferred = undefined;
       void this.reconcileExtensionGeneration(
         this.desiredExtensionGeneration,
+        options,
       ).catch(() => undefined);
     }
     if (this.skillsReconcileDeferred) {
@@ -246,7 +250,14 @@ export class WorkspaceRuntimeCoordinator {
       runtimeLive: snapshot.runtimeLive,
       runtimeEpoch: snapshot.runtimeEpoch,
       capabilities: {
-        extensions: extensionsStatus,
+        extensions: {
+          ...extensionsStatus,
+          appliedGeneration:
+            snapshot.runtimeLive &&
+            this.appliedExtensionRuntimeEpoch === snapshot.runtimeEpoch
+              ? this.appliedExtensionGeneration
+              : 0,
+        },
         mcp: mcpStatus,
         skills: skillsStatus,
       },
@@ -348,8 +359,19 @@ export class WorkspaceRuntimeCoordinator {
     }
   }
 
-  observeExtensionGeneration(generation: number): void {
-    if (generation <= this.desiredExtensionGeneration) return;
+  observeExtensionGeneration(
+    generation: number,
+    storeReadRevision?: number,
+  ): void {
+    if (generation === this.desiredExtensionGeneration) return;
+    if (generation < this.desiredExtensionGeneration) {
+      // Only a fresh store read may adopt automatic backup recovery. A late
+      // operation receipt or a read overtaken by a mutation cannot roll back.
+      if (storeReadRevision !== this.extensionsRevision) return;
+      this.appliedExtensionGeneration = 0;
+      this.appliedExtensionRuntimeEpoch = undefined;
+    }
+    this.runtime.workspaceService.invalidateWorkspaceSkillsStatus();
     this.desiredExtensionGeneration = generation;
     this.extensionsRevision += 1;
     this.extensionsRefreshFailedRevision = undefined;
@@ -373,10 +395,14 @@ export class WorkspaceRuntimeCoordinator {
     options: { skillsOnly?: boolean } = {},
   ): Promise<WorkspaceExtensionReconciliationResult> {
     this.observeExtensionGeneration(generation);
+    if (generation < this.desiredExtensionGeneration) {
+      return { state: 'superseded', refreshed: 0, failed: 0 };
+    }
     const snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
     if (!snapshot.runtimeLive || this.draining || this.disposed) {
-      this.extensionsReconcileDeferred ||=
-        snapshot.runtimeLive && this.draining;
+      if (snapshot.runtimeLive && this.draining && !this.disposed) {
+        this.deferExtensionsReconciliation(options);
+      }
       return { state: 'deferred', refreshed: 0, failed: 0 };
     }
     const current = this.status().capabilities?.extensions;
@@ -406,6 +432,7 @@ export class WorkspaceRuntimeCoordinator {
       };
     }
     const appliedGenerationBefore = this.appliedExtensionGeneration;
+    const appliedEpochBefore = this.appliedExtensionRuntimeEpoch;
     let result: ServeWorkspaceExtensionsRefreshResult | undefined;
     try {
       result = await this.queueExtensionsWork(() =>
@@ -413,14 +440,14 @@ export class WorkspaceRuntimeCoordinator {
       );
     } catch (error) {
       if (this.draining && !this.disposed) {
-        this.extensionsReconcileDeferred = true;
+        this.deferExtensionsReconciliation(options);
         return { state: 'deferred', refreshed: 0, failed: 0 };
       }
       if (
         revision !== this.extensionsRevision ||
         generation !== this.desiredExtensionGeneration
       ) {
-        return { state: 'deferred', refreshed: 0, failed: 0 };
+        return { state: 'superseded', refreshed: 0, failed: 0 };
       }
       const refresh =
         error instanceof ExtensionRuntimeRefreshError
@@ -438,15 +465,21 @@ export class WorkspaceRuntimeCoordinator {
         ),
       };
     }
+    const status = this.status();
+    const extensions = status.capabilities?.extensions;
     if (
+      status.runtimeLive &&
+      extensions?.state === 'ready' &&
+      extensions.runtimeEpoch === status.runtimeEpoch &&
       revision === this.extensionsRevision &&
       generation === this.desiredExtensionGeneration &&
       this.appliedExtensionGeneration === generation
     ) {
-      // prepareExtensionsRevision already ran the shared post-apply when it
-      // advanced the applied generation; an explicit reconcile that only
-      // re-certifies it re-verifies the derived capabilities itself.
-      if (appliedGenerationBefore === this.appliedExtensionGeneration) {
+      if (
+        appliedGenerationBefore === this.appliedExtensionGeneration &&
+        (revision === 0 ||
+          appliedEpochBefore === this.appliedExtensionRuntimeEpoch)
+      ) {
         this.afterExtensionApply(options);
       }
       return {
@@ -455,7 +488,27 @@ export class WorkspaceRuntimeCoordinator {
         failed: 0,
       };
     }
-    return { state: 'deferred', refreshed: 0, failed: 0 };
+    return {
+      state:
+        generation !== this.desiredExtensionGeneration
+          ? 'superseded'
+          : 'deferred',
+      refreshed: result?.sessionsRefreshed ?? 0,
+      failed: 0,
+      ...(extensions?.state === 'error'
+        ? { error: extensions.error?.message }
+        : {}),
+    };
+  }
+
+  private deferExtensionsReconciliation(options: {
+    skillsOnly?: boolean;
+  }): void {
+    this.extensionsReconcileDeferred = {
+      skillsOnly:
+        (this.extensionsReconcileDeferred?.skillsOnly ?? true) &&
+        options.skillsOnly === true,
+    };
   }
 
   reconcileSkillsConfiguration(): 'deferred' | 'reconciling' {
@@ -617,15 +670,8 @@ export class WorkspaceRuntimeCoordinator {
     generation: number,
     options: { skillsOnly?: boolean } = {},
   ): Promise<ServeWorkspaceExtensionsRefreshResult | undefined> {
-    let snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
-    if (!snapshot.runtimeLive) {
-      await withTimeout(
-        this.bridge.preheat({ keepAliveMs: ENSURE_KEEP_ALIVE_MS }),
-        DEFAULT_ENSURE_TIMEOUT_MS,
-      );
-      snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
-      this.assertAcceptingWork();
-    }
+    const snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
+    if (!snapshot.runtimeLive) return;
     const runtimeEpoch = snapshot.runtimeEpoch;
     if (
       revision !== this.extensionsRevision ||
@@ -633,6 +679,7 @@ export class WorkspaceRuntimeCoordinator {
     ) {
       return;
     }
+    if (this.isExtensionsFailureLatched(revision, runtimeEpoch)) return;
     this.extensionsStatus = {
       state: 'starting',
       revision,
@@ -689,7 +736,7 @@ export class WorkspaceRuntimeCoordinator {
           current.runtimeLive &&
           current.runtimeEpoch === runtimeEpoch
         ) {
-          this.extensionsReconcileDeferred = true;
+          this.deferExtensionsReconciliation(options);
         }
         this.extensionsStatus = {
           state: 'stale',
@@ -727,12 +774,18 @@ export class WorkspaceRuntimeCoordinator {
       // update for generations the runtime never fully applied.
       const certifiesGeneration =
         !options.skillsOnly ||
-        this.appliedExtensionGeneration === generation - 1 ||
-        this.appliedExtensionGeneration === generation;
+        (this.appliedExtensionRuntimeEpoch === runtimeEpoch &&
+          (this.appliedExtensionGeneration === generation - 1 ||
+            this.appliedExtensionGeneration === generation));
       const advancesGeneration =
-        certifiesGeneration && this.appliedExtensionGeneration !== generation;
+        certifiesGeneration &&
+        (this.appliedExtensionGeneration !== generation ||
+          // Initial ensure prepares Skills/MCP itself; a later certification
+          // reset (including Store recovery to zero) must invalidate them.
+          (revision > 0 && this.appliedExtensionRuntimeEpoch !== runtimeEpoch));
       if (certifiesGeneration) {
         this.appliedExtensionGeneration = generation;
+        this.appliedExtensionRuntimeEpoch = runtimeEpoch;
       }
       if (advancesGeneration) {
         this.afterExtensionApply(options);
@@ -1160,7 +1213,11 @@ export class WorkspaceRuntimeCoordinator {
     };
     // One failed refresh is retried once from the ensure path; the latch
     // closes only when that retry fails too. Mirror of the Skills markers.
-    if (this.extensionsRefreshRetryRevision === revision) {
+    if (
+      this.extensionsRefreshRetryRevision === revision ||
+      (this.extensionsRefreshFailedRevision?.revision === revision &&
+        this.extensionsRefreshFailedRevision.runtimeEpoch === runtimeEpoch)
+    ) {
       this.extensionsRefreshRetryRevision = undefined;
       this.extensionsRefreshFailedRevision = {
         revision,
