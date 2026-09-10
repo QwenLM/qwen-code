@@ -177,12 +177,12 @@ export function ensureWritableReviewWorkflowsDir(
 /**
  * The generated fan-out script for one plan.
  *
- * Named by a digest of the plan path so two reviews running in one session
- * do not overwrite each other's script, and so re-running `emit-workflow`
- * for the same review replaces its own file rather than accumulating.
+ * Both the canonical plan path and script content identify the file. A later
+ * wave cannot overwrite a previous run's script while it is resumable.
  */
 export function reviewWorkflowScriptPath(
   planPath: string,
+  script: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   const resolved = resolve(planPath);
@@ -200,7 +200,11 @@ export function reviewWorkflowScriptPath(
     .update(canonical)
     .digest('hex')
     .slice(0, 10);
-  return join(reviewWorkflowsDir(env), `${REVIEW_WORKFLOW_PREFIX}${digest}.js`);
+  const contentDigest = createHash('sha256').update(script).digest('hex');
+  return join(
+    reviewWorkflowsDir(env),
+    `${REVIEW_WORKFLOW_PREFIX}${digest}-${contentDigest}.js`,
+  );
 }
 
 /**
