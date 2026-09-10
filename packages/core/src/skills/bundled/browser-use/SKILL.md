@@ -14,7 +14,7 @@ start a separate Browser Use MCP server.
 If `node_repl` is unavailable, configure it with:
 
 ```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.1
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@latest
 ```
 
 Then tell the user to restart Qwen Code and stop. Do not start a separate

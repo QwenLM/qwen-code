@@ -40,13 +40,11 @@ function fakeSettings({
 }
 
 describe('resolveSkillSettings', () => {
-  it('requires an explicit Browser Use opt-in without changing Computer Use', () => {
+  it('makes Browser Use and Computer Use available by default', () => {
     const result = resolveSkillSettings(fakeSettings({ merged: {} }));
 
-    expect(result.disabledNames).toEqual(new Set(['browser-use']));
-    expect(result.disablements.get('browser-use')).toEqual({
-      reason: 'default',
-    });
+    expect(result.disabledNames).toEqual(new Set());
+    expect(result.disablements.has('browser-use')).toBe(false);
     expect(result.disabledNames.has('computer-use')).toBe(false);
   });
 
@@ -84,7 +82,7 @@ describe('resolveSkillSettings', () => {
       }),
     );
 
-    expect(result.disabledNames).toEqual(new Set(['plan', 'browser-use']));
+    expect(result.disabledNames).toEqual(new Set(['plan']));
     expect(result.enabledNames).toEqual(new Set(['review']));
     expect(result.disablements.get('plan')).toEqual({ reason: 'default' });
     expect(result.disablements.has('review')).toBe(false);
@@ -102,7 +100,7 @@ describe('resolveSkillSettings', () => {
       }),
     );
 
-    expect(result.disabledNames).toEqual(new Set(['review', 'browser-use']));
+    expect(result.disabledNames).toEqual(new Set(['review']));
     expect(result.disablements.get('review')).toEqual({
       reason: 'hard',
       lockedScope: 'user',
@@ -120,7 +118,7 @@ describe('resolveSkillSettings', () => {
       }),
     );
 
-    expect(result.disabledNames).toEqual(new Set(['valid', 'browser-use']));
+    expect(result.disabledNames).toEqual(new Set(['valid']));
   });
 });
 

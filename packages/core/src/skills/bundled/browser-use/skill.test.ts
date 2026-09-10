@@ -29,6 +29,7 @@ describe('bundled browser-use skill', () => {
   it('loads its bundled runtime through the generic Node REPL', () => {
     expect(skill).toContain('If `node_repl` is unavailable');
     expect(skill).toContain('qwen mcp add --scope user node-repl');
+    expect(skill).toContain('@qwen-code/node-repl-mcp@latest');
     expect(skill).toContain('node_repl_add_node_module_dir');
     expect(skill).toContain('<skill-base>/runtime/node_modules');
     expect(skill).toContain('node_modules/playwright-core/package.json');

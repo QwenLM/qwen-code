@@ -53,9 +53,9 @@ layout. The generic Node REPL MCP server must be configured, and the Qwen
 Chrome extension must be installed in the browser. Bundling does not connect
 to Chrome at CLI startup; the SDK connects when first used.
 
-Browser Use is disabled by default. Users opt in through `/skills` or
-`skills.enabled: ["browser-use"]` and disable it through the same skill
-controls (`skills.disabled` takes precedence). Disabled skills are excluded
+Browser Use is available to the model by default and is selected according to
+the user's task. Users can disable it through `/skills` or `skills.disabled`,
+using the same controls as Computer Use. Disabled skills are excluded
 from model discovery and skill invocation. This is the existing generic skill
 mechanism used by Computer Use, not a browser permission boundary: disabling
 the skill does not unload instructions already in a conversation or disconnect
@@ -318,7 +318,8 @@ For the first release:
 - there is no Browser Use-specific origin allowlist, upload-root allowlist, or
   snapshot redaction in this release;
 - the existing Qwen toolbar action and side panel remain;
-- Qwen skill availability is opt-in and uses the existing `/skills` controls.
+- the model can discover Browser Use by default; users can disable it through
+  the existing `/skills` controls.
 
 ## Current boundaries and future work
 
