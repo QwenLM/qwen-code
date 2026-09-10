@@ -412,14 +412,21 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   //
   // Skipping them was tempting and wrong. The premise was that an interaction
   // file's full-range slice is code the previous round already cleared — true
-  // only while the MERGE BASE holds still between rounds, and nothing
-  // enforces that. The anchor gate validates `--since` against head history;
-  // neither the round cache nor the posted ledger carries a base identity, so
-  // a BACKWARD base move — the author retargets the PR to an older base, an
-  // ordinary GitHub operation — is accepted. `newBase..anchor` then carries
-  // hunks no round has read, they arrive inside a heavy interaction file's
-  // full-range slice, and these three agents are the only ones that would
-  // have walked them. A clean verdict re-anchors past them for good.
+  // only while the MERGE BASE holds still between rounds. The anchor gate
+  // validates `--since` against head history and rules nothing about the
+  // base, so a BACKWARD base move — the author retargets the PR to an older
+  // base, an ordinary GitHub operation — is accepted. `newBase..anchor` then
+  // carries hunks no round has read, they arrive inside a heavy interaction
+  // file's full-range slice, and these three agents are the only ones that
+  // would have walked them. A clean verdict re-anchors past them for good.
+  //
+  // The seam bound has since given the widening its own gate on exactly
+  // that premise — each posted round carries the base it captured over in
+  // its marker (`mb`, #10136 R18-3), and the bound engages only where the
+  // bases match — but the gate covers the BOUND, not this skip: it is off
+  // on every round that cannot prove continuity, and those are precisely
+  // the rounds whose interaction slices carry the smuggled hunks. So the
+  // skip stays off unconditionally.
   //
   // So the skip is off until the anchor can prove base continuity. It costs
   // three agents on a rare shape — heavy, unchanged since the anchor, and

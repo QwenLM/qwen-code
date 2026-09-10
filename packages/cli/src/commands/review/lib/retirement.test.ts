@@ -917,6 +917,38 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(false);
   });
 
+  it('an uncertified sibling whose list cannot be compared still blocks (#10136 R20-2)', () => {
+    // The narrowing branch fails toward auditing like every other refusal
+    // here: "the two were launched against different lists" is a claim, and
+    // a prompt fallback names no entries either way. The sibling's record
+    // points at no findings file, so the comparison cannot be made — and
+    // the chunk stays in the wave rather than being priced out on it.
+    const L1 =
+      '- **File:** src/pay.ts:42 — the double charge — [unverified]\n' +
+      '- **Severity:** Suggestion\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', L1);
+    transcript(
+      record(
+        1,
+        14,
+        'chunk 14 round 1 territory walk a\n' +
+          `read_file(file_path="${f1 ?? ''}")`,
+        'd1',
+      ),
+      DRY,
+    );
+    // The sibling: a second record under a corrected list this test does
+    // not write, so the scheduler reads its prompt as the list.
+    record(1, 14, 'chunk 14 round 1 territory walk b', 'd2');
+
+    const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([14]);
+    expect(r3.narrowed).toEqual([]);
+    expect(r3.converged).toBe(false);
+  });
+
   it('a lone dry round still narrows — the sibling arm rules on siblings only (#10136 R20-2)', () => {
     // The control: one record, one transcript, one substantive dry receipt.
     // No sibling, nothing stale, and the non-delta chunk leaves the wave on

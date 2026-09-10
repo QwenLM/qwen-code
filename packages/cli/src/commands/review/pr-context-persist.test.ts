@@ -26,7 +26,7 @@ import {
   persistedAnchorSha,
   recoverLedger,
 } from './pr-context.js';
-import type { Ledger } from './lib/ledger.js';
+import { serializeLedger, type Ledger } from './lib/ledger.js';
 
 describe('persistRecoveredLedger', () => {
   // The serialization seam the helper tests could not reach before the
@@ -156,6 +156,50 @@ describe('persistRecoveredLedger', () => {
       expect(advanced['round']).toBe(9);
       expect('mb' in advanced).toBe(false);
       expect('sha' in advanced).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('carries the posted base end to end — marker, recovery, side file (#10136 R18-3)', () => {
+    // The links are unit-tested apart; this is the wiring between them, and
+    // it is the whole point of moving the stamp onto the marker: the base
+    // must reach the next round's capture on a machine whose `.qwen/` the
+    // runner deleted. The last step reads the file exactly as `fetch-pr`
+    // reads it — the field name included, which no single unit test pins.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'qwen-review-pr-1-prev-ledger.json');
+    try {
+      const posted: Ledger = {
+        v: 1,
+        round: 7,
+        findings: [],
+        sha: 'deadbeef00112233',
+        mb: 'b'.repeat(40),
+      };
+      const { recovered } = recoverLedger(
+        [
+          {
+            id: 1,
+            user: { login: 'bot' },
+            submitted_at: '2026-01-01T00:00:00Z',
+            body: `Reviewed.\n\n${serializeLedger(posted)}`,
+          },
+        ],
+        'bot',
+      );
+      persistRecoveredLedger(side, recovered, {
+        noOwnReview: false,
+        identityKnown: true,
+      });
+      const sideLedger = JSON.parse(readFileSync(side, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+      const carried = sideLedger['mb'];
+      expect(
+        typeof carried === 'string' && carried !== '' ? carried : null,
+      ).toBe('b'.repeat(40));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

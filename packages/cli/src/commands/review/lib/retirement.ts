@@ -1214,9 +1214,14 @@ export function scheduleReverseAuditRound(
             dryMembers.some(
               (d) =>
                 m.digest === d.digest ||
-                (m.fileList !== null &&
-                  d.fileList !== null &&
-                  sameEntrySet(m.fileList, d.fileList)),
+                // A list neither member can be compared on (a prompt
+                // fallback names no entries) does not lift the doubt: this
+                // is the narrowing branch, where every refusal in this file
+                // fails toward auditing, and "the two were launched against
+                // different lists" is a claim, not an absence.
+                m.fileList === null ||
+                d.fileList === null ||
+                sameEntrySet(m.fileList, d.fileList),
             ),
         );
         if (!staleAgainstYield && !staleWithinRound) {
