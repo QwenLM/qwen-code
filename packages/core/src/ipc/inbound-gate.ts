@@ -8,8 +8,10 @@
  * Decides what happens to an inbound peer message before this session's
  * model ever sees it.
  *
- * Three outcomes: **accept** (queue it), **hold** (park it for the user to
- * review, model never sees it), **refuse** (drop it and tell the sender).
+ * Four outcomes: **accept** (queue it), **hold** (park it for the user to
+ * review, model never sees it), **refuse** (turn it away because policy
+ * says so, and tell the sender), **dropped** (never metered in at all —
+ * see the admission note below).
  *
  * The explicit `crossSessionInbound` setting wins when set. When it is
  * unset the policy is derived from **approval-mode parity**, which
@@ -19,6 +21,7 @@
  * `bypass`, where some actions can be applied with no one looking — and
  * the sender asserts its class on the frame.
  *
+ *   arriving faster than this session takes  → dropped (before policy)
  *   sender is a process this session started → accept
  *   sender presented a controller grant       → accept
  *   receiver mode unknown/unrecognized        → hold  (fail closed)
@@ -71,17 +74,30 @@
  * sessions from surprising each other, not an access control; the
  * envelope's authority notice and the classifier are what stand up to a
  * hostile peer.
+ *
+ * Before any of that, a message has to get past the admission meter
+ * (`peer-admission.ts`). A `rate-limited` or `duplicate` drop happens
+ * there, above policy, so it carries no policy verdict and nobody decided
+ * anything about it. A `queue-full` drop is the other half of the same
+ * outcome and sits lower: policy already said accept, and the buffer it
+ * was accepted into — the session's input queue, or the hold buffer —
+ * had no room. Whichever it was, the message is never seen by the model
+ * or by the user, and none of them leaves a tombstone, so an honest retry
+ * later can still land. The sender is told once per burst rather than
+ * once per message — see `peer-drop-reports.ts` for why a report about a
+ * flood must not scale with it.
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { APPROVAL_MODES, ApprovalMode } from '../config/approval-mode.js';
+import { PeerAdmission, type PeerDropReason } from './peer-admission.js';
 import type { PeerControllerIdentity } from './peer-controllers.js';
 import { canonicalizeMsgId, type PeerUserFrame } from './peer-frames.js';
 
 const debugLogger = createDebugLogger('PEER_INBOUND');
 
 export type InboundPolicy = 'accept' | 'hold' | 'refuse';
-export type GateDecision = 'accept' | 'held' | 'refused';
+export type GateDecision = 'accept' | 'held' | 'refused' | 'dropped';
 
 /**
  * Why a message ended up where it did. Surfaced to the user so a held
@@ -99,8 +115,9 @@ export type HoldCause =
  *
  * A hold buffer is reachable by anything that can write to the socket, so
  * it needs a ceiling or a chatty peer becomes a memory leak in a session
- * whose user stepped away. Oldest is evicted first: the newest message is
- * the one most likely to still be relevant.
+ * whose user stepped away. Once full it turns arrivals away rather than
+ * making room: what is already parked is the user's to decide, and an
+ * arrival must not be able to destroy it.
  */
 export const MAX_HELD_MESSAGES = 50;
 
@@ -192,6 +209,46 @@ export interface PeerOrigin {
 }
 
 /**
+ * Longest self-asserted address the metering key keeps.
+ *
+ * `from` is peer-chosen and only type-checked on arrival, inside a frame
+ * that may be a megabyte, while the key it becomes is retained per sender
+ * in three tables at once. No address that can actually be dialled comes
+ * near this: `sun_path` holds 108 bytes on Linux and 104 on macOS, and a
+ * Windows named pipe is shorter still. So the cap costs nothing a real
+ * sender could use, and bounds what an unreal one can make this session
+ * hold.
+ */
+export const MAX_SENDER_KEY_CHARS = 256;
+
+/**
+ * The identity rate limiting and drop reporting meter a sender by.
+ *
+ * The branch is chosen by what the *transport* established, never by what
+ * the frame claims, and the self-asserted address is namespaced inside
+ * it. Otherwise a peer could simply write `from: "own-process"` and share
+ * a bucket — and a drop-notice line — with the scripts this session
+ * itself started: it would spend their allowance, its flood would be
+ * announced to the user as coming from their own process, and the
+ * receipts would be addressed to a socket path that does not exist.
+ *
+ * A sender with no address is still distinguished by what the transport
+ * knows, so a script and a controller do not fall into one anonymous
+ * bucket with every stranger. Two anonymous strangers do share `unknown`,
+ * which is the one collision nothing here can separate — the transport
+ * established nothing about either of them.
+ */
+export function peerSenderKey(
+  frame: Pick<PeerUserFrame, 'from'>,
+  origin: PeerOrigin,
+): string {
+  if (origin.controller) return `controller:${origin.controller.id}`;
+  const address = (frame.from ?? '').slice(0, MAX_SENDER_KEY_CHARS);
+  if (origin.selfSent) return `own:${address}`;
+  return address ? `peer:${address}` : 'unknown';
+}
+
+/**
  * setTimeout's 32-bit ceiling. Above it Node clamps the delay to 1 ms and
  * warns, so an unclamped re-arm becomes a busy loop.
  */
@@ -246,6 +303,28 @@ export interface InboundGateOptions {
   getPolicyScope?: () => PolicyScope | undefined;
   /** Whether a controller grant still exists. Absent means valid. */
   isControllerValid?: (id: string) => boolean;
+  /**
+   * Rate and duplicate control, applied before policy. A gate without one
+   * meters with the default limits; sharing one across gates would make
+   * two sessions in one process compete for the same allowance.
+   */
+  admission?: PeerAdmission;
+  /**
+   * Tell the sender its message was dropped. Best-effort, like
+   * `reportStatus`, and expected to fold a burst into few receipts rather
+   * than answering each drop.
+   */
+  reportDropped?: (
+    frame: PeerUserFrame,
+    reason: PeerDropReason,
+    origin?: PeerOrigin,
+  ) => void;
+  /** Tell this session's user. Absent means nobody is told. */
+  onDropped?: (
+    frame: PeerUserFrame,
+    origin: PeerOrigin,
+    reason: PeerDropReason,
+  ) => void;
   /** Deliver an accepted message into the session's input queue. */
   deliver: (frame: PeerUserFrame, origin: PeerOrigin) => void;
   /** Report a terminal outcome back to the sender. Best-effort. */
@@ -267,6 +346,16 @@ export interface InboundGateOptions {
    * into the session that replaced its addressee.
    */
   getSessionId?: () => string | undefined;
+  /**
+   * For a process hosting several sessions: whether `id` is one of them.
+   *
+   * Wired instead of `getSessionId`, which asks "what is the one session
+   * here" — a question such a process has no single answer to. A frame
+   * that names no session at all is not for any of them: with one session
+   * an unpinned frame can only have meant that one, and with several
+   * there is nothing to guess from.
+   */
+  ownsSessionId?: (id: string) => boolean;
   /**
    * How long a message may sit parked before it expires, in
    * milliseconds, or null to keep it until the session ends. Read on
@@ -356,8 +445,14 @@ export class InboundGate {
    * them, all firing to do the same sweep.
    */
   private expiryTimer: NodeJS.Timeout | null = null;
+  /** How fast senders may arrive. See `peer-admission.ts`. */
+  private readonly admission: PeerAdmission;
+  private admissionSessionObserved = false;
+  private admissionSessionId: string | undefined;
 
-  constructor(private readonly options: InboundGateOptions) {}
+  constructor(private readonly options: InboundGateOptions) {
+    this.admission = options.admission ?? new PeerAdmission();
+  }
 
   /** Messages currently parked, oldest first. */
   getHeld(): readonly HeldMessage[] {
@@ -539,10 +634,44 @@ export class InboundGate {
     frame: PeerUserFrame,
     origin: PeerOrigin = { selfSent: false },
   ): GateDecision {
+    // Only a process holding one session can "change session" — that is
+    // what a `/clear` or a resume does, and the meter starts over because
+    // the conversation it was pacing is gone. A process hosting several
+    // wires `ownsSessionId` instead, has no single id to compare, and
+    // meters across all of them: its sessions come and go constantly, and
+    // resetting on each would hand a flooding peer a fresh allowance.
+    const sessionId = this.options.getSessionId?.();
+    if (
+      this.admissionSessionObserved &&
+      this.admissionSessionId !== sessionId
+    ) {
+      this.admission.reset();
+    }
+    this.admissionSessionObserved = true;
+    this.admissionSessionId = sessionId;
     // Timers can be starved or slept through (a suspended laptop), so
     // every entry point sweeps before it reads the buffer rather than
     // trusting the timer to have fired.
     this.expireOverdue();
+
+    // Metered before the id lookups below, not after: those two answer a
+    // re-sent id with a receipt each, so a peer looping on one id would
+    // draw one outbound connection per message — and receipts share a
+    // ceiling with everything else this session sends, so the messages
+    // that lose their receipt first would be the legitimate ones. A drop
+    // is reported through a path that folds a burst instead.
+    const verdict = this.admission.admit({
+      senderKey: peerSenderKey(frame, origin),
+      body: frame.message.content,
+      messageId: frame.msgId,
+      // A hook reporting the same line twice, or a user repeating
+      // themselves to a controller, is not the model-driven repetition
+      // the duplicate check exists to stop. Both are still rate limited.
+      exemptFromDedup: origin.selfSent || origin.controller !== undefined,
+    });
+    if (!verdict.admitted) {
+      return this.drop(frame, origin, verdict.reason);
+    }
 
     // An id that is already settled has a final answer: repeat its
     // receipt and stop. This is what keeps a re-send from re-parking a
@@ -552,6 +681,7 @@ export class InboundGate {
       debugLogger.debug(
         `re-sent msgId ${frame.msgId}; repeating earlier verdict ${settled}`,
       );
+      this.forgetAdmittedBody(frame, origin);
       void this.report(frame, settled);
       return 'refused';
     }
@@ -572,6 +702,7 @@ export class InboundGate {
       )
     ) {
       debugLogger.debug(`duplicate msgId ${frame.msgId}; already held`);
+      this.forgetAdmittedBody(frame, origin);
       void this.report(frame, 'held');
       return 'held';
     }
@@ -583,7 +714,11 @@ export class InboundGate {
       debugLogger.debug(`refused peer message ${frame.msgId}`);
       // Not 'denied': nobody looked at it. A sender told its message was
       // declined waits for a person to change their mind; one told the
-      // session refuses peer messages knows to stop.
+      // session refuses peer messages knows to stop — and it must keep
+      // hearing that, so its repeat record is rolled back rather than
+      // turning the next verbatim attempt into a `duplicate`, which would
+      // replace "stop" with "fold it into a later message".
+      this.forgetAdmittedBody(frame, origin);
       this.recordSettled(frame.msgId, 'refused');
       void this.report(frame, 'refused');
       return 'refused';
@@ -597,28 +732,37 @@ export class InboundGate {
       debugLogger.debug(
         `not admitting peer message ${frame.msgId} during shutdown; expiring it`,
       );
+      this.forgetAdmittedBody(frame, origin);
       void this.report(frame, 'expired');
       return 'refused';
     }
 
     if (policy === 'accept') {
-      const ok = this.tryDeliver(frame, origin);
-      if (ok) {
-        this.recordSettled(frame.msgId, 'delivered');
+      if (!this.tryDeliver(frame, origin)) {
+        // The only way delivery throws in production is the accepted
+        // backlog being full, so this is a queue-full drop rather than an
+        // expiry: 'expired' would tell the sender a decision ran out when
+        // no decision was ever pending. The id is deliberately not
+        // settled, so an honest retry once the queue drains can land.
+        this.forgetAdmittedBody(frame, origin);
+        return this.drop(frame, origin, 'queue-full');
       }
-      // A failed delivery is transient (the input queue is full); the id
-      // is deliberately not settled, so an honest sender retry can land.
-      void this.report(frame, ok ? 'delivered' : 'expired');
-      return ok ? 'accept' : 'refused';
+      this.recordSettled(frame.msgId, 'delivered');
+      void this.report(frame, 'delivered');
+      return 'accept';
     }
 
     if (this.held.length >= MAX_HELD_MESSAGES) {
-      const evicted = this.held.shift();
-      if (evicted) {
-        debugLogger.debug(`hold buffer full; expiring ${evicted.frame.msgId}`);
-        this.recordSettled(evicted.frame.msgId, 'expired');
-        void this.report(evicted.frame, 'expired');
-      }
+      // The newcomer is turned away rather than a parked message evicted.
+      // Evicting made an arrival destroy someone else's message: a flood
+      // walked the user's real backlog out one entry at a time, and each
+      // eviction told an uninvolved sender its message had `expired` when
+      // what actually happened was that a stranger arrived. Refusing the
+      // newcomer costs only the sender that could not fit, tells it the
+      // truth, and lets it retry — the same shape the accept path above
+      // already had.
+      this.forgetAdmittedBody(frame, origin);
+      return this.drop(frame, origin, 'queue-full');
     }
 
     const cause = decision.policy === 'hold' ? decision.cause : 'mode-unknown';
@@ -671,6 +815,7 @@ export class InboundGate {
         // Dropped, not released: the id is tombstoned like every other
         // terminal outcome, and the caller is told the message is gone
         // rather than that it will appear on the next turn.
+        this.forgetAdmittedBody(entry.frame, originOf(entry));
         this.recordSettled(entry.frame.msgId, 'misaddressed');
         void this.report(entry.frame, 'misaddressed');
         this.notifyHeldChange();
@@ -690,6 +835,10 @@ export class InboundGate {
       this.recordSettled(entry.frame.msgId, 'delivered');
       void this.report(entry.frame, 'delivered');
     } else {
+      // A person saw this one, so the far *model* still did not: a
+      // verbatim retry deserves the same review rather than a `duplicate`
+      // asserting the content is already over there.
+      this.forgetAdmittedBody(entry.frame, originOf(entry));
       this.recordSettled(entry.frame.msgId, 'denied');
       void this.report(entry.frame, 'denied');
     }
@@ -731,6 +880,7 @@ export class InboundGate {
         // 'denied', not 'refused': this message was admitted and parked,
         // and what settles it now is the user switching the setting —
         // a decision, made after the fact, by a person.
+        this.forgetAdmittedBody(entry.frame, originOf(entry));
         this.recordSettled(entry.frame.msgId, 'denied');
         void this.report(entry.frame, 'denied');
       } else {
@@ -743,6 +893,7 @@ export class InboundGate {
     for (const entry of release) {
       if (!this.pinStillValid(entry.frame)) {
         misaddressed += 1;
+        this.forgetAdmittedBody(entry.frame, originOf(entry));
         this.recordSettled(entry.frame.msgId, 'misaddressed');
         void this.report(entry.frame, 'misaddressed');
         continue;
@@ -802,9 +953,10 @@ export class InboundGate {
     debugLogger.debug(
       `shutdown: expiring ${settling.length} held peer message(s)`,
     );
-    const receipts = settling.map((entry) =>
-      this.report(entry.frame, 'expired'),
-    );
+    const receipts = settling.map((entry) => {
+      this.forgetAdmittedBody(entry.frame, originOf(entry));
+      return this.report(entry.frame, 'expired');
+    });
     this.notifyHeldChange();
     // The caller tears the socket down next and the process exits right
     // after: a receipt still in flight when close resolves is a receipt
@@ -835,6 +987,14 @@ export class InboundGate {
    * session holds now, not the one the frame saw on arrival.
    */
   private pinStillValid(frame: PeerUserFrame): boolean {
+    const ownsSessionId = this.options.ownsSessionId;
+    if (ownsSessionId) {
+      // A process hosting several sessions cannot act on an unpinned
+      // frame: there is no one session it could have meant.
+      return (
+        frame.toSessionId !== undefined && ownsSessionId(frame.toSessionId)
+      );
+    }
     if (frame.toSessionId === undefined) return true;
     const ownSessionId = this.options.getSessionId?.();
     return ownSessionId === undefined || frame.toSessionId === ownSessionId;
@@ -869,6 +1029,64 @@ export class InboundGate {
       );
       return Promise.resolve();
     }
+  }
+
+  /**
+   * Undo the repeat record an admitted message left, when the gate went on
+   * to settle it as something the far model never saw.
+   *
+   * Admission records a body before the gate decides what to do with it,
+   * so every terminal that is not a delivery or a hold leaves a record for
+   * content that never arrived — and the sender's honest retry then comes
+   * back `duplicate`, a verdict whose whole premise is that the far side
+   * already has it. Keyed exactly as admission keyed it, or it is a
+   * silent no-op.
+   */
+  private forgetAdmittedBody(frame: PeerUserFrame, origin: PeerOrigin): void {
+    this.admission.forgetBody(
+      peerSenderKey(frame, origin),
+      frame.message.content,
+      frame.msgId,
+    );
+  }
+
+  /** Undo an admitted queued message that was invalidated outside the gate. */
+  forgetAdmittedMessage(senderKey: string, messageId: string): void {
+    this.admission.forgetMessage(senderKey, messageId);
+  }
+
+  /**
+   * Turn a message away without the model or the user ever seeing it, and
+   * say so to both audiences.
+   *
+   * Two of the three reasons are decided above policy; `queue-full` is
+   * decided below it, when a buffer the message was already accepted into
+   * had no room. What they share is that nothing was *decided about the
+   * message*, which is why none of them leaves a tombstone: a sender that
+   * waits and retries should find the same gate it would have found if it
+   * had waited in the first place.
+   *
+   * Both reporters are best-effort and neither may take the gate down,
+   * for the same reason `report` is wrapped: this runs on the arrival
+   * path of every message.
+   */
+  private drop(
+    frame: PeerUserFrame,
+    origin: PeerOrigin,
+    reason: PeerDropReason,
+  ): GateDecision {
+    debugLogger.debug(`dropped peer message ${frame.msgId} (${reason})`);
+    try {
+      this.options.reportDropped?.(frame, reason, origin);
+    } catch (error) {
+      debugLogger.debug(`reportDropped(${reason}) threw: ${describe(error)}`);
+    }
+    try {
+      this.options.onDropped?.(frame, origin, reason);
+    } catch (error) {
+      debugLogger.debug(`onDropped(${reason}) threw: ${describe(error)}`);
+    }
+    return 'dropped';
   }
 
   /** Hand a message to the session, reporting whether it landed. */
@@ -935,6 +1153,7 @@ export class InboundGate {
       debugLogger.debug(
         `held peer message ${entry.frame.msgId} expired after ${expiryMs} ms`,
       );
+      this.forgetAdmittedBody(entry.frame, originOf(entry));
       this.recordSettled(entry.frame.msgId, 'expired');
       void this.report(entry.frame, 'expired');
     }
@@ -997,6 +1216,10 @@ export class InboundGate {
       );
     }
   }
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function originOf(entry: HeldMessage): PeerOrigin {
