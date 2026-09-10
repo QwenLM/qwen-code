@@ -39,6 +39,10 @@ import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 // error code rather than an ad-hoc bare `{ message }` object.
 import { ToolErrorType } from '../tool-error.js';
 import type { Config } from '../../config/config.js';
+import {
+  normalizeWorkflowSourceRef,
+  type WorkflowSourceRef,
+} from '../../agents/workflow-source-ref.js';
 import type { WorkflowAgentDispatch } from '../../agents/runtime/workflow-orchestrator.js';
 import {
   DEFAULT_MAX_AGENTS_PER_RUN,
@@ -95,6 +99,7 @@ export interface WorkflowParams {
   scriptPath?: string;
   /** Optional structured value bound to the `args` global inside the script. */
   args?: unknown;
+  sourceRef?: WorkflowSourceRef;
   /**
    * P6: resume a prior run by id. When set, the run reuses `<runId>` and
    * loads `<projectDir>/workflows/<runId>/journal.jsonl`; `agent()` calls
@@ -118,6 +123,7 @@ export interface WorkflowToolOptions {
 export interface WorkflowToolResult extends ToolResult {
   /** Exact run started by a successfully admitted background invocation. */
   workflowRunId?: string;
+  sourceRef?: WorkflowSourceRef;
   /**
    * Where the script that ran lives on disk — the file a `{scriptPath}` call
    * loaded, or the persisted copy of an inline `{script}`. Absent when an
@@ -137,7 +143,9 @@ const WORKFLOW_PARAM_SCHEMA = {
         'JavaScript source of the workflow. Wrapped as an async IIFE. ' +
         'May call the injected globals `phase(title)`, `log(msg)`, ' +
         '`agent(prompt, opts?)`, and read `args`. ' +
-        'agent() opts: `{ label?, phase?, schema?, model?, agentType?, isolation?, workingDir?, stallMs? }`. ' +
+        'agent() opts: `{ label?, stepId?, extensions?, phase?, schema?, model?, agentType?, isolation?, workingDir?, stallMs? }`. ' +
+        '`stepId` (optional non-empty string, at most 256 characters): associates this dispatch with an external definition step. Multiple dispatches may share a stepId; changing it invalidates the resume cache from that call. ' +
+        '`extensions` (optional array of 1 to 16 unique names): loads active extension capabilities and context files before this agent starts. Missing, unreadable, or oversized extension context makes the dispatch fail; it does not grant permissions. ' +
         '`schema` (JSON Schema object): the subagent must deliver its result ' +
         'by calling `structured_output` with arguments matching the schema; ' +
         'agent() resolves to the validated object. After two in-conversation ' +
@@ -224,6 +232,19 @@ const WORKFLOW_PARAM_SCHEMA = {
     args: {
       description:
         'Optional structured value bound to the `args` global. Pass actual JSON, not a stringified value.',
+    },
+    sourceRef: {
+      type: 'object',
+      description:
+        'Optional external definition provenance. Does not grant permissions.',
+      properties: {
+        id: { type: 'string', minLength: 1, maxLength: 256 },
+        revision: { type: 'string', minLength: 1, maxLength: 256 },
+        digest: { type: 'string', minLength: 1, maxLength: 256 },
+        title: { type: 'string', minLength: 1, maxLength: 512 },
+      },
+      required: ['id', 'revision'],
+      additionalProperties: false,
     },
     resumeFromRunId: {
       type: 'string',
@@ -414,6 +435,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         script: this.params.script,
         scriptPath: this.params.scriptPath,
         args: this.params.args,
+        sourceRef: this.params.sourceRef,
         resumeFromRunId: this.params.resumeFromRunId,
         dispatch: this.toolOptions.dispatch,
         runInBackground,
@@ -462,6 +484,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       );
       return {
         workflowRunId: handle.runId,
+        ...(handle.sourceRef ? { sourceRef: handle.sourceRef } : {}),
         ...(handle.scriptPath ? { scriptPath: handle.scriptPath } : {}),
         ...(handle.journalPath ? { journalPath: handle.journalPath } : {}),
         llmContent: [
@@ -526,6 +549,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       });
 
       return {
+        ...(handle.sourceRef ? { sourceRef: handle.sourceRef } : {}),
         ...(handle.scriptPath ? { scriptPath: handle.scriptPath } : {}),
         ...(handle.journalPath ? { journalPath: handle.journalPath } : {}),
         // Two parts: the script's return value is left exactly as it was,
@@ -596,6 +620,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         },
       )}`;
       return {
+        ...(handle.sourceRef ? { sourceRef: handle.sourceRef } : {}),
         ...(handle.scriptPath ? { scriptPath: handle.scriptPath } : {}),
         ...(handle.journalPath ? { journalPath: handle.journalPath } : {}),
         // The failure message alone names what threw but not where to look:
@@ -704,6 +729,7 @@ function buildRunTrailer(
   const resume = buildResumeCall({
     runId: handle.runId,
     scriptPath: handle.scriptPath,
+    sourceRef: handle.sourceRef,
     args,
   });
   if (resume && includeResume) {
@@ -1262,6 +1288,13 @@ export class WorkflowTool extends BaseDeclarativeTool<
       !/^wf_[0-9a-f]+$/.test(params.resumeFromRunId)
     ) {
       return 'WorkflowTool: `resumeFromRunId` must match the generated id format `wf_<hex>`.';
+    }
+    if (params.sourceRef !== undefined) {
+      try {
+        normalizeWorkflowSourceRef(params.sourceRef);
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
     }
     if (params.run_in_background === true) {
       if (

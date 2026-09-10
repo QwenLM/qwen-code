@@ -196,6 +196,7 @@ function serializeWorkflowTask(
     ...optionalField('toolUseId', entry.toolUseId),
     ...optionalField('workflowName', entry.workflowName),
     ...optionalField('sourceRunId', entry.sourceRunId),
+    ...optionalField('sourceRef', entry.sourceRef && { ...entry.sourceRef }),
     ...optionalField('startMode', entry.startMode),
     label:
       entry.meta?.name ??
@@ -244,6 +245,10 @@ function serializeWorkflowSnapshot(
     ...optionalField('toolUseId', snapshot.toolUseId),
     ...optionalField('workflowName', snapshot.workflowName),
     ...optionalField('sourceRunId', snapshot.sourceRunId),
+    ...optionalField(
+      'sourceRef',
+      snapshot.sourceRef && { ...snapshot.sourceRef },
+    ),
     ...optionalField('startMode', snapshot.startMode),
     label:
       snapshot.meta?.name ??

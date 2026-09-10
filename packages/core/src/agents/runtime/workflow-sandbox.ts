@@ -469,6 +469,8 @@ const ARGS_MAX_DEPTH = 64;
  */
 export interface WorkflowAgentOpts {
   label?: string;
+  stepId?: string;
+  extensions?: string[];
   phase?: string;
   schema?: object;
   model?: string;
@@ -552,6 +554,7 @@ export interface WorkflowOrchestratorEmitter {
   /** A dispatch was issued and joined to the runtime dependency graph. */
   dispatchQueued?(event: {
     id: string;
+    stepId?: string;
     label?: string;
     prompt: string;
     dependsOn: string[];
@@ -1477,7 +1480,28 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // FIX-Round1-T13: throw on any opts key not in the allowlist — catches
       // typos like { scema: ... } that previously slipped through the
       // [key:string]: unknown index signature.
-      const KNOWN_AGENT_OPTS = ['label', 'phase', 'schema', 'model', 'isolation', 'agentType', 'stallMs', 'workingDir'];
+      const KNOWN_AGENT_OPTS = ['label', 'stepId', 'extensions', 'phase', 'schema', 'model', 'isolation', 'agentType', 'stallMs', 'workingDir'];
+      const validateAgentStepId = function (stepId) {
+        if (stepId !== undefined && (
+          typeof stepId !== 'string' ||
+          stepId.length === 0 ||
+          stepId.length > 256 ||
+          stepId.trim() !== stepId ||
+          Array.from(stepId).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+        )) {
+          throw new Error("agent({stepId}): must be a non-empty string of at most 256 characters without surrounding whitespace or control characters.");
+        }
+      };
+      const validateAgentExtensions = function (extensions) {
+        if (extensions !== undefined && (
+          !Array.isArray(extensions) || extensions.length === 0 || extensions.length > 16 ||
+          extensions.some((name) => typeof name !== 'string' || name.length === 0 || name.length > 128 || name.trim() !== name ||
+            Array.from(name).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) ||
+          new Set(extensions.map((name) => name.toLowerCase())).size !== extensions.length
+        )) {
+          throw new Error("agent({extensions}): must be an array of 1 to 16 unique, non-empty extension names, each at most 128 characters without surrounding whitespace or control characters.");
+        }
+      };
       globalThis.agent = vmAsync(function (prompt, agentOpts) {
         agentOpts = agentOpts || {};
         const keys = Object.keys(agentOpts);
@@ -1490,6 +1514,8 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             );
           }
         }
+        validateAgentStepId(agentOpts.stepId);
+        validateAgentExtensions(agentOpts.extensions);
         // P3: schema + model + agentType + isolation are all wired through
         // createProductionDispatch → SubagentManager.createAgentHeadless.
         // The dispatch surfaces descriptive errors for "agent type not found",
@@ -1558,6 +1584,8 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             String(e && e.message != null ? e.message : e)
           );
         }
+        validateAgentStepId(safeOpts.stepId);
+        validateAgentExtensions(safeOpts.extensions);
         // SECURITY (PR #4947 R1 wenshao, extended for P3): vmAsync's resolve
         // path is verbatim (no re-wrap of resolved values). Host-realm
         // strings cross the boundary harmlessly because primitives have no

@@ -2084,13 +2084,32 @@ caller named the path. Success responses and audit events include
       "_meta": { "source": "builtin" }
     }
   ],
-  "availableSkills": ["review"]
+  "availableSkills": ["review"],
+  "workflowsEnabled": true,
+  "workflowToolFeatures": {
+    "sourceRef": true,
+    "agentStepId": true,
+    "agentExtensions": true
+  }
 }
 ```
 
 `availableCommands` is the same command snapshot used by the
 `available_commands_update` SSE notification. `availableSkills` lists skill
 names only; clients must not expect skill bodies or paths over this route.
+
+`workflowToolFeatures` reports native `workflow` parameter support: definition
+provenance (`sourceRef`), node identity (`agentStepId`), and explicit expert
+extensions (`agentExtensions`). It is optional for older runtimes. Supporting
+runtimes report these fields as `true` independently of `workflowsEnabled`, which
+expresses current session availability. Disabling Workflow or distrusting a
+workspace does not erase implementation support or grant permission to run it.
+The same snapshot is available through ACP `session/supported-commands`.
+
+Generated flows execute through the current agent's native tool scheduler, with
+foreground execution by default and the existing hooks and approvals. See
+[Native Dynamic Workflow metadata](daemon/13-sdk-daemon-client.md#native-dynamic-workflow-metadata)
+for the tool arguments and observation contract.
 
 ### `GET /session/:id/tasks`
 
@@ -2145,6 +2164,13 @@ from the registry), and `depth` (0-based launch depth; 0 = spawned by the
 top-level session). Agents launched by the top-level session omit
 `parentAgentId` and `parentName`; clients should treat all three fields as
 optional and fall back to a flat list when they are absent.
+
+Pass `includeWorkflows=true` to include live and historical workflow tasks when
+Workflow is available. They expose optional `sourceRef` definition provenance and
+`dispatches[].stepId` node identity. The native tool call ID is `toolUseId`, and
+the task `id` is the run ID. These fields are metadata; the native tool result
+remains the source for foreground output. Ordinary task queries do not include
+workflow tasks unless requested.
 
 ### `GET /session/:id/lsp`
 

@@ -12441,6 +12441,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
       availableSkills: ['review'],
       workflowsEnabled: true,
+      workflowToolFeatures: {
+        sourceRef: true,
+        agentStepId: true,
+        agentExtensions: true,
+      },
       savedWorkflows: [
         { name: 'deep-review', source: 'project' },
         { name: 'release-check', source: 'user' },
@@ -15193,6 +15198,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
               { name: 'init', description: 'Initialize', input: null },
             ],
         workflowsEnabled: false,
+        workflowToolFeatures: {
+          sourceRef: true,
+          agentStepId: true,
+          agentExtensions: true,
+        },
         savedWorkflows: [],
       });
       await expect(

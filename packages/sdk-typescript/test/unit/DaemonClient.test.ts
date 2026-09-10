@@ -2111,6 +2111,12 @@ describe('DaemonClient', () => {
           },
         ],
         availableSkills: ['review'],
+        workflowsEnabled: false,
+        workflowToolFeatures: {
+          sourceRef: true,
+          agentStepId: true,
+          agentExtensions: true,
+        },
       };
       const tasks: DaemonSessionTasksStatus = {
         v: 1,

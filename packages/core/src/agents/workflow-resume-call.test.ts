@@ -40,6 +40,17 @@ describe('workflow resume call', () => {
     expect(serializeResumeArgs(undefined)).toBeNull();
   });
 
+  it('retains the external definition identity in model-visible resume calls', () => {
+    const sourceRef = { id: 'flow-1', revision: '7', digest: 'sha256:abc' };
+    expect(
+      buildResumeCall({
+        runId: 'wf_0123',
+        scriptPath: '/tmp/wf.js',
+        sourceRef,
+      }),
+    ).toContain(`sourceRef: ${JSON.stringify(sourceRef)}`);
+  });
+
   it('preserves background mode only when requested by the surface', () => {
     const call = buildResumeCall({
       runId: 'wf_0123',

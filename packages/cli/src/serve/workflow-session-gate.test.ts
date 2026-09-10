@@ -3,6 +3,7 @@ import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   redactWorkflowsFromAvailableCommandsEvent,
   redactWorkflowsFromReplayArrays,
+  redactWorkflowsFromSupportedCommands,
 } from './workflow-session-gate.js';
 
 interface CommandsData {
@@ -122,5 +123,38 @@ describe('redactWorkflowsFromReplayArrays', () => {
   it('returns its input unchanged when no replay arrays are present', () => {
     const session = { sessionId: 'sess-1', compactedReplay: undefined };
     expect(redactWorkflowsFromReplayArrays(session)).toBe(session);
+  });
+});
+
+describe('redactWorkflowsFromSupportedCommands', () => {
+  it('preserves native parameter support independently of session availability', () => {
+    const status = {
+      v: 1 as const,
+      sessionId: 'session-1',
+      availableCommands: [],
+      availableSkills: [],
+      workflowsEnabled: true,
+      workflowToolFeatures: {
+        sourceRef: true,
+        agentStepId: true,
+        agentExtensions: true,
+      },
+    };
+    expect(redactWorkflowsFromSupportedCommands(status)).toMatchObject({
+      workflowsEnabled: false,
+      workflowToolFeatures: status.workflowToolFeatures,
+    });
+    expect(status.workflowsEnabled).toBe(true);
+  });
+
+  it('does not invent feature support when an older runtime omits it', () => {
+    expect(
+      redactWorkflowsFromSupportedCommands({
+        v: 1,
+        sessionId: 'session-1',
+        availableCommands: [],
+        availableSkills: [],
+      }),
+    ).not.toHaveProperty('workflowToolFeatures');
   });
 });

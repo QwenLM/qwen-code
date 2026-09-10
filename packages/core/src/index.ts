@@ -470,6 +470,8 @@ export * from './agents/background-notification-queue.js';
 export * from './services/web-terminal-registry.js';
 export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-snapshot.js';
+export * from './agents/workflow-source-ref.js';
+export * from './utils/extension-mention.js';
 export {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
