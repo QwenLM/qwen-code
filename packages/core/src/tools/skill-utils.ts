@@ -389,6 +389,12 @@ export function applySkillHooks(
   }
 }
 
+export class ReviewWorkflowActivationError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
 /**
  * Applies every side effect a skill declares — `allowedTools` session allow
  * rules and frontmatter `hooks:` — behind the single folder-trust gate.
@@ -428,7 +434,11 @@ export async function applySkillSideEffects(
   });
   applySkillHooks(config, skill);
   if (skill.level === 'bundled' && skill.name === 'review') {
-    await config.enableReviewWorkflow();
+    try {
+      await config.enableReviewWorkflow();
+    } catch (error) {
+      throw new ReviewWorkflowActivationError(error);
+    }
   }
 }
 

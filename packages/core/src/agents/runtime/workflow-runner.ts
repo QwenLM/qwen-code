@@ -222,6 +222,7 @@ export class WorkflowRunner {
         reviewLimits = await resolveReviewWorkflowLimits(
           scriptPath,
           storage.getGeneratedWorkflowsDir(),
+          script,
         );
       }
       const workflowName =

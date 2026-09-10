@@ -13595,9 +13595,7 @@ class QwenAgent implements Agent {
             // The merged view is already workspace-stripped, so a repo
             // cannot self-grant here any more than at construction.
             const workflowsWereEnabled = config.isWorkflowsEnabled();
-            config.setWorkflowsEnabled(
-              newMerged.tools?.workflowsEnabled === true,
-            );
+            config.setWorkflowsEnabled(newMerged.tools?.workflowsEnabled);
             if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
               // The `workflows` slash command comes and goes with the
               // flag; a client holding the old list would keep offering

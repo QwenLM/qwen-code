@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getEventListeners } from 'node:events';
 import { promises as fs } from 'node:fs';
@@ -177,7 +179,7 @@ describe('WorkflowRunner', () => {
       'generated',
       'review',
       'session',
-      'wave.js',
+      `qwen-review-0123456789-${createHash('sha256').update(script).digest('hex')}.js`,
     );
     await fs.mkdir(path.dirname(scriptPath), { recursive: true });
     await fs.writeFile(scriptPath, script);

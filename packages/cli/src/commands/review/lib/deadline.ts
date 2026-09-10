@@ -140,15 +140,6 @@ export const DEFAULT_ROUND_SECONDS = 1800;
 /** Floor for an observed round cost — a quick same-round rebuild is not a round. */
 const MIN_OBSERVED_ROUND_SECONDS = 600;
 
-/**
- * The runtime's concurrent-agent slots — the pool every fan-out launch
- * shares. Review workflows prefer their explicit workflow concurrency limit,
- * then this tool limit, then ten slots. The admission estimate uses the same
- * resolver as dispatch so both price a paired audit against the same pool.
- */
-export const TOOL_CONCURRENCY_ENV = 'QWEN_CODE_MAX_TOOL_CONCURRENCY';
-export const DEFAULT_TOOL_CONCURRENCY = 10;
-
 interface RoundStamp {
   round: number | null;
   atMs: number;

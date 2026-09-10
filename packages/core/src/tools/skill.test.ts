@@ -621,6 +621,60 @@ describe('SkillTool', () => {
     expect(partToString(retry.llmContent)).not.toContain('already loaded');
   });
 
+  it('keeps a resident review loaded and warns when workflow activation fails', async () => {
+    vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+      name: 'review',
+      description: 'Review',
+      level: 'bundled',
+      filePath: '/bundled/review/SKILL.md',
+      body: 'Review body.',
+    });
+    const invoke = () =>
+      (skillTool as SkillToolWithProtectedMethods)
+        .createInvocation({ skill: 'review' })
+        .execute();
+    await invoke();
+    vi.mocked(config.enableReviewWorkflow).mockRejectedValueOnce(
+      new Error('schema refresh failed'),
+    );
+    const result = partToString((await invoke()).llmContent);
+    expect(result).toContain('already loaded');
+    expect(result).toContain('Warning:');
+    expect(result).toContain('schema refresh failed');
+    expect(result).not.toContain('Failed to load skill');
+    expect(result).not.toContain('Review body.');
+    const retry = partToString((await invoke()).llmContent);
+    expect(retry).toContain('already loaded');
+    expect(retry).not.toContain('Warning:');
+  });
+
+  it('does not swallow hook failures for an already loaded review', async () => {
+    vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+      name: 'review',
+      description: 'Review',
+      level: 'bundled',
+      filePath: '/bundled/review/SKILL.md',
+      body: 'Review body.',
+      hooks: { PreToolUse: [] },
+    });
+    vi.mocked(config.getHookSystem).mockReturnValue({
+      getSessionHooksManager: vi.fn().mockReturnValue({}),
+    } as unknown as ReturnType<Config['getHookSystem']>);
+    const invoke = () =>
+      (skillTool as SkillToolWithProtectedMethods)
+        .createInvocation({ skill: 'review' })
+        .execute();
+    await invoke();
+    vi.mocked(registerSkillHooks).mockImplementationOnce(() => {
+      throw new Error('hook registration failed');
+    });
+    const result = partToString((await invoke()).llmContent);
+    expect(result).toContain('Failed to load skill');
+    expect(result).toContain('hook registration failed');
+    expect(result).not.toContain('already loaded');
+    expect(config.enableReviewWorkflow).toHaveBeenCalledOnce();
+  });
+
   describe('project skill side effects require a trusted folder', () => {
     const repoSkill: SkillConfig = {
       name: 'repo-skill',

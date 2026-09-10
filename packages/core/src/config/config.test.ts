@@ -6112,6 +6112,40 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
+      it.each([undefined, false, true])(
+        'preserves the configured workflow preference %s on review activation',
+        async (workflowsEnabled) => {
+          const config = new Config({ ...baseParams, workflowsEnabled });
+          await config.initialize();
+          const registry = config.getToolRegistry();
+          vi.spyOn(registry, 'getAllToolNames').mockReturnValue([
+            ToolNames.WORKFLOW,
+          ]);
+          const getRegistry = vi.spyOn(config, 'getToolRegistry');
+          const refresh = vi.spyOn(config.getLlmClient(), 'setTools');
+          await config.enableReviewWorkflow();
+          expect(config.isWorkflowsEnabled()).toBe(workflowsEnabled !== false);
+          expect(getRegistry).toHaveBeenCalledTimes(
+            workflowsEnabled === false ? 0 : 1,
+          );
+          expect(refresh).toHaveBeenCalledTimes(
+            workflowsEnabled === false ? 0 : 1,
+          );
+        },
+      );
+
+      it('restores review auto-activation when an explicit opt-out is removed', async () => {
+        const config = new Config({ ...baseParams, workflowsEnabled: false });
+        await config.initialize();
+        vi.spyOn(config.getToolRegistry(), 'getAllToolNames').mockReturnValue([
+          ToolNames.WORKFLOW,
+        ]);
+        config.setWorkflowsEnabled(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(false);
+        await config.enableReviewWorkflow();
+        expect(config.isWorkflowsEnabled()).toBe(true);
+      });
+
       it.each(['registered', 'deferred', 'disabled'] as const)(
         'uses the existing registry with %s permissions',
         async (status) => {

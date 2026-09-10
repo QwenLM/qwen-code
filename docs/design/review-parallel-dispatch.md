@@ -47,17 +47,27 @@ overwrite the script a previous run's resume handle names.
 Invoking the trusted bundled review skill enables workflow dispatch for the current
 top-level session before the skill body reaches the model. The shared skill activation path
 covers slash commands and model-invoked skills. Registration retains existing tool
-permissions, bare/provisional restrictions, and the explicit workflow kill switch.
+permissions, bare/provisional restrictions, an explicit false workflow setting,
+and the workflow kill switch. Unset settings stay distinct from false, including
+on settings reload. A failed activation keeps the first load retryable; a failed
+refresh of an already loaded skill reports that failure alongside its loaded
+status without appending the body again.
 Other sessions remain opt-in; a disabled tool is not silently replaced by serial
 agent calls.
 
 ### Runtime limits
 
 Classify generated review scripts by their canonical location under the
-generated workflow review directory, not by model-authored metadata. Reuse the
+generated workflow review directory and the filename's content digest, not by
+model-authored metadata. Hash the exact source already loaded for execution so
+a second file read cannot validate different bytes. This detects modified
+content under an existing name; it does not authenticate a writer with access
+to the directory. Path-probe failures use generic limits, while an expired
+review deadline still refuses dispatch. Reuse the
 existing workflow dispatcher, queue, sandbox, transcripts, and failure handling.
 The review profile supplies finite defaults of 500 turns and 100 minutes per
-agent, a six-hour workflow limit, and ten concurrent agents. Honor explicit
+agent, a six-hour workflow limit, and ten concurrent agents, independent of CPU
+count because the work primarily waits for model responses. Honor explicit
 operator workflow limits: workflow concurrency takes priority over tool concurrency,
 and an explicit limit of one intentionally serializes the queue. When a valid review deadline exists, bound the run's
 launch-time allowance by the remaining time minus the compose reserve floor.

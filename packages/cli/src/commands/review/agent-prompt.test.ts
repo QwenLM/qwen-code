@@ -49,7 +49,6 @@ import {
   DEADLINE_ENV,
   RESERVE_ENV,
   COMPOSE_FLOOR_ENV,
-  TOOL_CONCURRENCY_ENV,
   readBudgetStop,
   readRoundStamps,
   stampRound,
@@ -4791,7 +4790,7 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
   afterEach(() => {
     delete process.env[DEADLINE_ENV];
     delete process.env[RESERVE_ENV];
-    delete process.env[TOOL_CONCURRENCY_ENV];
+    delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
     process.exitCode = undefined;
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
@@ -5245,7 +5244,7 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     // round runs two waves and the pair three, so round 2 pays 3/2 of the
     // round estimate — and the gate refuses it when the reserve plus that
     // does not fit, even though round 1 (one estimate) just admitted.
-    process.env[TOOL_CONCURRENCY_ENV] = '2';
+    process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '2';
     process.env[RESERVE_ENV] = '600';
     process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 3000);
     const plan = call('reverse-audit', { 'all-chunks': true, round: 1 });
@@ -5264,7 +5263,7 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
   });
 
   it('admits the 3B pair when the reserve plus the pair wall fits', () => {
-    process.env[TOOL_CONCURRENCY_ENV] = '2';
+    process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '2';
     process.env[RESERVE_ENV] = '600';
     process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 3400);
     const plan = call('reverse-audit', { 'all-chunks': true, round: 1 });
@@ -5350,7 +5349,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       // carries (#9259), on the describe that actually needs it.
       DEADLINE_ENV,
       RESERVE_ENV,
-      TOOL_CONCURRENCY_ENV,
+      'QWEN_CODE_MAX_TOOL_CONCURRENCY',
     ]) {
       SAVED[k] = process.env[k];
     }
@@ -5358,7 +5357,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     process.env['QWEN_CODE_SESSION_ID'] = 'S1';
     delete process.env[DEADLINE_ENV];
     delete process.env[RESERVE_ENV];
-    delete process.env[TOOL_CONCURRENCY_ENV];
+    delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
     mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
   });
   afterEach(() => {

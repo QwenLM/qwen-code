@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { createDebugLogger } from '../../utils/debugLogger.js';
 import { parsePositiveIntegerEnv } from '../../utils/env.js';
 import {
   resolveConcurrencyLimit,
@@ -14,6 +16,8 @@ import {
   MAX_WORKFLOW_CONCURRENCY_ENV,
   type WorkflowSubagentBounds,
 } from './workflow-orchestrator.js';
+
+const debugLogger = createDebugLogger('REVIEW_WORKFLOW');
 
 export function resolveReviewWorkflowConcurrency(
   env: NodeJS.ProcessEnv = process.env,
@@ -35,19 +39,37 @@ export interface ReviewWorkflowLimits {
 export async function resolveReviewWorkflowLimits(
   scriptPath: string,
   generatedDir: string,
+  scriptContent: string,
   env: NodeJS.ProcessEnv = process.env,
   nowMs: number = Date.now(),
 ): Promise<ReviewWorkflowLimits | undefined> {
-  let generatedRoot: string;
+  let canonicalScript: string;
   try {
     if ((await fs.lstat(generatedDir)).isSymbolicLink()) return undefined;
-    generatedRoot = await fs.realpath(generatedDir);
+    const generatedRoot = await fs.realpath(generatedDir);
+    canonicalScript = await fs.realpath(scriptPath);
+    if (
+      !canonicalScript.startsWith(path.join(generatedRoot, 'review') + path.sep)
+    ) {
+      return undefined;
+    }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw error;
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      debugLogger.warn(
+        'Cannot classify review workflow; using generic limits:',
+        error,
+      );
+    }
+    return undefined;
   }
-  const script = await fs.realpath(scriptPath);
-  if (!script.startsWith(path.join(generatedRoot, 'review') + path.sep)) {
+  const digest = /^qwen-review-[a-f0-9]{10}-([a-f0-9]{64})\.js$/.exec(
+    path.basename(canonicalScript),
+  )?.[1];
+  // Hash the source already loaded for execution, not a second filesystem read.
+  if (
+    !digest ||
+    createHash('sha256').update(scriptContent).digest('hex') !== digest
+  ) {
     return undefined;
   }
 
