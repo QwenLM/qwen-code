@@ -956,9 +956,10 @@ export interface BridgeClientRequestContext {
   promptId?: string;
   /**
    * Internal originator for a daemon-owned mid-turn message promoted into the
-   * normal prompt FIFO. It was authenticated when the message was enqueued,
-   * so promotion must not revalidate it after that client has detached.
-   * Transport routes never populate this field from request input.
+   * normal prompt FIFO. It was authenticated when the message was enqueued, so
+   * promotion may still deliver it after that client detaches; turn capabilities
+   * that require a live client must re-check attachment. Transport routes never
+   * populate this field from request input.
    */
   promotedMidTurn?: { originatorClientId?: string };
   /**
