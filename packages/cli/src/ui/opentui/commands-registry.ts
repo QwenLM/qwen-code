@@ -40,7 +40,7 @@ export type OpenTuiDialogRequest =
   | { dialog: 'settings' }
   | { dialog: 'statusline' }
   | { dialog: 'memory' }
-  | { dialog: 'auth' }
+  | { dialog: 'auth'; initialError?: string }
   | { dialog: 'trust' }
   | { dialog: 'permissions' }
   | { dialog: 'approval-mode' }
