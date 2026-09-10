@@ -282,6 +282,18 @@ The `qwen-extension.json` file contains the configuration for the extension. The
   "commands": "commands",
   "skills": "skills",
   "agents": "agents",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${extensionPath}/scripts/setup.sh"
+          }
+        ]
+      }
+    ]
+  },
   "settings": [
     {
       "name": "API Key",
@@ -302,6 +314,7 @@ The `qwen-extension.json` file contains the configuration for the extension. The
 - `commands`: The directory containing custom commands (default: `commands`). Commands are `.md` files that define prompts.
 - `skills`: The directory containing custom skills (default: `skills`). Skills are discovered automatically and become available via the `/skills` command.
 - `agents`: The directory containing custom subagents (default: `agents`). Subagents are `.yaml` or `.md` files that define specialized AI assistants.
+- `hooks`: Hook configurations that run scripts at specific points in the Qwen Code lifecycle. Can be a string path to a hook config file or an inline object. If omitted, hooks are loaded from `hooks/hooks.json` in the extension directory. If the string path is set but its file is missing, the runtime emits a warning and falls back to `hooks/hooks.json` if that file exists. See [Hooks](../features/hooks) for the supported events, schemas, and configuration format.
 - `settings`: An array of settings that the extension requires. When installing, users will be prompted to provide values for these settings. The values are stored securely and passed to MCP servers as environment variables.
   - Each setting has the following properties:
     - `name`: Display name for the setting
@@ -388,6 +401,23 @@ Extensions can provide custom subagents by placing agent configuration files in 
 ```
 
 Extension subagents appear in the subagent manager dialog under "Extension Agents" section.
+
+### Custom hooks
+
+Extensions can provide custom hooks by placing a `hooks/hooks.json` file in the extension directory, or by adding a `hooks` string path or inline object to `qwen-extension.json`.
+
+**Example**
+
+```
+.qwen/extensions/my-extension/
+├── qwen-extension.json
+└── hooks/
+    └── hooks.json
+```
+
+The hook will be available via the `/hooks` command when the extension is active.
+
+For the supported hook events, input/output schemas, and configuration format, see [Hooks](../features/hooks).
 
 ### Conflict resolution
 

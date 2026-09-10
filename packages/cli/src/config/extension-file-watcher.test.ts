@@ -111,6 +111,7 @@ describe('ExtensionFileWatcher', () => {
             type: 'link',
             source: 'relative-linked-extension',
           },
+          trustedLinkSource: linkedSource,
           contextFiles: [],
         },
       ]),
@@ -460,6 +461,7 @@ describe('ExtensionFileWatcher', () => {
           path: '/tmp/linked-extension',
           config: {},
           installMetadata: { type: 'link', source: '/tmp/linked-extension' },
+          trustedLinkSource: '/tmp/linked-extension',
           contextFiles: ['/tmp/linked-extension/GEMINI.md'],
         },
       ]),
@@ -474,6 +476,57 @@ describe('ExtensionFileWatcher', () => {
 
     expect(refreshState.markExtensionsChanged).toHaveBeenCalledTimes(2);
     expect(refreshState.markExtensionContentChanged).toHaveBeenCalledOnce();
+  });
+
+  it('classifies a link-source event by the trusted grant, ignoring forged in-band source', () => {
+    const realSource = path.resolve('/tmp/real-linked-extension');
+    const refreshState = createRefreshState();
+    const watcher = new ExtensionFileWatcher(
+      configWithExtensions([
+        {
+          path: realSource,
+          config: {},
+          installMetadata: { type: 'link', source: '/' },
+          contextFiles: [],
+        },
+        {
+          path: realSource,
+          config: {},
+          installMetadata: { type: 'link', source: realSource },
+          trustedLinkSource: realSource,
+          contextFiles: [],
+        },
+      ]),
+      extensionsDir,
+      refreshState,
+    );
+    watcher.startWatching();
+
+    fireAllEvent(0, 'change', `${realSource}/qwen-extension.json`);
+
+    expect(refreshState.markExtensionsChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips link-source classification for extensions without a trusted grant', () => {
+    const ungrantedSource = path.resolve('/tmp/ungranted-link');
+    const refreshState = createRefreshState();
+    const watcher = new ExtensionFileWatcher(
+      configWithExtensions([
+        {
+          path: ungrantedSource,
+          config: {},
+          installMetadata: { type: 'link', source: ungrantedSource },
+          contextFiles: [],
+        },
+      ]),
+      extensionsDir,
+      refreshState,
+    );
+    watcher.startWatching();
+
+    fireAllEvent(0, 'change', `${ungrantedSource}/qwen-extension.json`);
+
+    expect(refreshState.markExtensionsChanged).not.toHaveBeenCalled();
   });
 
   it('marks refresh needed for file-backed hook and LSP config changes', () => {
@@ -513,6 +566,7 @@ describe('ExtensionFileWatcher', () => {
             path: activeSource,
             config: {},
             installMetadata: { type: 'link', source: activeSource },
+            trustedLinkSource: activeSource,
             contextFiles: [`${activeSource}/QWEN.md`],
           },
           {
@@ -527,6 +581,7 @@ describe('ExtensionFileWatcher', () => {
             path: activeSource,
             config: {},
             installMetadata: { type: 'link', source: activeSource },
+            trustedLinkSource: activeSource,
             contextFiles: [`${activeSource}/QWEN.md`],
           },
         ],

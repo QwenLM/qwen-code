@@ -16,6 +16,21 @@ import type { ExtensionSetting } from './extensionSettings.js';
 import { ExtensionStorage } from './storage.js';
 import { convertTomlToMarkdown } from '../utils/toml-to-markdown-converter.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  isPathWithin,
+  isRegularFile,
+  readExtensionManifest,
+  realPathWithin,
+} from './path-confinement.js';
+import {
+  normalizeMcpServers,
+  assertMcpServersContainer,
+} from './claude-converter.js';
+import {
+  AGENT_PLUGIN_MANIFEST,
+  getAgentPluginSchemaStatus,
+} from './agent-plugins-v1/manifest.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 
 const debugLogger = createDebugLogger('GEMINI_CONVERTER');
 
@@ -35,17 +50,17 @@ export interface GeminiExtensionConfig {
 export function convertGeminiToQwenConfig(
   extensionDir: string,
 ): ExtensionConfig {
-  const configFilePath = path.join(extensionDir, 'gemini-extension.json');
-  // The manifest may be a symlink in an untrusted clone; refuse to follow it
-  // outside the extension (would read an arbitrary JSON-shaped host file),
-  // matching the Claude-format manifest guards.
-  if (!realPathWithin(configFilePath, extensionDir)) {
+  // readExtensionManifest throws on a symlink escape, unparseable body, or
+  // non-object body; returns null when absent.
+  const geminiConfig = readExtensionManifest(
+    extensionDir,
+    'gemini-extension.json',
+  ) as GeminiExtensionConfig | null;
+  if (!geminiConfig) {
     throw new Error(
-      `Gemini extension config at ${configFilePath} resolves through a symlink outside the extension`,
+      `Gemini extension config not found at ${stripAnsiAndControl(path.join(extensionDir, 'gemini-extension.json'))}`,
     );
   }
-  const configContent = fs.readFileSync(configFilePath, 'utf-8');
-  const geminiConfig: GeminiExtensionConfig = JSON.parse(configContent);
   // Validate required fields
   if (!geminiConfig.name || !geminiConfig.version) {
     throw new Error(
@@ -55,13 +70,45 @@ export function convertGeminiToQwenConfig(
 
   const settings: ExtensionSetting[] | undefined = geminiConfig.settings;
 
+  // Container must be an object (array / scalar would install zero
+  // servers silently); null treated as absent.
+  const validatedServers =
+    geminiConfig.mcpServers == null
+      ? undefined
+      : assertMcpServersContainer(
+          geminiConfig.mcpServers,
+          'Invalid MCP configuration: mcpServers must be an object',
+          geminiConfig.name,
+        );
+  const mcpServers = validatedServers
+    ? normalizeMcpServers(
+        validatedServers,
+        path.join(extensionDir, 'gemini-extension.json'),
+      )
+    : undefined;
+
+  // Declare hooks explicitly when the extension ships the default
+  // hooks/hooks.json file, so the manifest is self-contained instead of
+  // relying on the runtime's implicit default-route load. The path string is
+  // kept (not expanded) so loadExtension hydrates `${extensionPath}`/variables
+  // at load. existsSync + realPathWithin catches escaping symlinks;
+  // isRegularFile rejects a directory named hooks/hooks.json.
+  const hooksFile = path.join(extensionDir, 'hooks', 'hooks.json');
+  const hooks =
+    fs.existsSync(hooksFile) &&
+    realPathWithin(hooksFile, extensionDir) &&
+    isRegularFile(hooksFile)
+      ? 'hooks/hooks.json'
+      : undefined;
+
   // Direct field mapping
   return {
     name: geminiConfig.name,
     version: geminiConfig.version,
-    mcpServers: geminiConfig.mcpServers as ExtensionConfig['mcpServers'],
+    mcpServers,
     contextFileName: geminiConfig.contextFileName,
     settings,
+    hooks,
   };
 }
 
@@ -86,6 +133,14 @@ export async function convertGeminiExtensionPackage(
   try {
     // Step 1: Copy all files and directories to temporary directory
     await copyDirectory(extensionDir, tmpDir);
+
+    // If the source ships a root Agent-Plugins manifest, drop it so the
+    // loader cannot prefer it over the converted qwen-extension.json.
+    if (getAgentPluginSchemaStatus(tmpDir) !== 'unrelated') {
+      await fs.promises.rm(path.join(tmpDir, AGENT_PLUGIN_MANIFEST), {
+        force: true,
+      });
+    }
 
     // Step 2: Convert TOML commands to Markdown in commands folder
     const commandsDir = path.join(tmpDir, 'commands');
@@ -117,29 +172,6 @@ export async function convertGeminiExtensionPackage(
 }
 
 /**
- * True when `child` equals or is nested under `parent`. Both must already be
- * absolute, resolved paths. Shared containment primitive for the symlink
- * confinement guards (kept in one place so the rule can't drift between files).
- */
-export function isPathWithin(child: string, parent: string): boolean {
-  return child === parent || child.startsWith(parent + path.sep);
-}
-
-/**
- * True when `target` exists and its real (symlink-resolved) path stays within
- * `root`'s real path. Both sides are resolved with `fs.realpathSync` so a
- * symlink in an untrusted source cannot point a read/copy at a file outside
- * the package. Returns false for missing or broken paths.
- */
-export function realPathWithin(target: string, root: string): boolean {
-  try {
-    return isPathWithin(fs.realpathSync(target), fs.realpathSync(root));
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Recursively copies a directory and its contents.
  * @param source Source directory path
  * @param destination Destination directory path
@@ -152,16 +184,6 @@ export async function copyDirectory(
   destination: string,
   confineRoot?: string,
 ): Promise<void> {
-  // Create destination directory if it doesn't exist
-  if (!fs.existsSync(destination)) {
-    fs.mkdirSync(destination, { recursive: true });
-  }
-
-  // Symlinks in an (untrusted) source are dereferenced and their *target*
-  // content is copied below, so a link escaping the package — e.g.
-  // `skills/leak.txt -> ~/.ssh/id_rsa` — would otherwise pull host files into
-  // the output. Pin a confinement root (the package's real path) on the first
-  // call and thread it through recursion to reject escaping symlink targets.
   let root = confineRoot;
   if (root === undefined) {
     try {
@@ -170,40 +192,102 @@ export async function copyDirectory(
       root = path.resolve(source);
     }
   }
+  // Normalize the source to its real path ONCE: every recursive sourcePath
+  // joins a resolved parent, so the cycle guard below compares resolved-vs-
+  // resolved. Without this, a copy root that itself has a symlink component
+  // (macOS os.tmpdir: /var -> /private/var; a symlinked extensions dir on
+  // Linux) defeats the guard and nests a duplicated tree level.
+  let realSource = source;
+  try {
+    realSource = fs.realpathSync(source);
+  } catch {
+    realSource = path.resolve(source);
+  }
+  await copyDirectoryRecursive(realSource, destination, root, new Set(), {
+    createdDirs: 0,
+  });
+}
 
-  const entries = fs.readdirSync(source, { withFileTypes: true });
+// The stack-scoped cycle guard leaves mutually-interlinked directories legal
+// (~e*k! copy entries for k of them), so bound the total instead of letting the
+// conversion fill the disk.
+const MAX_CONVERT_DIRS = 1000;
 
-  for (const entry of entries) {
-    const sourcePath = path.join(source, entry.name);
-    const destPath = path.join(destination, entry.name);
-
-    if (entry.isDirectory()) {
-      await copyDirectory(sourcePath, destPath, root);
-    } else if (entry.isSymbolicLink()) {
-      // Resolve symlink and copy the target content, but only when the target
-      // stays inside the package root.
-      try {
-        const realPath = fs.realpathSync(sourcePath);
-        if (!isPathWithin(realPath, root)) {
-          debugLogger.warn(
-            `Skipping symlink that escapes the package: ${sourcePath} -> ${realPath}`,
-          );
-          continue;
-        }
-        const targetStat = fs.statSync(realPath);
-        if (targetStat.isDirectory()) {
-          await copyDirectory(realPath, destPath, root);
-        } else if (targetStat.isFile()) {
-          fs.copyFileSync(realPath, destPath);
-        }
-        // Skip sockets, FIFOs, etc.
-      } catch {
-        // Skip broken symlinks
-      }
-    } else if (entry.isFile()) {
-      fs.copyFileSync(sourcePath, destPath);
+/**
+ * Internal copy recursion. `stack` holds the real paths on the CURRENT
+ * recursion path only (deleted on exit), so a symlink whose target is the
+ * copy root, an ancestor, or a mutually-interlinked sibling is skipped
+ * instead of nesting to the OS path limit — without a global visited set
+ * silently dropping legitimate aliases already copied through another branch.
+ */
+async function copyDirectoryRecursive(
+  source: string,
+  destination: string,
+  root: string,
+  stack: Set<string>,
+  budget: { createdDirs: number },
+): Promise<void> {
+  if (stack.has(source)) return;
+  if (++budget.createdDirs > MAX_CONVERT_DIRS) {
+    throw new Error('Extension package is too complex to convert');
+  }
+  stack.add(source);
+  try {
+    // Create destination directory if it doesn't exist
+    if (!fs.existsSync(destination)) {
+      fs.mkdirSync(destination, { recursive: true });
     }
-    // Skip sockets, FIFOs, block devices, and character devices
+
+    const entries = fs.readdirSync(source, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const sourcePath = path.join(source, entry.name);
+      const destPath = path.join(destination, entry.name);
+
+      if (entry.isDirectory()) {
+        await copyDirectoryRecursive(sourcePath, destPath, root, stack, budget);
+      } else if (entry.isSymbolicLink()) {
+        // Resolve symlink and copy the target content, but only when the target
+        // stays inside the package root.
+        try {
+          const realPath = fs.realpathSync(sourcePath);
+          if (!isPathWithin(realPath, root)) {
+            debugLogger.warn(
+              `Skipping symlink that escapes the package: ${stripAnsiAndControl(sourcePath)} -> ${stripAnsiAndControl(realPath)}`,
+            );
+            continue;
+          }
+          // A symlink whose real target is already on the CURRENT recursion path
+          // (self-link, ancestor, mutual pair) would nest the copy forever.
+          if (stack.has(realPath)) {
+            debugLogger.warn(
+              `Skipping symlink that points back into the copied tree: ${stripAnsiAndControl(sourcePath)} -> ${stripAnsiAndControl(realPath)}`,
+            );
+            continue;
+          }
+          const targetStat = fs.statSync(realPath);
+          if (targetStat.isDirectory()) {
+            await copyDirectoryRecursive(
+              realPath,
+              destPath,
+              root,
+              stack,
+              budget,
+            );
+          } else if (targetStat.isFile()) {
+            fs.copyFileSync(realPath, destPath);
+          }
+          // Skip sockets, FIFOs, etc.
+        } catch {
+          // Skip broken symlinks
+        }
+      } else if (entry.isFile()) {
+        fs.copyFileSync(sourcePath, destPath);
+      }
+      // Skip sockets, FIFOs, block devices, and character devices
+    }
+  } finally {
+    stack.delete(source);
   }
 }
 
@@ -239,8 +323,12 @@ async function convertCommandsDirectory(commandsDir: string): Promise<void> {
       // Delete original TOML file
       fs.unlinkSync(tomlPath);
     } catch (error) {
+      const safeFile = stripAnsiAndControl(relativeFile);
+      const reason = stripAnsiAndControl(
+        error instanceof Error ? error.message : String(error),
+      );
       debugLogger.warn(
-        `Warning: Failed to convert command file ${relativeFile}: ${error instanceof Error ? error.message : String(error)}`,
+        `Warning: Failed to convert command file ${safeFile}: ${reason}`,
       );
       // Continue with other files even if one fails
     }
@@ -254,23 +342,10 @@ async function convertCommandsDirectory(commandsDir: string): Promise<void> {
  * @returns true if config appears to be Gemini format
  */
 export function isGeminiExtensionConfig(extensionDir: string) {
-  const configFilePath = path.join(extensionDir, 'gemini-extension.json');
-  if (!fs.existsSync(configFilePath)) {
+  const obj = readExtensionManifest(extensionDir, 'gemini-extension.json');
+  if (!obj) {
     return false;
   }
-  // Don't read through a symlink that escapes the extension during detection.
-  if (!realPathWithin(configFilePath, extensionDir)) {
-    return false;
-  }
-
-  const configContent = fs.readFileSync(configFilePath, 'utf-8');
-  const parsedConfig = JSON.parse(configContent);
-
-  if (typeof parsedConfig !== 'object' || parsedConfig === null) {
-    return false;
-  }
-
-  const obj = parsedConfig as Record<string, unknown>;
 
   // Must have name and version
   if (typeof obj['name'] !== 'string' || typeof obj['version'] !== 'string') {
