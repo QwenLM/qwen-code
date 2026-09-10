@@ -50,6 +50,9 @@ const ENV_EXPANDED_TRANSPORT_FIELDS = [
   // which is what a checked-in file needs a placeholder for.
   'targetAudience',
   'targetServiceAccount',
+  // Deliberately absent: `authProviderType`. It selects a provider from a fixed
+  // enum rather than carrying an environment-specific value, so a placeholder
+  // there could only ever resolve to a name the enum already has to contain.
 ] as const;
 
 /**
@@ -77,9 +80,10 @@ export const MAX_MCP_SERVER_CONFIG_DEPTH = 64;
  * walk reporting "within limit" and then hand the very same object to the
  * recursive resolver. Rejecting costs nothing here, because `JSON.parse` output
  * is always a tree — it can produce neither a cycle nor a shared subtree — so
- * for this function's only caller the branch is unreachable. It exists so the
- * helper is safe for a caller whose input did not come from `JSON.parse`, and
- * it also keeps the walk's work bounded, which dropping the set would not.
+ * for both of its callers — this loader and `parseMcpConfig` — the branch is
+ * unreachable. It exists so the helper is safe for a caller whose input did not
+ * come from `JSON.parse`, and it also keeps the walk's work bounded, which
+ * dropping the set would not.
  */
 export function exceedsMaxDepth(root: unknown, maxDepth: number): boolean {
   const stack: Array<{ value: unknown; depth: number }> = [
