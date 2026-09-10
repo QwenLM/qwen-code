@@ -14,7 +14,10 @@ describe('recursive locator plans', () => {
     const probe = spawnSync(
       process.execPath,
       [
-        '--max-old-space-size=256',
+        // The cap bounds the probe's own allocations; it must also clear the
+        // tsx loader's startup footprint, which alone exceeds 512MB on some
+        // hosts.
+        '--max-old-space-size=1024',
         '--import',
         'tsx',
         '--input-type=module',

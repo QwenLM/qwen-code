@@ -54,9 +54,15 @@ export function providerTab(value: unknown): ProviderTab {
 }
 
 export function matcher(value: LocatorMatcher): string | RegExp {
-  return typeof value === 'string'
-    ? value
-    : new RegExp(value.regex, value.flags ?? '');
+  if (typeof value === 'string') return value;
+  try {
+    return new RegExp(value.regex, value.flags ?? '');
+  } catch (error) {
+    throw new BrowserRuntimeError(
+      'INVALID_ARGUMENT',
+      `Invalid locator regex: ${(error as Error).message}`,
+    );
+  }
 }
 
 export function navigationOptions(args: Args): {

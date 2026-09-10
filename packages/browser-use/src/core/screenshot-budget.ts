@@ -8,7 +8,9 @@ import { BrowserRuntimeError } from './errors.js';
 
 // Keep the worst-case RGBA payload below the MCP/bridge byte ceilings while
 // still allowing a full 1920x1080 viewport without changing the 1:1 CSS-pixel
-// coordinate contract.
+// coordinate contract. Only clip and full-page captures are bounded by this
+// budget: a viewport capture must keep the whole window for the coordinate
+// contract, so its size is bounded by MAX_SCREENSHOT_BYTES instead.
 export const MAX_SCREENSHOT_PIXELS = 2_097_152;
 export const MAX_SCREENSHOT_EDGE = 8_192;
 export const MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024;
