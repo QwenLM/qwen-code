@@ -69,7 +69,7 @@ abstract class ChannelBase {
 
 All internal message delivery routes through `sendThreadMessage(chatId, threadId, text, sourceLabel)`. The default implementation falls through to `sendMessage(chatId, attributedText)`, ignoring `threadId`. Polling, rich-card, media, streaming, and platform-splitting adapters override the boundary so the optional plain-text source label is escaped for the platform and repeated on every independently visible object without mutating raw response state.
 
-Handles common cross-cutting concerns: sender gating (allowlist / denylist), group gating, message block streaming (chunk size, throttling), inbound debounce.
+Handles common cross-cutting concerns: sender gating (allowlist / denylist), group gating, inbound debounce.
 
 ### Per-channel adapters
 
@@ -141,9 +141,9 @@ sequenceDiagram
 
     D-->>SC: SSE: session_update (agent_message_chunk)
     SC-->>BR: DaemonEvent
-    BR-->>CB: emit 'textChunk'
-    CB->>CB: assemble response / block streaming
-    CB->>AD: sendMessage(chatId, chunk or full response)
+    BR-->>CB: emit 'textChunk' -> onResponseChunk (default no-op)
+    BR-->>CB: prompt() resolves with the full response
+    CB->>AD: sendThreadMessage(chatId, threadId, full response, sourceLabel)
     AD->>CH: sendText / sendMessage / sendChunk
 ```
 
@@ -201,7 +201,6 @@ Adapter `connect()` failures are reported separately from worker lifecycle error
 | `approvalMode`                           | `'auto'` (auto-respond) / `'prompt'` (render UI).                                                                                                                                                                                                                                                                                                                                                 |
 | `allowlist?: string[]`                   | Sender ids allowed; missing = open.                                                                                                                                                                                                                                                                                                                                                               |
 | `denylist?: string[]`                    | Sender ids denied.                                                                                                                                                                                                                                                                                                                                                                                |
-| `chunkSize`, `chunkIntervalMs`           | Outbound block streaming settings.                                                                                                                                                                                                                                                                                                                                                                |
 | `daemon: { baseUrl, token?, clientId? }` | Forwarded to `DaemonChannelSessionFactory`.                                                                                                                                                                                                                                                                                                                                                       |
 
 Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilinkUrl`, `botId`; Telegram: `botToken`; Feishu: `clientId` (appId), `clientSecret` (appSecret), `verificationToken`, `encryptKey` (webhook mode)).

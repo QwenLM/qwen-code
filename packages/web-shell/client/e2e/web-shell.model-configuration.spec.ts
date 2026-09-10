@@ -366,6 +366,7 @@ for (const viewport of [
           apiKey: 'test-only-api-key',
           modelIds: ['test-model', 'second-model'],
           advancedConfig: {
+            replaceExisting: true,
             enableThinking: true,
             multimodal: { image: true, audio: true },
             contextWindowSize: 131072,
@@ -454,7 +455,9 @@ test('keeps invalid values editable and preserves defaults on a failed save', as
   await page.getByRole('button', { name: 'next', exact: true }).click();
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect.poll(() => requests.length).toBe(2);
-  expect(requests[0]).not.toHaveProperty('advancedConfig');
+  expect(requests[0]).toHaveProperty('advancedConfig', {
+    replaceExisting: true,
+  });
   expect(requests[1]).toEqual(requests[0]);
   await expect(
     page.getByRole('dialog', { name: 'Connect a Provider' }),
@@ -721,7 +724,11 @@ for (const [purpose, label, modelId] of [
           baseUrl: 'https://models.example/v1',
           apiKey: 'test-only-api-key',
           modelIds: [modelId],
-          advancedConfig: { purpose, contextWindowSize: 32768 },
+          advancedConfig: {
+            replaceExisting: true,
+            purpose,
+            contextWindowSize: 32768,
+          },
         },
       ]);
     await expect(dialog).toHaveCount(0);

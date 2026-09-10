@@ -1,5 +1,6 @@
 import type {
   DaemonSessionArtifact,
+  SessionSource,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
   DaemonSessionTaskStatus,
@@ -7,6 +8,8 @@ import type {
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import type { WebShellRightPanelItem } from '../../customization';
 import {
+  useConnection,
+  type DaemonSessionOwnerSnapshot,
   type DaemonSessionActions,
   type DaemonScheduledTask,
 } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -31,6 +34,7 @@ import {
   NetworkIcon,
 } from 'lucide-react';
 import { Skeleton } from '../ui/skeleton';
+import { Button } from '../ui/button';
 import {
   useCallback,
   useEffect,
@@ -139,6 +143,17 @@ export type ImageTabSource = {
 export type ArtifactPanelTab =
   | {
       id: string;
+      kind: 'source';
+      title: string;
+      source: SessionSource;
+      sourceSessionId: string;
+      workspaceCwd?: string;
+      workspaceId?: string;
+      owner: DaemonSessionOwnerSnapshot;
+      sessionActions: DaemonSessionActions;
+    }
+  | {
+      id: string;
       kind: 'review';
       title: string;
       workspaceCwd?: string;
@@ -160,6 +175,7 @@ export type ArtifactPanelTab =
       previewData?: Blob;
       previewMimeType?: string;
       previewOnly?: boolean;
+      sourcePreview?: boolean;
       sourceSessionId?: string;
       /**
        * Set for attachment-backed previews so the tab can re-fetch its bytes
@@ -477,9 +493,17 @@ export function ArtifactPanel({
     [],
   );
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
+  const sourceHtmlPreview =
+    activeTab?.kind === 'file' &&
+    activeTab.sourcePreview &&
+    (/\.html?$/i.test(activeTab.workspacePath) ||
+      normalizeArtifactMimeType(
+        activeTab.previewMimeType || activeTab.previewData?.type,
+      ) === 'text/html');
   const canPreviewAttachment =
     activeTab?.kind === 'file' &&
     activeTab.previewOnly === true &&
+    !sourceHtmlPreview &&
     /\.(?:html?|md|markdown)$/i.test(activeTab.workspacePath) &&
     (activeTab.previewContent !== undefined ||
       !activeTab.previewData ||
@@ -1010,6 +1034,23 @@ export function ArtifactPanel({
             >
               {activeTab.loadError ?? t('common.loading')}
             </div>
+          ) : activeTab.sourcePreview &&
+            activeTab.previewData &&
+            normalizeArtifactMimeType(
+              activeTab.previewMimeType || activeTab.previewData.type,
+            ) !== 'application/pdf' &&
+            !normalizeTextMediaType(
+              activeTab.previewMimeType || activeTab.previewData.type,
+              activeTab.workspacePath,
+            ) ? (
+            <SourceBlobPreview
+              data={activeTab.previewData}
+              title={activeTab.title}
+              image={
+                Boolean(getImageMimeTypeFromPath(activeTab.workspacePath)) &&
+                activeTab.previewData.type.startsWith('image/')
+              }
+            />
           ) : (
             <WorkspaceFilePreview
               key={activeTab.id}
@@ -1020,12 +1061,15 @@ export function ArtifactPanel({
               previewMimeType={activeTab.previewMimeType}
               previewOnly={activeTab.previewOnly}
               previewKind={
-                activeTab.previewOnly && !attachmentPreview
+                sourceHtmlPreview ||
+                (activeTab.previewOnly && !attachmentPreview)
                   ? 'source'
                   : undefined
               }
             />
           )
+        ) : activeTab.kind === 'source' ? (
+          <SourceDetail key={activeTab.id} tab={activeTab} />
         ) : activeTab.kind === 'artifact' ? (
           <ArtifactDetailTab
             key={activeTab.id}
@@ -2923,6 +2967,215 @@ function DownloadableWorkspaceArtifact({
       </div>
     </div>
   );
+}
+
+function SourceDetail({
+  tab,
+}: {
+  tab: Extract<ArtifactPanelTab, { kind: 'source' }>;
+}) {
+  const { t } = useI18n();
+  const connection = useConnection();
+  const target = useArtifactWorkspaceTarget(tab.workspaceCwd);
+  const workspaceActions = target?.actions;
+  const openExternal = useExternalLinkOpener();
+  const [attempt, setAttempt] = useState(0);
+  const [data, setData] = useState<Blob>();
+  const [error, setError] = useState<string>();
+  const source = tab.source;
+  const locator = source.locator;
+  const valid =
+    tab.owner.isCurrent() &&
+    connection.sessionId === tab.sourceSessionId &&
+    connection.capabilities?.features.includes('session_sources') &&
+    target?.workspaceId === tab.workspaceId &&
+    (Boolean(target) ||
+      (tab.workspaceCwd === undefined && locator.type !== 'workspace_file')) &&
+    (locator.type !== 'workspace_file' ||
+      source.workspaceCwd === connection.workspaceCwd);
+  const path =
+    locator.type === 'workspace_file'
+      ? locator.workspacePath
+      : locator.type === 'attachment'
+        ? locator.attachmentId
+        : '';
+  const isPdf = /\.pdf$/i.test(path);
+  useEffect(() => {
+    let cancelled = false;
+    setData(undefined);
+    setError(undefined);
+    if (!valid || locator.type === 'url') return;
+    const load = async () => {
+      if (locator.type === 'attachment') {
+        const attachment = await tab.sessionActions.readAttachment(
+          locator.attachmentId,
+        );
+        if (cancelled || !tab.owner.isCurrent()) return;
+        const bytes = Uint8Array.from(atob(attachment.data), (character) =>
+          character.charCodeAt(0),
+        );
+        setData(new Blob([bytes], { type: attachment.mimeType }));
+      } else if (isPdf && workspaceActions) {
+        const blob = await readWorkspaceFileAsBlob(
+          workspaceActions.readFileBytes,
+          path,
+          'application/pdf',
+          {
+            statFile: workspaceActions.stat,
+            isCancelled: () => cancelled || !tab.owner.isCurrent(),
+          },
+        );
+        if (!cancelled && tab.owner.isCurrent()) setData(blob);
+      }
+    };
+    void load().catch((err: unknown) => {
+      if (!cancelled && tab.owner.isCurrent())
+        setError(extractErrorDetail(err));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    attempt,
+    valid,
+    locator,
+    path,
+    isPdf,
+    tab.owner,
+    tab.sessionActions,
+    workspaceActions,
+  ]);
+  if (valid && locator.type === 'url')
+    return (
+      <div className="flex flex-col gap-3 p-4">
+        <h3>{source.title}</h3>
+        {source.description && <p>{source.description}</p>}
+        <p className="break-all text-sm text-muted-foreground">{locator.url}</p>
+        {isSafeHref(locator.url) && (
+          <a
+            className="text-primary underline"
+            href={locator.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(event) => openExternal(event, locator.url)}
+          >
+            {t('sources.openOriginal')}
+          </a>
+        )}
+      </div>
+    );
+  if (!valid || (!target && locator.type !== 'attachment'))
+    return (
+      <div className={styles.empty} role="alert">
+        {t('sources.unavailable')}
+      </div>
+    );
+  const unsupported =
+    locator.type === 'workspace_file' &&
+    !isPdf &&
+    isDownloadOnlyWorkspaceArtifact({ workspacePath: path });
+  return (
+    <div className="flex h-full min-h-0 flex-1 flex-col">
+      <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
+        <span className="truncate text-xs text-muted-foreground" title={path}>
+          {path}
+        </span>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setAttempt((value) => value + 1)}
+        >
+          {t('common.retry')}
+        </Button>
+      </div>
+      {error ? (
+        <div className={styles.previewError} role="alert">
+          {error}
+        </div>
+      ) : unsupported ? (
+        <div className="p-4">
+          <p>{t('attachment.previewUnsupported')}</p>
+          <Button
+            onClick={() =>
+              void downloadWorkspaceFile(
+                workspaceActions!,
+                path,
+                'application/octet-stream',
+                () => !tab.owner.isCurrent(),
+              ).catch((err: unknown) => {
+                if (tab.owner.isCurrent()) setError(extractErrorDetail(err));
+              })
+            }
+          >
+            {t('common.download')}
+          </Button>
+        </div>
+      ) : (locator.type === 'attachment' || isPdf) && !data ? (
+        <div className={styles.empty} role="status">
+          {t('common.loading')}
+        </div>
+      ) : data &&
+        data.type !== 'application/pdf' &&
+        !normalizeTextMediaType(data.type, path) ? (
+        <SourceBlobPreview
+          data={data}
+          title={source.title}
+          image={
+            Boolean(getImageMimeTypeFromPath(path)) &&
+            data.type.startsWith('image/')
+          }
+        />
+      ) : (
+        <WorkspaceFilePreview
+          key={attempt}
+          workspacePath={path}
+          workspaceActions={workspaceActions!}
+          previewData={data}
+          previewOnly={locator.type === 'attachment'}
+          previewMimeType={data?.type}
+          previewKind={
+            /\.html?$/i.test(path) ||
+            normalizeArtifactMimeType(data?.type) === 'text/html'
+              ? 'source'
+              : undefined
+          }
+        />
+      )}
+    </div>
+  );
+}
+
+function SourceBlobPreview({
+  data,
+  title,
+  image,
+}: {
+  data: Blob;
+  title: string;
+  image: boolean;
+}) {
+  const [url, setUrl] = useState<string>();
+  useEffect(() => {
+    const objectUrl = URL.createObjectURL(data);
+    setUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [data]);
+  return url ? (
+    <div className={styles.imagePreviewWrap}>
+      {image ? (
+        <img className={styles.imagePreview} src={url} alt={title} />
+      ) : (
+        <UnsupportedAttachmentPreview
+          name={title}
+          mimeType={data.type}
+          size={data.size}
+        />
+      )}
+      <a href={url} download={title} aria-label={`Download ${title}`}>
+        <DownloadIcon />
+      </a>
+    </div>
+  ) : null;
 }
 
 function WorkspaceFilePreview({

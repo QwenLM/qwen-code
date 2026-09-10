@@ -50,6 +50,45 @@ function createAdapter(modelProviders: ModelProvidersConfig = {}) {
 }
 
 describe('applyProviderInstallPlan', () => {
+  it('rolls back a provider write shadowed by a higher-precedence scope before selecting it', async () => {
+    const original = { openai: [{ id: 'workspace-chat' }] };
+    const adapter = createAdapter(original);
+    vi.mocked(adapter.getModelProviders).mockReturnValue(original);
+    const plan: ProviderInstallPlan = {
+      providerId: 'test',
+      authType: AuthType.USE_OPENAI,
+      modelSelection: { modelId: 'new-user-model' },
+      modelProviders: [
+        {
+          authType: AuthType.USE_OPENAI,
+          models: [{ id: 'new-user-model' }],
+          mergeStrategy: 'append',
+        },
+      ],
+    };
+    const reload = vi.fn();
+    await expect(
+      applyProviderInstallPlan(plan, {
+        settings: adapter,
+        reloadModelProviders: reload,
+      }),
+    ).rejects.toMatchObject({ step: 'modelProviders' });
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      { id: 'workspace-chat' },
+      { id: 'new-user-model' },
+    ]);
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.name',
+      expect.anything(),
+    );
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'security.auth.selectedType',
+      expect.anything(),
+    );
+    expect(adapter.restore).toHaveBeenCalledOnce();
+    expect(reload).toHaveBeenCalledExactlyOnceWith(original);
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     delete process.env['TEST_API_KEY'];

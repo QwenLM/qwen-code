@@ -72,6 +72,26 @@ export function findModelConfiguration(loaded: LoadedSettings, key: string) {
     : undefined;
 }
 
+export function findModelConfigurationForDeletion(
+  loaded: LoadedSettings,
+  target: { authType: string; modelId: string; baseUrl?: string },
+) {
+  const candidates = modelEntries(loaded).filter(
+    (entry) =>
+      entry.authType === target.authType && entry.model.id === target.modelId,
+  );
+  const exact = candidates.filter(
+    (entry) => (entry.model.baseUrl ?? undefined) === target.baseUrl,
+  );
+  const matches =
+    target.baseUrl !== undefined && exact.length ? exact : candidates;
+  if (matches.length === 0) return undefined;
+  return matches.length === 1 &&
+    getWritableScopes(loaded).includes(matches[0]!.scope)
+    ? matches[0]
+    : 'ambiguous';
+}
+
 export function getModelConfigurationKey(
   loaded: LoadedSettings,
   authType: string,
@@ -165,7 +185,13 @@ export function listModelConfigurations(loaded: LoadedSettings) {
           ? publicProviderBaseUrl(model.baseUrl)
           : undefined,
         envKey: typeof model.envKey === 'string' ? model.envKey : undefined,
-        contextWindowSize: model.generationConfig?.contextWindowSize,
+        contextWindowSize:
+          typeof model.generationConfig?.contextWindowSize === 'number' &&
+          Number.isInteger(model.generationConfig.contextWindowSize) &&
+          model.generationConfig.contextWindowSize > 0
+            ? model.generationConfig.contextWindowSize
+            : undefined,
+        canEditContextWindow: uniqueRoute,
         purpose:
           model.imageOnly === true
             ? ('image' as const)
@@ -186,6 +212,15 @@ export function updateModelContextWindow(
 ): 'user' | 'workspace' | undefined {
   const match = findModelConfiguration(loaded, key);
   if (!match) return undefined;
+  if (
+    getModelConfigurationKey(
+      loaded,
+      match.authType,
+      match.model.id,
+      match.model.baseUrl,
+    ) !== key
+  )
+    return undefined;
   const { scope, provider, index } = match;
   const providers =
     loaded.forScope(scope).originalSettings.modelProviders ?? {};

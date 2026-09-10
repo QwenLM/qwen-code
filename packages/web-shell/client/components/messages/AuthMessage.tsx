@@ -282,6 +282,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     const config: NonNullable<
       DaemonAuthProviderInstallRequest['advancedConfig']
     > = {
+      replaceExisting: true,
       ...(purpose !== 'chat' ? { purpose } : {}),
       ...(purpose === 'chat' && thinking ? { enableThinking: true } : {}),
       ...(purpose === 'chat' && modality
@@ -303,7 +304,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         ? { maxTokens: Number(maxTokens) }
         : {}),
     };
-    return Object.keys(config).length ? config : undefined;
+    return config;
   }, [
     steps,
     purpose,

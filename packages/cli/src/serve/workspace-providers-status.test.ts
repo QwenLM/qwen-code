@@ -441,6 +441,121 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     },
   );
 
+  it.each([
+    {
+      name: 'saved off with a native nested override',
+      model: 'gpt-5.5',
+      persisted: 'none',
+      generationConfig: { extra_body: { reasoning: { effort: 'high' } } },
+      currentValue: 'none',
+      metadata: { enableValue: 'default' },
+    },
+    {
+      name: 'raw off without a saved preference',
+      model: 'gpt-5.5',
+      generationConfig: { samplingParams: { reasoning_effort: 'none' } },
+      currentValue: 'none',
+      metadata: { canEnable: false },
+    },
+    {
+      name: 'OpenRouter raw on without a saved preference',
+      model: 'gpt-5.4',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      generationConfig: { samplingParams: { reasoning_effort: 'high' } },
+      currentValue: 'high',
+      metadata: { enableValue: 'default' },
+    },
+    {
+      name: 'OpenRouter raw off with a saved tier',
+      model: 'gpt-5.5',
+      persisted: 'high',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      generationConfig: { extra_body: { reasoning: { enabled: false } } },
+      currentValue: 'none',
+      metadata: { canEnable: false },
+    },
+    {
+      name: 'provider default disables the raw reset',
+      model: 'gpt-5.5',
+      persisted: 'none',
+      generationConfig: {
+        reasoning: false,
+        extra_body: { reasoning: { effort: 'high' } },
+      },
+      currentValue: 'none',
+      metadata: { canEnable: false },
+    },
+    {
+      name: 'provider defaults ignore top-level raw restrictions',
+      model: 'gpt-5.5',
+      persisted: 'none',
+      generationConfig: {},
+      currentValue: 'none',
+      metadata: {},
+    },
+    {
+      name: 'provider disabled default without a saved preference',
+      model: 'gpt-5.5',
+      generationConfig: {
+        reasoning: false,
+        extra_body: { reasoning: { effort: 'high' } },
+      },
+      currentValue: 'none',
+      metadata: { canEnable: false },
+    },
+    {
+      name: 'mandatory model removes raw off and uses its default tier',
+      model: 'gpt-6-astra',
+      persisted: 'high',
+      generationConfig: { extra_body: { reasoning_effort: 'none' } },
+      currentValue: 'medium',
+      metadata: { enableValue: 'default', thinkingMandatory: true },
+    },
+  ])('projects cold reasoning controls: $name', async (testCase) => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      $version: 4,
+      security: { auth: { selectedType: 'openai' } },
+      model: {
+        name: testCase.model,
+        reasoningEffort: testCase.persisted,
+        generationConfig: { extra_body: { reasoning_effort: 'none' } },
+      },
+      modelProviders: {
+        openai: [
+          {
+            id: testCase.model,
+            baseUrl: testCase.baseUrl ?? 'https://api.openai.com/v1',
+            generationConfig: testCase.generationConfig,
+          },
+        ],
+      },
+    });
+    const settingsBefore = await fs.readFile(
+      path.join(qwenHome, 'settings.json'),
+      'utf8',
+    );
+    const result = await provider(workspace, false);
+    const options = result.providers
+      .flatMap((entry) => entry.models)
+      .find((model) => model.baseModelId === testCase.model)?.configOptions;
+    expect(options).toEqual([
+      expect.objectContaining({
+        id: 'reasoning_effort',
+        currentValue: testCase.currentValue,
+        _meta: {
+          'qwenCode/reasoning': {
+            defaultEffort: 'medium',
+            ...testCase.metadata,
+          },
+        },
+      }),
+    ]);
+    expect(
+      await fs.readFile(path.join(qwenHome, 'settings.json'), 'utf8'),
+    ).toBe(settingsBefore);
+  });
+
   it('does not project reasoning preview onto opaque route models', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({

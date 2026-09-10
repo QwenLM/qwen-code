@@ -6,6 +6,8 @@ import { ModelsConfig } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../config/settings.js';
 import {
   getModelConfigurationKey,
+  findModelConfiguration,
+  findModelConfigurationForDeletion,
   listModelConfigurations,
   updateModelContextWindow,
 } from './model-configuration.js';
@@ -65,6 +67,25 @@ afterEach(() => {
   fs.rmSync(temp, { recursive: true, force: true });
 });
 describe('persisted model configuration', () => {
+  it.each([0, -1, '128000', 1.5])(
+    'omits invalid stored context window %s from the wire',
+    (size) => {
+      fs.writeFileSync(
+        path.join(temp, 'settings.json'),
+        JSON.stringify({
+          modelProviders: {
+            openai: [
+              { id: 'custom', generationConfig: { contextWindowSize: size } },
+            ],
+          },
+        }),
+      );
+      expect(
+        listModelConfigurations(load())[0]?.contextWindowSize,
+      ).toBeUndefined();
+    },
+  );
+
   it('does not offer ambiguous routes or fast/voice-only entries as image choices', () => {
     const image = {
       id: 'image',
@@ -254,6 +275,27 @@ describe('persisted model configuration', () => {
         expect(configs[0]?.contextWindowSize).toBe(8192);
         expect(configs[0]?.advisorModel).toBeUndefined();
         expect(configs[0]?.imageModel).toBeUndefined();
+        expect(configs[0]?.canEditContextWindow).toBe(false);
+        const before = fs.readFileSync(
+          path.join(temp, 'settings.json'),
+          'utf8',
+        );
+        expect(
+          updateModelContextWindow(loaded, configs[0]!.key, 65536),
+        ).toBeUndefined();
+        expect(fs.readFileSync(path.join(temp, 'settings.json'), 'utf8')).toBe(
+          before,
+        );
+        expect(findModelConfiguration(loaded, configs[0]!.key)?.provider).toBe(
+          'gateway',
+        );
+        expect(
+          findModelConfigurationForDeletion(loaded, {
+            authType: 'openai',
+            modelId: model.id,
+            baseUrl: model.baseUrl,
+          }),
+        ).toBe('ambiguous');
       } finally {
         vi.unstubAllEnvs();
       }

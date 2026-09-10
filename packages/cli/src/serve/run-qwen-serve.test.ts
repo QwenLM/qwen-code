@@ -8,7 +8,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { X509Certificate } from 'node:crypto';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import * as https from 'node:https';
 import * as net from 'node:net';
 import type { AddressInfo } from 'node:net';
@@ -733,9 +733,14 @@ it('marks only the live-conversation bridge with the Conversations provenance en
   }
 });
 
-it.each(['chat', 'image', 'voice'] as const)(
-  'preserves saved %s configuration through the provider HTTP installer',
-  async (purpose) => {
+it.each([
+  ['chat', false],
+  ['image', false],
+  ['voice', false],
+  ['image', true],
+] as const)(
+  'preserves saved %s configuration through the provider HTTP installer (environment auth: %s)',
+  async (purpose, environmentAuth) => {
     const root = fs.mkdtempSync(
       path.join(os.tmpdir(), 'qws-provider-reconnect-'),
     );
@@ -743,6 +748,12 @@ it.each(['chat', 'image', 'voice'] as const)(
     const workspace = path.join(root, 'workspace');
     fs.mkdirSync(home);
     fs.mkdirSync(workspace);
+    if (environmentAuth) {
+      fs.writeFileSync(
+        path.join(workspace, '.env'),
+        'OPENAI_API_KEY=environment-chat-key\nOPENAI_MODEL=environment-chat\nOPENAI_BASE_URL=https://chat.example/v1\n',
+      );
+    }
     vi.stubEnv('QWEN_HOME', home);
     const baseUrl = 'https://media.example/v1';
     const id = purpose === 'voice' ? 'qwen3-asr-flash' : `${purpose}-model`;
@@ -810,7 +821,9 @@ it.each(['chat', 'image', 'voice'] as const)(
       const result = (await response.json()) as { message: string };
       if (purpose !== 'chat') {
         expect(result.message).toBe(
-          'Service models saved. Configure a conversation model to start chatting.',
+          environmentAuth
+            ? 'Service models saved.'
+            : 'Service models saved. Configure a conversation model to start chatting.',
         );
       }
       const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -820,6 +833,27 @@ it.each(['chat', 'image', 'voice'] as const)(
         expect(saved.security?.auth?.selectedType).toBeUndefined();
         expect(saved.model?.name).toBeUndefined();
       }
+      const cleared = await fetch(`${handle.url}/workspace/auth/provider`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          providerId: 'custom-openai-compatible',
+          protocol: 'openai',
+          baseUrl,
+          apiKey: 'after',
+          modelIds: [id],
+          advancedConfig: { replaceExisting: true },
+        }),
+      });
+      expect(cleared.status).toBe(200);
+      expect(
+        JSON.parse(fs.readFileSync(file, 'utf8')).modelProviders.openai,
+      ).toEqual([
+        {
+          ...model,
+          generationConfig: { customHeaders: { 'X-Route': 'paid' } },
+        },
+      ]);
     } finally {
       await handle?.close();
       vi.unstubAllEnvs();
@@ -885,6 +919,13 @@ const mockTotalMemBytes = vi.hoisted(() => ({
 }));
 const mockNetworkInterfaces = vi.hoisted(() => ({
   value: undefined as NodeJS.Dict<os.NetworkInterfaceInfo[]> | undefined,
+}));
+const mockRemoteQuickstart = vi.hoisted(() => ({
+  print: vi.fn(),
+}));
+
+vi.mock('./remote-quickstart.js', () => ({
+  printRemoteQuickstart: mockRemoteQuickstart.print,
 }));
 
 vi.mock('node:os', async (importOriginal) => {
@@ -1562,9 +1603,9 @@ describe('formatChannelWorkerDaemonUrl', () => {
   it.each(['::', '[::]'])(
     'uses IPv6 loopback for the IPv6 wildcard host %j when the host assigns ::1',
     (host) => {
-      expect(
-        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, true),
-      ).toBe('http://[::1]:4170');
+      expect(formatChannelWorkerDaemonUrl(host, 4170, false, true)).toBe(
+        'http://[::1]:4170',
+      );
     },
   );
 
@@ -1576,52 +1617,21 @@ describe('formatChannelWorkerDaemonUrl', () => {
   it.each(['::', '[::]'])(
     'falls back to IPv4 loopback for the IPv6 wildcard host %j when the host carries no ::1',
     (host) => {
-      expect(
-        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, false),
-      ).toBe('http://127.0.0.1:4170');
+      expect(formatChannelWorkerDaemonUrl(host, 4170, false, false)).toBe(
+        'http://127.0.0.1:4170',
+      );
     },
   );
 
-  // R10-1: `listen(port, '')` tries the IPv6 unspecified address first and
-  // falls back to binding `0.0.0.0` when IPv6 is unavailable, so an empty
-  // --hostname decides by the socket that actually bound, not by spelling —
-  // on the fallback host the old spelling-based rule handed workers `[::1]`,
-  // which nothing listened on, and the first worker's failure exited the
-  // daemon. Explicit `::`/`0.0.0.0` keep their spelling-based mapping: those
-  // binds fail loud when their family is unavailable.
-  it('uses IPv6 loopback for an empty hostname on an IPv6 socket when the host assigns ::1', () => {
-    expect(formatChannelWorkerDaemonUrl('', 4170, false, undefined, true)).toBe(
-      'http://[::1]:4170',
-    );
-    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv6', true)).toBe(
-      'http://[::1]:4170',
-    );
-  });
-
-  it('falls back to IPv4 loopback for an empty hostname on an IPv6 socket when the host carries no ::1', () => {
-    expect(
-      formatChannelWorkerDaemonUrl('', 4170, false, undefined, false),
-    ).toBe('http://127.0.0.1:4170');
-    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv6', false)).toBe(
-      'http://127.0.0.1:4170',
-    );
-  });
-
-  it('falls back to IPv4 loopback for an empty hostname on an IPv4-bound socket', () => {
-    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv4')).toBe(
-      'http://127.0.0.1:4170',
-    );
-    expect(formatChannelWorkerDaemonUrl('', 4170, true, 'IPv4')).toBe(
-      'https://127.0.0.1:4170',
-    );
-  });
-
+  // R10-1's empty-hostname mapping is gone together with its branch: an
+  // empty --hostname is refused at boot as operator error before any
+  // listener exists, so no worker URL can ever be formatted for it.
   it.each(['::0', '0::0', '[::0]', '0:0:0:0:0:0:0:0'])(
     'canonicalizes IPv6 wildcard spelling %j before choosing loopback',
     (host) => {
-      expect(
-        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, true),
-      ).toBe('http://[::1]:4170');
+      expect(formatChannelWorkerDaemonUrl(host, 4170, false, true)).toBe(
+        'http://[::1]:4170',
+      );
     },
   );
 
@@ -1665,11 +1675,6 @@ describe('formatChannelWorkerDaemonUrl', () => {
       // v4 loopback only — measured here through the same dial the workers
       // use; mutating the mapping to `[::1]` reddens this arm.
       ['::ffff:0.0.0.0', { host: '::ffff:0.0.0.0', port: 0 }],
-      // R10-1: the daemon's real bind shape for an empty --hostname. The
-      // loopback family is read from the socket that actually bound, so on a
-      // host without IPv6 this same arm binds 0.0.0.0 and exercises the
-      // IPv4 fallback instead.
-      ['', { host: '', port: 0 }],
     ] as const) {
       let server: net.Server;
       try {
@@ -1681,14 +1686,7 @@ describe('formatChannelWorkerDaemonUrl', () => {
       try {
         const addr = server.address() as AddressInfo;
         const certified = new URL(
-          formatChannelWorkerDaemonUrl(
-            bind,
-            addr.port,
-            false,
-            bind === '' && (addr.family === 'IPv4' || addr.family === 'IPv6')
-              ? addr.family
-              : undefined,
-          ),
+          formatChannelWorkerDaemonUrl(bind, addr.port, false),
         );
         // URL keeps IPv6 literals bracketed; net.connect wants them bare.
         const dialHost = certified.hostname.replace(/^\[|\]$/g, '');
@@ -1731,8 +1729,9 @@ describe('formatChannelWorkerDaemonUrl', () => {
 
 describe('assertChannelWorkerDaemonUrlIsLocal', () => {
   it('accepts loopback and wildcard-rewritten worker URLs', () => {
+    // No empty-host arm: boot refuses an empty --hostname before any listener
+    // or worker URL exists, so the certifier never sees one.
     for (const host of [
-      '',
       '0',
       '0.0',
       '0.0.0.0',
@@ -9568,6 +9567,90 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('keeps the remote same-origin exception alive during the bootstrap window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-selforigin-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir, {
+      serveOptions: { hostname: '0.0.0.0' },
+    });
+    try {
+      // Pin the premises, not just the statuses: the daemon really bound the
+      // wildcard (read from the socket, not from the option echoed back), and
+      // every request below is answered by the bootstrap app — the runtime
+      // bridge has not started, so a widened deferred-route classifier or a
+      // dropped override flips these instead of silently turning the test
+      // into a loopback/warm-app probe.
+      expect((handle.server.address() as AddressInfo).address).toBe('0.0.0.0');
+      // The single-workspace bootstrap capabilities handler answers 200; a
+      // multi-workspace boot would be 503, which the guard's own retry loop
+      // tolerates but this exception test is not about.
+      const authed = await fetch(`${handle.url}/capabilities`, {
+        headers: {
+          Origin: handle.url,
+          Authorization: 'Bearer secret-token',
+        },
+      });
+      expect(authed.status).toBe(200);
+      const unauthed = await fetch(`${handle.url}/capabilities`, {
+        headers: { Origin: handle.url },
+      });
+      expect(unauthed.status).toBe(401);
+      const crossOrigin = await fetch(`${handle.url}/capabilities`, {
+        headers: {
+          Origin: 'http://evil.test',
+          Authorization: 'Bearer secret-token',
+        },
+      });
+      expect(crossOrigin.status).toBe(403);
+      expect(createBridge).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('runs the Host gate ahead of the CORS wall during the bootstrap window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-order-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle } = await startDeferredDaemon(tmpDir);
+    try {
+      // A DNS-rebinding probe carries a bad Host AND an Origin, so which gate
+      // answers decides the reject body: the bootstrap chain must match the
+      // runtime app (hostAllowlist before the CORS wall). fetch cannot set
+      // Host, so drive the raw socket.
+      const port = new URL(handle.url).port;
+      const raw = await new Promise<string>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: '127.0.0.1',
+            port,
+            path: '/capabilities',
+            method: 'GET',
+            headers: {
+              Host: `evil.example:${port}`,
+              Origin: 'http://evil.example',
+              Authorization: 'Bearer secret-token',
+            },
+          },
+          (res) => {
+            let data = '';
+            res.on('data', (chunk) => (data += chunk));
+            res.on('end', () => resolve(`${res.statusCode} ${data}`));
+          },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+      expect(raw).toContain('403');
+      expect(raw).toContain('Invalid Host header');
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('serves the // root alias during the deferred window like the warm app', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-root-alias-')),
@@ -12666,6 +12749,341 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(factory).toHaveBeenCalled();
     } finally {
       await handle.close();
+    }
+  });
+
+  it('refuses tokenless localhost resolving outside loopback instead of generating a token', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-localhost-remote-')),
+    );
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: 'localhost',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            serveWebShell: false,
+          },
+          {
+            bridge: makeFakeBridge(),
+            bindHostnameLookup: async () => ({
+              address: '192.0.2.1',
+              family: 4,
+            }),
+          },
+        ),
+      ).rejects.toThrow(/token/i);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('refuses an empty --hostname as operator error', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    try {
+      await expect(
+        runQwenServe({
+          port: 0,
+          hostname: '',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        }),
+      ).rejects.toThrow(/empty value binds every interface/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('prints the quickstart with the resolved listener arguments', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-quickstart-args-')),
+    );
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe({
+        port: 0,
+        hostname: '0.0.0.0',
+        mode: 'http-bridge',
+        serveWebShell: false,
+        workspace: tmpDir,
+      });
+      expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
+      const arg = mockRemoteQuickstart.print.mock.calls[0][0];
+      expect(arg.bind).toBe('0.0.0.0');
+      expect(arg.boundAddress).toBe('0.0.0.0');
+      expect(arg.port).toBe(
+        (started.server.address() as { port: number }).port,
+      );
+      expect(arg.tls).toBe(false);
+      expect(arg.generated).toBe(true);
+      expect(arg.token).toBe(started.resolvedToken);
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('hands the quickstart the bound address, not the operator spelling', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    // The print-mode decision (full / token-only / silent) lives inside
+    // printRemoteQuickstart and is pinned by its own unit tests; boot's
+    // contract is to report the address the socket actually bound, which an
+    // IP-literal bind exercises without touching any resolver.
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-bound-pin');
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
+      const arg = mockRemoteQuickstart.print.mock.calls[0][0];
+      expect(arg.bind).toBe('127.0.0.1');
+      expect(arg.boundAddress).toBe('127.0.0.1');
+      expect(arg.generated).toBe(false);
+      expect(arg.token).toBe('env-token-bound-pin');
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('reports the wildcard bound address, not the inet_aton spelling', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-aton-pin');
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-quickstart-aton-')),
+    );
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
+      const arg = mockRemoteQuickstart.print.mock.calls[0][0];
+      // The operator spelling and the socket address differ here, so this
+      // pins that boot reports what the socket bound, not what was typed.
+      expect(arg.bind).toBe('0');
+      expect(arg.boundAddress).toBe('0.0.0.0');
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('hands the quickstart the mounted-web-shell flag', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-quickstart-web-')),
+    );
+    writeWebShellFixture(tmpDir);
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-web-pin');
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
+      expect(mockRemoteQuickstart.print.mock.calls[0][0].web).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('boots non-loopback --require-auth on the generated bearer', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-requireauth-gen-')),
+    );
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          requireAuth: true,
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(started.resolvedToken).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('boots non-loopback --allow-origin * on the generated bearer', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-anyorigin-gen-')),
+    );
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          allowOrigins: ['*'],
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(started.resolvedToken).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('boots non-loopback --allow-origin with a remote HTTP(S) origin on the generated bearer', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-remoteorigin-gen-')),
+    );
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          allowOrigins: ['https://app.example.com'],
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(started.resolvedToken).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('refuses --require-auth and --allow-origin * on a tokenless loopback bind', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            serveWebShell: false,
+            requireAuth: true,
+          },
+          { bridge: makeFakeBridge() },
+        ),
+      ).rejects.toThrow(/--require-auth/);
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            serveWebShell: false,
+            allowOrigins: ['*'],
+          },
+          { bridge: makeFakeBridge() },
+        ),
+      ).rejects.toThrow(/--allow-origin/);
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            serveWebShell: false,
+            allowOrigins: ['https://app.example.com'],
+          },
+          { bridge: makeFakeBridge() },
+        ),
+      ).rejects.toThrow(/--allow-origin/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('boots loopback --require-auth when a token arrives pre-installed', async () => {
+    // The shape --open-with-auth leaves behind: its generated loopback token
+    // is installed on the options before runQwenServe, so the flag's
+    // fail-fast must see it like any configured source.
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          requireAuth: true,
+          token: 'pre-installed-loopback-token',
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(started.resolvedToken).toBe('pre-installed-loopback-token');
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('survives an asynchronous EPIPE on stdout and rethrows other stream errors', async () => {
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      // The guard listens on the process streams; without it an 'error'
+      // event with no listener throws out of emit itself.
+      const epipe = Object.assign(new Error('write EPIPE'), {
+        code: 'EPIPE',
+      });
+      expect(() => process.stdout.emit('error', epipe)).not.toThrow();
+      expect(() => process.stderr.emit('error', epipe)).not.toThrow();
+      const other = Object.assign(new Error('stream boom'), {
+        code: 'ENOENT',
+      });
+      expect(() => process.stdout.emit('error', other)).toThrow('stream boom');
+      expect(() => process.stderr.emit('error', other)).toThrow('stream boom');
+    } finally {
+      await started?.close();
     }
   });
 

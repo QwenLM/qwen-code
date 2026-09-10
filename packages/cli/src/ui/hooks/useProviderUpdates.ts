@@ -272,7 +272,12 @@ export function useProviderUpdates(
             apiKey: '',
             modelIds: [...defaultIds, ...customIds],
           },
-          settings.merged.modelProviders?.[providerCfg.protocol],
+          settings.merged.modelProviders?.[providerCfg.protocol]?.map(
+            (model) =>
+              defaultIds.includes(model.id)
+                ? { ...model, name: undefined, generationConfig: undefined }
+                : model,
+          ),
         );
         installPlan.providerState![
           `${PROVIDER_METADATA_NS}.${pending.metadataKey}`

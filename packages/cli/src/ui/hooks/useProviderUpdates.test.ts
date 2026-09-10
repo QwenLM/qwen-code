@@ -267,12 +267,16 @@ describe('useProviderUpdates', () => {
     expect(entry?.diff.added).toContain(addedModelId);
   });
 
-  it('persists the template version and preserves custom models', async () => {
+  it('refreshes template fields and version while preserving custom model settings', async () => {
     const customModel = {
       id: 'my-custom-model',
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       envKey: CODING_PLAN_ENV_KEY,
       name: '[Coding Plan] my-custom-model',
+      generationConfig: {
+        contextWindowSize: 65536,
+        samplingParams: { temperature: 0.2 },
+      },
     };
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
@@ -281,7 +285,14 @@ describe('useProviderUpdates', () => {
       version: 'old-version-hash',
     };
     mockSettings.merged['modelProviders'] = {
-      [AuthType.USE_OPENAI]: [...chinaTemplate, customModel],
+      [AuthType.USE_OPENAI]: [
+        ...chinaTemplate.map((model) => ({
+          ...model,
+          name: '[OLD LABEL] ' + model.id,
+          generationConfig: { contextWindowSize: 262144 },
+        })),
+        customModel,
+      ],
     };
     mockConfig.refreshAuth.mockResolvedValue(undefined);
 
@@ -309,9 +320,7 @@ describe('useProviderUpdates', () => {
 
     const reloaded = mockConfig.reloadModelProvidersConfig.mock.calls[0][0];
     expect(reloaded[AuthType.USE_OPENAI]).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ id: 'my-custom-model' }),
-      ]),
+      expect.arrayContaining([customModel, ...chinaTemplate]),
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       expect.anything(),

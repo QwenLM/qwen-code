@@ -24,6 +24,7 @@ import {
   normalizeCustomModelIds,
   maskApiKey,
 } from './useAuth.js';
+import { setNestedPropertySafe } from '../../config/settingsUtils.js';
 
 vi.mock('../hooks/useQwenAuth.js', () => ({
   useQwenAuth: vi.fn(() => ({
@@ -47,18 +48,24 @@ vi.mock('../../config/modelProvidersScope.js', () => ({
   getPersistScopeForModelSelection: vi.fn(() => 'user'),
 }));
 
-const createSettings = () => ({
-  merged: {
-    modelProviders: {},
-  },
-  setValue: vi.fn(),
-  recomputeMerged: vi.fn(),
-  forScope: vi.fn(() => ({
+const createSettings = () => {
+  const file = {
     path: '/tmp/settings.json',
-    settings: {},
-    originalSettings: {},
-  })),
-});
+    settings: { modelProviders: {} } as Record<string, unknown>,
+    originalSettings: {} as Record<string, unknown>,
+  };
+  return {
+    get merged() {
+      return file.settings;
+    },
+    setValue: vi.fn((_scope: unknown, key: string, value: unknown) => {
+      setNestedPropertySafe(file.settings, key, value);
+      setNestedPropertySafe(file.originalSettings, key, value);
+    }),
+    recomputeMerged: vi.fn(),
+    forScope: vi.fn(() => file),
+  };
+};
 
 const createConfig = (recordSlashCommand = vi.fn()) => {
   const modelsConfig = {
@@ -77,6 +84,19 @@ const createConfig = (recordSlashCommand = vi.fn()) => {
 describe('useAuthCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it('accepts OpenAI Responses as QWEN_DEFAULT_AUTH_TYPE', () => {
+    vi.stubEnv('QWEN_DEFAULT_AUTH_TYPE', AuthType.USE_OPENAI_RESPONSES);
+    const settings = createSettings();
+    const config = createConfig();
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, vi.fn()),
+    );
+
+    expect(result.current.authError).toBeNull();
   });
 
   it('exposes closeAuthDialog that flips isAuthDialogOpen to false', () => {

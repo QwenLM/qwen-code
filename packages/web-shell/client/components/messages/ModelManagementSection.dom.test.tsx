@@ -95,6 +95,48 @@ function buttonByText(container: HTMLElement, text: string): HTMLButtonElement {
 }
 
 describe('ModelManagementSection', () => {
+  it('labels an ambiguous saved row and keeps its exact delete action without an ineffective window editor', () => {
+    const { container, props } = renderSection({
+      onUpdateContextWindow: vi.fn(),
+      configurations: [
+        {
+          key: 'alias-key',
+          authType: 'openai',
+          modelId: 'gpt-4o',
+          name: 'Saved alias',
+          baseUrl: 'https://api.openai.com/v1',
+          purpose: 'chat',
+          contextWindowSize: 8192,
+          canEditContextWindow: false,
+        },
+      ],
+    });
+    expect(
+      container.querySelector('[aria-label="Delete GPT-4o"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('Saved configuration');
+    expect(container.textContent).toContain(
+      'Multiple configurations share this route',
+    );
+    expect(
+      container.querySelector('[aria-label="Edit context window Saved alias"]'),
+    ).toBeNull();
+    act(() =>
+      (
+        container.querySelector(
+          '[aria-label="Delete Saved alias"]',
+        ) as HTMLButtonElement
+      ).click(),
+    );
+    act(() => buttonByText(container, 'Confirm').click());
+    expect(props.onDeleteModel).toHaveBeenCalledWith({
+      key: 'alias-key',
+      authType: 'openai',
+      modelId: 'gpt-4o',
+      baseUrl: 'https://api.openai.com/v1',
+    });
+  });
+
   it('pairs rows by persisted key even when their displayed endpoint differs', () => {
     const configured = providers();
     configured[0].models[0].configurationKey = 'exact-key';

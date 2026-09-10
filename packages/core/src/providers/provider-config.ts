@@ -93,11 +93,22 @@ function buildGenerationConfig(
 
 function buildAdvancedGenerationConfig(
   advCfg: ProviderSetupInputs['advancedConfig'] | undefined,
+  protocol: AuthType,
 ): ProviderModelConfig['generationConfig'] | undefined {
   const cfg: ProviderModelConfig['generationConfig'] = {};
   let hasAny = false;
   if (advCfg?.enableThinking) {
-    cfg.extra_body = { enable_thinking: true };
+    // `extra_body.enable_thinking` is a DashScope/Qwen-specific wire knob:
+    // sibling wires either translate it (OpenAI Chat, when the baseUrl looks
+    // like DashScope) or silently drop it. The Responses wire does neither —
+    // it forwards extra_body verbatim, so enable_thinking would ship as an
+    // undefined top-level field with no reasoning actually requested. Route
+    // this protocol through the unified reasoning-effort ladder instead.
+    if (protocol === AuthType.USE_OPENAI_RESPONSES) {
+      cfg.reasoning = { effort: 'medium' };
+    } else {
+      cfg.extra_body = { enable_thinking: true };
+    }
     hasAny = true;
   }
   if (advCfg?.multimodal && Object.values(advCfg.multimodal).some(Boolean)) {
@@ -161,6 +172,7 @@ function buildModelConfigs(
 ): ProviderModelConfig[] {
   const envKey = resolveEnvKey(config, inputs);
   const prefix = resolveModelNamePrefix(config, inputs.baseUrl);
+  const protocol = inputs.protocol ?? config.protocol;
 
   let models: ProviderModelConfig[];
 
@@ -182,7 +194,10 @@ function buildModelConfigs(
           envKey,
         );
       }
-      const genConfig = buildAdvancedGenerationConfig(inputs.advancedConfig);
+      const genConfig = buildAdvancedGenerationConfig(
+        inputs.advancedConfig,
+        protocol,
+      );
       return {
         id,
         name: prefix ? `[${prefix}] ${id}` : id,
@@ -196,7 +211,7 @@ function buildModelConfigs(
     const advCfg = inputs.advancedConfig;
     const displayName = (id: string) => (prefix ? `[${prefix}] ${id}` : id);
     models = inputs.modelIds.map((id) => {
-      const genConfig = buildAdvancedGenerationConfig(advCfg);
+      const genConfig = buildAdvancedGenerationConfig(advCfg, protocol);
       return {
         id,
         name: displayName(id),
@@ -302,32 +317,69 @@ export function buildInstallPlan(
           entry.baseUrl === model.baseUrl,
       );
       if (!existing) return model;
+      const preservedGeneration = { ...existing.generationConfig };
+      const advanced = inputs.advancedConfig;
+      if (!config.models && advanced) {
+        if (advanced.replaceExisting) {
+          delete preservedGeneration.contextWindowSize;
+          if (preservedGeneration.samplingParams) {
+            preservedGeneration.samplingParams = {
+              ...preservedGeneration.samplingParams,
+            };
+            delete preservedGeneration.samplingParams.max_tokens;
+            if (!Object.keys(preservedGeneration.samplingParams).length)
+              delete preservedGeneration.samplingParams;
+          }
+        }
+        if (advanced.replaceExisting || advanced.multimodal !== undefined)
+          delete preservedGeneration.modalities;
+        if (advanced.replaceExisting || advanced.enableThinking !== undefined) {
+          if (preservedGeneration.extra_body) {
+            preservedGeneration.extra_body = {
+              ...preservedGeneration.extra_body,
+            };
+            delete preservedGeneration.extra_body['enable_thinking'];
+            if (!Object.keys(preservedGeneration.extra_body).length)
+              delete preservedGeneration.extra_body;
+          }
+          if (protocol === AuthType.USE_OPENAI_RESPONSES)
+            delete preservedGeneration.reasoning;
+        }
+      }
       const generationConfig =
-        existing?.generationConfig || model.generationConfig
+        Object.keys(preservedGeneration).length || model.generationConfig
           ? {
-              ...existing?.generationConfig,
+              ...preservedGeneration,
               ...model.generationConfig,
-              ...(existing.generationConfig?.contextWindowSize !== undefined &&
-              inputs.advancedConfig?.contextWindowSize === undefined
+              ...(preservedGeneration.extra_body ||
+              model.generationConfig?.extra_body
                 ? {
-                    contextWindowSize:
-                      existing.generationConfig.contextWindowSize,
+                    extra_body: {
+                      ...preservedGeneration.extra_body,
+                      ...model.generationConfig?.extra_body,
+                    },
                   }
                 : {}),
-              ...(existing?.generationConfig?.samplingParams ||
+              ...(preservedGeneration.contextWindowSize !== undefined &&
+              inputs.advancedConfig?.contextWindowSize === undefined
+                ? {
+                    contextWindowSize: preservedGeneration.contextWindowSize,
+                  }
+                : {}),
+              ...(preservedGeneration.samplingParams ||
               model.generationConfig?.samplingParams
                 ? {
                     samplingParams: {
-                      ...existing?.generationConfig?.samplingParams,
+                      ...preservedGeneration.samplingParams,
                       ...model.generationConfig?.samplingParams,
                     },
                   }
                 : {}),
-              ...(existing?.generationConfig?.customHeaders ||
+              ...(preservedGeneration.customHeaders ||
               model.generationConfig?.customHeaders
                 ? {
                     customHeaders: {
-                      ...existing?.generationConfig?.customHeaders,
+                      ...preservedGeneration.customHeaders,
                       ...model.generationConfig?.customHeaders,
                     },
                   }
@@ -338,7 +390,7 @@ export function buildInstallPlan(
         ...existing,
         ...model,
         name: existing?.name ?? model.name,
-        ...(generationConfig ? { generationConfig } : {}),
+        generationConfig,
         ...(existing?.supportsImageGeneration
           ? { supportsImageGeneration: true }
           : {}),
@@ -417,6 +469,7 @@ export function computeModelListVersion(models: ProviderModelConfig[]): string {
  */
 const DEFAULT_BASE_URLS: Partial<Record<AuthType, string>> = {
   [AuthType.USE_OPENAI]: 'https://api.openai.com/v1',
+  [AuthType.USE_OPENAI_RESPONSES]: 'https://api.openai.com',
   [AuthType.USE_ANTHROPIC]: 'https://api.anthropic.com/v1',
   [AuthType.USE_GEMINI]: 'https://generativelanguage.googleapis.com',
 };

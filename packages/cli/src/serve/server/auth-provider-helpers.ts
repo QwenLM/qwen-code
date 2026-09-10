@@ -371,6 +371,9 @@ export function parseAuthProviderInstallRequest(
   const advancedConfig: ServeAuthProviderInstallRequest['advancedConfig'] =
     rawAdvanced
       ? {
+          ...(rawAdvanced['replaceExisting'] === true
+            ? { replaceExisting: true }
+            : {}),
           ...(purpose ? { purpose } : {}),
           ...(typeof rawAdvanced['enableThinking'] === 'boolean'
             ? { enableThinking: rawAdvanced['enableThinking'] }

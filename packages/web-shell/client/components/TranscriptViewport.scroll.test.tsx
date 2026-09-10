@@ -210,9 +210,14 @@ async function setup(
         v: 1,
         sessionId: 'session',
         snapshot: 's',
-        totalTurns: 1,
+        totalTurns: 4,
         start: 0,
-        turns: [{ ordinal: 0, turnId: 'u1', kind: 'prompt', label: 'u1' }],
+        turns: Array.from({ length: 4 }, (_, ordinal) => ({
+          ordinal,
+          turnId: ordinal === 0 ? 'u1' : `turn-${ordinal}`,
+          kind: 'prompt' as const,
+          label: 'u1',
+        })),
       };
     });
   const client: DaemonTurnNavigationClient = {
@@ -415,6 +420,32 @@ describe('TranscriptViewport scroll restoration and fallback', () => {
       }
     },
   );
+
+  it('captures rows materialized after a boundary request starts before admitting the page', async () => {
+    const { click, list, row, getTranscriptPage, settleFrames, render } =
+      await setup();
+    await click('history.openEarlier');
+    settleFrames();
+    const targetKey = `msg:${observed.props!.messages[0]!.id}`;
+    let resolve!: (value: DaemonSessionTranscriptPage) => void;
+    getTranscriptPage.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    await click('history.loadEarlier');
+    expect(getTranscriptPage).toHaveBeenCalledTimes(2);
+    observed.hideRows = true;
+    render();
+    observed.hideRows = false;
+    render();
+    list().scrollTop += 20;
+    const before = row(targetKey).getBoundingClientRect().top;
+    await act(async () => resolve(page(['old1', 'old2'])));
+    settleFrames();
+    expect(row(targetKey).getBoundingClientRect().top).toBe(before);
+  });
 
   it('restores a collapse row independently of its sibling prompt sharing its source', async () => {
     const { click, list, row, getTranscriptPage, settleFrames } = await setup({

@@ -120,6 +120,18 @@ export interface ProviderConfig {
   mergeModelsByIdentity?: boolean;
 
   /**
+   * Built-in `web_search` backend this provider can serve with the same
+   * credentials as the main model, letting the tool register without any
+   * `tools.webSearch` configuration.
+   *
+   * For a preset that pins its base URL, absence vetoes automatic activation.
+   * Custom and unmatched endpoints carry no preset-level knowledge and still
+   * pass through the automatic DashScope host check. Explicit configuration
+   * requires a search model; an env-declared backend also requires that model.
+   */
+  webSearch?: { backend: 'dashscope' };
+
+  /**
    * UI grouping hint — used by AuthDialog to organize providers into sections.
    * Providers with the same `uiGroup` appear together under a shared heading.
    */
@@ -145,6 +157,8 @@ export interface ProviderSetupInputs {
   /** Pre-built model configs (e.g. OpenRouter fetches models from API). Overrides modelIds. */
   prebuiltModels?: ProviderModelConfig[];
   advancedConfig?: {
+    /** Replace all advanced form controls; omitted fields otherwise stay unchanged. */
+    replaceExisting?: boolean;
     purpose?: 'image' | 'voice';
     enableThinking?: boolean;
     multimodal?: InputModalities;

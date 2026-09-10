@@ -129,6 +129,117 @@ afterEach(() => {
 });
 
 describe('DELETE /workspace/models', () => {
+  it.each([
+    ['QWEN_CODE_SYSTEM_SETTINGS_PATH', 'openai'],
+    ['QWEN_CODE_SYSTEM_DEFAULTS_PATH', 'managed'],
+  ])(
+    'requires the saved key to delete an alias sharing a read-only route (%s)',
+    async (variable, provider) => {
+      const model = { id: 'shared', baseUrl: 'https://models.example/v1' };
+      writeUserSettings({
+        providerProtocol: { gateway: 'openai', managed: 'openai' },
+        modelProviders: { openai: [], gateway: [model] },
+        model: { name: model.id, baseUrl: model.baseUrl },
+      });
+      const systemFile = path.join(home, 'system-models.json');
+      const system = JSON.stringify({
+        $version: 4,
+        modelProviders: { [provider]: [model] },
+      });
+      fs.writeFileSync(systemFile, system);
+      vi.stubEnv(variable, systemFile);
+      try {
+        const { app, persistSettings } = makeApp();
+        const listed = await request(app).get('/workspace/models');
+        const target = listed.body.models[0];
+        expect(listed.body.models).toHaveLength(1);
+        expect(
+          (
+            await request(app).delete('/workspace/models').send({
+              authType: 'openai',
+              modelId: model.id,
+              baseUrl: model.baseUrl,
+            })
+          ).status,
+        ).toBe(409);
+        expect(
+          (
+            await request(app).patch('/workspace/models').send({
+              key: target.key,
+              contextWindowSize: 65536,
+            })
+          ).status,
+        ).toBe(409);
+        expect(persistSettings).not.toHaveBeenCalled();
+        expect(readUserSettings()['modelProviders']).toEqual({
+          openai: [],
+          gateway: [model],
+        });
+        const deleted = await request(app)
+          .delete('/workspace/models')
+          .send(target);
+        expect(deleted.status).toBe(200);
+        expect(deleted.body.clearedActiveModel).toBe(false);
+        expect(readUserSettings()['modelProviders']).toEqual({
+          openai: [],
+          gateway: [],
+        });
+        expect(readUserSettings()['model']).toEqual({
+          name: model.id,
+          baseUrl: model.baseUrl,
+        });
+        expect(fs.readFileSync(systemFile, 'utf8')).toBe(system);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it.each(
+    ['imageOnly', 'voiceOnly'].flatMap(
+      (purpose) =>
+        [
+          [purpose, false],
+          [purpose, true],
+        ] as const,
+    ),
+  )(
+    'clears primary selection when the winning %s alias is service-only (shadowed chat: %s)',
+    async (purpose, shadowedChat) => {
+      const model = { id: 'shared', baseUrl: 'https://models.example/v1' };
+      writeUserSettings({
+        providerProtocol: { service: 'openai', spare: 'openai' },
+        modelProviders: {
+          openai: [model, { id: 'fallback' }],
+          service: [{ ...model, name: 'service-alias', [purpose]: true }],
+          ...(shadowedChat
+            ? { spare: [{ ...model, name: 'shadowed-chat' }] }
+            : {}),
+        },
+        model: { name: model.id, baseUrl: model.baseUrl },
+      });
+      const { app } = makeApp();
+      const listed = await request(app).get('/workspace/models');
+      const target = listed.body.models.find(
+        (entry: { modelId: string; name?: string }) =>
+          entry.modelId === model.id && !entry.name,
+      );
+      const deleted = await request(app)
+        .delete('/workspace/models')
+        .send(target);
+      expect(deleted.status).toBe(200);
+      expect(deleted.body.clearedActiveModel).toBe(true);
+      expect(readUserSettings()['model']).toEqual({ name: '', baseUrl: '' });
+      expect(readUserSettings()['modelProviders']).toEqual({
+        openai: [{ id: 'fallback' }],
+        service: [{ ...model, name: 'service-alias', [purpose]: true }],
+        ...(shadowedChat
+          ? { spare: [{ ...model, name: 'shadowed-chat' }] }
+          : {}),
+      });
+    },
+  );
+
   it.each(['sanitized URLs', 'provider keys'])(
     'deletes only the selected configuration despite same-id collisions (%s)',
     async (collision) => {
@@ -157,6 +268,18 @@ describe('DELETE /workspace/models', () => {
       const [keep, target] = listed.body.models;
       expect(target.key).not.toBe(keep.key);
       expect(target.baseUrl).toBe(keep.baseUrl);
+      const before = fs.readFileSync(path.join(home, 'settings.json'), 'utf8');
+      const keyless = {
+        authType: target.authType,
+        modelId: target.modelId,
+        baseUrl: target.baseUrl,
+      };
+      expect(
+        (await request(app).delete('/workspace/models').send(keyless)).status,
+      ).toBe(409);
+      expect(fs.readFileSync(path.join(home, 'settings.json'), 'utf8')).toBe(
+        before,
+      );
       const result = await request(app)
         .delete('/workspace/models')
         .send(target);
@@ -424,13 +547,22 @@ describe('DELETE /workspace/models', () => {
     writeWorkspaceSettings({
       modelProviders: { openai: [{ id: 'gpt-4o' }, { id: 'deepseek-v4' }] },
     });
-    const { app, broadcastSettingsChanged } = makeApp();
+    const syncModelProvidersRuntime = vi
+      .fn()
+      .mockResolvedValue({ status: 'applied' });
+    const { app, broadcastSettingsChanged } = makeApp({
+      syncModelProvidersRuntime,
+    });
 
     const res = await request(app)
       .delete('/workspace/models')
       .send({ authType: 'openai', modelId: 'gpt-4o' });
 
     expect(res.status).toBe(200);
+    expect(syncModelProvidersRuntime).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'DELETE',
+    );
     expect(broadcastSettingsChanged).toHaveBeenCalledWith(
       'modelProviders',
       { openai: [{ id: 'deepseek-v4' }] },

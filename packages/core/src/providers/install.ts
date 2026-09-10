@@ -305,6 +305,24 @@ export async function applyProviderInstallPlan(
       );
     }
 
+    const effectiveProviders = settings.getModelProviders();
+    for (const patch of plan.modelProviders ?? []) {
+      if (
+        patch.models.some(
+          (model) =>
+            !effectiveProviders[patch.authType]?.some((effective) =>
+              isSameModelIdentity(model, effective),
+            ),
+        )
+      ) {
+        throw new ProviderInstallError(
+          'A higher-precedence settings scope overrides the installed models. Update the scope that owns this provider.',
+          'modelProviders',
+          plan.authType,
+        );
+      }
+    }
+
     // Set auth type
     currentStep = 'authType';
     if (!preserveSelection) {

@@ -55,3 +55,21 @@ describe('custom service model purpose', () => {
     ).toMatchObject({ ok: false });
   });
 });
+
+describe('advanced form replacement', () => {
+  it.each([true, false, 'true', 1, null, undefined])(
+    'requires an explicit true boolean for %j',
+    (replaceExisting) => {
+      const parsed = parseAuthProviderInstallRequest({
+        ...request,
+        advancedConfig: { replaceExisting, contextWindowSize: 32768 },
+      });
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) throw new Error('Request rejected');
+      expect(parsed.value.advancedConfig).toEqual({
+        ...(replaceExisting === true ? { replaceExisting: true } : {}),
+        contextWindowSize: 32768,
+      });
+    },
+  );
+});

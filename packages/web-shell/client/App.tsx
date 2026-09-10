@@ -15,7 +15,6 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  DAEMON_APPROVAL_MODES,
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
@@ -153,6 +152,7 @@ import {
 } from './components/panels/EnvironmentPanel';
 import { ChatContextHeader } from './components/ChatContextHeader';
 import { WelcomeHeader } from './components/WelcomeHeader';
+import { EXECUTION_APPROVAL_MODES, parsePlanCommand } from './utils/planMode';
 import { ApprovalModeDialog } from './components/dialogs/ApprovalModeDialog';
 import { ResumeDialog } from './components/dialogs/ResumeDialog';
 import { DialogShell } from './components/dialogs/DialogShell';
@@ -262,11 +262,14 @@ import {
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameTranscriptSnapshot } from './hooks/useAnimationFrameTranscriptBlocks';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
+import { getSubagentDetailsUnavailableReason } from './components/messages/toolFormatting';
 import { isSessionDisconnectedError } from './utils/sessionErrors';
 import {
   projectStreamingTailMessages,
   useMessagesFromBlocks,
 } from './hooks/useMessages';
+import { useSessionSources } from './hooks/useSessionSources';
+import type { SessionSource } from '@qwen-code/sdk/daemon';
 import { useSessionArtifacts } from './hooks/useSessionArtifacts';
 import { useSessionArtifactsChange } from './hooks/useSessionArtifactsChange';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
@@ -409,7 +412,7 @@ import { WebShellPortalRootContext } from './portalRoot';
 import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
 import styles from './App.module.css';
 
-const MODES_CYCLE = DAEMON_APPROVAL_MODES;
+const MODES_CYCLE = EXECUTION_APPROVAL_MODES;
 const MAX_TOASTS = 4;
 const TOAST_AUTO_DISMISS_MS = 5000;
 const DEFAULT_REVIEW_PANEL_WIDTH = 500;
@@ -1115,7 +1118,7 @@ export interface WebShellProps {
   messageTurnOutputs?: readonly TurnOutputKind[];
   /** Imperative handle for externally opening WebShell surfaces. */
   shellRef?: React.Ref<WebShellApi>;
-  /** Built-in composer toolbar actions to show. Defaults to all actions. */
+  /** Built-in composer toolbar actions to show. Plan must be explicitly included. */
   composerToolbarActions?: readonly ComposerToolbarAction[];
   /** Optionally filter main-model entries without changing shared defaults. */
   mainModelFilter?: (model: ModelDialogModel) => boolean;
@@ -1365,22 +1368,21 @@ function getStandaloneRecoverySessionId(
 type PendingReasoningIntent = {
   modelId: string;
   value: ReasoningSelection;
+  fromToggle?: true;
 };
-
-function getReasoningSelection(
-  reasoning: DaemonReasoningControls,
-): ReasoningSelection {
-  if (!reasoning.enabled) return 'none';
-  return reasoning.effort === 'none' ? 'default' : reasoning.effort;
-}
 
 function reasoningPreviewSupports(
   reasoning: DaemonReasoningControls,
   value: ReasoningSelection,
 ): boolean {
   if (value === 'none') return reasoning.canDisable !== false;
+  if (reasoning.canEnable === false && !reasoning.enabled) return false;
   if (value === 'default') return true;
-  return reasoning.efforts.includes(value);
+  return (
+    reasoning.canEnable !== false &&
+    reasoning.enableValue !== 'default' &&
+    reasoning.efforts.includes(value)
+  );
 }
 
 const emptyComposerApi: WebShellComposerApi = {
@@ -1431,7 +1433,7 @@ const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'sideTask',
 ];
 const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
-  ['environment', 'subagents', 'backgroundTasks', 'attachments', 'artifacts'];
+  ['environment', 'sources', 'subagents', 'backgroundTasks', 'artifacts'];
 const ATTACHMENTS_REFRESH_INTERVAL_MS = 1000;
 const SESSION_AGENTS_REFRESH_INTERVAL_MS = 3000;
 const SESSION_AGENTS_MAX_RETRY_INTERVAL_MS = 30_000;
@@ -1625,6 +1627,7 @@ type PersistedArtifactPanelTab =
       | 'workspaceId'
       | 'previewMimeType'
       | 'previewOnly'
+      | 'sourcePreview'
       | 'attachmentId'
       | 'sourceSessionId'
     >
@@ -1710,6 +1713,8 @@ function parsePersistedArtifactPanelTab(
     optionalStrings.some(
       (key) => tab[key] !== undefined && typeof tab[key] !== 'string',
     ) ||
+    (tab['sourcePreview'] !== undefined &&
+      typeof tab['sourcePreview'] !== 'boolean') ||
     (tab['previewOnly'] !== undefined &&
       typeof tab['previewOnly'] !== 'boolean') ||
     (tab['closeWithPane'] !== undefined &&
@@ -1743,6 +1748,7 @@ function parsePersistedArtifactPanelTab(
         workspaceId: tab['workspaceId'],
         previewMimeType: tab['previewMimeType'],
         previewOnly: tab['previewOnly'],
+        sourcePreview: tab['sourcePreview'],
         attachmentId: tab['attachmentId'],
         sourceSessionId: tab['sourceSessionId'],
       } as PersistedArtifactPanelTab;
@@ -1863,6 +1869,8 @@ function serializeArtifactPanelTabs(
   return tabs.flatMap((tab): PersistedArtifactPanelTab[] => {
     const { id, title } = tab;
     switch (tab.kind) {
+      case 'source':
+        return [];
       case 'review':
         return [
           {
@@ -1890,6 +1898,7 @@ function serializeArtifactPanelTabs(
                 workspaceId: tab.workspaceId,
                 previewMimeType: tab.previewMimeType,
                 previewOnly: tab.previewOnly,
+                sourcePreview: tab.sourcePreview,
                 attachmentId: tab.attachmentId,
                 sourceSessionId: tab.sourceSessionId,
               },
@@ -3007,6 +3016,9 @@ export function App({
     chatHeaderEnabled &&
     environmentHeaderItemVisible &&
     (!renderChatHeader || Boolean(header));
+  const environmentSourcesEnabled =
+    environmentPanelItems.includes('sources') ||
+    environmentPanelItems.includes('attachments');
   const environmentGitReplacementEnabled =
     environmentPanelReachable && environmentPanelItems.includes('environment');
   const environmentTasksReplacementEnabled =
@@ -4036,6 +4048,19 @@ export function App({
     refresh: refreshArtifacts,
     hydrated: artifactsHydrated,
   } = useSessionArtifacts();
+  const sourcesState = useSessionSources();
+  const refreshSources = sourcesState.refresh;
+  const [sourceRegistrationRetries, setSourceRegistrationRetries] = useState<
+    Array<() => Promise<void>>
+  >([]);
+  useEffect(() => {
+    setSourceRegistrationRetries([]);
+  }, [sourcesState.owner]);
+  const retrySourceRegistrations = useCallback(async () => {
+    setSourceRegistrationRetries([]);
+    await Promise.allSettled(sourceRegistrationRetries.map((retry) => retry()));
+    await refreshSources();
+  }, [sourceRegistrationRetries, refreshSources]);
   const artifactsRef = useRef(artifacts);
   artifactsRef.current = artifacts;
   const [artifactPanelExtraArtifacts, setArtifactPanelExtraArtifacts] =
@@ -4304,12 +4329,16 @@ export function App({
     sessionAttachmentsOwnerRef.current = sessionOwnerGuard.capture();
   }
   const sessionAttachmentsOwner = sessionAttachmentsOwnerRef.current;
+  const [sessionAttachmentsError, setSessionAttachmentsError] = useState<{
+    owner: DaemonSessionOwnerSnapshot;
+    message: string;
+  }>();
   const sessionAttachmentsBySessionRef = useRef(
     new Map<string, DaemonSessionAttachmentReference[]>(),
   );
   const sessionAttachmentsSkeletonLoading =
     environmentPanelReachable &&
-    environmentPanelItems.includes('attachments') &&
+    environmentSourcesEnabled &&
     (sessionAttachmentsLoading ||
       Boolean(
         environmentPanelOpen &&
@@ -4323,15 +4352,13 @@ export function App({
   const sessionAttachmentsRequestIdRef = useRef(0);
   const attachmentRetryCountRef = useRef(new Map<string, number>());
   const [attachmentRefreshNonce, setAttachmentRefreshNonce] = useState(0);
-  // The attachments panel is fed by the daemon's attachment store, never by
-  // parsing transcript blocks. Refetch while the panel is open whenever the
-  // transcript moves (a sent message is the only way the store gains
-  // attachments) — throttled so streaming appends do not hammer the route.
+  // Uploaded sources come from the daemon attachment store. Refresh on
+  // transcript updates while the panel is open, throttled during streaming.
   const transcriptRevision = blockChangeSummary?.revision ?? 0;
   const sessionAttachmentsRequestEligibleRef = useRef(false);
   sessionAttachmentsRequestEligibleRef.current =
     environmentPanelReachable &&
-    environmentPanelItems.includes('attachments') &&
+    environmentSourcesEnabled &&
     environmentPanelOpen &&
     connection.status === 'connected' &&
     Boolean(connection.sessionId && logicalSessionKey) &&
@@ -4340,8 +4367,7 @@ export function App({
     ) === true;
   useEffect(() => {
     const attachmentsSectionEnabled =
-      environmentPanelReachable &&
-      environmentPanelItems.includes('attachments');
+      environmentPanelReachable && environmentSourcesEnabled;
     const attachmentsSupported =
       connection.capabilities?.features.includes(
         SESSION_ATTACHMENT_LIST_FEATURE,
@@ -4357,9 +4383,11 @@ export function App({
         attachmentRetryCountRef.current.delete(logicalSessionKey);
       }
       setSessionAttachmentsLoading(false);
+      setSessionAttachmentsError(undefined);
       return;
     }
     if (!attachmentsSupported) {
+      setSessionAttachmentsError(undefined);
       attachmentRetryCountRef.current.delete(logicalSessionKey);
       setBoundedMapEntry(
         sessionAttachmentsBySessionRef.current,
@@ -4390,6 +4418,7 @@ export function App({
         fetchedAt: Date.now(),
       };
       const requestId = ++sessionAttachmentsRequestIdRef.current;
+      setSessionAttachmentsError(undefined);
       const listing = sessionActions.listAttachments();
       void listing
         .then((attachments) => {
@@ -4408,7 +4437,7 @@ export function App({
             setSessionAttachmentsLoading(false);
           }
         })
-        .catch(() => {
+        .catch((error: unknown) => {
           if (!cancelled && sessionAttachmentsOwner.isCurrent()) {
             if (firstLoad) {
               const failures =
@@ -4434,6 +4463,10 @@ export function App({
               );
               setSessionAttachments([]);
             }
+            setSessionAttachmentsError({
+              owner: sessionAttachmentsOwner,
+              message: formatError(error, t('environment.unavailable')),
+            });
             setSessionAttachmentsLoading(false);
           }
         });
@@ -4456,6 +4489,8 @@ export function App({
     transcriptRevision,
     sessionActions,
     sessionAttachmentsOwner,
+    environmentSourcesEnabled,
+    t,
   ]);
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
   artifactPanelOpenRef.current = artifactPanelOpen;
@@ -4667,6 +4702,7 @@ export function App({
       const pending = sideTaskCreationPromisesRef.current.get(tabId);
       if (pending) return pending;
       const creation = (async () => {
+        const owner = sessionOwnerGuard.capture();
         const ownerCwd = connection.workspaceCwd;
         const parentClientId =
           connection.sessionId === parentSessionId
@@ -4679,6 +4715,9 @@ export function App({
           },
           parentClientId,
         );
+        if (owner.isCurrent() && session.sourceWarnings?.length) {
+          pushToast('warning', session.sourceWarnings.join(' '));
+        }
         if (ownerCwd) {
           sessionCatalogController.sessionCreated(ownerCwd, session.sessionId);
         }
@@ -4697,6 +4736,8 @@ export function App({
       connection.clientId,
       connection.sessionId,
       connection.workspaceCwd,
+      sessionOwnerGuard,
+      pushToast,
       sessionCatalogController,
       workspace.client,
     ],
@@ -4986,6 +5027,83 @@ export function App({
       rememberArtifactPanelTrigger,
     ],
   );
+  const openSourcePanel = useCallback(
+    (source: SessionSource) => {
+      if (!sourcesState.owner.isCurrent() || !connection.sessionId) return;
+      const tab: ArtifactPanelTab = {
+        id: `source:${connection.sessionId}:${source.id}`,
+        kind: 'source',
+        title: source.title,
+        source,
+        sourceSessionId: connection.sessionId,
+        workspaceCwd: connection.workspaceCwd,
+        workspaceId: artifactWorkspaceTarget?.workspaceId,
+        owner: sourcesState.owner,
+        sessionActions,
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [
+      sourcesState.owner,
+      connection.sessionId,
+      connection.workspaceCwd,
+      artifactWorkspaceTarget?.workspaceId,
+      sessionActions,
+      getDefaultReviewPanelWidth,
+    ],
+  );
+  useEffect(() => {
+    const tabs = artifactPanelTabsRef.current;
+    const next = tabs.flatMap<ArtifactPanelTab>((tab) => {
+      if (tab.kind !== 'source') return [tab];
+      const fresh = sourcesState.sources.find(
+        (source) => source.id === tab.source.id,
+      );
+      if (
+        !tab.owner.isCurrent() ||
+        (tab.workspaceCwd !== undefined &&
+          artifactWorkspaceCwd === undefined) ||
+        tab.workspaceId !== artifactWorkspaceTarget?.workspaceId ||
+        !sourcesState.supported ||
+        (tab.sourceSessionId === connection.sessionId &&
+          sourcesState.hydrated &&
+          !fresh)
+      )
+        return [];
+      return fresh && fresh !== tab.source
+        ? [{ ...tab, source: fresh, title: fresh.title }]
+        : [tab];
+    });
+    if (next.length === tabs.length && next.every((tab, i) => tab === tabs[i]))
+      return;
+    setArtifactPanelTabs(next);
+    if (
+      activeArtifactPanelTabId &&
+      !next.some((tab) => tab.id === activeArtifactPanelTabId)
+    ) {
+      setActiveArtifactPanelTabId(null);
+      setArtifactPanelOpen(false);
+    }
+  }, [
+    activeArtifactPanelTabId,
+    artifactWorkspaceCwd,
+    artifactWorkspaceTarget?.workspaceId,
+    sourcesState.owner,
+    sourcesState.sources,
+    sourcesState.hydrated,
+    sourcesState.supported,
+    connection.sessionId,
+  ]);
+
   const openReviewPanel = useCallback(
     (
       changes: readonly TurnOutputFileChange[],
@@ -5211,6 +5329,7 @@ export function App({
       file: AttachmentPreviewRequest,
       workspaceCwd = connection.workspaceCwd,
       sourceSessionId = connection.sessionId,
+      sourcePreview = false,
     ) => {
       if (
         onWorkspaceFileOpen &&
@@ -5233,7 +5352,7 @@ export function App({
           resolvedFile.attachmentId !== undefined;
         const tab: ArtifactPanelTab = {
           id: previewOnly
-            ? `attachment:${sourceSessionId ?? ''}:${resolvedFile.attachmentId ?? workspacePath}`
+            ? `${sourcePreview ? 'source-attachment' : 'attachment'}:${sourceSessionId ?? ''}:${resolvedFile.attachmentId ?? workspacePath}`
             : `file:${workspaceCwd ?? ''}:${workspacePath}`,
           kind: 'file',
           title: resolvedFile.name,
@@ -5250,6 +5369,7 @@ export function App({
             : {}),
           ...(sourceSessionId ? { sourceSessionId } : {}),
           ...(previewOnly ? { previewOnly: true } : {}),
+          ...(sourcePreview ? { sourcePreview: true } : {}),
           ...(workspaceCwd ? { workspaceCwd } : {}),
           ...(workspaceId ? { workspaceId } : {}),
         };
@@ -6192,6 +6312,7 @@ export function App({
   );
   const openSubagentPanelForSession = useCallback(
     (tool: ACPToolCall, sessionId: string, workspaceCwd?: string) => {
+      if (getSubagentDetailsUnavailableReason(tool)) return;
       if (!artifactPanelOpenRef.current) {
         setWaitForSubagentPanelAnimation(true);
       }
@@ -8940,26 +9061,18 @@ export function App({
         reasoningIntent?.modelId === currentModelRef.current
           ? reasoningIntent
           : undefined;
-      const sourceReasoningPreview = models?.find(
-        (model) => model.id === currentModelRef.current,
-      )?.reasoningPreview;
-      const sourceReasoningSelection =
-        sourceReasoningIntent?.value ??
-        (sourceReasoningPreview
-          ? getReasoningSelection(sourceReasoningPreview)
-          : undefined);
       const reasoningPreview = models?.find(
         (model) => model.id === modelId,
       )?.reasoningPreview;
       const keepReasoningIntent =
-        sourceReasoningSelection &&
+        sourceReasoningIntent &&
         reasoningPreview &&
-        reasoningPreviewSupports(reasoningPreview, sourceReasoningSelection);
+        reasoningPreviewSupports(reasoningPreview, sourceReasoningIntent.value);
       setPendingReasoningIntent(
-        sourceReasoningIntent && keepReasoningIntent
-          ? { modelId, value: sourceReasoningIntent.value }
-          : sourceReasoningSelection && !keepReasoningIntent
-            ? { modelId, value: 'default' }
+        sourceReasoningIntent?.fromToggle && modelId !== currentModelRef.current
+          ? undefined
+          : sourceReasoningIntent && keepReasoningIntent
+            ? { ...sourceReasoningIntent, modelId }
             : undefined,
       );
       setPendingModel(modelId);
@@ -9086,11 +9199,18 @@ export function App({
     });
   }, [connection.sessionId, onSessionInfoChange, sessionDisplayName]);
   const [currentMode, setCurrentMode] = useState('default');
+  const [planExecutionMode, setPlanExecutionMode] = useState('default');
+  const executionMode =
+    currentMode === 'plan' ? planExecutionMode : currentMode;
+  const executionModeRef = useRef(executionMode);
+  executionModeRef.current = executionMode;
   const currentModeRef = useRef(currentMode);
   currentModeRef.current = currentMode;
   const sessionSourceTypeRef = useRef(sessionSourceType);
   sessionSourceTypeRef.current = sessionSourceType;
+  const pendingModeSelectionRef = useRef(false);
   const setPendingMode = useCallback((modeId: string) => {
+    pendingModeSelectionRef.current = true;
     currentModeRef.current = modeId;
     setCurrentMode(modeId);
   }, []);
@@ -9191,8 +9311,8 @@ export function App({
         reasoningPreviewSupports(reasoningPreview, reasoningIntent.value)
           ? reasoningIntent.value
           : undefined;
-      const modeId =
-        currentModeRef.current || connectionRef.current.currentMode;
+      const modeId = executionModeRef.current;
+      const planMode = currentModeRef.current === 'plan';
       const requestedSessionContext =
         pendingSessionContextRef.current ??
         connectionRef.current.sessionContext;
@@ -9250,6 +9370,7 @@ export function App({
           modelId,
           reasoningEffort,
           modeId,
+          planMode,
           workspaceCwd: targetWorkspaceCwd,
           sessionContext: creationSessionContext,
           worktree:
@@ -10296,6 +10417,12 @@ export function App({
 
   useEffect(() => {
     for (const notice of notices) {
+      if (notice.sourceRetry) {
+        const retry = notice.sourceRetry;
+        setSourceRegistrationRetries((previous) =>
+          previous.includes(retry) ? previous : [...previous, retry],
+        );
+      }
       if (shouldToastNotice(notice)) {
         pushToast(toastToneFromNotice(notice), notice.message);
       } else if (notice.category !== 'lifecycle') {
@@ -11172,67 +11299,125 @@ export function App({
     store.reset();
   }, [store, t]);
 
-  const handleSetMode = useCallback(
-    (modeId: string) => {
-      if (sessionWriteBlocked) return;
-      if (!isDaemonApprovalMode(modeId)) {
+  const [modeControlsBusy, setModeControlsBusy] = useState(false);
+  const modeTransitionRef = useRef<{
+    owner: { isCurrent: () => boolean };
+    requestId?: string;
+    initialMode?: string;
+    hadActiveTurn?: boolean;
+  } | null>(null);
+  const releaseModeTransition = useCallback(
+    (transition: typeof modeTransitionRef.current) => {
+      if (modeTransitionRef.current !== transition) return;
+      modeTransitionRef.current = null;
+      setModeControlsBusy(false);
+    },
+    [],
+  );
+  useEffect(() => {
+    const transition = modeTransitionRef.current;
+    if (!transition) return;
+    const activeTurn = streamingState !== 'idle' || sessionHasActivePrompt;
+    if (
+      !transition.owner.isCurrent() ||
+      (transition.requestId &&
+        ((connection.currentMode !== 'plan' &&
+          connection.currentMode !== transition.initialMode) ||
+          (isExitPlanApprovalRequest(pendingToolApproval) &&
+            pendingToolApproval?.id !== transition.requestId) ||
+          (transition.hadActiveTurn && !activeTurn)))
+    ) {
+      releaseModeTransition(transition);
+    } else if (activeTurn) {
+      transition.hadActiveTurn = true;
+    }
+  });
+
+  const setComposerMode = useCallback(
+    async (modeId: string, planMode: boolean): Promise<boolean> => {
+      if (modeTransitionRef.current?.owner.isCurrent()) return false;
+      if (sessionWriteBlocked) return false;
+      if (!isDaemonApprovalMode(modeId) || modeId === 'plan') {
         reportError(
-          new Error(`Unsupported approval mode: ${modeId}`),
+          new Error(`Unsupported execution approval mode: ${modeId}`),
           t('local.approvalMode'),
         );
-        return;
+        return false;
       }
       if (!connectionRef.current.sessionId) {
-        setPendingMode(modeId);
-        return;
+        executionModeRef.current = modeId;
+        setPlanExecutionMode(modeId);
+        setPendingMode(planMode ? 'plan' : modeId);
+        return true;
       }
       const owner = sessionOwnerGuard.capture();
-      sessionActions
-        .setApprovalMode(modeId)
-        .then((result) => {
-          if (!owner.isCurrent()) return;
-          const effectiveMode = result.mode || modeId;
-          setCurrentMode(effectiveMode);
-          const approval = pendingApprovalRef.current;
-          if (!approval) return;
-          const shouldAutoApprove =
-            modeId === 'yolo' ||
-            (modeId === 'auto-edit' && isEditToolPermission(approval));
-          if (shouldAutoApprove) {
-            const allowOnce = approval.options.find(
-              (o) => o.kind === 'allow_once',
-            );
-            if (allowOnce) {
-              const toolDesc = approval.title || '';
-              store.dispatch([
-                {
-                  type: 'status',
-                  text: t('mode.autoApproved', { tool: toolDesc }),
-                },
-              ]);
-              sessionActions
-                .submitPermission(approval.id, allowOnce.id)
-                .catch((error: unknown) => {
-                  reportError(error, 'Failed to auto-approve tool call');
-                });
-            }
-          }
-        })
-        .catch((error: unknown) => {
-          if (!owner.isCurrent()) return;
-          reportError(error, t('local.approvalMode'));
+      const transition = { owner };
+      modeTransitionRef.current = transition;
+      setModeControlsBusy(true);
+      try {
+        const result = await sessionActions.setApprovalMode(modeId, {
+          planMode,
         });
+        if (!owner.isCurrent()) return false;
+        setPendingMode(result.mode || (planMode ? 'plan' : modeId));
+        executionModeRef.current = result.planExecutionMode || modeId;
+        setPlanExecutionMode(executionModeRef.current);
+        const approval = pendingApprovalRef.current;
+        if (
+          !planMode &&
+          approval &&
+          !isExitPlanApprovalRequest(approval) &&
+          (modeId === 'yolo' ||
+            (modeId === 'auto-edit' && isEditToolPermission(approval)))
+        ) {
+          const allowOnce = approval.options.find(
+            (option) => option.kind === 'allow_once',
+          );
+          if (allowOnce) {
+            store.dispatch([
+              {
+                type: 'status',
+                text: t('mode.autoApproved', { tool: approval.title || '' }),
+              },
+            ]);
+            sessionActions
+              .submitPermission(approval.id, allowOnce.id)
+              .catch((error: unknown) =>
+                reportError(error, 'Failed to auto-approve tool call'),
+              );
+          }
+        }
+        return true;
+      } catch (error) {
+        if (owner.isCurrent()) reportError(error, t('local.approvalMode'));
+        return false;
+      } finally {
+        releaseModeTransition(transition);
+      }
     },
     [
       sessionWriteBlocked,
       reportError,
       sessionActions,
       sessionOwnerGuard,
+      releaseModeTransition,
       setPendingMode,
       store,
       t,
     ],
   );
+  const handleSetMode = useCallback(
+    (modeId: string) => {
+      void setComposerMode(modeId, currentModeRef.current === 'plan');
+    },
+    [setComposerMode],
+  );
+  const handleTogglePlan = useCallback(() => {
+    void setComposerMode(
+      executionModeRef.current,
+      currentModeRef.current !== 'plan',
+    );
+  }, [setComposerMode]);
 
   // Drop queued commands on a session switch so the drain never runs a
   // command against a different workspace's daemon (mirrors useQueuedPrompts).
@@ -11518,16 +11703,28 @@ export function App({
     setCurrentModel((prev) => (wasLateHydration && prev ? prev : (next ?? '')));
   }, [connection.currentModel, logicalSessionKey]);
 
-  const prevConnectionModeRef = useRef(connection.currentMode);
+  const prevModeSessionKeyRef = useRef(logicalSessionKey);
   useLayoutEffect(() => {
     const next = connection.currentMode;
-    const wasLateHydration =
-      prevConnectionModeRef.current === undefined && next !== undefined;
-    prevConnectionModeRef.current = next;
-    setCurrentMode((prev) =>
-      wasLateHydration && prev !== 'default' ? prev : (next ?? 'default'),
+    const sameSession = prevModeSessionKeyRef.current === logicalSessionKey;
+    prevModeSessionKeyRef.current = logicalSessionKey;
+    const preservePendingSelection =
+      sameSession && !connection.sessionId && pendingModeSelectionRef.current;
+    if (!sameSession || connection.sessionId)
+      pendingModeSelectionRef.current = false;
+    if (preservePendingSelection) return;
+    setPlanExecutionMode((previous) =>
+      next === 'plan'
+        ? (connection.planExecutionMode ?? (sameSession ? previous : 'default'))
+        : (next ?? 'default'),
     );
-  }, [connection.currentMode, logicalSessionKey]);
+    setCurrentMode(next ?? 'default');
+  }, [
+    connection.currentMode,
+    connection.planExecutionMode,
+    connection.sessionId,
+    logicalSessionKey,
+  ]);
 
   useEffect(() => {
     if (connection.loadingTranscript) return;
@@ -11794,10 +11991,10 @@ export function App({
     // findIndex, not indexOf: narrowing currentMode to the tuple member type
     // silently degrades when the SDK's declaration bundle leaves its
     // permission-mode import dangling, and the build must survive both states.
-    const idx = MODES_CYCLE.findIndex((mode) => mode === currentMode);
+    const idx = MODES_CYCLE.findIndex((mode) => mode === executionMode);
     const next = MODES_CYCLE[(idx + 1) % MODES_CYCLE.length];
     handleSetMode(next);
-  }, [currentMode, handleSetMode]);
+  }, [executionMode, handleSetMode]);
 
   // Shared by the /context slash command and the status-bar context
   // indicator. Echoes the command when idle — that also makes the transcript
@@ -11867,6 +12064,8 @@ export function App({
         .branchSession(name || undefined, atRecordId)
         .then((result) => {
           if (!result.switchStarted) return;
+          if (result.sourceWarnings?.length)
+            pushToast('warning', result.sourceWarnings.join(' '));
           store.dispatch([
             {
               type: 'status',
@@ -12575,6 +12774,68 @@ export function App({
     editorRef.current?.focus();
   }, [dismissNewSessionSuggestion, newSessionSuggestion]);
 
+  const handleConfirm = useCallback(
+    async (
+      id: string,
+      selectedOption: string,
+      answers?: Record<string, string>,
+    ) => {
+      const request = pendingApprovalRef.current;
+      const isPlan = request?.id === id && isExitPlanApprovalRequest(request);
+      if (isPlan && modeTransitionRef.current?.owner.isCurrent()) {
+        throw new Error('Approval mode or plan confirmation is still pending');
+      }
+      const owner = sessionOwnerGuard.capture();
+      const option = request?.options.find(
+        (entry) => entry.id === selectedOption,
+      );
+      const approvesPlan =
+        isPlan &&
+        (option?.kind === 'allow_once' || option?.kind === 'allow_always');
+      const transition = isPlan
+        ? {
+            owner,
+            ...(approvesPlan
+              ? {
+                  requestId: id,
+                  initialMode: connectionRef.current.currentMode,
+                  hadActiveTurn:
+                    streamingStateRef.current !== 'idle' ||
+                    sessionHasActivePromptRef.current,
+                }
+              : {}),
+          }
+        : null;
+      if (transition) {
+        modeTransitionRef.current = transition;
+        setModeControlsBusy(true);
+      }
+      try {
+        if (approvesPlan && connection.planExecutionMode !== undefined) {
+          await sessionActions.respondToPermission(id, {
+            outcome: { outcome: 'selected', optionId: selectedOption },
+            expectedPlanExecutionMode: connection.planExecutionMode,
+          });
+        } else {
+          await sessionActions.submitPermission(id, selectedOption, answers);
+        }
+        if (transition && !approvesPlan) releaseModeTransition(transition);
+      } catch (error) {
+        if (transition) releaseModeTransition(transition);
+        if (owner.isCurrent())
+          reportError(error, 'Failed to submit permission choice');
+        throw error;
+      }
+    },
+    [
+      sessionActions,
+      reportError,
+      sessionOwnerGuard,
+      releaseModeTransition,
+      connection.planExecutionMode,
+    ],
+  );
+
   const respondToPendingPermission = useCallback(
     async (
       requestIdOrDecision: string,
@@ -12619,10 +12880,10 @@ export function App({
       if (!option) {
         return false;
       }
-      await sessionActions.submitPermission(request.id, option.id);
+      await handleConfirm(request.id, option.id);
       return true;
     },
-    [hostOwnsEditDiffPreview, sessionActions],
+    [hostOwnsEditDiffPreview, handleConfirm],
   );
 
   const shellApi = useMemo<WebShellApi>(
@@ -14198,11 +14459,19 @@ export function App({
             return true;
           }
           if (cmd === 'plan') {
-            if (commandBlocked) return blockCommand();
-            const prompt = text.slice(match[0].length).trim();
+            if (modeTransitionRef.current?.owner.isCurrent()) {
+              pushToast('warning', t('mode.changePending'));
+              return false;
+            }
+            const operation = parsePlanCommand(
+              text.slice(match[0].length),
+              currentModeRef.current === 'plan',
+            );
+            const { prompt } = operation;
+            if (prompt && commandBlocked) return blockCommand();
             if (!connectionRef.current.sessionId) {
-              setPendingMode('plan');
-              if (prompt) {
+              void setComposerMode(executionModeRef.current, operation.enabled);
+              if (prompt)
                 return submitPromptFromEditor(
                   prompt,
                   images,
@@ -14210,23 +14479,21 @@ export function App({
                   'Failed to send plan prompt',
                   { inputAnnotations: metadata?.inputAnnotations },
                 );
-              }
               return true;
             }
             const planPreparationToken = prompt
               ? ++planPreparationTokenRef.current
               : undefined;
-            const planPromptPreparationOwner = prompt
+            const preparationOwner = prompt
               ? beginPromptPreparation()
               : undefined;
             const owner = sessionOwnerGuard.capture();
             const writeBlockGeneration = sessionWriteBlockGenerationRef.current;
-            sessionActions
-              .setApprovalMode('plan')
-              .then(() => {
-                if (!owner.isCurrent()) return;
-                setPendingMode('plan');
+            void setComposerMode(executionModeRef.current, operation.enabled)
+              .then((applied) => {
                 if (
+                  applied &&
+                  owner.isCurrent() &&
                   prompt &&
                   !sessionWriteBlockedRef.current &&
                   sessionWriteBlockGenerationRef.current ===
@@ -14235,22 +14502,19 @@ export function App({
                   return sendPrompt(prompt, images, files, {
                     clearComposerOnPromptStart: true,
                     inputAnnotations: metadata?.inputAnnotations,
-                  }).catch((error: unknown) =>
-                    reportError(error, 'Failed to send plan prompt'),
-                  );
+                  });
                 }
               })
               .catch((error: unknown) => {
-                if (!owner.isCurrent()) return;
-                reportError(error, t('mode.plan'));
+                if (owner.isCurrent())
+                  reportError(error, 'Failed to send plan prompt');
               })
               .finally(() => {
                 if (
                   prompt &&
                   planPreparationTokenRef.current === planPreparationToken
-                ) {
-                  finishPromptPreparation(planPromptPreparationOwner);
-                }
+                )
+                  finishPromptPreparation(preparationOwner);
               });
             return prompt ? false : true;
           }
@@ -14895,6 +15159,7 @@ export function App({
       handleGoalSlashCommand,
       handleThemeChange,
       handleSetMode,
+      setComposerMode,
       handleLanguageChange,
       blockCommand,
       createSideTask,
@@ -14912,7 +15177,6 @@ export function App({
       selectedLanguage,
       setPendingModel,
       selectWelcomeModel,
-      setPendingMode,
       setWorkspaceSetting,
       openVoiceModelPicker,
       writeVoiceModelForTarget,
@@ -14954,27 +15218,6 @@ export function App({
     [resumeChatBottomFollow],
   );
 
-  const handleConfirm = useCallback(
-    (id: string, selectedOption: string, answers?: Record<string, string>) => {
-      const owner = sessionOwnerGuard.capture();
-      // Return the submission promise (and rethrow a rejection) so the
-      // ToolApproval re-arm contract engages: its confirm() resets the
-      // double-submit guard only when the returned promise rejects.
-      // Swallowing the rejection here would leave submittedRef latched on a
-      // transient daemon/WS failure, blocking every retry for this request.
-      // Same shape as ChatPane.handleConfirm.
-      return sessionActions
-        .submitPermission(id, selectedOption, answers)
-        .then(() => undefined)
-        .catch((error: unknown) => {
-          if (owner.isCurrent()) {
-            reportError(error, 'Failed to submit permission choice');
-          }
-          throw error;
-        });
-    },
-    [sessionActions, reportError, sessionOwnerGuard],
-  );
   const handleAskUserConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) =>
       sessionActions.submitPermission(id, selectedOption, answers),
@@ -15558,7 +15801,7 @@ export function App({
   );
 
   const handleWelcomeReasoningEffort = useCallback(
-    (value: ReasoningSelection) => {
+    (value: ReasoningSelection, source?: 'toggle') => {
       const activeConnection = connectionRef.current;
       if (
         sessionWriteBlockedRef.current ||
@@ -15577,12 +15820,12 @@ export function App({
         setPendingReasoningIntent({ modelId, value });
         return;
       }
-      if (value === 'default') {
-        setPendingReasoningIntent({ modelId, value });
-        return;
-      }
-      if (!preview.efforts.includes(value)) return;
-      setPendingReasoningIntent({ modelId, value });
+      if (value !== 'default' && !preview.efforts.includes(value)) return;
+      setPendingReasoningIntent({
+        modelId,
+        value,
+        ...(source === 'toggle' ? { fromToggle: true } : {}),
+      });
     },
     [setPendingReasoningIntent],
   );
@@ -16509,7 +16752,7 @@ export function App({
               onClose={() => setShowApprovalModeDialog(false)}
             >
               <ApprovalModeDialog
-                currentMode={currentMode}
+                currentMode={executionMode}
                 sessionWorkflowEnabled={sessionWorkflowEnabled}
                 onSelect={(modeId) => {
                   handleSetMode(modeId);
@@ -17839,6 +18082,7 @@ export function App({
                       belong to the outer session, not the panes). */}
                   <WebShellCustomizationProvider value={customization}>
                       <SplitView
+                        planControlVisible={visibleComposerToolbarActions.includes('plan')}
                         sessionIds={splitSessionIds}
                         showSessionDetails={
                           (sidebarOptions.sessionActions?.items ??
@@ -18208,6 +18452,8 @@ export function App({
                           className={styles.approvalOverlay}
                         >
                           <ToolApproval
+                            disabled={isExitPlanApprovalRequest(pendingToolApproval) && modeControlsBusy}
+                            planExecutionMode={connection.planExecutionMode}
                             request={pendingToolApproval}
                             onConfirm={handleConfirm}
                             variant="floating"
@@ -18240,10 +18486,6 @@ export function App({
                           />
                         </div>
                       )}
-                      {/* A pending approval overlay owns the footer: drop the
-                          composer out of layout (kept mounted so the draft
-                          survives) instead of leaving a live input below the
-                          dialog. */}
                       <div
                         className={
                           approvalOverlayActive && mainView === 'chat'
@@ -18589,7 +18831,10 @@ export function App({
                           onFocusFooter={handleFocusTaskPill}
                           onPopQueuedMessages={editLastQueuedPrompt}
                           onClearQueuedMessages={clearQueuedPrompts}
-                          currentMode={currentMode}
+                          currentMode={executionMode}
+                          modeControlsDisabled={modeControlsBusy}
+                          planMode={currentMode === 'plan'}
+                          onTogglePlan={handleTogglePlan}
                           sessionWorkflowEnabled={sessionWorkflowEnabled}
                           currentModel={currentModel}
                           gitBranch={
@@ -18888,6 +19133,22 @@ export function App({
                     : []
                 }
                 attachmentsLoading={sessionAttachmentsSkeletonLoading}
+                attachmentsError={
+                  sessionAttachmentsError?.owner === sessionAttachmentsOwner &&
+                  sessionAttachmentsOwner.isCurrent()
+                    ? sessionAttachmentsError.message
+                    : undefined
+                }
+                onRetryAttachments={() =>
+                  setAttachmentRefreshNonce((value) => value + 1)
+                }
+                sources={sourcesState}
+                onOpenSource={openSourcePanel}
+                retrySourceRegistration={
+                  sourceRegistrationRetries.length
+                    ? retrySourceRegistrations
+                    : undefined
+                }
                 artifacts={artifacts}
                 artifactsLoading={artifactsLoading}
                 items={environmentPanelItems}
@@ -18912,7 +19173,9 @@ export function App({
                     openImagePanel(src, alt, source);
                   }
                 }}
-                onAttachmentPreview={openAttachmentPanel}
+                onAttachmentPreview={(file) =>
+                  openAttachmentPanel(file, undefined, undefined, true)
+                }
                 onAttachmentPreviewError={(error) => {
                   if (!environmentPanelOwner.isCurrent()) return;
                   pushToast(

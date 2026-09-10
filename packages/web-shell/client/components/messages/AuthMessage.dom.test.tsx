@@ -285,17 +285,25 @@ describe('AuthMessage model configuration', () => {
       baseUrl: 'https://models.example/v1',
       apiKey: 'test-secret-do-not-display',
       modelIds: ['model-a', 'model-b'],
-      advancedConfig: { contextWindowSize: 131072, maxTokens: 8192 },
+      advancedConfig: {
+        replaceExisting: true,
+        contextWindowSize: 131072,
+        maxTokens: 8192,
+      },
     });
   });
 
-  it('omits optional configuration when left at defaults', async () => {
+  it('submits explicit empty advanced configuration when controls are cleared', async () => {
     await openAdvanced();
+    fillInput('Context window', '131072');
+    fillInput('Maximum output tokens', '8192');
+    fillInput('Context window', '');
+    fillInput('Maximum output tokens', '');
     await clickButton('Next');
     await clickButton('Save');
-    expect(
-      actions.installAuthProvider.mock.calls[0][0].advancedConfig,
-    ).toBeUndefined();
+    expect(actions.installAuthProvider.mock.calls[0][0].advancedConfig).toEqual(
+      { replaceExisting: true },
+    );
   });
 
   it.each(['0', '-1', '1.5', '10000001', '1e3', 'abc'])(
@@ -338,7 +346,7 @@ describe('AuthMessage model configuration', () => {
     await clickButton('Next');
     await clickButton('Save');
     expect(actions.installAuthProvider.mock.calls[0][0].advancedConfig).toEqual(
-      { contextWindowSize: 10000000, maxTokens: 1 },
+      { replaceExisting: true, contextWindowSize: 10000000, maxTokens: 1 },
     );
   });
 });

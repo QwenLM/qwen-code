@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 
-import { act, forwardRef, type ComponentProps } from 'react';
+import { act, createRef, forwardRef, type ComponentProps } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
+import { Button } from '../ui/button';
+import { WebShellPortalRootContext } from '../../portalRoot';
 import styles from '../SessionPrStateIcon.module.css';
 
 const popoverContentProps = vi.hoisted(() => vi.fn());
@@ -56,6 +58,183 @@ afterEach(() => {
 });
 
 describe('SessionDetailsTooltip', () => {
+  it.each([
+    [
+      {
+        hasActivePrompt: true,
+        isWaitingForPermission: true,
+        isWaitingForUserQuestion: true,
+      },
+      'Needs approval',
+    ],
+    [
+      { hasActivePrompt: true, isWaitingForUserQuestion: true },
+      'User input needed',
+    ],
+    [{ hasActivePrompt: true, activeWorkState: 'active' as const }, 'Running'],
+    [{ activeWorkState: 'active' as const }, 'Active work'],
+    [{ activeWorkState: 'unknown' as const }, 'Background activity unknown'],
+  ])(
+    'prioritizes blocked states over an active prompt: %s',
+    async (flags, expected) => {
+      vi.useFakeTimers();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        act(() =>
+          root.render(
+            <I18nProvider language="en">
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'status',
+                  workspaceCwd: '/workspace',
+                  ...flags,
+                }}
+                label="Session"
+                time=""
+                completedUnread={false}
+              >
+                <button type="button">Session</button>
+              </SessionDetailsTooltip>
+            </I18nProvider>,
+          ),
+        );
+        await openDetails(container);
+        const details = document.querySelector('[role="dialog"]');
+        expect(details?.textContent).toContain(expected);
+        if (expected !== 'Running')
+          expect(details?.textContent).not.toContain('Running');
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it('supports a ref-forwarding click trigger, keyboard dismissal and the host portal', async () => {
+    const container = document.createElement('div');
+    container.setAttribute('data-web-shell-root', '');
+    const portal = document.createElement('div');
+    document.body.append(container, portal);
+    const root = createRoot(container);
+    const ref = createRef<HTMLButtonElement>();
+    const onRowClick = vi.fn();
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    try {
+      await act(async () =>
+        root.render(
+          <I18nProvider language="en">
+            <WebShellPortalRootContext.Provider value={portal}>
+              <div onClick={onRowClick}>
+                <SessionDetailsTooltip
+                  session={{
+                    sessionId: 'click-details',
+                    workspaceCwd: '/workspace',
+                  }}
+                  label="Session"
+                  time=""
+                  completedUnread={false}
+                  openOnClick
+                >
+                  <Button ref={ref}>Details</Button>
+                </SessionDetailsTooltip>
+              </div>
+            </WebShellPortalRootContext.Provider>
+          </I18nProvider>,
+        ),
+      );
+      expect(ref.current).toBe(container.querySelector('button'));
+      expect(ref.current?.getAttribute('aria-expanded')).toBe('false');
+      await act(async () => ref.current!.click());
+      onRowClick.mockClear();
+      const details = portal.querySelector<HTMLElement>('[role="dialog"]')!;
+      expect(details).not.toBeNull();
+      expect(ref.current?.getAttribute('aria-expanded')).toBe('true');
+      const copy = details.querySelector<HTMLButtonElement>(
+        '[data-web-shell-session-id-copy]',
+      )!;
+      expect(copy.tabIndex).toBe(0);
+      expect(document.activeElement).toBe(copy);
+      await act(async () => {
+        details.dispatchEvent(new Event('pointerout', { bubbles: true }));
+        copy.click();
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+      expect(writeText).toHaveBeenCalledExactlyOnceWith('click-details');
+      expect(onRowClick).not.toHaveBeenCalled();
+      expect(portal.querySelector('[role="dialog"]')).not.toBeNull();
+      await act(async () => {
+        copy.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(portal.querySelector('[role="dialog"]')).toBeNull();
+      expect(document.activeElement).toBe(ref.current);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it("leaves another owner's pinned details open and focused on hover", async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{ sessionId: 'a', workspaceCwd: '/w' }}
+              label="Alpha"
+              time=""
+              completedUnread={false}
+              openOnClick
+            >
+              <button type="button">Alpha details</button>
+            </SessionDetailsTooltip>
+            <SessionDetailsTooltip
+              session={{ sessionId: 'b', workspaceCwd: '/w' }}
+              label="Bravo"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Bravo title</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      const [detailsButton, hoverTitle] = container.querySelectorAll('button');
+      await act(async () => detailsButton!.click());
+      const alpha = document.querySelector(
+        '[role="dialog"][aria-label="Alpha"]',
+      );
+      const copy = alpha?.querySelector('[data-web-shell-session-id-copy]');
+      expect(document.activeElement).toBe(copy);
+      await act(async () => {
+        hoverTitle!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+        vi.advanceTimersByTime(300);
+      });
+      await act(async () => vi.advanceTimersByTime(0));
+      // A hover from a different owner must not steal focus from — or
+      // dismiss — this pinned popover.
+      expect(
+        document.querySelector('[role="dialog"][aria-label="Bravo"]'),
+      ).not.toBeNull();
+      expect(alpha?.getAttribute('data-state')).toBe('open');
+      expect(document.activeElement).toBe(copy);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
   it('shows the same structured details on row hover', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');
@@ -97,6 +276,39 @@ describe('SessionDetailsTooltip', () => {
     expect(details?.querySelector('svg path.fill-popover')).not.toBeNull();
 
     act(() => root.unmount());
+  });
+
+  it('preserves the standalone workspace label from the sidebar', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'standalone',
+                workspaceCwd: '/internal/fallback',
+              }}
+              label="Standalone"
+              time=""
+              completedUnread={false}
+              workspaceLabel="No workspace"
+            >
+              <button type="button">Standalone</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain('No workspace');
+      expect(details?.textContent).not.toContain('/internal/fallback');
+    } finally {
+      act(() => root.unmount());
+    }
   });
 
   it('shows the bound pull request as a link', async () => {

@@ -6,11 +6,13 @@
  * Adapter that lets core's `applyProviderInstallPlan` write through
  * `LoadedSettings` while preserving CLI-specific guarantees:
  * - scope resolution via `getPersistScopeForModelSelection`
- * - on-disk `.orig` backup of the target settings file
+ * - original file contents for transaction rollback
  * - in-memory snapshot of `settings` / `originalSettings` for rollback
  * - merged-settings recomputation after restore
  */
 
+import * as fs from 'node:fs';
+import { writeWithBackupSync } from '../utils/writeWithBackup.js';
 import type {
   ModelProvidersConfig,
   ProviderSettingsAdapter,
@@ -22,12 +24,7 @@ import {
 } from './settings.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import { getPersistScopeForModelSelection } from './modelProvidersScope.js';
-import {
-  backupSettingsFile,
-  cleanupSettingsBackup,
-  restoreSettingsFromBackup,
-  getNestedProperty,
-} from './settingsUtils.js';
+import { getNestedProperty } from './settingsUtils.js';
 
 function preservePlaceholders(
   value: unknown,
@@ -76,6 +73,7 @@ export function createLoadedSettingsAdapter(
   const persistScope = scope ?? getPersistScopeForModelSelection(settings);
   const settingsFile = settings.forScope(persistScope);
 
+  let fileSnapshot: string | null | undefined;
   let settingsSnapshot: object | null = null;
   let originalSnapshot: object | null = null;
 
@@ -163,38 +161,38 @@ export function createLoadedSettingsAdapter(
     },
 
     backup(): void {
-      backupSettingsFile(settingsFile.path);
+      // Each settings write consumes .orig; keep the transaction snapshot separate.
+      const contents = fs.existsSync(settingsFile.path)
+        ? fs.readFileSync(settingsFile.path, 'utf8')
+        : null;
       settingsSnapshot = structuredClone(settingsFile.settings);
       originalSnapshot = structuredClone(settingsFile.originalSettings);
+      fileSnapshot = contents;
     },
 
     restore(): void {
-      // restoreSettingsFromBackup returns false (rather than throwing) when
-      // the .orig copy can't be restored (EACCES, disk full, missing .orig).
-      // Log loudly so a user staring at the next CLI session knows the
-      // on-disk file may be inconsistent with the recovered in-memory state.
-      const restored = restoreSettingsFromBackup(settingsFile.path);
-      if (!restored) {
-        // eslint-disable-next-line no-console -- best-effort rollback path
-        console.error(
-          `[loadedSettingsAdapter] On-disk rollback of ${settingsFile.path} failed; ` +
-            `in-memory state was restored but the file may be inconsistent. ` +
-            `Re-run /auth or inspect the file directly to recover.`,
-        );
+      if (fileSnapshot === undefined) return;
+      try {
+        if (fileSnapshot === null) {
+          fs.rmSync(settingsFile.path, { force: true });
+        } else {
+          writeWithBackupSync(settingsFile.path, fileSnapshot);
+        }
+      } finally {
+        if (settingsSnapshot !== null) {
+          settingsFile.settings =
+            settingsSnapshot as typeof settingsFile.settings;
+        }
+        if (originalSnapshot !== null) {
+          settingsFile.originalSettings =
+            originalSnapshot as typeof settingsFile.originalSettings;
+        }
+        settings.recomputeMerged();
       }
-      if (settingsSnapshot !== null) {
-        settingsFile.settings =
-          settingsSnapshot as typeof settingsFile.settings;
-      }
-      if (originalSnapshot !== null) {
-        settingsFile.originalSettings =
-          originalSnapshot as typeof settingsFile.originalSettings;
-      }
-      settings.recomputeMerged();
     },
 
     cleanupBackup(): void {
-      cleanupSettingsBackup(settingsFile.path);
+      fileSnapshot = undefined;
       settingsSnapshot = null;
       originalSnapshot = null;
     },

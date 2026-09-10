@@ -6,13 +6,13 @@
 
 import {
   findModelConfiguration,
+  findModelConfigurationForDeletion,
   listModelConfigurations,
 } from '../model-configuration.js';
 import type { Application, Request, Response } from 'express';
 import { resolveProviderProtocol } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
-  getModelProvidersOwnerScope,
   getOwnKeyScope,
   getWritableScopes,
 } from '../../config/modelProvidersScope.js';
@@ -20,7 +20,6 @@ import { getSettingDefinition } from '../../config/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   isActiveModelSelection,
-  removeModelFromProviders,
   type RemoveModelTarget,
 } from '../model-providers-edit.js';
 import {
@@ -286,10 +285,11 @@ export function registerWorkspaceModelsRoutes(
         });
         const configuration = parsed.key
           ? findModelConfiguration(loaded, parsed.key)
-          : undefined;
+          : findModelConfigurationForDeletion(loaded, parsed);
         if (
-          parsed.key &&
-          (!configuration || configuration.authType !== parsed.authType)
+          configuration === 'ambiguous' ||
+          (parsed.key && !configuration) ||
+          (configuration && configuration.authType !== parsed.authType)
         ) {
           res.status(409).json({
             error:
@@ -297,53 +297,42 @@ export function registerWorkspaceModelsRoutes(
           });
           return;
         }
-        const scope =
-          configuration?.scope ??
-          getModelProvidersOwnerScope(loaded) ??
-          SettingScope.User;
-        const modelProviders =
-          loaded.forScope(scope).originalSettings.modelProviders ?? {};
-        const resolvedProviders =
-          loaded.forScope(scope).settings.modelProviders ?? {};
-        const removal = configuration
-          ? {
-              next: resolvedProviders,
-              removed: true,
-              removedBaseUrl: configuration.model.baseUrl,
-            }
-          : removeModelFromProviders(
-              resolvedProviders,
-              loaded.merged.providerProtocol,
-              parsed,
-            );
-        const { removed, removedBaseUrl } = removal;
-        const next = { ...modelProviders };
-        const remainingProviders = { ...loaded.merged.modelProviders };
-        if (configuration) {
-          next[configuration.provider] = modelProviders[
-            configuration.provider
-          ]!.filter((_, index) => index !== configuration.index);
-          remainingProviders[configuration.provider] = resolvedProviders[
-            configuration.provider
-          ]!.filter((_, index) => index !== configuration.index);
-        } else if (removed) {
-          for (const [provider, models] of Object.entries(resolvedProviders)) {
-            if (Array.isArray(models) && removal.next[provider] !== models) {
-              next[provider] = modelProviders[provider]!.filter((_, index) =>
-                removal.next[provider]!.includes(models[index]!),
-              );
-              remainingProviders[provider] = removal.next[provider]!;
-            }
-          }
-        }
-        const removedModelId = configuration?.model.id ?? parsed.modelId;
-        if (!removed) {
+        if (!configuration) {
           res.status(404).json({
             error: 'Model not found in configured providers',
             code: 'model_not_found',
           });
           return;
         }
+        const scope = configuration.scope;
+        const modelProviders =
+          loaded.forScope(scope).originalSettings.modelProviders ?? {};
+        const resolvedProviders =
+          loaded.forScope(scope).settings.modelProviders ?? {};
+        const removedBaseUrl = configuration.model.baseUrl;
+        const next = { ...modelProviders };
+        const remainingProviders = { ...loaded.merged.modelProviders };
+        next[configuration.provider] = modelProviders[
+          configuration.provider
+        ]!.filter((_, index) => index !== configuration.index);
+        remainingProviders[configuration.provider] = resolvedProviders[
+          configuration.provider
+        ]!.filter((_, index) => index !== configuration.index);
+        const removedModelId = configuration.model.id;
+        const remaining = Object.entries(remainingProviders).flatMap(
+          ([provider, models]) =>
+            Array.isArray(models)
+              ? models
+                  .filter((model) => model?.id === removedModelId)
+                  .map((model) => ({
+                    model,
+                    authType: resolveProviderProtocol(
+                      provider,
+                      loaded.merged.providerProtocol,
+                    ),
+                  }))
+              : [],
+        );
 
         writes = [{ scope, key: 'modelProviders', value: next }];
 
@@ -360,9 +349,17 @@ export function registerWorkspaceModelsRoutes(
           modelId: removedModelId,
           ...(removedBaseUrl ? { baseUrl: removedBaseUrl } : {}),
         };
+        const remainingRoute = remaining.find(
+          ({ model, authType }) =>
+            authType === parsed.authType &&
+            (model.baseUrl ?? '') === (removedBaseUrl ?? ''),
+        )?.model;
         for (const activeScope of getWritableScopes(loaded)) {
           const scopeModel = loaded.forScope(activeScope).settings.model;
           if (
+            (!remainingRoute ||
+              remainingRoute.imageOnly ||
+              remainingRoute.voiceOnly) &&
             isActiveModelSelection(
               scopeModel?.name,
               scopeModel?.baseUrl,
@@ -385,20 +382,6 @@ export function registerWorkspaceModelsRoutes(
         // been intended for that other provider's variant). `modelFallbacks` is
         // scoped independently of `modelProviders`, so resolve and rewrite it in
         // its own owning scope.
-        const remaining = Object.entries(remainingProviders).flatMap(
-          ([provider, models]) =>
-            Array.isArray(models)
-              ? models
-                  .filter((model) => model?.id === removedModelId)
-                  .map((model) => ({
-                    model,
-                    authType: resolveProviderProtocol(
-                      provider,
-                      loaded.merged.providerProtocol,
-                    ),
-                  }))
-              : [],
-        );
         const stillConfigured = remaining.length > 0;
         for (const selectionScope of getWritableScopes(loaded)) {
           const settings = loaded.forScope(selectionScope).settings;

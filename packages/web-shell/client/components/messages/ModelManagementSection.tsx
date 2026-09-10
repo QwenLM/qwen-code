@@ -202,6 +202,11 @@ export function ModelManagementSection({
                         {t('settings.models.runtime')}
                       </span>
                     )}
+                    {!canSelect && (
+                      <span className={styles.runtimeBadge}>
+                        {t('settings.models.savedConfiguration')}
+                      </span>
+                    )}
                     {model.name && model.name !== model.baseModelId && (
                       <span className={styles.modelId}>
                         {model.baseModelId}
@@ -258,13 +263,19 @@ export function ModelManagementSection({
                             {t(`auth.purpose.${configuration.purpose}`)}
                           </span>
                         )}
-                        {onUpdateContextWindow && (
-                          <ModelWindowEditor
-                            configuration={configuration}
-                            busy={busy}
-                            onSave={onUpdateContextWindow}
-                          />
+                        {configuration.canEditContextWindow === false && (
+                          <div className={styles.modelDescription}>
+                            {t('settings.models.ambiguousWindow')}
+                          </div>
                         )}
+                        {onUpdateContextWindow &&
+                          configuration.canEditContextWindow !== false && (
+                            <ModelWindowEditor
+                              configuration={configuration}
+                              busy={busy}
+                              onSave={onUpdateContextWindow}
+                            />
+                          )}
                       </>
                     )}
                   </div>

@@ -1,5 +1,7 @@
 # Web Shell model configuration
 
+[English](web-shell-model-configuration.md) | [简体中文](web-shell-model-configuration.zh-CN.md)
+
 ## Problem
 
 Settings → Models opens the provider setup flow to add models. Its advanced
@@ -55,8 +57,16 @@ endpoint and credential key; omitted credentials cannot reuse a service key for
 new conversation IDs. Image and voice groups with independent keys must reconnect
 separately. Installs reject new ambiguity for existing voice-only or selected voice
 IDs before writing. Other preset setup behavior stays unchanged.
-An edited context window survives a preset reconnect or template update instead
-of being replaced by the catalog default. A service reconnect with a differently
+An edited context window survives a preset reconnect. Accepting a template update
+refreshes catalog-owned names and generation defaults while preserving custom
+model IDs and their settings. An omitted advanced configuration preserves saved
+generation settings during credential-only reconnects; explicitly submitting the
+custom advanced form, including an empty form, replaces its thinking, modality,
+window, and output-limit controls while retaining unrelated settings. Web submits
+`advancedConfig.replaceExisting: true` for this full-form replacement. Partial
+submissions from other clients preserve omitted controls; explicitly disabling
+thinking or modalities changes only that control.
+A service reconnect with a differently
 spelled URL in the same credential bucket is rejected before writing; the user
 must use the saved raw endpoint so exact role selections remain valid. Saving
 only service models does not complete first-time conversation authentication.
@@ -89,8 +99,12 @@ semantics. Configuration keys follow each provider bucket’s actual writable
 scope, including user buckets inherited alongside unrelated workspace providers.
 Route uniqueness also includes read-only System and SystemDefaults buckets, so
 an alias cannot attach a writable key or role choice to a read-only model.
-An independently stored writable alias retains its own editor and delete action;
-changing that row does not claim to replace the read-only runtime winner.
+An independently stored writable alias retains its exact delete action and is
+labelled as a saved configuration. Ambiguous runtime routes expose
+`canEditContextWindow: false` and reject window updates, so an alias cannot
+silently edit a value the runtime does not use. Keyless deletion resolves all
+effective scopes, including read-only entries, and requires one writable target;
+redacted endpoints retain an ID-only fallback only when that ID is unique.
 PATCH and DELETE pass the actual provider write scope to runtime synchronization,
 including partial persistence: user writes refresh registered sibling runtimes,
 while workspace writes stay in the primary runtime.
@@ -100,6 +114,12 @@ the existing settings/model-provider refresh path. Disabling image generation
 hides its cached tool and refreshes the current conversation’s tool declarations;
 re-enabling restores availability. GET projects only safe fields;
 settings-change broadcasts invalidate clients without sending model credentials.
+Provider installs that remain hidden by a higher-precedence provider bucket fail
+and roll back before selecting the new model. The CLI adapter snapshots original
+file contents separately from each write’s temporary `.orig` backup, restoring
+exact contents or initial absence if the install fails. Service-only save feedback uses
+the primary runtime's effective authentication environment as well as persisted
+settings.
 
 Production changes cover Web Shell components and translations, the daemon SDK,
 CLI route/persistence wiring, and the provider install plan. Existing provider and
