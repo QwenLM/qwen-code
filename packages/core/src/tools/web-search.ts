@@ -638,9 +638,13 @@ const CITATION_POLICY =
 /**
  * Link text is model-supplied, so a stray bracket would silently swallow the
  * URL that follows it. Escaping keeps the citation the model copies intact.
+ *
+ * Backslashes are escaped along with the brackets, and first: a title ending
+ * in one would otherwise consume the escape we add and turn `]` back into a
+ * literal, breaking the very link this guards.
  */
 function escapeLinkText(title: string): string {
-  return title.replace(/([[\])])/g, '\\$1');
+  return title.replace(/([\\[\])])/g, '\\$1');
 }
 
 /**

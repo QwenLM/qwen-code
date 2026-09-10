@@ -1704,6 +1704,31 @@ describe('WebSearchTool execute', () => {
     );
   });
 
+  it('escapes a backslash so it cannot consume the bracket escape', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          SEARCH_ITEM,
+          {
+            type: 'message',
+            status: 'completed',
+            content: [
+              {
+                type: 'output_text',
+                text: 'Answer.\nSources:\n- C:\\path\\ — https://example.com/a',
+              },
+            ],
+          },
+        ]),
+      ),
+    );
+
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    // A title ending in a backslash must not escape the closing bracket:
+    // `[C:\path\](url)` would render as literal text, losing the citation.
+    expect(content).toContain('- [C:\\\\path\\\\](https://example.com/a)');
+  });
+
   it('keeps titled sources when an oversized answer is truncated', async () => {
     const bigText = 'x'.repeat(150_000);
     mockCreate.mockResolvedValueOnce(
