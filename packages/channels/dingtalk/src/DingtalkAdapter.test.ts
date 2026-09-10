@@ -277,7 +277,6 @@ vi.mock('@qwen-code/channel-base', async () => {
     },
     sanitizeLogText: real.sanitizeLogText,
     sanitizeSenderName: real.sanitizeSenderName,
-    startsWithMessagePrefix: real.startsWithMessagePrefix,
     // Real, for the same reason as sanitizeSenderName: the chat-record
     // formatter's injection defence is this exact helper, and a stub would
     // let the DM path regress with the suite green.

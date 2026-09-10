@@ -7,11 +7,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function receive(
-  data: Record<string, unknown>,
-  messagePrefix?: string,
-  prefixAccepted = true,
-): Envelope {
+function receive(data: Record<string, unknown>): Envelope {
   const channel = new DingtalkChannel(
     'mention-test',
     {
@@ -26,7 +22,6 @@ function receive(
       groupPolicy: 'open',
       dmPolicy: 'open',
       groups: {},
-      messagePrefix,
     },
     {} as never,
     { registerBridgeEvents: false },
@@ -51,15 +46,6 @@ function receive(
   } as DWClientDownStream);
   expect(inbound).toHaveBeenCalledOnce();
   const envelope = inbound.mock.calls[0][0];
-  if (messagePrefix) {
-    expect(
-      (
-        channel as unknown as {
-          preflightInbound(envelope: Envelope): boolean;
-        }
-      ).preflightInbound(envelope),
-    ).toBe(prefixAccepted);
-  }
   return envelope;
 }
 
@@ -180,39 +166,6 @@ describe('DingTalk mention body preservation', () => {
     });
     expect(envelope.text).toBe('@/new');
   });
-
-  it('does not strip a bot entity to match a configured prefix', () => {
-    const envelope = receive(
-      {
-        msgtype: 'richText',
-        content: {
-          richText: [
-            { type: 'at', atName: 'Qwen Code', atUserId: 'test-bot' },
-            { text: '/review inspect this' },
-          ],
-        },
-      },
-      '/review',
-      false,
-    );
-    expect(envelope.text).toBe('@Qwen Code /review inspect this');
-  });
-
-  it('matches a configured prefix when the callback already omits the mention', () => {
-    const envelope = receive(
-      { text: { content: ' /review inspect this' } },
-      '/review',
-    );
-    expect(envelope.text).toBe('inspect this');
-  });
-
-  it.each(['@Qwen /review inspect', '@Qwen正文\n/review inspect'])(
-    'does not let prefix filtering guess mention boundaries in %s',
-    (body) => {
-      const envelope = receive({ text: { content: body } }, '/review', false);
-      expect(envelope.text).toBe(body);
-    },
-  );
 
   it.each([
     '@someone 你好 @Qwen',

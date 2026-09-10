@@ -16,7 +16,6 @@ import {
   sanitizeLogText,
   sanitizePromptText,
   sanitizeSenderName,
-  startsWithMessagePrefix,
   truncateUtf16Units,
 } from '@qwen-code/channel-base';
 import {
@@ -4328,7 +4327,6 @@ export class DingtalkChannel extends ChannelBase {
       const mentionedMemberIds = isGroup ? collectNonBotMentionIds(data) : [];
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';
-      const messagePrefix = this.config.messagePrefix?.trim();
 
       const envelope: Envelope = {
         channelName: this.name,
@@ -4339,17 +4337,6 @@ export class DingtalkChannel extends ChannelBase {
           ? { chatName: conversationTitle }
           : {}),
         text: content.text,
-        // Prevent the shared prefix filter from stripping mention text.
-        ...(messagePrefix
-          ? {
-              messagePrefixText: startsWithMessagePrefix(
-                content.text.trim(),
-                messagePrefix,
-              )
-                ? content.text
-                : '',
-            }
-          : {}),
         ...(content.syntheticText ? { syntheticText: true as const } : {}),
         ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
         isGroup,
