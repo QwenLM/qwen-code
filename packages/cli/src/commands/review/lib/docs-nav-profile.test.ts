@@ -7,6 +7,7 @@
 import { createTwoFilesPatch } from 'diff';
 import { describe, expect, it, vi } from 'vitest';
 import { PROJECT_ENV_HARDCODED_EXCLUSIONS } from '../../../config/shared-env-keys.js';
+import { parseDiff } from './diff-plan.js';
 import {
   automaticReviewRequested,
   isStaticDocsNavDiff,
@@ -36,9 +37,66 @@ function classify(base = BASE, head = HEAD, patch = diff(base, head)): boolean {
 }
 
 describe('static documentation navigation profile', () => {
-  it('accepts the complete #11426 visibility change', () => {
+  it('accepts a literal visibility change in either direction', () => {
     expect(classify()).toBe(true);
     expect(classify(HEAD, BASE)).toBe(true);
+  });
+
+  it('accepts the quoted keys and separators from #11426', () => {
+    const base = `export default {
+  'Contribute to Qwen Code': {
+    title: 'Contribute to Qwen Code',
+    type: 'separator',
+  },
+  architecture: 'Architecture',
+  roadmap: 'Roadmap',
+  contributing: 'Contributing Guide',
+  'Qwen Code SDK': {
+    title: 'Agent SDK',
+    type: 'separator',
+  },
+  'sdk-typescript': 'TypeScript SDK',
+  'sdk-python': 'Python SDK (alpha)',
+  'sdk-java': 'Java SDK (alpha)',
+  'Dive Into Qwen Code': {
+    title: 'Dive Into Qwen Code',
+    type: 'separator',
+  },
+
+  'channel-plugins': 'Channel Plugin Guide',
+  tools: 'Tools',
+  'qwen-serve-protocol': 'qwen serve HTTP protocol',
+  daemon: 'Daemon Mode (Developer Deep Dive)',
+
+  examples: {
+    display: 'hidden',
+  },
+};
+`;
+    const head = base.replace(
+      "examples: {\n    display: 'hidden',\n  }",
+      "examples: 'Examples'",
+    );
+    expect(classify(base, head)).toBe(true);
+    expect(classify(head, base)).toBe(true);
+    expect(
+      classify(base, head.replace("type: 'separator'", "type: 'page'")),
+    ).toBe(false);
+    expect(
+      classify(base, head.replace("'sdk-typescript':", "'__proto__':")),
+    ).toBe(false);
+  });
+
+  it('accepts comments, quoted slugs and Unicode labels', () => {
+    const base = `/* navigation */ export default {
+  // Released versions
+  '01-intro': 'Intro · 简介',
+  "2026-roadmap": 'Roadmap — 2026',
+}; // end
+`;
+    expect(
+      classify(base, base.replace('Intro · 简介', 'Introduction · 简介')),
+    ).toBe(true);
   });
 
   it('accepts literal labels and titles with unchanged other metadata', () => {
@@ -183,6 +241,14 @@ describe('static documentation navigation profile', () => {
     expect(classify(base, head)).toBe(false);
     const smaller = head.replace("p12: 'new'", "p12: 'old'");
     expect(classify(base, smaller)).toBe(true);
+    const at25Base = base.replace('};', '  extra: {\n  },\n};');
+    const at25Head = smaller.replace(
+      '};',
+      "  extra: {\n    title: 'Extra',\n  },\n};",
+    );
+    const [file] = parseDiff(diff(at25Base, at25Head)).files;
+    expect(file.addedLines + file.removedLines).toBe(25);
+    expect(classify(at25Base, at25Head)).toBe(false);
   });
 
   it('keeps unknown, malformed and oversized inputs on the full path', () => {

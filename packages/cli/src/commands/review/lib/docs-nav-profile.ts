@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { parse, type ParseError } from 'jsonc-parser';
 import { isFileSourcedEnvKey } from '../../../config/environment.js';
+import { parseJsoncObject } from '../../../utils/jsonc-editor.js';
 import { parseDiff } from './diff-plan.js';
 
 export const DOCS_NAV_PROFILE = 'docs-nav';
@@ -76,14 +76,7 @@ function literalNavigation(source: string): NavObject | null {
     }
   }
   try {
-    const errors: ParseError[] = [];
-    const result: unknown = parse(json.join(' '), errors, {
-      allowTrailingComma: true,
-      disallowComments: true,
-    });
-    return errors.length === 0 && result !== null && typeof result === 'object'
-      ? (result as NavObject)
-      : null;
+    return parseJsoncObject(json.join(' ')) as NavObject;
   } catch {
     return null;
   }

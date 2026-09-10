@@ -439,7 +439,7 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
  * adversarial personas, re-add whole-diff walkers to a chunked 3B fan-out, or
  * demand a tree-grepping tracer from a review that has no tree.
  */
-function contextRoleRunsInThisReview(
+export function contextRoleRunsInThisReview(
   role: RepositoryContextRoleId,
   plan: RosterPlan,
   mode: ReviewMode,

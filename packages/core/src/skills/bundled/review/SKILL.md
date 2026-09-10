@@ -763,6 +763,8 @@ All findings (aggregated or standalone) proceed to Step 5 — confirmed ones unt
 
 **The automatic `docs-nav` profile skips this step**, including the first convergence pair normally launched alongside Step 4. Continue with composition and authorized publication.
 
+**Before applying any exit-4 rule below, inspect its stderr discriminator.** `PROFILE SKIP:` means the focused navigation profile omits reverse audit by design: no budget-stop marker is recorded and no `unreviewedDimensions` entry is owed. Finish the single Step 4 verification pass, then compose and submit; do not retry the audit. This applies to both convergence-pair builds as well as standalone round builds. The budget and round-cap rules below apply only to their named `BUDGET:`, `VERIFY BUDGET:` and `ROUND CAP:` refusals, never to `PROFILE SKIP:`.
+
 **Medium skips this step.** A balanced (medium) review stops after Step 4: it goes straight to Step 6, composes the report and verdict from the verified findings, and does not run the reverse audit — which is why `compose-review` caps a clean medium review at `Comment` (Step 6) and why medium never writes the incremental cache or posts (`--comment` forces high). Everything below is high effort only.
 
 After deduplication, run reverse audit **iteratively** — the first launch rides with the Step 4 verifiers (Step 4 names this), so aggregation and the audit overlap rather than queue. Each round receives the cumulative reported findings from all prior rounds, so successive rounds focus on whatever the previous round missed.

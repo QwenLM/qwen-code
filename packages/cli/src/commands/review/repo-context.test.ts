@@ -166,21 +166,35 @@ function run(
 }
 
 describe('repo-context providers and trust boundary', () => {
-  it.each([false, true])(
-    'restores the full roster only when repository reviewers are required (%s)',
-    (required) => {
+  it.each([
+    { requiredAgents: [], effort: 'high', revoke: false },
+    { requiredAgents: ['6c'] as const, effort: 'high', revoke: true },
+    { requiredAgents: ['test-matrix'] as const, effort: 'high', revoke: false },
+    { requiredAgents: ['6c'] as const, effort: 'medium', revoke: false },
+  ])(
+    'applies roster policy before revoking the profile: %j',
+    ({ requiredAgents, effort, revoke }) => {
       const root = temp();
       const worktree = join(root, 'worktree');
       mkdirSync(worktree);
       const { planPath } = run(
         root,
         worktree,
-        { files: [{ path: 'docs/_meta.ts' }], reviewProfile: DOCS_NAV_PROFILE },
+        {
+          files: [{ path: 'docs/_meta.ts' }],
+          reviewProfile: DOCS_NAV_PROFILE,
+          prNumber: '11426',
+          ownerRepo: 'QwenLM/qwen-code',
+          worktreePath: worktree,
+          effort,
+          srcDiffLines: 0,
+          diffLines: 13,
+        },
         [
           {
             provide: () => ({
               ...context(),
-              requiredAgents: required ? ['test-matrix'] : [],
+              requiredAgents: [...requiredAgents],
             }),
           },
         ],
@@ -188,7 +202,7 @@ describe('repo-context providers and trust boundary', () => {
       expect(readJson(planPath)).toMatchObject({
         repositoryContext: { provider: 'fake-provider' },
       });
-      if (required)
+      if (revoke)
         expect(readJson(planPath)).not.toHaveProperty('reviewProfile');
       else
         expect(readJson(planPath)).toHaveProperty(

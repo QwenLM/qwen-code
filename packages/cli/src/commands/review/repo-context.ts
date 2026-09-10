@@ -35,6 +35,11 @@ import {
   validateRepositoryContext,
 } from './lib/repository-context.js';
 import { stringifyPlanReport } from './lib/report.js';
+import {
+  contextRoleRunsInThisReview,
+  reviewMode,
+  type RosterPlan,
+} from './lib/roster.js';
 
 interface RepoContextArgs {
   plan: string;
@@ -434,7 +439,13 @@ export function runRepoContext(
   if (
     plan.reviewProfile === DOCS_NAV_PROFILE &&
     context &&
-    context.requiredAgents.length > 0
+    context.requiredAgents.some((role) =>
+      contextRoleRunsInThisReview(
+        role,
+        plan as RosterPlan,
+        reviewMode(plan as RosterPlan),
+      ),
+    )
   ) {
     delete plan.reviewProfile;
     writeStderrLine(

@@ -64,6 +64,7 @@ import {
 } from './agent-prompt.js';
 import {
   BRIEFS,
+  DOCS_NAV_CAUSAL_SCOPE,
   ENUMERATION_TRAP_LENS,
   MODELED_SYSTEM_EXECUTION_LENS,
 } from './lib/agent-briefs.js';
@@ -445,9 +446,18 @@ describe('agent-prompt (command boundary)', () => {
       expect(process.exitCode).toBe(4);
       expect(writeStdoutLine).not.toHaveBeenCalled();
       expect(readRecordedPrompts(plan).size).toBe(0);
+      expect(readBudgetStop(plan)).toBeNull();
       expect(writeStderrLine).toHaveBeenCalledWith(
-        expect.stringContaining('skips reverse audit'),
+        expect.stringContaining(
+          'PROFILE SKIP: focused navigation review skips reverse audit',
+        ),
       );
+      expect(writeStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'no marker is recorded and no unreviewedDimensions entry is owed',
+        ),
+      );
+      expect(agentPromptCommand.describe).toContain('PROFILE SKIP');
     } finally {
       process.exitCode = savedExit;
       rmSync(dir, { recursive: true, force: true });
@@ -2823,12 +2833,20 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     'keeps %s inside the causal navigation scope',
     (role) => {
       const brief = buildRoleBrief(
-        { ...PR_PLAN, reviewProfile: 'docs-nav' },
+        {
+          ...PR_PLAN,
+          reviewProfile: 'docs-nav',
+          fetchedSha: 'a'.repeat(40),
+          files: [{ path: 'docs/developers/_meta.ts' }],
+        },
         role,
         { planPath: join(absTmp, 'plan.json') },
       );
       expect(brief).toContain('causal base/head difference');
       expect(brief).toContain('discoverability alone does not establish that');
+      expect(brief).toContain('Do not audit unchanged example implementations');
+      expect(brief.split(DOCS_NAV_CAUSAL_SCOPE)).toHaveLength(2);
+      expect(BRIEFS['docs-nav'].brief).toContain(DOCS_NAV_CAUSAL_SCOPE);
       if (role === 'docs-nav') {
         expect(brief).toContain(join(absTmp, 'qwen-review-pr-6766-context.md'));
         // The finder's brief carries no `### Incidental findings` channel and
@@ -2837,6 +2855,12 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
         // no later round carries — must not be welded in here.
         expect(brief).not.toContain('channel above is withdrawn');
         expect(brief).toContain('Do not file incidental findings');
+        expect(brief).toContain(
+          `git show ${PR_PLAN.mergeBaseSha}:docs/developers/_meta.ts`,
+        );
+        expect(brief).toContain(
+          `git show ${'a'.repeat(40)}:docs/developers/_meta.ts`,
+        );
       }
       if (role === 'verify') {
         // The verify brief carries the `### Incidental findings` channel two
@@ -2845,7 +2869,44 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
         // profile has no later round to carry.
         expect(brief).toContain('### Incidental findings');
         expect(brief).toContain('channel above is withdrawn');
+        expect(brief).not.toContain(
+          join(absTmp, 'qwen-review-pr-6766-context.md'),
+        );
       }
+    },
+  );
+
+  it.each(['1a', 'verify', '6a', 'reverse-audit'] as const)(
+    'keeps the focused scope out of an ordinary %s review',
+    (role) => {
+      const brief = buildRoleBrief(PR_PLAN, role, {
+        planPath: join(absTmp, 'plan.json'),
+      });
+      expect(brief).not.toContain('causal base/head difference');
+      expect(brief).not.toContain('Do not file incidental findings');
+    },
+  );
+
+  it.each([
+    { mergeBaseSha: 'HEAD~1' },
+    { fetchedSha: '$(touch /tmp/unsafe)' },
+    { files: [{ path: 'docs/$(touch unsafe)/_meta.ts' }] },
+    { files: [] },
+  ])(
+    'does not invent navigation reads for invalid captured input: %j',
+    (invalid) => {
+      const brief = buildRoleBrief(
+        {
+          ...PR_PLAN,
+          reviewProfile: 'docs-nav',
+          fetchedSha: 'a'.repeat(40),
+          files: [{ path: 'docs/developers/_meta.ts' }],
+          ...invalid,
+        },
+        'docs-nav',
+      );
+      expect(brief).toContain('do not guess a base revision');
+      expect(brief).not.toContain('read the complete captured base with');
     },
   );
 

@@ -28,6 +28,10 @@ remain identical. Imports, calls, spreads, computed keys, escapes, renames,
 mode changes and unsupported syntax retain the full review. The classifier
 never evaluates the file and does not affect CI's shared docs-only classifier.
 
+The shared docs-only classifier controls CI routing, not the review roster or
+the causal scope of its findings. Extending it alone would still leave the
+review work that timed out on #11426. This profile bounds that work separately.
+
 The focused profile keeps the existing high-effort invocation and its posting
 authorization. The plan's profile changes the required work: one navigation
 reviewer reads the whole diff, relevant PR context and direct navigation
@@ -35,8 +39,10 @@ consumers, then returns candidates or an explicit clean receipt. Candidate
 findings must explain the behavior difference caused by this PR before they
 enter one independent verification pass. Existing defects outside that causal
 scope do not trigger verification or further exploration. There is no reverse
-audit or specialist fan-out. Repository-declared extra review requirements
-retain the normal roster.
+audit or specialist fan-out. The reviewer receives explicit reads for both
+captured revisions rather than inferring a base from the branch's last commit.
+Repository-declared extra reviewers retain the normal roster only when the
+existing effort, topology and mode policy would admit those roles.
 
 Coverage checks require the focused reviewer and, when posting findings, the
 existing independent-verifier evidence. Composition discloses the focused
