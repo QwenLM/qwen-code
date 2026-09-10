@@ -39173,7 +39173,7 @@ describe('Session', () => {
       expect(guardAttempts).toEqual([1, 2, 2]);
     });
 
-    it('does not change error-time queue draining before the Guard is armed', async () => {
+    it('drains a mid-turn background completion when an unarmed turn errors out', async () => {
       rebuildSessionWithGuard();
       const callback =
         mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
@@ -39189,19 +39189,24 @@ describe('Session', () => {
           status: 'completed',
         });
       });
-      mockChat.sendMessageStream = vi.fn().mockResolvedValue(failedStream);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(failedStream)
+        .mockResolvedValue(createEmptyStream());
 
       await expect(runGuardPrompt()).rejects.toThrow('unarmed stream failed');
 
-      const internals = session as unknown as {
-        notificationProcessing: boolean;
-        notificationQueue: Array<{ taskId: string }>;
-      };
-      expect(internals.notificationProcessing).toBe(false);
-      expect(internals.notificationQueue).toEqual([
-        expect.objectContaining({ taskId: 'unrelated-after-unarmed-error' }),
-      ]);
-      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      // A background completion queued mid-turn must not be stranded when the
+      // owning turn errors out: the error path drains it so the session can
+      // return to idle instead of holding activeWorkState forever.
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      const automaticCall = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[1]?.[1] as { message: Part[] };
+      expect(textParts(automaticCall.message).join('\n')).toContain(
+        '<unrelated-after-unarmed-error />',
+      );
     });
 
     it('clears a failed guard chain when a new ordinary prompt starts', async () => {
