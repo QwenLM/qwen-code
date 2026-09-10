@@ -1573,6 +1573,107 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.tool_choice).toBeUndefined();
     });
 
+    it('applies learned mandatory thinking after external profile shaping', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        model: 'learned-model',
+        baseUrl: 'https://proxy.example/v1',
+        reasoningConfig: {
+          profile: 'openai-effort',
+          supportedEfforts: ['low', 'medium'],
+          defaultEffort: 'medium',
+        },
+      };
+      pipeline = new ContentGenerationPipeline({
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      });
+      const learned = pipeline as unknown as {
+        requiredThinkingModels: Set<string>;
+      };
+      learned.requiredThinkingModels.add('learned-model');
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'test' },
+      ]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [],
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(
+        {
+          model: 'learned-model',
+          contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+          config: { thinkingConfig: { includeThoughts: false } },
+        },
+        'prompt-id',
+      );
+
+      expect(
+        (mockClient.chat.completions.create as Mock).mock.calls[0][0],
+      ).toMatchObject({ reasoning_effort: 'medium' });
+    });
+
+    it('removes forced tool choice for a mandatory external profile on DashScope', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        model: 'glm-mandatory',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        thinkingMandatory: true,
+        reasoningConfig: {
+          profile: 'openai-effort',
+          defaultEffort: 'medium',
+        },
+      };
+      pipeline = new ContentGenerationPipeline({
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      });
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'test' },
+      ]);
+      (mockConverter.convertLlmToolsToOpenAI as Mock).mockResolvedValue([
+        { type: 'function', function: { name: 'respond_in_schema' } },
+      ]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [],
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(
+        {
+          model: 'glm-mandatory',
+          contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+          config: {
+            tools: [
+              {
+                functionDeclarations: [
+                  {
+                    name: 'respond_in_schema',
+                    parameters: { type: Type.OBJECT, properties: {} },
+                  },
+                ],
+              },
+            ],
+            toolConfig: {
+              functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+            },
+          },
+        },
+        'prompt-id',
+      );
+
+      expect(
+        (mockClient.chat.completions.create as Mock).mock.calls[0][0],
+      ).not.toHaveProperty('tool_choice');
+    });
+
     it('learns required thinking from a provider error and retries once', async () => {
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,

@@ -85,6 +85,13 @@ export class ModelsConfig {
   private modelRegistry: ModelRegistry;
   private pendingModelRegistry?: ModelRegistry;
   private pendingModelSelection?: { modelId: string; baseUrl?: string };
+  private pendingModelSelectionSource?: {
+    authType: AuthType | undefined;
+    modelId: string;
+    baseUrl: string | null | undefined;
+    revision: number;
+  };
+  private modelSelectionRevision = 0;
 
   // Current selection state
   private currentAuthType: AuthType | undefined;
@@ -561,6 +568,7 @@ export class ModelsConfig {
       if (this.onModelChange) {
         await this.onModelChange(authType, requiresRefresh);
       }
+      this.modelSelectionRevision += 1;
     } catch (error) {
       // Rollback on error
       this.rollbackToStateSnapshot(rollbackSnapshot);
@@ -1354,6 +1362,7 @@ export class ModelsConfig {
           requiresRefresh,
         );
       }
+      this.modelSelectionRevision += 1;
     } catch (error) {
       this.rollbackToStateSnapshot(rollbackSnapshot);
       throw error;
@@ -1455,6 +1464,9 @@ export class ModelsConfig {
       modelProvidersConfig,
       providerProtocolConfig,
     );
+    this.pendingModelRegistry = undefined;
+    this.pendingModelSelection = undefined;
+    this.pendingModelSelectionSource = undefined;
   }
 
   getNextPromptModelProvidersConfig(): ModelProvidersConfig | undefined {
@@ -1463,6 +1475,11 @@ export class ModelsConfig {
     ).getModelProvidersConfig();
   }
 
+  /**
+   * Stage providers for the next prompt. An omitted modelId preserves an
+   * already staged selection, null clears it, and a string replaces it.
+   * baseUrl is used only with a string modelId.
+   */
   stageModelProvidersReload(
     modelProviders?: ModelProvidersConfig,
     providerProtocol?: ProviderProtocolConfig,
@@ -1481,6 +1498,15 @@ export class ModelsConfig {
               modelId,
               ...(baseUrl !== undefined ? { baseUrl } : {}),
             };
+      this.pendingModelSelectionSource =
+        modelId === null
+          ? undefined
+          : {
+              authType: this.currentAuthType,
+              modelId: this.getModel(),
+              baseUrl: this.currentRegistryBaseUrl,
+              revision: this.modelSelectionRevision,
+            };
     }
   }
 
@@ -1492,7 +1518,15 @@ export class ModelsConfig {
   ): Promise<boolean> {
     const pending = this.pendingModelRegistry;
     if (!pending) return false;
-    const pendingModelSelection = this.pendingModelSelection;
+    const source = this.pendingModelSelectionSource;
+    const pendingModelSelection =
+      !source ||
+      (source.authType === this.currentAuthType &&
+        source.modelId === this.getModel() &&
+        source.baseUrl === this.currentRegistryBaseUrl &&
+        source.revision === this.modelSelectionRevision)
+        ? this.pendingModelSelection
+        : undefined;
     const previousRegistry = this.modelRegistry;
     const previousState = this.createStateSnapshotForRollback();
     this.modelRegistry = pending;
@@ -1501,6 +1535,7 @@ export class ModelsConfig {
       if (this.pendingModelRegistry === pending) {
         this.pendingModelRegistry = undefined;
         this.pendingModelSelection = undefined;
+        this.pendingModelSelectionSource = undefined;
       }
       return true;
     } catch (error) {

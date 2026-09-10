@@ -519,8 +519,8 @@ export class ResponsesPipeline {
     const resolved = getModelReasoningConfig(this.cliConfig, this.config);
     // A per-send opt-out, mirroring the sibling Chat wire's
     // buildReasoningConfig: `includeThoughts:false` is the caller saying this
-    // particular request wants no thinking, and it outranks any static
-    // configuration. Only the explicit `false` opts out -- no other value of
+    // particular request wants no thinking, unless the route declares thinking
+    // mandatory. Only the explicit `false` opts out -- no other value of
     // thinkingConfig is given a meaning on this wire.
     if (
       request.config?.thinkingConfig?.includeThoughts === false &&

@@ -11,6 +11,7 @@ import type { ModelReasoningCapabilities } from '../models/types.js';
 import {
   clampReasoningEffort,
   getGptReasoningCapabilities,
+  OPENAI_COMPATIBLE_EFFORTS,
   parseModelReasoningCapabilities,
   REASONING_EFFORT_TIERS,
   type ReasoningEffort,
@@ -19,6 +20,8 @@ import {
   anthropicSupportedEffortTiers,
   parseClaudeModelVersion,
 } from './anthropic-reasoning.js';
+import { isDeepSeekHostname } from './openaiContentGenerator/provider/deepseek.js';
+import { isOpenRouterHostname } from './openaiContentGenerator/provider/openrouter.js';
 
 export const REASONING_PROFILES = [
   'openai-reasoning',
@@ -65,8 +68,7 @@ function inferProfile(
   legacy?: ModelReasoningCapabilities,
 ): ReasoningProfile {
   const host = hostname(route.baseUrl);
-  const deepseek =
-    host === 'api.deepseek.com' || host.endsWith('.api.deepseek.com');
+  const deepseek = isDeepSeekHostname(route);
   if (route.authType === 'gemini' || route.authType === 'vertex-ai')
     return 'gemini';
   if (route.authType === 'openai-responses') return 'openai-reasoning';
@@ -85,8 +87,7 @@ function inferProfile(
       return 'anthropic-adaptive';
     return 'anthropic-manual';
   }
-  if (host === 'openrouter.ai' || host.endsWith('.openrouter.ai'))
-    return 'openai-reasoning';
+  if (isOpenRouterHostname(route)) return 'openai-reasoning';
   if (deepseek || legacy?.disableField === 'thinking') return 'deepseek-openai';
   const qwen = /^(qwen|coder-model)/i.test(route.model);
   const dashscope = isDashScopeProvider(route);
@@ -171,12 +172,11 @@ export function resolveModelReasoningConfig(
     profile === 'dashscope-thinking' ||
     profile === 'qwen-chat-template' ||
     (!explicitProfile && legacy?.toggleOnly === true);
-  const gpt = explicitProfile
-    ? undefined
-    : getGptReasoningCapabilities(route.model);
+  const gpt = getGptReasoningCapabilities(route.model);
   const mandatory =
     route.thinkingMandatory ??
-    (legacy?.canDisable === false || gpt?.thinkingMandatory === true);
+    (!explicitProfile &&
+      (legacy?.canDisable === false || gpt?.thinkingMandatory === true));
   const common = {
     thinking: true as const,
     profile,
@@ -189,33 +189,34 @@ export function resolveModelReasoningConfig(
     ...(mandatory ? { canDisable: false as const } : {}),
   };
   if (toggleOnly) {
-    if (
-      input.supportedEfforts !== undefined ||
-      input.defaultEffort !== undefined
-    )
+    if (input.supportedEfforts !== undefined)
       fail('supportedEfforts', 'this profile supports only thinking on/off');
+    if (input.defaultEffort !== undefined)
+      fail('defaultEffort', 'this profile supports only thinking on/off');
     return { ...common, toggleOnly: true };
   }
   const profileEfforts: readonly ReasoningEffort[] = profile.startsWith(
     'deepseek-',
   )
     ? ['high', 'max']
-    : profile === 'gemini' || profile === 'anthropic-manual'
+    : profile === 'gemini'
       ? ['low', 'medium', 'high']
-      : profile === 'anthropic-adaptive'
-        ? ['low', 'medium', 'high', 'max']
+      : protocol === 'anthropic'
+        ? anthropicSupportedEffortTiers(route.model)
         : profile === 'dashscope-effort'
           ? ['low', 'medium', 'xhigh']
-          : REASONING_EFFORT_TIERS;
-  const inferredEfforts = !explicitProfile
-    ? legacy && !legacy.toggleOnly
-      ? legacy.efforts
-      : (gpt?.efforts ??
-        (protocol === 'anthropic' && profile !== 'deepseek-anthropic'
-          ? anthropicSupportedEffortTiers(route.model)
-          : undefined))
-    : undefined;
-  const efforts = input.supportedEfforts ?? inferredEfforts ?? profileEfforts;
+          : OPENAI_COMPATIBLE_EFFORTS;
+  const inferredEfforts =
+    legacy && !legacy.toggleOnly ? legacy.efforts : gpt?.efforts;
+  const inheritedEfforts = inferredEfforts ?? profileEfforts;
+  const efforts =
+    input.supportedEfforts ??
+    (input.defaultEffort && !inheritedEfforts.includes(input.defaultEffort)
+      ? REASONING_EFFORT_TIERS.filter(
+          (tier) =>
+            inheritedEfforts.includes(tier) || tier === input.defaultEffort,
+        )
+      : inheritedEfforts);
   if (
     !Array.isArray(efforts) ||
     !efforts.length ||
@@ -231,11 +232,8 @@ export function resolveModelReasoningConfig(
     efforts.some((tier) => tier === 'xhigh' || tier === 'max')
   )
     fail('supportedEfforts', 'Gemini supports low/medium/high');
-  const inheritedDefault = !explicitProfile
-    ? legacy && !legacy.toggleOnly
-      ? legacy.defaultEffort
-      : gpt?.defaultEffort
-    : undefined;
+  const inheritedDefault =
+    legacy && !legacy.toggleOnly ? legacy.defaultEffort : gpt?.defaultEffort;
   const defaultEffort =
     input.defaultEffort ??
     (inheritedDefault
@@ -267,6 +265,9 @@ export function resolveEffectiveReasoning(
   if (reasoning === undefined && resolved.defaultEnabled === false)
     return false;
   const requested = reasoning?.effort ?? resolved.defaultEffort;
+  if (requested && !REASONING_EFFORT_TIERS.includes(requested)) {
+    return { ...reasoning, effort: requested };
+  }
   return requested
     ? {
         ...reasoning,

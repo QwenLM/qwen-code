@@ -171,6 +171,49 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
+describe('staged model-provider refresh admission', () => {
+  it('keeps user prompts running when a staged refresh fails', async () => {
+    const apply = vi
+      .fn()
+      .mockRejectedValue(new Error('credentials unavailable'));
+    const error = vi.fn();
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      modelsConfig: { applyPendingModelProvidersReload: apply },
+      debugLogger: { error },
+    });
+
+    await expect(config.applyPendingModelProvidersReload()).resolves.toBe(
+      false,
+    );
+    await expect(config.applyPendingModelProvidersReload()).resolves.toBe(
+      false,
+    );
+    expect(apply).toHaveBeenCalledTimes(2);
+    expect(error).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('effective declared reasoning state', () => {
+  it('uses the Responses resolver instead of the Chat serializer', () => {
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      getResolvedModelConfig: () => undefined,
+      getContentGeneratorConfig: () => ({
+        model: 'responses-alias',
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        reasoningConfig: {
+          profile: 'openai-reasoning',
+          supportedEfforts: ['low', 'medium', 'high'],
+        },
+        reasoning: { effort: 'minimal' },
+      }),
+    });
+
+    expect(config.getEffectiveReasoning()).toEqual({ effort: 'minimal' });
+  });
+});
+
 // Mock dependencies that might be called during Config construction or createServerConfig
 vi.mock('../tools/tool-registry', () => {
   const ToolRegistryMock = vi.fn();

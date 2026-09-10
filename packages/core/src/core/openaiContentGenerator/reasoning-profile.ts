@@ -14,6 +14,8 @@ import {
   selectDashScopeThinkingKnob,
   withoutNullishThinkingKnobs,
 } from './provider/dashscope.js';
+import { isOpenRouterHostname } from './provider/openrouter.js';
+import { isDeepSeekHostname } from './provider/deepseek.js';
 import { ensureReasoningContentOnAssistantMessage } from './provider/utils.js';
 import { REASONING_EFFORT_TIERS } from '../reasoning-effort.js';
 
@@ -24,6 +26,19 @@ const THINKING_FIELDS = [
   'thinking_budget',
   'thinking',
 ] as const;
+
+function withNestedReasoningEffort(
+  layer: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  const reasoning = layer?.['reasoning'];
+  const effort =
+    reasoning && typeof reasoning === 'object' && !Array.isArray(reasoning)
+      ? (reasoning as Record<string, unknown>)['effort']
+      : undefined;
+  if (!layer || layer['reasoning_effort'] != null || effort == null)
+    return layer;
+  return { ...layer, reasoning_effort: effort };
+}
 
 export function applyOpenAIReasoningProfile(
   request: OpenAI.Chat.ChatCompletionCreateParams,
@@ -59,6 +74,11 @@ export function applyOpenAIReasoningProfile(
       body['chat_template_kwargs'] = { ...template, enable_thinking: true };
     } else if (effort) {
       body['reasoning_effort'] = effort;
+      if (
+        profile !== 'dashscope-effort' &&
+        reasoning.budget_tokens !== undefined
+      )
+        body['reasoning'] = { budget_tokens: reasoning.budget_tokens };
     }
   }
   for (const rawLayer of [generation.samplingParams, generation.extra_body]) {
@@ -67,30 +87,134 @@ export function applyOpenAIReasoningProfile(
         ? withoutNullishThinkingKnobs(rawLayer)
         : rawLayer;
     if (!layer) continue;
-    if (layer['reasoning'] !== undefined) delete body['reasoning_effort'];
-    if (layer['reasoning_effort'] != null) delete body['reasoning'];
     for (const key of THINKING_FIELDS) {
+      if (key === 'reasoning' || key === 'reasoning_effort') continue;
       if (Object.hasOwn(layer, key)) {
         if (layer[key] == null) delete body[key];
         else body[key] = layer[key];
+        if (key === 'thinking' && layer[key] != null) {
+          delete body['reasoning'];
+          delete body['reasoning_effort'];
+        }
       }
+    }
+    const hasReasoning = Object.hasOwn(layer, 'reasoning');
+    const rawReasoning = layer['reasoning'];
+    const hasEffort = layer['reasoning_effort'] != null;
+    if (hasReasoning) {
+      if (rawReasoning === null) {
+        body['reasoning'] = null;
+        delete body['reasoning_effort'];
+      } else if (
+        rawReasoning &&
+        typeof rawReasoning === 'object' &&
+        !Array.isArray(rawReasoning)
+      ) {
+        if (profile === 'openai-reasoning' && !hasEffort) {
+          body['reasoning'] = rawReasoning;
+          delete body['reasoning_effort'];
+        } else {
+          const { effort: nestedEffort, ...rest } = rawReasoning as Record<
+            string,
+            unknown
+          >;
+          if (!hasEffort && nestedEffort != null)
+            body['reasoning_effort'] = nestedEffort;
+          if (
+            !hasEffort &&
+            nestedEffort == null &&
+            Object.hasOwn(rawReasoning, 'enabled')
+          )
+            delete body['reasoning_effort'];
+          if (Object.keys(rest).length) body['reasoning'] = rest;
+          else delete body['reasoning'];
+        }
+      } else if (rawReasoning === undefined) {
+        delete body['reasoning'];
+      } else {
+        body['reasoning'] = rawReasoning;
+        delete body['reasoning_effort'];
+      }
+    }
+    if (hasEffort) {
+      body['reasoning_effort'] = layer['reasoning_effort'];
+      delete body['thinking'];
+      delete body['thinking_budget'];
+      delete body['enable_thinking'];
+      const nested = body['reasoning'];
+      if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+        const rest = { ...(nested as Record<string, unknown>) };
+        delete rest['effort'];
+        delete rest['enabled'];
+        if (Object.keys(rest).length) body['reasoning'] = rest;
+        else delete body['reasoning'];
+      } else {
+        delete body['reasoning'];
+      }
+    } else if (Object.hasOwn(layer, 'reasoning_effort')) {
+      delete body['reasoning_effort'];
     }
     if (layer['chat_template_kwargs'] !== undefined) {
       body['chat_template_kwargs'] = {
-        ...template,
+        ...(body['chat_template_kwargs'] as
+          | Record<string, unknown>
+          | undefined),
         ...(layer['chat_template_kwargs'] as Record<string, unknown>),
       };
     }
+    const rawTemplate = layer['chat_template_kwargs'];
+    const templateSwitch =
+      rawTemplate !== null &&
+      typeof rawTemplate === 'object' &&
+      !Array.isArray(rawTemplate)
+        ? (rawTemplate as Record<string, unknown>)['enable_thinking']
+        : undefined;
+    const hasTemplateDisable =
+      rawTemplate !== null &&
+      typeof rawTemplate === 'object' &&
+      !Array.isArray(rawTemplate) &&
+      Object.hasOwn(rawTemplate, 'enable_thinking') &&
+      templateSwitch === false;
+    if (
+      profile === 'qwen-chat-template' &&
+      Object.hasOwn(layer, 'enable_thinking')
+    ) {
+      body['chat_template_kwargs'] = {
+        ...(body['chat_template_kwargs'] as
+          | Record<string, unknown>
+          | undefined),
+        enable_thinking: layer['enable_thinking'],
+      };
+      delete body['enable_thinking'];
+    }
+    if (
+      hasTemplateDisable &&
+      (profile === 'qwen-chat-template' || !hasEffort)
+    ) {
+      delete body['reasoning'];
+      delete body['reasoning_effort'];
+      delete body['thinking'];
+    } else if (hasEffort) {
+      const kwargs = body['chat_template_kwargs'];
+      if (kwargs && typeof kwargs === 'object' && !Array.isArray(kwargs)) {
+        const next = { ...(kwargs as Record<string, unknown>) };
+        delete next['enable_thinking'];
+        if (Object.keys(next).length) body['chat_template_kwargs'] = next;
+        else delete body['chat_template_kwargs'];
+      }
+    }
   }
+  let dashscopeBudgetSelected = false;
   if (profile === 'dashscope-effort') {
     const selected = selectDashScopeThinkingKnob(
       generation.model,
-      generation.extra_body,
-      generation.samplingParams,
+      withNestedReasoningEffort(generation.extra_body),
+      withNestedReasoningEffort(generation.samplingParams),
       effort || undefined,
       true,
     );
-    if (selected?.field === 'thinking_budget') delete body['reasoning_effort'];
+    dashscopeBudgetSelected = selected?.field === 'thinking_budget';
+    if (dashscopeBudgetSelected) delete body['reasoning_effort'];
     else if (body['reasoning_effort'] !== undefined) {
       delete body['thinking_budget'];
       if (body['enable_thinking'] !== false) delete body['enable_thinking'];
@@ -103,8 +227,18 @@ export function applyOpenAIReasoningProfile(
   }
   if (disabled) {
     for (const key of THINKING_FIELDS) delete body[key];
-    if (profile === 'openai-reasoning') body['reasoning'] = { enabled: false };
-    else if (profile === 'deepseek-openai')
+    if (body['chat_template_kwargs'] !== undefined)
+      body['chat_template_kwargs'] = {
+        ...(body['chat_template_kwargs'] as Record<string, unknown>),
+        enable_thinking: false,
+      };
+    if (profile === 'openai-reasoning') {
+      if (
+        generation.reasoningConfig?.profile === 'openai-reasoning' ||
+        isOpenRouterHostname(generation)
+      )
+        body['reasoning'] = { enabled: false };
+    } else if (profile === 'deepseek-openai')
       body['thinking'] = { type: 'disabled' };
     else if (profile === 'dashscope-thinking') body['enable_thinking'] = false;
     else if (profile === 'qwen-chat-template')
@@ -141,6 +275,7 @@ export function applyOpenAIReasoningProfile(
     }
     if (
       effort &&
+      !dashscopeBudgetSelected &&
       body['reasoning_effort'] === undefined &&
       body['reasoning'] === undefined
     ) {
@@ -159,7 +294,12 @@ export function applyOpenAIReasoningProfile(
         body['enable_thinking'] !== false))
   )
     delete body['tool_choice'];
-  if (profile === 'deepseek-openai')
+  if (
+    profile === 'deepseek-openai' &&
+    (generation.reasoningConfig?.profile === 'deepseek-openai' ||
+      isDeepSeekHostname(generation) ||
+      generation.model.toLowerCase().includes('deepseek'))
+  )
     body['messages'] = request.messages.map(
       ensureReasoningContentOnAssistantMessage,
     );

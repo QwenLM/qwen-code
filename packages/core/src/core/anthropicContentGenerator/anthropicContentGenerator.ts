@@ -706,7 +706,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // model-generation behavior change, identical on the native API,
     // Vertex AI, and Bedrock, so (unlike the signature workaround above)
     // this is NOT gated on baseURL.
-    const stripTrailingAssistantPrefill = this.modelSupportsAdaptiveThinking();
+    const stripTrailingAssistantPrefill =
+      this.modelGenerationRejectsAssistantPrefill();
 
     // Sample the live cache-control flags once per request and forward
     // them to the converter (body-side `cache_control`). The converter's
@@ -875,6 +876,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
     };
   }
 
+  private configuredReasoning() {
+    return getModelReasoningConfig(this.cliConfig, this.contentGeneratorConfig);
+  }
+
   /**
    * Compute the effort value that both the thinking budget ladder and
    * output_config should use for this request. Returns undefined whenever
@@ -891,10 +896,6 @@ export class AnthropicContentGenerator implements ContentGenerator {
    * `effortClampWarned` latch — repeating on every request just spams
    * the log without giving users new information.
    */
-  private configuredReasoning() {
-    return getModelReasoningConfig(this.cliConfig, this.contentGeneratorConfig);
-  }
-
   private resolveEffectiveEffort(
     request: GenerateContentParameters,
   ): ReasoningEffort | undefined {
@@ -970,6 +971,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
         external.profile === 'anthropic-adaptive' ||
         external.profile === 'anthropic-adaptive-only'
       );
+    const parsed = parseClaudeModelVersion(
+      this.contentGeneratorConfig.model || '',
+    );
+    if (!parsed) return false;
+    const { major, minor } = parsed;
+    return major > 4 || (major === 4 && minor >= 6);
+  }
+
+  private modelGenerationRejectsAssistantPrefill(): boolean {
     const parsed = parseClaudeModelVersion(
       this.contentGeneratorConfig.model || '',
     );

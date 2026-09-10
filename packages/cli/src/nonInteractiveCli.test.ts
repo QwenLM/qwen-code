@@ -346,6 +346,7 @@ describe('runNonInteractive', () => {
       initialize: vi.fn().mockResolvedValue(undefined),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
+      applyPendingModelProvidersReload: vi.fn().mockResolvedValue(false),
       getChatRecordingService: vi.fn().mockReturnValue({
         flush: vi.fn().mockResolvedValue(undefined),
         finalize: vi.fn().mockResolvedValue(undefined),
@@ -2508,6 +2509,7 @@ describe('runNonInteractive', () => {
       },
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
+    expect(mockConfig.applyPendingModelProvidersReload).toHaveBeenCalledOnce();
     expect(mockShutdownTelemetry).toHaveBeenCalled();
   });
 

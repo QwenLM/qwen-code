@@ -639,6 +639,8 @@ describe('registerModelProvidersHotReload', () => {
   });
 
   it('retains the previous snapshot when validation fails and retries a corrected update', async () => {
+    const logError = vi.fn();
+    appEvents.on(AppEvent.LogError, logError);
     desired = { openai: [{ id: 'old' }] };
     merged.modelProviders = desired;
     registerModelProvidersHotReload(watcher, settings, config);
@@ -647,11 +649,18 @@ describe('registerModelProvidersHotReload', () => {
     stage.mockImplementationOnce(() => {
       throw new Error('invalid declaration');
     });
-    await listener([]);
-    expect(desired).toBe(previous);
-    await listener([]);
-    expect(desired).toEqual(merged.modelProviders);
-    expect(stage).toHaveBeenCalledTimes(2);
+    try {
+      await listener([]);
+      expect(desired).toBe(previous);
+      expect(logError).toHaveBeenCalledWith(
+        expect.stringContaining('model provider settings'),
+      );
+      await listener([]);
+      expect(desired).toEqual(merged.modelProviders);
+      expect(stage).toHaveBeenCalledTimes(2);
+    } finally {
+      appEvents.off(AppEvent.LogError, logError);
+    }
   });
 
   it('reconciles the startup window and out-of-band model registry changes', async () => {

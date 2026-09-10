@@ -267,23 +267,11 @@ export function registerMcpHotReload(
 
 /**
  * Subscribe the running {@link Config} to settings changes so `modelProviders`
- * edits take effect without a session restart (issue #10568). Mirrors
- * {@link registerMcpHotReload}: the watcher already debounces and filters out
- * restart-required keys, so this listener only diffs the merged
- * `modelProviders` against the registry's APPLIED config (same design as the
- * MCP listener diffing against `getSettingsMcpServers()`) and calls the
- * existing reload primitive. The diff gate keeps unrelated settings edits
- * (theme, …) from rebuilding the model registry. Called once at startup,
- * after `settingsWatcher.startWatching()`; returns a disposer that
- * unsubscribes.
- *
- * Diffing against applied state (not a listener-local snapshot) keeps the
- * gate correct when other paths rewrite the registry without a watcher event
- * (provider-template updates, ACP session reloads), and means a throwing
- * reload retries on the next event — applied state never advanced. A
- * rejected `refreshAuth` is the one exception: the registry reload has
- * already advanced applied state by then, so a listener-local flag retries
- * only the auth refresh on subsequent events (never the registry reload).
+ * edits take effect without a session restart (issue #10568). The watcher
+ * already debounces and filters restart-required keys. This listener stages
+ * the latest valid provider snapshot, and each runtime applies it at its next
+ * user-prompt boundary. Called once at startup, after
+ * `settingsWatcher.startWatching()`; returns a disposer that unsubscribes.
  *
  * `providerProtocol` stays boot-frozen: it is `requiresRestart` in the
  * schema, so this listener does not pass it to the reload primitive.
@@ -306,6 +294,10 @@ export function registerModelProvidersHotReload(
       modelProvidersDebugLogger.error(
         'Invalid model-provider update; keeping the current configuration',
         error,
+      );
+      appEvents.emit(
+        AppEvent.LogError,
+        'Failed to reload model provider settings; the current model configuration remains active. Run with --debug for details.',
       );
     }
   };

@@ -28764,20 +28764,25 @@ describe('sessionLanguage multi-session propagation', () => {
       modelProviders: providerConfig,
       providerProtocol: { idealab: 'openai' },
     };
+    let reloadedSettings: Record<string, unknown> = {
+      modelProviders: providerConfig,
+    };
     const settings = {
       get merged() {
         return mergedSettings;
       },
       reloadScopesFromDiskAtomically: vi.fn(() => {
-        mergedSettings = { modelProviders: providerConfig };
+        mergedSettings = reloadedSettings;
         return true;
       }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
+    const setDisabledTools = vi.fn();
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-reload'),
       stageModelProvidersReload: vi.fn(),
+      setDisabledTools,
       getAuthType: vi.fn().mockReturnValue('openai'),
       // The reload re-derivation applies the Session Workflow gate to live
       // sessions unconditionally; report the (unchanged) effective gate so
@@ -28837,6 +28842,30 @@ describe('sessionLanguage multi-session propagation', () => {
     );
     expect(cfg.refreshAuth).not.toHaveBeenCalled();
     expect(reloadReasoningSelection).not.toHaveBeenCalled();
+
+    reloadedSettings = {
+      modelProviders: {
+        idealab: [{ ...providerConfig.idealab[0], id: 'invalid-update' }],
+      },
+      tools: { disabled: ['shell'] },
+    };
+    vi.mocked(cfg.stageModelProvidersReload).mockImplementationOnce(() => {
+      throw new Error('invalid reasoningConfig.defaultEffort');
+    });
+    const failed = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.workspaceReload,
+      {},
+    );
+    expect(setDisabledTools).toHaveBeenCalledWith(new Set(['shell']));
+    expect(failed).toMatchObject({
+      sessionFailures: [
+        {
+          sessionId: 's-reload',
+          error: 'invalid reasoningConfig.defaultEffort',
+        },
+      ],
+      sessionsSkipped: [],
+    });
 
     mockConnectionState.resolve();
     await agentPromise;

@@ -231,18 +231,29 @@ export class LlmContentGenerator implements ContentGenerator {
       request?.config?.thinkingConfig?.includeThoughts === false &&
       external.canDisable !== false
     )
-      return { includeThoughts: false };
+      return undefined;
 
     if (reasoning === false && external?.canDisable !== false) {
       return { includeThoughts: false };
     }
 
-    if (reasoning) {
+    const mandatoryOverride =
+      external?.canDisable === false &&
+      (request?.config?.thinkingConfig?.includeThoughts === false ||
+        generation?.reasoning === false);
+    const requestedEffort = reasoning === false ? undefined : reasoning?.effort;
+    const fallbackEffort =
+      external && !external.toggleOnly
+        ? (external.defaultEffort ?? external.efforts[0])
+        : undefined;
+    const effectiveEffort = requestedEffort ?? fallbackEffort;
+
+    if (reasoning || mandatoryOverride) {
       // Gemini's thinkingLevel ladder is MINIMAL / LOW / MEDIUM / HIGH — there
       // is no xhigh/max, so the extra-strong tiers are capped at HIGH. An unset
       // effort stays UNSPECIFIED so the model picks its own default.
       let thinkingLevel: ThinkingLevel;
-      switch (reasoning.effort) {
+      switch (effectiveEffort) {
         case 'low':
           thinkingLevel = 'LOW' as ThinkingLevel;
           break;
@@ -259,7 +270,7 @@ export class LlmContentGenerator implements ContentGenerator {
           // that silently runs at HIGH leaves a trace in debug logs.
           if (!this.effortClampWarned) {
             debugLogger.warn(
-              `reasoning.effort='${reasoning.effort}' is not supported by Gemini; clamping to 'HIGH'.`,
+              `reasoning.effort='${effectiveEffort}' is not supported by Gemini; clamping to 'HIGH'.`,
             );
             this.effortClampWarned = true;
           }
@@ -275,7 +286,7 @@ export class LlmContentGenerator implements ContentGenerator {
           // matching case makes this a TypeScript compile error rather than a
           // silent fall-through to UNSPECIFIED. (A `default` is required here by
           // the eslint default-case rule.)
-          const _exhaustive: never = reasoning.effort;
+          const _exhaustive: never = effectiveEffort;
           void _exhaustive;
           thinkingLevel = 'THINKING_LEVEL_UNSPECIFIED' as ThinkingLevel;
           break;

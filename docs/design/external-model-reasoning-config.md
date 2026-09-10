@@ -56,10 +56,11 @@ generation declaration wins, while omitted fields may inherit existing
 capabilities.
 
 Efforts use `low/medium/high/xhigh/max`. Toggle-only profiles reject effort
-fields. Validate profile/protocol compatibility, unique supported efforts and
-membership of the default effort. Gemini accepts its existing low/medium/high
-mapping. A declaration must contain at least one field; an empty object is
-invalid. Invalid declarations report the model and field.
+fields. Validate profile/protocol compatibility and unique supported efforts.
+When `supportedEfforts` is present, the default must belong to it; otherwise an
+explicit default extends the inherited effort set. Gemini accepts its existing
+low/medium/high mapping. A declaration must contain at least one field; an empty
+object is invalid. Invalid declarations report the model and field.
 
 ## Resolution and lifecycle
 

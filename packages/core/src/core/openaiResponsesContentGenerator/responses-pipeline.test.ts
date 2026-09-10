@@ -360,6 +360,32 @@ describe('ResponsesPipeline', () => {
       expect(body.include).toEqual(['reasoning.encrypted_content']);
     });
 
+    it('preserves a Responses-native effort outside the shared ladder', async () => {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          model: 'responses-alias',
+          reasoningConfig: {
+            profile: 'openai-reasoning',
+            supportedEfforts: ['low', 'medium', 'high'],
+          },
+          reasoning: {
+            effort: 'minimal',
+          } as unknown as ContentGeneratorConfig['reasoning'],
+        }),
+        makeCliConfig(),
+      );
+      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
+        // drain
+      }
+      const body = JSON.parse(
+        fetchMock.mock.calls[0]![1].body,
+      ) as ResponsesApiRequest;
+      expect(body.reasoning).toEqual({ effort: 'minimal', summary: 'auto' });
+    });
+
     it('keeps external mandatory reasoning on for a request opt-out', async () => {
       mockResponse(
         sseEvent('response.completed', { response: { status: 'completed' } }),

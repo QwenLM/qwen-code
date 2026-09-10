@@ -97,6 +97,58 @@ describe('external model reasoning configuration', () => {
     });
   });
 
+  it('keeps known model limits when only the wire profile is overridden', () => {
+    expect(
+      resolveModelReasoningConfig({
+        model: 'claude-haiku-4-6',
+        authType: AuthType.USE_ANTHROPIC,
+        reasoningConfig: { profile: 'anthropic-adaptive' },
+      }),
+    ).toMatchObject({ efforts: ['low', 'medium', 'high'] });
+    expect(
+      resolveModelReasoningConfig({
+        model: 'unknown-alias',
+        authType: AuthType.USE_OPENAI,
+        reasoningConfig: { profile: 'openai-effort' },
+      }),
+    ).toMatchObject({ efforts: ['low', 'medium', 'high', 'xhigh'] });
+  });
+
+  it('lets an explicit supportedEfforts declaration widen known limits', () => {
+    expect(
+      resolveModelReasoningConfig({
+        model: 'claude-haiku-4-6',
+        authType: AuthType.USE_ANTHROPIC,
+        reasoningConfig: {
+          profile: 'anthropic-adaptive',
+          supportedEfforts: ['low', 'max'],
+          defaultEffort: 'max',
+        },
+      }),
+    ).toMatchObject({ efforts: ['low', 'max'], defaultEffort: 'max' });
+  });
+
+  it('preserves protocol-native efforts outside the configurable ladder', () => {
+    const resolved = resolveModelReasoningConfig({
+      model: 'responses-alias',
+      authType: AuthType.USE_OPENAI_RESPONSES,
+      reasoningConfig: {
+        supportedEfforts: ['low', 'medium', 'high'],
+        defaultEffort: 'medium',
+      },
+    });
+    expect(
+      resolveEffectiveReasoning(
+        {
+          reasoning: {
+            effort: 'minimal',
+          } as unknown as ContentGeneratorConfig['reasoning'],
+        },
+        resolved,
+      ),
+    ).toEqual({ effort: 'minimal' });
+  });
+
   it.each([
     'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
     'https://dashscope-us.aliyuncs.com/compatible-mode/v1',

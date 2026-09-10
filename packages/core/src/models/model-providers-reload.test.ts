@@ -57,6 +57,16 @@ describe('model providers reload at the next user prompt', () => {
     expect(config.getModelProvidersConfig()).toEqual(providers('max'));
   });
 
+  it('discards an older staged snapshot after a successful immediate reload', async () => {
+    const config = create();
+    config.stageModelProvidersReload(providers('medium'));
+    config.reloadModelProvidersConfig(providers('high'));
+    expect(await config.applyPendingModelProvidersReload(async () => {})).toBe(
+      false,
+    );
+    expect(config.getModelProvidersConfig()).toEqual(providers('high'));
+  });
+
   it('applies a model selected in the same settings update against the new registry', async () => {
     const config = create();
     const next = providers('medium');
@@ -122,6 +132,38 @@ describe('model providers reload at the next user prompt', () => {
     expect(config.getCurrentRegistryBaseUrl()).toBe(
       'https://second.example/v1',
     );
+  });
+
+  it('does not overwrite a model explicitly selected after staging', async () => {
+    const config = create();
+    const next = providers('medium');
+    next['openai']!.push({ id: 'staged-alias' }, { id: 'user-alias' });
+    config.reloadModelProvidersConfig(next);
+    config.stageModelProvidersReload(next, undefined, 'staged-alias');
+    await config.switchModel(AuthType.USE_OPENAI, 'user-alias');
+
+    const refresh = vi.fn(async (selection) => {
+      expect(selection).toBeUndefined();
+    });
+    await config.applyPendingModelProvidersReload(refresh);
+
+    expect(config.getModel()).toBe('user-alias');
+  });
+
+  it('does not revive a staged selection after switching away and back', async () => {
+    const config = create();
+    const next = providers('medium');
+    next['openai']!.push({ id: 'staged-alias' }, { id: 'user-alias' });
+    config.reloadModelProvidersConfig(next);
+    config.stageModelProvidersReload(next, undefined, 'staged-alias');
+    await config.switchModel(AuthType.USE_OPENAI, 'user-alias');
+    await config.switchModel(AuthType.USE_OPENAI, 'alias');
+
+    await config.applyPendingModelProvidersReload(async (selection) => {
+      expect(selection).toBeUndefined();
+    });
+
+    expect(config.getModel()).toBe('alias');
   });
 
   it('rolls back registry and selection when refresh fails, retaining the pending update', async () => {

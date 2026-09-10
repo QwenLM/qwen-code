@@ -520,6 +520,14 @@ export async function runNonInteractive(
   options: RunNonInteractiveOptions = {},
 ): Promise<number> {
   return promptIdContext.run(prompt_id, async (): Promise<number> => {
+    if (
+      !options.continueInterrupted &&
+      (options.sendMessageType === undefined ||
+        options.sendMessageType === SendMessageType.UserQuery)
+    ) {
+      await config.applyPendingModelProvidersReload?.();
+    }
+
     // Create output adapter based on format
     let adapter: JsonOutputAdapterInterface;
     const outputFormat = config.getOutputFormat();

@@ -4306,37 +4306,41 @@ export class Config {
   }
 
   async applyPendingModelProvidersReload(): Promise<boolean> {
-    return this.modelsConfig.applyPendingModelProvidersReload(
-      async (selection) => {
-        const authType = this.getAuthType();
-        if (
-          authType &&
-          selection &&
-          (selection.modelId !== this.getModel() ||
-            (selection.baseUrl !== undefined &&
-              selection.baseUrl !== this.getCurrentModelRegistryBaseUrl()))
-        ) {
-          await this.switchModel(authType, selection.modelId, {
-            ...(selection.baseUrl !== undefined
-              ? { baseUrl: selection.baseUrl }
-              : {}),
-          });
-        } else if (authType) {
-          // Keep reload non-interactive. Without isInitialAuth=true, unavailable
-          // cached Qwen OAuth credentials can start device auth mid-session and
-          // stall ACP or headless callers that cannot answer the prompt.
-          await this.refreshAuth(authType, true);
-        }
-        this.baseLlmClient?.clearPerModelGeneratorCache();
-      },
-    );
+    try {
+      return await this.modelsConfig.applyPendingModelProvidersReload(
+        async (selection) => {
+          const authType = this.getAuthType();
+          if (
+            authType &&
+            selection &&
+            (selection.modelId !== this.getModel() ||
+              (selection.baseUrl !== undefined &&
+                selection.baseUrl !== this.getCurrentModelRegistryBaseUrl()))
+          ) {
+            await this.switchModel(authType, selection.modelId, {
+              ...(selection.baseUrl !== undefined
+                ? { baseUrl: selection.baseUrl }
+                : {}),
+            });
+          } else if (authType) {
+            // Keep reload non-interactive. Without isInitialAuth=true, unavailable
+            // cached Qwen OAuth credentials can start device auth mid-session and
+            // stall ACP or headless callers that cannot answer the prompt.
+            await this.refreshAuth(authType, true);
+          }
+          this.baseLlmClient?.clearPerModelGeneratorCache();
+        },
+      );
+    } catch (error) {
+      this.debugLogger.error(
+        'Failed to apply staged model-provider configuration; keeping the current configuration',
+        error,
+      );
+      return false;
+    }
   }
 
-  /**
-   * The raw modelProviders config the model registry was last built from.
-   * Lets hot-reload listeners diff against the APPLIED registry state instead
-   * of a listener-local snapshot (which out-of-band reloads would desync).
-   */
+  /** The raw provider config currently active in this session. */
   getModelProvidersConfig(): ModelProvidersConfig | undefined {
     return this.modelsConfig.getModelProvidersConfig();
   }
@@ -5275,7 +5279,6 @@ export class Config {
     const resolved = getModelReasoningConfig(this, generation);
     return resolved &&
       (generation.authType === AuthType.USE_OPENAI ||
-        generation.authType === AuthType.USE_OPENAI_RESPONSES ||
         generation.authType === AuthType.QWEN_OAUTH)
       ? getOpenAIReasoningState(generation, resolved)
       : resolveEffectiveReasoning(generation, resolved);

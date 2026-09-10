@@ -2508,6 +2508,45 @@ describe('AnthropicContentGenerator', () => {
         });
       });
 
+      it('keeps the 4.6 prefill guard when an external profile selects manual thinking', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'claude-sonnet-4-6',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-sonnet-4-6',
+            apiKey: 'test-key',
+            baseUrl: 'https://api.anthropic.com',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 500 },
+            schemaCompliance: 'auto',
+            reasoningConfig: { profile: 'anthropic-manual' },
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Prefill:' }] },
+          ],
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        const messages = (anthropicRequest as { messages: unknown[] }).messages;
+        expect(messages[messages.length - 1]).toMatchObject({
+          role: 'user',
+          content: [expect.objectContaining({ text: 'Continue.' })],
+        });
+      });
+
       it('leaves a trailing assistant turn untouched on claude-opus-4-5 (pre-4.6)', async () => {
         const { AnthropicContentGenerator } = await importGenerator();
         anthropicState.createImpl.mockResolvedValue({

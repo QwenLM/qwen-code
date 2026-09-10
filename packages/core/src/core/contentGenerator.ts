@@ -30,7 +30,7 @@ import { PROVIDER_SOURCED_FIELDS } from '../models/constants.js';
 import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
 import type { ReasoningEffort } from './reasoning-effort.js';
 import {
-  resolveModelReasoningConfig,
+  getModelReasoningConfig,
   type ModelReasoningConfig,
 } from './model-reasoning-config.js';
 
@@ -275,7 +275,8 @@ export function resolveContentGeneratorConfigWithSources(
     throw new Error(validation.errors.map((e) => e.message).join('\n'));
   }
 
-  resolveModelReasoningConfig(
+  getModelReasoningConfig(
+    config,
     newContentGeneratorConfig as ContentGeneratorConfig,
   );
 

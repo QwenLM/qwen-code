@@ -29,6 +29,14 @@ export const REASONING_EFFORT_TIERS: readonly ReasoningEffort[] = [
   'max',
 ] as const;
 
+/** Safe default for an OpenAI-compatible endpoint with unknown capabilities. */
+export const OPENAI_COMPATIBLE_EFFORTS: readonly ReasoningEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+];
+
 /**
  * Numeric strength used when clamping a requested tier down to what a model
  * supports. Gaps are intentional so future intermediate tiers (e.g. a

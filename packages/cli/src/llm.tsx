@@ -951,9 +951,8 @@ export async function main() {
       );
       registerCleanup(disposeMcpHotReload);
 
-      // Same plumbing for modelProviders edits (#10568): reload the model
-      // registry in place so `/model` picks up new providers without a
-      // session restart.
+      // Stage modelProviders edits so the next user prompt adopts one
+      // validated snapshot without changing an in-flight turn.
       const disposeModelProvidersHotReload = registerModelProvidersHotReload(
         settingsWatcher,
         settings,

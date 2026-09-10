@@ -391,7 +391,9 @@ const SETTINGS_SCHEMA = {
         items: {
           type: 'object',
           additionalProperties: true,
+          required: ['id'],
           properties: {
+            id: { type: 'string', minLength: 1 },
             generationConfig: {
               type: 'object',
               additionalProperties: true,

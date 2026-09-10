@@ -154,7 +154,7 @@ export function normalize(model: string): string {
   // Runs AFTER the whitespace collapse so space-separated display names
   // (`Claude Opus 4.8`) reach it hyphenated. The family segment is matched
   // as `[a-z]+` rather than an enumerated list so it can't drift from
-  // anthropicContentGenerator.ts's CLAUDE_MODEL_FAMILIES; this is safe
+  // anthropic-reasoning.ts's CLAUDE_MODEL_FAMILIES; this is safe
   // because the rewrite only has observable effect via the family-specific
   // downstream patterns. An already-hyphenated minor plus any further dotted
   // components (`claude-opus-4-8.0`, `claude-opus-4.8.0`) is folded too so

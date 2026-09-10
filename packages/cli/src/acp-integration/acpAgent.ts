@@ -13542,28 +13542,40 @@ class QwenAgent implements Agent {
         const sessions = [...this.sessions.entries()];
         const refreshed: string[] = [];
         const skipped: string[] = [];
+        const failed: Array<{ sessionId: string; error: string }> = [];
         const newModelName = newMerged.model?.name;
 
         const results = await Promise.allSettled(
           sessions.map(async ([id, session]) => {
+            let modelProvidersStageError: string | undefined;
             if (providersChanged) {
               const config = session.getConfig();
-              if (changed.has('model')) {
-                config.stageModelProvidersReload(
-                  newMerged.modelProviders,
-                  newMerged.providerProtocol ?? {},
-                  newModelName || null,
-                  newMerged.model?.baseUrl,
-                );
-              } else {
-                config.stageModelProvidersReload(
-                  newMerged.modelProviders,
-                  newMerged.providerProtocol ?? {},
+              try {
+                if (changed.has('model')) {
+                  config.stageModelProvidersReload(
+                    newMerged.modelProviders,
+                    newMerged.providerProtocol ?? {},
+                    newModelName || null,
+                    newMerged.model?.baseUrl,
+                  );
+                } else {
+                  config.stageModelProvidersReload(
+                    newMerged.modelProviders,
+                    newMerged.providerProtocol ?? {},
+                  );
+                }
+              } catch (err) {
+                modelProvidersStageError =
+                  err instanceof Error ? err.message : String(err);
+                debugLogger.warn(
+                  `reload: modelProviders staging failed for session ${id}: ${err}`,
                 );
               }
             }
             if (!session.isIdle()) {
-              skipped.push(id);
+              if (modelProvidersStageError)
+                failed.push({ sessionId: id, error: modelProvidersStageError });
+              else skipped.push(id);
               return;
             }
             const config = session.getConfig();
@@ -13599,7 +13611,7 @@ class QwenAgent implements Agent {
                   `reload: refreshAuth failed for session ${id}: ${err}`,
                 );
               }
-            } else if (changed.has('model')) {
+            } else if (!providersChanged && changed.has('model')) {
               session.reloadReasoningSelection();
             }
 
@@ -13694,7 +13706,9 @@ class QwenAgent implements Agent {
               );
             }
 
-            refreshed.push(id);
+            if (modelProvidersStageError)
+              failed.push({ sessionId: id, error: modelProvidersStageError });
+            else refreshed.push(id);
           }),
         );
         for (let i = 0; i < results.length; i++) {
@@ -13703,7 +13717,10 @@ class QwenAgent implements Agent {
             debugLogger.warn(
               `Session ${sessions[i]![0]} reload failed: ${reason}`,
             );
-            skipped.push(sessions[i]![0]);
+            failed.push({
+              sessionId: sessions[i]![0],
+              error: reason instanceof Error ? reason.message : String(reason),
+            });
           }
         }
 
@@ -13712,6 +13729,7 @@ class QwenAgent implements Agent {
           changedKeys: [...changed],
           sessionsRefreshed: refreshed,
           sessionsSkipped: skipped,
+          sessionFailures: failed,
         };
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh: {

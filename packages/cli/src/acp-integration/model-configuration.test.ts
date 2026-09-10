@@ -61,6 +61,31 @@ describe('external model thinking controls', () => {
     });
   });
 
+  it('does not let GPT name inference replace an external declaration', () => {
+    const declared = {
+      ...generation,
+      model: 'gpt-5.5',
+      reasoning: { effort: 'xhigh' as const },
+    };
+    expect(getGptReasoningOverrideState(declared)).toBeUndefined();
+    expect(
+      buildModelReasoningConfigPreview(
+        declared.model,
+        {},
+        undefined,
+        declared,
+      )?.[0],
+    ).toMatchObject({
+      currentValue: 'xhigh',
+      options: [
+        { value: 'none' },
+        { value: 'low' },
+        { value: 'medium' },
+        { value: 'xhigh' },
+      ],
+    });
+  });
+
   it('shows the raw override that actually wins on the wire', () => {
     const options = buildModelReasoningConfigPreview(
       generation.model,

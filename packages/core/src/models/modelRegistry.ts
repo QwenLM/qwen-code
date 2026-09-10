@@ -326,12 +326,14 @@ export class ModelRegistry {
       generationConfig.modalities = defaultModalities(config.id);
     }
 
+    const baseUrl = config.baseUrl || this.getDefaultBaseUrl(authType);
+
     resolveModelReasoningConfig(
       {
         ...generationConfig,
         model: config.id,
         authType,
-        baseUrl: config.baseUrl,
+        baseUrl,
       },
       config.capabilities?.reasoning,
     );
@@ -340,7 +342,7 @@ export class ModelRegistry {
       ...config,
       authType,
       name: config.name || config.id,
-      baseUrl: config.baseUrl || this.getDefaultBaseUrl(authType),
+      baseUrl,
       ...(config.baseUrl ? { registryBaseUrl: config.baseUrl } : {}),
       generationConfig,
       capabilities: config.capabilities || {},
@@ -393,6 +395,11 @@ export class ModelRegistry {
     this.modelProvidersConfig = reloaded.modelProvidersConfig;
   }
 
+  /**
+   * Build a validated replacement without mutating this registry.
+   * `undefined` preserves the current provider-protocol map; an object,
+   * including `{}`, replaces it.
+   */
   prepareReload(
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,

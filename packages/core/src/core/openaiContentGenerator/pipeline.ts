@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { getModelReasoningConfig } from '../model-reasoning-config.js';
+import {
+  getModelReasoningConfig,
+  type ResolvedModelReasoningConfig,
+} from '../model-reasoning-config.js';
 import { applyOpenAIReasoningProfile } from './reasoning-profile.js';
 import type OpenAI from 'openai';
 import {
@@ -970,13 +973,29 @@ export class ContentGenerationPipeline {
       this.contentGeneratorConfig,
       context.model,
     );
+    const model = (context.model ?? '').toLowerCase();
+    const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
+      this.contentGeneratorConfig,
+    );
     if (externalReasoning) {
-      return applyOpenAIReasoningProfile(
+      const requiredThinking = this.requiresThinking(model);
+      const resolved: ResolvedModelReasoningConfig = requiredThinking
+        ? { ...externalReasoning, canDisable: false as const }
+        : externalReasoning;
+      const shaped = applyOpenAIReasoningProfile(
         providerRequest,
         this.contentGeneratorConfig,
-        externalReasoning,
+        resolved,
         request.config?.thinkingConfig?.includeThoughts === false,
       );
+      if (
+        isDashScope &&
+        resolved.canDisable === false &&
+        shaped.tool_choice === 'required'
+      ) {
+        delete shaped.tool_choice;
+      }
+      return shaped;
     }
 
     // Reasoning is disabled when either:
@@ -993,10 +1012,6 @@ export class ContentGenerationPipeline {
     // model generation config). For these, never emit the disable on the
     // wire: a "disabled" shape is a guaranteed request failure, so the flag
     // also overrides the config-level `reasoning: false` opt-out.
-    const model = (context.model ?? '').toLowerCase();
-    const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
-      this.contentGeneratorConfig,
-    );
     const explicitThinkingMandatory =
       reasoningCapabilities?.canDisable === false ||
       this.requiresThinking(model);

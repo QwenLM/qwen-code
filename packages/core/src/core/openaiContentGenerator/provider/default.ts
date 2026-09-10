@@ -12,9 +12,10 @@ import {
   defaultOutputCeiling,
   parsePositiveIntegerEnvValue,
 } from '../../tokenLimits.js';
-import type { ReasoningEffort } from '../../reasoning-effort.js';
 import {
+  OPENAI_COMPATIBLE_EFFORTS,
   REASONING_EFFORT_TIERS,
+  type ReasoningEffort,
   clampReasoningEffort,
   getGptReasoningCapabilities,
   parseModelReasoningCapabilities,
@@ -25,18 +26,6 @@ import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 
 const debugLogger = createDebugLogger('DefaultOpenAICompatibleProvider');
-
-/**
- * Default tiers for an OpenAI-compatible endpoint without known model
- * capabilities. Model-specific capabilities and provider subclasses can
- * override this fallback, including support for `max`.
- */
-const OPENAI_COMPATIBLE_EFFORTS: readonly ReasoningEffort[] = [
-  'low',
-  'medium',
-  'high',
-  'xhigh',
-];
 
 type AssistantMessageWithReasoningFields =
   OpenAI.Chat.ChatCompletionAssistantMessageParam & {

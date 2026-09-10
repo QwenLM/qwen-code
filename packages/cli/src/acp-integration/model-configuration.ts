@@ -7,6 +7,7 @@
 import {
   getModelReasoningConfig,
   getOpenAIReasoningState,
+  resolveEffectiveReasoning,
   resolveModelReasoningConfig,
   type ReasoningProfile,
   parseModelReasoningCapabilities,
@@ -580,15 +581,13 @@ export function buildModelReasoningConfigPreview(
     ? resolveModelReasoningConfig(generation, configuredReasoning)
     : undefined;
   const externalState =
-    generation &&
-    external &&
-    (generation.authType === 'openai' ||
-      generation.authType === 'openai-responses' ||
-      generation.authType === 'qwen-oauth')
-      ? getOpenAIReasoningState(
-          { ...generation, reasoning: effectiveReasoning },
-          external,
-        )
+    generation && external
+      ? generation.authType === 'openai' || generation.authType === 'qwen-oauth'
+        ? getOpenAIReasoningState(
+            { ...generation, reasoning: effectiveReasoning },
+            external,
+          )
+        : resolveEffectiveReasoning({ reasoning: effectiveReasoning }, external)
       : undefined;
   const option = buildModelReasoningConfigOption(
     modelId,
