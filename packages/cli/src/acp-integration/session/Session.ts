@@ -262,6 +262,7 @@ import {
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
@@ -5008,7 +5009,10 @@ export class Session implements SessionContext {
       if (stillOwnsPendingPrompt) {
         this.todoStopGuardDrainAutomaticQueuesWhenIdle = false;
       }
-      if (shouldDrainAutomaticQueues) {
+      // The success path drains after releasePendingSend; mirror that on the
+      // error path so a background-shell completion that queued mid-turn is
+      // not stranded when the turn ends with a provider error.
+      if (shouldDrainAutomaticQueues || stillOwnsPendingPrompt) {
         void this.#drainCronQueue();
         void this.#drainNotificationQueue();
       }
@@ -5309,6 +5313,10 @@ export class Session implements SessionContext {
               typeof promptDisplayTextValue === 'string'
                 ? promptDisplayTextValue
                 : undefined;
+            const declaredSubmission =
+              promptMetadata?.[DAEMON_SUBMITTED_PROMPT_META_KEY];
+            const submittedPrompt =
+              typeof declaredSubmission === 'string' ? declaredSubmission : '';
             const modelPromptBlocks: PromptRequest['prompt'] =
               modelPrompt === undefined
                 ? params.prompt
@@ -5620,6 +5628,10 @@ export class Session implements SessionContext {
               !isContinue &&
               !isRestoreAskUserQuestion &&
               !isRuntimeContinuation;
+            // Channel markers cover both automated and human messages. Keep
+            // that class excluded until its producers distinguish them; see
+            // docs/design/daemon-user-prompt-submit-provenance.md.
+            const isUserSubmissionTurn = isFreshUserTurn && !channelTurn;
             if (
               !isContinue &&
               !isRestoreAskUserQuestion &&
@@ -5637,6 +5649,10 @@ export class Session implements SessionContext {
                   eventName: 'UserPromptSubmit',
                   input: {
                     prompt: promptText,
+                    ...(isUserSubmissionTurn &&
+                    submittedPrompt.trim().length > 0
+                      ? { submitted_prompt: submittedPrompt }
+                      : {}),
                   },
                   signal: pendingSend.signal,
                 },
@@ -13447,7 +13463,11 @@ export class Session implements SessionContext {
             executeAttempted = true;
             try {
               const execute = () =>
-                invocation.execute(activeToolAbortSignal, onToolProgress);
+                invocation.execute(
+                  activeToolAbortSignal,
+                  onToolProgress,
+                  this.config.getShellExecutionConfig(),
+                );
               if (toolName !== ToolNames.EXEC) {
                 toolResult = await execute();
               } else {

@@ -45,6 +45,8 @@ import {
   type BridgeEvent,
 } from '@qwen-code/acp-bridge/eventBus';
 import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
+import { MAX_CHANNEL_CONTROL_WORKSPACES } from '@qwen-code/acp-bridge/channelControlTimeouts';
+import { assertChannelControlWorkspaceCapacity } from './channel-control-capacity.js';
 import type {
   NdJsonMessageObservation,
   NdJsonQueueSaturationInfo,
@@ -57,7 +59,7 @@ import {
   type ServeFastPathSettings,
 } from './fast-path-settings.js';
 import {
-  MAX_REGISTERED_WORKSPACES,
+  resolveMaxRegisteredWorkspaces,
   resolveWorkspaceInputs,
 } from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -469,7 +471,10 @@ function isNonNegativeIntegerOrInfinity(value: number): boolean {
 function deriveDefaultMaxTotalSessions(
   maxSessionsPerWorkspace: number | undefined,
   workspaceCount: number,
+  maxRegisteredWorkspaces: number,
 ): number | undefined {
+  // Keep the legacy session-policy threshold independent of registration defaults.
+  if (maxRegisteredWorkspaces > 25) return 800;
   if (workspaceCount <= 1) return undefined;
   const perWorkspace = maxSessionsPerWorkspace ?? DEFAULT_MAX_SESSIONS;
   if (perWorkspace === 0 || perWorkspace === Number.POSITIVE_INFINITY) {
@@ -2414,6 +2419,16 @@ function createBootstrapCapabilities(input: {
     transports: ['rest'],
     policy: { permission: input.permissionPolicy ?? 'first-responder' },
     limits: {
+      maxRegisteredWorkspaces: input.opts.maxRegisteredWorkspaces,
+      maxChannelControlWorkspaces: MAX_CHANNEL_CONTROL_WORKSPACES,
+      ...(input.opts.maxTotalSessions !== undefined
+        ? {
+            maxSessionsPerWorkspace: advertisedMaxSessions(
+              input.opts.maxSessions,
+            ),
+            maxTotalSessions: positiveFiniteOrNull(input.opts.maxTotalSessions),
+          }
+        : {}),
       maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
         input.opts.maxPendingPromptsPerSession,
       ),
@@ -2747,6 +2762,8 @@ function createBootstrapServeApp(input: {
         sessionShellCommandEnabled,
       },
       limits: {
+        maxRegisteredWorkspaces: opts.maxRegisteredWorkspaces!,
+        maxChannelControlWorkspaces: MAX_CHANNEL_CONTROL_WORKSPACES,
         maxSessions: advertisedMaxSessions(opts.maxSessions),
         maxTotalSessions: positiveFiniteOrNull(opts.maxTotalSessions),
         maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
@@ -3416,6 +3433,10 @@ async function runQwenServeImpl(
   const opts: ServeOptions = {
     ...optsIn,
     hostname: bindHostname,
+    maxRegisteredWorkspaces: resolveMaxRegisteredWorkspaces(
+      optsIn.maxRegisteredWorkspaces,
+      daemonRuntimeBaseEnv,
+    ),
     token,
     promptDeadlineMs,
     writerIdleTimeoutMs,
@@ -3773,9 +3794,9 @@ async function runQwenServeImpl(
       }
     }
   }
-  if (workspaceInputs.length > MAX_REGISTERED_WORKSPACES) {
+  if (workspaceInputs.length > opts.maxRegisteredWorkspaces!) {
     throw new Error(
-      `At most ${MAX_REGISTERED_WORKSPACES} --workspace values may be registered.`,
+      `At most ${opts.maxRegisteredWorkspaces} --workspace values may be registered.`,
     );
   }
   // Resolve the daemon's memory figures once. Nothing downstream consumes
@@ -3845,6 +3866,10 @@ async function runQwenServeImpl(
     );
   }
   let workspaceRegistrationStore = deps.workspaceRegistrationStore;
+  // Snapshot before the restore loop below pushes persisted records into
+  // `workspaceInputs`, so the overflow diagnostic can tell the operator which
+  // component they can actually shrink.
+  const explicitWorkspaceCount = workspaceInputs.length;
   if (
     workspaceRegistrationStore === undefined &&
     process.env['QWEN_SERVE_NO_PERSISTENT_REGISTRATION'] !== '1'
@@ -3908,14 +3933,6 @@ async function runQwenServeImpl(
           );
           continue;
         }
-        if (workspaceInputs.length >= MAX_REGISTERED_WORKSPACES) {
-          writeStderrLine(
-            `qwen serve: skipping persisted workspace registration ${JSON.stringify(
-              storedWorkspace,
-            )}: workspace limit reached`,
-          );
-          continue;
-        }
         workspaceInputs.push({
           raw: storedWorkspace,
           cwd,
@@ -3931,6 +3948,14 @@ async function runQwenServeImpl(
         }; continuing with explicit workspaces only`,
       );
     }
+  }
+  if (workspaceInputs.length > opts.maxRegisteredWorkspaces!) {
+    throw new Error(
+      `${explicitWorkspaceCount} explicit + ${
+        workspaceInputs.length - explicitWorkspaceCount
+      } restored workspaces exceed the configured limit of ${opts.maxRegisteredWorkspaces}. ` +
+        'Restart with the previous capacity, forget registrations and reduce explicit --workspace values before lowering the limit. The registration store was not changed.',
+    );
   }
   if (workspaceInputs.length > 1 && deps.bridge) {
     throw new Error(
@@ -4201,6 +4226,7 @@ async function runQwenServeImpl(
   opts.maxTotalSessions ??= deriveDefaultMaxTotalSessions(
     opts.maxSessions,
     workspaceInputs.length,
+    opts.maxRegisteredWorkspaces!,
   );
   // Per-handle env overrides: `undefined` value means "scrub this
   // var from the child env" — important when a different daemon
@@ -7560,6 +7586,7 @@ async function runQwenServeImpl(
     };
 
     const app = runtime.createServeApp(opts, () => actualPort, {
+      maxChannelControlWorkspaces: MAX_CHANNEL_CONTROL_WORKSPACES,
       serveAppLifecycle,
       liveDiscoveryStableBaseDir,
       workspaceRegistry,
@@ -8175,6 +8202,15 @@ async function runQwenServeImpl(
   };
 
   if (opts.channelSelection) {
+    if (
+      opts.channelSelection.mode === 'names' &&
+      workspaceInputs.length > MAX_CHANNEL_CONTROL_WORKSPACES
+    ) {
+      const groups = resolveChannelWorkspaceGroupsAtListen();
+      assertChannelControlWorkspaceCapacity(
+        groups?.map((group) => group.workspaceCwd) ?? [],
+      );
+    }
     reserveChannelServicePidfile(opts.channelSelection);
   }
 

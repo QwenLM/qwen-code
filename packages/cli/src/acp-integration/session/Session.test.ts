@@ -921,6 +921,11 @@ describe('Session', () => {
       // that care override via `mockConfig.getApprovalMode = vi.fn()...`.
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getApprovalModeRevision: vi.fn().mockReturnValue(0),
+      getShellExecutionConfig: vi.fn().mockReturnValue({
+        terminalWidth: 80,
+        terminalHeight: 24,
+        showColor: false,
+      }),
       switchModel: switchModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
@@ -1673,6 +1678,54 @@ describe('Session', () => {
       await vi.waitFor(() =>
         expect(session.collectActiveWorkHolds()).toEqual([]),
       );
+      session.dispose();
+    });
+
+    it('drains a shell notification stranded when the owning prompt errors out', async () => {
+      let rejectPrompt!: (reason: Error) => void;
+      mockChat.sendMessageStream = vi.fn().mockReturnValue(
+        new Promise((_resolve, reject) => {
+          rejectPrompt = reject;
+        }),
+      );
+      createReportingSession();
+      const notify =
+        mockBackgroundShellRegistry.setNotificationCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { shellId: string; status: string },
+        ) => void;
+
+      // Start a prompt and let it reach the model send before the shell
+      // completes, so the completion notification queues while the prompt is
+      // still pending.
+      const promptPromise = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalledOnce(),
+      );
+
+      notify('Shell completed.', '<task-notification />', {
+        shellId: 'shell-stranded',
+        status: 'completed',
+      });
+      await vi.waitFor(() =>
+        expect(holdIds('shell')).toEqual(['background-shells']),
+      );
+
+      // The prompt then fails with a plain provider error (not loop detection
+      // or a stop guard), which previously stranded the queued notification.
+      rejectPrompt(new Error('provider failed'));
+      await expect(promptPromise).rejects.toThrow('provider failed');
+
+      await vi.waitFor(() =>
+        expect(session.collectActiveWorkHolds()).toEqual([]),
+      );
+      expect(session.isIdle()).toBe(true);
       session.dispose();
     });
 
@@ -2651,6 +2704,57 @@ describe('Session', () => {
         sessionUpdate: 'session_info_update',
         title: 'Durable title',
       },
+    });
+  });
+
+  describe('shell execution config plumbing', () => {
+    it('passes the config shell execution settings to invocation.execute', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'hi',
+        returnDisplay: 'hi',
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'run_shell_command',
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue({
+          params: { command: 'echo hi' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('echo hi'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute,
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-shell-1',
+                    name: 'run_shell_command',
+                    args: { command: 'echo hi' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run it' }],
+      });
+
+      expect(execute).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.any(Function),
+        { terminalWidth: 80, terminalHeight: 24, showColor: false },
+      );
     });
   });
 
@@ -30955,6 +31059,182 @@ describe('Session', () => {
           );
         });
 
+        it.each<{
+          name: string;
+          prompt: PromptRequest['prompt'];
+          submitted?: string;
+          declared?: unknown;
+          displayText?: string;
+          modelPrompt?: string;
+          retry?: boolean;
+          metaRetry?: boolean;
+          channel?: boolean;
+        }>([
+          {
+            name: 'text blocks without resource bodies',
+            prompt: [
+              { type: 'text', text: '  check' },
+              {
+                type: 'resource',
+                resource: {
+                  uri: 'file:///notes.txt',
+                  text: 'PRIVATE RESOURCE',
+                },
+              },
+              { type: 'text', text: 'this\n' },
+            ],
+            submitted: '  check this\n',
+            declared: '  check this\n',
+          },
+          {
+            name: 'explicit submission overrides unrelated display text',
+            prompt: [{ type: 'text', text: 'internal channel instructions' }],
+            displayText: 'display label',
+            submitted: 'original question',
+            declared: 'original question',
+          },
+          {
+            name: 'display projection cannot declare submission provenance',
+            prompt: [{ type: 'text', text: 'internal channel instructions' }],
+            displayText: 'display text without a declaration',
+          },
+          {
+            name: 'model-only delegation excluded',
+            prompt: [{ type: 'text', text: 'original question' }],
+            modelPrompt:
+              '<realtime_delegation>private model context</realtime_delegation>',
+            submitted: 'original question',
+            declared: 'original question',
+          },
+          { name: 'blank text', prompt: [{ type: 'text', text: ' \n ' }] },
+          {
+            name: 'resource-only submission',
+            prompt: [
+              {
+                type: 'resource',
+                resource: {
+                  uri: 'file:///notes.txt',
+                  text: 'PRIVATE RESOURCE',
+                },
+              },
+            ],
+          },
+          {
+            name: 'legacy retry',
+            prompt: [{ type: 'text', text: 'retry question' }],
+            retry: true,
+            declared: 'retry question',
+          },
+          {
+            name: 'daemon retry',
+            prompt: [{ type: 'text', text: 'retry question' }],
+            metaRetry: true,
+            declared: 'retry question',
+          },
+          {
+            name: 'channel turn with display projection',
+            prompt: [{ type: 'text', text: 'composed channel wrapper' }],
+            displayText: 'Issue assigned: broken build',
+            channel: true,
+            declared: 'human channel message',
+          },
+          {
+            name: 'channel turn without display projection',
+            prompt: [{ type: 'text', text: 'composed channel wrapper' }],
+            channel: true,
+            declared: 'human channel message',
+          },
+          {
+            name: 'machine dispatch without a declaration',
+            prompt: [{ type: 'text', text: 'Run this scheduled task now' }],
+          },
+          {
+            name: 'empty declaration never falls back to request text',
+            prompt: [{ type: 'text', text: 'internal wrapper' }],
+            declared: '',
+          },
+          {
+            name: 'blank declaration',
+            prompt: [{ type: 'text', text: 'internal wrapper' }],
+            declared: '  \n',
+          },
+          {
+            name: 'invalid declaration',
+            prompt: [{ type: 'text', text: 'internal wrapper' }],
+            declared: { text: 'not a string' },
+          },
+        ])(
+          'preserves submission provenance: $name',
+          async ({
+            prompt,
+            submitted,
+            declared,
+            displayText,
+            modelPrompt,
+            retry,
+            metaRetry,
+            channel,
+          }) => {
+            const messageBus = {
+              request: vi.fn().mockResolvedValue({ success: true, output: {} }),
+            };
+            mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+            mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+            mockConfig.hasHooksForEvent = vi
+              .fn()
+              .mockImplementation(
+                (eventName: string) => eventName === 'UserPromptSubmit',
+              );
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValue(createEmptyStream());
+
+            await session.prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt,
+                ...(retry ? { retry: true } : {}),
+                _meta: {
+                  ...(declared !== undefined
+                    ? { 'qwen.daemon.submittedPrompt': declared }
+                    : {}),
+                  ...(channel ? { [CHANNEL_PROMPT_META_KEY]: true } : {}),
+                  ...(displayText !== undefined
+                    ? { 'qwen.daemon.promptDisplayText': displayText }
+                    : {}),
+                  ...(metaRetry ? { 'qwen.daemon.retry': true } : {}),
+                },
+              } as PromptRequest,
+              modelPrompt === undefined
+                ? undefined
+                : {
+                    version: 1,
+                    sessionId: 'test-session-id',
+                    promptId: 'daemon-prompt-id',
+                  },
+              undefined,
+              modelPrompt,
+            );
+
+            expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+            expect(messageBus.request).toHaveBeenCalledWith(
+              expect.objectContaining({
+                eventName: 'UserPromptSubmit',
+                input: {
+                  prompt: prompt
+                    .filter((block) => block.type === 'text')
+                    .map((block) => (block.type === 'text' ? block.text : ''))
+                    .join(' '),
+                  ...(submitted === undefined
+                    ? {}
+                    : { submitted_prompt: submitted }),
+                },
+              }),
+              expect.anything(),
+            );
+          },
+        );
+
         it('blocks prompt when UserPromptSubmit hook returns blocking decision', async () => {
           const messageBus = {
             request: vi.fn().mockResolvedValue({
@@ -39258,7 +39538,7 @@ describe('Session', () => {
       expect(guardAttempts).toEqual([1, 2, 2]);
     });
 
-    it('does not change error-time queue draining before the Guard is armed', async () => {
+    it('drains a mid-turn background completion when an unarmed turn errors out', async () => {
       rebuildSessionWithGuard();
       const callback =
         mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
@@ -39274,19 +39554,24 @@ describe('Session', () => {
           status: 'completed',
         });
       });
-      mockChat.sendMessageStream = vi.fn().mockResolvedValue(failedStream);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(failedStream)
+        .mockResolvedValue(createEmptyStream());
 
       await expect(runGuardPrompt()).rejects.toThrow('unarmed stream failed');
 
-      const internals = session as unknown as {
-        notificationProcessing: boolean;
-        notificationQueue: Array<{ taskId: string }>;
-      };
-      expect(internals.notificationProcessing).toBe(false);
-      expect(internals.notificationQueue).toEqual([
-        expect.objectContaining({ taskId: 'unrelated-after-unarmed-error' }),
-      ]);
-      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      // A background completion queued mid-turn must not be stranded when the
+      // owning turn errors out: the error path drains it so the session can
+      // return to idle instead of holding activeWorkState forever.
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      const automaticCall = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[1]?.[1] as { message: Part[] };
+      expect(textParts(automaticCall.message).join('\n')).toContain(
+        '<unrelated-after-unarmed-error />',
+      );
     });
 
     it('clears a failed guard chain when a new ordinary prompt starts', async () => {
