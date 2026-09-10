@@ -1,5 +1,6 @@
 export default {
   commands: 'Commands',
+  'cross-session-protocol': 'Cross-Session Protocol',
   'code-review': 'Code Review',
   'followup-suggestions': 'Followup Suggestions',
   'tool-use-summaries': 'Tool-Use Summaries',
