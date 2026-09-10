@@ -6,17 +6,20 @@ replace it.
 
 ## What it does
 
-- Runs `qwen-docker-cleanup` once a day at 03:30, with up to 30 minutes of
+- Runs `qwen-docker-cleanup` once a day at 02:30 UTC, with up to 30 minutes of
   randomized delay.
-- Removes Qwen CI containers created more than 24 hours ago.
-- Prunes unused Qwen CI images and dangling images older than 24 hours.
+- Removes Qwen CI containers — sandbox-labelled or named `qwen-code-*` —
+  created more than 24 hours ago.
+- Prunes sandbox-labelled Qwen CI images and dangling images older than 24
+  hours.
 - Uses the existing Qwen sandbox daemon lock to avoid concurrent Docker
   maintenance.
 - Changes the host `/tmp` retention policy from 30 days to 7 days through
   `systemd-tmpfiles`.
 
-Use this only on dedicated CI hosts. A matching container older than 24 hours
-is considered leaked and may be removed even if it is still running.
+Use this only on dedicated CI hosts. A sandbox-labelled or `qwen-code-*`-named
+container older than 24 hours is considered leaked and may be removed even if
+it is still running.
 
 ## Prerequisites
 
@@ -73,6 +76,7 @@ sudo systemd-tmpfiles --clean --prefix=/tmp
 
 ```bash
 sudo systemctl disable --now qwen-docker-cleanup.timer
+sudo systemctl clean --what=state qwen-docker-cleanup.timer
 sudo rm -f /usr/local/sbin/qwen-docker-cleanup
 sudo rm -f /etc/systemd/system/qwen-docker-cleanup.service
 sudo rm -f /etc/systemd/system/qwen-docker-cleanup.timer

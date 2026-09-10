@@ -7,7 +7,7 @@ if ((EUID != 0)); then
 fi
 
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-install -Dm755 "$source_dir/qwen-docker-cleanup" /usr/local/sbin/qwen-docker-cleanup
+install -Dm755 "$source_dir/qwen-docker-cleanup.sh" /usr/local/sbin/qwen-docker-cleanup
 install -Dm644 "$source_dir/qwen-docker-cleanup.service" /etc/systemd/system/qwen-docker-cleanup.service
 install -Dm644 "$source_dir/qwen-docker-cleanup.timer" /etc/systemd/system/qwen-docker-cleanup.timer
 install -Dm644 "$source_dir/qwen-ci-tmp.conf" /etc/tmpfiles.d/tmp.conf

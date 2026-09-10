@@ -2,7 +2,7 @@
 Description=Run Qwen CI Docker cleanup daily
 
 [Timer]
-OnCalendar=*-*-* 03:30:00
+OnCalendar=*-*-* 02:30:00 UTC
 RandomizedDelaySec=30m
 Persistent=true
 

@@ -5,8 +5,10 @@ After=docker.service
 
 [Service]
 Type=oneshot
-# The script budgets `timeout 20m` for the labeled image prune alone, so a
-# oneshot's inherited 90s start timeout would SIGTERM the daily run mid-sweep
-# on exactly the backlog this service exists to clear. Cover the whole budget.
-TimeoutStartSec=30min
+# Type=oneshot units do NOT inherit DefaultTimeoutStartSec (systemd disables
+# the start timeout by default for oneshot), so this is the unit's only bound.
+# Keep it: without one, a wedged docker call hangs the run forever holding the
+# /run mutex, and every later elapse then skips. 1h clears the script's worst
+# case instead of cutting the sweep off mid-prune.
+TimeoutStartSec=1h
 ExecStart=/usr/local/sbin/qwen-docker-cleanup
