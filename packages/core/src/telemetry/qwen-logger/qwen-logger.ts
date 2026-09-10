@@ -143,8 +143,14 @@ function redactErrorTextFields(event: RumEvent): void {
 // spelling-based patterns). Re-registered on every event so credential
 // refreshes mid-session are covered.
 function registerProcessSecrets(config: Config | undefined): void {
+  // The getter's declared return type is non-nullable, but the backing
+  // field is assigned only in refreshAuth and the ALS runtime store is
+  // empty at startup, so before auth initialization it yields undefined —
+  // dereferencing `.apiKey` here would throw inside enqueueLogEvent's
+  // catch-all and silently drop the event (e.g. session_start). Guard
+  // like the other pre-auth call sites.
   const secrets: Array<string | undefined> = [
-    config?.getContentGeneratorConfig().apiKey,
+    config?.getContentGeneratorConfig()?.apiKey,
   ];
   for (const server of Object.values(config?.getMcpServers() ?? {})) {
     for (const value of Object.values(server.headers ?? {})) {

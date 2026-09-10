@@ -363,6 +363,53 @@ describe('QwenLogger', () => {
       // existing hook tests: `error: 'Command failed'`).
     });
 
+    it('should keep the event when secret registration hits a pre-auth config', () => {
+      // Before auth initialization getContentGeneratorConfig() returns
+      // undefined despite its non-nullable declared type (the backing field
+      // is assigned only in refreshAuth); session_start fires on that path.
+      // Unlike the default mock, this one does not paper over it.
+      const preAuthGetter = (() =>
+        undefined) as unknown as Config['getContentGeneratorConfig'];
+      const preAuthConfig = makeFakeConfig({
+        getContentGeneratorConfig: preAuthGetter,
+      });
+      const logger = QwenLogger.getInstance(preAuthConfig)!;
+
+      logger.enqueueLogEvent({
+        timestamp: Date.now(),
+        event_type: 'action',
+        type: 'session',
+        name: 'session_start',
+      });
+
+      expect(logger['events'].size).toBe(1);
+      expect(debugLoggerSpy.error).not.toHaveBeenCalled();
+    });
+
+    it('should mask a process-held api key by exact value', () => {
+      const config = makeFakeConfig({
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          apiKey: 'sk-live-9f3ab207d18e',
+        }),
+      });
+      const logger = QwenLogger.getInstance(config)!;
+
+      const event: RumResourceEvent = {
+        timestamp: Date.now(),
+        event_type: 'resource',
+        type: 'tool',
+        name: 'tool_call',
+        message: 'Request failed: Authorization sk-live-9f3ab207d18e rejected',
+      };
+      logger.enqueueLogEvent(event);
+
+      const queued = logger['events'].toArray() as RumResourceEvent[];
+      expect(queued[queued.length - 1]?.message).toBe(
+        'Request failed: Authorization *** rejected',
+      );
+    });
+
     it('should handle enqueue errors gracefully', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
 
