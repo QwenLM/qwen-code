@@ -3790,6 +3790,26 @@ export function tryIngestBodyCriticals(value: unknown): string[] | undefined {
  * `BUDGET:` line) asks for the EXACT entry; a reshaped relay is
  * non-compliance, and non-compliance already withholds the anchor.
  *
+ * R34-9 re-raised the same three shapes with the cost MEASURED rather than
+ * argued, and the measurement is recorded here because it is worse than the
+ * paragraph above claims. `[step 5] `, `step 5/7 — ` and `step five — ` do
+ * not merely render the gap twice: `capAxes` routes the cap to `coverage`
+ * instead of `verification`, so an automated repair caller relaunches Step 3
+ * agents that had read the whole diff. Wasteful, not unsafe — no verdict is
+ * loosened and no gap is swallowed — so the failure direction is still the
+ * one this rule chose, but the price is a repair loop, not a duplicate line.
+ *
+ * The closure R34-9 asks for is the right one and is NOT this PR's to take:
+ * have the CLI's stderr instruction print a machine relay token per
+ * structural entry and dedup by exact token membership, so anything
+ * token-less is a distinct claim and no residue grammar is needed at all.
+ * That changes the orchestrator protocol — the instruction site, the entry
+ * text the body renders, and a migration window in which relays carry no
+ * token — and it must not widen the ANCHOR grant, which `canonicalStopEntries`
+ * deliberately keeps on the exact text. A protocol change belongs in its own
+ * change, measured on its own runs; extending the residue class one more
+ * corner here would be the fourth round of the loop that produced it.
+ *
  * Shared by the two consumers that must agree — the caller-echo filter and
  * the canonical-stop splice (R32-3) — so a relay spliced out of the rendered
  * list is exactly a relay the echo filter would have deduped, never more.
@@ -6437,8 +6457,25 @@ function composeReviewBody(
           // bare `verification` names that floor entry and nothing else; with
           // the verifier delivered no such entry exists, and the bare name
           // renders as any other whiff, as before.
+          //
+          // And the exemption is off for the BY-DESIGN entry, which the
+          // subject literal alone cannot tell apart. A balanced-medium run
+          // mints one Step-5 entry whose subject is also `reverse audit`,
+          // but medium never launches an auditor — so there is no whiff for
+          // a bare relay to be the only detector OF, and the exemption
+          // published `reverse audit — the agent returned no evidence of
+          // its walk twice` against an agent that does not exist, flipped
+          // `dimensionGapsAreDepthOnly` false (withholding the incremental
+          // anchor the by-design exemption in `scopeUnproven` exists to
+          // grant) and routed the cap to `coverage` instead of `posture`,
+          // where no repair can lift it. `byDesignFloorEntries` is the
+          // exact discriminator: `reverseGap` and the by-design gap are
+          // mutually exclusive on `balancedMedium`, so this narrows the
+          // exemption to precisely the repairable entry R22-4 is about.
           (!(
-            verificationFloorEntries.has(e) && e.subject === 'reverse audit'
+            verificationFloorEntries.has(e) &&
+            e.subject === 'reverse audit' &&
+            !byDesignFloorEntries.has(e)
           ) &&
             (entry === e.subject || entry === e.subjectZh)) ||
           // The floor's COMBINED entry (`verification and reverse audit`,
@@ -7326,6 +7363,19 @@ function composeReviewBody(
     if (unexplainedReceipts.length > 0) {
       const gap = describeChunkGap(unexplainedReceipts, plannedChunks);
       const pron = gap.plural ? 'them' : 'it';
+      // "Nobody read it" is a claim about the transcripts, so it is posted
+      // only where the ledger supports it. `no-agent` means no record in
+      // this run was assigned to the chunk at all; anything else — an owner
+      // the seals refused, or agents that read the window and reported it
+      // unreadable without the plan being able to confirm — is a chunk
+      // somebody demonstrably read, and the sentence would be false on a
+      // public PR. The twin of this rule lives in `check-coverage`'s
+      // `missingChunks` line, and the two must not wear each other's
+      // message: fixing one and leaving the other is how they drift.
+      const everyOneUnlaunched = unexplainedReceipts.every(
+        (id) =>
+          chunkLedger.find((i) => i.id === id)?.classification === 'no-agent',
+      );
       notReviewedParts.push(
         coverageSealRefusedAll
           ? {
@@ -7334,10 +7384,15 @@ function composeReviewBody(
               en: `Not reviewed: ${gap.phrase} — no read of ${pron} could be credited to this plan, whose identity this build cannot read.`,
               zh: `未审查：${gap.phraseZh}——本 plan 的身份无法被本版本读取，因此没有任何读取能记入它。`,
             }
-          : {
-              en: `Not reviewed: ${gap.phrase} — no agent reported covering ${pron}; nobody read ${pron}.`,
-              zh: `未审查：${gap.phraseZh}——没有 agent 报告覆盖过这部分，也没有人读过它。`,
-            },
+          : everyOneUnlaunched
+            ? {
+                en: `Not reviewed: ${gap.phrase} — no agent reported covering ${pron}; nobody read ${pron}.`,
+                zh: `未审查：${gap.phraseZh}——没有 agent 报告覆盖过这部分，也没有人读过它。`,
+              }
+            : {
+                en: `Not reviewed: ${gap.phrase} — no read of ${pron} could be accepted for this plan.`,
+                zh: `未审查：${gap.phraseZh}——没有任何针对它的读取能被本 plan 采信。`,
+              },
       );
     }
   }

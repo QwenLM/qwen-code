@@ -309,9 +309,26 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
             `read (the owners' reads, where any exist, are on record but ` +
             `uncredited); re-plan rather than relaunch. Do not aggregate ` +
             `findings over a diff whose reading cannot be shown.`
-        : `ERROR: ${report.missingChunks.length} chunk(s) were not reviewed — ` +
-            `${report.missingChunks.join(', ')}. Nobody read those lines. Do not ` +
-            `aggregate findings over a diff that was not read.`,
+        : // "Nobody read those lines" is a claim about the transcripts, so
+          // it is made only when the ledger supports it. A chunk classified
+          // `no-agent` had no record assigned to it at all; anything else —
+          // an owner whose reads the seals refused, agents that read the
+          // window and declared it unreadable without the plan being able
+          // to confirm — is a chunk somebody demonstrably read, and saying
+          // otherwise puts a false sentence beside a ledger that names the
+          // reader. Same repair either way, so this splits the sentence,
+          // not the remedy.
+          `ERROR: ${report.missingChunks.length} chunk(s) were not reviewed — ` +
+            `${report.missingChunks.join(', ')}. ` +
+            (report.missingChunks.every(
+              (id) =>
+                report.chunkItems.find((i) => i.id === id)?.classification ===
+                'no-agent',
+            )
+              ? `Nobody read those lines. `
+              : `Their reads could not be accepted for this plan — see the ` +
+                `per-agent lines above for which, and why. `) +
+            `Do not aggregate findings over a diff that was not read.`,
     );
   }
   // A NOTE, never an error, and never a relaunch: a disclosed gap is the soft

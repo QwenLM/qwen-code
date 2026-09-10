@@ -286,3 +286,30 @@ describe('buildSelectionIdentity', () => {
     expect(a.sourceArtifactSha256).toBe(b.sourceArtifactSha256);
   });
 });
+
+describe('planIdentityToken — the token must be one the reader can match', () => {
+  it('refuses a digest the reader would never match, so the run fails closed', () => {
+    // `PLAN_TOKEN_RE` accepts `[0-9a-f]{16}` and nothing else. Validated only
+    // as `string`, a short or non-hex digest minted a token no launch line
+    // can match — and that is the worst of the three outcomes this function
+    // can produce, because the token is non-null, so `identityUnreadable`
+    // stays FALSE while the seal refuses every record: the run reports every
+    // chunk unread and prescribes a relaunch whose freshly built launches
+    // carry the same unmatchable token. That is the loop `identityUnreadable`
+    // (R34-4) exists to stop. Present-but-malformed is an identity this build
+    // cannot read; null routes it there.
+    const good = buildSelectionIdentity(DIFF, CHUNKS, 3) as unknown as Record<
+      string,
+      unknown
+    >;
+    expect(planIdentityToken(good)).toMatch(/^[0-9a-f]{16}$/);
+    for (const bad of [
+      { ...good, sourceArtifactSha256: 'abc' },
+      { ...good, selectionSha256: 'ZZZZZZZZZZZZZZZZ' },
+      { ...good, sourceArtifactSha256: '' },
+      { ...good, selectionSha256: 'ABCDEF0123456789' },
+    ]) {
+      expect(planIdentityToken(bad)).toBeNull();
+    }
+  });
+});

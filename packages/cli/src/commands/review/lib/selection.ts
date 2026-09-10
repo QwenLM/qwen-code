@@ -123,9 +123,22 @@ export function planIdentityToken(selection: unknown): string | null {
   if (typeof selection !== 'object' || Array.isArray(selection)) return null;
   const id = selection as Partial<SelectionIdentity>;
   if (id.schemaVersion !== SELECTION_SCHEMA_VERSION) return null;
+  // Checked against the shape the READER requires, not merely against
+  // `string`. `PLAN_TOKEN_RE` accepts `[0-9a-f]{16}` and nothing else, so a
+  // digest that is short or not lower-hex mints a token no launch line can
+  // ever match — and the two nulls above make that the worst of the three
+  // outcomes: the token is non-null, so `identityUnreadable` stays FALSE
+  // while `markedOfThisPlan` refuses every record. The run then reports
+  // every chunk unread and prescribes a relaunch whose freshly built
+  // launches carry the same unmatchable token, which is precisely the loop
+  // `identityUnreadable` (R34-4) exists to stop. A present-but-malformed
+  // digest is an identity this build cannot read; routed here, it fails
+  // closed with the re-plan repair instead.
+  const readableDigest = (v: unknown): v is string =>
+    typeof v === 'string' && /^[0-9a-f]{8}/.test(v);
   if (
-    typeof id.sourceArtifactSha256 !== 'string' ||
-    typeof id.selectionSha256 !== 'string'
+    !readableDigest(id.sourceArtifactSha256) ||
+    !readableDigest(id.selectionSha256)
   ) {
     return null;
   }

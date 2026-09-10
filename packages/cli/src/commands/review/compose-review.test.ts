@@ -17952,6 +17952,75 @@ describe('terminalState — coverage, not verdict', () => {
     expect(r.chunkLedger.every((i) => i.outcome === 'covered')).toBe(true);
   });
 
+  it('does not post "nobody read it" for a chunk the ledger says an agent read', () => {
+    // The posted twin of `check-coverage`'s stderr sentence, and the reason
+    // they are fixed together: on a plan whose metadata cannot answer the
+    // truncation question, two agents of chunk 2 read its window and both
+    // reported it unreadable. The declarations annihilate, the chunk is
+    // `missing` with `classification: 'unknown'` — and the body accused
+    // nobody of reading lines two agents demonstrably read, on a public PR.
+    // The two channels must not wear each other's message.
+    const p = plan();
+    transcript('a1', goodPrompt(1), { toolCalls: 2 });
+    for (const id of ['a2', 'a2b']) {
+      transcript(id, goodPrompt(2), {
+        toolCalls: 1,
+        range: [100, 100],
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      });
+    }
+    recordBuilt(p, 1, goodPrompt(1));
+    recordBuilt(p, 2, goodPrompt(2));
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.chunkLedger.find((i) => i.id === 2)?.classification).toBe(
+      'unknown',
+    );
+    expect(r.body).not.toContain('nobody read');
+    expect(r.body).toContain('could be accepted for this plan');
+  });
+
+  it('holds `complete` beside a coverage cap when the relay names a chunk the ledger COVERED', () => {
+    // The sharper half of R34-7, and the one the `chunk 5` case above does
+    // not reach: the relayed id is a chunk of THIS plan, and the ledger
+    // records it `covered` off the transcripts. The two fields then say
+    // different things about the same chunk on purpose — `terminalState`
+    // reports what the run's own transcripts show was read, `cappedBy` /
+    // `capAxes.coverage` report the caller's unproven claim about it — and
+    // an automated caller routes on the PAIR: `complete` alone is never
+    // "nothing about this run's coverage is unresolved", which is why the
+    // cap ships beside it rather than being folded into the state.
+    //
+    // Folding the relay into the ledger, the alternative R34-7 offers, is
+    // what this pins against: the ledger is asserted to partition the plan,
+    // a relayed id need not be in it at all (the `chunk 5` sibling above),
+    // and `save-artifact` re-derives the state from the persisted ledger
+    // alone — so a folded state would be one the boundary cannot reproduce.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify', 'reverse-audit']),
+      env: ENV,
+      modelId: MODEL,
+      uncoverableChunks: ['chunk 2 (src/a.ts)'],
+    });
+    expect(r.chunkLedger.find((i) => i.id === 2)?.outcome).toBe('covered');
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('uncoverable-chunk');
+    expect(r.capAxes.coverage).toContain('uncoverable-chunk');
+    // Both halves reach the caller, so the pair is readable: the state the
+    // boundary can re-derive, and the cap that says the relay was refused.
+    expect(deriveTerminalState(r.chunkLedger, null)).toBe(r.terminalState);
+  });
+
   it('reads nothing but the ledger — findings do not move it', () => {
     // The property that makes it worth having. A run that read all 18 chunks
     // covered 18 chunks whether it found a blocker in them or nothing at all.
@@ -18483,6 +18552,37 @@ describe('capAxes — three kinds of cap, three repairs', () => {
     expect(r.cappedBy).toContain('unreviewed-dimension');
     expect(r.capAxes.coverage).toEqual([]);
     expect(r.capAxes.verification).toContain('unreviewed-dimension');
+  });
+
+  it('dedups a bare `reverse audit` relay of the medium tier\u2019s BY-DESIGN skip', () => {
+    // The bare-subject exemption exists for one thing: `reverse audit` is
+    // also the subject an orchestrator gives a WHIFFED reverse audit, so a
+    // bare relay there is the whiff's only detector (R22-4). A
+    // balanced-medium run mints a Step-5 entry with that same subject and
+    // `byDesign: true` \u2014 and medium never launches an auditor, so there is
+    // no whiff for the bare relay to be the only detector OF. Keyed on the
+    // subject literal alone, the exemption published an accusation against
+    // an agent that does not exist, flipped `dimensionGapsAreDepthOnly`
+    // false (withholding the incremental anchor the by-design exemption in
+    // `scopeUnproven` exists to grant) and routed the cap to `coverage`
+    // instead of `posture`, where no repair can lift it (R34-2).
+    const r = composeReview({
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify'], {
+        effort: 'medium',
+        prNumber: 8255,
+        ownerRepo: 'QwenLM/qwen-code',
+        fetchedSha: 'deadbeef00112233',
+      }),
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: ['reverse audit'],
+    });
+    expect(r.body).not.toContain('returned no evidence of its walk twice');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.posture).toContain('unreviewed-dimension');
+    expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
   });
 
   it('dedups a bare verification relay against the COMBINED floor entry too', () => {
