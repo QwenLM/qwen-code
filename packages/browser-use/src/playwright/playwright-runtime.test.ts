@@ -56,6 +56,17 @@ describe('PlaywrightRuntime command contracts', () => {
     expect(fixture.request).not.toHaveBeenCalled();
   });
 
+  it.each(['constructor', 'hasOwnProperty', '__proto__'])(
+    'rejects inherited Object.prototype keys as unknown methods: %s',
+    async (method) => {
+      const fixture = await runtimeFixture();
+      await expect(fixture.runtime.dispatch(method, {})).rejects.toMatchObject({
+        code: 'UNKNOWN_METHOD',
+      });
+      expect(fixture.request).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([
     'playwright.evaluate',
     'locator.evaluate',

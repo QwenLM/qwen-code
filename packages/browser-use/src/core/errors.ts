@@ -54,23 +54,26 @@ export function sanitizeOperationError(
   const message = rawMessage
     ? `${method} failed: ${rawMessage}`
     : `${method} failed`;
-  if (/LOCATOR_NOT_UNIQUE|strict mode violation/i.test(rawMessage)) {
+  // Playwright prefixes every client error with the API name
+  // ("locator.fill: ..."); classify on the failure text, not the call site.
+  const failure = rawMessage.replace(/^[a-zA-Z][\w$]*(?:\.[\w$]+)*:\s/, '');
+  if (/LOCATOR_NOT_UNIQUE|strict mode violation/i.test(failure)) {
     return new BrowserRuntimeError('LOCATOR_NOT_UNIQUE', message);
   }
   if (
     /STALE_TAB|target (page|context|browser).*closed|page has been closed|no tab with id/i.test(
-      rawMessage,
+      failure,
     )
   ) {
     return new BrowserRuntimeError('STALE_TAB', message);
   }
-  if (/INVALID_LOCATOR|frame was detached/i.test(rawMessage)) {
+  if (/INVALID_LOCATOR|frame was detached/i.test(failure)) {
     return new BrowserRuntimeError('INVALID_LOCATOR', message);
   }
-  if (/timeout/i.test(rawMessage)) {
+  if (/timeout/i.test(failure)) {
     return new BrowserRuntimeError('OPERATION_TIMEOUT', message);
   }
-  if (/selector|locator/i.test(rawMessage)) {
+  if (/selector|locator/i.test(failure)) {
     return new BrowserRuntimeError('INVALID_LOCATOR', message);
   }
   return new BrowserRuntimeError('OPERATION_FAILED', message);

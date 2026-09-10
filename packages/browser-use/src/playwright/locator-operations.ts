@@ -23,6 +23,8 @@ import type { Args, TabState } from './runtime-state.js';
 const DEFAULT_ACTION_TIMEOUT_MS = 5_000;
 const DEFAULT_READ_TIMEOUT_MS = 1_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
+const TYPE_CHAR_BUDGET_MS = 2;
+const MAX_TYPE_TIMEOUT_MS = 120_000;
 
 export async function executeLocatorOperation(
   method: SupportedCommand,
@@ -76,7 +78,7 @@ export async function executeLocatorOperation(
       return null;
     case 'locator.downloadMedia':
       await locator.evaluate(
-        (element) => {
+        async (element) => {
           element.scrollIntoView({ block: 'center', inline: 'nearest' });
           const media =
             element.closest('img, video, source, a[href]') ??
@@ -84,25 +86,33 @@ export async function executeLocatorOperation(
             element;
           const readString = (name: string): string | null => {
             const value = Reflect.get(media, name);
-            return typeof value === 'string' ? value : null;
+            // An unloaded element exposes '' for these IDL properties, and
+            // '' must fall through to the next source.
+            return typeof value === 'string' && value !== '' ? value : null;
           };
           const url =
-            readString('currentSrc') ??
-            readString('src') ??
-            readString('href') ??
-            '';
-          if (url === '')
+            readString('currentSrc') ?? readString('src') ?? readString('href');
+          if (url === null)
             throw new Error(
               'Matched element does not expose a downloadable URL',
             );
+          // The download attribute is honored only for same-origin URLs, so
+          // clicking a cross-origin anchor would navigate the claimed tab
+          // away instead; fetch the resource and download a same-origin
+          // object URL, failing loudly when the fetch yields no body.
+          const response = await fetch(url);
+          if (!response.ok)
+            throw new Error(`Media download failed: HTTP ${response.status}`);
+          const objectUrl = URL.createObjectURL(await response.blob());
           const anchor = document.createElement('a');
-          anchor.href = url;
+          anchor.href = objectUrl;
           anchor.download = url.split('/').pop()?.split('?')[0] || 'download';
           anchor.rel = 'noopener';
           anchor.style.display = 'none';
           document.body.append(anchor);
           anchor.click();
           anchor.remove();
+          setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
         },
         undefined,
         options,
@@ -111,9 +121,22 @@ export async function executeLocatorOperation(
     case 'locator.fill':
       await locator.fill(stringArg(args, 'value'), options);
       return null;
-    case 'locator.type':
-      await typeIntoLocator(locator, stringArg(args, 'value'), options);
+    case 'locator.type': {
+      const value = stringArg(args, 'value');
+      // pressSequentially pays a CDP round trip per character, so the 5s
+      // action default cannot deliver a long value; grow the deadline with
+      // the input length, capped at the schema's 120s ceiling. An explicit
+      // timeoutMs is honored as given.
+      const scaled =
+        args.timeoutMs === undefined
+          ? Math.min(
+              Math.max(options.timeout, value.length * TYPE_CHAR_BUDGET_MS),
+              MAX_TYPE_TIMEOUT_MS,
+            )
+          : options.timeout;
+      await typeIntoLocator(locator, value, { timeout: scaled });
       return null;
+    }
     case 'locator.press':
       await locator.press(stringArg(args, 'value'), {
         ...options,

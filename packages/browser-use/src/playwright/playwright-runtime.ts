@@ -104,7 +104,11 @@ export class PlaywrightRuntime {
   }
 
   async dispatch(method: string, input: unknown): Promise<DispatchResult> {
-    const schema = commandSchemas[method as SupportedCommand];
+    // commandSchemas is a plain object literal: an own-property check keeps
+    // inherited Object.prototype keys from bypassing the UNKNOWN_METHOD guard.
+    const schema = Object.hasOwn(commandSchemas, method)
+      ? commandSchemas[method as SupportedCommand]
+      : undefined;
     if (schema === undefined)
       throw new BrowserRuntimeError(
         'UNKNOWN_METHOD',

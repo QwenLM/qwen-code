@@ -23,7 +23,10 @@ const matcher = z.union([
       regex: z.string().max(20_000),
       flags: z
         .string()
-        .regex(/^[dgimsuvy]*$/)
+        // Playwright compiles one RegExp per locator matcher and reuses it
+        // across the element walk; g and y carry lastIndex between elements
+        // and silently skip matches.
+        .regex(/^[dimsuv]*$/, 'Locator matcher flags must not include g or y')
         .optional(),
     })
     .strict(),

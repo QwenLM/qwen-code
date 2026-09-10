@@ -38,7 +38,7 @@ This runtime controls the user's existing Chrome through an explicitly installed
 - tab.dev.logs({ filter?, levels?, limit? }) returns console messages and uncaught exceptions captured since the tab was claimed.
 - JavaScript dialogs: call tab.getJsDialog() to read the dialog type and message. While a dialog is open, page operations fail with DIALOG_OPEN instead of waiting for a timeout. Alerts can be dismissed, confirms and before-unload dialogs can be accepted or dismissed, and prompts require text when accepted. A dialog handle applies only to the dialog that was read; get a new handle if it has closed or been replaced.
 - A claimed tab that is closed, crashed, or whose debugger the user revoked reports STALE_TAB on the next command; claim a tab again to continue.
-- Screenshots return JPEG image objects for nodeRepl.emitImage(). Their metadata reports the original image dimensions, viewport, device pixel ratio and CSS-pixel coordinate space.
+- Screenshots return JPEG image objects for nodeRepl.emitImage(). Their metadata reports the original image dimensions, viewport, device pixel ratio and CSS-pixel coordinate space. Only a viewport screenshot is directly usable as cua coordinate space; for clip and fullPage captures the metadata origin names the document point of the image's top-left pixel.
 - Clipboard and raw CDP are not exposed.
 
 - Browser transport, serialization, snapshot truncation and screenshot budgets are runtime details rather than model-facing controls.`;

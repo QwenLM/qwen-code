@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 export const CHROME_BRIDGE_PROTOCOL_VERSION = 1;
@@ -23,7 +25,50 @@ export function defaultChromeBridgeSocketPath(
   }
   const uid =
     typeof process.getuid === 'function' ? process.getuid() : 'default';
-  return join('/tmp', `qwen-browser-use-${uid}.sock`);
+  return join(
+    defaultChromeBridgeSocketDirectory(uid),
+    `qwen-browser-use-${uid}.sock`,
+  );
+}
+
+interface DirectoryStat {
+  isDirectory(): boolean;
+  uid: number;
+  mode: number;
+}
+
+// /tmp is world-writable, so any local user can squat the predictable socket
+// name (or its recovery lock) and deny the bridge permanently. Prefer a
+// per-user directory when the platform offers one. The choice must stay a
+// pure function of uid and platform — never of $TMPDIR/$XDG_RUNTIME_DIR — so
+// the CLI and the Chrome-launched native host derive the same path without
+// sharing an environment.
+export function defaultChromeBridgeSocketDirectory(
+  uid: number | 'default',
+  platform: NodeJS.Platform = process.platform,
+  stat: (path: string) => DirectoryStat | undefined = statDirectory,
+): string {
+  if (platform === 'darwin') return tmpdir();
+  if (platform !== 'win32' && typeof uid === 'number') {
+    const runtimeDir = `/run/user/${uid}`;
+    const info = stat(runtimeDir);
+    if (
+      info !== undefined &&
+      info.isDirectory() &&
+      info.uid === uid &&
+      (info.mode & 0o077) === 0
+    )
+      return runtimeDir;
+  }
+  return '/tmp';
+}
+
+function statDirectory(path: string): DirectoryStat | undefined {
+  try {
+    return statSync(path);
+  } catch {
+    return undefined;
+  }
 }
 
 export interface BridgeHello {

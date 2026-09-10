@@ -61,6 +61,7 @@ export class BrowserSdkContext {
         viewport: image.viewport,
         devicePixelRatio: image.devicePixelRatio,
         coordinateSpace: image.coordinateSpace,
+        origin: image.origin,
       },
     };
   }

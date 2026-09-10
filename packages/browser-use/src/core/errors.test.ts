@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { invalidArguments } from './errors.js';
+import { invalidArguments, sanitizeOperationError } from './errors.js';
 import { commandSchemas } from './schemas.js';
 
 describe('model-facing argument errors', () => {
@@ -43,5 +43,37 @@ describe('model-facing argument errors', () => {
     expect(error.message).toContain('Unrecognized key');
     expect(error.message).toContain('dom_cua.click({ node_id })');
     expect(error.message).toContain('dom_cua.type({ text })');
+  });
+});
+
+describe('operation error classification', () => {
+  it('classifies the failure text rather than the Playwright API prefix', () => {
+    expect(
+      sanitizeOperationError(
+        'locator.fill',
+        new Error('locator.fill: Element is not an <input> element'),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+    expect(
+      sanitizeOperationError(
+        'locator.click',
+        new Error('locator.click: Timeout 5000ms exceeded'),
+      ),
+    ).toMatchObject({ code: 'OPERATION_TIMEOUT' });
+    expect(
+      sanitizeOperationError(
+        'locator.click',
+        new Error('locator.click: strict mode violation: two buttons'),
+      ),
+    ).toMatchObject({ code: 'LOCATOR_NOT_UNIQUE' });
+  });
+
+  it('keeps classifying genuine locator failures', () => {
+    expect(
+      sanitizeOperationError(
+        'locator.waitFor',
+        new Error('Unexpected token ">>>" while parsing css selector'),
+      ),
+    ).toMatchObject({ code: 'INVALID_LOCATOR' });
   });
 });

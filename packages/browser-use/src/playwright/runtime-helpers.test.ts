@@ -6,7 +6,12 @@
 
 import type { Page } from 'playwright-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { withModifiers, withTimeout } from './runtime-helpers.js';
+import {
+  pressKeyChord,
+  selectOptions,
+  withModifiers,
+  withTimeout,
+} from './runtime-helpers.js';
 
 describe('evaluation deadlines', () => {
   afterEach(() => vi.useRealTimers());
@@ -75,5 +80,57 @@ describe('modifier cleanup', () => {
       withModifiers(page, ['Control', 'Shift'], async () => undefined),
     ).rejects.toBe(failure);
     expect(keyboard.up.mock.calls).toEqual([['Shift'], ['Control']]);
+  });
+});
+
+describe('key chord press', () => {
+  it('releases every modifier when a chord token is rejected', async () => {
+    const keyboard = {
+      up: vi.fn(async (_key: string) => undefined),
+      press: vi.fn(async (_chord: string) => {
+        throw new Error('Unknown key: "Bogus"');
+      }),
+    };
+    const page = { keyboard } as unknown as Page;
+    await expect(pressKeyChord(page, ['Control', 'Bogus'])).rejects.toThrow(
+      'Unknown key',
+    );
+    expect(keyboard.press).toHaveBeenCalledExactlyOnceWith('Control+Bogus');
+    expect(keyboard.up.mock.calls).toEqual([
+      ['Shift'],
+      ['Control'],
+      ['Alt'],
+      ['Meta'],
+    ]);
+  });
+
+  it('leaves the keyboard untouched after a successful chord', async () => {
+    const keyboard = {
+      up: vi.fn(async (_key: string) => undefined),
+      press: vi.fn(async (_chord: string) => undefined),
+    };
+    const page = { keyboard } as unknown as Page;
+    await pressKeyChord(page, ['Control', 'a']);
+    expect(keyboard.press).toHaveBeenCalledExactlyOnceWith('Control+a');
+    expect(keyboard.up).not.toHaveBeenCalled();
+  });
+});
+
+describe('select option values', () => {
+  it('normalizes a mixed string/descriptor array for Playwright', () => {
+    expect(selectOptions(['a', { label: 'B' }])).toEqual([
+      { value: 'a' },
+      { label: 'B' },
+    ]);
+  });
+
+  it('keeps homogeneous arrays in their compact form', () => {
+    expect(selectOptions(['a', 'b'])).toEqual(['a', 'b']);
+    expect(selectOptions([{ value: 'a' }, { index: 2 }])).toEqual([
+      { value: 'a' },
+      { index: 2 },
+    ]);
+    expect(selectOptions('a')).toBe('a');
+    expect(selectOptions({ index: 2 })).toEqual({ index: 2 });
   });
 });

@@ -163,6 +163,7 @@ describe('Chrome screenshot acquisition', () => {
       viewport: { width: 800, height: 600 },
       devicePixelRatio: 2,
       coordinateSpace: 'css-pixels',
+      origin: { x: 0, y: 0 },
     });
     expect(bridge.methods()).toEqual([
       'Page.getLayoutMetrics',
@@ -353,6 +354,36 @@ describe('Chrome screenshot acquisition', () => {
     expect(bridge.request.mock.calls.at(-1)?.[1]?.params).toMatchObject({
       clip: { x: 0, y: 0, width: 800, height: 1200, scale: 0.5 },
     });
+  });
+
+  it('publishes the document origin of full-page and clipped captures', async () => {
+    const full = new ScreenshotBridge();
+    full.viewport.pageX = 120;
+    full.viewport.pageY = 800;
+    full.content = { x: 0, y: 0, width: 800, height: 2000 };
+    full.captureData = jpeg(800, 2000).toString('base64');
+    await expect(
+      captureTabScreenshot(tab(), { fullPage: true }, full),
+    ).resolves.toMatchObject({ origin: { x: 0, y: 0 } });
+
+    const clipped = new ScreenshotBridge();
+    clipped.viewport.pageX = 120;
+    clipped.viewport.pageY = 800;
+    clipped.captureData = jpeg(200, 100).toString('base64');
+    await expect(
+      captureTabScreenshot(
+        tab(),
+        { clip: { x: 10, y: 20, width: 200, height: 100 } },
+        clipped,
+      ),
+    ).resolves.toMatchObject({ origin: { x: 130, y: 820 } });
+
+    const scrolled = new ScreenshotBridge();
+    scrolled.viewport.pageX = 120;
+    scrolled.viewport.pageY = 800;
+    await expect(
+      captureTabScreenshot(tab(), {}, scrolled),
+    ).resolves.toMatchObject({ origin: { x: 120, y: 800 } });
   });
 
   it('does not shrink a large viewport to the explicit-crop pixel budget', async () => {

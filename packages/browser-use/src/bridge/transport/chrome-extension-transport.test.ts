@@ -18,6 +18,7 @@ import {
   CHROME_BRIDGE_PROTOCOL_VERSION,
   CHROME_EXTENSION_ID,
   MAX_BRIDGE_FRAME_BYTES,
+  defaultChromeBridgeSocketDirectory,
   defaultChromeBridgeSocketPath,
 } from '../protocol.js';
 import {
@@ -149,6 +150,117 @@ describe('ChromeExtensionTransport', () => {
     ).not.toBe('/tmp/legacy.sock');
     expect(CHROME_BRIDGE_PROTOCOL_VERSION).toBe(1);
   });
+
+  it('prefers an owned per-user runtime directory over world-writable /tmp', () => {
+    const owned = () => ({
+      isDirectory: () => true,
+      uid: 42,
+      mode: 0o040700,
+    });
+    expect(defaultChromeBridgeSocketDirectory(42, 'linux', owned)).toBe(
+      '/run/user/42',
+    );
+    // A foreign-owned or group/other-accessible runtime dir is not safer.
+    expect(
+      defaultChromeBridgeSocketDirectory(42, 'linux', () => ({
+        isDirectory: () => true,
+        uid: 43,
+        mode: 0o040700,
+      })),
+    ).toBe('/tmp');
+    expect(
+      defaultChromeBridgeSocketDirectory(42, 'linux', () => ({
+        isDirectory: () => true,
+        uid: 42,
+        mode: 0o040770,
+      })),
+    ).toBe('/tmp');
+    expect(
+      defaultChromeBridgeSocketDirectory(42, 'linux', () => undefined),
+    ).toBe('/tmp');
+    expect(
+      defaultChromeBridgeSocketDirectory(42, 'linux', () => ({
+        isDirectory: () => false,
+        uid: 42,
+        mode: 0o040700,
+      })),
+    ).toBe('/tmp');
+    expect(defaultChromeBridgeSocketDirectory('default', 'linux')).toBe('/tmp');
+    expect(defaultChromeBridgeSocketDirectory(42, 'darwin')).toBe(os.tmpdir());
+  });
+
+  it('derives the default socket path from a private directory when one is available', () => {
+    if (process.platform === 'win32') return;
+    const parent = path.dirname(defaultChromeBridgeSocketPath({}));
+    if (parent === '/tmp' || parent === os.tmpdir()) return;
+    expect(parent).toBe(
+      `/run/user/${typeof process.getuid === 'function' ? process.getuid() : 0}`,
+    );
+    expect(fs.statSync(parent).mode & 0o002).toBe(0);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'recovers a stale socket guarded by an abandoned unidentifiable lock',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
+      roots.push(root);
+      const socketPath = path.join(root, 'bridge.sock');
+      const child = spawnSync(
+        process.execPath,
+        [
+          '-e',
+          "require('node:net').createServer().listen(process.argv[1], () => process.exit(0))",
+          socketPath,
+        ],
+        { timeout: 15_000 },
+      );
+      expect(child.error).toBeUndefined();
+      expect(child.status).toBe(0);
+      const lockPath = `${socketPath}.recovery-lock`;
+      fs.writeFileSync(lockPath, '');
+      const abandoned = new Date(Date.now() - 120_000);
+      fs.utimesSync(lockPath, abandoned, abandoned);
+
+      const transport = new ChromeExtensionTransport({ socketPath });
+      transports.push(transport);
+      await transport.start();
+      expect(fs.existsSync(lockPath)).toBe(false);
+      const socket = connect(socketPath);
+      await new Promise<void>((resolve) => socket.once('connect', resolve));
+      socket.destroy();
+    },
+    30_000,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses recovery while a fresh unidentifiable lock may be a live peer',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
+      roots.push(root);
+      const socketPath = path.join(root, 'bridge.sock');
+      const child = spawnSync(
+        process.execPath,
+        [
+          '-e',
+          "require('node:net').createServer().listen(process.argv[1], () => process.exit(0))",
+          socketPath,
+        ],
+        { timeout: 15_000 },
+      );
+      expect(child.error).toBeUndefined();
+      expect(child.status).toBe(0);
+      const lockPath = `${socketPath}.recovery-lock`;
+      fs.writeFileSync(lockPath, '');
+
+      const transport = new ChromeExtensionTransport({ socketPath });
+      transports.push(transport);
+      await expect(transport.start()).rejects.toMatchObject({
+        code: 'TRANSPORT_UNAVAILABLE',
+      });
+      expect(fs.existsSync(lockPath)).toBe(true);
+    },
+    30_000,
+  );
 
   it('validates the fixed extension identity and correlates responses', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));

@@ -173,8 +173,21 @@ export async function withModifiers(
   if (releaseFailure) throw releaseFailure.reason;
 }
 
-export function keyChord(value: unknown): string {
-  return stringArray(value).join('+');
+export async function pressKeyChord(page: Page, value: unknown): Promise<void> {
+  const keys = stringArray(value);
+  try {
+    await page.keyboard.press(keys.join('+'));
+  } catch (error) {
+    // Playwright presses chord modifiers left to right and never releases
+    // them when a later token is rejected; release every modifier so the tab
+    // is not left with keys physically held.
+    await Promise.allSettled(
+      (['Shift', 'Control', 'Alt', 'Meta'] as const).map((key) =>
+        page.keyboard.up(key),
+      ),
+    );
+    throw error;
+  }
 }
 
 export function selectOptions(
@@ -185,10 +198,17 @@ export function selectOptions(
   | { value?: string; label?: string; index?: number }
   | Array<{ value?: string; label?: string; index?: number }> {
   if (typeof value === 'string') return value;
-  if (Array.isArray(value))
-    return value.map((item) =>
+  if (Array.isArray(value)) {
+    const mapped = value.map((item) =>
       typeof item === 'string' ? item : selectOptionRecord(item),
-    ) as string[] | Array<{ value?: string; label?: string; index?: number }>;
+    );
+    // Playwright accepts an all-string or all-descriptor array, never mixed.
+    if (mapped.some((item) => typeof item !== 'string'))
+      return mapped.map((item) =>
+        typeof item === 'string' ? { value: item } : item,
+      );
+    return mapped as string[];
+  }
   return selectOptionRecord(value);
 }
 

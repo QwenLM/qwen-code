@@ -111,6 +111,16 @@ async function capture(
     clip?.width ?? (fullPage ? numberArg(content, 'width') : viewportWidth);
   const height =
     clip?.height ?? (fullPage ? numberArg(content, 'height') : viewportHeight);
+  // The image's top-left pixel as a document point; only a viewport capture
+  // is directly aligned with the viewport coordinate space cua consumes.
+  const origin = {
+    x: fullPage
+      ? numberArg(content, 'x')
+      : numberArg(viewport, 'pageX') + (clip?.x ?? 0),
+    y: fullPage
+      ? numberArg(content, 'y')
+      : numberArg(viewport, 'pageY') + (clip?.y ?? 0),
+  };
   if (constrained)
     assertScreenshotBudget(width, height, fullPage ? 'Full-page' : 'Clip');
 
@@ -123,12 +133,8 @@ async function capture(
       quality: 80,
       captureBeyondViewport: constrained,
       clip: {
-        x: fullPage
-          ? numberArg(content, 'x')
-          : numberArg(viewport, 'pageX') + (clip?.x ?? 0),
-        y: fullPage
-          ? numberArg(content, 'y')
-          : numberArg(viewport, 'pageY') + (clip?.y ?? 0),
+        x: origin.x,
+        y: origin.y,
         width,
         height,
         scale,
@@ -172,6 +178,7 @@ async function capture(
     viewport: { width: viewportWidth, height: viewportHeight },
     devicePixelRatio,
     coordinateSpace: 'css-pixels',
+    origin,
   };
 }
 

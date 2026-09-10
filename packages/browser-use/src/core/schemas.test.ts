@@ -67,6 +67,23 @@ describe('recursive locator plans', () => {
   });
 });
 
+describe('locator matcher flags', () => {
+  it('accepts stateless flags and rejects stateful g/y flags', () => {
+    expect(
+      locatorStepsSchema.safeParse([
+        { kind: 'getByText', text: { regex: 'Save|Cancel', flags: 'ims' } },
+      ]).success,
+    ).toBe(true);
+    for (const flags of ['g', 'y', 'gi', 'iy']) {
+      expect(
+        locatorStepsSchema.safeParse([
+          { kind: 'getByText', text: { regex: 'Save', flags } },
+        ]).success,
+      ).toBe(false);
+    }
+  });
+});
+
 describe('browser command schemas', () => {
   it('accepts the five coordinate CUA mouse buttons from Codex', () => {
     const base = { tabId: 'tab-1', x: 1, y: 1 };

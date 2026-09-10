@@ -603,7 +603,7 @@ describe('QwenPlaywrightTransport', () => {
     expect(messages.at(-1)).toEqual({
       sessionId: 'pw-tab-1',
       method: 'Target.detachedFromTarget',
-      params: { sessionId: 'child-1' },
+      params: { sessionId: 'child-1', targetId: 'frame-1' },
     });
   });
 
