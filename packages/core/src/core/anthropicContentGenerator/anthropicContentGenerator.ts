@@ -1633,6 +1633,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
       // Match LlmChat's replay boundary: known mid-SSE socket cuts and
       // status-less upstream failures the provider traced with a request id
       // both release an already closed batch before the error propagates.
+      // The status-less arm reaches this provider only through an id inside
+      // the error body: the SDK builds a mid-stream failure as an
+      // `APIConnectionError` without headers, so the `request-id` response
+      // header never reaches `request_id` the way the OpenAI SDK stamps its
+      // `x-request-id`. Same policy as the OpenAI path, narrower set of
+      // producers — a gateway relaying its own id in the frame, rather than
+      // the SDK handing one over from the response.
       // Releasing keeps the two providers' functionCall cuts on one footing —
       // the delivered call flips LlmChat's delivered flags
       // (`streamYieldedContentChunk`, `streamYieldedFunctionCall`), which
