@@ -475,19 +475,26 @@ export async function gitRemoteRemove(
         // leaves), then surface git's answer.
         await deleteRemoteTrackingRefs(cwd, name, env);
         await unsetUpstreamKeys(cwd, pointed, name, env);
-        // Same narrowing as the main path: inert merge survivors do not
-        // refuse.
-        if (
-          (await upstreamKeysToSweep(cwd, pointed, name, env)).some(
-            (k) => k.fixedValue !== undefined,
-          )
-        ) {
+        await sweepSiblingWorktreeKeys(cwd, name, env);
+        // Same resolution check as the main path: an inert survivor
+        // does not refuse.
+        if (await sweptUpstreamResolving(cwd, pointed, name, env)) {
           throw new Error('remote still configured after removal');
         }
       }
       throw removeError;
     }
   }
+  // git rm's effective-value match can also delete a LOCAL [branch <b>]
+  // section whose shadowed copy named a SURVIVING remote (a
+  // worktree-scope record shadowed it): the branch's effective upstream
+  // was the removed remote, but the user's local config held a fallback
+  // git had no business destroying. Restore those records IMMEDIATELY —
+  // above every post-destruction gate, so a later refusal cannot skip
+  // the rollback of git's own collateral damage (the restored values
+  // name surviving remotes, so no downstream gate or sweep can claim
+  // them).
+  await restoreLocalUpstreamBackups(cwd, pointed, name, env);
   let remotes = await fetchGitRemotes(cwd, env);
   if (remotes.some((remote) => remote.name === name)) {
     // git exited 0 over a split section (an included config file, or a
@@ -503,9 +510,20 @@ export async function gitRemoteRemove(
     throw new Error('remote still configured after removal');
   }
   // The repository-scope listing cannot see a same-name survivor in an
-  // inherited scope, but git still resolves it — fetch/push keep reaching
-  // the remote the panel just said was removed. Verify resolution too.
-  if ((await remoteSectionScopes(cwd, name, env)).size > 0) {
+  // inherited scope — or one git resolves from OUTSIDE config entirely
+  // (a legacy $GIT_DIR/remotes/<name> file, branches/<name>, an
+  // insteadOf alias) — but git still resolves it: fetch/push keep
+  // reaching the remote the panel just said was removed. Two checks,
+  // because each sees a different survivor: the all-scope section read
+  // catches an inherited pushurl-only section (which resolves
+  // fetch-side as the bare name), and git's own resolver catches the
+  // non-config sources — `ls-remote --get-url` expands the name without
+  // contacting the remote and echoes the input verbatim only when
+  // nothing answers it.
+  if (
+    (await remoteSectionScopes(cwd, name, env)).size > 0 ||
+    (await remoteStillResolves(cwd, name, env))
+  ) {
     throw new Error('remote still configured after removal');
   }
   // git's rm deletes the remote-tracking refs only through a fetch
@@ -527,17 +545,20 @@ export async function gitRemoteRemove(
   // fatals on. Clear them now that the removal is certified — a refused
   // removal above never reaches this point.
   await unsetUpstreamKeys(cwd, pointed, name, env);
-  // Re-verify only the VALUE-MATCHED keys: a merge key is unset
-  // best-effort, but a survivor resolves to "." and is inert (the same
-  // doctrine the surviving-keys gate follows), so an include-held merge
-  // key the sweep cannot edit must not refuse a completed removal.
-  if (
-    (await upstreamKeysToSweep(cwd, pointed, name, env)).some(
-      (k) => k.fixedValue !== undefined,
-    )
-  ) {
+  // Re-verify by RESOLUTION, not presence: an entry that survived the
+  // sweep (a lock, an include-held file) refuses only when it still
+  // resolves to the removed name — a residue shadowed by a
+  // surviving-remote record is inert (the same doctrine the
+  // surviving-keys gate follows), and a merge survivor resolves to "."
+  // regardless.
+  if (await sweptUpstreamResolving(cwd, pointed, name, env)) {
     throw new Error('remote still configured after removal');
   }
+  // Linked worktrees each carry their own config.worktree — invisible
+  // to every read above, which all run the INVOKING worktree's scope
+  // chain. A sibling's key naming the removed remote dangles in the
+  // same repository; sweep it the same way.
+  await sweepSiblingWorktreeKeys(cwd, name, env);
   // The same keys held outside .git/config survive too, into the
   // identical dangling state: an include.path'd file (scope-local), or
   // an inherited global/system file (a shadowing local copy git's rm
@@ -672,6 +693,30 @@ async function remoteSectionHasIncludedOrigin(
   return false;
 }
 
+// Whether git still RESOLVES the name after the section is gone — the
+// certification the config-record checks cannot give: a legacy
+// $GIT_DIR/remotes/<name> file (a tarball-era or hand-made clone) keeps
+// the remote fetchable with no config record at all. `--get-url` is
+// documented not to contact the remote. Fail-closed on any failure —
+// a blind read is not a negative answer.
+async function remoteStillResolves(
+  cwd: string,
+  name: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  try {
+    const out = await runGit(cwd, ['ls-remote', '--get-url', '--', name], env);
+    // git echoes an unanswered name VERBATIM plus exactly one trailing
+    // LF — strip only that terminator: a config-held name may itself
+    // carry edge whitespace (or a trailing CR), which the lenient
+    // removal predicate admits.
+    return (out.endsWith('\n') ? out.slice(0, -1) : out) !== name;
+  } catch (err) {
+    stripConfigDump(err);
+    throw err;
+  }
+}
+
 // The config scopes holding `remote.<name>.*` records, from the same scoped
 // read the listing uses.
 async function remoteSectionScopes(
@@ -754,6 +799,18 @@ interface PointingBranches {
   // pointed at the removed remote) from "a dangling inherited value was
   // always there" (not this removal's to refuse).
   pushDefault: string | undefined;
+  // Per-pointed-branch LOCAL-scope upstream records (value lists). git
+  // rm's effective-value match deletes the whole local [branch <b>]
+  // section even when the shadowed local copy named a SURVIVING remote
+  // — restoring that copy needs its pre-removal values.
+  localBackup: Map<
+    string,
+    { remote?: string[]; merge?: string[]; pushremote?: string[] }
+  >;
+  // The local-scope `remote.pushDefault` value list: git rm's
+  // handle_push_default writes the common config when the EFFECTIVE
+  // value matched, destroying a shadowed local copy naming a survivor.
+  pushDefaultBackup: string[] | undefined;
 }
 
 // The branches linked to `name` by fetch or push upstream config,
@@ -772,22 +829,35 @@ async function pointingBranches(
     stripConfigDump(err);
     throw err;
   }
-  const local = new Map<string, string>();
-  const worktree = new Map<string, string>();
+  const local = new Map<string, string[]>();
+  const worktree = new Map<string, string[]>();
   let pushDefault: string | undefined;
+  let pushDefaultBackup: string[] | undefined;
+  const collect = (m: Map<string, string[]>, key: string, value: string) => {
+    const list = m.get(key) ?? [];
+    list.push(value);
+    m.set(key, list);
+  };
   for (const record of iterConfigRecords(raw)) {
     const { scope, key, value } = record;
     // The dump is in scope order: the last record wins, every scope
     // included — the way `git push` resolves the default.
-    if (key === 'remote.pushdefault') pushDefault = value;
+    if (key === 'remote.pushdefault') {
+      pushDefault = value;
+      if (scope === 'local') {
+        pushDefaultBackup = pushDefaultBackup ?? [];
+        pushDefaultBackup.push(value);
+      }
+    }
     if (scope !== 'local' && scope !== 'worktree') continue;
     if (!key.startsWith('branch.')) continue;
     const rest = key.slice('branch.'.length);
     const dot = rest.lastIndexOf('.');
     if (dot <= 0) continue;
     const sub = rest.slice(dot + 1);
-    if (sub !== 'remote' && sub !== 'pushremote') continue;
-    (scope === 'worktree' ? worktree : local).set(
+    if (sub !== 'remote' && sub !== 'pushremote' && sub !== 'merge') continue;
+    collect(
+      scope === 'worktree' ? worktree : local,
       `${rest.slice(0, dot)}.${sub}`,
       value,
     );
@@ -796,12 +866,26 @@ async function pointingBranches(
     fetch: new Set(),
     push: new Set(),
     pushDefault,
+    localBackup: new Map(),
+    pushDefaultBackup,
   };
+  const lastOf = (m: Map<string, string[]>, key: string) => m.get(key)?.at(-1);
   for (const key2 of new Set([...local.keys(), ...worktree.keys()])) {
-    // Map.set keeps the LAST value per scope, then worktree beats local.
-    if ((worktree.get(key2) ?? local.get(key2)) !== name) continue;
+    if (key2.endsWith('.merge')) continue;
+    // The last value per scope wins, then worktree beats local.
+    if ((lastOf(worktree, key2) ?? lastOf(local, key2)) !== name) continue;
     const branch = key2.slice(0, key2.lastIndexOf('.'));
     (key2.endsWith('.remote') ? pointed.fetch : pointed.push).add(branch);
+    const backup: {
+      remote?: string[];
+      merge?: string[];
+      pushremote?: string[];
+    } = {};
+    for (const sub of ['remote', 'merge', 'pushremote'] as const) {
+      const values = local.get(`${branch}.${sub}`);
+      if (values !== undefined) backup[sub] = values;
+    }
+    pointed.localBackup.set(branch, backup);
   }
   return pointed;
 }
@@ -812,12 +896,18 @@ async function pointingBranches(
 // warning — so keys held in config.worktree, and multi-valued local
 // keys, survive every removal into a dangling `branch.<b>.remote =
 // <gone>`. Fetch-pointed branches lose their remote (by value), their
-// merge (git unsets it whenever the remote matches), and their
-// pushRemote (by value); push-pointed branches lose only their
-// pushRemote (by value) — their merge key belongs to the surviving fetch
-// upstream. Plus a `remote.pushDefault` resolving to the removed remote.
-// A key with SEVERAL values contributes only the matching entries
-// (--fixed-value).
+// merge (only when the same scope's remote key holds no entry naming a
+// SURVIVING remote — otherwise the branch keeps its upstream and the
+// merge half stays), and their pushRemote (by value); push-pointed
+// branches lose only their pushRemote (by value) — their merge key
+// belongs to the surviving fetch upstream. Plus a `remote.pushDefault`
+// with an entry naming the removed remote (value-matched like the rest —
+// git's rm skips a multi-valued pushDefault with a warning too). And
+// independently of the snapshot:
+// ANY branch.<b>.remote/pushRemote entry value-matched to the removed
+// remote goes — a multi-valued key's non-effective entry is residue
+// whose later surfacing would dangle. A key with SEVERAL values
+// contributes only the matching entries (--fixed-value).
 async function upstreamKeysToSweep(
   cwd: string,
   pointed: PointingBranches,
@@ -849,16 +939,34 @@ async function upstreamKeysToSweep(
     byKey.set(record.key, list);
   }
   const keys: UpstreamKey[] = [];
+  const seen = new Set<string>();
+  const pushKey = (key: UpstreamKey): void => {
+    const id = `${key.scope} ${key.key}`;
+    if (!seen.has(id)) {
+      seen.add(id);
+      keys.push(key);
+    }
+  };
   for (const [scope, byKey] of byScope) {
     for (const branch of pointed.fetch) {
       if ((byKey.get(`branch.${branch}.remote`) ?? []).includes(name)) {
-        keys.push({ scope, key: `branch.${branch}.remote`, fixedValue: name });
+        pushKey({ scope, key: `branch.${branch}.remote`, fixedValue: name });
       }
-      if (byKey.has(`branch.${branch}.merge`)) {
-        keys.push({ scope, key: `branch.${branch}.merge` });
+      // The merge key pairs with the branch's remote key in the same
+      // scope: sweep it only when that key has no entry naming a
+      // SURVIVING remote — otherwise the branch still has its upstream
+      // here and the merge half must stay. A scope with no remote key
+      // at all is sweepable (the worktree-merge/local-remote shape).
+      const remoteValues = byKey.get(`branch.${branch}.remote`);
+      if (
+        (remoteValues === undefined ||
+          remoteValues.every((value) => value === name)) &&
+        byKey.has(`branch.${branch}.merge`)
+      ) {
+        pushKey({ scope, key: `branch.${branch}.merge` });
       }
       if ((byKey.get(`branch.${branch}.pushremote`) ?? []).includes(name)) {
-        keys.push({
+        pushKey({
           scope,
           key: `branch.${branch}.pushremote`,
           fixedValue: name,
@@ -867,7 +975,7 @@ async function upstreamKeysToSweep(
     }
     for (const branch of pointed.push) {
       if ((byKey.get(`branch.${branch}.pushremote`) ?? []).includes(name)) {
-        keys.push({
+        pushKey({
           scope,
           key: `branch.${branch}.pushremote`,
           fixedValue: name,
@@ -875,37 +983,75 @@ async function upstreamKeysToSweep(
       }
     }
     if ((byKey.get('remote.pushdefault') ?? []).includes(name)) {
-      keys.push({ scope, key: 'remote.pushdefault', fixedValue: name });
+      pushKey({ scope, key: 'remote.pushdefault', fixedValue: name });
+    }
+    // A multi-valued key's non-effective entry naming the removed remote
+    // is residue even when the branch's EFFECTIVE upstream is a surviving
+    // remote — sweep by value, independent of the pointed snapshot.
+    for (const [key, values] of byKey) {
+      if (!key.startsWith('branch.')) continue;
+      const rest = key.slice('branch.'.length);
+      const dot = rest.lastIndexOf('.');
+      if (dot <= 0) continue;
+      const sub = rest.slice(dot + 1);
+      if (sub !== 'remote' && sub !== 'pushremote') continue;
+      if (values.includes(name)) {
+        pushKey({ scope, key, fixedValue: name });
+      }
     }
   }
   return keys;
 }
 
-// The remote-tracking refs under refs/remotes/<name>/ — the trailing
-// slash keeps a dotted sibling's namespace (`refs/remotes/a.b/`) out of
-// a removal of `a`.
+// The remote-tracking refs OWNED by the removed name. A ref under
+// refs/remotes/ belongs to the remote whose name is its LONGEST prefix
+// at a '/' boundary — `refs/remotes/a/b/main` is remote `a/b`'s, not
+// `a`'s — so a string-prefix sweep would destroy a configured slashed
+// sibling's refs. The exact ref `refs/remotes/<name>` (a
+// single-destination fetch leaves it) is the remote's own. Ownership
+// resolves against the configured set PLUS the removed name: at sweep
+// time the section is gone, but its namespace is still being swept.
 async function remoteTrackingRefs(
   cwd: string,
   name: string,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<string[]> {
-  let raw: string;
+  let refsRaw: string;
+  let namesRaw: string;
   try {
-    raw = await runGit(
-      cwd,
-      ['for-each-ref', '--format=%(refname)', `refs/remotes/${name}/`],
-      env,
-    );
+    [refsRaw, namesRaw] = await Promise.all([
+      runGit(
+        cwd,
+        ['for-each-ref', '--format=%(refname)', 'refs/remotes/'],
+        env,
+      ),
+      runGit(cwd, ['remote'], env),
+    ]);
   } catch (err) {
     // for-each-ref exits 0 on empty, so any failure here must abort,
     // not read as "no refs" — the caller's verification is fail-closed.
     stripConfigDump(err);
     throw err;
   }
-  return raw.split('\n').filter((line) => line !== '');
+  const owners = [...namesRaw.split('\n').filter(Boolean), name];
+  return refsRaw
+    .split('\n')
+    .filter((ref) => ref !== '')
+    .filter((ref) => owningRemote(ref, owners) === name);
 }
 
-// Delete every refs/remotes/<name>/* entry, best-effort per ref: the
+function owningRemote(ref: string, names: string[]): string | undefined {
+  let best: string | undefined;
+  for (const n of names) {
+    const prefix = `refs/remotes/${n}`;
+    if (ref !== prefix && !ref.startsWith(`${prefix}/`)) continue;
+    if (best === undefined || n.length > best.length) best = n;
+  }
+  return best;
+}
+
+// Delete every remote-tracking ref OWNED by the removed name (see
+// remoteTrackingRefs for the ownership rule), best-effort per ref: the
 // caller's re-verification decides whether a survivor certifies or
 // refuses.
 async function deleteRemoteTrackingRefs(
@@ -924,6 +1070,286 @@ async function deleteRemoteTrackingRefs(
       // Re-verified by the caller: a ref that survives (a killed delete,
       // a concurrent fetch re-adding it) must not be certified as
       // cleaned.
+    }
+  }
+}
+
+// The config records of one worktree's config.worktree file, read from
+// that worktree (`--worktree` alone reads exactly that scope when
+// extensions.worktreeConfig is on).
+async function worktreeScopeRecords(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<Map<string, string[]>> {
+  let raw: string;
+  try {
+    raw = await runGit(cwd, ['config', '--worktree', '--list', '-z'], env);
+  } catch (err) {
+    // extensions.worktreeConfig on but no config.worktree file yet: the
+    // worktree scope is empty. git reports that as a missing-file fatal;
+    // anything else (a kill, a parse failure) is not a negative answer.
+    const detail =
+      err && typeof err === 'object'
+        ? String(
+            (err as { stderr?: unknown }).stderr ??
+              (err as { message?: unknown }).message ??
+              '',
+          )
+        : '';
+    // Without extensions.worktreeConfig there IS no worktree scope to
+    // read: git refuses the selector outright.
+    if (
+      /unable to read config file.*No such file/s.test(detail) ||
+      /--worktree cannot be used/s.test(detail)
+    ) {
+      return new Map();
+    }
+    stripConfigDump(err);
+    throw err;
+  }
+  const byKey = new Map<string, string[]>();
+  for (const entry of raw.split('\0')) {
+    if (entry === '') continue;
+    const newline = entry.indexOf('\n');
+    const key = newline === -1 ? entry : entry.slice(0, newline);
+    const value = newline === -1 ? '' : entry.slice(newline + 1);
+    const list = byKey.get(key) ?? [];
+    list.push(value);
+    byKey.set(key, list);
+  }
+  return byKey;
+}
+
+// Sweep the upstream keys naming the removed remote from every LINKED
+// worktree's config.worktree: the invoking worktree's reads never see
+// those files, so a sibling's key would dangle in the same repository.
+// Fail-closed per worktree: a killed or failed read/write refuses the
+// certification rather than silently skipping a sibling.
+async function sweepSiblingWorktreeKeys(
+  cwd: string,
+  name: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<void> {
+  let listed: string;
+  try {
+    listed = await runGit(cwd, ['worktree', 'list', '--porcelain', '-z'], env);
+  } catch (err) {
+    stripConfigDump(err);
+    throw err;
+  }
+  let topSpellings: Set<string> | undefined;
+  // `-z` terminates every FIELD (record separator = an empty field), so
+  // a path carrying a literal newline stays intact.
+  const records: string[][] = [];
+  let lines: string[] = [];
+  for (const field of listed.split('\0')) {
+    if (field === '') {
+      if (lines.length > 0) records.push(lines);
+      lines = [];
+    } else {
+      lines.push(field);
+    }
+  }
+  if (lines.length > 0) records.push(lines);
+  for (const record of records) {
+    const first = record[0] ?? '';
+    if (!first.startsWith('worktree ')) continue;
+    const wt = first.slice('worktree '.length);
+    // A `prunable` record's directory is gone (deleted out of band): no
+    // git process can run from it, and `git worktree prune` deletes its
+    // admin dir. Skipping is not the fail-closed exemption — nothing is
+    // readable there.
+    if (
+      record.some((line) => line === 'prunable' || line.startsWith('prunable '))
+    )
+      continue;
+    // The invoking worktree is already swept by the main path. The
+    // toplevel read is lazy: no siblings, no extra spawn.
+    if (topSpellings === undefined) {
+      topSpellings = await pathSpellings(cwd, await repoTopLevel(cwd, env));
+    }
+    const wtSpellings = await pathSpellings(cwd, wt);
+    if ([...wtSpellings].some((spelling) => topSpellings!.has(spelling))) {
+      continue;
+    }
+    let byKey: Map<string, string[]>;
+    try {
+      byKey = await worktreeScopeRecords(wt, env);
+    } catch (err) {
+      stripConfigDump(err);
+      throw err;
+    }
+    // A remote.<name>.* record here is the sibling's own per-worktree
+    // section override — the name still resolves for that worktree once
+    // the shared section goes. Deliberate per-worktree state: refuse,
+    // mirroring the include-held doctrine.
+    for (const key of byKey.keys()) {
+      if (!key.startsWith(`remote.${name}.`)) continue;
+      // Section identity, not prefix: a sibling remote whose name
+      // EXTENDS this one (`a.b` next to `a`) is not an override of `a`.
+      const rest = key.slice('remote.'.length);
+      const dot = rest.lastIndexOf('.');
+      if (dot > 0 && rest.slice(0, dot) === name) {
+        throw new Error('remote still configured after removal');
+      }
+    }
+    const keys: string[] = [];
+    for (const [key, values] of byKey) {
+      if (key === 'remote.pushdefault') {
+        if (values.includes(name)) keys.push(key);
+        continue;
+      }
+      if (!key.startsWith('branch.')) continue;
+      const rest = key.slice('branch.'.length);
+      const dot = rest.lastIndexOf('.');
+      if (dot <= 0) continue;
+      const sub = rest.slice(dot + 1);
+      if (sub === 'remote' || sub === 'pushremote') {
+        if (values.includes(name)) keys.push(key);
+      } else if (sub === 'merge') {
+        // The merge key pairs with the branch's remote key in the same
+        // file: sweep it only when that remote key is being value-swept
+        // here AND holds no entry naming a surviving remote (a
+        // multi-valued key keeps the branch's upstream — the merge half
+        // stays, mirroring the main path). A merge whose remote lives
+        // in the shared config is not this file's to decide.
+        const remoteValues = byKey.get(`branch.${rest.slice(0, dot)}.remote`);
+        if (
+          remoteValues !== undefined &&
+          remoteValues.includes(name) &&
+          remoteValues.every((value) => value === name)
+        ) {
+          keys.push(key);
+        }
+      }
+    }
+    for (const key of keys) {
+      const isMerge = key.endsWith('.merge');
+      const args = isMerge
+        ? ['config', '--worktree', '--unset-all', key]
+        : ['config', '--worktree', '--fixed-value', '--unset-all', key, name];
+      try {
+        await runGit(wt, args, env);
+      } catch {
+        // re-verified just below
+      }
+    }
+    // Re-verify: a key that survived (a killed unset, a concurrent
+    // re-add) must refuse rather than be certified cleaned. Only the
+    // swept shapes count — an unrelated branch subkey that happens to
+    // carry the name (a description, say) is not the sweep's business.
+    const after = await worktreeScopeRecords(wt, env);
+    for (const [key, values] of after) {
+      if (key === 'remote.pushdefault' && values.includes(name)) {
+        throw new Error('remote still configured after removal');
+      }
+      if (
+        key.startsWith('branch.') &&
+        (key.endsWith('.remote') || key.endsWith('.pushremote')) &&
+        values.includes(name)
+      ) {
+        throw new Error('remote still configured after removal');
+      }
+    }
+  }
+}
+
+// The local-scope values of one branch key, [] when unset (exit 1 with
+// no output). A kill is not an answer.
+async function localBranchKeyValues(
+  cwd: string,
+  key: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string[]> {
+  try {
+    const out = await runGit(cwd, ['config', '--local', '--get-all', key], env);
+    return out.split('\n').filter((line) => line !== '');
+  } catch (err) {
+    if (isNoMatchConfigError(err)) return [];
+    stripConfigDump(err);
+    throw err;
+  }
+}
+
+// Restore the local-scope upstream records git's rm destroyed through
+// its effective-value match: a pointed branch whose LOCAL copy named a
+// SURVIVING remote (shadowed by a worktree-scope record) loses the whole
+// [branch <b>] section. Only absent keys are rewritten — a surviving
+// key (a multi-valued one git skipped, swept by value above) is never
+// duplicated. Fail-closed: a restore that cannot run refuses the
+// certification rather than leaving the branch silently untracked.
+async function restoreLocalUpstreamBackups(
+  cwd: string,
+  pointed: PointingBranches,
+  name: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<void> {
+  for (const [branch, backup] of pointed.localBackup) {
+    const remoteNow = await localBranchKeyValues(
+      cwd,
+      `branch.${branch}.remote`,
+      env,
+    );
+    const remoteRestore = (backup.remote ?? []).filter((v) => v !== name);
+    const remoteRestored = remoteNow.length === 0 && remoteRestore.length > 0;
+    if (remoteRestored) {
+      for (const value of remoteRestore) {
+        await runGit(
+          cwd,
+          ['config', '--local', '--add', `branch.${branch}.remote`, value],
+          env,
+        );
+      }
+    }
+    // The merge key pairs with the branch's upstream — restore it when
+    // the remote was restored here OR survived (a multi-valued remote
+    // key git's rm skips while still deleting the merge).
+    if (remoteRestored || remoteNow.length > 0) {
+      const mergeNow = await localBranchKeyValues(
+        cwd,
+        `branch.${branch}.merge`,
+        env,
+      );
+      if (mergeNow.length === 0) {
+        for (const value of backup.merge ?? []) {
+          await runGit(
+            cwd,
+            ['config', '--local', '--add', `branch.${branch}.merge`, value],
+            env,
+          );
+        }
+      }
+    }
+    const pushNow = await localBranchKeyValues(
+      cwd,
+      `branch.${branch}.pushremote`,
+      env,
+    );
+    const pushRestore = (backup.pushremote ?? []).filter((v) => v !== name);
+    if (pushNow.length === 0 && pushRestore.length > 0) {
+      for (const value of pushRestore) {
+        await runGit(
+          cwd,
+          ['config', '--local', '--add', `branch.${branch}.pushremote`, value],
+          env,
+        );
+      }
+    }
+  }
+  // git rm's handle_push_default writes the common config when the
+  // EFFECTIVE pushDefault matched — a shadowed local copy naming a
+  // survivor goes with it. Restore the non-name values.
+  const pdRestore = (pointed.pushDefaultBackup ?? []).filter((v) => v !== name);
+  if (pdRestore.length > 0) {
+    const pdNow = await localBranchKeyValues(cwd, 'remote.pushdefault', env);
+    if (pdNow.length === 0) {
+      for (const value of pdRestore) {
+        await runGit(
+          cwd,
+          ['config', '--local', '--add', 'remote.pushdefault', value],
+          env,
+        );
+      }
     }
   }
 }
@@ -1031,6 +1457,37 @@ async function survivingUpstreamKeys(
 // remaining class — and the dangling-remote-name shape the gate refuses.
 function isSectionlessUpstream(value: string): boolean {
   return value === '.' || value.includes(':') || value.includes('/');
+}
+
+// Whether any upstream key still RESOLVES to the removed name after the
+// sweep — the re-verify's question. Presence is not the question: an
+// entry the sweep could not edit (an include-held file) that is
+// SHADOWED by a surviving-remote record is inert, exactly the
+// shadowed-survivor doctrine the surviving-keys gate states.
+async function sweptUpstreamResolving(
+  cwd: string,
+  pointed: PointingBranches,
+  name: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  let raw: string;
+  try {
+    raw = await runGit(cwd, ['config', '--list', '--show-scope', '-z'], env);
+  } catch (err) {
+    stripConfigDump(err);
+    throw err;
+  }
+  const lastValue = new Map<string, string>();
+  for (const record of iterConfigRecords(raw)) {
+    lastValue.set(record.key, record.value);
+  }
+  for (const branch of pointed.fetch) {
+    if (lastValue.get(`branch.${branch}.remote`) === name) return true;
+  }
+  for (const branch of pointed.push) {
+    if (lastValue.get(`branch.${branch}.pushremote`) === name) return true;
+  }
+  return lastValue.get('remote.pushdefault') === name;
 }
 
 // Unset every upstreamKeysToSweep entry, best-effort per key: the

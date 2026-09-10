@@ -918,6 +918,307 @@ describe('fetchGitRemotes repository scope', () => {
     );
   });
 
+  it('refuses to certify while a legacy .git/remotes/<name> file still resolves', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // The pre-config-era mechanism git still honors: $GIT_DIR/remotes/
+    // <name> resolves the name with no config record at all — a
+    // config-only certification would certify while fetches keep
+    // working.
+    fs.mkdirSync(path.join(dir, '.git', 'remotes'));
+    fs.writeFileSync(
+      path.join(dir, '.git', 'remotes', 'origin'),
+      'URL: https://example.com/legacy/r.git\n',
+    );
+    await expect(gitRemoteRemove(dir, 'origin', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    // git's own section removal DID happen — only the certification
+    // refuses.
+    expect(git(dir, 'config', '--list')).not.toContain('remote.origin.url');
+    // Deleting the legacy file converges the retry to git's own 404.
+    fs.unlinkSync(path.join(dir, '.git', 'remotes', 'origin'));
+    await expect(gitRemoteRemove(dir, 'origin', fixtureEnv)).rejects.toThrow(
+      /no such remote/i,
+    );
+  });
+
+  it('sweeps a sibling worktree\u2019s upstream keys on a removal from the main one', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(wt, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(wt, 'branch', 'feature');
+    // The key lives in the SIBLING's config.worktree: invisible to
+    // every read the removal runs from the main worktree.
+    git(wt, 'config', '--worktree', 'branch.feature.remote', 'origin');
+    git(wt, 'config', '--worktree', 'branch.feature.merge', 'refs/heads/main');
+    const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(remotes).toEqual([]);
+    expect(git(wt, 'config', '--worktree', '--list')).not.toContain(
+      'branch.feature.remote',
+    );
+    expect(git(wt, 'config', '--worktree', '--list')).not.toContain(
+      'branch.feature.merge',
+    );
+  });
+
+  it('removes a remote while a stale (prunable) worktree record exists', async () => {
+    const dir = makeRepo();
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    // Deleting the directory out of band leaves the registration
+    // (tagged prunable) until `git worktree prune` — removals must not
+    // die on it.
+    fs.rmSync(wt, { recursive: true, force: true });
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(remotes).toEqual([]);
+  });
+
+  it('removes fine with a linked sibling when extensions.worktreeConfig is off', async () => {
+    const dir = makeRepo();
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    // No extensions.worktreeConfig: `git config --worktree` refuses
+    // outright — the sibling sweep must read that as "no worktree
+    // scope", not fail the removal.
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(remotes).toEqual([]);
+  });
+
+  it('refuses when a sibling worktree holds a section override for the remote', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(wt, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // The sibling's own per-worktree override: the name still resolves
+    // there after the shared section goes.
+    git(
+      wt,
+      'config',
+      '--worktree',
+      'remote.origin.url',
+      'https://example.com/override/r.git',
+    );
+    await expect(gitRemoteRemove(dir, 'origin', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    expect(git(wt, 'config', '--worktree', '--get', 'remote.origin.url')).toBe(
+      'https://example.com/override/r.git\n',
+    );
+  });
+
+  it('keeps a sibling merge key whose remote lives in the shared config', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(wt, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(wt, 'remote', 'add', 'upstream', 'https://example.com/u/r.git');
+    git(wt, 'branch', 'feat');
+    // The branch's remote is in the SHARED config (naming the surviving
+    // remote); only its merge key is per-worktree. Removing the
+    // unrelated remote must not touch the sibling's merge.
+    git(wt, 'config', '--local', 'branch.feat.remote', 'upstream');
+    git(wt, 'config', '--worktree', 'branch.feat.merge', 'refs/heads/main');
+    const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['upstream']);
+    expect(git(wt, 'config', '--worktree', '--get', 'branch.feat.merge')).toBe(
+      'refs/heads/main\n',
+    );
+  });
+
+  it('ignores an unrelated sibling branch subkey carrying the name', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(wt, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(wt, 'branch', 'feat');
+    // A description that happens to carry the removed name is not the
+    // sweep's business and must not trip the re-verify.
+    git(wt, 'config', '--worktree', 'branch.feat.description', 'origin');
+    const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(remotes).toEqual([]);
+    expect(
+      git(wt, 'config', '--worktree', '--get', 'branch.feat.description'),
+    ).toBe('origin\n');
+  });
+
+  it('removes a hand-configured remote whose name carries edge whitespace', async () => {
+    const dir = makeRepo();
+    fs.appendFileSync(
+      path.join(dir, '.git', 'config'),
+      '\n[remote " foo"]\n\turl = https://example.com/f/r.git\n',
+    );
+    // The lenient removal predicate admits the name; the certification
+    // must not read git's verbatim echo + terminator as still-resolving.
+    const remotes = await gitRemoteRemove(dir, ' foo', fixtureEnv);
+    expect(remotes).toEqual([]);
+  });
+
+  it('restores a destroyed merge key when the multi-valued remote survived', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(wt, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(wt, 'remote', 'add', 'survivor', 'https://example.com/s/r.git');
+    git(wt, 'branch', 'b1');
+    // git's rm skips the multi-valued remote key but still deletes the
+    // merge: the restore must re-add the merge against the survivor.
+    git(wt, 'config', '--local', '--add', 'branch.b1.remote', 'survivor');
+    git(wt, 'config', '--local', '--add', 'branch.b1.remote', 'origin');
+    git(wt, 'config', '--local', 'branch.b1.merge', 'refs/heads/b1');
+    git(wt, 'config', '--worktree', 'branch.b1.remote', 'origin');
+    const remotes = await gitRemoteRemove(wt, 'origin', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['survivor']);
+    expect(git(wt, 'config', '--local', '--get', 'branch.b1.merge')).toBe(
+      'refs/heads/b1\n',
+    );
+    expect(git(wt, 'config', '--local', '--get', 'branch.b1.remote')).toBe(
+      'survivor\n',
+    );
+  });
+
+  it('refuses to certify while an inherited pushurl-only section survives', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // A pushurl-only inherited section resolves fetch-side as the BARE
+    // name (ls-remote --get-url echoes it) — only the all-scope section
+    // read sees it. Push keeps reaching it after a certified removal.
+    git(
+      dir,
+      'config',
+      '--global',
+      'remote.origin.pushurl',
+      'https://example.com/push/r.git',
+    );
+    await expect(gitRemoteRemove(dir, 'origin', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    expect(git(dir, 'config', '--list')).not.toContain('remote.origin.url');
+    expect(
+      git(dir, 'config', '--global', '--get', 'remote.origin.pushurl'),
+    ).toBe('https://example.com/push/r.git\n');
+  });
+
+  it('resolves cleanly when a sibling holds a dotted-EXTENSION remote, not an override', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(wt, 'remote', 'add', 'a', 'https://example.com/a/r.git');
+    // [remote "a.b"] in the sibling's file is not remote a's section.
+    git(
+      wt,
+      'config',
+      '--worktree',
+      'remote.a.b.url',
+      'https://example.com/ab/r.git',
+    );
+    const remotes = await gitRemoteRemove(dir, 'a', fixtureEnv);
+    // The sibling's section is worktree-scoped — invisible from here.
+    expect(remotes).toEqual([]);
+    expect(git(wt, 'config', '--worktree', '--get', 'remote.a.b.url')).toBe(
+      'https://example.com/ab/r.git\n',
+    );
+  });
+
+  it('restores a shadowed local pushDefault naming a surviving remote', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(wt, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(wt, 'remote', 'add', 'survivor', 'https://example.com/s/r.git');
+    // git rm's handle_push_default unsets the key in the COMMON config
+    // when the effective value matched — the shadowed local survivor
+    // copy is collateral the restore must bring back.
+    git(wt, 'config', '--local', 'remote.pushDefault', 'survivor');
+    git(wt, 'config', '--worktree', 'remote.pushDefault', 'origin');
+    const remotes = await gitRemoteRemove(wt, 'origin', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['survivor']);
+    expect(git(wt, 'config', '--local', '--get', 'remote.pushdefault')).toBe(
+      'survivor\n',
+    );
+  });
+
+  it('removes a hand-configured remote whose name carries a trailing CR', async () => {
+    const dir = makeRepo();
+    fs.appendFileSync(
+      path.join(dir, '.git', 'config'),
+      '\n[remote "a\r"]\n\turl = https://example.com/f/r.git\n',
+    );
+    // git echoes an unanswered name verbatim + one LF; the terminator
+    // strip must not eat a CR belonging to the name.
+    const remotes = await gitRemoteRemove(dir, 'a\r', fixtureEnv);
+    expect(remotes).toEqual([]);
+  });
+
+  it('does not refuse an include-held upstream key shadowed by a surviving worktree record', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(wt, 'remote', 'add', 'gone', 'https://example.com/g/r.git');
+    git(wt, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // The include-held residue names the removed remote but is
+    // shadowed by the worktree record naming the SURVIVING one — inert
+    // by the shadowed-survivor doctrine, so the re-verify must not
+    // refuse over it.
+    const include = path.join(dir, 'extra.cfg');
+    fs.writeFileSync(include, '[branch "main"]\n\tremote = gone\n');
+    git(dir, 'config', '--local', 'include.path', include);
+    // The shadow must live in the INVOKING worktree's scope — a
+    // sibling's config.worktree is invisible to this worktree's reads.
+    git(dir, 'config', '--worktree', 'branch.main.remote', 'origin');
+    const remotes = await gitRemoteRemove(dir, 'gone', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['origin']);
+    // The residue is still there (uneditable) — the point is only that
+    // it does not refuse the removal.
+    expect(git(dir, 'config', '--get', 'branch.main.remote')).toBe('origin\n');
+  });
+
+  it('keeps a sibling merge key when the same file holds a surviving remote entry', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(wt, 'remote', 'add', 'gone', 'https://example.com/g/r.git');
+    git(wt, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(wt, 'branch', 'feat');
+    // The sibling's file: a multi-valued remote key holding BOTH the
+    // removed and the surviving remote — the value sweep takes the
+    // removed entry, and the merge key must stay with the survivor.
+    git(wt, 'config', '--worktree', '--add', 'branch.feat.remote', 'origin');
+    git(wt, 'config', '--worktree', '--add', 'branch.feat.remote', 'gone');
+    git(wt, 'config', '--worktree', 'branch.feat.merge', 'refs/heads/main');
+    const remotes = await gitRemoteRemove(dir, 'gone', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['origin']);
+    expect(git(wt, 'config', '--worktree', '--get', 'branch.feat.merge')).toBe(
+      'refs/heads/main\n',
+    );
+    expect(
+      git(wt, 'config', '--worktree', '--get-all', 'branch.feat.remote'),
+    ).toBe('origin\n');
+  });
+
   it('refuses an include-held section before rm, and the retry refuses identically', async () => {
     const dir = makeRepo();
     const inc = path.join(dir, 'included.gitconfig');
@@ -1081,7 +1382,12 @@ describe('fetchGitRemotes repository scope', () => {
     expect(
       git(wt, 'config', '--worktree', '--get-all', 'branch.feat.remote'),
     ).toBe('upstream\n');
-    expect(git(wt, 'config', '--list')).not.toContain('branch.feat.merge');
+    // And the merge key stays: the scope still holds a surviving remote
+    // entry, so the branch keeps its (surviving) upstream — the merge
+    // half pairs with it.
+    expect(
+      git(wt, 'config', '--worktree', '--get-all', 'branch.feat.merge'),
+    ).toBe('refs/heads/main\nrefs/heads/main\n');
   });
 
   it('attributes a branch by its worktree-scope remote over a divergent local one', async () => {
@@ -1093,17 +1399,27 @@ describe('fetchGitRemotes repository scope', () => {
     git(wt, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
     git(wt, 'branch', 'feat');
     // git resolves worktree-over-local: feat points at origin through
-    // the WORKTREE record. git's rm then unsets the local copy too (its
-    // effective-value match), so the removal must sweep the WORKTREE
-    // record — a local-first fold would leave it dangling.
+    // the WORKTREE record. git's rm then deletes the local section too
+    // (its effective-value match writes the file it can write) — the
+    // shadowed `other` copy is collateral the removal must restore,
+    // while the worktree copy (pointing at the removed remote) goes.
     git(wt, 'remote', 'add', 'other', 'https://example.com/other/r.git');
     git(wt, 'config', '--local', 'branch.feat.remote', 'other');
+    git(wt, 'config', '--local', 'branch.feat.merge', 'refs/heads/main');
     git(wt, 'config', '--worktree', 'branch.feat.remote', 'origin');
     const remotes = await gitRemoteRemove(wt, 'origin', fixtureEnv);
     expect(remotes.map((r) => r.name)).toEqual(['other']);
-    // No copy survives: the local one went with git's rm (effective
-    // match), the worktree one with the sweep (correct attribution).
-    expect(git(wt, 'config', '--list')).not.toContain('branch.feat.remote');
+    // The surviving local copy is restored: the branch tracks `other`.
+    expect(git(wt, 'config', '--local', '--get', 'branch.feat.remote')).toBe(
+      'other\n',
+    );
+    expect(git(wt, 'config', '--local', '--get', 'branch.feat.merge')).toBe(
+      'refs/heads/main\n',
+    );
+    // The worktree-scope copy (the removed remote's) is gone.
+    expect(git(wt, 'config', '--worktree', '--list')).not.toContain(
+      'branch.feat.remote',
+    );
   });
 
   it('clears a worktree merge key whose remote key lives at local scope', async () => {
@@ -1194,6 +1510,39 @@ describe('fetchGitRemotes repository scope', () => {
       /no such remote/i,
     );
     expect(git(dir, 'for-each-ref', 'refs/remotes/nf/')).toBe('');
+  });
+
+  it('converges the SIBLING cleanup on a retry after a failed first attempt', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(wt, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(wt, 'branch', 'feat');
+    git(wt, 'config', '--worktree', 'branch.feat.remote', 'origin');
+    const configWorktree = path.join(
+      dir,
+      '.git',
+      'worktrees',
+      `${path.basename(dir)}-wt`,
+      'config.worktree',
+    );
+    // Attempt 1 dies AFTER the section removal, before the sibling
+    // sweep: the sibling's config.worktree is locked.
+    fs.writeFileSync(`${configWorktree}.lock`, '');
+    await expect(gitRemoteRemove(dir, 'origin', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    fs.rmSync(`${configWorktree}.lock`);
+    // Retry: git answers no-such-remote — the converge arm must still
+    // sweep the sibling's keys before surfacing git's 404.
+    await expect(gitRemoteRemove(dir, 'origin', fixtureEnv)).rejects.toThrow(
+      /no such remote/i,
+    );
+    expect(git(wt, 'config', '--worktree', '--list')).not.toContain(
+      'branch.feat.remote',
+    );
   });
 
   it('converges the upstream cleanup on a retry after a failed cleanup', async () => {
@@ -1332,6 +1681,62 @@ describe('fetchGitRemotes repository scope', () => {
     expect(
       git(dir, 'config', '--local', '--get-all', 'branch.feat.remote'),
     ).toBe('upstream\n');
+  });
+
+  it('sweeps a non-effective multi-valued entry so a later removal cannot unmask it', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'gone', 'https://example.com/g/r.git');
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // branch.main.remote = [gone, origin]: the branch is NOT pointed at
+    // `gone` (the effective value is origin), but the non-effective
+    // entry is residue — left behind, it would surface and dangle the
+    // moment `origin` is removed.
+    git(dir, 'config', '--local', '--add', 'branch.main.remote', 'gone');
+    git(dir, 'config', '--local', '--add', 'branch.main.remote', 'origin');
+    const step1 = await gitRemoteRemove(dir, 'gone', fixtureEnv);
+    expect(step1.map((r) => r.name)).toEqual(['origin']);
+    expect(
+      git(dir, 'config', '--local', '--get-all', 'branch.main.remote'),
+    ).toBe('origin\n');
+    const step2 = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(step2).toEqual([]);
+    expect(git(dir, 'config', '--list')).not.toContain('branch.main.remote');
+  });
+
+  it('keeps the merge key when the scope still holds a surviving remote entry', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'upstream', 'https://example.com/u/r.git');
+    git(dir, 'remote', 'add', 'wtonly', 'https://example.com/w/r.git');
+    git(dir, 'branch', 'feat');
+    // feat is pointed at wtonly (last value wins), but the same scope's
+    // remote key keeps an upstream entry after the sweep — the merge
+    // key pairs with the SURVIVING upstream now and must stay.
+    git(dir, 'config', '--local', '--add', 'branch.feat.remote', 'upstream');
+    git(dir, 'config', '--local', '--add', 'branch.feat.remote', 'wtonly');
+    git(
+      dir,
+      'config',
+      '--local',
+      '--add',
+      'branch.feat.merge',
+      'refs/heads/main',
+    );
+    git(
+      dir,
+      'config',
+      '--local',
+      '--add',
+      'branch.feat.merge',
+      'refs/heads/main',
+    );
+    const remotes = await gitRemoteRemove(dir, 'wtonly', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['upstream']);
+    expect(
+      git(dir, 'config', '--local', '--get-all', 'branch.feat.remote'),
+    ).toBe('upstream\n');
+    expect(
+      git(dir, 'config', '--local', '--get-all', 'branch.feat.merge'),
+    ).toBe('refs/heads/main\nrefs/heads/main\n');
   });
 
   it('refuses when the removal unmasks an inherited upstream key naming a gone remote', async () => {
@@ -1540,6 +1945,35 @@ describe('fetchGitRemotes repository scope', () => {
     expect(git(dir, 'for-each-ref', 'refs/remotes/origin')).toContain(
       'refs/remotes/origin/staging/main',
     );
+  });
+
+  it('sweeps the exact bare tracking ref git rm leaves behind', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // A single-destination fetch (or a plain update-ref) leaves the
+    // EXACT ref refs/remotes/origin — outside the refs/remotes/origin/
+    // pattern git's rm deletes through, and invisible to a
+    // trailing-slash listing.
+    git(dir, 'update-ref', 'refs/remotes/origin', 'HEAD');
+    const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(remotes).toEqual([]);
+    expect(git(dir, 'for-each-ref', 'refs/remotes')).toBe('');
+  });
+
+  it('keeps a configured slashed sibling tracking namespace when the prefix remote goes', async () => {
+    const dir = makeRepo();
+    // `git remote add a/b` is legal on the CLI: the panel lists it, and
+    // refs/remotes/a/b/* is ITS namespace — a removal of `a` must not
+    // take it down.
+    git(dir, 'remote', 'add', 'a', 'https://example.com/a/r.git');
+    git(dir, 'remote', 'add', 'a/b', 'https://example.com/ab/r.git');
+    git(dir, 'update-ref', 'refs/remotes/a/main', 'HEAD');
+    git(dir, 'update-ref', 'refs/remotes/a/b/main', 'HEAD');
+    const remotes = await gitRemoteRemove(dir, 'a', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['a/b']);
+    const refs = git(dir, 'for-each-ref', 'refs/remotes');
+    expect(refs).toContain('refs/remotes/a/b/main');
+    expect(refs).not.toContain('refs/remotes/a/main');
   });
 
   it('sweeps orphaned tracking refs a refspec-less worktree removal leaves behind', async () => {

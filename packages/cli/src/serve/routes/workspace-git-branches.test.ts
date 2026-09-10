@@ -883,6 +883,36 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
         expect(urlText).toContain('https://example.invalid/org/repo.git/');
         expect(urlText).not.toContain('<config>');
 
+        // A Windows drive-letter path is an absolute config target too.
+        const winShared = 'D:\\a\\_temp\\team\\company.gitconfig';
+        const outWin = classifyAt(
+          wt,
+          `fatal: unable to access '${winShared}': Permission denied`,
+        );
+        const winText = String(outWin.body['error'] ?? outWin.body['message']);
+        expect(winText).toContain('<config>');
+        expect(winText).not.toContain('_temp');
+
+        // git-for-Windows predominantly echoes forward-slash paths.
+        const winFwd = 'D:/a/_temp/team/company.gitconfig';
+        const outFwd = classifyAt(
+          wt,
+          `fatal: unable to access '${winFwd}': Permission denied`,
+        );
+        const fwdText = String(outFwd.body['error'] ?? outFwd.body['message']);
+        expect(fwdText).toContain('<config>');
+        expect(fwdText).not.toContain('_temp');
+
+        // So is a UNC share path.
+        const uncShared = String.raw`\\server\share\team.gitconfig`;
+        const outUnc = classifyAt(
+          wt,
+          `fatal: unable to access '${uncShared}': Permission denied`,
+        );
+        const uncText = String(outUnc.body['error'] ?? outUnc.body['message']);
+        expect(uncText).toContain('<config>');
+        expect(uncText).not.toContain('server');
+
         // The system gitconfig path is build-time (ETC_GITCONFIG) —
         // Homebrew git reads /opt/homebrew/etc/gitconfig — so any path
         // ENDING in /etc/gitconfig redacts, prefix included.

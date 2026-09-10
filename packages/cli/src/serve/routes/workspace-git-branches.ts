@@ -107,9 +107,10 @@ function redactGitPaths(detail: string, cwd: string): string {
   );
   // `unable to access '<url>'` is also git's TRANSPORT error on every
   // fetch/pull/push network failure — only an absolute filesystem path
-  // is a config target; a URL payload stays as-is.
+  // is a config target; a URL payload stays as-is. Absolute means a
+  // leading slash, a Windows drive letter, or a UNC share.
   message = message.replace(
-    /(unable to access ')(?!<)(\/[^']*)(')/g,
+    /(unable to access ')(?!<)((?:\/|[A-Za-z]:[\\/]|\\\\)[^']*)(')/g,
     '$1<config>$3',
   );
   return message;

@@ -2755,6 +2755,78 @@ describe('BranchPickerPopover remotes view', () => {
     expect(badges[1]?.textContent).toContain('1 other setting');
   });
 
+  it('marks a row whose URL carries a non-ASCII homoglyph', async () => {
+    // URLs are ASCII-only by spec: a Cyrillic і in the host inks
+    // identically to i — fail closed.
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://gіthub.com/qwen/qwen-code.git',
+          // A DIFFERING push URL carrying its own homoglyph: the push
+          // line of the tooltip must spell it too.
+          pushUrl: 'https://gіthub.com/push/qwen-code.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          // Homoglyph on the PUSH side only — the push arm alone must
+          // mark the row.
+          name: 'pushonly',
+          fetchUrl: 'https://example.com/clean/r.git',
+          pushUrl: 'https://gіthub.com/push/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          // Homoglyph on the FETCH side only.
+          name: 'fetchonly',
+          fetchUrl: 'https://gіthub.com/fetch/r.git',
+          pushUrl: 'https://example.com/clean/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    });
+    await openRemotesView();
+    const row = document.body.querySelector('[data-testid="remote-row"]');
+    expect(row?.textContent).toContain('(hidden characters)');
+    const title = row
+      ?.querySelector('[data-testid="remote-url"]')
+      ?.getAttribute('title');
+    expect(title).toContain('\\u{456}');
+    // The push line is escaped too (pushUrl !== fetchUrl renders both).
+    expect(title?.split('\n')).toHaveLength(2);
+    expect(title?.split('\n')[1]).toContain('\\u{456}');
+    // The name is clean — the aria tail must not stutter it.
+    expect(
+      document.body
+        .querySelector('[data-testid="remote-remove-origin"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Remove origin (hidden characters)');
+    // Each arm alone marks its row.
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-pushonly"]')
+        ?.parentElement?.textContent,
+    ).toContain('(hidden characters)');
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-fetchonly"]')
+        ?.parentElement?.textContent,
+    ).toContain('(hidden characters)');
+  });
+
   it('restores focus to the manage-remotes row when leaving the view', async () => {
     await openRemotesView();
     clickTestId('remotes-back');

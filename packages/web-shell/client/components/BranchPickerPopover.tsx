@@ -1886,17 +1886,24 @@ function RemotesView({
               // letters (the Cyrillic-`о` homoglyph shape). Both mark
               // the UNUSUAL row, keeping the house polarity: a plain
               // sibling row stays unmarked.
+              // URLs are a bounded ASCII-only surface (RFC 3986: anything
+              // else is percent-encoded/punycoded), so a non-ASCII byte in
+              // one is a homoglyph or garbage — fail closed: the row
+              // marks and the tooltip spells every such character out.
+              const fetchNonAscii = /[^\x20-\x7E]/.test(r.fetchUrl);
+              const pushNonAscii = /[^\x20-\x7E]/.test(r.pushUrl);
               const nfcName = r.name.normalize('NFC');
               const mixedScripts =
                 /\p{Script=Latin}/u.test(r.name) &&
                 /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u.test(
                   r.name,
                 );
-              const hiddenChars =
+              const nameUnusual =
                 displayName !== r.name ||
                 r.name.replace(/\s+/g, ' ').trim() !== r.name ||
                 nfcName !== r.name ||
                 mixedScripts;
+              const hiddenChars = nameUnusual || fetchNonAscii || pushNonAscii;
               // The marker's visible part shows the name as CSS inks it
               // (whitespace collapsed, edges trimmed) so the raw name's
               // padding does not double the separator before the marker;
@@ -1907,7 +1914,10 @@ function RemotesView({
                   ? `${visibleName} ${t('branchPicker.remotes.hiddenChars')}`
                   : t('branchPicker.remotes.invisibleName')
                 : displayName;
-              const escapedName = hiddenChars
+              // The escaped tail exists to disambiguate the NAME; a row
+              // marked only for a URL homoglyph has a clean name, and
+              // appending it would stutter in screen readers.
+              const escapedName = nameUnusual
                 ? escapeNameChars(r.name, nfcName !== r.name || mixedScripts)
                 : undefined;
               const ariaName = escapedName
@@ -1919,14 +1929,16 @@ function RemotesView({
               // only by invisible characters OR whitespace must not
               // tooltip identically (CSS collapses the latter out of the
               // inked text, so the tooltip carries the escapes).
-              const fetchTitle =
-                fetchDisplay === r.fetchUrl &&
-                r.fetchUrl.replace(/\s+/g, ' ').trim() === r.fetchUrl
+              const fetchTitle = fetchNonAscii
+                ? escapeNameChars(r.fetchUrl, true)
+                : fetchDisplay === r.fetchUrl &&
+                    r.fetchUrl.replace(/\s+/g, ' ').trim() === r.fetchUrl
                   ? fetchDisplay
                   : escapeNameChars(r.fetchUrl);
-              const pushTitle =
-                pushDisplay === r.pushUrl &&
-                r.pushUrl.replace(/\s+/g, ' ').trim() === r.pushUrl
+              const pushTitle = pushNonAscii
+                ? escapeNameChars(r.pushUrl, true)
+                : pushDisplay === r.pushUrl &&
+                    r.pushUrl.replace(/\s+/g, ' ').trim() === r.pushUrl
                   ? pushDisplay
                   : escapeNameChars(r.pushUrl);
               const extras = remoteExtras(r, t);
