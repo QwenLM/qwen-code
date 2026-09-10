@@ -35,6 +35,12 @@ const NO_SEARCH_RETRY_BASE_DELAY_MS = 750;
 const NO_SEARCH_RETRY_JITTER_MS = 500;
 /** Upper bound on a title relayed by the side model, before it is rendered. */
 const MAX_SOURCE_TITLE_CHARS = 200;
+/**
+ * Upper bound on one Sources-block line. A title, the separator and a URL
+ * fit in far fewer characters, so a longer line is prose — and keeping the
+ * entry regexes off it bounds their quadratic backtracking in line length.
+ */
+const MAX_SOURCE_LINE_CHARS = 1_000;
 
 /**
  * Inner defense layer: system instructions on the search side request
@@ -43,10 +49,10 @@ const MAX_SOURCE_TITLE_CHARS = 200;
  * its narrated answer has already formed.
  *
  * The closing sentences are what make titled citations possible: DashScope's
- * search items carry only `{type, url}`, so the page titles the outer model
- * is told to cite have to come from the side model, which has seen the
- * pages. {@link attachSideModelTitles} keeps only the ones that match a URL
- * the search actually returned.
+ * search items usually carry only `{type, url}`, so the page titles the
+ * outer model is told to cite normally come from the side model, which has
+ * read the pages it opened. {@link attachSideModelTitles} keeps only the
+ * ones that match a URL the search returned or the agent opened.
  *
  * The list is asked for *before* the narration on purpose. This request runs
  * under a fixed wall-clock budget, and a search that exhausts it is salvaged
@@ -137,6 +143,13 @@ interface CollectedSearchData {
   candidates: CandidateSource[];
   openedUrls: string[];
   answerText: string;
+  /**
+   * True when answerText came from the model (message items or text deltas)
+   * rather than salvaged extractor output. Only narrated text may carry the
+   * side model's Sources block; raw page text must never be mined for
+   * titles, or the page would author its own citation.
+   */
+  narrated: boolean;
   searchCallCount: number;
   usage?: WsUsage;
 }
@@ -170,10 +183,10 @@ function collectFromItems(
           if (!existing) {
             candidates.set(source.url, {
               url: source.url,
-              title: source.title?.trim() || undefined,
+              title: source.title ? cleanTitle(source.title) : undefined,
             });
-          } else if (!existing.title && source.title?.trim()) {
-            existing.title = source.title.trim();
+          } else if (!existing.title && source.title) {
+            existing.title = cleanTitle(source.title);
           }
         }
         break;
@@ -216,6 +229,7 @@ function collectFromItems(
     // extraction text is the fallback when narration never arrived.
     answerText:
       messageParts.join('\n') || fallbackText || extractedParts.join('\n\n'),
+    narrated: messageParts.length > 0 || fallbackText.length > 0,
     searchCallCount,
     usage,
   };
@@ -237,25 +251,37 @@ function normalizeSourceUrl(raw: string): string {
 }
 
 /** Strip the decorations a model wraps around a title before quoting it. */
-function cleanTitle(raw: string): string {
-  const collapsed = raw.replace(/\s+/g, ' ').trim();
+function cleanTitle(raw: string): string | undefined {
+  const collapsed = raw
+    .replace(/\s+/g, ' ')
+    // A title becomes the link text of a citation to a different page: a URL
+    // smuggled into it must not reach the Sources section the outer model is
+    // told to copy.
+    .replace(/(?:https?:\/\/|www\.)\S+/gi, '')
+    .trim();
   const unwrapped = collapsed
     .replace(/^\*\*(.*)\*\*$/s, '$1')
     .replace(/^["'“”‘’](.*)["'“”‘’]$/s, '$1')
     .trim();
+  if (!unwrapped) return undefined;
   return sliceAtCharBoundary(unwrapped, MAX_SOURCE_TITLE_CHARS);
 }
 
 const SOURCES_HEADER_RE =
   /^\s*(?:#{1,6}\s*)?(?:\*\*)?sources?\b:?(?:\*\*)?:?\s*$/i;
-const BULLET = String.raw`(?:[-*•‣]|\d+[.)])`;
+const BULLET = String.raw`(?:[-*+•‣–—]|\d+[.)])`;
+const BULLET_PREFIX_RE = new RegExp(`^\\s*${BULLET}`);
 // `i` so a model that echoes a page's uppercase "HTTPS://" still matches.
+// The URL class excludes `>` but not `)`: the closing `\)` anchor forces the
+// backtrack that keeps a parenthesized path (Wikipedia, MSDN) intact.
 const MARKDOWN_ENTRY_RE = new RegExp(
-  String.raw`^\s*${BULLET}?\s*\[([^\]]+)\]\(\s*<?(https?://[^\s>)]+)>?\s*\)`,
+  String.raw`^\s*${BULLET}?\s*\[([^\]]+)\]\(\s*<?(https?://[^\s>]+)>?\s*\)`,
   'i',
 );
+// The bullet is mandatory in the plain form: without it any narration line
+// that merely ends in a URL parses as a source entry and gets deleted.
 const PLAIN_ENTRY_RE = new RegExp(
-  String.raw`^\s*${BULLET}?\s*(.*?)\s*<?(https?://\S+?)>?[.,;]?\s*$`,
+  String.raw`^\s*${BULLET}\s*(.*?)\s*<?(https?://\S+?)>?[.,;]?\s*$`,
   'i',
 );
 
@@ -284,10 +310,10 @@ function parseSourceLine(line: string): ParsedSourceLine | undefined {
  * write, and take the block out of the narration.
  *
  * Two rules make this safe to trust. A line only contributes a title when
- * its URL is one the search itself returned — the side model can relabel a
- * page but never introduce one. And the block is removed only when at least
- * one line matched, so a model that ignored the format keeps its answer
- * intact instead of losing its last paragraph.
+ * its URL is one the search returned or the agent opened — the side model
+ * can relabel a page but never add one to the source lists. And a block is
+ * removed only when at least one line matched, so a model that ignored the
+ * format keeps its answer intact instead of losing its last paragraph.
  *
  * @returns the narration with the block removed, and titles keyed by
  * {@link normalizeSourceUrl}.
@@ -313,16 +339,22 @@ export function attachSideModelTitles(
   const dropped = new Set<number>();
   for (let i = 0; i < lines.length; i++) {
     if (!SOURCES_HEADER_RE.test(lines[i])) continue;
-    // Consume the contiguous list under the header: blank lines are tolerated
-    // inside it, anything else ends the block so prose around it survives.
-    let lastEntry = i;
+    // Consume the contiguous list region under the header and drop it whole
+    // or not at all: a line belongs to the region while it is blank, starts
+    // with a bullet, or parses as an entry, so narration that merely follows
+    // the block ends the region and survives. Dropping only a parsed prefix
+    // would leave an orphaned bullet tail inside text the model is told to
+    // cite from.
+    let lastMember = i;
     let matched = false;
     for (let j = i + 1; j < lines.length; j++) {
       const line = lines[j];
       if (!line.trim()) continue;
+      if (line.length > MAX_SOURCE_LINE_CHARS) break;
       const parsed = parseSourceLine(line);
-      if (!parsed) break;
-      lastEntry = j;
+      if (!parsed && !BULLET_PREFIX_RE.test(line)) break;
+      lastMember = j;
+      if (!parsed) continue;
       const key = normalizeSourceUrl(parsed.url);
       if (!known.has(key)) continue;
       matched = true;
@@ -332,8 +364,8 @@ export function attachSideModelTitles(
     // nothing may be prose the model wrote, and losing it would cost the
     // answer a paragraph.
     if (!matched) continue;
-    for (let j = i; j <= lastEntry; j++) dropped.add(j);
-    i = lastEntry;
+    for (let j = i; j <= lastMember; j++) dropped.add(j);
+    i = lastMember;
   }
 
   if (dropped.size === 0) return { answerText, titles };
@@ -347,7 +379,6 @@ export function attachSideModelTitles(
  * optionally `web_extractor`) tools enabled.
  */
 export class DashScopeWebSearchBackend implements WebSearchBackend {
-  readonly kind = 'dashscope' as const;
   private readonly debugLogger: DebugLogger;
 
   constructor(
@@ -686,11 +717,9 @@ export class DashScopeWebSearchBackend implements WebSearchBackend {
     data: CollectedSearchData,
     partialNote: string | undefined,
   ): WebSearchOutcome {
-    const { answerText, titles } = attachSideModelTitles(
-      data.answerText,
-      data.candidates,
-      data.openedUrls,
-    );
+    const { answerText, titles } = data.narrated
+      ? attachSideModelTitles(data.answerText, data.candidates, data.openedUrls)
+      : { answerText: data.answerText, titles: new Map<string, string>() };
     // A title the side model gave wins over one the response carried: it
     // read the page, the search index only listed it.
     const declared = new Map(
@@ -699,7 +728,10 @@ export class DashScopeWebSearchBackend implements WebSearchBackend {
     const titleFor = (url: string): string | undefined =>
       titles.get(normalizeSourceUrl(url)) ?? declared.get(url);
 
-    const openedSet = new Set(data.openedUrls);
+    // The extractor reports the URL it fetched while the search index
+    // reports its own; a trailing slash or scheme difference must not list
+    // one page in both evidence tiers.
+    const openedSet = new Set(data.openedUrls.map(normalizeSourceUrl));
     const sources: WebSearchSource[] = [
       ...data.openedUrls.map((url) => ({
         url,
@@ -707,7 +739,9 @@ export class DashScopeWebSearchBackend implements WebSearchBackend {
         opened: true,
       })),
       ...data.candidates
-        .filter((candidate) => !openedSet.has(candidate.url))
+        .filter(
+          (candidate) => !openedSet.has(normalizeSourceUrl(candidate.url)),
+        )
         .map((candidate) => ({
           url: candidate.url,
           title: titleFor(candidate.url),

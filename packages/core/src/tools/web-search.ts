@@ -863,7 +863,7 @@ CRITICAL REQUIREMENT - You MUST follow this:
 
 Usage notes:
   - The query must be at least 2 characters; prefer specific phrases over single keywords
-  - Results are the search agent's findings plus the pages behind them; to read one of those pages in full, call web_fetch with its URL
+  - Results are the search agent's findings plus the pages behind them; to dig deeper into one of those pages, call web_fetch with its URL and a prompt describing what to extract — it returns a model-processed summary of the page (truncated to the first 100,000 characters), not the raw page text
 
 IMPORTANT - Use the correct year in search queries:
   - The current month is ${currentMonthYear}. You MUST use this year when searching for recent information, documentation, or current events.

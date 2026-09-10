@@ -37,13 +37,19 @@ export interface WebSearchBackendConfig {
 export interface WebSearchSource {
   url: string;
   title?: string;
-  /** True when the backend read the page in full — stronger evidence. */
+  /**
+   * True when the backend's extractor opened the page and did not report
+   * failure — treated as stronger evidence.
+   */
   opened: boolean;
 }
 
 /** What a successful search hands back to the tool for formatting. */
 export interface WebSearchOutcome {
-  /** Narrated answer from the search side model; may be empty. */
+  /**
+   * Narrated answer from the search side model, or salvaged extracted page
+   * text when the stream died before any narration arrived; may be empty.
+   */
   answerText: string;
   /** Opened pages first, then the unopened candidates. De-duplicated. */
   sources: WebSearchSource[];
@@ -80,7 +86,6 @@ export interface WebSearchBackendRequest {
  * errors reach the model through the same envelope.
  */
 export interface WebSearchBackend {
-  readonly kind: 'dashscope';
   search(request: WebSearchBackendRequest): Promise<WebSearchBackendResult>;
 }
 
